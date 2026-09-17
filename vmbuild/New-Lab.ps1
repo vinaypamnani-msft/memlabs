@@ -114,6 +114,104 @@ function Initialize-NewLabHyperVPrerequisite {
     }
 }
 
+function Test-NewLabEnhancedSessionModeCache {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+
+    try {
+        $cache = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return [bool]($cache -and $cache.Enabled -eq $true)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-NewLabEnhancedSessionModeCheck {
+    [CmdletBinding()]
+    param(
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSeconds = 30,
+        [scriptblock]$Operation = {
+            Import-Module Hyper-V -ErrorAction Stop
+            $vmHost = Get-VMHost -ErrorAction Stop
+            if ($null -eq $vmHost) {
+                throw 'Get-VMHost returned no host object.'
+            }
+
+            $changed = $false
+            if ($vmHost.EnableEnhancedSessionMode -ne $true) {
+                Set-VMHost -EnableEnhancedSessionMode $true -ErrorAction Stop
+                $changed = $true
+                $vmHost = Get-VMHost -ErrorAction Stop
+            }
+            if ($null -eq $vmHost -or $vmHost.EnableEnhancedSessionMode -ne $true) {
+                throw 'Enhanced session mode could not be verified as enabled.'
+            }
+
+            [pscustomobject]@{
+                ResultType = 'MemLabsEnhancedSessionMode'
+                Enabled    = $true
+                Changed    = $changed
+            }
+        }
+    )
+
+    $job = $null
+    try {
+        $jobName = "MemLabs-VMHostESM-$PID-$([guid]::NewGuid().ToString('N'))"
+        $job = Start-Job -Name $jobName -ScriptBlock $Operation -ErrorAction Stop
+        $completed = Wait-Job -Job $job -Timeout $TimeoutSeconds -ErrorAction Stop
+        if (-not $completed) {
+            return [pscustomobject]@{
+                Succeeded = $false
+                TimedOut  = $true
+                Enabled   = $null
+                Changed   = $false
+                Error     = "Hyper-V management did not respond within $TimeoutSeconds seconds."
+            }
+        }
+
+        $output = @($job | Receive-Job -ErrorAction Stop)
+        $result = @($output | Where-Object { $_.ResultType -eq 'MemLabsEnhancedSessionMode' })
+        if ($result.Count -ne 1) {
+            throw "Enhanced session mode worker returned $($result.Count) result objects; expected one."
+        }
+
+        return [pscustomobject]@{
+            Succeeded = $true
+            TimedOut  = $false
+            Enabled   = [bool]$result[0].Enabled
+            Changed   = [bool]$result[0].Changed
+            Error     = ''
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Succeeded = $false
+            TimedOut  = $false
+            Enabled   = $null
+            Changed   = $false
+            Error     = $_.Exception.Message
+        }
+    }
+    finally {
+        if ($null -ne $job) {
+            if ($job.State -notin @('Completed', 'Failed', 'Stopped')) {
+                $null = $job | Stop-Job -ErrorAction SilentlyContinue
+            }
+            $null = $job | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # Give the user immediate visible feedback. Everything below this point (the
 # shortcut creation, dot-sourcing Common.ps1, and Initialize-Common) can take
 # several seconds on a cold start - especially if vmms / WMI / Hyper-V module
@@ -210,34 +308,33 @@ Write-Log "Post-init: Checking VMHost enhanced session mode..." -LogOnly
 Flush-LogBuffer -All
 # Cache the enhanced session mode check — Get-VMHost is a CIM call that can
 # stall for minutes when vmms.exe is busy. The setting persists across reboots
-# once enabled; only re-check once per 24 hours.
+# once enabled, so a successful cache entry never expires.
 $esmCacheFile = Join-Path $Common.CachePath "vmhost-esm-state.json"
-$esmNeedsCheck = $true
-if (Test-Path $esmCacheFile) {
-    try {
-        $esmCache = Get-Content $esmCacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
-        if ($esmCache -and $esmCache.Enabled -eq $true) {
-            $esmAge = ((Get-Date) - [DateTime]::Parse($esmCache.CheckedUtc)).TotalHours
-            if ($esmAge -le 24) {
-                $esmNeedsCheck = $false
-                Write-Log "Post-init: Enhanced session mode already enabled (cached, age=$([Math]::Round($esmAge,1))h)." -LogOnly
-            }
-        }
-    }
-    catch {}
+$esmNeedsCheck = -not (Test-NewLabEnhancedSessionModeCache -Path $esmCacheFile)
+if (-not $esmNeedsCheck) {
+    Write-Log "Post-init: Enhanced session mode already enabled (cached permanently)." -LogOnly
 }
 if ($esmNeedsCheck) {
-    Write-Log "Post-init: Calling Get-VMHost (CIM — may be slow if vmms is busy)..." -LogOnly
-    if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
-        Set-VMHost -EnableEnhancedSessionMode $True
+    Write-Log "Post-init: Calling Get-VMHost in a worker (30s timeout if vmms is busy)..." -LogOnly
+    $esmResult = Invoke-NewLabEnhancedSessionModeCheck -TimeoutSeconds 30
+    if (-not $esmResult.Succeeded) {
+        $esmFailure = if ($esmResult.TimedOut) { 'timed out' } else { 'failed' }
+        Write-Log "Post-init: VMHost enhanced session check $esmFailure; continuing because it is optional. $($esmResult.Error)" -Warning -LogOnly
     }
-    try {
-        [PSCustomObject]@{
-            CheckedUtc = (Get-Date).ToUniversalTime().ToString("o")
-            Enabled    = $true
-        } | ConvertTo-Json | Set-Content -Path $esmCacheFile -Encoding UTF8
+    else {
+        if ($esmResult.Changed) {
+            Write-Log "Post-init: Enabled VMHost enhanced session mode." -LogOnly
+        }
+        try {
+            [PSCustomObject]@{
+                CheckedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                Enabled    = $true
+            } | ConvertTo-Json | Set-Content -Path $esmCacheFile -Encoding UTF8
+        }
+        catch {
+            Write-Log "Post-init: Could not cache enhanced session mode; the next run will retry: $($_.Exception.Message)" -Warning -LogOnly
+        }
     }
-    catch {}
 }
 Write-Log "Post-init: VMHost check complete. Proceeding to window resize and config..." -LogOnly
 

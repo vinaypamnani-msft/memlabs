@@ -43,6 +43,8 @@ $prerequisitePath = Join-Path $RootPath 'vmbuild\common\Common.Prereqs.ps1'
 $dscBuilderPath = Join-Path $RootPath 'vmbuild\DSC\createGuestDscZip.ps1'
 . $prerequisitePath
 . (Import-TestFunction -Path $newLabPath -Name 'Initialize-NewLabHyperVPrerequisite')
+. (Import-TestFunction -Path $newLabPath -Name 'Test-NewLabEnhancedSessionModeCache')
+. (Import-TestFunction -Path $newLabPath -Name 'Invoke-NewLabEnhancedSessionModeCheck')
 . (Import-TestFunction -Path $newLabPath -Name 'Invoke-NewLabDscArchiveRefresh')
 . (Import-TestFunction -Path $configPath -Name 'Start-VMIPRefreshJob')
 $windowsPowerShellModulePath = Get-MemLabsWindowsPowerShellModulePath -AllUsersOnly
@@ -119,6 +121,51 @@ $failedResult = Initialize-NewLabHyperVPrerequisite
 Assert-Equal $false $failedResult 'installer failure stops startup'
 Assert-Equal 3 $script:InstallCount 'installer failure was exercised'
 Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -like '*simulated install failure*' })) 'installer failure is logged'
+
+$esmCacheFixture = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-vmhost-esm-' + [guid]::NewGuid().ToString('N') + '.json')
+try {
+    Assert-Equal $false (Test-NewLabEnhancedSessionModeCache -Path $esmCacheFixture) 'missing enhanced session cache requires a check'
+    @{ Enabled = $true; CheckedUtc = '2000-01-01T00:00:00.0000000Z' } | ConvertTo-Json | Set-Content -LiteralPath $esmCacheFixture
+    Assert-Equal $true (Test-NewLabEnhancedSessionModeCache -Path $esmCacheFixture) 'successful enhanced session cache never expires'
+    @{ Enabled = $false; CheckedUtc = '2000-01-01T00:00:00.0000000Z' } | ConvertTo-Json | Set-Content -LiteralPath $esmCacheFixture
+    Assert-Equal $false (Test-NewLabEnhancedSessionModeCache -Path $esmCacheFixture) 'disabled enhanced session cache requires a check'
+    '{invalid json' | Set-Content -LiteralPath $esmCacheFixture
+    Assert-Equal $false (Test-NewLabEnhancedSessionModeCache -Path $esmCacheFixture) 'malformed enhanced session cache requires a check'
+}
+finally {
+    Remove-Item -LiteralPath $esmCacheFixture -Force -ErrorAction SilentlyContinue
+}
+
+$esmSuccess = Invoke-NewLabEnhancedSessionModeCheck -TimeoutSeconds 5 -Operation {
+    [pscustomobject]@{
+        ResultType = 'MemLabsEnhancedSessionMode'
+        Enabled    = $true
+        Changed    = $false
+    }
+}
+Assert-Equal $true $esmSuccess.Succeeded 'enhanced session worker returns a verified result'
+Assert-Equal $false $esmSuccess.TimedOut 'enhanced session success is not reported as a timeout'
+Assert-Equal $true $esmSuccess.Enabled 'enhanced session success preserves enabled state'
+
+$esmFailure = Invoke-NewLabEnhancedSessionModeCheck -TimeoutSeconds 5 -Operation { throw 'simulated VMHost failure' }
+Assert-Equal $false $esmFailure.Succeeded 'enhanced session worker failure does not report success'
+Assert-Equal $false $esmFailure.TimedOut 'enhanced session worker failure is distinct from timeout'
+Assert-Equal $true ($esmFailure.Error -like '*simulated VMHost failure*') 'enhanced session worker preserves failure detail'
+
+$esmStopwatch = [Diagnostics.Stopwatch]::StartNew()
+$esmTimeout = Invoke-NewLabEnhancedSessionModeCheck -TimeoutSeconds 1 -Operation {
+    Start-Sleep -Seconds 30
+    [pscustomobject]@{
+        ResultType = 'MemLabsEnhancedSessionMode'
+        Enabled    = $true
+        Changed    = $false
+    }
+}
+$esmStopwatch.Stop()
+Assert-Equal $false $esmTimeout.Succeeded 'blocked enhanced session worker does not report success'
+Assert-Equal $true $esmTimeout.TimedOut 'blocked enhanced session worker reports timeout'
+Assert-Equal $true ($esmStopwatch.Elapsed.TotalSeconds -lt 10) 'blocked enhanced session worker returns within its cleanup budget'
+Assert-Equal 0 @(Get-Job -Name "MemLabs-VMHostESM-$PID-*" -ErrorAction SilentlyContinue).Count 'enhanced session worker leaves no PowerShell jobs'
 
 $global:Common = [pscustomobject]@{ InJob = $false; CachePath = $env:TEMP }
 $script:InstallFailure = $null
