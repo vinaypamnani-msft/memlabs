@@ -1069,7 +1069,7 @@ function Build-MainMenuOptions {
 
     if ($global:existingMachines) {
         $preOptions += [ordered]@{ "*B1" = ""; "*B2" = "Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
-        foreach ($existingVM in $global:existingMachines) {
+        foreach ($existingVM in $global:existingMachines | Sort-Object -Property vmName) {
             $i = $i + 1
             $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
             $customOptions += [ordered]@{"-D$i" = "$name" }
