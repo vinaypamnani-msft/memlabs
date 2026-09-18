@@ -1240,8 +1240,8 @@ function Remove-MissingConnectionsFromMRemoteNG {
             continue
         }
         # For display names with brackets, extract the VM name (first word)
-        $vmNameFromDisplay = ($name -split '\s*\[')[0].Trim()
-        $vmNameFromDisplay = ($vmNameFromDisplay -replace '^\[console\]\s*', '').Trim()
+        $vmNameFromDisplay = ($name -replace '^\[console\]\s*', '').Trim()
+        $vmNameFromDisplay = ($vmNameFromDisplay -split '\s*\[')[0].Trim()
         if ($vmNameFromDisplay -in $completeServerList) {
             continue
         }
