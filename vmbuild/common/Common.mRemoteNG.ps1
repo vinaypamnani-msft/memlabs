@@ -1889,13 +1889,15 @@ function New-MRemoteNGFileFromHyperV {
             $connUsername = $username
             $connDomain = $domain
             $connPassword = $encryptedPass
+            $connectionPort = "3389"
 
             if (-not [string]::IsNullOrWhiteSpace($vmID)) {
-                $displayName = "[console] " + $displayName
+                $displayName += " [Console]"
                 $connUsername = ""
                 $connDomain = ""
                 $connPassword = ""
                 $name = $env:computername
+                $connectionPort = "2179"
             }
             elseif ($vm.domainUser) {
                 $connUsername = $vm.domainUser
@@ -1909,11 +1911,11 @@ function New-MRemoteNGFileFromHyperV {
             if ($rdcSettings.DefaultGrouping -or -not $anyAdditiveGrouping) {
                 if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $targetContainer `
                         -Name $name -DisplayName $displayName -Hostname $name `
-                        -Protocol "RDP" -Port "3389" -Description $comment `
+                        -Protocol "RDP" -Port $connectionPort -Description $comment `
                         -Username $connUsername -Domain $connDomain -Password $connPassword `
                         -GuidSeed "rdp:${domain}:$($vm.VmName)" `
                         -VmId $(if ($vmID) { $vmID } else { "" }) `
-                        -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
+                        -UseEnhancedMode $false `
                         -ForceOverwrite $ForceOverwrite) {
                     $shouldSave = $true
                 }
@@ -1926,11 +1928,11 @@ function New-MRemoteNGFileFromHyperV {
                     -Username $username -Domain $domain -Password $encryptedPass
                 if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $addContainer `
                         -Name $name -DisplayName $displayName -Hostname $name `
-                        -Protocol "RDP" -Port "3389" -Description $comment `
+                        -Protocol "RDP" -Port $connectionPort -Description $comment `
                         -Username $connUsername -Domain $connDomain -Password $connPassword `
                         -GuidSeed "rdp:${domain}:$($vm.VmName):$($fp -join '/')" `
                         -VmId $(if ($vmID) { $vmID } else { "" }) `
-                        -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
+                        -UseEnhancedMode $false `
                         -ForceOverwrite $ForceOverwrite) {
                     $shouldSave = $true
                 }
@@ -1967,7 +1969,7 @@ function New-MRemoteNGFileFromHyperV {
 
         # --- Hyper-V Console sub-container ---
         # Protocol=RDP, Port=2179, UseVmId=true, Hostname=local Hyper-V host.
-        # Lets users connect via Hyper-V Enhanced Session (vmconnect equivalent)
+        # Lets users connect via the standard Hyper-V VM console (vmconnect equivalent)
         # without needing network connectivity to the guest.
         $hvContainer = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "Hyper-V Console" } | Select-Object -First 1
         if (-not $hvContainer) {
@@ -1997,7 +1999,7 @@ function New-MRemoteNGFileFromHyperV {
                     -Protocol "RDP" -Port "2179" -Description "" `
                     -Username "" -Domain "" -Password "" `
                     -GuidSeed "hv:${domain}:$($vm.VmName)" `
-                    -VmId $hvVmId -UseEnhancedMode $true `
+                    -VmId $hvVmId -UseEnhancedMode $false `
                     -ForceOverwrite $true) {
                 $shouldSave = $true
             }
