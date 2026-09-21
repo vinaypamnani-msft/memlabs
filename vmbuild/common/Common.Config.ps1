@@ -1693,6 +1693,119 @@ function Add-RemoteSQLVMToDeployConfig {
         Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.fileServerVM -configToModify $configToModify -hidden:$hidden
     }
 }
+
+function Add-Phase8DistributionPointMetadata {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [AllowNull()]
+        [object[]] $ExistingVMs,
+        [bool] $InventoryRefreshVerified = $false
+    )
+
+    $Config | Add-Member -MemberType NoteProperty -Name phase8ManagedDistributionPointScopes -Value @() -Force
+    $domainName = "$($Config.vmOptions.domainName)"
+    $phase8Primaries = @($Config.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and (-not $_.domain -or $_.domain -eq $domainName)
+        })
+    if ($phase8Primaries.Count -eq 0) { return }
+
+    if (-not $PSBoundParameters.ContainsKey('ExistingVMs')) {
+        $disableSmartUpdateValue = (Get-Variable -Name 'DisableSmartUpdate' -Scope Global -ErrorAction SilentlyContinue).Value
+        $inventoryRefreshStarted = Get-Date
+        try {
+            $global:DisableSmartUpdate = $false
+            $global:vm_List_Dirty = $true
+            $refreshedVmInventory = Get-List -Type VM -SmartUpdate
+            $ExistingVMs = @($refreshedVmInventory)
+            $InventoryRefreshVerified = $null -ne $refreshedVmInventory -and
+                $global:vm_List_LastUpdate -and
+                $global:vm_List_LastUpdate -ge $inventoryRefreshStarted -and
+                -not $global:vm_List_Dirty
+        }
+        finally {
+            $global:DisableSmartUpdate = [bool]$disableSmartUpdateValue
+        }
+    }
+    $existingPhase8Primaries = @($phase8Primaries | Where-Object { $_.hidden -eq $true })
+    if ($existingPhase8Primaries.Count -gt 0 -and -not $InventoryRefreshVerified) {
+        $primaryNames = @($existingPhase8Primaries | ForEach-Object { $_.vmName }) -join ', '
+        throw "Cannot determine Phase 8 Distribution Point ownership for existing Primary site server(s) $primaryNames because the live VM inventory refresh returned no data."
+    }
+
+    $configuredVmKeys = @{}
+    foreach ($configuredVm in @($Config.virtualMachines)) {
+        $configuredVmName = "$($configuredVm.vmName)".Trim()
+        if ($configuredVmName) { $configuredVmKeys[$configuredVmName.ToUpperInvariant()] = $true }
+    }
+    $allExistingVMs = @($ExistingVMs)
+    $managedDpScopes = @()
+    foreach ($primary in $phase8Primaries) {
+        $primarySiteCode = "$($primary.siteCode)".Trim()
+        if (-not $primarySiteCode) { continue }
+
+        $allowDomainlessInventory = -not $primary.domain
+        $existingHierarchyVMs = @($allExistingVMs | Where-Object {
+            $existingVmName = "$($_.vmName)".Trim()
+            $isShadowed = $existingVmName -and $configuredVmKeys.ContainsKey($existingVmName.ToUpperInvariant())
+            -not $isShadowed -and ($_.domain -eq $domainName -or ($allowDomainlessInventory -and -not $_.domain))
+            })
+        $configuredHierarchyVMs = @($Config.virtualMachines | Where-Object {
+                -not $_.domain -or $_.domain -eq $domainName
+            })
+        $secondarySiteCodes = @(@($existingHierarchyVMs) + @($configuredHierarchyVMs) | Where-Object {
+                $_.role -eq 'Secondary' -and "$($_.parentSiteCode)" -eq $primarySiteCode
+            } | ForEach-Object { "$($_.siteCode)" } | Where-Object { $_ } | Select-Object -Unique)
+        $managedSiteCodes = @($primarySiteCode) + @($secondarySiteCodes)
+        $existingDpCandidates = @($existingHierarchyVMs | Where-Object {
+                "$($_.siteCode)" -in $managedSiteCodes -and
+                ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
+            })
+        $configuredDpCandidates = @($configuredHierarchyVMs | Where-Object {
+                "$($_.siteCode)" -in $managedSiteCodes -and
+                ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
+            })
+        $allDpCandidates = @($configuredDpCandidates) + @($existingDpCandidates)
+        $scopeDpNames = @()
+        foreach ($candidate in $allDpCandidates) {
+            $candidateName = "$($candidate.vmName)".Trim()
+            if (-not $candidateName) { continue }
+            if (-not $candidateName.Contains('.')) {
+                $candidateDomain = if ($candidate.domain) { "$($candidate.domain)".Trim() } else { $domainName }
+                if ($candidateDomain) { $candidateName = "$candidateName.$candidateDomain" }
+            }
+            $scopeDpNames += $candidateName
+        }
+
+        $siteHasManagedDp = $allDpCandidates | Where-Object {
+            $_.siteCode -eq $primary.siteCode -and ($_.installDP -eq $true -or $_.enablePullDP -eq $true)
+        } | Select-Object -First 1
+        if (-not $siteHasManagedDp) {
+            $primaryName = "$($primary.vmName)".Trim()
+            if (-not $primaryName) { continue }
+            if (-not $primaryName.Contains('.') -and $domainName) { $primaryName = "$primaryName.$domainName" }
+            $scopeDpNames += $primaryName
+            Write-Log "Add-to-existing Phase 8: no managed DP is represented for site $($primary.siteCode); recording the Primary '$($primary.vmName)' deploy-time DP fallback." -LogOnly
+        }
+
+        $scopeNameKeys = @{}
+        $uniqueScopeNames = @()
+        foreach ($scopeDpName in $scopeDpNames) {
+            $scopeNameKey = $scopeDpName.ToUpperInvariant()
+            if ($scopeNameKeys.ContainsKey($scopeNameKey)) { continue }
+            $scopeNameKeys[$scopeNameKey] = $true
+            $uniqueScopeNames += $scopeDpName
+        }
+        $managedDpScopes += [pscustomobject]@{
+            PrimarySiteCode       = $primarySiteCode
+            DistributionPointNames = @($uniqueScopeNames)
+        }
+    }
+
+    $Config | Add-Member -MemberType NoteProperty -Name phase8ManagedDistributionPointScopes -Value @($managedDpScopes) -Force
+}
+
 function Add-ExistingVMsToDeployConfig {
     [CmdletBinding()]
     param (
@@ -1700,8 +1813,24 @@ function Add-ExistingVMsToDeployConfig {
         [object] $config
     )
 
-    #Update Cache
-    get-list -type vm -SmartUpdate | out-null
+    # Phase 8 DP ownership must not be inferred from a stale cache. Validation
+    # normally disables later SmartUpdates after its initial inventory pass, so
+    # temporarily force one authoritative refresh and verify Get-List recorded
+    # its successful completion before permitting existing-site fallbacks.
+    $disableSmartUpdateValue = (Get-Variable -Name 'DisableSmartUpdate' -Scope Global -ErrorAction SilentlyContinue).Value
+    $inventoryRefreshStarted = Get-Date
+    try {
+        $global:DisableSmartUpdate = $false
+        $global:vm_List_Dirty = $true
+        $refreshedVmInventory = get-list -type vm -SmartUpdate
+        $inventoryRefreshVerified = $null -ne $refreshedVmInventory -and
+            $global:vm_List_LastUpdate -and
+            $global:vm_List_LastUpdate -ge $inventoryRefreshStarted -and
+            -not $global:vm_List_Dirty
+    }
+    finally {
+        $global:DisableSmartUpdate = [bool]$disableSmartUpdateValue
+    }
 
     # Add existing DC to list
     if ($config.virtualMachines | Where-Object { $_.role -notin ("OSDClient") }) {
@@ -2061,6 +2190,8 @@ function Add-ExistingVMsToDeployConfig {
             $sqlao.PSObject.Properties.Remove('OtherNode')
         }
     }
+
+    Add-Phase8DistributionPointMetadata -Config $config -ExistingVMs @($refreshedVmInventory) -InventoryRefreshVerified $inventoryRefreshVerified
 }
 
 function Add-ModifiedExistingVMToDeployConfig {

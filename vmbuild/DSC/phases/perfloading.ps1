@@ -106,11 +106,21 @@ Write-DscStatus "$Tag Starting perfloading"
     function Get-MemLabsManagedDistributionPointNames {
         param (
             [object[]] $VirtualMachines,
-            [string] $DefaultDomainName
+            [string] $DefaultDomainName,
+            [string] $PrimarySiteCode,
+            [object[]] $AdditionalDistributionPointScopes
         )
 
-        @($VirtualMachines | Where-Object {
-                $_.installDP -eq $true -or $_.enablePullDP -eq $true -or "$($_.role)" -eq 'Secondary'
+        $localVirtualMachines = @($VirtualMachines | Where-Object {
+                -not $_.domain -or "$($_.domain)" -eq $DefaultDomainName
+            })
+        $secondarySiteCodes = @($localVirtualMachines | Where-Object {
+                $_.role -eq 'Secondary' -and "$($_.parentSiteCode)" -eq $PrimarySiteCode
+            } | ForEach-Object { "$($_.siteCode)" } | Where-Object { $_ } | Select-Object -Unique)
+        $managedSiteCodes = @($PrimarySiteCode) + @($secondarySiteCodes)
+        $managedNames = @($localVirtualMachines | Where-Object {
+                "$($_.siteCode)" -in $managedSiteCodes -and
+            ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or "$($_.role)" -eq 'Secondary')
             } | ForEach-Object {
                 $vmName = "$($_.vmName)".Trim()
                 if (-not $vmName) { return }
@@ -118,7 +128,23 @@ Write-DscStatus "$Tag Starting perfloading"
                 $domainName = if ($_.domain) { "$($_.domain)".Trim() } else { $DefaultDomainName }
                 if ($domainName) { return "$vmName.$domainName" }
                 return $vmName
-            } | Select-Object -Unique)
+            })
+        $additionalNames = @($AdditionalDistributionPointScopes | Where-Object {
+                "$($_.PrimarySiteCode)" -eq $PrimarySiteCode
+            } | ForEach-Object { @($_.DistributionPointNames) })
+        foreach ($additionalName in $additionalNames) {
+            $name = "$additionalName".Trim()
+            if (-not $name) { continue }
+            if (-not $name.Contains('.') -and $DefaultDomainName) { $name = "$name.$DefaultDomainName" }
+            $managedNames += $name
+        }
+        $managedNameKeys = @{}
+        @($managedNames | Where-Object {
+                $managedNameKey = $_.ToUpperInvariant()
+                if ($managedNameKeys.ContainsKey($managedNameKey)) { return $false }
+                $managedNameKeys[$managedNameKey] = $true
+                return $true
+            })
     }
 
     function Test-MemLabsDistributionPointGroupMember {
@@ -131,7 +157,7 @@ Write-DscStatus "$Tag Starting perfloading"
         return $MemberKeys.ContainsKey($DistributionPointName.ToUpperInvariant())
     }
 
-    function Test-MemLabsDistributionPointGroupCoverage {
+    function Sync-MemLabsDistributionPointGroupMembership {
         param (
             [string] $SiteCode,
             [string] $GroupName,
@@ -141,25 +167,71 @@ Write-DscStatus "$Tag Starting perfloading"
             [int] $RetrySeconds = 5
         )
 
+        $expectedNames = @($ExpectedDistributionPointNames | Where-Object { $_ } | Select-Object -Unique)
+        if ($expectedNames.Count -eq 0) {
+            Write-DscStatus "$StatusTag '$GroupName' membership cannot be verified because no MemLabs-managed Distribution Points were identified. Content distribution was not requested." -Failure
+            return $false
+        }
+
         for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
             try {
+                $allDistributionPoints = @(Get-CMDistributionPoint -AllSite -ErrorAction Stop)
+                $liveDpNames = @{}
+                foreach ($liveDp in $allDistributionPoints) {
+                    $liveDpName = ($liveDp.NetworkOSPath -replace '^\\\\', '') -split '\\' | Select-Object -First 1
+                    if ($liveDpName) { $liveDpNames[$liveDpName.ToUpperInvariant()] = $liveDpName }
+                }
                 $group = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$GroupName'" -ErrorAction Stop
                 if (-not $group) { throw "group was not found" }
-                $memberRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop)
-                $memberKeys = @{}
-                foreach ($memberRow in $memberRows) {
-                    if ("$($memberRow.DPNALPath)" -match '\\([^\\"\]]+)') {
-                        $memberKeys[$Matches[1].ToUpperInvariant()] = $true
+
+                $readMembership = {
+                    $rows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop)
+                    $keys = @{}
+                    foreach ($row in $rows) {
+                        if ("$($row.DPNALPath)" -match '\\([^\\\"\]]+)') {
+                            $keys[$Matches[1].ToUpperInvariant()] = $true
+                        }
+                    }
+                    [pscustomobject]@{ Rows = @($rows); Keys = $keys }
+                }
+
+                $membership = & $readMembership
+                $addFailures = @()
+                $addAttempted = $false
+                foreach ($expectedName in $expectedNames) {
+                    $expectedKey = $expectedName.ToUpperInvariant()
+                    if (-not $liveDpNames.ContainsKey($expectedKey) -or $membership.Keys.ContainsKey($expectedKey)) { continue }
+                    $addAttempted = $true
+                    try {
+                        Add-CMDistributionPointToGroup -DistributionPointGroupName $GroupName -DistributionPointName $liveDpNames[$expectedKey] -ErrorAction Stop
+                        Write-DscStatus "$StatusTag Added Distribution Point '$($liveDpNames[$expectedKey])' to group '$GroupName'"
+                    }
+                    catch {
+                        $addFailures += "$expectedName ($($_.Exception.Message))"
                     }
                 }
-                $missingNames = @($ExpectedDistributionPointNames | Where-Object {
-                        -not (Test-MemLabsDistributionPointGroupMember -MemberKeys $memberKeys -DistributionPointName $_)
+                if ($addAttempted) { $membership = & $readMembership }
+
+                $missingLiveNames = @($expectedNames | Where-Object { -not $liveDpNames.ContainsKey($_.ToUpperInvariant()) })
+                $missingNames = @($expectedNames | Where-Object {
+                        -not (Test-MemLabsDistributionPointGroupMember -MemberKeys $membership.Keys -DistributionPointName $_)
                     })
-                if ($memberRows.Count -gt 0 -and $missingNames.Count -eq 0) {
-                    Write-DscStatus "$StatusTag Verified '$GroupName' membership: $($memberRows.Count) total DP(s), all $($ExpectedDistributionPointNames.Count) MemLabs-managed DP(s) present"
+                $managedLiveCount = @($expectedNames | Where-Object { $liveDpNames.ContainsKey($_.ToUpperInvariant()) }).Count
+                $externalDpCount = $allDistributionPoints.Count - $managedLiveCount
+                if ($missingLiveNames.Count -eq 0 -and $missingNames.Count -eq 0) {
+                    Write-DscStatus "$StatusTag Verified '$GroupName' membership: $($membership.Rows.Count) total DP(s), all $($expectedNames.Count) MemLabs-managed DP(s) are live and present; $externalDpCount external DP(s)/CMG(s) are left unchanged"
                     return $true
                 }
-                $reason = if ($memberRows.Count -eq 0) { 'the group is empty' } else { "missing: $($missingNames -join ', ')" }
+                $reason = if ($missingLiveNames.Count -gt 0) {
+                    "not registered as live DP(s): $($missingLiveNames -join ', ')"
+                }
+                elseif ($membership.Rows.Count -eq 0) {
+                    'the group is empty'
+                }
+                else {
+                    "missing from the group: $($missingNames -join ', ')"
+                }
+                if ($addFailures.Count -gt 0) { $reason += "; add failed: $($addFailures -join ', ')" }
             }
             catch {
                 $reason = $_.Exception.Message
@@ -1558,54 +1630,15 @@ if ($licensed) { Write-Output 'Activated' }
     # application, and package distribution to this site's DP. (Only the boot-
     # image call surfaced it; the app/package calls use -ErrorAction
     # SilentlyContinue and swallowed the same failure.)
-    # Add-CMDistributionPointToGroup is idempotent here: a DP already in the
-    # group may return success without changing anything, so resolve current
-    # membership first and call it only for missing DPs.
-    $serverFromNal = {
-        param($NalPath)
-        if ("$NalPath" -match '\\([^\\"\]]+)') { return $Matches[1] }
-        return $null
+    # Re-read and reconcile both live DP registration and group membership on
+    # every attempt so provider replication or a transient add failure can
+    # converge without rerunning the phase.
+    $distributionPrimarySiteCode = if ($CurrentRole -eq 'Secondary' -and $ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
+    $managedDpNames = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $deployConfig.virtualMachines -DefaultDomainName $DomainFullName -PrimarySiteCode $distributionPrimarySiteCode -AdditionalDistributionPointScopes $deployConfig.phase8ManagedDistributionPointScopes)
+    if ($managedDpNames.Count -eq 0 -and $CurrentRole -eq 'CAS') {
+        Write-DscStatus "$Tag No CAS-local MemLabs-managed Distribution Points were identified; child Primary workers reconcile their own group membership."
     }
-    $managedDpNames = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $deployConfig.virtualMachines -DefaultDomainName $DomainFullName)
-    $managedDpKeys = @{}
-    foreach ($managedDpName in $managedDpNames) { $managedDpKeys[$managedDpName.ToUpperInvariant()] = $true }
-    $allDistributionPoints = @(Get-CMDistributionPoint -AllSite)
-    $DistributionPoints = @($allDistributionPoints | Where-Object {
-            $liveDpName = ($_.NetworkOSPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-            $managedDpKeys.ContainsKey($liveDpName.ToUpperInvariant())
-        })
-    Write-DscStatus "$Tag Reconciling '$DPGroupName' membership for $($DistributionPoints.Count) MemLabs-managed DP(s); $($allDistributionPoints.Count - $DistributionPoints.Count) external DP(s)/CMG(s) are left unchanged"
-    $existingAllDpMemberKeys = @{}
-    try {
-        $allGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$DPGroupName'" -ErrorAction Stop
-        if ($allGrpWmi) {
-            foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($allGrpWmi.GroupID)'" -ErrorAction Stop)) {
-                $memberHostName = & $serverFromNal $memberRow.DPNALPath
-                if (-not $memberHostName) { continue }
-                $existingAllDpMemberKeys[$memberHostName.ToUpperInvariant()] = $true
-            }
-        }
-    }
-    catch {
-        Write-DscStatus "$Tag Could not read existing '$DPGroupName' membership; falling back to idempotent adds: $($_.Exception.Message)"
-    }
-    foreach ($dp in $DistributionPoints) {
-        $DPName = ($dp.NetworkOSPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-        if (Test-MemLabsDistributionPointGroupMember -MemberKeys $existingAllDpMemberKeys -DistributionPointName $DPName) {
-            Write-DscStatus "$Tag Distribution Point '$DPName' is already in '$DPGroupName' -- skipping add"
-            continue
-        }
-        try {
-            Add-CMDistributionPointToGroup -DistributionPointGroupName $DPGroupName -DistributionPointName $DPName -ErrorAction Stop
-            Write-DscStatus "$Tag Added Distribution Point '$DPName' to group '$DPGroupName'"
-        }
-        catch {
-            # Most common: DP is already a member. Benign -- log and continue.
-            Write-DscStatus "$Tag DP '$DPName' not added to '$DPGroupName' (likely already a member): $($_.Exception.Message)"
-        }
-    }
-
-    if (-not (Test-MemLabsDistributionPointGroupCoverage -SiteCode $SiteCode -GroupName $DPGroupName -ExpectedDistributionPointNames $managedDpNames -StatusTag $Tag)) {
+    elseif (-not (Sync-MemLabsDistributionPointGroupMembership -SiteCode $SiteCode -GroupName $DPGroupName -ExpectedDistributionPointNames $managedDpNames -StatusTag $Tag)) {
         return
     }
 

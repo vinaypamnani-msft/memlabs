@@ -50,27 +50,45 @@ function Import-TestFunction {
 $perfloadingPath = Join-Path $RootPath 'DSC\phases\perfloading.ps1'
 . (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsManagedDistributionPointNames')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Test-MemLabsDistributionPointGroupMember')
-. (Import-TestFunction -Path $perfloadingPath -Name 'Test-MemLabsDistributionPointGroupCoverage')
+. (Import-TestFunction -Path $perfloadingPath -Name 'Sync-MemLabsDistributionPointGroupMembership')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Test-MemLabsContentDistributionTarget')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Sync-MemLabsContentDistribution')
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
 $virtualMachines = @(
-    [pscustomobject]@{ vmName = 'PRIMARY1'; role = 'Primary'; installDP = $true; enablePullDP = $false; hidden = $false },
-    [pscustomobject]@{ vmName = 'PULLDP1'; role = 'SiteSystem'; installDP = $false; enablePullDP = $true; hidden = $false },
-    [pscustomobject]@{ vmName = 'SECONDARY1'; role = 'Secondary'; installDP = $false; enablePullDP = $false; hidden = $false },
-    [pscustomobject]@{ vmName = 'EXISTINGDP1'; role = 'SiteSystem'; installDP = $true; enablePullDP = $false; hidden = $true; domain = 'existing.test' },
-    [pscustomobject]@{ vmName = 'EXTERNALDP'; role = 'SiteSystem'; installDP = $false; enablePullDP = $false; hidden = $false },
-    [pscustomobject]@{ vmName = 'EXTERNALCMG'; role = 'CMG'; installDP = $false; enablePullDP = $false; hidden = $false }
+    [pscustomobject]@{ vmName = 'PRIMARY1'; role = 'Primary'; siteCode = 'PRI'; installDP = $true; enablePullDP = $false; hidden = $false },
+    [pscustomobject]@{ vmName = 'PULLDP1'; role = 'SiteSystem'; siteCode = 'PRI'; installDP = $false; enablePullDP = $true; hidden = $false },
+    [pscustomobject]@{ vmName = 'SECONDARY1'; role = 'Secondary'; siteCode = 'SEC'; parentSiteCode = 'PRI'; installDP = $false; enablePullDP = $false; hidden = $false },
+    [pscustomobject]@{ vmName = 'EXISTINGDP1'; role = 'SiteSystem'; siteCode = 'PRI'; installDP = $true; enablePullDP = $false; hidden = $true; domain = 'memlabs.test' },
+    [pscustomobject]@{ vmName = 'OTHERPRIMARY'; role = 'Primary'; siteCode = 'OTH'; installDP = $true; enablePullDP = $false; hidden = $false },
+    [pscustomobject]@{ vmName = 'OTHERPULL'; role = 'SiteSystem'; siteCode = 'OTH'; installDP = $false; enablePullDP = $true; hidden = $false },
+    [pscustomobject]@{ vmName = 'FOREIGNDP'; role = 'SiteSystem'; siteCode = 'PRI'; domain = 'foreign.test'; installDP = $true; enablePullDP = $false; hidden = $false },
+    [pscustomobject]@{ vmName = 'FOREIGNPULL'; role = 'SiteSystem'; siteCode = 'PRI'; domain = 'foreign.test'; installDP = $false; enablePullDP = $true; hidden = $false },
+    [pscustomobject]@{ vmName = 'FOREIGNSECONDARY'; role = 'Secondary'; siteCode = 'FSE'; parentSiteCode = 'PRI'; domain = 'foreign.test'; installDP = $false; enablePullDP = $false; hidden = $false },
+    [pscustomobject]@{ vmName = 'EXTERNALDP'; role = 'SiteSystem'; siteCode = 'PRI'; installDP = $false; enablePullDP = $false; hidden = $false },
+    [pscustomobject]@{ vmName = 'EXTERNALCMG'; role = 'CMG'; siteCode = 'PRI'; installDP = $false; enablePullDP = $false; hidden = $false }
 )
 
-$managedNames = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $virtualMachines -DefaultDomainName 'memlabs.test' | Sort-Object)
-Assert-Equal 'EXISTINGDP1.existing.test,PRIMARY1.memlabs.test,PULLDP1.memlabs.test,SECONDARY1.memlabs.test' ($managedNames -join ',') 'only exact MemLabs-managed DP FQDNs are selected'
+$managedNames = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $virtualMachines -DefaultDomainName 'memlabs.test' -PrimarySiteCode PRI | Sort-Object)
+Assert-Equal 'EXISTINGDP1.memlabs.test,PRIMARY1.memlabs.test,PULLDP1.memlabs.test,SECONDARY1.memlabs.test' ($managedNames -join ',') 'only exact MemLabs-managed DP FQDNs are selected'
 Assert-Equal $true ($managedNames -contains 'PULLDP1.memlabs.test') 'pull-only DP is selected'
 Assert-Equal $false ($managedNames -contains 'EXTERNALDP.memlabs.test') 'external DP is not auto-added'
 Assert-Equal $false ($managedNames -contains 'EXTERNALCMG.memlabs.test') 'CMG is not auto-added'
+Assert-Equal $false ($managedNames -contains 'OTHERPRIMARY.memlabs.test') 'another Primary site is not auto-added'
+Assert-Equal $false ($managedNames -contains 'OTHERPULL.memlabs.test') 'pull DP from another Primary site is not auto-added'
+Assert-Equal $false ($managedNames -contains 'FOREIGNDP.foreign.test') 'foreign-domain DP with a colliding site code is excluded'
+Assert-Equal $false ($managedNames -contains 'FOREIGNPULL.foreign.test') 'foreign-domain pull DP with a colliding site code is excluded'
+Assert-Equal $false ($managedNames -contains 'FOREIGNSECONDARY.foreign.test') 'foreign-domain Secondary under the local Primary is excluded'
 Assert-Equal $false ($managedNames -contains 'PRIMARY1.external.test') 'same short name in another domain is not selected'
+$projectedScopes = @(
+    [pscustomobject]@{ PrimarySiteCode = 'PRI'; DistributionPointNames = @('LEGACYPRI', 'EXISTINGDP1.memlabs.test') },
+    [pscustomobject]@{ PrimarySiteCode = 'OTH'; DistributionPointNames = @('OTHERDP.memlabs.test') }
+)
+$managedNamesWithProjection = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $virtualMachines -DefaultDomainName 'memlabs.test' -PrimarySiteCode PRI -AdditionalDistributionPointScopes $projectedScopes | Sort-Object)
+Assert-Equal $true ($managedNamesWithProjection -contains 'LEGACYPRI.memlabs.test') 'host-projected Primary fallback is included and domain-qualified'
+Assert-Equal 1 @($managedNamesWithProjection | Where-Object { $_ -eq 'EXISTINGDP1.memlabs.test' }).Count 'host-projected DP names are deduplicated with declared roles'
+Assert-Equal $false ($managedNamesWithProjection -contains 'OTHERDP.memlabs.test') 'host projection from another Primary site is excluded'
 
 $existingMembers = @{ 'PRIMARY1.EXTERNAL.TEST' = $true }
 Assert-Equal $false (Test-MemLabsDistributionPointGroupMember -MemberKeys $existingMembers -DistributionPointName 'PRIMARY1.memlabs.test') 'external member with same short name does not suppress managed DP add'
@@ -83,6 +101,22 @@ $script:ContentPackages = @()
 $script:GroupPackages = @()
 $script:GroupPackageReadCount = 0
 $script:GroupPackagesAfterRead = 0
+$script:LiveDpReadCount = 0
+$script:LiveDpMode = 'Present'
+$script:GroupMembers = New-Object System.Collections.Generic.List[string]
+$script:PendingGroupMembers = New-Object System.Collections.Generic.List[string]
+$script:MemberProjectionAfterRead = 0
+$script:AddReadCount = 0
+$script:AddFailureAttempts = 0
+function Get-CMDistributionPoint {
+    param ([switch] $AllSite, $ErrorAction)
+
+    $script:LiveDpReadCount++
+    if ($script:LiveDpMode -eq 'Missing') { return @() }
+    if ($script:LiveDpMode -eq 'Delayed' -and $script:LiveDpReadCount -eq 1) { return @() }
+    if ($script:LiveDpMode -eq 'Unrelated') { return [pscustomobject]@{ NetworkOSPath = '\\EXTERNAL.memlabs.test' } }
+    return [pscustomobject]@{ NetworkOSPath = '\\PRIMARY1.memlabs.test' }
+}
 function Get-WmiObject {
     param ([string] $Namespace, [string] $Class, [string] $Filter, [string] $ErrorAction)
 
@@ -95,9 +129,22 @@ function Get-WmiObject {
     }
     if ($Class -ne 'SMS_DPGroupMembers') { return }
     $script:MemberReadCount++
-    $members = @('PRIMARY1.external.test')
-    if ($script:CoverageMode -eq 'Delayed' -and $script:MemberReadCount -gt 1) { $members += 'PRIMARY1.memlabs.test' }
-    @($members | ForEach-Object { [pscustomobject]@{ DPNALPath = "[`"Display=\\$_`"]MSWNET:[`"SMS_SITE=ABC`"]\\$_\" } })
+    if ($script:PendingGroupMembers.Count -gt 0 -and $script:MemberReadCount -gt $script:MemberProjectionAfterRead) {
+        foreach ($pendingMember in @($script:PendingGroupMembers)) {
+            if (-not $script:GroupMembers.Contains($pendingMember)) { [void]$script:GroupMembers.Add($pendingMember) }
+        }
+        $script:PendingGroupMembers.Clear()
+    }
+    @($script:GroupMembers | ForEach-Object { [pscustomobject]@{ DPNALPath = "[`"Display=\\$_`"]MSWNET:[`"SMS_SITE=ABC`"]\\$_\" } })
+}
+function Add-CMDistributionPointToGroup {
+    param ([string] $DistributionPointGroupName, [string] $DistributionPointName, $ErrorAction)
+
+    $script:AddReadCount++
+    if ($script:AddReadCount -le $script:AddFailureAttempts) { throw 'simulated transient add failure' }
+    if (-not $script:GroupMembers.Contains($DistributionPointName) -and -not $script:PendingGroupMembers.Contains($DistributionPointName)) {
+        [void]$script:PendingGroupMembers.Add($DistributionPointName)
+    }
 }
 function Write-DscStatus {
     param ([Parameter(Position = 0)][string] $Message, [switch] $Failure)
@@ -106,16 +153,68 @@ function Write-DscStatus {
 }
 function Start-Sleep { param ([int] $Seconds) }
 
-$coverage = Test-MemLabsDistributionPointGroupCoverage -SiteCode ABC -GroupName 'All MEMLABS DPs' -ExpectedDistributionPointNames @('PRIMARY1.memlabs.test') -StatusTag '[test]' -Attempts 2 -RetrySeconds 0
+[void]$script:GroupMembers.Add('PRIMARY1.external.test')
+$script:MemberProjectionAfterRead = 2
+$coverage = Sync-MemLabsDistributionPointGroupMembership -SiteCode ABC -GroupName 'All MEMLABS DPs' -ExpectedDistributionPointNames @('PRIMARY1.memlabs.test') -StatusTag '[test]' -Attempts 2 -RetrySeconds 0
 Assert-Equal $true $coverage 'membership verification waits for the exact managed FQDN'
-Assert-Equal 2 $script:MemberReadCount 'membership verification retries delayed provider state'
+Assert-Equal $true ($script:MemberReadCount -ge 3) 'membership verification retries delayed provider state'
+Assert-Equal 1 $script:AddReadCount 'missing managed DP is added once while provider projection catches up'
 
-$script:CoverageMode = 'Missing'
 $script:MemberReadCount = 0
+$script:AddReadCount = 0
+$script:AddFailureAttempts = 1
+$script:MemberProjectionAfterRead = 0
+$script:GroupMembers.Clear()
+[void]$script:GroupMembers.Add('PRIMARY1.external.test')
+$script:PendingGroupMembers.Clear()
 $script:Statuses.Clear()
-$coverage = Test-MemLabsDistributionPointGroupCoverage -SiteCode ABC -GroupName 'All MEMLABS DPs' -ExpectedDistributionPointNames @('PRIMARY1.memlabs.test') -StatusTag '[test]' -Attempts 1 -RetrySeconds 0
+$coverage = Sync-MemLabsDistributionPointGroupMembership -SiteCode ABC -GroupName 'All MEMLABS DPs' -ExpectedDistributionPointNames @('PRIMARY1.memlabs.test') -StatusTag '[test]' -Attempts 1 -RetrySeconds 0
 Assert-Equal $false $coverage 'external member cannot mask a missing managed DP'
 Assert-Equal 1 @($script:Statuses | Where-Object Failure).Count 'unverified membership records a phase failure'
+
+$script:LiveDpMode = 'Unrelated'
+$script:LiveDpReadCount = 0
+$script:Statuses.Clear()
+$coverage = Sync-MemLabsDistributionPointGroupMembership -SiteCode ABC -GroupName 'All MEMLABS DPs' -ExpectedDistributionPointNames @() -StatusTag '[test]' -Attempts 1 -RetrySeconds 0
+Assert-Equal $false $coverage 'unrelated group membership cannot satisfy an empty managed-DP expectation'
+Assert-Equal 1 @($script:Statuses | Where-Object Failure).Count 'empty managed-DP expectation records a phase failure'
+
+$script:LiveDpMode = 'Missing'
+$script:LiveDpReadCount = 0
+$script:GroupMembers.Clear()
+[void]$script:GroupMembers.Add('PRIMARY1.memlabs.test')
+$script:Statuses.Clear()
+$coverage = Sync-MemLabsDistributionPointGroupMembership -SiteCode ABC -GroupName 'All MEMLABS DPs' -ExpectedDistributionPointNames @('PRIMARY1.memlabs.test') -StatusTag '[test]' -Attempts 1 -RetrySeconds 0
+Assert-Equal $false $coverage 'stale group membership cannot mask a missing live managed DP'
+Assert-Equal 1 @($script:Statuses | Where-Object { $_.Failure -and $_.Message -match 'not registered as live DP' }).Count 'missing live managed DP is reported in the phase failure'
+
+$script:LiveDpMode = 'Delayed'
+$script:LiveDpReadCount = 0
+$script:MemberReadCount = 0
+$script:AddReadCount = 0
+$script:AddFailureAttempts = 0
+$script:MemberProjectionAfterRead = 0
+$script:GroupMembers.Clear()
+[void]$script:GroupMembers.Add('PRIMARY1.external.test')
+$script:PendingGroupMembers.Clear()
+$script:Statuses.Clear()
+$coverage = Sync-MemLabsDistributionPointGroupMembership -SiteCode ABC -GroupName 'All MEMLABS DPs' -ExpectedDistributionPointNames @('PRIMARY1.memlabs.test') -StatusTag '[test]' -Attempts 2 -RetrySeconds 0
+Assert-Equal $true $coverage 'membership verification retries delayed live DP registration'
+Assert-Equal 2 $script:LiveDpReadCount 'live DP projection is refreshed on each coverage attempt'
+Assert-Equal 1 $script:AddReadCount 'DP appearing on the second attempt is reconciled into the group'
+
+$script:LiveDpMode = 'Present'
+$script:LiveDpReadCount = 0
+$script:MemberReadCount = 0
+$script:AddReadCount = 0
+$script:AddFailureAttempts = 1
+$script:MemberProjectionAfterRead = 0
+$script:GroupMembers.Clear()
+$script:PendingGroupMembers.Clear()
+$script:Statuses.Clear()
+$coverage = Sync-MemLabsDistributionPointGroupMembership -SiteCode ABC -GroupName 'All MEMLABS DPs' -ExpectedDistributionPointNames @('PRIMARY1.memlabs.test') -StatusTag '[test]' -Attempts 2 -RetrySeconds 0
+Assert-Equal $true $coverage 'membership reconciliation retries a transient add failure'
+Assert-Equal 2 $script:AddReadCount 'transient add failure is retried rather than observed repeatedly'
 
 $script:DistributionRequests = New-Object System.Collections.Generic.List[string]
 $script:RemovalRequests = New-Object System.Collections.Generic.List[string]
@@ -201,9 +300,10 @@ Assert-Equal 1 @($script:Statuses | Where-Object Failure).Count 'absent target r
 $source = Get-Content -LiteralPath $perfloadingPath -Raw
 Assert-Equal $true $source.Contains('$DPGroupName = "All MEMLABS DPs"') 'production group name reflects MemLabs ownership'
 Assert-Equal $true $source.Contains('Distribution points created and managed by MEMLABS') 'production group description reflects MemLabs ownership'
-Assert-Equal $true $source.Contains('$allDistributionPoints = @(Get-CMDistributionPoint -AllSite)') 'production enumerates live DPs before applying ownership scope'
-Assert-Equal $true $source.Contains('$managedDpKeys.ContainsKey') 'production filters live DPs through managed config names'
-Assert-Equal $true $source.Contains('-ExpectedDistributionPointNames $managedDpNames') 'production requires every config-owned DP, including missing live rows'
+Assert-Equal $true $source.Contains('$allDistributionPoints = @(Get-CMDistributionPoint -AllSite -ErrorAction Stop)') 'production refreshes live DPs during membership reconciliation'
+Assert-Equal $true $source.Contains('-AdditionalDistributionPointScopes $deployConfig.phase8ManagedDistributionPointScopes') 'production consumes per-Primary add-to-existing DP ownership'
+Assert-Equal $true $source.Contains('Sync-MemLabsDistributionPointGroupMembership -SiteCode $SiteCode') 'production reconciles and verifies group membership in one retry loop'
+Assert-Equal $true $source.Contains('-ExpectedDistributionPointNames $managedDpNames') 'production requires every site-scoped config-owned DP, including missing live rows'
 Assert-Equal $true $source.Contains('external DP(s)/CMG(s) are left unchanged') 'production preserves manual external membership'
 Assert-Equal $false $source.Contains('-DistributionPointGroupName "ALL DPS"') 'content calls do not target the legacy group name'
 $distributionOffset = $source.IndexOf('Sync-MemLabsContentDistribution -ContentType Application -ContentName $appname')

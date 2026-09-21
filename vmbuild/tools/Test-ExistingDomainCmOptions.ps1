@@ -22,6 +22,7 @@ $script:SetVmShouldThrow = $false
 $script:SetVmIgnoreWrite = $false
 $script:BackupOptionsByVm = @{}
 $script:BackupRequests = New-Object System.Collections.Generic.List[string]
+$script:GetListSmartUpdateFailure = $false
 
 function Assert-Equal {
     param ($Expected, $Actual, [string] $What)
@@ -69,6 +70,11 @@ function Import-TestFunction {
 
 function Get-List {
     param ($Type, $DomainName, [switch] $SmartUpdate)
+    if ($SmartUpdate) {
+        if ($script:GetListSmartUpdateFailure) { return @($script:Inventory) }
+        $global:vm_List_LastUpdate = Get-Date
+        $global:vm_List_Dirty = $false
+    }
     $result = @($script:Inventory)
     if ($DomainName) {
         $result = @($result | Where-Object {
@@ -145,6 +151,7 @@ $sourcePath = Join-Path $RootPath 'common\Common.Config.ps1'
 $commonPath = Join-Path $RootPath 'Common.ps1'
 $existingPath = Join-Path $RootPath 'common\Common.GenConfig.Existing.ps1'
 $genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
+$perfloadingPath = Join-Path $RootPath 'DSC\phases\perfloading.ps1'
 . (Import-TestFunction -Path $commonPath -Name 'Get-VMNote')
 . (Import-TestFunction -Path $commonPath -Name 'Set-VMNote')
 . (Import-TestFunction -Path $sourcePath -Name 'Get-CmOptionsFingerprint')
@@ -158,14 +165,24 @@ $genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
 . (Import-TestFunction -Path $sourcePath -Name 'Add-ExistingVMToDeployConfig')
 . (Import-TestFunction -Path $sourcePath -Name 'Add-ModifiedExistingVMToDeployConfig')
 . (Import-TestFunction -Path $sourcePath -Name 'Add-CmOptionsPersistenceTargetForPhase8')
+. (Import-TestFunction -Path $sourcePath -Name 'Add-Phase8DistributionPointMetadata')
 . (Import-TestFunction -Path $sourcePath -Name 'Add-ExistingVMsToDeployConfig')
 . (Import-TestFunction -Path $sourcePath -Name 'Move-CmOptionsToTopLevelSiteServer')
 . (Import-TestFunction -Path $sourcePath -Name 'Sync-AddToExistingCmOptionsNotes')
 . (Import-TestFunction -Path $sourcePath -Name 'New-DeployConfig')
 . (Import-TestFunction -Path $existingPath -Name 'New-UserConfig')
 . (Import-TestFunction -Path $genConfigPath -Name 'ConvertTo-DeployConfigEx')
+. (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsManagedDistributionPointNames')
 $phasesPath = Join-Path $RootPath 'common\Common.Phases.ps1'
 . (Import-TestFunction -Path $phasesPath -Name 'Get-Phase8ConfigurationData')
+
+function Get-TestProjectedDpNames {
+    param ([object] $Config, [string] $PrimarySiteCode)
+
+    @($Config.phase8ManagedDistributionPointScopes | Where-Object {
+            $_.PrimarySiteCode -eq $PrimarySiteCode
+        } | ForEach-Object { @($_.DistributionPointNames) })
+}
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
@@ -557,6 +574,202 @@ function Invoke-MultiHierarchyOwnerCase {
 
 Invoke-MultiHierarchyOwnerCase
 Invoke-MultiHierarchyOwnerCase -ReverseInventory
+
+$script:Inventory = @(
+    [pscustomobject]@{
+        vmName = 'PS1SITE'; role = 'Primary'; siteCode = 'PS1'; state = 'Running'; domain = 'example.test'
+        installDP = $false; installMP = $false
+        cmOptions = [pscustomobject]@{ EnableBLM = $false; Version = '2509'; Install = $true }
+    },
+    [pscustomobject]@{
+        vmName = 'PS1DPMP1'; role = 'SiteSystem'; siteCode = 'PS1'; state = 'Running'; domain = 'example.test'
+        installDP = $true; installMP = $true
+    }
+)
+foreach ($inventoryVm in $script:Inventory) {
+    Set-TestVmNote -Name $inventoryVm.vmName -Note $inventoryVm
+}
+$dpProjectionConfig = [pscustomobject]@{
+    cmOptions = [pscustomobject]@{ EnableBLM = $false; Version = '2509'; Install = $true }
+    cmOptionsOwnerVM = 'PS1SITE'
+    vmOptions = [pscustomobject]@{ domainName = 'example.test'; network = '192.168.1.0' }
+    parameters = [pscustomobject]@{ ExistingDCName = $null }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'NEWSERVER'; role = 'DomainMember'; hidden = $false; pushClient = 'PS1'
+        })
+}
+Add-ExistingVMsToDeployConfig -Config $dpProjectionConfig
+Assert-Equal 'PS1DPMP1.example.test' ((Get-TestProjectedDpNames -Config $dpProjectionConfig -PrimarySiteCode PS1) -join ',') 'client-push expansion projects the existing managed DP into Phase 8 metadata'
+Assert-Equal 0 @($dpProjectionConfig.virtualMachines | Where-Object { $_.vmName -eq 'PS1DPMP1' }).Count 'managed DP metadata does not synthesize a VM worker'
+$projectedPhase8Nodes = @((Get-Phase8ConfigurationData -DeployConfig $dpProjectionConfig).AllNodes | Where-Object { $_.NodeName -ne '*' } | ForEach-Object { $_.NodeName }) -join ','
+Assert-Equal 'PS1SITE' $projectedPhase8Nodes 'projected DP metadata does not dispatch a Phase 8 worker'
+$projectedManagedDps = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $dpProjectionConfig.virtualMachines -DefaultDomainName 'example.test' -PrimarySiteCode PS1 -AdditionalDistributionPointScopes $dpProjectionConfig.phase8ManagedDistributionPointScopes)
+Assert-Equal 'PS1DPMP1.example.test' ($projectedManagedDps -join ',') 'perfloading receives the existing dedicated DP ownership metadata'
+$convertedProjectionConfig = ConvertTo-DeployConfigEx -DeployConfig ([pscustomobject]@{
+        cmOptions = [pscustomobject]@{ Install = $true }
+        vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+        virtualMachines = @()
+        phase8ManagedDistributionPointScopes = @([pscustomobject]@{
+                PrimarySiteCode = 'PS1'; DistributionPointNames = @('PS1DPMP1.example.test')
+            })
+    })
+Assert-Equal 'PS1DPMP1.example.test' ((Get-TestProjectedDpNames -Config $convertedProjectionConfig -PrimarySiteCode PS1) -join ',') 'deploy conversion preserves Phase 8 managed DP metadata'
+
+$script:Inventory = @([pscustomobject]@{
+        vmName = 'LEGACYPRI'; role = 'Primary'; siteCode = 'LEG'; state = 'Running'; domain = 'example.test'
+        installDP = $false; installMP = $false
+        cmOptions = [pscustomobject]@{ EnableBLM = $false; Version = '2509'; Install = $true }
+    })
+Set-TestVmNote -Name 'LEGACYPRI' -Note $script:Inventory[0]
+$fallbackProjectionConfig = [pscustomobject]@{
+    cmOptions = [pscustomobject]@{ EnableBLM = $false; Version = '2509'; Install = $true }
+    cmOptionsOwnerVM = 'LEGACYPRI'
+    vmOptions = [pscustomobject]@{ domainName = 'example.test'; network = '192.168.1.0' }
+    parameters = [pscustomobject]@{ ExistingDCName = $null }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'NEWSERVER2'; role = 'DomainMember'; hidden = $false; pushClient = 'LEG'
+        })
+}
+Add-ExistingVMsToDeployConfig -Config $fallbackProjectionConfig
+$fallbackPrimary = $fallbackProjectionConfig.virtualMachines | Where-Object { $_.vmName -eq 'LEGACYPRI' } | Select-Object -First 1
+Assert-Equal $false $fallbackPrimary.installDP 'legacy Primary fallback metadata does not rewrite the saved role declaration'
+$fallbackManagedDps = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $fallbackProjectionConfig.virtualMachines -DefaultDomainName 'example.test' -PrimarySiteCode LEG -AdditionalDistributionPointScopes $fallbackProjectionConfig.phase8ManagedDistributionPointScopes)
+Assert-Equal 'LEGACYPRI.example.test' ($fallbackManagedDps -join ',') 'perfloading receives the legacy Primary fallback DP ownership metadata'
+
+$script:Inventory = @(
+    [pscustomobject]@{ vmName = 'DOMAINLESSPRI'; role = 'Primary'; siteCode = 'DLS'; state = 'Running'; installDP = $false },
+    [pscustomobject]@{ vmName = 'DOMAINLESSDP'; role = 'SiteSystem'; siteCode = 'DLS'; state = 'Running'; installDP = $true },
+    [pscustomobject]@{ vmName = 'FOREIGNDP'; role = 'SiteSystem'; siteCode = 'DLS'; state = 'Running'; domain = 'foreign.test'; installDP = $true }
+)
+foreach ($inventoryVm in $script:Inventory) {
+    Set-TestVmNote -Name $inventoryVm.vmName -Note $inventoryVm
+}
+$domainlessProjectionConfig = [pscustomobject]@{
+    cmOptions = [pscustomobject]@{ EnableBLM = $false; Version = '2509'; Install = $true }
+    cmOptionsOwnerVM = 'DOMAINLESSPRI'
+    vmOptions = [pscustomobject]@{ domainName = 'example.test'; network = '192.168.1.0' }
+    parameters = [pscustomobject]@{ ExistingDCName = $null }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'NEWSERVER3'; role = 'DomainMember'; hidden = $false; pushClient = 'DLS'
+        })
+}
+Add-ExistingVMsToDeployConfig -Config $domainlessProjectionConfig
+Assert-Equal 'DOMAINLESSDP.example.test' ((Get-TestProjectedDpNames -Config $domainlessProjectionConfig -PrimarySiteCode DLS) -join ',') 'domainless legacy Primary admits only domainless DP metadata for its site'
+Assert-Equal $false ((Get-TestProjectedDpNames -Config $domainlessProjectionConfig -PrimarySiteCode DLS) -contains 'FOREIGNDP.foreign.test') 'foreign-domain DP with a colliding site code is excluded'
+
+$script:Inventory = @(
+    [pscustomobject]@{ vmName = 'HIERPRI'; role = 'Primary'; siteCode = 'HPR'; state = 'Running'; domain = 'example.test'; installDP = $false },
+    [pscustomobject]@{ vmName = 'PULLDP'; role = 'SiteSystem'; siteCode = 'HPR'; state = 'Running'; domain = 'example.test'; installDP = $false; enablePullDP = $true },
+    [pscustomobject]@{ vmName = 'SECONDARY'; role = 'Secondary'; siteCode = 'SEC'; parentSiteCode = 'HPR'; state = 'Running'; domain = 'example.test'; installDP = $false }
+)
+foreach ($inventoryVm in $script:Inventory) {
+    Set-TestVmNote -Name $inventoryVm.vmName -Note $inventoryVm
+}
+$hierarchyProjectionConfig = [pscustomobject]@{
+    cmOptions = [pscustomobject]@{ EnableBLM = $false; Version = '2509'; Install = $true }
+    cmOptionsOwnerVM = 'HIERPRI'
+    vmOptions = [pscustomobject]@{ domainName = 'example.test'; network = '192.168.1.0' }
+    parameters = [pscustomobject]@{ ExistingDCName = $null }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'NEWSERVER4'; role = 'DomainMember'; hidden = $false; pushClient = 'HPR'
+        })
+}
+Add-ExistingVMsToDeployConfig -Config $hierarchyProjectionConfig
+Assert-Equal 'PULLDP.example.test,SECONDARY.example.test' ((Get-TestProjectedDpNames -Config $hierarchyProjectionConfig -PrimarySiteCode HPR) -join ',') 'pull and implicit Secondary DPs are projected for the active Primary hierarchy'
+
+$script:Inventory = @(
+    [pscustomobject]@{ vmName = 'DOMAINLESS-EXA'; role = 'SiteSystem'; siteCode = 'EXA'; state = 'Running'; installDP = $true },
+    [pscustomobject]@{ vmName = 'DOMAINLESS-LEG'; role = 'SiteSystem'; siteCode = 'LEG'; state = 'Running'; installDP = $true }
+)
+$mixedPrimaryConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'EXACTPRI'; role = 'Primary'; siteCode = 'EXA'; hidden = $true; domain = 'example.test'; installDP = $false },
+        [pscustomobject]@{ vmName = 'DOMAINLESSPRI'; role = 'Primary'; siteCode = 'LEG'; hidden = $true; installDP = $false }
+    )
+}
+Add-Phase8DistributionPointMetadata -Config $mixedPrimaryConfig
+Assert-Equal 'EXACTPRI.example.test' ((Get-TestProjectedDpNames -Config $mixedPrimaryConfig -PrimarySiteCode EXA) -join ',') 'exact-domain Primary fallback remains isolated to its site'
+Assert-Equal 'DOMAINLESS-LEG.example.test' ((Get-TestProjectedDpNames -Config $mixedPrimaryConfig -PrimarySiteCode LEG) -join ',') 'domainless inventory eligibility is scoped to its owning Primary hierarchy'
+Assert-Equal $false ((Get-TestProjectedDpNames -Config $mixedPrimaryConfig -PrimarySiteCode EXA) -contains 'DOMAINLESS-EXA.example.test') 'domainless DP cannot suppress an exact-domain Primary fallback'
+
+$script:Inventory = @([pscustomobject]@{
+        vmName = 'DP1'; role = 'SiteSystem'; siteCode = 'PS1'; state = 'Running'; domain = 'example.test'; installDP = $true
+    })
+$disabledDpConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'PRI1'; role = 'Primary'; siteCode = 'PS1'; hidden = $true; domain = 'example.test'; installDP = $false },
+        [pscustomobject]@{ vmName = 'dp1'; role = 'SiteSystem'; siteCode = 'PS1'; hidden = $false; installDP = $false }
+    )
+}
+Add-Phase8DistributionPointMetadata -Config $disabledDpConfig
+Assert-Equal 'PRI1.example.test' ((Get-TestProjectedDpNames -Config $disabledDpConfig -PrimarySiteCode PS1) -join ',') 'configured DP disable shadows stale inventory and restores the Primary fallback'
+
+$movedDpConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'PRI1'; role = 'Primary'; siteCode = 'PS1'; hidden = $true; domain = 'example.test'; installDP = $false },
+        [pscustomobject]@{ vmName = 'DP1'; role = 'SiteSystem'; siteCode = 'PS2'; hidden = $false; installDP = $true }
+    )
+}
+Add-Phase8DistributionPointMetadata -Config $movedDpConfig
+Assert-Equal 'PRI1.example.test' ((Get-TestProjectedDpNames -Config $movedDpConfig -PrimarySiteCode PS1) -join ',') 'configured DP move shadows its stale old-site inventory row'
+
+$noPrimaryConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+    virtualMachines = @()
+    phase8ManagedDistributionPointScopes = @([pscustomobject]@{
+            PrimarySiteCode = 'OLD'; DistributionPointNames = @('STALE.example.test')
+        })
+}
+Add-Phase8DistributionPointMetadata -Config $noPrimaryConfig
+Assert-Equal 0 @($noPrimaryConfig.phase8ManagedDistributionPointScopes).Count 'pre-seeded managed DP metadata is cleared when no Phase 8 Primary remains'
+
+$reusedMetadataConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'PRI1'; role = 'Primary'; siteCode = 'PS1'; hidden = $false; domain = 'example.test'; installDP = $false
+        })
+}
+$script:Inventory = @()
+Add-Phase8DistributionPointMetadata -Config $reusedMetadataConfig
+Assert-Equal 'PRI1.example.test' ((Get-TestProjectedDpNames -Config $reusedMetadataConfig -PrimarySiteCode PS1) -join ',') 'first metadata pass records the Primary fallback'
+$reusedMetadataConfig.virtualMachines = @()
+Add-Phase8DistributionPointMetadata -Config $reusedMetadataConfig
+Assert-Equal 0 @($reusedMetadataConfig.phase8ManagedDistributionPointScopes).Count 'second metadata pass clears the fallback after Primary removal'
+
+$script:Inventory = @(
+    [pscustomobject]@{ vmName = 'A-DP'; role = 'SiteSystem'; siteCode = 'STA'; domain = 'example.test'; installDP = $true },
+    [pscustomobject]@{ vmName = 'B-DP1'; role = 'SiteSystem'; siteCode = 'PRI'; domain = 'example.test'; installDP = $true },
+    [pscustomobject]@{ vmName = 'B-DP2'; role = 'SiteSystem'; siteCode = 'PRI2'; domain = 'example.test'; installDP = $true }
+)
+$multiHierarchyDpConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'A-STANDALONE'; role = 'Primary'; siteCode = 'STA'; hidden = $true; domain = 'example.test' },
+        [pscustomobject]@{ vmName = 'B-PRIMARY'; role = 'Primary'; siteCode = 'PRI'; parentSiteCode = 'CAS'; hidden = $true; domain = 'example.test' },
+        [pscustomobject]@{ vmName = 'B-PRIMARY2'; role = 'Primary'; siteCode = 'PRI2'; parentSiteCode = 'CAS'; hidden = $true; domain = 'example.test' }
+    )
+}
+Add-Phase8DistributionPointMetadata -Config $multiHierarchyDpConfig
+Assert-Equal 'A-DP.example.test' ((Get-TestProjectedDpNames -Config $multiHierarchyDpConfig -PrimarySiteCode STA) -join ',') 'standalone worker receives only its managed DP projection'
+Assert-Equal 'B-DP1.example.test' ((Get-TestProjectedDpNames -Config $multiHierarchyDpConfig -PrimarySiteCode PRI) -join ',') 'first child Primary receives only its managed DP projection'
+Assert-Equal 'B-DP2.example.test' ((Get-TestProjectedDpNames -Config $multiHierarchyDpConfig -PrimarySiteCode PRI2) -join ',') 'second child Primary receives only its managed DP projection'
+
+$script:GetListSmartUpdateFailure = $true
+$staleInventoryConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+    virtualMachines = @([pscustomobject]@{
+            vmName = 'STALEPRI'; role = 'Primary'; siteCode = 'STL'; hidden = $true; domain = 'example.test'; installDP = $false
+        })
+}
+Assert-Throws { Add-Phase8DistributionPointMetadata -Config $staleInventoryConfig } '*live VM inventory refresh returned no data*' 'existing Primary fallback requires an authoritative VM inventory refresh'
+$script:Inventory = @([pscustomobject]@{
+        vmName = 'STALE-DP'; role = 'SiteSystem'; siteCode = 'STL'; domain = 'example.test'; installDP = $true
+    })
+Assert-Throws { Add-ExistingVMsToDeployConfig -Config $staleInventoryConfig } '*live VM inventory refresh returned no data*' 'nonempty stale VM cache cannot authorize existing Primary DP ownership'
+$script:GetListSmartUpdateFailure = $false
 
 $script:Inventory = @(
     [pscustomobject]@{ vmName = 'B-CAS'; role = 'CAS'; siteCode = 'CAS'; domain = 'example.test' },
