@@ -72,6 +72,77 @@ function Get-CmSetupCompletionFailureReason {
     return ''
 }
 
+function Get-CmSiteUpdateByPackageGuid {
+    param(
+        [Parameter(Mandatory)][string]$PackageGuid,
+        [Parameter(Mandatory)][string]$PackageName,
+        [ValidateRange(1, 20)][int]$MaximumAttempts = 3,
+        [ValidateRange(0, 3600)][int]$RetrySeconds = 30,
+        [switch]$SuppressFailureStatus
+    )
+
+    $lastError = ''
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            $package = Get-CMSiteUpdate -Fast -ErrorAction Stop |
+                Where-Object { "$($_.PackageGuid)" -eq $PackageGuid } |
+                Select-Object -First 1
+            if ($package) { return $package }
+            $lastError = 'the provider returned no matching package'
+        }
+        catch {
+            $lastError = $_.Exception.Message
+        }
+
+        Write-DscStatus "WARNING: Could not refresh Configuration Manager update '$PackageName' ($PackageGuid) by provider key (attempt $attempt/$MaximumAttempts): $lastError"
+        if ($attempt -lt $MaximumAttempts -and $RetrySeconds -gt 0) {
+            Start-Sleep -Seconds $RetrySeconds
+        }
+    }
+
+    $failureMessage = "Could not refresh Configuration Manager update '$PackageName' ($PackageGuid) by provider key after $MaximumAttempts attempts. Last error: $lastError"
+    if (-not $SuppressFailureStatus.IsPresent) {
+        Write-DscStatus $failureMessage -Failure
+    }
+    throw $failureMessage
+}
+
+function Start-CmSiteUpdatePackageDownload {
+    param(
+        [Parameter(Mandatory)]$UpdatePackage,
+        [ValidateRange(1, 20)][int]$MaximumAttempts = 5,
+        [ValidateRange(0, 3600)][int]$RetrySeconds = 60
+    )
+
+    $packageGuid = "$($UpdatePackage.PackageGuid)"
+    $packageName = "$($UpdatePackage.Name)"
+    if (-not $packageGuid) {
+        throw "Configuration Manager update '$packageName' has no PackageGuid"
+    }
+
+    $lastError = ''
+    $lastFailureStage = ''
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        $attemptStage = 'provider refresh'
+        try {
+            $currentPackage = Get-CmSiteUpdateByPackageGuid -PackageGuid $packageGuid -PackageName $packageName -MaximumAttempts 1 -RetrySeconds 0 -SuppressFailureStatus
+            $attemptStage = 'download invocation'
+            $currentPackage | Invoke-CMSiteUpdateDownload -Force -WarningAction SilentlyContinue -ErrorAction Stop
+            return $currentPackage
+        }
+        catch {
+            $lastError = $_.Exception.Message
+            $lastFailureStage = $attemptStage
+            Write-DscStatus "WARNING: Configuration Manager update '$packageName' $attemptStage failed (attempt $attempt/$MaximumAttempts): $lastError"
+            if ($attempt -lt $MaximumAttempts -and $RetrySeconds -gt 0) {
+                Start-Sleep -Seconds $RetrySeconds
+            }
+        }
+    }
+
+    throw "Could not request the download for '$packageName' ($packageGuid) after $MaximumAttempts attempts. Last failure during $lastFailureStage`: $lastError"
+}
+
 function Start-CmSetupProcessWithBreadcrumb {
     param(
         [Parameter(Mandatory)][string]$BreadcrumbPath,
@@ -1772,13 +1843,13 @@ if ($UpdateRequired) {
         }
 
         # Get update info
-        $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
-
-        if (-not $updatepack) {
-            start-sleep -Seconds 300
-            $retrytimes++
-            continue
+        $updatePackageGuid = "$($updatepack.PackageGuid)"
+        $updatePackageName = "$($updatepack.Name)"
+        if (-not $updatePackageGuid) {
+            Write-DscStatus "Configuration Manager update '$updatePackageName' has no PackageGuid; refusing to make update decisions without a stable provider key." -Failure
+            return
         }
+        $updatepack = Get-CmSiteUpdateByPackageGuid -PackageGuid $updatePackageGuid -PackageName $updatePackageName
         if ($updatepack.state -eq 196612 -or $updatepack.state -eq 199612) {
             $updateCompleted = $true
             break
@@ -1813,36 +1884,20 @@ if ($UpdateRequired) {
             # Package not downloaded
             if ($updatepack.State -eq 327682) {
 
-                # Invoke download.
-                # Invoke-CMSiteUpdateDownload throws a TERMINATING ArgumentNullException
-                # ("Value cannot be null. Parameter name: key") when the package was only
-                # just discovered by the forced Invoke-CMSiteUpdateCheck above -- seen on
-                # two consecutive WGB full builds (2026-09-02, 'Configuration Manager 2503'
-                # invoked ~30s after discovery). Un-caught it escaped this whole script, so
-                # the update was never installed, yet Invoke-DotSource logs script-level
-                # throws as a WARNING only: both builds reported success with the site still
-                # on the baseline build. A later attempt on the same package succeeds, so
-                # retry here; every sibling CM cmdlet in this loop is already guarded.
                 Write-DscStatus "Invoking download for '$($updatepack.Name)', waiting for download to begin."
-                $downloadInvoked = $false
-                for ($invokeTry = 1; $invokeTry -le 5 -and -not $downloadInvoked; $invokeTry++) {
-                    try {
-                        Invoke-CMSiteUpdateDownload -Name $updatepack.Name -Force -WarningAction SilentlyContinue
-                        $downloadInvoked = $true
-                    }
-                    catch {
-                        Write-DscStatus "WARNING: Invoke-CMSiteUpdateDownload for '$($updatepack.Name)' threw (attempt $invokeTry/5): $_"
-                        Start-Sleep 60
-                    }
+                try {
+                    $updatepack = Start-CmSiteUpdatePackageDownload -UpdatePackage $updatepack
                 }
-                if (-not $downloadInvoked) {
-                    Write-DscStatus "Could not invoke the download for '$($updatepack.Name)' after 5 attempts. The state machine stays at AVAILABLE until something starts the download, so the wait below will time out and fail the update rather than silently leaving the site on the baseline build."
+                catch {
+                    $downloadFailure = $_.Exception.Message
+                    Write-DscStatus "$downloadFailure The site remains on baseline build $originalbuildnumber; stopping Phase 8 before dependent roles are configured." -Failure
+                    return
                 }
                 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
                 Start-Sleep 120                               
 
                 # Check state
-                $updatepack = Get-CMSiteUpdate -Name $updatepack.Name -Fast
+                $updatepack = Get-CmSiteUpdateByPackageGuid -PackageGuid $updatePackageGuid -PackageName $updatePackageName
                 $downloadstarttime = get-date
                 while ($updatepack.State -eq 327682) {
 
@@ -1852,7 +1907,7 @@ if ($UpdateRequired) {
 
                     # Check state again
                     $downloadspan = New-TimeSpan -Start $downloadstarttime -End (Get-Date)
-                    $updatepack = Get-CMSiteUpdate -Name $updatepack.Name -Fast
+                    $updatepack = Get-CmSiteUpdateByPackageGuid -PackageGuid $updatePackageGuid -PackageName $updatePackageName
 
                     # Trigger restart every 5 mins
                     if (0 -eq $downloadspan.Minutes % 5) {
@@ -1887,7 +1942,7 @@ if ($UpdateRequired) {
             while ($updatepack.State -eq 262145) {
                 Write-DscStatus "Download in progress. Waiting for '$($updatepack.Name)' download to complete" -RetrySeconds 30
                 Start-Sleep 30
-                $updatepack = Get-CMSiteUpdate -Name $updatepack.Name -Fast
+                $updatepack = Get-CmSiteUpdateByPackageGuid -PackageGuid $updatePackageGuid -PackageName $updatePackageName
                 $downloadspan = New-TimeSpan -Start $downloadstarttime -End (Get-Date)
                 if ($downloadspan.Minutes -ge 30) {
                     Write-DscStatus "Still waiting for '$($updatepack.Name)' download to complete'. Restarting SmsExec."
@@ -1936,7 +1991,7 @@ if ($UpdateRequired) {
             }
             Write-DscStatus "[$($state[$updatepack.State])] Prereq check for '$($updatepack.Name)'."
             Start-Sleep 90
-            $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+            $updatepack = Get-CmSiteUpdateByPackageGuid -PackageGuid $updatePackageGuid -PackageName $updatePackageName
             
         }
 
@@ -1963,7 +2018,7 @@ if ($UpdateRequired) {
             }
             catch {
                 # Check if the update started installing despite the error
-                $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+                $updatepack = Get-CmSiteUpdateByPackageGuid -PackageGuid $updatePackageGuid -PackageName $updatePackageName
                 if ($updatepack.State -ge 196609 -and $updatepack.State -le 196629) {
                     Write-DscStatus "Install-CMSiteUpdate threw but update is now installing (state $($updatepack.State)). Monitoring."
                 }
@@ -2142,7 +2197,7 @@ if ($UpdateRequired) {
             start-sleep -seconds 60
 
             try {
-                $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+                $updatepack = Get-CmSiteUpdateByPackageGuid -PackageGuid $updatePackageGuid -PackageName $updatePackageName -MaximumAttempts 1 -RetrySeconds 0 -SuppressFailureStatus
                 $stateReadOk = $true
             }
             catch {
