@@ -38,6 +38,28 @@ function Invoke-CommandWithTimeout {
     }
 }
 
+function Format-CmUpdateErrorRecord {
+    param([Parameter(Mandatory)]$ErrorRecord)
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    $parts.Add("Type=$($ErrorRecord.Exception.GetType().FullName)")
+    $parts.Add("Message=$($ErrorRecord.Exception.Message -replace '\r?\n', ' ')")
+    if ($ErrorRecord.Exception.StackTrace) { $parts.Add("ExceptionStack=$($ErrorRecord.Exception.StackTrace -replace '\r?\n', ' <- ')") }
+    if ($ErrorRecord.Exception.InnerException) {
+        $parts.Add("InnerType=$($ErrorRecord.Exception.InnerException.GetType().FullName)")
+        $parts.Add("InnerMessage=$($ErrorRecord.Exception.InnerException.Message -replace '\r?\n', ' ')")
+    }
+    if ($ErrorRecord.FullyQualifiedErrorId) { $parts.Add("FullyQualifiedErrorId=$($ErrorRecord.FullyQualifiedErrorId)") }
+    if ($ErrorRecord.CategoryInfo) { $parts.Add("Category=$($ErrorRecord.CategoryInfo)") }
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) { $parts.Add("ErrorDetails=$($ErrorRecord.ErrorDetails.Message -replace '\r?\n', ' ')") }
+    if ($null -ne $ErrorRecord.TargetObject) { $parts.Add("TargetObject=$($ErrorRecord.TargetObject)") }
+    if ($ErrorRecord.InvocationInfo -and $ErrorRecord.InvocationInfo.PositionMessage) {
+        $parts.Add("Position=$($ErrorRecord.InvocationInfo.PositionMessage -replace '\r?\n', ' ')")
+    }
+    if ($ErrorRecord.ScriptStackTrace) { $parts.Add("Stack=$($ErrorRecord.ScriptStackTrace -replace '\r?\n', ' <- ')") }
+    return ($parts -join '; ')
+}
+
 function Get-CmSiteUpdateByPackageGuid {
     param(
         [Parameter(Mandatory)][string]$PackageGuid,
@@ -57,7 +79,7 @@ function Get-CmSiteUpdateByPackageGuid {
             $lastError = 'the provider returned no matching package'
         }
         catch {
-            $lastError = $_.Exception.Message
+            $lastError = Format-CmUpdateErrorRecord -ErrorRecord $_
         }
 
         Write-DscStatus "WARNING: Could not refresh Configuration Manager update '$PackageName' ($PackageGuid) by provider key (attempt $attempt/$MaximumAttempts): $lastError"
@@ -88,25 +110,27 @@ function Start-CmSiteUpdatePackageDownload {
 
     $lastError = ''
     $lastFailureStage = ''
+    $lastObservedState = "$($UpdatePackage.State)"
     for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
         $attemptStage = 'provider refresh'
         try {
             $currentPackage = Get-CmSiteUpdateByPackageGuid -PackageGuid $packageGuid -PackageName $packageName -MaximumAttempts 1 -RetrySeconds 0 -SuppressFailureStatus
+            $lastObservedState = "$($currentPackage.State)"
             $attemptStage = 'download invocation'
             $currentPackage | Invoke-CMSiteUpdateDownload -Force -WarningAction SilentlyContinue -ErrorAction Stop
             return $currentPackage
         }
         catch {
-            $lastError = $_.Exception.Message
+            $lastError = Format-CmUpdateErrorRecord -ErrorRecord $_
             $lastFailureStage = $attemptStage
-            Write-DscStatus "WARNING: Configuration Manager update '$packageName' $attemptStage failed (attempt $attempt/$MaximumAttempts): $lastError"
+            Write-DscStatus "WARNING: Configuration Manager update '$packageName' ($packageGuid, state=$lastObservedState) $attemptStage failed (attempt $attempt/$MaximumAttempts): $lastError"
             if ($attempt -lt $MaximumAttempts -and $RetrySeconds -gt 0) {
                 Start-Sleep -Seconds $RetrySeconds
             }
         }
     }
 
-    throw "Could not request the download for '$packageName' ($packageGuid) after $MaximumAttempts attempts. Last failure during $lastFailureStage`: $lastError"
+    throw "Could not request the download for '$packageName' ($packageGuid, lastState=$lastObservedState) after $MaximumAttempts attempts. Last failure during $lastFailureStage`: $lastError"
 }
 
 # Read config json

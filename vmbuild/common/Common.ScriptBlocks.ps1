@@ -2127,9 +2127,9 @@ function Save-CMSetupLogsFromVm {
     <#
     .SYNOPSIS
         Pulls C:\ConfigMgrSetup.log, C:\staging\DSC\InstallCMLog.log,
-        C:\staging\DSC\DSC_Log.log and recent ADK installer diagnostics out
-        of a VM and writes them next to the host VMBuild log so operators can
-        inspect them without RDP'ing in.
+        C:\staging\DSC\DSC_Log.log and failure-specific product diagnostics
+        out of a VM and writes them next to the host VMBuild log so operators
+        can inspect them without RDP'ing in.
     .DESCRIPTION
         InstallCMLog.log (DSC wrapper transcript, normally <1 MB) is ALWAYS
         pulled in full. ConfigMgrSetup.log is pulled FULL on failure AND on
@@ -2146,12 +2146,21 @@ function Save-CMSetupLogsFromVm {
         On failure, files from C:\staging\DSC\ADKSetupLogs modified in the
         last eight hours are also pulled. Files over 16MB retain their first
         and last 5000 lines so one large Burn log cannot swamp PSDirect.
+        On Phase 8 failure, collection also pulls bounded copies
+        of the provider and update-engine logs and records service, registry,
+        and console-version state in JSON. After those files are safely written
+        on the host, a separate hard-bounded job captures SMS_CM_Update* provider
+        state and replays both read-only cmdlet lookup paths. A broken provider
+        therefore cannot suppress the primary log evidence.
         Files land in (Split-Path $Common.LogPath -Parent) as:
             <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.log          (full)
             <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.head30000-tail5000.log (>64MB only)
             <VmName>-Phase<N>-<timestamp>-InstallCMLog.log            (always: full)
             <VmName>-Phase<N>-<timestamp>-DSC_Log.log                 (always: tail 4000)
             <VmName>-Phase<N>-<timestamp>-adksetup-*.log/.txt          (failure only)
+            <VmName>-Phase8-<timestamp>-SMSProv.log, dmpdownloader.log, etc. (failure only)
+            <VmName>-Phase8-<timestamp>-ConfigMgrUpdateDiagnostics.json
+            <VmName>-Phase8-<timestamp>-ConfigMgrProviderState.json
     #>
     [CmdletBinding()]
     param(
@@ -2162,7 +2171,7 @@ function Save-CMSetupLogsFromVm {
     )
 
     $probeAndRead = {
-        param([string]$Mode)
+        param([string]$Mode, [int]$Phase, [bool]$CollectCmEvidenceOnly)
         $out = [ordered]@{
             SetupExists    = $false
             SetupBytes     = 0
@@ -2175,16 +2184,16 @@ function Save-CMSetupLogsFromVm {
             DscLogBytes    = 0
             DscLogContent  = $null
             AdkArtifacts   = @()
+            CmArtifacts    = @()
+            UpdateDiagnostics = $null
         }
+        if (-not $CollectCmEvidenceOnly) {
         if (Test-Path 'C:\ConfigMgrSetup.log') {
             $fi = Get-Item 'C:\ConfigMgrSetup.log' -ErrorAction SilentlyContinue
             if ($fi) {
                 $out.SetupExists = $true
                 $out.SetupBytes  = $fi.Length
-                if ($Mode -eq 'Failure') {
-                    $out.SetupContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
-                }
-                elseif ($fi.Length -le 64MB) {
+                if ($fi.Length -le 64MB) {
                     # Whole file on success too: the AI import sits ~4% in and index
                     # creation ~39% in, 17k lines apart, so no tail window covers both
                     # regions where Init_Database has actually died.
@@ -2246,22 +2255,196 @@ function Save-CMSetupLogsFromVm {
             }
             $out.AdkArtifacts = @($artifacts)
         }
+        }
+        if ($CollectCmEvidenceOnly -and $Mode -eq 'Failure' -and $Phase -eq 8) {
+            $cmArtifacts = New-Object System.Collections.Generic.List[object]
+            $productLogInventory = New-Object System.Collections.Generic.List[object]
+            $cmInstallDir = ''
+            $cmLogDir = ''
+            $uiInstallCandidates = @()
+            try {
+                $smsSetup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
+                $cmInstallDir = "$($smsSetup.'Installation Directory')"
+                if ($cmInstallDir) { $cmLogDir = Join-Path $cmInstallDir 'Logs' }
+                if ($smsSetup.'UI Installation Directory') { $uiInstallCandidates += "$($smsSetup.'UI Installation Directory')" }
+            }
+            catch {}
+            $consoleRegistry = $null
+            $consoleSetupKey = $null
+            try {
+                $consoleRegistry = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                    [Microsoft.Win32.RegistryHive]::LocalMachine,
+                    [Microsoft.Win32.RegistryView]::Registry32)
+                $consoleSetupKey = $consoleRegistry.OpenSubKey('SOFTWARE\Microsoft\ConfigMgr10\Setup')
+                if ($consoleSetupKey) {
+                    $registeredUiPath = "$($consoleSetupKey.GetValue('UI Installation Directory'))"
+                    if ($registeredUiPath) { $uiInstallCandidates += $registeredUiPath }
+                }
+            }
+            catch {}
+            finally {
+                if ($consoleSetupKey) { $consoleSetupKey.Dispose() }
+                if ($consoleRegistry) { $consoleRegistry.Dispose() }
+            }
+            if ($env:SMS_ADMIN_UI_PATH) {
+                $uiInstallCandidates += "$(Split-Path -Parent $env:SMS_ADMIN_UI_PATH)"
+            }
+
+            $cmLogNames = @(
+                'SMSProv.log', 'SMSProv.lo_',
+                'dmpdownloader.log', 'dmpdownloader.lo_',
+                'cmupdate.log', 'cmupdate.lo_',
+                'hman.log', 'hman.lo_',
+                'distmgr.log', 'distmgr.lo_',
+                'smsexec.log', 'smsexec.lo_'
+            )
+            if ($cmLogDir -and (Test-Path -LiteralPath $cmLogDir -PathType Container)) {
+                foreach ($cmLogName in $cmLogNames) {
+                    $cmLogPath = Join-Path $cmLogDir $cmLogName
+                    try {
+                        $cmLogFile = Get-Item -LiteralPath $cmLogPath -ErrorAction Stop
+                        $cmLogTail = (Get-Content -LiteralPath $cmLogFile.FullName -Tail 4000 -ErrorAction Stop) -join "`r`n"
+                        $cmLogContent = "***** MEMLABS source=$($cmLogFile.FullName); bytes=$($cmLogFile.Length); lastWriteUtc=$($cmLogFile.LastWriteTimeUtc.ToString('o')); tailLines=4000 *****`r`n$cmLogTail"
+                        $cmArtifacts.Add([pscustomobject]@{
+                                Name             = $cmLogFile.Name
+                                SourcePath       = $cmLogFile.FullName
+                                Bytes            = $cmLogFile.Length
+                                LastWriteTimeUtc = $cmLogFile.LastWriteTimeUtc
+                                TailLines        = 4000
+                                Content          = $cmLogContent
+                            })
+                        $productLogInventory.Add([pscustomobject]@{ SourcePath = $cmLogPath; Exists = $true; Collected = $true; Bytes = $cmLogFile.Length; Error = '' })
+                    }
+                    catch {
+                        $exists = Test-Path -LiteralPath $cmLogPath -PathType Leaf
+                        $productLogInventory.Add([pscustomobject]@{ SourcePath = $cmLogPath; Exists = $exists; Collected = $false; Bytes = 0; Error = $_.Exception.Message })
+                    }
+                }
+            }
+            elseif ($cmLogDir) {
+                $productLogInventory.Add([pscustomobject]@{ SourcePath = $cmLogDir; Exists = $false; Collected = $false; Bytes = 0; Error = 'ConfigMgr log directory was not found' })
+            }
+            else {
+                $productLogInventory.Add([pscustomobject]@{ SourcePath = '<ConfigMgr installation directory>'; Exists = $false; Collected = $false; Bytes = 0; Error = 'Installation Directory registry value was unavailable' })
+            }
+
+            foreach ($rootLogPath in @('C:\ConfigMgrPrereq.log')) {
+                try {
+                    $rootLogFile = Get-Item -LiteralPath $rootLogPath -ErrorAction Stop
+                    $rootLogTail = (Get-Content -LiteralPath $rootLogFile.FullName -Tail 4000 -ErrorAction Stop) -join "`r`n"
+                    $cmArtifacts.Add([pscustomobject]@{
+                            Name             = $rootLogFile.Name
+                            SourcePath       = $rootLogFile.FullName
+                            Bytes            = $rootLogFile.Length
+                            LastWriteTimeUtc = $rootLogFile.LastWriteTimeUtc
+                            TailLines        = 4000
+                            Content          = "***** MEMLABS source=$($rootLogFile.FullName); bytes=$($rootLogFile.Length); lastWriteUtc=$($rootLogFile.LastWriteTimeUtc.ToString('o')); tailLines=4000 *****`r`n$rootLogTail"
+                        })
+                    $productLogInventory.Add([pscustomobject]@{ SourcePath = $rootLogPath; Exists = $true; Collected = $true; Bytes = $rootLogFile.Length; Error = '' })
+                }
+                catch {
+                    $exists = Test-Path -LiteralPath $rootLogPath -PathType Leaf
+                    $productLogInventory.Add([pscustomobject]@{ SourcePath = $rootLogPath; Exists = $exists; Collected = $false; Bytes = 0; Error = $_.Exception.Message })
+                }
+            }
+
+            $adminUiDirectories = @(
+                @($uiInstallCandidates | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'AdminUILog' })
+                'C:\Windows\Temp'
+                'C:\Windows\System32\config\systemprofile\AppData\Local\Temp'
+                'C:\Windows\System32\config\systemprofile\AppData\Roaming\Microsoft\ConfigMgr10\AdminConsole\AdminUILog'
+                'C:\Windows\System32\config\systemprofile\AppData\Local\Microsoft\ConfigMgr10\AdminConsole\AdminUILog'
+            )
+            foreach ($userProfile in @(Get-ChildItem -LiteralPath 'C:\Users' -Directory -ErrorAction SilentlyContinue)) {
+                $adminUiDirectories += Join-Path $userProfile.FullName 'AppData\Local\Temp'
+                $adminUiDirectories += Join-Path $userProfile.FullName 'AppData\Roaming\Microsoft\ConfigMgr10\AdminConsole\AdminUILog'
+                $adminUiDirectories += Join-Path $userProfile.FullName 'AppData\Local\Microsoft\ConfigMgr10\AdminConsole\AdminUILog'
+            }
+            $adminUiDirectories = @($adminUiDirectories | Where-Object { $_ } | Sort-Object -Unique)
+            $adminUiIndex = 0
+            foreach ($adminUiDir in $adminUiDirectories) {
+                foreach ($adminUiLog in @(Get-ChildItem -LiteralPath $adminUiDir -Filter 'SmsAdminUI*.log' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 2)) {
+                    $adminUiIndex++
+                    try {
+                        $adminUiTail = (Get-Content -LiteralPath $adminUiLog.FullName -Tail 4000 -ErrorAction Stop) -join "`r`n"
+                        $cmArtifacts.Add([pscustomobject]@{
+                                Name             = "SmsAdminUI-$adminUiIndex-$($adminUiLog.Name)"
+                                SourcePath       = $adminUiLog.FullName
+                                Bytes            = $adminUiLog.Length
+                                LastWriteTimeUtc = $adminUiLog.LastWriteTimeUtc
+                                TailLines        = 4000
+                                Content          = "***** MEMLABS source=$($adminUiLog.FullName); bytes=$($adminUiLog.Length); lastWriteUtc=$($adminUiLog.LastWriteTimeUtc.ToString('o')); tailLines=4000 *****`r`n$adminUiTail"
+                            })
+                        $productLogInventory.Add([pscustomobject]@{ SourcePath = $adminUiLog.FullName; Exists = $true; Collected = $true; Bytes = $adminUiLog.Length; Error = '' })
+                    }
+                    catch {
+                        $productLogInventory.Add([pscustomobject]@{ SourcePath = $adminUiLog.FullName; Exists = $true; Collected = $false; Bytes = $adminUiLog.Length; Error = $_.Exception.Message })
+                    }
+                }
+            }
+            if ($adminUiIndex -eq 0) {
+                $productLogInventory.Add([pscustomobject]@{ SourcePath = 'SmsAdminUI*.log'; Exists = $false; Collected = $false; Bytes = 0; Error = "No console trace was found in: $($adminUiDirectories -join '; ')" })
+            }
+            $out.CmArtifacts = @($cmArtifacts)
+
+            $updateDiagnostic = [ordered]@{
+                CapturedAtUtc       = (Get-Date).ToUniversalTime().ToString('o')
+                ComputerName        = $env:COMPUTERNAME
+                RunAs               = ''
+                PowerShellVersion   = "$($PSVersionTable.PSVersion)"
+                SiteCode            = ''
+                InstallationDirectory = $cmInstallDir
+                LogDirectory        = $cmLogDir
+                ConsoleSetup        = $null
+                ConsoleLogSearchDirectories = $adminUiDirectories
+                ProductLogInventory = @($productLogInventory)
+                Services            = @()
+                ComponentRegistry   = @()
+                CollectorErrors     = @()
+            }
+            try { $updateDiagnostic.RunAs = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+            catch { $updateDiagnostic.CollectorErrors += "RunAs: $($_.Exception.Message)" }
+            try {
+                $siteCode = "$(Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop)"
+                $updateDiagnostic.SiteCode = $siteCode
+            }
+            catch { $updateDiagnostic.CollectorErrors += "SiteCode: $($_.Exception.Message)" }
+            try {
+                $consoleSetup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup' -ErrorAction Stop
+                $updateDiagnostic.ConsoleSetup = [ordered]@{
+                    AdminConsoleVersion      = "$($consoleSetup.AdminConsoleVersion)"
+                    RequiredExtensionVersion = "$($consoleSetup.RequiredExtensionVersion)"
+                    UIInstallationDirectory = "$($consoleSetup.'UI Installation Directory')"
+                }
+            }
+            catch { $updateDiagnostic.CollectorErrors += "ConsoleSetup: $($_.Exception.Message)" }
+            foreach ($serviceName in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER', 'Winmgmt')) {
+                try {
+                    $service = Get-Service -Name $serviceName -ErrorAction Stop
+                    $updateDiagnostic.Services += [ordered]@{ Name = $service.Name; Status = "$($service.Status)"; StartType = "$($service.StartType)" }
+                }
+                catch { $updateDiagnostic.Services += [ordered]@{ Name = $serviceName; Error = $_.Exception.Message } }
+            }
+            foreach ($componentPath in @(
+                    'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_DMP_DOWNLOADER',
+                    'HKLM:\SOFTWARE\Microsoft\SMS\Components\SMS_Executive\Threads\SMS_DMP_DOWNLOADER'
+                )) {
+                try {
+                    $component = Get-ItemProperty -Path $componentPath -ErrorAction Stop
+                    $values = [ordered]@{}
+                    foreach ($property in $component.PSObject.Properties) {
+                        if ($property.Name -notlike 'PS*') { $values[$property.Name] = "$($property.Value)" }
+                    }
+                    $updateDiagnostic.ComponentRegistry += [ordered]@{ Path = $componentPath; Values = $values }
+                }
+                catch { $updateDiagnostic.ComponentRegistry += [ordered]@{ Path = $componentPath; Error = $_.Exception.Message } }
+            }
+            try { $out.UpdateDiagnostics = $updateDiagnostic | ConvertTo-Json -Depth 10 }
+            catch { $out.UpdateDiagnostics = "{`"CollectorSerializationError`":`"$($_.Exception.Message -replace '"', '\"')`"}" }
+        }
         [pscustomobject]$out
     }
 
-    try {
-        $res = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $probeAndRead -ArgumentList @($Mode) -SuppressLog -DisplayName "Pull CM setup logs ($Mode)"
-    }
-    catch {
-        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: PSDirect call threw: $($_.Exception.Message)" -Warning
-        return
-    }
-    if (-not $res -or $res.ScriptBlockFailed -or -not $res.ScriptBlockOutput) {
-        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: no response from VM" -Warning
-        return
-    }
-
-    $r = $res.ScriptBlockOutput
     $logDir = $null
     if ($Common -and $Common.LogPath) { $logDir = Split-Path $Common.LogPath -Parent }
     if (-not $logDir -or -not (Test-Path $logDir)) {
@@ -2271,6 +2454,48 @@ function Save-CMSetupLogsFromVm {
 
     $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
     $base  = "$VmName-Phase$Phase-$stamp"
+    $res = $null
+    $baselineCaptureError = ''
+    try {
+        $res = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $probeAndRead -ArgumentList @($Mode, $Phase, $false) -AsJob -TimeoutSeconds 300 -SessionMaxRetries 1 -SuppressLog -DisplayName "Pull CM setup logs ($Mode)"
+    }
+    catch {
+        $baselineCaptureError = "PSDirect call threw: $($_.Exception.Message)"
+    }
+    if (-not $res -or $res.ScriptBlockFailed -or -not $res.ScriptBlockOutput) {
+        if (-not $baselineCaptureError) {
+            $baselineCaptureError = if ($res -and $res.TimedOut) { 'baseline log transfer timed out after 300 seconds' } else { 'baseline log transfer returned no usable response' }
+        }
+        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: $baselineCaptureError; continuing with independent failure diagnostics" -Warning
+        $r = [pscustomobject]@{
+            SetupExists   = $false
+            WrapperExists = $false
+            DscLogExists  = $false
+            AdkArtifacts  = @()
+        }
+        $baselineStatusData = [ordered]@{
+            CapturedAtUtc     = (Get-Date).ToUniversalTime().ToString('o')
+            ComputerName      = $VmName
+            CaptureStatus     = 'HostInvocationFailed'
+            TimedOut          = [bool]($res -and $res.TimedOut)
+            ScriptBlockFailed = [bool]($res -and $res.ScriptBlockFailed)
+            Error             = $baselineCaptureError
+            ErrorDetails      = @($res.ErrorDetails | Where-Object { $null -ne $_ })
+        }
+        try { $baselineStatus = $baselineStatusData | ConvertTo-Json -Depth 6 -ErrorAction Stop }
+        catch { $baselineStatus = '{"CaptureStatus":"HostSerializationFailed","Stage":"BaselineCapture"}' }
+        $baselineStatusPath = Join-Path $logDir "$base-BaselineCaptureStatus.json"
+        try {
+            Set-Content -LiteralPath $baselineStatusPath -Value $baselineStatus -Encoding UTF8 -ErrorAction Stop
+            Write-Log "[Phase $Phase]: $VmName`: Wrote baseline capture failure status -> $baselineStatusPath" -OutputStream
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write baseline capture status: $_" -Warning
+        }
+    }
+    else {
+        $r = @($res.ScriptBlockOutput | Where-Object { $null -ne $_ }) | Select-Object -Last 1
+    }
 
     if ($r.SetupExists) {
         if ($r.SetupContent) {
@@ -2352,6 +2577,261 @@ function Save-CMSetupLogsFromVm {
         }
         catch {
             Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write DSC_Log copy: $_" -Warning
+        }
+    }
+
+    $cmEvidence = $null
+    if ($Mode -eq 'Failure' -and $Phase -eq 8) {
+        $cmEvidenceResult = $null
+        try {
+            $cmEvidenceResult = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $probeAndRead -ArgumentList @($Mode, $Phase, $true) -AsJob -TimeoutSeconds 180 -SessionMaxRetries 1 -SuppressLog -DisplayName 'Pull ConfigMgr failure diagnostics'
+        }
+        catch {
+            $cmEvidenceResult = [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = $null; TimedOut = $false; ErrorDetails = @($_.Exception.Message) }
+        }
+        if ($cmEvidenceResult -and -not $cmEvidenceResult.ScriptBlockFailed -and $cmEvidenceResult.ScriptBlockOutput) {
+            $cmEvidence = @($cmEvidenceResult.ScriptBlockOutput | Where-Object { $null -ne $_ }) | Select-Object -Last 1
+        }
+        if (-not $cmEvidence) {
+            $cmEvidenceFallback = [ordered]@{
+                CapturedAtUtc     = (Get-Date).ToUniversalTime().ToString('o')
+                ComputerName      = $VmName
+                CaptureStatus     = 'HostInvocationFailed'
+                TimedOut          = [bool]($cmEvidenceResult -and $cmEvidenceResult.TimedOut)
+                ScriptBlockFailed = [bool]($cmEvidenceResult -and $cmEvidenceResult.ScriptBlockFailed)
+                ErrorDetails      = @($cmEvidenceResult.ErrorDetails | Where-Object { $null -ne $_ })
+            }
+            try { $cmEvidenceFallbackJson = $cmEvidenceFallback | ConvertTo-Json -Depth 6 -ErrorAction Stop }
+            catch { $cmEvidenceFallbackJson = '{"CaptureStatus":"HostSerializationFailed","Stage":"ConfigMgrProductLogs"}' }
+            $cmEvidence = [pscustomobject]@{
+                CmArtifacts      = @()
+                UpdateDiagnostics = $cmEvidenceFallbackJson
+            }
+        }
+    }
+
+    if ($cmEvidence -and $cmEvidence.PSObject.Properties.Name -contains 'CmArtifacts') {
+        foreach ($artifact in @($cmEvidence.CmArtifacts | Where-Object { $null -ne $_ })) {
+            $safeName = [System.IO.Path]::GetFileName("$($artifact.Name)")
+            if (-not $safeName) { continue }
+            if (-not $artifact.Content) {
+                Write-Log "[Phase $Phase]: $VmName`: ConfigMgr diagnostic '$safeName' was $($artifact.Bytes) bytes in the VM but its tail was empty" -Warning
+                continue
+            }
+            $dest = Join-Path $logDir "$base-$safeName"
+            try {
+                Set-Content -LiteralPath $dest -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
+                $kb = [math]::Round($artifact.Bytes / 1KB, 1)
+                Write-Log "[Phase $Phase]: $VmName`: Pulled ConfigMgr diagnostic $safeName (last $($artifact.TailLines) lines of ${kb}KB) -> $dest" -OutputStream
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write ConfigMgr diagnostic '$safeName': $_" -Warning
+            }
+        }
+    }
+
+    if ($cmEvidence -and $cmEvidence.PSObject.Properties.Name -contains 'UpdateDiagnostics' -and $cmEvidence.UpdateDiagnostics) {
+        $dest = Join-Path $logDir "$base-ConfigMgrUpdateDiagnostics.json"
+        try {
+            Set-Content -LiteralPath $dest -Value $cmEvidence.UpdateDiagnostics -Encoding UTF8 -ErrorAction Stop
+            Write-Log "[Phase $Phase]: $VmName`: Pulled ConfigMgr update/provider state -> $dest" -OutputStream
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write ConfigMgr update/provider state: $_" -Warning
+        }
+    }
+
+    if ($Mode -eq 'Failure' -and $Phase -eq 8) {
+        $providerProbe = {
+            function Get-ProbeError {
+                param($ErrorRecord)
+                $innerType = ''
+                $innerMessage = ''
+                $position = ''
+                if ($ErrorRecord.Exception.InnerException) {
+                    $innerType = $ErrorRecord.Exception.InnerException.GetType().FullName
+                    $innerMessage = $ErrorRecord.Exception.InnerException.Message
+                }
+                if ($ErrorRecord.InvocationInfo) { $position = $ErrorRecord.InvocationInfo.PositionMessage }
+                [ordered]@{
+                    Type                  = $ErrorRecord.Exception.GetType().FullName
+                    Message               = $ErrorRecord.Exception.Message
+                    StackTrace            = $ErrorRecord.Exception.StackTrace
+                    InnerType             = $innerType
+                    InnerMessage          = $innerMessage
+                    FullyQualifiedErrorId = $ErrorRecord.FullyQualifiedErrorId
+                    Category              = "$($ErrorRecord.CategoryInfo)"
+                    Position              = $position
+                    ScriptStackTrace      = $ErrorRecord.ScriptStackTrace
+                }
+            }
+
+            $probe = [ordered]@{
+                CapturedAtUtc       = (Get-Date).ToUniversalTime().ToString('o')
+                ComputerName        = $env:COMPUTERNAME
+                ProbeStatus         = 'Completed'
+                SiteCode            = ''
+                Namespace           = ''
+                DirectCimClasses    = [ordered]@{}
+                DirectCimErrors     = [ordered]@{}
+                CmdletModule        = $null
+                CmdletBroadQuery    = @()
+                CmdletBroadError    = $null
+                CmdletNameQueries   = @()
+                CmdletSetupError    = $null
+                WmiActivityErrors   = @()
+            }
+            $moduleImportedByProbe = $false
+            $siteDriveCreatedByProbe = $false
+            $locationPushed = $false
+            $module = $null
+            try {
+                $probe.SiteCode = "$(Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop)"
+            }
+            catch { $probe.DirectCimErrors['SiteCode'] = Get-ProbeError $_ }
+
+            $packageNames = @()
+            if ($probe.SiteCode) {
+                $probe.Namespace = "root\SMS\site_$($probe.SiteCode)"
+                foreach ($className in @(
+                        'SMS_CM_UpdatePackages',
+                        'SMS_CM_UpdatePackDownloadMonitoring',
+                        'SMS_CM_UpdatePackTopLevelMonitoring',
+                        'SMS_CM_UpdatePackDetailedMonitoring'
+                    )) {
+                    try {
+                        $providerRows = @(Get-CimInstance -Namespace $probe.Namespace -ClassName $className -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 250)
+                        $serializedRows = @(
+                            foreach ($providerRow in $providerRows) {
+                                $rowValues = [ordered]@{}
+                                foreach ($property in $providerRow.CimInstanceProperties) { $rowValues[$property.Name] = $property.Value }
+                                [pscustomobject]$rowValues
+                            }
+                        )
+                        $probe.DirectCimClasses[$className] = $serializedRows
+                        if ($className -eq 'SMS_CM_UpdatePackages') {
+                            $packageNames = @($providerRows | ForEach-Object { "$($_.Name)" } | Where-Object { $_ } | Select-Object -Unique)
+                        }
+                    }
+                    catch { $probe.DirectCimErrors[$className] = Get-ProbeError $_ }
+                }
+            }
+
+            try {
+                $uiInstallCandidates = @()
+                try {
+                    $smsSetup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
+                    if ($smsSetup.'UI Installation Directory') { $uiInstallCandidates += "$($smsSetup.'UI Installation Directory')" }
+                }
+                catch {}
+                $registry = $null
+                $key = $null
+                try {
+                    $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+                    $key = $registry.OpenSubKey('SOFTWARE\Microsoft\ConfigMgr10\Setup')
+                    if ($key) {
+                        $uiPath = "$($key.GetValue('UI Installation Directory'))"
+                        if ($uiPath) { $uiInstallCandidates += $uiPath }
+                    }
+                }
+                finally {
+                    if ($key) { $key.Dispose() }
+                    if ($registry) { $registry.Dispose() }
+                }
+                $modulePath = @($uiInstallCandidates | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'bin\ConfigurationManager.psd1' } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+                if ($modulePath.Count -ne 1) { throw "ConfigurationManager.psd1 was not found under registered UI installation paths: $($uiInstallCandidates -join ', ')" }
+                $module = Get-Module -Name ConfigurationManager | Select-Object -First 1
+                if (-not $module) {
+                    $module = Import-Module -Name $modulePath[0] -PassThru -ErrorAction Stop
+                    $moduleImportedByProbe = $true
+                }
+                $downloadCommand = Get-Command Invoke-CMSiteUpdateDownload -ErrorAction Stop
+                $probe.CmdletModule = [ordered]@{
+                    Path                    = $modulePath[0]
+                    Name                    = $module.Name
+                    Version                 = "$($module.Version)"
+                    DownloadParameterSets   = @($downloadCommand.ParameterSets | ForEach-Object { "$($_.Name): $($_.ToString())" })
+                    SmsAdminUiPath          = "$env:SMS_ADMIN_UI_PATH"
+                }
+                $providerLocation = Get-CimInstance -Namespace 'root\SMS' -ClassName SMS_ProviderLocation -OperationTimeoutSec 10 -ErrorAction Stop |
+                    Where-Object { $_.ProviderForLocalSite } | Select-Object -First 1
+                if (-not $providerLocation -or -not $providerLocation.Machine) { throw 'SMS_ProviderLocation returned no local-site provider' }
+                if (-not (Get-PSDrive -Name $probe.SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                    $null = New-PSDrive -Name $probe.SiteCode -PSProvider CMSite -Root $providerLocation.Machine -ErrorAction Stop
+                    $siteDriveCreatedByProbe = $true
+                }
+                Push-Location "$($probe.SiteCode):\"
+                $locationPushed = $true
+                try {
+                    $broadRows = @(Get-CMSiteUpdate -Fast -ErrorAction Stop)
+                    $probe.CmdletBroadQuery = @($broadRows | Select-Object Name, PackageGuid, State, FullVersion, DateCreated, DateReleased, LastUpdateTime)
+                    if ($packageNames.Count -eq 0) { $packageNames = @($broadRows | ForEach-Object { "$($_.Name)" } | Where-Object { $_ } | Select-Object -Unique) }
+                }
+                catch { $probe.CmdletBroadError = Get-ProbeError $_ }
+                foreach ($packageName in @($packageNames | Select-Object -First 20)) {
+                    try {
+                        $nameRows = @(Get-CMSiteUpdate -Name $packageName -Fast -ErrorAction Stop)
+                        $probe.CmdletNameQueries += [ordered]@{
+                            Name = $packageName
+                            Rows = @($nameRows | Select-Object Name, PackageGuid, State, FullVersion, DateCreated, DateReleased, LastUpdateTime)
+                            Error = $null
+                        }
+                    }
+                    catch {
+                        $probe.CmdletNameQueries += [ordered]@{ Name = $packageName; Rows = @(); Error = Get-ProbeError $_ }
+                    }
+                }
+            }
+            catch { $probe.CmdletSetupError = Get-ProbeError $_ }
+            finally {
+                if ($locationPushed) {
+                    try { Pop-Location } catch {}
+                }
+                if ($siteDriveCreatedByProbe) {
+                    try { Remove-PSDrive -Name $probe.SiteCode -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                if ($moduleImportedByProbe -and $module) {
+                    try { Remove-Module -ModuleInfo $module -Force -ErrorAction SilentlyContinue } catch {}
+                }
+            }
+
+            try {
+                $since = (Get-Date).AddHours(-2)
+                $probe.WmiActivityErrors = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-WMI-Activity/Operational'; StartTime = $since; Level = 2, 3 } -MaxEvents 100 -ErrorAction Stop |
+                    Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message)
+            }
+            catch { $probe.DirectCimErrors['WmiActivityEventLog'] = Get-ProbeError $_ }
+            $probe | ConvertTo-Json -Depth 12
+        }
+
+        $providerResult = $null
+        try {
+            $providerResult = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $providerProbe -AsJob -TimeoutSeconds 120 -SessionMaxRetries 1 -SuppressLog -DisplayName 'Capture ConfigMgr provider state'
+        }
+        catch {
+            $providerResult = [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = $null; TimedOut = $false; ErrorDetails = @($_.Exception.Message) }
+        }
+        $providerStateText = ''
+        if ($providerResult -and -not $providerResult.ScriptBlockFailed -and $providerResult.ScriptBlockOutput) {
+            $providerStateText = @($providerResult.ScriptBlockOutput | ForEach-Object { "$_" }) -join "`r`n"
+        }
+        if (-not $providerStateText) {
+            $providerStateText = [ordered]@{
+                CapturedAtUtc    = (Get-Date).ToUniversalTime().ToString('o')
+                ComputerName     = $VmName
+                ProbeStatus      = 'HostInvocationFailed'
+                TimedOut         = [bool]($providerResult -and $providerResult.TimedOut)
+                ScriptBlockFailed = [bool]($providerResult -and $providerResult.ScriptBlockFailed)
+                ErrorDetails     = @($providerResult.ErrorDetails | Where-Object { $_ })
+            } | ConvertTo-Json -Depth 6
+        }
+        $dest = Join-Path $logDir "$base-ConfigMgrProviderState.json"
+        try {
+            Set-Content -LiteralPath $dest -Value $providerStateText -Encoding UTF8 -ErrorAction Stop
+            Write-Log "[Phase $Phase]: $VmName`: Captured bounded ConfigMgr provider state -> $dest" -OutputStream
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write bounded ConfigMgr provider state: $_" -Warning
         }
     }
 
