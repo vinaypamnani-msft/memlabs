@@ -9,7 +9,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "$sourcePath has $($errors.Count) parse error(s)." }
-$functionNames = @('Get-CmSiteUpdateByPackageGuid', 'Start-CmSiteUpdatePackageDownload')
+$functionNames = @('Format-CmUpdateErrorRecord', 'Get-CmSiteUpdateByPackageGuid', 'Start-CmSiteUpdatePackageDownload')
 $functionAsts = @($ast.FindAll({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $functionNames
@@ -75,6 +75,11 @@ function Write-DscStatus {
     $script:StatusMessages += [pscustomobject]@{ Text = $Status; Failure = $Failure.IsPresent }
 }
 
+$detailError = $null
+try { throw [InvalidOperationException]::new('synthetic provider failure') }
+catch { $detailError = Format-CmUpdateErrorRecord -ErrorRecord $_ }
+Assert-Equal $true ($detailError -like '*Type=System.InvalidOperationException*Message=synthetic provider failure*FullyQualifiedErrorId=*Category=*Position=*Stack=*') 'update error detail retains type, id, category, invocation, and script stack'
+
 $targetPackage = [pscustomobject]@{ Name = 'Configuration Manager 2503'; PackageGuid = 'target-guid'; State = 327682 }
 $sameNameWrongPackage = [pscustomobject]@{ Name = 'Configuration Manager 2503'; PackageGuid = 'wrong-guid'; State = 327682 }
 $script:Packages = @($sameNameWrongPackage, $targetPackage)
@@ -116,7 +121,7 @@ $caught = $null
 try { Start-CmSiteUpdatePackageDownload -UpdatePackage $targetPackage -MaximumAttempts 2 -RetrySeconds 0 | Out-Null }
 catch { $caught = $_ }
 Assert-Equal $true ([bool]$caught) 'retry exhaustion throws instead of returning success'
-Assert-Equal $true ($caught.Exception.Message -like "Could not request the download for 'Configuration Manager 2503'*after 2 attempts*download invocation*key*") 'retry exhaustion preserves package identity, stage, and the last error'
+Assert-Equal $true ($caught.Exception.Message -like "Could not request the download for 'Configuration Manager 2503'*lastState=327682*after 2 attempts*download invocation*key*") 'retry exhaustion preserves package identity, state, stage, and the last error'
 Assert-Equal 2 $script:DownloadCalls 'retry exhaustion honors the attempt bound'
 
 $script:Packages = @()
