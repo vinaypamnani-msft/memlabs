@@ -7191,19 +7191,34 @@ class SqlAoMultiSubnetNetworkName {
         $groupIps = @(Get-ClusterResource -Cluster $this.ClusterName -ErrorAction Stop |
                 Where-Object { $_.OwnerGroup.Name -eq $groupName -and $_.ResourceType -eq 'IP Address' })
         $byAddress = @{}
+        $byName = @{}
         foreach ($resource in $groupIps) {
+            $byName[[string]$resource.Name] = $resource
             $address = ($resource | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
             if ($address) { $byAddress[[string]$address] = $resource }
         }
 
+        # Allocate each existing resource to at most one desired address before
+        # mutating anything. Deterministic names take precedence over stale
+        # Address values so a cross-named resource cannot be claimed twice.
+        $resourcePlan = @{}
+        $claimedResourceNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($address in $desired) {
-            $resource = $byAddress[$address]
-            if (-not $resource) {
-                $resourceName = "$($this.Name) IP Address ($address)"
-                $resource = Add-ClusterResource -Cluster $this.ClusterName -Name $resourceName -Group $groupName -ResourceType 'IP Address' -ErrorAction Stop
-                $byAddress[$address] = $resource
+            $resourceName = "$($this.Name) IP Address ($address)"
+            $namedResource = $byName[$resourceName]
+            if ($namedResource -and $claimedResourceNames.Add([string]$namedResource.Name)) {
+                $resourcePlan[$address] = $namedResource
             }
+        }
+        foreach ($address in $desired) {
+            if ($resourcePlan.ContainsKey($address)) { continue }
+            $addressResource = $byAddress[$address]
+            if ($addressResource -and $claimedResourceNames.Add([string]$addressResource.Name)) {
+                $resourcePlan[$address] = $addressResource
+            }
+        }
 
+        foreach ($address in $desired) {
             $source = $this.IPAddresses | Where-Object { $this.StripMask($_) -eq $address } | Select-Object -First 1
             $octets = $address.Split('.')
             $prefix = "$($octets[0]).$($octets[1]).$($octets[2])."
@@ -7213,26 +7228,62 @@ class SqlAoMultiSubnetNetworkName {
             if (-not $network) {
                 throw "No cluster network in '$($this.ClusterName)' can host $address."
             }
+
+            $resourceName = "$($this.Name) IP Address ($address)"
+            $resource = $resourcePlan[$address]
+            $createdResource = $false
+            if (-not $resource) {
+                $resource = Add-ClusterResource -Cluster $this.ClusterName -Name $resourceName -Group $groupName -ResourceType 'IP Address' -ErrorAction Stop
+                $createdResource = $true
+                $byName[$resourceName] = $resource
+                $resourcePlan[$address] = $resource
+                $null = $claimedResourceNames.Add([string]$resource.Name)
+            }
+            foreach ($entry in @($byAddress.GetEnumerator() | Where-Object { $_.Value.Name -eq $resource.Name })) {
+                $byAddress.Remove($entry.Key)
+            }
+            $byAddress[$address] = $resource
+
             $desiredParameters = @{
                 Address    = $address
                 SubnetMask = $this.GetMask($source)
                 Network    = [string]$network.Name
                 EnableDhcp = 0
             }
-            $currentParameters = @{}
-            foreach ($parameter in @($resource | Get-ClusterParameter -ErrorAction Stop)) {
-                $currentParameters[[string]$parameter.Name] = $parameter.Value
-            }
-            $parameterDrift = -not $currentParameters.ContainsKey('EnableDhcp') -or
-                [string]$currentParameters.Address -ne [string]$desiredParameters.Address -or
-                [string]$currentParameters.SubnetMask -ne [string]$desiredParameters.SubnetMask -or
-                [string]$currentParameters.Network -ne [string]$desiredParameters.Network -or
-                [uint32]$currentParameters.EnableDhcp -ne 0
-            if ($parameterDrift) {
-                if ([string]$resource.State -eq 'Online') {
-                    $resource | Stop-ClusterResource -Wait 30 -ErrorAction Stop | Out-Null
+            try {
+                $currentParameters = @{}
+                foreach ($parameter in @($resource | Get-ClusterParameter -ErrorAction Stop)) {
+                    $currentParameters[[string]$parameter.Name] = $parameter.Value
                 }
-                $resource | Set-ClusterParameter -Multiple $desiredParameters -ErrorAction Stop
+                $parameterDrift = -not $currentParameters.ContainsKey('EnableDhcp') -or
+                    [string]$currentParameters.Address -ne [string]$desiredParameters.Address -or
+                    [string]$currentParameters.SubnetMask -ne [string]$desiredParameters.SubnetMask -or
+                    [string]$currentParameters.Network -ne [string]$desiredParameters.Network -or
+                    [uint32]$currentParameters.EnableDhcp -ne 0
+                if ($parameterDrift) {
+                    if ([string]$resource.State -eq 'Online') {
+                        $resource | Stop-ClusterResource -Wait 30 -ErrorAction Stop | Out-Null
+                    }
+                    $resource | Set-ClusterParameter -Multiple $desiredParameters -ErrorAction Stop
+                }
+            }
+            catch {
+                $initializationError = $_
+                if ($createdResource) {
+                    try {
+                        Remove-ClusterResource -Cluster $this.ClusterName -Name $resource.Name -Force -ErrorAction Stop
+                        $remainingResource = Get-ClusterResource -Cluster $this.ClusterName -Name $resource.Name -ErrorAction SilentlyContinue
+                        if ($remainingResource) {
+                            throw "resource still exists after Remove-ClusterResource returned"
+                        }
+                    }
+                    catch {
+                        throw "Failed to initialize new cluster IP resource '$($resource.Name)': $($initializationError.Exception.Message). Cleanup also failed: $($_.Exception.Message)"
+                    }
+                    $byAddress.Remove($address)
+                    $byName.Remove($resourceName)
+                }
+                throw $initializationError
             }
         }
 
@@ -7273,7 +7324,10 @@ class SqlAoMultiSubnetNetworkName {
             $ipResources = @(Get-ClusterResource -Cluster $this.ClusterName -ErrorAction Stop |
                     Where-Object { $_.OwnerGroup.Name -eq $groupName -and $_.ResourceType -eq 'IP Address' })
             $actual = @($ipResources | ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction Stop).Value } | Sort-Object -Unique)
-            if (($desired -join ',') -ne ($actual -join ',')) { return $false }
+            if (($desired -join ',') -ne ($actual -join ',')) {
+                Write-Verbose "Network Name '$($this.Name)' IP set mismatch: desired='$($desired -join ',')' actual='$($actual -join ',')'"
+                return $false
+            }
 
             $desiredResourceNames = [Collections.Generic.List[string]]::new()
             $onlineIpCount = 0
@@ -7282,7 +7336,10 @@ class SqlAoMultiSubnetNetworkName {
                 $resource = $ipResources | Where-Object {
                     ($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value -eq $address
                 } | Select-Object -First 1
-                if (-not $resource) { return $false }
+                if (-not $resource) {
+                    Write-Verbose "Network Name '$($this.Name)' has no IP resource for $address"
+                    return $false
+                }
                 $desiredResourceNames.Add([string]$resource.Name)
                 if ([string]$resource.State -eq 'Online') { $onlineIpCount++ }
 
@@ -7301,26 +7358,46 @@ class SqlAoMultiSubnetNetworkName {
                     [string]$parameters.SubnetMask -ne $this.GetMask($source) -or
                     [string]$parameters.Network -ne [string]$network.Name -or
                     [uint32]$parameters.EnableDhcp -ne 0) {
+                    Write-Verbose "Network Name '$($this.Name)' IP resource '$($resource.Name)' has incorrect static address parameters"
                     return $false
                 }
             }
-            if ($onlineIpCount -lt 1 -or [string]$networkName.State -ne 'Online') { return $false }
+            if ($onlineIpCount -lt 1 -or [string]$networkName.State -ne 'Online') {
+                Write-Verbose "Network Name '$($this.Name)' is not online with at least one online IP resource"
+                return $false
+            }
 
             $dependencyInfo = @($networkName | Get-ClusterResourceDependency -ErrorAction Stop)
-            if ($dependencyInfo.Count -ne 1 -or -not $dependencyInfo[0].PSObject.Properties['DependencyExpression']) { return $false }
+            if ($dependencyInfo.Count -ne 1 -or -not $dependencyInfo[0].PSObject.Properties['DependencyExpression']) {
+                Write-Verbose "Network Name '$($this.Name)' dependency expression is unavailable"
+                return $false
+            }
             $dependencyExpression = [string]$dependencyInfo[0].DependencyExpression
             $providerMatches = [regex]::Matches($dependencyExpression, '\[([^\]]+)\]')
             $actualProviders = @($providerMatches | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
             $expectedProviders = @($desiredResourceNames | Sort-Object -Unique)
-            if (($actualProviders -join ',') -ne ($expectedProviders -join ',')) { return $false }
-            if ($dependencyExpression -match '(?i)\band\b') { return $false }
+            if (($actualProviders -join ',') -ne ($expectedProviders -join ',')) {
+                Write-Verbose "Network Name '$($this.Name)' dependency providers mismatch: expected='$($expectedProviders -join ',')' actual='$($actualProviders -join ',')'"
+                return $false
+            }
+            if ($dependencyExpression -match '(?i)\band\b') {
+                Write-Verbose "Network Name '$($this.Name)' dependency contains AND: $dependencyExpression"
+                return $false
+            }
             $orCount = [regex]::Matches($dependencyExpression, '(?i)\bor\b').Count
-            if ($orCount -ne [math]::Max(0, $expectedProviders.Count - 1)) { return $false }
+            if ($orCount -ne [math]::Max(0, $expectedProviders.Count - 1)) {
+                Write-Verbose "Network Name '$($this.Name)' dependency has an incorrect OR count: $dependencyExpression"
+                return $false
+            }
 
             $regAll = ($networkName | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction Stop).Value
             $ttl = ($networkName | Get-ClusterParameter -Name HostRecordTTL -ErrorAction Stop).Value
-            return ([uint32]$regAll -eq $this.RegisterAllProvidersIP) -and
+            $dnsParametersMatch = ([uint32]$regAll -eq $this.RegisterAllProvidersIP) -and
                 ([uint32]$ttl -eq $this.HostRecordTTL)
+            if (-not $dnsParametersMatch) {
+                Write-Verbose "Network Name '$($this.Name)' DNS parameters mismatch: RegisterAllProvidersIP=$regAll HostRecordTTL=$ttl"
+            }
+            return $dnsParametersMatch
         }
         catch {
             Write-Verbose "SQLAO multi-subnet Network Name test failed: $_"

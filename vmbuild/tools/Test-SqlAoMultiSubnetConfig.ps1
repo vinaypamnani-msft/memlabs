@@ -113,6 +113,7 @@ $templateModule = Get-Module TemplateHelpDSC
 $mockResults = & $templateModule {
     function Import-Module { param($Name) }
     $group = [pscustomobject]@{ Name = 'AG' }
+    $script:mockGroup = $group
     $script:networkName = [pscustomobject]@{
         Name = 'Listener'; ResourceType = 'Network Name'; OwnerGroup = $group; State = 'Online'
         Parameters = @{ DnsName = 'LISTENER'; RegisterAllProvidersIP = 1; HostRecordTTL = 300 }
@@ -143,6 +144,8 @@ $mockResults = & $templateModule {
         }
     }
     function Get-ClusterNetwork {
+        [CmdletBinding()]
+        param($Cluster)
         return @(
             [pscustomobject]@{ Name = 'Net1'; Address = '10.1.1.0' },
             [pscustomobject]@{ Name = 'Net2'; Address = '10.1.2.0' }
@@ -186,5 +189,185 @@ Assert-Equal $false $mockResults.ExtraProvider 'Network Name Test rejects an ext
 Assert-Equal $false $mockResults.MixedAnd 'Network Name Test rejects mixed AND/OR dependencies'
 Assert-Equal $false $mockResults.WrongNetwork 'Network Name Test rejects an IP bound to the wrong cluster network'
 Assert-Equal $false $mockResults.OfflineName 'Network Name Test rejects an offline Network Name'
+
+$setResults = & $templateModule {
+    function Import-Module { param($Name) }
+    $group = [pscustomobject]@{ Name = 'AG' }
+    $script:mockGroup = $group
+    $script:networkName = [pscustomobject]@{
+        Name = 'Listener'; ResourceType = 'Network Name'; OwnerGroup = $group; State = 'Online'
+        Parameters = @{ DnsName = 'LISTENER'; RegisterAllProvidersIP = 1; HostRecordTTL = 300 }
+    }
+    $script:ip1 = [pscustomobject]@{
+        Name = 'IP1'; ResourceType = 'IP Address'; OwnerGroup = $group; State = 'Online'
+        Parameters = @{ Address = '10.1.1.202'; SubnetMask = '255.255.255.0'; Network = 'Net1'; EnableDhcp = 0 }
+    }
+    $script:orphan = [pscustomobject]@{
+        Name = 'LISTENER IP Address (10.1.2.202)'; ResourceType = 'IP Address'; OwnerGroup = $group; State = 'Offline'
+        Parameters = @{}
+    }
+    $script:resources = [Collections.Generic.List[object]]::new()
+    $script:resources.Add($script:networkName)
+    $script:resources.Add($script:ip1)
+    $script:resources.Add($script:orphan)
+    $script:dependencyExpression = '[IP1] or [LISTENER IP Address (10.1.2.202)]'
+    $script:addCount = 0
+    $script:removeCount = 0
+    $script:failNewResourceSet = $false
+    $script:failCleanup = $false
+
+    function Get-ClusterResource {
+        param($Cluster, $Name)
+        if ($Name) { return @($script:resources | Where-Object Name -eq $Name) }
+        return @($script:resources)
+    }
+    function Get-ClusterParameter {
+        param([Parameter(ValueFromPipeline)]$InputObject, $Name)
+        process {
+            if ($Name) { return [pscustomobject]@{ Name = $Name; Value = $InputObject.Parameters[$Name] } }
+            foreach ($key in $InputObject.Parameters.Keys) {
+                [pscustomobject]@{ Name = $key; Value = $InputObject.Parameters[$key] }
+            }
+        }
+    }
+    function Set-ClusterParameter {
+        param([Parameter(ValueFromPipeline)]$InputObject, $Multiple)
+        process {
+            if ($script:failNewResourceSet -and $InputObject.Name -eq 'LISTENER IP Address (10.1.2.202)') {
+                throw 'injected parameter failure'
+            }
+            foreach ($key in $Multiple.Keys) { $InputObject.Parameters[$key] = $Multiple[$key] }
+            return $InputObject
+        }
+    }
+    function Get-ClusterNetwork {
+        return @(
+            [pscustomobject]@{ Name = 'Net1'; Address = '10.1.1.0' },
+            [pscustomobject]@{ Name = 'Net2'; Address = '10.1.2.0' }
+        )
+    }
+    function Get-ClusterResourceDependency {
+        param([Parameter(ValueFromPipeline)]$InputObject)
+        process { return [pscustomobject]@{ DependencyExpression = $script:dependencyExpression } }
+    }
+    function Set-ClusterResourceDependency {
+        [CmdletBinding()]
+        param($Resource, $Dependency)
+        $script:dependencyExpression = $Dependency
+    }
+    function Add-ClusterResource {
+        [CmdletBinding()]
+        param($Cluster, $Name, $Group, $ResourceType)
+        $script:addCount++
+        $newResource = [pscustomobject]@{
+            Name = $Name; ResourceType = $ResourceType; OwnerGroup = $script:mockGroup; State = 'Offline'; Parameters = @{}
+        }
+        $script:resources.Add($newResource)
+        return $newResource
+    }
+    function Remove-ClusterResource {
+        [CmdletBinding()]
+        param($Cluster, $Name, [switch]$Force)
+        $script:removeCount++
+        if ($script:failCleanup) {
+            Write-Error 'injected cleanup failure'
+            return
+        }
+        $target = $script:resources | Where-Object Name -eq $Name | Select-Object -First 1
+        if ($target) { $script:resources.Remove($target) }
+    }
+    function Stop-ClusterResource {
+        param([Parameter(ValueFromPipeline)]$InputObject, $Wait)
+        process { $InputObject.State = 'Offline'; return $InputObject }
+    }
+    function Start-ClusterResource {
+        param([Parameter(ValueFromPipeline)]$InputObject, $Wait)
+        process {
+            $InputObject.State = 'Online'
+            $onlineIp = $script:resources | Where-Object { $_.ResourceType -eq 'IP Address' } | Select-Object -First 1
+            if ($onlineIp) { $onlineIp.State = 'Online' }
+            return $InputObject
+        }
+    }
+    function Update-ClusterNetworkNameResource {
+        param([Parameter(ValueFromPipeline)]$InputObject)
+        process { return $InputObject }
+    }
+
+    $resource = [SqlAoMultiSubnetNetworkName]::new()
+    $resource.Name = 'LISTENER'
+    $resource.ClusterName = 'CLUSTER'
+    $resource.Kind = 'Listener'
+    $resource.IPAddresses = @('10.1.1.202/24', '10.1.2.202/24')
+    $resource.RegisterAllProvidersIP = 1
+    $resource.HostRecordTTL = 300
+
+    try { $resource.Set() } catch { throw "orphan reuse scenario failed: $($_.Exception.Message)" }
+    $orphanReused = $script:addCount -eq 0 -and
+        $script:orphan.Parameters.Address -eq '10.1.2.202' -and
+        $resource.Test()
+
+    $crossNamed = [pscustomobject]@{
+        Name = 'LISTENER IP Address (10.1.2.202)'; ResourceType = 'IP Address'; OwnerGroup = $group; State = 'Offline'
+        Parameters = @{ Address = '10.1.1.202'; SubnetMask = '255.255.255.0'; Network = 'Net1'; EnableDhcp = 0 }
+    }
+    $script:resources.Clear()
+    $script:resources.Add($script:networkName)
+    $script:resources.Add($crossNamed)
+    $script:networkName.State = 'Online'
+    $script:dependencyExpression = '[LISTENER IP Address (10.1.2.202)]'
+    $script:addCount = 0
+    $script:removeCount = 0
+    try { $resource.Set() } catch { throw "cross-named scenario failed: $($_.Exception.Message)" }
+    $crossNamedIps = @($script:resources | Where-Object ResourceType -eq 'IP Address')
+    $crossNamedAddresses = @($crossNamedIps | ForEach-Object { ($_ | Get-ClusterParameter -Name Address).Value } | Sort-Object -Unique)
+    $crossNamedConverged = $crossNamedIps.Count -eq 2 -and
+        @($crossNamedIps.Name | Sort-Object -Unique).Count -eq 2 -and
+        $crossNamedAddresses.Count -eq 2 -and
+        $script:dependencyExpression -notmatch '\[\]'
+    $crossNamedAddCount = $script:addCount
+
+    $script:resources.Clear()
+    $script:resources.Add($script:networkName)
+    $script:resources.Add($script:ip1)
+    $script:networkName.State = 'Online'
+    $script:resources.Remove($script:orphan)
+    $script:dependencyExpression = '[IP1]'
+    $script:addCount = 0
+    $script:removeCount = 0
+    $script:failNewResourceSet = $true
+    $failedSetThrew = $false
+    try { $resource.Set() } catch { $failedSetThrew = $_.Exception.Message -like '*injected parameter failure*' }
+    $failedResourceRemoved = -not ($script:resources | Where-Object Name -eq 'LISTENER IP Address (10.1.2.202)')
+
+    $script:resources.Clear()
+    $script:resources.Add($script:networkName)
+    $script:resources.Add($script:ip1)
+    $script:networkName.State = 'Online'
+    $script:dependencyExpression = '[IP1]'
+    $script:addCount = 0
+    $script:removeCount = 0
+    $script:failCleanup = $true
+    $cleanupFailureSurfaced = $false
+    try { $resource.Set() }
+    catch {
+        $cleanupFailureSurfaced = $_.Exception.Message -like "*Cleanup also failed*injected cleanup failure*"
+    }
+
+    return [pscustomobject]@{
+        OrphanReused = $orphanReused
+        CrossNamedConverged = $crossNamedConverged
+        CrossNamedAddCount = $crossNamedAddCount
+        FailedSetThrew = $failedSetThrew
+        FailedResourceRemoved = $failedResourceRemoved
+        CleanupFailureSurfaced = $cleanupFailureSurfaced
+    }
+}
+Assert-Equal $true $setResults.OrphanReused 'Network Name Set reuses and repairs a deterministic orphan resource'
+Assert-Equal $true $setResults.CrossNamedConverged 'Network Name Set assigns a cross-named stale resource to only one desired address'
+Assert-Equal 1 $setResults.CrossNamedAddCount 'Network Name Set creates the second resource required by a cross-named stale address'
+Assert-Equal $true $setResults.FailedSetThrew 'Network Name Set surfaces initialization failure'
+Assert-Equal $true $setResults.FailedResourceRemoved 'Network Name Set removes a newly created resource after initialization failure'
+Assert-Equal $true $setResults.CleanupFailureSurfaced 'Network Name Set reports initialization and cleanup failures together'
 
 Write-Host 'SQLAO multi-subnet configuration tests passed.' -ForegroundColor Green
