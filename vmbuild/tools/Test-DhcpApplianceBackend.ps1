@@ -136,6 +136,105 @@ Assert-Equal '192.168.55.22' $deploy.virtualMachines[3].AssignedIP 'first domain
 Assert-Equal '192.168.55.23' $deploy.virtualMachines[4].AssignedIP 'second domain member follows SQL nodes without colliding with virtual IPs'
 Assert-True (-not $deploy.virtualMachines[5].PSObject.Properties['AssignedIP']) 'OSD client remains dynamic'
 
+$multiSubnetDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.61.0'; domainName = 'multisubnet.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-MS1'; role = 'SQLAO'; OtherNode = 'SQL-MS2' },
+        [pscustomobject]@{ vmName = 'SQL-MS2'; role = 'SQLAO'; network = '192.168.62.0' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $multiSubnetDeploy -LiveVMs @()
+$multiSubnetOwner = $multiSubnetDeploy.virtualMachines[0]
+Assert-Equal '192.168.61.201,192.168.62.201' (@($multiSubnetOwner.ClusterIPAddresses) -join ',') 'multi-subnet SQLAO allocates one cluster IP per node subnet'
+Assert-Equal '192.168.61.202,192.168.62.202' (@($multiSubnetOwner.AGIPAddresses) -join ',') 'multi-subnet SQLAO allocates one listener IP per node subnet'
+Assert-Equal '192.168.61.201' $multiSubnetOwner.ClusterIPAddress 'legacy cluster IP aliases the owner subnet'
+Assert-Equal '192.168.61.202' $multiSubnetOwner.AGIPAddress 'legacy listener IP aliases the owner subnet'
+Assert-Equal '192.168.61.201,192.168.62.201' (@($multiSubnetDeploy.virtualMachines[1].ClusterIPAddresses) -join ',') 'appliance allocator persists cluster IP state on the partner'
+Assert-Equal '192.168.61.202,192.168.62.202' (@($multiSubnetDeploy.virtualMachines[1].AGIPAddresses) -join ',') 'appliance allocator persists listener IP state on the partner'
+
+$mixedMultiSubnetDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.69.0'; domainName = 'mixed.multisubnet.test' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SQL-MIX1'; role = 'SQLAO'; OtherNode = 'SQL-MIX2'
+            ClusterIPAddress = '192.168.69.210'; ClusterIPAddresses = @('192.168.70.220')
+            AGIPAddress = '192.168.69.211'; AGIPAddresses = @('192.168.70.221')
+        },
+        [pscustomobject]@{ vmName = 'SQL-MIX2'; role = 'SQLAO'; network = '192.168.70.0' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $mixedMultiSubnetDeploy -LiveVMs @()
+Assert-Equal '192.168.69.210,192.168.70.220' (@($mixedMultiSubnetDeploy.virtualMachines[0].ClusterIPAddresses) -join ',') 'appliance allocator merges owner singular and partner-only plural cluster state'
+Assert-Equal '192.168.69.211,192.168.70.221' (@($mixedMultiSubnetDeploy.virtualMachines[0].AGIPAddresses) -join ',') 'appliance allocator merges owner singular and partner-only plural listener state'
+
+$persistedUnionNote = [pscustomobject]@{
+    ClusterIPAddresses = @('192.168.82.220')
+    AGIPAddresses = @('192.168.82.221')
+} | ConvertTo-Json -Compress
+$persistedUnionLive = @([pscustomobject]@{ Name = 'SQL-UNION2'; Notes = $persistedUnionNote; NetworkAdapters = @() })
+$persistedUnionDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.80.0'; domainName = 'union.multisubnet.test' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SQL-UNION1'; role = 'SQLAO'; OtherNode = 'SQL-UNION2'
+            ClusterIPAddress = '192.168.80.210'
+            AGIPAddress = '192.168.80.211'
+        },
+        [pscustomobject]@{ vmName = 'SQL-UNION2'; role = 'SQLAO'; network = '192.168.82.0' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $persistedUnionDeploy -LiveVMs $persistedUnionLive
+Assert-Equal '192.168.80.210,192.168.82.220' (@($persistedUnionDeploy.virtualMachines[0].ClusterIPAddresses) -join ',') 'appliance allocator unions configured owner and persisted partner cluster state'
+Assert-Equal '192.168.80.211,192.168.82.221' (@($persistedUnionDeploy.virtualMachines[0].AGIPAddresses) -join ',') 'appliance allocator unions configured owner and persisted partner listener state'
+
+$configuredMultiSubnetDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.63.0'; domainName = 'configured.multisubnet.test' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SQL-CMS1'; role = 'SQLAO'; OtherNode = 'SQL-CMS2'
+            ClusterIPAddresses = @('192.168.63.210/24', '192.168.64.220/24')
+            AGIPAddresses = @('192.168.63.211/24', '192.168.64.221/24')
+        },
+        [pscustomobject]@{ vmName = 'SQL-CMS2'; role = 'SQLAO'; network = '192.168.64.0' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $configuredMultiSubnetDeploy -LiveVMs @()
+$configuredMultiSubnetOwner = $configuredMultiSubnetDeploy.virtualMachines[0]
+Assert-Equal '192.168.63.210,192.168.64.220' (@($configuredMultiSubnetOwner.ClusterIPAddresses) -join ',') 'configured multi-subnet cluster IPs are preserved and normalized'
+Assert-Equal '192.168.63.211,192.168.64.221' (@($configuredMultiSubnetOwner.AGIPAddresses) -join ',') 'configured multi-subnet listener IPs are preserved and normalized'
+
+$partialMultiSubnetDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.65.0'; domainName = 'partial.multisubnet.test' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SQL-PMS1'; role = 'SQLAO'; OtherNode = 'SQL-PMS2'
+            ClusterIPAddresses = @('192.168.65.210')
+            AGIPAddresses = @('192.168.65.211')
+        },
+        [pscustomobject]@{ vmName = 'SQL-PMS2'; role = 'SQLAO'; network = '192.168.66.0' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $partialMultiSubnetDeploy -LiveVMs @()
+$partialMultiSubnetOwner = $partialMultiSubnetDeploy.virtualMachines[0]
+Assert-Equal '192.168.65.210,192.168.66.201' (@($partialMultiSubnetOwner.ClusterIPAddresses) -join ',') 'partial cluster IP list fills only the missing subnet'
+Assert-Equal '192.168.65.211,192.168.66.202' (@($partialMultiSubnetOwner.AGIPAddresses) -join ',') 'partial listener IP list fills only the missing subnet'
+
+$duplicateSubnetDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.67.0'; domainName = 'duplicate.multisubnet.test' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SQL-DMS1'; role = 'SQLAO'; OtherNode = 'SQL-DMS2'
+            ClusterIPAddresses = @('192.168.67.210', '192.168.67.211')
+            AGIPAddresses = @('192.168.67.212', '192.168.68.212')
+        },
+        [pscustomobject]@{ vmName = 'SQL-DMS2'; role = 'SQLAO'; network = '192.168.68.0' }
+    )
+}
+$duplicateSubnetRejected = $false
+try { $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $duplicateSubnetDeploy -LiveVMs @() }
+catch { $duplicateSubnetRejected = $_.Exception.Message -like '*more than one address on subnet*' }
+Assert-True $duplicateSubnetRejected 'multi-subnet SQLAO rejects duplicate cluster IPs on one subnet'
+
 $rerunNote = [pscustomobject]@{
     lastUpdate = '09/06/2026 00:00'; role = 'SQLAO'; domain = 'new.test'
     network = '192.168.55.0'; AssignedIP = '192.168.55.77'
@@ -190,7 +289,7 @@ $disagreeingPairDeploy = [pscustomobject]@{
 }
 $pairDisagreementRejected = $false
 try { $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $disagreeingPairDeploy -LiveVMs $disagreeingPairLive }
-catch { $pairDisagreementRejected = $_.Exception.Message -like '*persisted SQLAO ClusterIPAddress values disagree*' }
+catch { $pairDisagreementRejected = $_.Exception.Message -like '*more than one address on subnet*' }
 Assert-True $pairDisagreementRejected 'SQLAO pair rejects disagreeing persisted virtual IPs'
 
 $duplicateVirtualIpDeploy = [pscustomobject]@{
@@ -234,6 +333,41 @@ $ordinaryConflictRejected = $false
 try { $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $ordinaryConflictDeploy -LiveVMs $ordinaryConflictLive }
 catch { $ordinaryConflictRejected = $_.Exception.Message -like '*already in use by another VM or virtual endpoint*' }
 Assert-True $ordinaryConflictRejected 'SQLAO virtual IP claimed by another VM ordinary note is rejected'
+
+$foreignMultiNote = [pscustomobject]@{
+    ClusterIPAddress = '192.168.83.201'
+    AGIPAddress = '192.168.83.202'
+    ClusterIPAddresses = @('192.168.83.201', '192.168.84.201')
+    AGIPAddresses = @('192.168.83.202', '192.168.84.202')
+} | ConvertTo-Json -Compress
+$foreignMultiLive = @([pscustomobject]@{ Name = 'FOREIGN-SQL'; Notes = $foreignMultiNote; NetworkAdapters = @() })
+$foreignMultiDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.84.0'; domainName = 'foreign.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-F1'; role = 'SQLAO'; OtherNode = 'SQL-F2' },
+        [pscustomobject]@{ vmName = 'SQL-F2'; role = 'SQLAO' }
+    )
+}
+$null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $foreignMultiDeploy -LiveVMs $foreignMultiLive
+Assert-Equal '192.168.84.203' $foreignMultiDeploy.virtualMachines[0].ClusterIPAddress 'appliance allocator does not reuse an unrelated partner-subnet cluster VIP'
+Assert-Equal '192.168.84.204' $foreignMultiDeploy.virtualMachines[0].AGIPAddress 'appliance allocator does not reuse an unrelated partner-subnet listener VIP'
+
+$duplicateOrdinaryNote = [pscustomobject]@{ AssignedIP = '192.168.85.20' } | ConvertTo-Json -Compress
+$duplicateOrdinaryLive = @(
+    [pscustomobject]@{ Name = 'DUP-1'; Notes = $duplicateOrdinaryNote; NetworkAdapters = @() },
+    [pscustomobject]@{ Name = 'DUP-2'; Notes = $duplicateOrdinaryNote; NetworkAdapters = @() }
+)
+$duplicateOrdinaryDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.85.0'; domainName = 'duplicate-ordinary.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'DUP-1'; role = 'DomainMember' },
+        [pscustomobject]@{ vmName = 'DUP-2'; role = 'DomainMember' }
+    )
+}
+$duplicateOrdinaryRejected = $false
+try { $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $duplicateOrdinaryDeploy -LiveVMs $duplicateOrdinaryLive }
+catch { $duplicateOrdinaryRejected = $_.Exception.Message -like '*DHCP allocation conflict*' }
+Assert-True $duplicateOrdinaryRejected 'appliance allocator rejects duplicate persisted ordinary addresses'
 
 $pairAdapterNote = [pscustomobject]@{ ClusterIPAddress = '192.168.58.201'; AGIPAddress = '192.168.58.202' } | ConvertTo-Json -Compress
 $pairAdapterLive = @(
@@ -292,6 +426,7 @@ $commonPath = Join-Path $RootPath 'vmbuild\Common.ps1'
 . (Import-TestFunction -Path $commonPath -Name 'Add-SwitchAndDhcp')
 . (Import-TestFunction -Path $commonPath -Name 'Get-DHCPReservationIPForMac')
 . (Import-TestFunction -Path $commonPath -Name 'Set-DeployConfigIPAddresses')
+. (Import-TestFunction -Path $commonPath -Name 'New-VmNote')
 $global:Common = [pscustomobject]@{ DhcpBackend = $client }
 function Get-Service { throw 'native DHCP service access is forbidden in Client routing test' }
 function Test-NetworkSwitch { param($NetworkName, $NetworkSubnet, $DomainName); $script:SwitchCall = "$NetworkName|$NetworkSubnet|$DomainName"; return $true }
@@ -312,6 +447,200 @@ $validClientDeploy = [pscustomobject]@{
 $phaseOutput = @(Set-DeployConfigIPAddresses -DeployConfig $validClientDeploy)
 Assert-Equal 1 $script:AllocatorCalls 'Phase 1 allocation routes to appliance allocator once'
 Assert-Equal 0 $phaseOutput.Count 'Phase 1 appliance allocation does not pollute Start-Phase output'
+
+function Get-VMNote { return $null }
+function Set-VMNote { param($vmName, $vmNote); $script:CapturedPartnerNote = $vmNote }
+$global:Common | Add-Member -MemberType NoteProperty -Name MemLabsVersion -Value 'test' -Force
+New-VmNote -VmName 'SQL-MS2' -DeployConfig $multiSubnetDeploy -InProgress $true
+Assert-Equal '192.168.61.201,192.168.62.201' (@($script:CapturedPartnerNote.ClusterIPAddresses) -join ',') 'partner VM note round-trip preserves cluster IP state'
+Assert-Equal '192.168.61.202,192.168.62.202' (@($script:CapturedPartnerNote.AGIPAddresses) -join ',') 'partner VM note round-trip preserves listener IP state'
+
+# Exercise the native Windows DHCP allocation path without touching the host.
+function Test-MemLabsUsesDhcpAppliance { return $false }
+function Get-Service { return [pscustomobject]@{ Status = 'Running' } }
+function Get-DhcpServerv4Scope { param($ScopeId); return [pscustomobject]@{ Name = "Scope $ScopeId" } }
+function Get-DhcpServerv4ScopeStatistics { return $null }
+function Get-DhcpServerv4Reservation { return @() }
+function Get-VM2 { return $null }
+function Get-DhcpServerv4FreeIPAddress {
+    param($ScopeId)
+    if (-not $script:NextNativeIp) { $script:NextNativeIp = @{} }
+    if (-not $script:NextNativeIp.ContainsKey($ScopeId)) { $script:NextNativeIp[$ScopeId] = 20 }
+    $octet = $script:NextNativeIp[$ScopeId]
+    $script:NextNativeIp[$ScopeId]++
+    $base = (($ScopeId -split '\.') | Select-Object -First 3) -join '.'
+    return [Net.IPAddress]"$base.$octet"
+}
+function Add-DhcpServerv4ExclusionRange {
+    param($ScopeId, $StartRange, $EndRange)
+    if (-not $script:NativeExclusions) { $script:NativeExclusions = [Collections.Generic.List[string]]::new() }
+    $script:NativeExclusions.Add("$ScopeId|$StartRange")
+}
+function Remove-DhcpServerv4ExclusionRange { return $null }
+function Remove-DhcpServerv4Reservation {}
+function Invoke-WithDhcpMutex { param([scriptblock]$ScriptBlock); return (& $ScriptBlock) }
+
+$nativeMultiSubnetDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.71.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-N1'; role = 'SQLAO'; OtherNode = 'SQL-N2' },
+        [pscustomobject]@{ vmName = 'SQL-N2'; role = 'SQLAO'; network = '192.168.72.0' }
+    )
+}
+$null = Set-DeployConfigIPAddresses -DeployConfig $nativeMultiSubnetDeploy
+$nativeOwner = $nativeMultiSubnetDeploy.virtualMachines[0]
+Assert-Equal '192.168.71.201,192.168.72.201' (@($nativeOwner.ClusterIPAddresses) -join ',') 'native DHCP allocates one cluster IP per SQLAO node subnet'
+Assert-Equal '192.168.71.202,192.168.72.202' (@($nativeOwner.AGIPAddresses) -join ',') 'native DHCP allocates one listener IP per SQLAO node subnet'
+Assert-Equal '192.168.71.201' $nativeOwner.ClusterIPAddress 'native DHCP retains the owner-subnet cluster alias'
+Assert-Equal '192.168.71.202' $nativeOwner.AGIPAddress 'native DHCP retains the owner-subnet listener alias'
+Assert-Equal '192.168.71.201,192.168.72.201' (@($nativeMultiSubnetDeploy.virtualMachines[1].ClusterIPAddresses) -join ',') 'native DHCP persists cluster IP state on the partner'
+Assert-Equal '192.168.71.202,192.168.72.202' (@($nativeMultiSubnetDeploy.virtualMachines[1].AGIPAddresses) -join ',') 'native DHCP persists listener IP state on the partner'
+
+function Get-VMNote {
+    param($VMName)
+    if ($VMName -eq 'SQL-NOTE2') {
+        return [pscustomobject]@{
+            ClusterIPAddresses = @('192.168.90.210', '192.168.91.220')
+            AGIPAddresses = @('192.168.90.211', '192.168.91.221')
+        }
+    }
+    return $null
+}
+$nativePartnerNoteDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.90.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-NOTE1'; role = 'SQLAO'; OtherNode = 'SQL-NOTE2' },
+        [pscustomobject]@{ vmName = 'SQL-NOTE2'; role = 'SQLAO'; network = '192.168.91.0' }
+    )
+}
+$null = Set-DeployConfigIPAddresses -DeployConfig $nativePartnerNoteDeploy
+Assert-Equal '192.168.90.210,192.168.91.220' (@($nativePartnerNoteDeploy.virtualMachines[0].ClusterIPAddresses) -join ',') 'native DHCP reconstructs cluster state from the surviving partner note'
+Assert-Equal '192.168.90.211,192.168.91.221' (@($nativePartnerNoteDeploy.virtualMachines[0].AGIPAddresses) -join ',') 'native DHCP reconstructs listener state from the surviving partner note'
+function Get-VMNote { return $null }
+
+$nativeMixedDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.75.0' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SQL-N5'; role = 'SQLAO'; OtherNode = 'SQL-N6'
+            ClusterIPAddress = '192.168.75.210'; ClusterIPAddresses = @('192.168.76.220')
+            AGIPAddress = '192.168.75.211'; AGIPAddresses = @('192.168.76.221')
+        },
+        [pscustomobject]@{ vmName = 'SQL-N6'; role = 'SQLAO'; network = '192.168.76.0' }
+    )
+}
+$null = Set-DeployConfigIPAddresses -DeployConfig $nativeMixedDeploy
+Assert-Equal '192.168.75.210,192.168.76.220' (@($nativeMixedDeploy.virtualMachines[0].ClusterIPAddresses) -join ',') 'native DHCP merges owner singular and partner-only plural cluster state'
+Assert-Equal '192.168.75.211,192.168.76.221' (@($nativeMixedDeploy.virtualMachines[0].AGIPAddresses) -join ',') 'native DHCP merges owner singular and partner-only plural listener state'
+
+$invalidNativeDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.73.0' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SQL-N3'; role = 'SQLAO'; OtherNode = 'SQL-N4'
+            ClusterIPAddresses = @('192.168.73.210', '192.168.73.211')
+            AGIPAddresses = @('192.168.73.212', '192.168.74.212')
+        },
+        [pscustomobject]@{ vmName = 'SQL-N4'; role = 'SQLAO'; network = '192.168.74.0' }
+    )
+}
+$invalidNativeRejected = $false
+try { $null = Set-DeployConfigIPAddresses -DeployConfig $invalidNativeDeploy }
+catch { $invalidNativeRejected = $_.Exception.Message -like '*more than one address on subnet*' }
+Assert-True $invalidNativeRejected 'native DHCP rejects multiple cluster IPs on one SQLAO subnet'
+
+foreach ($reservedIp in '192.168.77.0', '192.168.77.1', '192.168.77.19', '192.168.77.200', '192.168.77.255') {
+    $reservedNativeDeploy = [pscustomobject]@{
+        vmOptions = [pscustomobject]@{ network = '192.168.77.0' }
+        virtualMachines = @(
+            [pscustomobject]@{
+                vmName = 'SQL-N7'; role = 'SQLAO'; OtherNode = 'SQL-N8'
+                ClusterIPAddress = $reservedIp
+                AGIPAddress = '192.168.77.202'
+            },
+            [pscustomobject]@{ vmName = 'SQL-N8'; role = 'SQLAO' }
+        )
+    }
+    $reservedNativeRejected = $false
+    try { $null = Set-DeployConfigIPAddresses -DeployConfig $reservedNativeDeploy }
+    catch { $reservedNativeRejected = $_.Exception.Message -like '*reserved or unusable*' }
+    Assert-True $reservedNativeRejected "native DHCP rejects reserved or unusable SQLAO address $reservedIp"
+}
+
+$legacyNativeDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.79.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-N13'; role = 'SQLAO'; OtherNode = 'SQL-N14'; ClusterIPAddress = '192.168.79.20'; AGIPAddress = '192.168.79.21' },
+        [pscustomobject]@{ vmName = 'SQL-N14'; role = 'SQLAO' }
+    )
+}
+$script:NextNativeIp['192.168.79.0'] = 22
+$null = Set-DeployConfigIPAddresses -DeployConfig $legacyNativeDeploy
+Assert-Equal '192.168.79.20' $legacyNativeDeploy.virtualMachines[0].ClusterIPAddress 'native DHCP preserves a restored legacy in-pool cluster IP'
+Assert-Equal '192.168.79.21' $legacyNativeDeploy.virtualMachines[0].AGIPAddress 'native DHCP preserves a restored legacy in-pool listener IP'
+
+$legacyPluralNativeDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.86.0' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SQL-N17'; role = 'SQLAO'; OtherNode = 'SQL-N18'
+            ClusterIPAddress = '192.168.86.20'; ClusterIPAddresses = @('192.168.86.20', '192.168.87.20')
+            AGIPAddress = '192.168.86.21'; AGIPAddresses = @('192.168.86.21', '192.168.87.21')
+        },
+        [pscustomobject]@{ vmName = 'SQL-N18'; role = 'SQLAO'; network = '192.168.87.0' }
+    )
+}
+$script:NextNativeIp['192.168.86.0'] = 22
+$script:NextNativeIp['192.168.87.0'] = 22
+$null = Set-DeployConfigIPAddresses -DeployConfig $legacyPluralNativeDeploy
+Assert-True ($script:NativeExclusions -contains '192.168.87.0|192.168.87.20') 'native DHCP excludes an in-pool partner-subnet cluster VIP individually'
+Assert-True ($script:NativeExclusions -contains '192.168.87.0|192.168.87.21') 'native DHCP excludes an in-pool partner-subnet listener VIP individually'
+
+$overlapNativeDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.81.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-N15'; role = 'SQLAO'; OtherNode = 'SQL-N16'; ClusterIPAddress = '192.168.81.201'; AGIPAddress = '192.168.81.201' },
+        [pscustomobject]@{ vmName = 'SQL-N16'; role = 'SQLAO' }
+    )
+}
+$overlapNativeRejected = $false
+try { $null = Set-DeployConfigIPAddresses -DeployConfig $overlapNativeDeploy }
+catch { $overlapNativeRejected = $_.Exception.Message -like '*overlap*' }
+Assert-True $overlapNativeRejected 'native DHCP rejects cluster/listener family overlap'
+
+$duplicateNativeClaimDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.78.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-N9'; role = 'SQLAO'; OtherNode = 'SQL-N10'; ClusterIPAddress = '192.168.78.201'; AGIPAddress = '192.168.78.202' },
+        [pscustomobject]@{ vmName = 'SQL-N10'; role = 'SQLAO' },
+        [pscustomobject]@{ vmName = 'SQL-N11'; role = 'SQLAO'; OtherNode = 'SQL-N12'; ClusterIPAddress = '192.168.78.201'; AGIPAddress = '192.168.78.203' },
+        [pscustomobject]@{ vmName = 'SQL-N12'; role = 'SQLAO' }
+    )
+}
+$duplicateNativeClaimRejected = $false
+try { $null = Set-DeployConfigIPAddresses -DeployConfig $duplicateNativeClaimDeploy }
+catch { $duplicateNativeClaimRejected = $_.Exception.Message -like '*already claimed*' }
+Assert-True $duplicateNativeClaimRejected 'native DHCP rejects a virtual IP claimed by two SQLAO owners'
+
+function Get-List {
+    return @([pscustomobject]@{
+            vmName = 'EXTERNAL-SQL'; role = 'SQLAO'
+            ClusterIPAddresses = @('192.168.88.201', '192.168.89.201')
+            AGIPAddresses = @('192.168.88.202', '192.168.89.202')
+        })
+}
+$externalNativeDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ network = '192.168.89.0'; domainName = 'external-native.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SQL-N19'; role = 'SQLAO'; OtherNode = 'SQL-N20'; ClusterIPAddress = '192.168.89.201'; AGIPAddress = '192.168.89.203' },
+        [pscustomobject]@{ vmName = 'SQL-N20'; role = 'SQLAO' }
+    )
+}
+$externalNativeRejected = $false
+try { $null = Set-DeployConfigIPAddresses -DeployConfig $externalNativeDeploy }
+catch { $externalNativeRejected = $_.Exception.Message -like '*already claimed by external-sql*' }
+Assert-True $externalNativeRejected 'native DHCP rejects a VIP claimed by an existing external SQLAO cluster'
+function Get-List { return @() }
 
 $serverScriptPath = Join-Path $RootPath 'vmbuild\scripts\linux\dhcp\configure-dhcp-server.sh'
 $serverScript = Get-Content -LiteralPath $serverScriptPath -Raw

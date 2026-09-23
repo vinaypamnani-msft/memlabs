@@ -110,6 +110,7 @@
       "sqlInstanceName": "MSSQLSERVER",
       "sqlInstanceDir": "E:\\SQL",
       "sqlPort": "1433",
+      "network": "10.221.212.0",
       "additionalDisks": {
         "E": "250GB"
       },

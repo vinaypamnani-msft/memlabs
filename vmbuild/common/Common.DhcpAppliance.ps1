@@ -278,7 +278,12 @@ function Set-DnsmasqDeployConfigIPAddresses {
                         $addressClaims[$ordinaryIp].Add([pscustomobject]@{ Name = $live.Name.ToLowerInvariant(); Kind = 'OrdinaryNote' })
                     }
                 }
-                foreach ($candidate in @($note.ClusterIPAddress, $note.AGIPAddress)) {
+                $virtualCandidates = @()
+                $virtualCandidates += @($note.ClusterIPAddress)
+                $virtualCandidates += @($note.AGIPAddress)
+                $virtualCandidates += @($note.ClusterIPAddresses)
+                $virtualCandidates += @($note.AGIPAddresses)
+                foreach ($candidate in $virtualCandidates) {
                     if ($candidate) {
                         $virtualIp = [string]$candidate -replace '/.+$', ''
                         $null = $used.Add($virtualIp)
@@ -288,10 +293,12 @@ function Set-DnsmasqDeployConfigIPAddresses {
                 }
                 $persistedIp = if ($note.AssignedIP) { [string]$note.AssignedIP } elseif ($note.LastKnownIP) { [string]$note.LastKnownIP } else { '' }
                 if ($persistedIp) { $existingIpByName[$live.Name.ToLowerInvariant()] = $persistedIp }
-                if ($note.ClusterIPAddress -or $note.AGIPAddress) {
+                if ($note.ClusterIPAddress -or $note.AGIPAddress -or $note.ClusterIPAddresses -or $note.AGIPAddresses) {
                     $existingVirtualIpsByName[$live.Name.ToLowerInvariant()] = [pscustomobject]@{
-                        ClusterIPAddress = [string]$note.ClusterIPAddress
-                        AGIPAddress      = [string]$note.AGIPAddress
+                        ClusterIPAddresses = @($note.ClusterIPAddresses)
+                        AGIPAddresses      = @($note.AGIPAddresses)
+                        ClusterIPAddress   = [string]$note.ClusterIPAddress
+                        AGIPAddress        = [string]$note.AGIPAddress
                     }
                 }
             }
@@ -311,71 +318,100 @@ function Set-DnsmasqDeployConfigIPAddresses {
     $sqlAoOwners = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden })
 
     # Validate and claim every explicit/restored VIP before allocating any missing
-    # value. Otherwise a missing owner listed first can consume a later owner's
-    # configured address even though other reserved-range addresses are free.
+    # value. Multi-subnet pairs own one cluster IP and one listener IP per distinct
+    # node subnet; the legacy singular properties remain aliases for the owner's
+    # subnet so existing configs and VM notes continue to work.
     foreach ($owner in $sqlAoOwners) {
-        $scopeId = if ($owner.network) { [string]$owner.network } else { $defaultNetwork }
-        $base = (($scopeId -split '\.') | Select-Object -First 3) -join '.'
+        $partner = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $owner.OtherNode } | Select-Object -First 1
+        if (-not $partner) { throw "$($owner.vmName): SQLAO partner '$($owner.OtherNode)' was not found." }
+        $ownerScope = if ($owner.network) { [string]$owner.network } else { $defaultNetwork }
+        $partnerScope = if ($partner.network) { [string]$partner.network } else { $defaultNetwork }
+        $scopeIds = @(@($ownerScope, $partnerScope) | Select-Object -Unique)
+        $bases = @($scopeIds | ForEach-Object { (($_ -split '\.') | Select-Object -First 3) -join '.' })
         $ownerKey = ([string]$owner.vmName).ToLowerInvariant()
         $pairKeys = @($ownerKey, ([string]$owner.OtherNode).ToLowerInvariant())
-        foreach ($property in 'ClusterIPAddress', 'AGIPAddress') {
-            $configuredIp = if ($owner.$property) { [string]$owner.$property -replace '/.+$', '' } else { '' }
+        foreach ($family in @(
+                @{ Singular = 'ClusterIPAddress'; Plural = 'ClusterIPAddresses' },
+                @{ Singular = 'AGIPAddress'; Plural = 'AGIPAddresses' }
+            )) {
+            $configuredIps = @()
+            $configuredIps += @($owner.($family.Plural))
+            $configuredIps += @($owner.($family.Singular))
+            $configuredIps = @($configuredIps | ForEach-Object { [string]$_ -replace '/.+$', '' } | Where-Object { $_ } | Sort-Object -Unique)
             $persistedIps = @($pairKeys | ForEach-Object {
                     if ($existingVirtualIpsByName.ContainsKey($_)) {
-                        $value = $existingVirtualIpsByName[$_].$property
-                        if ($value) { [string]$value -replace '/.+$', '' }
+                        @($existingVirtualIpsByName[$_].($family.Plural))
+                        @($existingVirtualIpsByName[$_].($family.Singular))
                     }
-                } | Sort-Object -Unique)
-            if ($persistedIps.Count -gt 1) {
-                throw "$($owner.vmName)/$($owner.OtherNode): persisted SQLAO $property values disagree: $($persistedIps -join ', ')."
+                } | ForEach-Object { [string]$_ -replace '/.+$', '' } | Where-Object { $_ } | Sort-Object -Unique)
+            $ips = @($configuredIps + $persistedIps | Sort-Object -Unique)
+            foreach ($ip in $ips) {
+                $parsedIp = $null
+                $octets = @($ip -split '\.')
+                $ipBase = if ($octets.Count -eq 4) { $octets[0..2] -join '.' } else { '' }
+                $validIp = [Net.IPAddress]::TryParse($ip, [ref]$parsedIp) -and $parsedIp.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and $parsedIp.ToString() -eq $ip
+                if (-not $validIp -or $octets.Count -ne 4 -or $ipBase -notin $bases -or [int]$octets[3] -lt 201 -or [int]$octets[3] -gt 254) {
+                    throw "$($owner.vmName): persisted $($family.Singular) $ip must be a canonical IPv4 address in the reserved range of a SQLAO node subnet ($($bases -join ', '))."
+                }
+                if (@($ips | Where-Object { ($_ -split '\.')[0..2] -join '.' -eq $ipBase }).Count -gt 1) {
+                    throw "$($owner.vmName): $($family.Plural) contains more than one address on subnet $ipBase.0."
+                }
+                $conflictingClaims = @($addressClaims[$ip] | Where-Object {
+                        $null -ne $_ -and
+                        -not ($_.Kind -eq 'VirtualNote' -and $_.Name -in $pairKeys) -and
+                        -not ($_.Kind -eq 'Adapter' -and $_.Name -in $pairKeys)
+                    })
+                if ($conflictingClaims.Count -gt 0) {
+                    throw "$($owner.vmName): SQLAO $($family.Singular) $ip is already in use by another VM or virtual endpoint."
+                }
+                $null = $used.Add($ip)
+                if (-not $addressClaims.ContainsKey($ip)) { $addressClaims[$ip] = [Collections.Generic.List[object]]::new() }
+                $addressClaims[$ip].Add([pscustomobject]@{ Name = $ownerKey; Kind = 'ConfigVirtual' })
             }
-            if ($configuredIp -and $persistedIps.Count -eq 1 -and $configuredIp -ne $persistedIps[0]) {
-                throw "$($owner.vmName)/$($owner.OtherNode): configured SQLAO $property $configuredIp disagrees with persisted value $($persistedIps[0])."
-            }
-            $ip = if ($configuredIp) { $configuredIp } elseif ($persistedIps.Count -eq 1) { $persistedIps[0] } else { '' }
-            if (-not $ip) { continue }
-            $parsedIp = $null
-            $octets = @($ip -split '\.')
-            $validIp = [Net.IPAddress]::TryParse($ip, [ref]$parsedIp) -and $parsedIp.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and $parsedIp.ToString() -eq $ip
-            if (-not $validIp -or $octets.Count -ne 4 -or (($octets[0..2] -join '.') -ne $base) -or [int]$octets[3] -lt 201 -or [int]$octets[3] -gt 254) {
-                throw "$($owner.vmName): persisted $property $ip must be a canonical IPv4 address in $base.201-$base.254."
-            }
-            $conflictingClaims = @($addressClaims[$ip] | Where-Object {
-                    $null -ne $_ -and
-                    -not ($_.Kind -eq 'VirtualNote' -and $_.Name -in $pairKeys) -and
-                    -not ($_.Kind -eq 'Adapter' -and $_.Name -in $pairKeys)
-                })
-            if ($conflictingClaims.Count -gt 0) {
-                throw "$($owner.vmName): SQLAO $property $ip is already in use by another VM or virtual endpoint."
-            }
-            $null = $used.Add($ip)
-            if (-not $addressClaims.ContainsKey($ip)) { $addressClaims[$ip] = [Collections.Generic.List[object]]::new() }
-            $addressClaims[$ip].Add([pscustomobject]@{ Name = $ownerKey; Kind = 'ConfigVirtual' })
-            $owner | Add-Member -MemberType NoteProperty -Name $property -Value $ip -Force
+            $owner | Add-Member -MemberType NoteProperty -Name $family.Plural -Value @($ips) -Force
         }
     }
 
     foreach ($owner in $sqlAoOwners) {
-        $scopeId = if ($owner.network) { [string]$owner.network } else { $defaultNetwork }
-        $base = (($scopeId -split '\.') | Select-Object -First 3) -join '.'
+        $partner = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $owner.OtherNode } | Select-Object -First 1
+        $ownerScope = if ($owner.network) { [string]$owner.network } else { $defaultNetwork }
+        $partnerScope = if ($partner.network) { [string]$partner.network } else { $defaultNetwork }
+        $scopeIds = @(@($ownerScope, $partnerScope) | Select-Object -Unique)
         $ownerKey = ([string]$owner.vmName).ToLowerInvariant()
-        foreach ($property in 'ClusterIPAddress', 'AGIPAddress') {
-            $ip = [string]$owner.$property
-            if (-not $ip) {
-                for ($octet = 201; $octet -le 254; $octet++) {
-                    $candidate = "$base.$octet"
-                    if (-not $used.Contains($candidate)) { $ip = $candidate; break }
+        foreach ($family in @(
+                @{ Singular = 'ClusterIPAddress'; Plural = 'ClusterIPAddresses' },
+                @{ Singular = 'AGIPAddress'; Plural = 'AGIPAddresses' }
+            )) {
+            $ips = @($owner.($family.Plural))
+            foreach ($scopeId in $scopeIds) {
+                $base = (($scopeId -split '\.') | Select-Object -First 3) -join '.'
+                $ip = $ips | Where-Object { $_ -like "$base.*" } | Select-Object -First 1
+                if (-not $ip) {
+                    for ($octet = 201; $octet -le 254; $octet++) {
+                        $candidate = "$base.$octet"
+                        if (-not $used.Contains($candidate)) { $ip = $candidate; break }
+                    }
+                    if (-not $ip) { throw "No free SQLAO virtual address remains in $base.201-$base.254 for $($owner.vmName) $($family.Singular)." }
+                    $null = $used.Add($ip)
+                    if (-not $addressClaims.ContainsKey($ip)) { $addressClaims[$ip] = [Collections.Generic.List[object]]::new() }
+                    $addressClaims[$ip].Add([pscustomobject]@{ Name = $ownerKey; Kind = 'ConfigVirtual' })
+                    $ips += $ip
                 }
-                if (-not $ip) { throw "No free SQLAO virtual address remains in $base.201-$base.254 for $($owner.vmName) $property." }
-                $null = $used.Add($ip)
-                if (-not $addressClaims.ContainsKey($ip)) { $addressClaims[$ip] = [Collections.Generic.List[object]]::new() }
-                $addressClaims[$ip].Add([pscustomobject]@{ Name = $ownerKey; Kind = 'ConfigVirtual' })
-                $owner | Add-Member -MemberType NoteProperty -Name $property -Value $ip -Force
+                Write-Log "$($owner.vmName): Pre-assigned appliance SQLAO $($family.Singular) $ip (scope $scopeId)" -LogOnly
             }
-            Write-Log "$($owner.vmName): Pre-assigned appliance SQLAO $property $ip (scope $scopeId)" -LogOnly
+            $ips = @($ips | Sort-Object { [Array]::IndexOf($scopeIds, ((($_ -split '\.')[0..2] -join '.') + '.0')) })
+            $owner | Add-Member -MemberType NoteProperty -Name $family.Plural -Value $ips -Force
+            $ownerIp = $ips | Where-Object {
+                $base = (($ownerScope -split '\.') | Select-Object -First 3) -join '.'
+                $_ -like "$base.*"
+            } | Select-Object -First 1
+            $owner | Add-Member -MemberType NoteProperty -Name $family.Singular -Value $ownerIp -Force
+            $partner | Add-Member -MemberType NoteProperty -Name $family.Plural -Value @($ips) -Force
+            $partner | Add-Member -MemberType NoteProperty -Name $family.Singular -Value $ownerIp -Force
         }
-        if ($owner.ClusterIPAddress -eq $owner.AGIPAddress) {
-            throw "$($owner.vmName): SQLAO ClusterIPAddress and AGIPAddress both resolved to $($owner.ClusterIPAddress)."
+        $overlap = @($owner.ClusterIPAddresses | Where-Object { $_ -in $owner.AGIPAddresses })
+        if ($overlap.Count -gt 0) {
+            throw "$($owner.vmName): SQLAO cluster and listener addresses overlap: $($overlap -join ', ')."
         }
     }
 
@@ -415,9 +451,18 @@ function Set-DnsmasqDeployConfigIPAddresses {
             }
         }
         if (-not $ip) { throw "No free address remains in DHCP pool $base.20-$base.199 for $($vm.vmName)." }
+        $vmKey = ([string]$vm.vmName).ToLowerInvariant()
         if (-not $used.Add($ip)) {
-            if (-not $reusedForVm) { throw "DHCP allocation conflict: $ip is already in use while assigning $($vm.vmName)." }
+            $conflictingClaims = @($addressClaims[$ip] | Where-Object {
+                    -not ($_ -and $_.Name -eq $vmKey -and $_.Kind -in @('OrdinaryNote', 'Adapter'))
+                })
+            if (-not $reusedForVm -or $conflictingClaims.Count -gt 0) {
+                $claimDetail = if ($conflictingClaims.Count -gt 0) { " Claimed by $($conflictingClaims[0].Name) ($($conflictingClaims[0].Kind))." } else { '' }
+                throw "DHCP allocation conflict: $ip is already in use while assigning $($vm.vmName).$claimDetail"
+            }
         }
+        if (-not $addressClaims.ContainsKey($ip)) { $addressClaims[$ip] = [Collections.Generic.List[object]]::new() }
+        $addressClaims[$ip].Add([pscustomobject]@{ Name = $vmKey; Kind = 'ConfigOrdinary' })
         $vm | Add-Member -MemberType NoteProperty -Name AssignedIP -Value $ip -Force
         Write-Log "$($vm.vmName): Pre-assigned appliance DHCP IP $ip (scope $scopeId)" -LogOnly
     }

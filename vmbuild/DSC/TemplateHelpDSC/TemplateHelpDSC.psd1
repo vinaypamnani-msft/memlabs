@@ -39,6 +39,7 @@ DscResourcesToExport = @(
     'FileReadAccessShare',
     'ModuleAdd',
     'ClusterRemoveUnwantedIPs',
+    'SqlAoMultiSubnetNetworkName',
     'ClusterSetOwnerNodes',
     'ConfigureWSUS',
     'WSUSSync',

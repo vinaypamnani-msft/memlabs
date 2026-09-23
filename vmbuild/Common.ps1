@@ -5959,6 +5959,20 @@ function Set-DeployConfigIPAddresses {
     }
 
     $sqlaoIps = [System.Collections.Generic.HashSet[string]]::new()
+    $sqlaoClaims = @{}
+    $addSqlaoClaim = {
+        param([string]$IP, [string]$Owner, [string]$Kind)
+        if (-not $IP) { return }
+        $normalized = $IP -replace '/.+$', ''
+        $null = $sqlaoIps.Add($normalized)
+        if (-not $sqlaoClaims.ContainsKey($normalized)) {
+            $sqlaoClaims[$normalized] = [Collections.Generic.List[object]]::new()
+        }
+        $sqlaoClaims[$normalized].Add([pscustomobject]@{
+                Owner = $Owner.ToLowerInvariant()
+                Kind  = $Kind
+            })
+    }
 
     # 1. Collect every cluster/AG IP already known (deployConfig + VM Notes, all nodes).
     #    For owner nodes, restore note values back onto the config object so a rerun
@@ -5966,12 +5980,26 @@ function Set-DeployConfigIPAddresses {
     foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
         $note = $null
         try { $note = Get-VMNote -VMName $sqlaoVm.vmName -ErrorAction SilentlyContinue } catch {}
-        foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
-            if ($sqlaoVm.OtherNode -and -not $sqlaoVm.$prop -and $note -and $note.$prop) {
-                $sqlaoVm | Add-Member -MemberType NoteProperty -Name $prop -Value ($note.$prop) -Force
+        foreach ($family in @(
+                @{ Singular = 'ClusterIPAddress'; Plural = 'ClusterIPAddresses' },
+                @{ Singular = 'AGIPAddress'; Plural = 'AGIPAddresses' }
+            )) {
+            $knownValues = @()
+            $knownValues += @($sqlaoVm.($family.Plural))
+            $knownValues += @($sqlaoVm.($family.Singular))
+            if ($note) {
+                $knownValues += @($note.($family.Plural))
+                $knownValues += @($note.($family.Singular))
             }
-            foreach ($src in @($sqlaoVm.$prop, $note.$prop)) {
-                if ($src) { $null = $sqlaoIps.Add(($src -replace '/.+$', '')) }
+            $knownValues = @($knownValues | Where-Object { $_ } | ForEach-Object { $_ -replace '/.+$', '' } | Sort-Object -Unique)
+            if ($knownValues.Count -gt 0) {
+                $sqlaoVm | Add-Member -MemberType NoteProperty -Name $family.Plural -Value $knownValues -Force
+            }
+            if ($sqlaoVm.OtherNode -and -not $sqlaoVm.($family.Singular) -and $note -and $note.($family.Singular)) {
+                $sqlaoVm | Add-Member -MemberType NoteProperty -Name $family.Singular -Value ($note.($family.Singular)) -Force
+            }
+            foreach ($src in $knownValues) {
+                & $addSqlaoClaim -IP $src -Owner ([string]$sqlaoVm.vmName) -Kind 'DeployOrNote'
             }
         }
     }
@@ -5983,8 +6011,10 @@ function Set-DeployConfigIPAddresses {
         $existingSqlaoVMs = @()
         try { $existingSqlaoVMs = @(Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' }) } catch {}
         foreach ($evm in $existingSqlaoVMs) {
-            foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
-                if ($evm.$prop) { $null = $sqlaoIps.Add(($evm.$prop -replace '/.+$', '')) }
+            foreach ($prop in 'ClusterIPAddress', 'AGIPAddress', 'ClusterIPAddresses', 'AGIPAddresses') {
+                foreach ($ip in @($evm.$prop)) {
+                    if ($ip) { & $addSqlaoClaim -IP ([string]$ip) -Owner ([string]$evm.vmName) -Kind 'ExistingDomain' }
+                }
             }
         }
     }
@@ -6013,54 +6043,119 @@ function Set-DeployConfigIPAddresses {
         }
     }
 
-    # 3. For each cluster-owner node still missing a cluster/AG IP, allocate one now
-    #    from the domain scope. Both IPs must live on the domain subnet so they are
-    #    reachable by clients (the heartbeat network is cluster-only / Role 1).
+    # 3. Allocate one cluster IP and one listener IP on every distinct SQLAO node
+    #    subnet. The singular properties remain aliases for the owner node's subnet.
     foreach ($ownerVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden })) {
-        # Allocate from the node's OWN network, not the domain default. A SQLAO
-        # node placed on a secondary network (e.g. a child Primary's site network)
-        # has its domain NIC -- and therefore its only gateway-bearing
-        # ClusterAndClient network -- on that subnet. Allocating the cluster/AG
-        # virtual IPs from $defaultNetwork instead lands them on a subnet the node
-        # can't host, so New-Cluster -StaticAddress fails with "no appropriate
-        # ClusterAndClient network was found to host it". Mirror the per-VM main-NIC
-        # rule ($vm.network ?? $defaultNetwork).
-        $domainScopeId = if ($ownerVm.network) { $ownerVm.network } else { $defaultNetwork }
-        if (-not $scopesNeeded.Contains($domainScopeId)) {
-            Write-Log "$($ownerVm.vmName): SQLAO: domain scope $domainScopeId not available; cluster/AG IPs will be allocated in Phase 1." -Warning
+        $partnerVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $ownerVm.OtherNode } | Select-Object -First 1
+        if (-not $partnerVm) {
+            Write-Log "$($ownerVm.vmName): SQLAO partner '$($ownerVm.OtherNode)' was not found; virtual IP allocation skipped." -Failure
             continue
         }
-        $ownerSubnet = (($domainScopeId.Split('.') | Select-Object -First 3) -join '.') + '.'
-        foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
-            $existing = $ownerVm.$prop
-            if ($existing) {
-                $clean = $existing -replace '/.+$', ''
-                # Self-heal: a value restored from a note/config that was allocated
-                # against the WRONG subnet (e.g. an earlier build that drew cluster
-                # IPs from the domain default network instead of this node's own
-                # network) would make New-Cluster fail forever. Discard it so it gets
-                # reallocated from $domainScopeId below.
-                if ($clean -notlike "$ownerSubnet*") {
-                    Write-Log "$($ownerVm.vmName): SQLAO: discarding $prop $clean -- not on node subnet $ownerSubnet* (reallocating from scope $domainScopeId)" -Warning
-                    $null = $sqlaoIps.Remove($clean)
-                    $ownerVm.$prop = $null
-                    $existing = $null
+        $ownerScopeId = if ($ownerVm.network) { [string]$ownerVm.network } else { $defaultNetwork }
+        $partnerScopeId = if ($partnerVm.network) { [string]$partnerVm.network } else { $defaultNetwork }
+        $domainScopeIds = @(@($ownerScopeId, $partnerScopeId) | Select-Object -Unique)
+        $pairNames = @(([string]$ownerVm.vmName).ToLowerInvariant(), ([string]$partnerVm.vmName).ToLowerInvariant())
+
+        foreach ($family in @(
+                @{ Singular = 'ClusterIPAddress'; Plural = 'ClusterIPAddresses'; Label = 'Cluster' },
+                @{ Singular = 'AGIPAddress'; Plural = 'AGIPAddresses'; Label = 'AG listener' }
+            )) {
+            $ips = @(
+                @($ownerVm.($family.Plural)) +
+                @($ownerVm.($family.Singular)) +
+                @($partnerVm.($family.Plural)) +
+                @($partnerVm.($family.Singular)) |
+                    Where-Object { $_ } |
+                    ForEach-Object { $_ -replace '/.+$', '' }
+            )
+            $ips = @($ips | Sort-Object -Unique)
+            $validIps = [Collections.Generic.List[string]]::new()
+            foreach ($ip in $ips) {
+                $parsedIp = $null
+                if (-not [Net.IPAddress]::TryParse($ip, [ref]$parsedIp) -or
+                    $parsedIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+                    $parsedIp.ToString() -ne $ip) {
+                    throw "$($ownerVm.vmName): SQLAO $($family.Plural) contains invalid IPv4 address '$ip'."
                 }
-                else {
-                    # Already set and on the correct subnet -- keep it, strip any /suffix.
-                    if ($clean -ne $existing) { $ownerVm | Add-Member -MemberType NoteProperty -Name $prop -Value $clean -Force }
+                $lastOctet = [int]($ip.Split('.')[-1])
+                if ($lastOctet -lt 20 -or $lastOctet -eq 200 -or $lastOctet -gt 254) {
+                    throw "$($ownerVm.vmName): SQLAO $($family.Plural) address $ip is reserved or unusable. Use legacy pool range .20-.199 only for restored labs, or the SQLAO virtual range .201-.254."
+                }
+                $foreignClaims = @($sqlaoClaims[$ip] | Where-Object { $_ -and $_.Owner -notin $pairNames })
+                if ($foreignClaims.Count -gt 0) {
+                    throw "$($ownerVm.vmName): SQLAO $($family.Plural) address $ip is already claimed by $($foreignClaims[0].Owner) ($($foreignClaims[0].Kind))."
+                }
+                $reservation = $null
+                try { $reservation = Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue } catch {}
+                if ($reservation) {
+                    throw "$($ownerVm.vmName): SQLAO $($family.Plural) address $ip is already owned by a DHCP reservation."
+                }
+                $matchingScopes = @($domainScopeIds | Where-Object {
+                        $prefix = (($_ -split '\.') | Select-Object -First 3) -join '.'
+                        $ip -like "$prefix.*"
+                    })
+                if ($matchingScopes.Count -eq 0) {
+                    Write-Log "$($ownerVm.vmName): SQLAO: discarding $($family.Singular) $ip -- it is not on either SQLAO node subnet ($($domainScopeIds -join ', '))." -Warning
                     continue
                 }
+                $validIps.Add($ip)
             }
-            $label = if ($prop -eq 'ClusterIPAddress') { 'Cluster' } else { 'AG listener' }
-            $newIp = Get-SqlaoFreeIP -ScopeId $domainScopeId -VmName $ownerVm.vmName -Label $label
-            if (-not $newIp) { continue }
-            $null = $sqlaoIps.Add($newIp)
-            $ownerVm | Add-Member -MemberType NoteProperty -Name $prop -Value $newIp -Force
-            Write-Log "$($ownerVm.vmName): SQLAO: Pre-assigned $label IP $newIp (domain scope $domainScopeId)" -LogOnly
+            $ips = @($validIps)
+            foreach ($domainScopeId in $domainScopeIds) {
+                $subnet = (($domainScopeId.Split('.') | Select-Object -First 3) -join '.') + '.'
+                $subnetIps = @($ips | Where-Object { $_ -like "$subnet*" })
+                if ($subnetIps.Count -gt 1) {
+                    throw "$($ownerVm.vmName): SQLAO $($family.Plural) contains more than one address on subnet $domainScopeId`: $($subnetIps -join ', ')."
+                }
+            }
+
+            foreach ($domainScopeId in $domainScopeIds) {
+                if (-not $scopesNeeded.Contains($domainScopeId)) {
+                    Write-Log "$($ownerVm.vmName): SQLAO: domain scope $domainScopeId not available; $($family.Label) IP will be allocated in Phase 1." -Warning
+                    continue
+                }
+                $subnet = (($domainScopeId.Split('.') | Select-Object -First 3) -join '.') + '.'
+                $existing = $ips | Where-Object { $_ -like "$subnet*" } | Select-Object -First 1
+                if ($existing) { continue }
+
+                $newIp = Get-SqlaoFreeIP -ScopeId $domainScopeId -VmName $ownerVm.vmName -Label $family.Label
+                if (-not $newIp) { continue }
+                $null = $sqlaoIps.Add($newIp)
+                $ips += $newIp
+                Write-Log "$($ownerVm.vmName): SQLAO: Pre-assigned $($family.Label) IP $newIp (domain scope $domainScopeId)" -LogOnly
+            }
+
+            $orderedIps = foreach ($domainScopeId in $domainScopeIds) {
+                $subnet = (($domainScopeId.Split('.') | Select-Object -First 3) -join '.') + '.'
+                $ips | Where-Object { $_ -like "$subnet*" } | Select-Object -First 1
+            }
+            $orderedIps = @($orderedIps | Where-Object { $_ })
+            $ownerVm | Add-Member -MemberType NoteProperty -Name $family.Plural -Value $orderedIps -Force
+
+            $ownerSubnet = (($ownerScopeId.Split('.') | Select-Object -First 3) -join '.') + '.'
+            $ownerIp = $orderedIps | Where-Object { $_ -like "$ownerSubnet*" } | Select-Object -First 1
+            if ($ownerIp) {
+                $ownerVm | Add-Member -MemberType NoteProperty -Name $family.Singular -Value $ownerIp -Force
+            }
+            $partnerVm | Add-Member -MemberType NoteProperty -Name $family.Plural -Value @($orderedIps) -Force
+            $partnerVm | Add-Member -MemberType NoteProperty -Name $family.Singular -Value $ownerIp -Force
         }
-        if ($ownerVm.ClusterIPAddress -and $ownerVm.AGIPAddress -and $ownerVm.ClusterIPAddress -eq $ownerVm.AGIPAddress) {
-            Write-Log "$($ownerVm.vmName): SQLAO: Cluster and AG IP are identical ($($ownerVm.ClusterIPAddress)). Domain scope $domainScopeId may be exhausted." -Failure
+
+        $overlap = @($ownerVm.ClusterIPAddresses | Where-Object { $_ -in $ownerVm.AGIPAddresses })
+        if ($overlap.Count -gt 0) {
+            throw "$($ownerVm.vmName): SQLAO cluster and listener addresses overlap: $($overlap -join ', ')."
+        }
+    }
+
+    $virtualIpClaims = @{}
+    foreach ($ownerVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden })) {
+        foreach ($family in 'ClusterIPAddresses', 'AGIPAddresses') {
+            foreach ($ip in @($ownerVm.$family)) {
+                if ($virtualIpClaims.ContainsKey($ip)) {
+                    throw "$($ownerVm.vmName): SQLAO $family address $ip is already claimed by $($virtualIpClaims[$ip])."
+                }
+                $virtualIpClaims[$ip] = "$($ownerVm.vmName) $family"
+            }
         }
     }
 
@@ -6180,7 +6275,7 @@ function Set-DeployConfigIPAddresses {
         }
 
         if (-not $allocatedIps.Add($ip)) {
-            Write-Log "$($vm.vmName): DUPLICATE — IP $ip already allocated to another VM in this deploy! (source=$ipSource)" -Warning
+            throw "$($vm.vmName): IP $ip is already allocated to another VM or SQLAO virtual endpoint in this deployment (source=$ipSource)."
         }
 
         $vm | Add-Member -MemberType NoteProperty -Name 'AssignedIP' -Value $ip -Force

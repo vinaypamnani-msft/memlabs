@@ -199,10 +199,34 @@ function Get-CmDatabaseProbeTargets {
     return @($targets)
 }
 
+function Get-CmOdbcPreflightCandidates {
+    param(
+        [Parameter(Mandatory)][string]$Target,
+        [bool]$MultiSubnet
+    )
+
+    $candidates = [Collections.Generic.List[object]]::new()
+    if (-not $MultiSubnet) {
+        $candidates.Add([pscustomobject]@{
+                Driver = 'SQL Server'
+                ConnectionString = "Driver={SQL Server};AutoTranslate=no;Server=$Target;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
+            })
+    }
+    $multiSubnetOption = if ($MultiSubnet) { ';MultiSubnetFailover=Yes' } else { '' }
+    $candidates.Add([pscustomobject]@{
+            Driver = 'ODBC Driver 18'
+            # MemLabs does not bind a listener-SAN SQL certificate by default.
+            # Match setup's non-secure probe and the other deployment probes.
+            ConnectionString = "Driver={ODBC Driver 18 for SQL Server};AutoTranslate=no;Server=$Target;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes$multiSubnetOption"
+        })
+    return @($candidates)
+}
+
 function Get-CmDatabaseStateForRetry {
     param(
         [Parameter(Mandatory)][string]$DatabaseName,
-        [Parameter(Mandatory)][string[]]$Targets
+        [Parameter(Mandatory)][string[]]$Targets,
+        [AllowEmptyString()][string]$MultiSubnetTarget = ''
     )
 
     $state = [pscustomobject]@{ Reached = $false; Exists = $false; Target = ''; Error = '' }
@@ -214,7 +238,8 @@ function Get-CmDatabaseStateForRetry {
         $targetExists = $false
         $targetError = ''
         try {
-            $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$target;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+            $multiSubnetOption = if ($MultiSubnetTarget -and $target -ieq $MultiSubnetTarget) { ';MultiSubnetFailover=True' } else { '' }
+            $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$target;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True$multiSubnetOption"
             $connection.Open()
             $command = $connection.CreateCommand()
             $command.CommandText = 'SELECT COUNT(*) FROM sys.databases WHERE name = @n'
@@ -487,7 +512,8 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
         $probeReached = $false
         $probeDbExists = $false
         $probeError = $null
-        $databaseState = Get-CmDatabaseStateForRetry -DatabaseName $cmDbName -Targets $sqlProbeTargets
+        $multiSubnetTarget = if ($installToAO -and $SQLVM.thisParams.SQLAO.MultiSubnetFailover) { $sqlDataSource } else { '' }
+        $databaseState = Get-CmDatabaseStateForRetry -DatabaseName $cmDbName -Targets $sqlProbeTargets -MultiSubnetTarget $multiSubnetTarget
         $probeDbExists = $databaseState.Exists
         $probeReached = $databaseState.Reached
         $probeError = $databaseState.Error
@@ -596,7 +622,8 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
 
         foreach ($probeTarget in $sqlProbeTargets) {
             try {
-                $cs = "Data Source=$probeTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+                $multiSubnetOption = if ($installToAO -and $SQLVM.thisParams.SQLAO.MultiSubnetFailover -and $probeTarget -ieq $sqlDataSource) { ';MultiSubnetFailover=True' } else { '' }
+                $cs = "Data Source=$probeTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True$multiSubnetOption"
                 $conn = New-Object System.Data.SqlClient.SqlConnection $cs
                 $conn.Open()
                 try {
@@ -663,7 +690,8 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
     else { $sqlDataSource = $sqlServerName }
     if ($sqlPort -and $sqlPort -ne 1433) { $sqlDataSource = "$sqlServerName,$sqlPort" }
     $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNodePort)
-    $preLaunchDatabaseState = Get-CmDatabaseStateForRetry -DatabaseName $cmDbName -Targets $sqlProbeTargets
+    $multiSubnetTarget = if ($installToAO -and $SQLVM.thisParams.SQLAO.MultiSubnetFailover) { $sqlDataSource } else { '' }
+    $preLaunchDatabaseState = Get-CmDatabaseStateForRetry -DatabaseName $cmDbName -Targets $sqlProbeTargets -MultiSubnetTarget $multiSubnetTarget
     try {
         if (Repair-StaleCmSetupTypeForRetry -SiteCode $SiteCode -DatabaseState $preLaunchDatabaseState) {
             Write-DscStatus "Cleared stale HKLM:\SOFTWARE\Microsoft\SMS\Setup\Type before setup launch after verifying [$cmDbName] absent and no ConfigMgr services, site WMI, server-role keys, or provider-site keys remain."
@@ -1086,41 +1114,30 @@ CurrentBranch=1
             $sqlPreCheckMax = 12   # 12 attempts x 15s = 3 min
         }
         $sqlPreCheckOk = $false
+        $multiSubnetOdbc = $installToAO -and $SQLVM.thisParams.SQLAO.MultiSubnetFailover
         for ($sqlTry = 1; $sqlTry -le $sqlPreCheckMax; $sqlTry++) {
-            # Try unsecure first (same as setup.exe: bUseSecureConnection=false)
-            $odbcCs1 = "Driver={SQL Server};AutoTranslate=no;Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
-            try {
-                $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs1
-                $odbcConn.Open()
-                $odbcConn.Close()
-                $sqlPreCheckOk = $true
-                $sqlPreCheckCs = $odbcCs1
-                Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $sqlTry (Driver={SQL Server})"
-                break
+            $sqlPreCheckErrors = [Collections.Generic.List[string]]::new()
+            foreach ($candidate in @(Get-CmOdbcPreflightCandidates -Target $sqlTarget -MultiSubnet $multiSubnetOdbc)) {
+                try {
+                    $odbcConn = New-Object System.Data.Odbc.OdbcConnection $candidate.ConnectionString
+                    $odbcConn.Open()
+                    $odbcConn.Close()
+                    $sqlPreCheckOk = $true
+                    $sqlPreCheckCs = $candidate.ConnectionString
+                    Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $sqlTry ($($candidate.Driver))"
+                    break
+                }
+                catch {
+                    $sqlPreCheckErrors.Add("$($candidate.Driver): $($_.Exception.Message)")
+                }
             }
-            catch {
-                $sqlPreErr1 = $_.Exception.Message
-            }
-            # Fallback to secure (same as setup.exe: bUseSecureConnection=true)
-            $odbcCs2 = "Driver={ODBC Driver 18 for SQL Server};AutoTranslate=no;Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=yes;TrustServerCertificate=no"
-            try {
-                $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs2
-                $odbcConn.Open()
-                $odbcConn.Close()
-                $sqlPreCheckOk = $true
-                $sqlPreCheckCs = $odbcCs2
-                Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $sqlTry (Driver={ODBC Driver 18}, secure)"
-                break
-            }
-            catch {
-                $sqlPreErr2 = $_.Exception.Message
-            }
-            Write-DscStatus "SQL pre-flight: attempt $sqlTry/$sqlPreCheckMax to [$sqlTarget] failed: $sqlPreErr1"
+            if ($sqlPreCheckOk) { break }
+            Write-DscStatus "SQL pre-flight: attempt $sqlTry/$sqlPreCheckMax to [$sqlTarget] failed: $($sqlPreCheckErrors -join ' | ')"
             if ($sqlTry -lt $sqlPreCheckMax) { Start-Sleep -Seconds 15 }
         }
         if (-not $sqlPreCheckOk) {
             Write-DscStatus "SQL pre-flight: ODBC failed after $sqlPreCheckMax attempts to [$sqlTarget]. setup.exe would also fail. Cannot start." -Failure
-            Write-DscStatus "SQL pre-flight: Last errors — Driver={SQL Server}: $sqlPreErr1 | Driver={ODBC Driver 18}: $sqlPreErr2"
+            Write-DscStatus "SQL pre-flight: Last errors -- $($sqlPreCheckErrors -join ' | ')"
             return
         }
 
@@ -1476,23 +1493,21 @@ WHERE drs.is_suspended = 1
                 $sqlPreCheckOk = $false
                 $sqlPreCheckCs = $null
                 for ($sqlTry = 1; $sqlTry -le 20; $sqlTry++) {
-                    $odbcCs1 = "Driver={SQL Server};AutoTranslate=no;Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
-                    try {
-                        $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs1
-                        $odbcConn.Open(); $odbcConn.Close()
-                        $sqlPreCheckOk = $true; $sqlPreCheckCs = $odbcCs1
-                        Write-DscStatus "Prereq retry: ODBC connected on attempt $sqlTry (Driver={SQL Server})"
-                        break
-                    } catch { $sqlPreErr1 = $_.Exception.Message }
-                    $odbcCs2 = "Driver={ODBC Driver 18 for SQL Server};AutoTranslate=no;Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=yes;TrustServerCertificate=no"
-                    try {
-                        $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs2
-                        $odbcConn.Open(); $odbcConn.Close()
-                        $sqlPreCheckOk = $true; $sqlPreCheckCs = $odbcCs2
-                        Write-DscStatus "Prereq retry: ODBC connected on attempt $sqlTry (Driver={ODBC Driver 18}, secure)"
-                        break
-                    } catch {}
-                    Write-DscStatus "Prereq retry: ODBC attempt $sqlTry/20 to [$sqlTarget] failed: $sqlPreErr1"
+                    $sqlPreCheckErrors = [Collections.Generic.List[string]]::new()
+                    foreach ($candidate in @(Get-CmOdbcPreflightCandidates -Target $sqlTarget -MultiSubnet $multiSubnetOdbc)) {
+                        try {
+                            $odbcConn = New-Object System.Data.Odbc.OdbcConnection $candidate.ConnectionString
+                            $odbcConn.Open(); $odbcConn.Close()
+                            $sqlPreCheckOk = $true; $sqlPreCheckCs = $candidate.ConnectionString
+                            Write-DscStatus "Prereq retry: ODBC connected on attempt $sqlTry ($($candidate.Driver))"
+                            break
+                        }
+                        catch {
+                            $sqlPreCheckErrors.Add("$($candidate.Driver): $($_.Exception.Message)")
+                        }
+                    }
+                    if ($sqlPreCheckOk) { break }
+                    Write-DscStatus "Prereq retry: ODBC attempt $sqlTry/20 to [$sqlTarget] failed: $($sqlPreCheckErrors -join ' | ')"
                     if ($sqlTry -lt 20) { Start-Sleep -Seconds 15 }
                 }
                 if (-not $sqlPreCheckOk) {
@@ -1580,6 +1595,56 @@ $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identifica
 if (-not $SiteCode) {
     Write-DscStatus "Failed to get 'Site Code' from SOFTWARE\Microsoft\SMS\Identification. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
     return
+}
+
+if ($installToAO -and $SQLVM.thisParams.SQLAO.MultiSubnetFailover) {
+    $listenerTarget = if ($sqlPort -and $sqlPort -ne 1433) { "$sqlServerName,$sqlPort" } else { $sqlServerName }
+    $connection = $null
+    try {
+        $connectionString = "Data Source=$listenerTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True;MultiSubnetFailover=True"
+        $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        $command.CommandText = @'
+SELECT COUNT(*)
+FROM sys.availability_group_listener_ip_addresses
+WHERE ip_address IN
+(
+    SELECT local_net_address
+    FROM sys.dm_exec_connections
+    WHERE session_id = @@SPID
+)
+'@
+        $listenerMatch = [int]$command.ExecuteScalar()
+        if ($listenerMatch -lt 1) {
+            throw "SQL session local address was not recognized as an availability group listener address."
+        }
+
+        $identificationPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
+        New-ItemProperty -Path $identificationPath -Name 'Availability Group' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $identificationPath -Name 'MSF Enabled' -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
+        $availabilityGroupEnabled = Get-ItemPropertyValue -Path $identificationPath -Name 'Availability Group' -ErrorAction Stop
+        $multiSubnetEnabled = Get-ItemPropertyValue -Path $identificationPath -Name 'MSF Enabled' -ErrorAction Stop
+        $identificationKey = Get-Item -Path $identificationPath -ErrorAction Stop
+        $availabilityGroupKind = $identificationKey.GetValueKind('Availability Group')
+        $multiSubnetKind = $identificationKey.GetValueKind('MSF Enabled')
+        if ($availabilityGroupEnabled -ne 1 -or $multiSubnetEnabled -ne 1 -or
+            $availabilityGroupKind -ne [Microsoft.Win32.RegistryValueKind]::DWord -or
+            $multiSubnetKind -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+            throw "ConfigMgr SQLAO registry state did not converge."
+        }
+        Write-DscStatus "Verified listener endpoint [$listenerTarget] and enabled ConfigMgr Availability Group / MSF registry state."
+    }
+    catch {
+        Write-DscStatus "Failed to validate and enable ConfigMgr multi-subnet SQL failover for listener [$listenerTarget]: $($_.Exception.Message)" -Failure
+        return
+    }
+    finally {
+        if ($connection) {
+            try { $connection.Close() } catch {}
+            $connection.Dispose()
+        }
+    }
 }
 
 # Provider

@@ -3131,6 +3131,12 @@ function Get-SQLAOConfig {
             write-log "Setting Cluster IP from vmNotes" -verbose
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $vm.ClusterIPAddress -Force
             $PrimaryAO | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $vm.AGIPAddress -Force
+            if ($vm.ClusterIPAddresses) {
+                $PrimaryAO | Add-Member -MemberType NoteProperty -Name "ClusterIPAddresses" -Value @($vm.ClusterIPAddresses) -Force
+            }
+            if ($vm.AGIPAddresses) {
+                $PrimaryAO | Add-Member -MemberType NoteProperty -Name "AGIPAddresses" -Value @($vm.AGIPAddresses) -Force
+            }
         }
         else {
             write-log "Cluster IP not found in VMNotes" -verbose
@@ -3156,6 +3162,49 @@ function Get-SQLAOConfig {
         write-log "$vmName`: WARNING: AGIPAddress $($PrimaryAO.AGIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). AG listener may not be reachable." -Warning
     }
 
+    $SecondAOVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $SecondAO } | Select-Object -First 1
+    $primaryNetwork = if ($PrimaryAO.network) { [string]$PrimaryAO.network } else { [string]$deployConfig.vmOptions.network }
+    $secondaryNetwork = if ($SecondAOVM -and $SecondAOVM.network) { [string]$SecondAOVM.network } else { [string]$deployConfig.vmOptions.network }
+    $domainNetworks = @(@($primaryNetwork, $secondaryNetwork) | Where-Object { $_ } | Select-Object -Unique)
+
+    $clusterIps = @($PrimaryAO.ClusterIPAddresses | Where-Object { $_ } | ForEach-Object { [string]$_ -replace '/.+$', '' })
+    if ($clusterIps.Count -eq 0 -and $PrimaryAO.ClusterIPAddress) { $clusterIps = @([string]$PrimaryAO.ClusterIPAddress -replace '/.+$', '') }
+    $listenerIps = @($PrimaryAO.AGIPAddresses | Where-Object { $_ } | ForEach-Object { [string]$_ -replace '/.+$', '' })
+    if ($listenerIps.Count -eq 0 -and $PrimaryAO.AGIPAddress) { $listenerIps = @([string]$PrimaryAO.AGIPAddress -replace '/.+$', '') }
+
+    $orderedClusterIps = @()
+    $orderedListenerIps = @()
+    foreach ($network in $domainNetworks) {
+        $prefix = (($network -split '\.') | Select-Object -First 3) -join '.'
+        $clusterMatches = @($clusterIps | Where-Object { $_ -like "$prefix.*" })
+        $listenerMatches = @($listenerIps | Where-Object { $_ -like "$prefix.*" })
+        if ($clusterMatches.Count -ne 1 -or $listenerMatches.Count -ne 1) {
+            throw "$vmName`: SQLAO requires exactly one cluster IP and one listener IP on $network. Cluster matches=$($clusterMatches -join ', '); Listener matches=$($listenerMatches -join ', ')."
+        }
+        $orderedClusterIps += $clusterMatches[0]
+        $orderedListenerIps += $listenerMatches[0]
+    }
+    $clusterIps = $orderedClusterIps
+    $listenerIps = $orderedListenerIps
+
+    $multiSubnetFailover = $domainNetworks.Count -gt 1
+    $registerAllProvidersIP = if ($null -ne $PrimaryAO.listenerRegisterAllProvidersIP) {
+        [bool]$PrimaryAO.listenerRegisterAllProvidersIP
+    }
+    else {
+        $multiSubnetFailover
+    }
+    $hostRecordTtlProperty = $PrimaryAO.PSObject.Properties['listenerHostRecordTTL']
+    $hostRecordTTL = if ($hostRecordTtlProperty -and $null -ne $hostRecordTtlProperty.Value) {
+        [int]$hostRecordTtlProperty.Value
+    }
+    else {
+        300
+    }
+    if ($hostRecordTTL -lt 30 -or $hostRecordTTL -gt 86400) {
+        throw "$vmName`: listenerHostRecordTTL must be between 30 and 86400 seconds."
+    }
+
     $config = [PSCustomObject]@{
         GroupName                  = $ClusterName + "Group"
         GroupMembers               = @("$($PrimaryAO.vmName)$", "$($SecondAO)$", "$($ClusterName)$")
@@ -3173,8 +3222,14 @@ function Get-SQLAOConfig {
         PrimaryNodeName            = $PrimaryAO.vmName
         SecondaryNodeName          = $SecondAO
         FileServerName             = $FSAO.vmName
-        ClusterIPAddress           = $PrimaryAO.ClusterIPAddress + "/24"
-        AGIPAddress                = $PrimaryAO.AGIPAddress + "/255.255.255.0"
+        ClusterIPAddress           = $clusterIps[0] + "/24"
+        ClusterIPAddresses         = @($clusterIps | ForEach-Object { "$_/24" })
+        AGIPAddress                = $listenerIps[0] + "/255.255.255.0"
+        AGIPAddresses              = @($listenerIps | ForEach-Object { "$_/255.255.255.0" })
+        DomainNetworks             = $domainNetworks
+        MultiSubnetFailover        = $multiSubnetFailover
+        ListenerRegisterAllProvidersIP = $registerAllProvidersIP
+        ListenerHostRecordTTL      = $hostRecordTTL
         PrimaryReplicaServerName   = $PrimaryAO.vmName + "." + $deployConfig.vmOptions.DomainName
         SecondaryReplicaServerName = $PrimaryAO.OtherNode + "." + $deployConfig.vmOptions.DomainName
         AlwaysOnListenerName       = $PrimaryAO.AlwaysOnListenerName

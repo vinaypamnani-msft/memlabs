@@ -266,6 +266,7 @@
         # subnet. Skip all cluster setup steps for those — the cluster is already
         # running. New labs set up the cluster fresh with proper network roles.
         $clusterIPOnHeartbeat = $thisVM.thisParams.SQLAO.ClusterIPAddress -match '^10\.250\.250\.'
+        $multiSubnetSqlAo = @($thisVM.thisParams.SQLAO.DomainNetworks | Where-Object { $_ }).Count -gt 1
 
         ModuleAdd SQLServerModule {
             Key             = 'Always'
@@ -395,6 +396,44 @@
         }
         $nextDepend = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
 
+        $domainNetworkIndex = 0
+        foreach ($domainNetwork in @($thisVM.thisParams.SQLAO.DomainNetworks)) {
+            $domainNetworkIndex++
+            WriteStatus "ChangeDomainNetwork$domainNetworkIndex" {
+                DependsOn = $nextDepend
+                Status    = "Setting $domainNetwork to cluster + client (Role 3)"
+            }
+
+            ClusterNetwork "ChangeDomainNetwork$domainNetworkIndex" {
+                Address              = $domainNetwork
+                AddressMask          = '255.255.255.0'
+                Name                 = "Domain Network $domainNetworkIndex"
+                Role                 = '3'
+                DependsOn            = "[WriteStatus]ChangeDomainNetwork$domainNetworkIndex"
+                PsDscRunAsCredential = $Admincreds
+            }
+            $nextDepend = "[ClusterNetwork]ChangeDomainNetwork$domainNetworkIndex"
+        }
+
+        if ($multiSubnetSqlAo) {
+            WriteStatus MultiSubnetClusterName {
+                DependsOn = $nextDepend
+                Status    = "Configuring multi-subnet IP resources for cluster '$($thisVM.ClusterName)'"
+            }
+
+            SqlAoMultiSubnetNetworkName MultiSubnetClusterName {
+                Name                   = $thisVM.ClusterName
+                ClusterName            = $thisVM.ClusterName
+                Kind                   = 'CoreCluster'
+                IPAddresses            = $thisVM.thisParams.SQLAO.ClusterIPAddresses
+                RegisterAllProvidersIP = 0
+                HostRecordTTL          = $thisVM.thisParams.SQLAO.ListenerHostRecordTTL
+                DependsOn              = '[WriteStatus]MultiSubnetClusterName'
+                PsDscRunAsCredential   = $Admincreds
+            }
+            $nextDepend = '[SqlAoMultiSubnetNetworkName]MultiSubnetClusterName'
+        }
+
         WriteStatus PostClusterDnsConfig {
             DependsOn = $nextDepend
             Status    = "Setting RegisterAllProvidersIP=0 on cluster '$($thisVM.ClusterName)'"
@@ -517,23 +556,6 @@
         }
         $nextDepend = '[SqlAlwaysOnService]EnableHADR'
 
-        if (-not $clusterIPOnHeartbeat) {
-        WriteStatus 'ChangeNetwork-192' {
-            DependsOn = $nextDepend
-            Status    = "Setting $($thisVM.thisParams.vmNetwork) to cluster + client (Role 3)"
-        }
-
-        ClusterNetwork 'ChangeNetwork-192' {
-            Address              = $thisVM.thisParams.vmNetwork
-            AddressMask          = '255.255.255.0'
-            Name                 = 'Domain Network'
-            Role                 = '3'
-            DependsOn            = $nextDepend
-            PsDscRunAsCredential = $Admincreds
-        }
-        $nextDepend = '[ClusterNetwork]ChangeNetwork-192'
-        } # end if (-not $clusterIPOnHeartbeat)
-
         WriteStatus SQLAG {
             DependsOn = $nextDepend
             Status    = "Creating Availability Group $($thisVM.thisParams.SQLAO.AlwaysOnGroupName) on $($Node.NodeName)\$($thisVM.sqlInstanceName)"
@@ -581,6 +603,25 @@
         $nextDepend = '[SqlAGListener]AvailabilityGroupListener'
 
         if (-not $clusterIPOnHeartbeat) {
+        if ($multiSubnetSqlAo) {
+        WriteStatus MultiSubnetListener {
+            DependsOn = $nextDepend
+            Status    = "Configuring multi-subnet IP resources and DNS parameters for listener '$($thisVM.thisParams.SQLAO.AlwaysOnListenerName)'"
+        }
+
+        SqlAoMultiSubnetNetworkName MultiSubnetListener {
+            Name                   = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
+            ClusterName            = $thisVM.ClusterName
+            Kind                   = 'Listener'
+            IPAddresses            = $thisVM.thisParams.SQLAO.AGIPAddresses
+            RegisterAllProvidersIP = [uint32][bool]$thisVM.thisParams.SQLAO.ListenerRegisterAllProvidersIP
+            HostRecordTTL          = $thisVM.thisParams.SQLAO.ListenerHostRecordTTL
+            DependsOn              = '[WriteStatus]MultiSubnetListener'
+            PsDscRunAsCredential   = $Admincreds
+        }
+        $nextDepend = '[SqlAoMultiSubnetNetworkName]MultiSubnetListener'
+        }
+        else {
         WriteStatus ClusterRemoveUnwantedIPs {
             DependsOn = $nextDepend
             Status    = "Removing DHCP IPs from Cluster"
@@ -593,6 +634,7 @@
             DependsOn            = $nextDepend
         }
         $nextDepend = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
+        }
         } # end if (-not $clusterIPOnHeartbeat)
 
 
@@ -650,7 +692,9 @@
         # "untrusted domain" because FQDN resolution is required for Kerberos.
         $listenerNameForDns  = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
         $listenerFqdnForDns  = $thisVM.thisParams.SQLAO.AlwaysOnListenerNameFQDN
-        $listenerIpForDns    = ($thisVM.thisParams.SQLAO.AGIPAddress -split '/')[0]  # strip CIDR if present
+        $listenerIpsForDns   = @($thisVM.thisParams.SQLAO.AGIPAddresses | ForEach-Object { ($_ -split '/')[0] })
+        $listenerRegisterAllProviders = [bool]$thisVM.thisParams.SQLAO.ListenerRegisterAllProvidersIP
+        $listenerHostRecordTTL = [int]$thisVM.thisParams.SQLAO.ListenerHostRecordTTL
         $dcForDns            = $DCNameFromConfig
 
         Script VerifyListenerDns {
@@ -662,14 +706,29 @@
                 # but not the other due to replication lag.
                 $vlog = { param($m) try { Write-VerboseEx -Message $m -Component 'VerifyListenerDns/Test' } catch { Write-Verbose $m } }
                 try {
+                    $expectedIps = @($using:listenerIpsForDns)
+                    if (-not $using:listenerRegisterAllProviders) {
+                        $listenerResource = Get-ClusterResource -ErrorAction Stop |
+                            Where-Object {
+                                $_.ResourceType -eq 'Network Name' -and
+                                (($_ | Get-ClusterParameter -Name DnsName -ErrorAction SilentlyContinue).Value -ieq $using:listenerNameForDns)
+                            } | Select-Object -First 1
+                        if (-not $listenerResource) { return $false }
+                        $expectedIps = @(Get-ClusterResource -ErrorAction Stop |
+                                Where-Object { $_.OwnerGroup.Name -eq $listenerResource.OwnerGroup.Name -and $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |
+                                ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction Stop).Value })
+                        if ($expectedIps.Count -ne 1) { return $false }
+                    }
                     $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
                     if ($allDCs.Count -eq 0) { $allDCs = @($using:dcForDns) }
                     foreach ($dc in $allDCs) {
                         & $vlog "query A '$($using:listenerNameForDns)' on DC '$dc'"
                         $rec = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
                             -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
-                        if ($rec.Count -eq 0) {
-                            & $vlog "DNS A record for '$($using:listenerNameForDns)' missing on DC '$dc'"
+                        $actualIps = @($rec | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                        $wrongTtl = @($rec | Where-Object { [int]$_.TimeToLive.TotalSeconds -ne $using:listenerHostRecordTTL })
+                        if ((($actualIps | Sort-Object) -join ',') -ne (($expectedIps | Sort-Object) -join ',') -or $wrongTtl.Count -gt 0) {
+                            & $vlog "DNS A record for '$($using:listenerNameForDns)' on '$dc' is addresses '$($actualIps -join ', ')' with TTLs '$(@($rec.TimeToLive.TotalSeconds) -join ', ')'; expected '$($expectedIps -join ', ')' with TTL $($using:listenerHostRecordTTL)"
                             return $false
                         }
                     }
@@ -696,36 +755,67 @@
                 & $vlog "DCs: $($allDCs -join ', ')"
                 $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
                 $listenerName = $using:listenerNameForDns
-                $listenerIP   = $using:listenerIpForDns
+                $listenerIPs  = @($using:listenerIpsForDns)
+                if (-not $using:listenerRegisterAllProviders) {
+                    $listenerResource = Get-ClusterResource -ErrorAction Stop |
+                        Where-Object {
+                            $_.ResourceType -eq 'Network Name' -and
+                            (($_ | Get-ClusterParameter -Name DnsName -ErrorAction SilentlyContinue).Value -ieq $listenerName)
+                        } | Select-Object -First 1
+                    if (-not $listenerResource) { throw "Could not find listener Network Name resource '$listenerName'." }
+                    $listenerIPs = @(Get-ClusterResource -ErrorAction Stop |
+                            Where-Object { $_.OwnerGroup.Name -eq $listenerResource.OwnerGroup.Name -and $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |
+                            ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction Stop).Value })
+                    if ($listenerIPs.Count -ne 1) { throw "RegisterAllProvidersIP=0 requires exactly one online listener IP; found $($listenerIPs.Count)." }
+                }
+                $listenerTtl  = [timespan]::FromSeconds($using:listenerHostRecordTTL)
                 $zoneName     = $using:DomainName
-                $primaryDC    = $using:dcForDns
+                $primaryDcShort = ($using:dcForDns -split '\.')[0]
                 $maxAttempts  = 5
-                $registered   = $false
-                $addedRecord  = $false
 
                 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
                     & $vlog "VerifyListenerDns: attempt $attempt/$maxAttempts"
 
-                    # Attempt a) Register the A record on the primary DC (idempotent).
-                    if (-not $registered) {
+                    # Reconcile every DC on every attempt. AD-integrated DNS can
+                    # replicate a newer stale value back after the first repair,
+                    # so a one-shot primary-DC latch is not sufficient.
+                    $addedRecord = $false
+                    $primaryAddressMissing = $false
+                    foreach ($repairDC in $allDCs) {
                         try {
-                            & $vlog "enter Get-DnsServerResourceRecord on '$primaryDC'"
+                            & $vlog "enter Get-DnsServerResourceRecord on '$repairDC'"
                             $existing = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $listenerName `
-                                -RRType A -ComputerName $primaryDC -ErrorAction SilentlyContinue)
-                            if ($existing.Count -eq 0) {
-                                & $vlog "enter Add-DnsServerResourceRecordA $listenerName -> $listenerIP on '$primaryDC'"
-                                Add-DnsServerResourceRecordA -ZoneName $zoneName -Name $listenerName `
-                                    -IPv4Address $listenerIP -ComputerName $primaryDC -ErrorAction Stop
-                                & $vlog "Registered DNS A record: $listenerName -> $listenerIP on DC '$primaryDC'"
-                                $addedRecord = $true
+                                -RRType A -ComputerName $repairDC -ErrorAction SilentlyContinue)
+                            $existingIpsBefore = @($existing | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                            if (($repairDC -split '\.')[0] -ieq $primaryDcShort -and
+                                @($listenerIPs | Where-Object { $_ -notin $existingIpsBefore }).Count -gt 0) {
+                                $primaryAddressMissing = $true
                             }
-                            else {
-                                & $vlog "DNS A record already exists on primary DC '$primaryDC'"
+                            foreach ($record in @($existing)) {
+                                $recordIp = $record.RecordData.IPv4Address.IPAddressToString
+                                if ($recordIp -notin $listenerIPs -or [int]$record.TimeToLive.TotalSeconds -ne $using:listenerHostRecordTTL) {
+                                    Remove-DnsServerResourceRecord -ZoneName $zoneName -InputObject $record -ComputerName $repairDC -Force -ErrorAction Stop
+                                    & $vlog "Removed stale listener DNS record $listenerName -> $recordIp (TTL $([int]$record.TimeToLive.TotalSeconds)) on '$repairDC'"
+                                }
                             }
-                            $registered = $true
+                            $existing = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $listenerName `
+                                -RRType A -ComputerName $repairDC -ErrorAction SilentlyContinue)
+                            $existingIps = @($existing | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                            foreach ($listenerIP in $listenerIPs) {
+                                if ($listenerIP -notin $existingIps) {
+                                    & $vlog "enter Add-DnsServerResourceRecordA $listenerName -> $listenerIP on '$repairDC'"
+                                    Add-DnsServerResourceRecordA -ZoneName $zoneName -Name $listenerName `
+                                        -IPv4Address $listenerIP -TimeToLive $listenerTtl -ComputerName $repairDC -ErrorAction Stop
+                                    & $vlog "Registered DNS A record: $listenerName -> $listenerIP on DC '$repairDC'"
+                                    $addedRecord = $true
+                                }
+                            }
+                            if (-not $addedRecord) {
+                                & $vlog "DNS A record already has the expected addresses and TTL on '$repairDC'"
+                            }
                         }
                         catch {
-                            & $vlog "DNS registration attempt $attempt failed: $($_.Exception.Message)"
+                            & $vlog "DNS reconciliation attempt $attempt failed on '$repairDC': $($_.Exception.Message)"
                         }
                     }
 
@@ -735,7 +825,7 @@
                     # the common case here is a record that exists but has not
                     # replicated to the BDC yet, and taking the AG listener offline
                     # to fix a replication delay is both useless and disruptive.
-                    if ($addedRecord -and $attempt -le 2) {
+                    if ($primaryAddressMissing -and $attempt -le 2) {
                         & $vlog 'enter Get-ClusterResource (Network Name)'
                         $nnRes = Get-ClusterResource -ErrorAction SilentlyContinue |
                             Where-Object { $_.ResourceType -eq 'Network Name' -and $_.OwnerGroup -eq $listenerName }
@@ -793,7 +883,9 @@
                         & $vlog "enter verify Get-DnsServerResourceRecord on '$dc'"
                         $verify = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $listenerName `
                             -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
-                        if ($verify.Count -eq 0) {
+                        $verifyIps = @($verify | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                        $wrongTtl = @($verify | Where-Object { [int]$_.TimeToLive.TotalSeconds -ne $using:listenerHostRecordTTL })
+                        if ((($verifyIps | Sort-Object) -join ',') -ne (($listenerIPs | Sort-Object) -join ',') -or $wrongTtl.Count -gt 0) {
                             $missingDCs += $dc
                         }
                     }
@@ -1484,17 +1576,16 @@ ALTER DATABASE [$databaseIdentifier] SET HADR AVAILABILITY GROUP = [$agIdentifie
             # Create PTR records for the cluster IP and AG listener IP so that
             # reverse DNS lookups work. OpenCluster() and other cluster APIs may
             # need reverse resolution. Skip legacy labs on the heartbeat subnet.
-            $_clusterIP = $pNode.thisParams.SQLAO.ClusterIPAddress -replace '/.*$', ''
-            $_agIP = $pNode.thisParams.SQLAO.AGIPAddress -replace '/.*$', ''
+            $_clusterIPs = @($pNode.thisParams.SQLAO.ClusterIPAddresses | ForEach-Object { $_ -replace '/.*$', '' })
+            $_agIPs = @($pNode.thisParams.SQLAO.AGIPAddresses | ForEach-Object { $_ -replace '/.*$', '' })
             $_clusterFqdn = "$($pNode.ClusterName).$DomainName"
             $_listenerFqdn = "$($pNode.thisParams.SQLAO.AlwaysOnListenerName).$DomainName"
 
             Script "ClusterPtrRecords$i" {
                 SetScript  = {
-                    $entries = @(
-                        @{ IP = $using:_clusterIP; FQDN = $using:_clusterFqdn },
-                        @{ IP = $using:_agIP; FQDN = $using:_listenerFqdn }
-                    )
+                    $entries = @()
+                    foreach ($ip in @($using:_clusterIPs)) { $entries += @{ IP = $ip; FQDN = $using:_clusterFqdn } }
+                    foreach ($ip in @($using:_agIPs)) { $entries += @{ IP = $ip; FQDN = $using:_listenerFqdn } }
                     foreach ($entry in $entries) {
                         if ($entry.IP -match '^10\.250\.250\.') { continue }
                         # PTR records are a nice-to-have for reverse lookups; never let a
@@ -1524,10 +1615,9 @@ ALTER DATABASE [$databaseIdentifier] SET HADR AVAILABILITY GROUP = [$agIdentifie
                     }
                 }
                 TestScript = {
-                    $entries = @(
-                        @{ IP = $using:_clusterIP; FQDN = $using:_clusterFqdn },
-                        @{ IP = $using:_agIP; FQDN = $using:_listenerFqdn }
-                    )
+                    $entries = @()
+                    foreach ($ip in @($using:_clusterIPs)) { $entries += @{ IP = $ip; FQDN = $using:_clusterFqdn } }
+                    foreach ($ip in @($using:_agIPs)) { $entries += @{ IP = $ip; FQDN = $using:_listenerFqdn } }
                     foreach ($entry in $entries) {
                         if ($entry.IP -match '^10\.250\.250\.') { continue }
                         # Wrap per-entry so Test NEVER throws -- a thrown Test fails the
