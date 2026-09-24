@@ -65,12 +65,16 @@ if (-not (Test-Path $modulePath)) {
     return
 }
 
-# Connect to the site's drive if it is not already present
-try {
-    New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providerMachineName @initParams
-} catch {
-    Write-DscStatus "Failed to create PS Drive for site $siteCode. Error: $_" -NoStatus
-    return
+# Connect to the site's global drive without shadowing it in this script's child
+# scope. Leaving Set-Location bound to a child-scoped drive after this script
+# returns makes the next ConfigMgr cmdlet fail while initializing its connection.
+if (-not (Get-PSDrive -Name $siteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+    try {
+        New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providerMachineName -Scope Global @initParams -ErrorAction Stop | Out-Null
+    } catch {
+        Write-DscStatus "Failed to create PS Drive for site $siteCode. Error: $_" -NoStatus
+        return
+    }
 }
 
 # Validate PS Drive creation
@@ -84,7 +88,7 @@ while ($null -eq (Get-PSDrive -Name $siteCode -PSProvider CMSite -ErrorAction Si
     Write-DscStatus "Retry in 10s to Set PS Drive" -NoStatus
     Start-Sleep -Seconds 10
     try {
-        New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providerMachineName @initParams
+        New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providerMachineName -Scope Global @initParams -ErrorAction Stop | Out-Null
     } catch {
         Write-DscStatus "Failed to create PS Drive for site $siteCode during retry. Error: $_" -NoStatus
     }

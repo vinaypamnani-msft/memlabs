@@ -116,6 +116,13 @@ function Start-CmSiteUpdatePackageDownload {
         try {
             $currentPackage = Get-CmSiteUpdateByPackageGuid -PackageGuid $packageGuid -PackageName $packageName -MaximumAttempts 1 -RetrySeconds 0 -SuppressFailureStatus
             $lastObservedState = "$($currentPackage.State)"
+            if (-not $lastObservedState) {
+                throw "Configuration Manager update '$packageName' ($packageGuid) has no provider State"
+            }
+            if ($lastObservedState -ne '327682') {
+                Write-DscStatus "Configuration Manager update '$packageName' ($packageGuid) advanced to state $lastObservedState before the download invocation; skipping the duplicate request."
+                return $currentPackage
+            }
             $attemptStage = 'download invocation'
             $currentPackage | Invoke-CMSiteUpdateDownload -Force -WarningAction SilentlyContinue -ErrorAction Stop
             return $currentPackage

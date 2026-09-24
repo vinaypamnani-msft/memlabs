@@ -34,6 +34,7 @@ $script:GetCalls = 0
 $script:GetFailuresRemaining = 0
 $script:DownloadCalls = 0
 $script:DownloadFailuresRemaining = 0
+$script:AdvanceStateOnDownloadFailure = $false
 $script:LastDownloadInput = $null
 $script:Sleeps = @()
 $script:StatusMessages = @()
@@ -60,6 +61,9 @@ function Invoke-CMSiteUpdateDownload {
         $script:LastDownloadInput = $InputObject
         if ($script:DownloadFailuresRemaining -gt 0) {
             $script:DownloadFailuresRemaining--
+            if ($script:AdvanceStateOnDownloadFailure) {
+                $InputObject.State = 262145
+            }
             throw [ArgumentNullException]::new('key')
         }
     }
@@ -89,6 +93,17 @@ Assert-Equal 'target-guid' $script:LastDownloadInput.PackageGuid 'download cmdle
 Assert-Equal 1 $script:GetCalls 'successful download refreshes the provider object once'
 Assert-Equal 1 $script:DownloadCalls 'successful download invokes the cmdlet once'
 
+$targetPackage.State = 262145
+$script:GetCalls = 0
+$script:DownloadCalls = 0
+$script:StatusMessages = @()
+$result = Start-CmSiteUpdatePackageDownload -UpdatePackage $targetPackage -MaximumAttempts 2 -RetrySeconds 0
+Assert-Equal 262145 $result.State 'download helper returns the live package after an external state advance'
+Assert-Equal 1 $script:GetCalls 'external state advance is verified with one keyed refresh'
+Assert-Equal 0 $script:DownloadCalls 'external state advance skips the duplicate mutating download command'
+Assert-Equal $true ([bool]($script:StatusMessages | Where-Object { $_.Text -like '*advanced to state 262145*skipping the duplicate request*' })) 'external state advance is recorded in the DSC log'
+$targetPackage.State = 327682
+
 $script:GetCalls = 0
 $script:DownloadCalls = 0
 $script:DownloadFailuresRemaining = 1
@@ -100,6 +115,19 @@ Assert-Equal 2 $script:GetCalls 'each retry refreshes through the unfiltered pro
 Assert-Equal 2 $script:DownloadCalls 'one transient failure causes exactly one retry'
 Assert-Equal '7' ($script:Sleeps -join ',') 'transient failure waits only between attempts'
 Assert-Equal $true ([bool]($script:StatusMessages | Where-Object { $_.Text -like '*download invocation failed*attempt 1/3*Value cannot be null*' })) 'download failure is attributed and remains visible in the DSC log'
+
+$targetPackage.State = 327682
+$script:GetCalls = 0
+$script:DownloadCalls = 0
+$script:DownloadFailuresRemaining = 1
+$script:AdvanceStateOnDownloadFailure = $true
+$script:StatusMessages = @()
+$result = Start-CmSiteUpdatePackageDownload -UpdatePackage $targetPackage -MaximumAttempts 2 -RetrySeconds 0
+Assert-Equal 262145 $result.State 'post-action exception is accepted when the keyed refresh shows download in progress'
+Assert-Equal 2 $script:GetCalls 'post-action exception is verified with a fresh keyed provider query'
+Assert-Equal 1 $script:DownloadCalls 'accepted post-action exception does not replay the mutating command'
+$script:AdvanceStateOnDownloadFailure = $false
+$targetPackage.State = 327682
 
 $script:GetCalls = 0
 $script:GetFailuresRemaining = 1
@@ -140,6 +168,13 @@ Assert-Equal 0 @([regex]::Matches($source, 'Invoke-CMSiteUpdateDownload\s+-Name'
 Assert-Equal 0 @([regex]::Matches($source, 'Get-CMSiteUpdate\s+(?:-Fast\s+)?-Name')).Count 'state refresh avoids name-filtered provider queries'
 Assert-Equal 2 @([regex]::Matches($source, 'Get-CmSiteUpdateByPackageGuid[^\r\n]+-SuppressFailureStatus')).Count 'only caller-owned retry paths suppress refresh failure status'
 Assert-Equal $true ($source -match '(?s)catch \{\s*\$downloadFailure = \$_\.Exception\.Message\s*Write-DscStatus.+?-Failure\s*return\s*\}') 'download exhaustion writes JOBFAILURE and stops Phase 8'
+
+$enableEhttpPath = Join-Path $RootPath 'vmbuild\DSC\phases\EnableEHTTP.ps1'
+$enableEhttpSource = Get-Content -LiteralPath $enableEhttpPath
+$siteDriveCreations = @($enableEhttpSource | Where-Object { $_ -match 'New-PSDrive.+-PSProvider CMSite' })
+Assert-Equal $true ($siteDriveCreations.Count -gt 0) 'EHTTP setup creates the CMSite drive when it is missing'
+Assert-Equal $siteDriveCreations.Count @($siteDriveCreations | Where-Object { $_ -match '-Scope Global' }).Count 'EHTTP setup never leaves the workflow on a child-scoped CMSite drive'
+Assert-Equal $true ([bool]($enableEhttpSource | Where-Object { $_ -match 'if \(-not \(Get-PSDrive -Name \$siteCode -PSProvider CMSite' })) 'EHTTP setup reuses an existing CMSite drive'
 
 if ($script:Failures -gt 0) { throw "$script:Failures ConfigMgr site-update download regression assertion(s) failed." }
 Write-Host 'ALL CONFIGMGR SITE-UPDATE DOWNLOAD TESTS PASSED'
