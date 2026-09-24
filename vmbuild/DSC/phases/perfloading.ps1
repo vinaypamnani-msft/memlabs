@@ -1221,8 +1221,11 @@ Write-DscStatus "$Tag Starting perfloading"
     $uncCanary = "\\$ThisMachineName\$shareName"
     $bareCanary = Test-Path -LiteralPath $uncCanary -ErrorAction SilentlyContinue
     $qualifiedCanary = Test-Path -LiteralPath "FileSystem::$uncCanary" -ErrorAction SilentlyContinue
-    if ($bareCanary -ne $qualifiedCanary) {
-        Write-DscStatus "$Tag UNC path resolution: bare '$uncCanary' reads $bareCanary but 'FileSystem::' reads $qualifiedCanary -- current location is '$((Get-Location).Path)' on the $((Get-Location).Provider.Name) provider, so every BARE UNC in this script resolves through that provider and reads as absent. Any path from WMI (ImagePath, PkgSourcePath) must be FileSystem::-qualified." -Warning
+    if (-not $qualifiedCanary) {
+        Write-DscStatus "$Tag UNC path resolution FAILED: FileSystem-qualified '$uncCanary' is not reachable after creating the share. Boot-image source paths under this share cannot be validated." -Warning
+    }
+    elseif ($bareCanary -ne $qualifiedCanary) {
+        Write-DscStatus "$Tag UNC path resolution note: bare '$uncCanary' reads $bareCanary while 'FileSystem::' reads $qualifiedCanary -- expected on the $((Get-Location).Provider.Name) provider. WMI ImagePath/PkgSourcePath probes are FileSystem-qualified."
     }
     else {
         Write-DscStatus "$Tag UNC path resolution OK: bare and FileSystem:: probes of '$uncCanary' agree ($bareCanary); provider is $((Get-Location).Provider.Name)"
