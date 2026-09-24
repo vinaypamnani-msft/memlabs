@@ -315,6 +315,100 @@ Write-DscStatus "$Tag Starting perfloading"
         return $null
     }
 
+    function Get-MemLabsMissingContentTargets {
+        param(
+            [string] $PackageId,
+            [string[]] $ExpectedDistributionPointNames,
+            [string] $SiteCode
+        )
+
+        $targetKeys = @{}
+        foreach ($targetRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$PackageId'" -ErrorAction Stop)) {
+            $targetName = Get-MemLabsServerFromNalPath $targetRow.ServerNALPath
+            if (-not $targetName) { continue }
+            $targetKeys[$targetName.ToUpperInvariant()] = $true
+            $targetKeys[(($targetName -split '\.')[0]).ToUpperInvariant()] = $true
+        }
+        @($ExpectedDistributionPointNames | Where-Object {
+                $expectedName = "$_"
+                $expectedShort = ($expectedName -split '\.')[0]
+                -not ($targetKeys.ContainsKey($expectedName.ToUpperInvariant()) -or $targetKeys.ContainsKey($expectedShort.ToUpperInvariant()))
+            })
+    }
+
+    function Sync-MemLabsOsdContentDistribution {
+        param(
+            [ValidateSet('Package', 'OperatingSystemImage', 'OperatingSystemInstaller')]
+            [string] $ContentType,
+            [string] $PackageId,
+            [string] $ContentName,
+            [string] $DistributionPointGroupName,
+            [string[]] $ExpectedDistributionPointNames,
+            [string] $SiteCode,
+            [string] $StatusTag,
+            [int] $Attempts = 6,
+            [int] $RetrySeconds = 5
+        )
+
+        if (-not $PackageId) {
+            Write-DscStatus "$StatusTag Cannot distribute $ContentType '$ContentName' because its PackageID is empty." -Warning
+            return $false
+        }
+        $expectedNames = @($ExpectedDistributionPointNames | Where-Object { $_ } | Select-Object -Unique)
+        if ($expectedNames.Count -eq 0) {
+            Write-DscStatus "$StatusTag Cannot distribute $ContentType '$ContentName' because no OSD DP was resolved." -Warning
+            return $false
+        }
+
+        try {
+            $missingNames = @(Get-MemLabsMissingContentTargets -PackageId $PackageId -ExpectedDistributionPointNames $expectedNames -SiteCode $SiteCode)
+        }
+        catch {
+            Write-DscStatus "$StatusTag Could not read $ContentType '$ContentName' ($PackageId) targeting: $($_.Exception.Message). Continuing with the remaining OSD content; Phase 11 validation will measure this package independently." -Warning
+            return $false
+        }
+        if ($missingNames.Count -eq 0) {
+            Write-DscStatus "$StatusTag $ContentType '$ContentName' ($PackageId) is already targeted to every OSD DP -- skipping distribution request"
+            return $true
+        }
+
+        $distributionError = $null
+        try {
+            switch ($ContentType) {
+                'Package' { $null = Start-CMContentDistribution -PackageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                'OperatingSystemImage' { $null = Start-CMContentDistribution -OperatingSystemImageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                'OperatingSystemInstaller' { $null = Start-CMContentDistribution -OperatingSystemInstallerId $PackageId -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+            }
+            Write-DscStatus "$StatusTag Requested $ContentType '$ContentName' ($PackageId) distribution to '$DistributionPointGroupName'"
+        }
+        catch {
+            $distributionError = $_.Exception.Message
+        }
+
+        $targetReadError = $null
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            try {
+                $missingNames = @(Get-MemLabsMissingContentTargets -PackageId $PackageId -ExpectedDistributionPointNames $expectedNames -SiteCode $SiteCode)
+                $targetReadError = $null
+            }
+            catch {
+                $targetReadError = $_.Exception.Message
+                $missingNames = @($expectedNames)
+            }
+            if ($missingNames.Count -eq 0) { break }
+            if ($attempt -lt $Attempts) { Start-Sleep -Seconds $RetrySeconds }
+        }
+        if ($missingNames.Count -eq 0) {
+            $errorNote = if ($distributionError) { " despite provider response '$distributionError'" } else { '' }
+            Write-DscStatus "$StatusTag Verified $ContentType '$ContentName' ($PackageId) is targeted to every OSD DP$errorNote"
+            return $true
+        }
+
+        $errorNote = if ($distributionError) { " Provider response: $distributionError" } elseif ($targetReadError) { " Target read failed: $targetReadError" } else { '' }
+        Write-DscStatus "$StatusTag $ContentType '$ContentName' ($PackageId) is still not targeted to $($missingNames -join ', ') after $Attempts reads.$errorNote Phase 11 validation will fail until targeting appears." -Warning
+        return $false
+    }
+
     function Approve-MemLabsScriptQueue {
         param([object[]]$Queue)
 
@@ -1711,10 +1805,24 @@ Write-DscStatus "$Tag Starting perfloading"
     # already exist. A rerun must be able to repair a missing DP assignment without deleting
     # and recreating otherwise healthy task sequences.
     if ($hasOsdTargets) {
-        Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
-        Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
-        Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Distributed OS image + upgrade + USMT content to '$osdDistTarget' (OSDClient subnet DP)"
+        $osdContentSpecs = @(
+            [pscustomobject]@{ Type = 'Package'; Id = $UserStateMigrationToolPackageId; Name = 'User State Migration Tool' }
+            [pscustomobject]@{ Type = 'OperatingSystemImage'; Id = $win11OSimagepackageID; Name = 'Windows 11' }
+            [pscustomobject]@{ Type = 'OperatingSystemImage'; Id = $win10OSimagepackageID; Name = 'Windows 10' }
+            [pscustomobject]@{ Type = 'OperatingSystemInstaller'; Id = $win11UpgradePackageID; Name = 'Windows 11 upgrade' }
+            [pscustomobject]@{ Type = 'OperatingSystemInstaller'; Id = $win10UpgradePackageID; Name = 'Windows 10 upgrade' }
+        )
+        $osdContentTargetFailures = @()
+        foreach ($osdContentSpec in $osdContentSpecs) {
+            $targeted = Sync-MemLabsOsdContentDistribution -ContentType $osdContentSpec.Type -PackageId $osdContentSpec.Id -ContentName $osdContentSpec.Name -DistributionPointGroupName $osdDistTarget -ExpectedDistributionPointNames $osdDpFqdns -SiteCode $SiteCode -StatusTag $Tag
+            if (-not $targeted) { $osdContentTargetFailures += "$($osdContentSpec.Id) '$($osdContentSpec.Name)'" }
+        }
+        if ($osdContentTargetFailures.Count -eq 0) {
+            Write-DscStatus "$Tag Verified OS image + upgrade + USMT targeting to every OSD DP"
+        }
+        else {
+            Write-DscStatus "$Tag OSD content targeting remains incomplete for: $($osdContentTargetFailures -join '; '). Continuing so the remaining MEMLABS objects are reconciled; Phase 11 validation will fail if the targets remain absent." -Warning
+        }
     }
     else {
         Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing OS image/upgrade/USMT content (saves space); will distribute when an OSDClient is added"

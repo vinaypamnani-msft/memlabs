@@ -12555,9 +12555,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     # Same state vocabulary as the boot-image check above: 0=Installed,
                     # 1=InstallPending, 2=InstallRetrying, 3=InstallFailed, 4=RemovalPending,
                     # 5=RemovalRetrying, 6=RemovalFailed, 7=ContentValidating,
-                    # 8=ContentValidationFailed. Phase 11 runs minutes after these multi-GB WIMs
-                    # start distributing, so 1/2/7 are the NORMAL in-flight states and must not
-                    # fail the phase -- only a genuine failure or a missing targeting row does.
+                    # 8=ContentValidationFailed. InstallPending and ContentValidating are normal
+                    # shortly after these multi-GB WIMs are targeted. InstallRetrying is not:
+                    # the content attempted installation and is now waiting to retry, so OSD is
+                    # unusable and final functional validation must not report success.
                     $osPkgProblems = @()
                     $osPkgPending = @()
                     foreach ($osPkg in $osPkgs) {
@@ -12573,9 +12574,15 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                 continue
                             }
                             $osState = [int]$row[0].State
+                            $osStateName = @{
+                                0 = 'Installed'; 1 = 'InstallPending'; 2 = 'InstallRetrying'; 3 = 'InstallFailed'
+                                4 = 'RemovalPending'; 5 = 'RemovalRetrying'; 6 = 'RemovalFailed'
+                                7 = 'ContentValidating'; 8 = 'ContentValidationFailed'
+                            }[$osState]
+                            if (-not $osStateName) { $osStateName = 'Unknown' }
                             if ($osState -eq 0) { continue }
-                            if ($osState -in 1, 2, 7) { $osPkgPending += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is State=$osState" }
-                            else { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is State=$osState" }
+                            if ($osState -in 1, 7) { $osPkgPending += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)" }
+                            else { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)" }
                         }
                     }
                     if ($osPkgProblems.Count -gt 0) {

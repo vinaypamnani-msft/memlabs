@@ -38,8 +38,8 @@ $helperCalls = @($ast.FindAll({
             $node -is [System.Management.Automation.Language.CommandAst] -and
             $node.GetCommandName() -eq 'Get-MemLabsServerFromNalPath'
         }, $true))
-if ($helperCalls.Count -ne 5) {
-    throw "Expected five production NAL parser calls; found $($helperCalls.Count)."
+if ($helperCalls.Count -ne 6) {
+    throw "Expected six production NAL parser calls; found $($helperCalls.Count)."
 }
 
 Invoke-Expression $helperDefinitions[0].Extent.Text
