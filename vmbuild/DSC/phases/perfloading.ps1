@@ -1682,6 +1682,44 @@ Write-DscStatus "$Tag Starting perfloading"
         Write-DscStatus "$Tag WARNING: Failed to create OS image packages: $_"
     }
 
+    # Every site in a hierarchy has its own same-named client/USMT/OS content, so a bare
+    # -ExpandProperty PackageID yields an ARRAY and silently poisons every WQL filter,
+    # cmdlet argument and task-sequence reference built from it.
+    $resolveSitePackageId = {
+        param([string]$Label, $Candidates)
+        $rows = @($Candidates | Where-Object { $_ -and "$($_.PackageID)" })
+        if ($rows.Count -eq 0) {
+            Write-DscStatus "$Tag $Label was not found, so its PackageID is empty"
+            return ''
+        }
+        $local = @($rows | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
+        $chosen = if ($local.Count -gt 0) { $local[0] } else { $rows[0] }
+        if ($rows.Count -gt 1) {
+            Write-DscStatus "$Tag $Label resolved to $($chosen.PackageID) from $($rows.Count) same-named packages ($(if ($local.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
+        }
+        return "$($chosen.PackageID)"
+    }
+    $win11UpgradePackageID = & $resolveSitePackageId 'Windows 11 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade")
+    $win10UpgradePackageID = & $resolveSitePackageId 'Windows 10 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade")
+    $BootImagePackageID = & $resolveSitePackageId "Boot image ($memlabsBootImageName)" (Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName })
+    $win11OSimagepackageID = & $resolveSitePackageId 'Windows 11 OS image' (Get-CMOperatingSystemImage -Name "windows 11")
+    $win10OSimagepackageID = & $resolveSitePackageId 'Windows 10 OS image' (Get-CMOperatingSystemImage -Name "windows 10")
+    $ClientPackagePackageId = & $resolveSitePackageId 'Configuration Manager Client Package' (Get-CMPackage -Fast -Name "Configuration Manager Client Package")
+    $UserStateMigrationToolPackageId = & $resolveSitePackageId 'User State Migration Tool' (Get-CMPackage -Fast -Name "User State Migration Tool for Windows")
+
+    # Reconcile content targeting on every pass, independently of whether task sequences
+    # already exist. A rerun must be able to repair a missing DP assignment without deleting
+    # and recreating otherwise healthy task sequences.
+    if ($hasOsdTargets) {
+        Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
+        Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
+        Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
+        Write-DscStatus "$Tag Distributed OS image + upgrade + USMT content to '$osdDistTarget' (OSDClient subnet DP)"
+    }
+    else {
+        Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing OS image/upgrade/USMT content (saves space); will distribute when an OSDClient is added"
+    }
+
     # Get all Task Sequences with names starting with the specified prefix.
     # New-CMTaskSequence can hit a transient SQL deadlock (a SMS_PackageContentServerInfo
     # query, error "waiting for query to return" / SQLStatus 1205) mid-block. Because
@@ -1702,30 +1740,6 @@ Write-DscStatus "$Tag Starting perfloading"
 
         # Define variables for TS
         #$TaskSequenceName = "Windows 11 In-Place Upgrade Task Sequence"
-        # Every site in a hierarchy has its own same-named client/USMT/OS content, so a bare
-        # -ExpandProperty PackageID yields an ARRAY and silently poisons every WQL filter,
-        # cmdlet argument and task-sequence reference built from it.
-        $resolveSitePackageId = {
-            param([string]$Label, $Candidates)
-            $rows = @($Candidates | Where-Object { $_ -and "$($_.PackageID)" })
-            if ($rows.Count -eq 0) {
-                Write-DscStatus "$Tag $Label was not found, so its PackageID is empty"
-                return ''
-            }
-            $local = @($rows | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
-            $chosen = if ($local.Count -gt 0) { $local[0] } else { $rows[0] }
-            if ($rows.Count -gt 1) {
-                Write-DscStatus "$Tag $Label resolved to $($chosen.PackageID) from $($rows.Count) same-named packages ($(if ($local.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
-            }
-            return "$($chosen.PackageID)"
-        }
-        $win11UpgradePackageID = & $resolveSitePackageId 'Windows 11 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade")
-        $win10UpgradePackageID = & $resolveSitePackageId 'Windows 10 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade")
-        $BootImagePackageID = & $resolveSitePackageId "Boot image ($memlabsBootImageName)" (Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName })
-        $win11OSimagepackageID = & $resolveSitePackageId 'Windows 11 OS image' (Get-CMOperatingSystemImage -Name "windows 11")
-        $win10OSimagepackageID = & $resolveSitePackageId 'Windows 10 OS image' (Get-CMOperatingSystemImage -Name "windows 10")
-        $ClientPackagePackageId = & $resolveSitePackageId 'Configuration Manager Client Package' (Get-CMPackage -Fast -Name "Configuration Manager Client Package")
-        $UserStateMigrationToolPackageId = & $resolveSitePackageId 'User State Migration Tool' (Get-CMPackage -Fast -Name "User State Migration Tool for Windows")
         if (-not $BootImagePackageID) {
             # Five of the seven task sequences take -BootImagePackageId. Creating the other two
             # would leave a partial set that Phase 11 counts as present, so build none.
@@ -1742,19 +1756,6 @@ Write-DscStatus "$Tag Starting perfloading"
             # Add cm_svc user as a CM Account
             $unencrypted = Get-Content $cm_svc_file
         }
-        #distribute the OS packages and upgrade packages -- ONLY to OSD-capable DP(s)
-        # (same subnet as an OSDClient). No OSDClient -> skip so the multi-GB content
-        # doesn't fill every DP; a re-run distributes once an OSDClient is added.
-        if ($hasOsdTargets) {
-            Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
-            Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
-            Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName $osdDistTarget -ErrorAction SilentlyContinue
-            Write-DscStatus "$Tag Distributed OS image + upgrade + USMT content to '$osdDistTarget' (OSDClient subnet DP)"
-        }
-        else {
-            Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing OS image/upgrade/USMT content (saves space); will distribute when an OSDClient is added"
-        }
-     
 
         # Create the in-place upgrade task sequence
         New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w11-In-Place Upgrade Task Sequence" -UpgradePackageId $win11UpgradePackageID -SoftwareUpdateStyle All
