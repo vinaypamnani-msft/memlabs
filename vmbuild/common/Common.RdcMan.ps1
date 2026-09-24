@@ -816,7 +816,7 @@ function New-RDCManFileFromHyperV {
                 Write-Log "[RDCMan restart] Stopped rdcman (killedAlready=true); exe path now '$rdcExePath'." -LogOnly
             }
             Start-Sleep 1
-            Remove-Item $rdcmanfile -ProgressAction SilentlyContinue| out-null
+            Remove-Item -LiteralPath $rdcmanfile -Force
         }
         $shouldSave = $true
     }
@@ -855,12 +855,13 @@ function New-RDCManFileFromHyperV {
 
         $group = $file.group
         if ($null -eq $group) {
-            Write-Log "Could not load group section from $rdcmanfile" -Failure
-            Get-Content -Path $rdcmanfile | Out-Host
             if ($OverWrite -eq $false) {
+                Write-Log "No groups remain in $rdcmanfile. Regenerating it from the template." -LogOnly -Verbose
                 return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
             }
             else {
+                Write-Log "Could not load group section from $rdcmanfile" -Failure
+                Get-Content -Path $rdcmanfile | Out-Host
                 return
             }
         }
