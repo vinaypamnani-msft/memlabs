@@ -161,9 +161,8 @@ Write-DscStatus "$Tag Starting perfloading"
                     $rows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop)
                     $keys = @{}
                     foreach ($row in $rows) {
-                        if ("$($row.DPNALPath)" -match '\\([^\\\"\]]+)') {
-                            $keys[$Matches[1].ToUpperInvariant()] = $true
-                        }
+                        $memberHostName = Get-MemLabsServerFromNalPath $row.DPNALPath
+                        if ($memberHostName) { $keys[$memberHostName.ToUpperInvariant()] = $true }
                     }
                     [pscustomobject]@{ Rows = @($rows); Keys = $keys }
                 }
@@ -308,6 +307,12 @@ Write-DscStatus "$Tag Starting perfloading"
         }
         if ($ErrorRecord.FullyQualifiedErrorId) { $parts.Add("FQEID=$($ErrorRecord.FullyQualifiedErrorId)") }
         return ($parts -join ' | ')
+    }
+
+    function Get-MemLabsServerFromNalPath {
+        param($NalPath)
+        if ("$NalPath" -match '\\([^\\"\]]+)') { return $Matches[1] }
+        return $null
     }
 
     function Approve-MemLabsScriptQueue {
@@ -1009,7 +1014,7 @@ Write-DscStatus "$Tag Starting perfloading"
                 $osdGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$OsdDpGroupName'" -ErrorAction Stop
                 if ($osdGrpWmi) {
                     foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction Stop)) {
-                        $memberHostName = & $serverFromNal $memberRow.DPNALPath
+                        $memberHostName = Get-MemLabsServerFromNalPath $memberRow.DPNALPath
                         if (-not $memberHostName) { continue }
                         $osdMemberKeys[$memberHostName.ToUpper()] = $true
                         $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
@@ -1058,7 +1063,7 @@ Write-DscStatus "$Tag Starting perfloading"
                     $osdMemberKeys = @{}
                     if ($osdGrpWmi) {
                         foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction Stop)) {
-                            $memberHostName = & $serverFromNal $memberRow.DPNALPath
+                            $memberHostName = Get-MemLabsServerFromNalPath $memberRow.DPNALPath
                             if (-not $memberHostName) { continue }
                             $osdMemberKeys[$memberHostName.ToUpper()] = $true
                             $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
@@ -1534,7 +1539,7 @@ Write-DscStatus "$Tag Starting perfloading"
                         }
                         $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
                         foreach ($expectedDp in $osdDpFqdns) {
-                            $dpRow = @($bootDpRows | Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $expectedDp } | Select-Object -First 1)
+                            $dpRow = @($bootDpRows | Where-Object { (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $expectedDp } | Select-Object -First 1)
                             if ($dpRow.Count -eq 0) {
                                 $bootCoverageProblems += "$expectedDp (no status row)"
                                 $bootIncompleteDps += $expectedDp
@@ -1557,7 +1562,7 @@ Write-DscStatus "$Tag Starting perfloading"
                         $armKey = $incompleteDp.ToUpper()
                         try {
                             $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
-                                    Where-Object { (& $serverFromNal $_.ServerNALPath) -ieq $incompleteDp })
+                                    Where-Object { (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $incompleteDp })
                             if ($targetRows.Count -eq 0) {
                                 Start-CMContentDistribution -BootImageId $packageId -DistributionPointName $incompleteDp -ErrorAction Stop
                                 Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"

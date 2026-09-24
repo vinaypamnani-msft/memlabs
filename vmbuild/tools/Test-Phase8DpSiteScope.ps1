@@ -59,6 +59,7 @@ function Import-TestFunction {
 $perfloadingPath = Join-Path $RootPath 'DSC\phases\perfloading.ps1'
 $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
 . (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsManagedDistributionPointNames')
+. (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsServerFromNalPath')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Test-MemLabsDistributionPointGroupMember')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Sync-MemLabsDistributionPointGroupMembership')
 . (Import-TestFunction -Path $configPath -Name 'Add-Phase8DistributionPointMetadata')
