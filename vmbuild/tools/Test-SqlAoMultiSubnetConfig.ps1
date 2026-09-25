@@ -183,6 +183,7 @@ foreach ($validTtl in 30, 86400) {
 $phase5 = Get-Content (Join-Path $RootPath 'vmbuild\DSC\phases\Phase5.ps1') -Raw
 Assert-Equal $true ($phase5 -match 'SqlAoMultiSubnetNetworkName MultiSubnetClusterName') 'Phase 5 converges the core cluster Network Name'
 Assert-Equal $true ($phase5 -match 'SqlAoMultiSubnetNetworkName MultiSubnetListener') 'Phase 5 converges the listener Network Name'
+Assert-Equal $true ($phase5 -match 'IpAddress\s+=\s+\$thisVM\.thisParams\.SQLAO\.AGIPAddresses') 'SqlAGListener declares the complete multi-subnet listener IP set'
 Assert-Equal $true ($phase5 -match 'Add-DnsServerResourceRecordA[\s\S]+-TimeToLive \$listenerTtl') 'listener DNS repair applies the configured TTL'
 Assert-Equal $true ($phase5 -match 'if \(-not \$using:listenerRegisterAllProviders\)') 'listener DNS repair honors RegisterAllProvidersIP=0'
 Assert-Equal $true ($phase5 -match 'foreach \(\$repairDC in \$allDCs\)') 'listener DNS repair reconciles every DC on every attempt'
@@ -194,6 +195,8 @@ Assert-Equal $true ($phase5 -match "Script PrimaryAgReady") 'secondary replica a
 Assert-Equal $true ($phase5 -match "rs\.role_desc = 'PRIMARY'") 'primary readiness gate verifies the local AG role'
 Assert-Equal $true ($phase5 -match '\$_localAgTarget') 'primary readiness gate checks existing local replica membership first'
 Assert-Equal $true ($phase5 -match 'local replica is absent and configured primary is not PRIMARY') 'primary readiness gate distinguishes initial add from converged failover state'
+Assert-Equal $false ($phase5 -match "SqlWaitForAG 'SQLConfigureAG-WaitAG'") 'local membership gate has no mandatory configured-primary SqlWaitForAG predecessor'
+Assert-Equal $false ($phase5 -match 'WaitForAll AG \{') 'local membership gate has no remote listener WaitForAll predecessor'
 Assert-Equal $true ($phase5 -match '\[DateTime\]::UtcNow\.AddMinutes\(10\)') 'primary readiness gate uses an absolute ten-minute deadline'
 Assert-Equal $true ($phase5 -match 'while \(\[DateTime\]::UtcNow -lt \$deadline\)') 'primary readiness retries stop at the deadline'
 

@@ -597,7 +597,7 @@
             AvailabilityGroup    = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
             DHCP                 = $false
             Name                 = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
-            IpAddress            = $thisVM.thisParams.SQLAO.AGIPAddress
+            IpAddress            = $thisVM.thisParams.SQLAO.AGIPAddresses
             Port                 = $AOSqlPort
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
@@ -1274,36 +1274,7 @@
             DependsOn            = '[SqlEndpoint]HADREndpoint'
         }
 
-        WriteStatus SQLAOWait {
-            DependsOn = '[SqlAlwaysOnService]EnableHADR'
-            Status    = "Waiting for '$node1' to create the Availability Group"
-        }
-
-        SqlWaitForAG 'SQLConfigureAG-WaitAG' {
-            Name                 = $node1VM.thisParams.SQLAO.AlwaysOnGroupName
-            RetryIntervalSec     = 10
-            RetryCount           = 300
-            ServerName           = $node1
-            InstanceName         = $node1vm.sqlInstanceName
-            DependsOn            = '[SqlAlwaysOnService]EnableHADR'
-            PsDscRunAsCredential = $Admincreds
-        }
-        $nextDepend = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
-
-        WriteStatus SQLAO1 {
-            DependsOn = $nextDepend
-            Status    = "Waiting for $node1 to complete"
-        }
-
-        WaitForAll AG {
-            ResourceName     = '[SqlAGListener]AvailabilityGroupListener'
-            NodeName         = $node1
-            RetryIntervalSec = 5
-            RetryCount       = 450
-            DependsOn        = $nextDepend
-            PsDscRunAsCredential = $Admincreds
-        }
-        $nextDepend = '[WaitForAll]AG'
+        $nextDepend = '[SqlAlwaysOnService]EnableHADR'
 
         $_primaryAgTarget = $node1VM.thisParams.SQLAO.PrimaryReplicaServerName
         if ($node1vm.sqlInstanceName -and $node1vm.sqlInstanceName -ine 'MSSQLSERVER') {
