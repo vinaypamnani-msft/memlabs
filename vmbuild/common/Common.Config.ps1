@@ -1630,7 +1630,7 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
-    # Add Primary to list, when adding Passive
+    # Add existing dependencies when adding a Passive
     $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and -not $_.Hidden }
     foreach ($PassiveVM in $PassiveVMs) {
         $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
@@ -1642,6 +1642,9 @@ function Add-ExistingVMsToDeployConfig {
                 }
                 Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
             }
+        }
+        if ($PassiveVM.remoteContentLibVM) {
+            Add-ExistingVMToDeployConfig -vmName $PassiveVM.remoteContentLibVM -configToModify $config -hidden:$true
         }
     }
 

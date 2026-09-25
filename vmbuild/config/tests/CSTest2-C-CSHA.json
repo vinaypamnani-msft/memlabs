@@ -22,19 +22,7 @@
       "additionalDisks": {
         "E": "250GB"
       },
-      "remoteContentLibVM": "FS1"
-    },
-    {
-      "vmName": "FS1",
-      "role": "FileServer",
-      "operatingSystem": "Server 2022",
-      "memory": "3GB",
-      "dynamicMinRam": "1GB",
-      "virtualProcs": 4,
-      "additionalDisks": {
-        "E": "500GB",
-        "F": "200GB"
-      }
+      "remoteContentLibVM": "CS2-FS1"
     },
     {
       "vmName": "W10Client2",
