@@ -6141,6 +6141,17 @@ function Set-DeployConfigIPAddresses {
             $partnerVm | Add-Member -MemberType NoteProperty -Name $family.Singular -Value $ownerIp -Force
         }
 
+        foreach ($metadataName in @(
+                'ClusterName', 'AlwaysOnGroupName', 'AlwaysOnListenerName',
+                'fileServerVM', 'SqlServiceAccount', 'SqlAgentAccount',
+                'listenerRegisterAllProvidersIP', 'listenerHostRecordTTL'
+            )) {
+            if ($null -ne $ownerVm.$metadataName) {
+                $partnerVm | Add-Member -MemberType NoteProperty -Name $metadataName -Value $ownerVm.$metadataName -Force
+            }
+        }
+        $partnerVm | Add-Member -MemberType NoteProperty -Name SQLAOOwnerVM -Value $ownerVm.vmName -Force
+
         $overlap = @($ownerVm.ClusterIPAddresses | Where-Object { $_ -in $ownerVm.AGIPAddresses })
         if ($overlap.Count -gt 0) {
             throw "$($ownerVm.vmName): SQLAO cluster and listener addresses overlap: $($overlap -join ', ')."

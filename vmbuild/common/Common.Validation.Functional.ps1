@@ -1952,15 +1952,19 @@ function Test-SQLAOFunctionality {
     $witnessShare = ''
     $backupShare = ''
     $agIP = ''
+    $agIPs = @()
     $listenerPort = '1500'
 
     $clusterName = ''
     $clusterIP = ''
+    $clusterIPs = @()
 
     if ($primaryAO) {
         $listenerName = $primaryAO.AlwaysOnListenerName
         $agName = $primaryAO.AlwaysOnGroupName
         $agIP = $primaryAO.AGIPAddress   # without CIDR
+        $agIPs = @($primaryAO.AGIPAddresses | ForEach-Object { [string]$_ -replace '/.*$', '' } | Where-Object { $_ })
+        if ($agIPs.Count -eq 0 -and $agIP) { $agIPs = @([string]$agIP -replace '/.*$', '') }
         # "Other node" relative to THIS VM
         $otherNode = if ($VMName -eq $primaryAO.vmName) { $primaryAO.OtherNode } else { $primaryAO.vmName }
         # Derive share UNC paths (same logic as Get-SQLAOConfig)
@@ -1971,6 +1975,8 @@ function Test-SQLAOFunctionality {
         $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"
         $clusterName = $primaryAO.ClusterName
         $clusterIP = $primaryAO.ClusterIPAddress   # raw IP without CIDR
+        $clusterIPs = @($primaryAO.ClusterIPAddresses | ForEach-Object { [string]$_ -replace '/.*$', '' } | Where-Object { $_ })
+        if ($clusterIPs.Count -eq 0 -and $clusterIP) { $clusterIPs = @([string]$clusterIP -replace '/.*$', '') }
     }
 
     # Degraded / single-node Availability Group: the partner node (OtherNode)
@@ -1990,7 +1996,7 @@ function Test-SQLAOFunctionality {
     if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
 
     $scriptBlock = {
-        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP)
+        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $clusterIPs, $agIPs)
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
@@ -2080,6 +2086,89 @@ function Test-SQLAOFunctionality {
             }
         }
 
+        function Get-SqlAoIpResourceHealth {
+            param(
+                [object[]]$Resources,
+                [string[]]$ExpectedClusterIPs,
+                [string[]]$ExpectedListenerIPs
+            )
+
+            $ExpectedClusterIPs = @($ExpectedClusterIPs | Where-Object { $_ } | Sort-Object -Unique)
+            $ExpectedListenerIPs = @($ExpectedListenerIPs | Where-Object { $_ } | Sort-Object -Unique)
+            $ExpectedIPs = @($ExpectedClusterIPs + $ExpectedListenerIPs | Sort-Object -Unique)
+            $entries = @($Resources | ForEach-Object {
+                    [pscustomobject]@{
+                        Name    = [string]$_.Name
+                        State   = [string]$_.State
+                        Group   = [string]$_.OwnerGroup
+                        Address = [string](($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value)
+                        Network = [string](($_ | Get-ClusterParameter -Name Network -ErrorAction SilentlyContinue).Value)
+                    }
+                })
+            $details = [System.Collections.Generic.List[string]]::new()
+            $passed = $true
+            if ($ExpectedIPs.Count -gt 0) {
+                foreach ($expectedIp in $ExpectedIPs) {
+                    $matches = @($entries | Where-Object { $_.Address -eq $expectedIp })
+                    if ($matches.Count -ne 1) {
+                        $passed = $false
+                        $details.Add("FAIL: Expected cluster/listener IP '$expectedIp' has $($matches.Count) resource occurrence(s), expected exactly one")
+                    }
+                }
+                $clusterGroups = @($entries | Where-Object { $_.Address -in $ExpectedClusterIPs } | Select-Object -ExpandProperty Group -Unique)
+                $listenerGroups = @($entries | Where-Object { $_.Address -in $ExpectedListenerIPs } | Select-Object -ExpandProperty Group -Unique)
+                if ($ExpectedClusterIPs.Count -gt 0 -and $clusterGroups.Count -ne 1) {
+                    $passed = $false
+                    $details.Add("FAIL: Core cluster IP resources span $($clusterGroups.Count) owner group(s), expected one")
+                }
+                if ($ExpectedListenerIPs.Count -gt 0 -and $listenerGroups.Count -ne 1) {
+                    $passed = $false
+                    $details.Add("FAIL: Listener IP resources span $($listenerGroups.Count) owner group(s), expected one")
+                }
+                if ($clusterGroups.Count -eq 1 -and $listenerGroups.Count -eq 1 -and $clusterGroups[0] -eq $listenerGroups[0]) {
+                    $passed = $false
+                    $details.Add("FAIL: Core cluster and listener IP resources share owner group '$($clusterGroups[0])'")
+                }
+            }
+            foreach ($group in @($entries | Group-Object Group)) {
+                $groupEntries = @($group.Group)
+                $desiredEntries = @($groupEntries | Where-Object { $_.Address -in $ExpectedIPs })
+                $unexpectedEntries = @($groupEntries | Where-Object { $ExpectedIPs.Count -gt 0 -and $_.Address -notin $ExpectedIPs })
+                foreach ($entry in $groupEntries) {
+                    $details.Add("INFO: Cluster IP resource '$($entry.Name)' = $($entry.Address) on '$($entry.Network)' ($($entry.State))")
+                }
+                foreach ($entry in $unexpectedEntries) {
+                    $passed = $false
+                    $details.Add("FAIL: Unexpected cluster IP resource '$($entry.Name)' has address '$($entry.Address)'")
+                }
+
+                if ($desiredEntries.Count -gt 1) {
+                    $badStates = @($desiredEntries | Where-Object { $_.State -notin @('Online', 'Offline') })
+                    $online = @($desiredEntries | Where-Object { $_.State -eq 'Online' })
+                    foreach ($entry in $badStates) {
+                        $passed = $false
+                        $details.Add("FAIL: Multi-subnet IP resource '$($entry.Name)' is $($entry.State), expected Online or Offline")
+                    }
+                    if ($online.Count -lt 1) {
+                        $passed = $false
+                        $details.Add("FAIL: Multi-subnet resource group '$($group.Name)' has no online IP resource")
+                    }
+                    elseif ($badStates.Count -eq 0) {
+                        $details.Add("OK: Multi-subnet resource group '$($group.Name)' has $($online.Count) online IP and $(@($desiredEntries | Where-Object { $_.State -eq 'Offline' }).Count) expected offline IP(s)")
+                    }
+                }
+                else {
+                    foreach ($entry in $groupEntries) {
+                        if ($entry.State -ne 'Online') {
+                            $passed = $false
+                            $details.Add("FAIL: Cluster IP resource '$($entry.Name)' is $($entry.State), expected Online")
+                        }
+                    }
+                }
+            }
+            return [pscustomobject]@{ Passed = $passed; Entries = $entries; Details = $details }
+        }
+
         try {
             Import-Module SqlServer -ErrorAction SilentlyContinue
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
@@ -2096,17 +2185,18 @@ function Test-SQLAOFunctionality {
 
                 # Post-reboot settle wait: after a -startPhase 11 rerun the nodes
                 # are freshly booted and the failover cluster needs a minute or two
-                # to re-form (node rejoin + AG IP resource online). Poll up to ~2 min
-                # for all nodes Up and all IP-Address resources Online before
-                # evaluating, so a not-yet-settled cluster doesn't produce spurious
-                # FAILs. If it never settles, the checks below still FAIL as before.
+                # to re-form (node rejoin + active-subnet IP resources online). Poll
+                # up to ~2 min for all nodes Up and each resource group to have its
+                # required online IP. Multi-subnet OR dependencies intentionally
+                # leave the inactive-subnet provider Offline.
                 $settleWaited = $false
                 for ($cw = 1; $cw -le 8; $cw++) {
                     try {
                         $wNodes = @(Get-ClusterNode -ErrorAction Stop)
                         $wIp = @(Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { $_.ResourceType -eq 'IP Address' })
                         $allUp = ($wNodes.Count -gt 0) -and -not @($wNodes | Where-Object { $_.State -ne 'Up' }).Count
-                        $ipOk = -not @($wIp | Where-Object { $_.State -ne 'Online' }).Count
+                        $wIpHealth = Get-SqlAoIpResourceHealth -Resources $wIp -ExpectedClusterIPs $clusterIPs -ExpectedListenerIPs $agIPs
+                        $ipOk = $wIpHealth.Passed
                         if ($allUp -and $ipOk) { break }
                     }
                     catch { }
@@ -2136,15 +2226,15 @@ function Test-SQLAOFunctionality {
 
                 # Validate cluster resource IPs
                 $results.Details.Add("CMD: Validate cluster resource IPs and DNS")
-                $clusterIPRes = Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { $_.ResourceType -eq 'IP Address' }
-                foreach ($ipRes in $clusterIPRes) {
-                    $ip = ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
-                    $network = ($ipRes | Get-ClusterParameter -Name Network -ErrorAction SilentlyContinue).Value
-                    $results.Details.Add("OK: Cluster IP resource '$($ipRes.Name)' = $ip on '$network' ($($ipRes.State))")
-                    if ($ipRes.State -ne 'Online') {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: Cluster IP resource '$($ipRes.Name)' is $($ipRes.State), expected Online")
-                    }
+                $clusterIPRes = @(Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { $_.ResourceType -eq 'IP Address' })
+                $ipHealth = Get-SqlAoIpResourceHealth -Resources $clusterIPRes -ExpectedClusterIPs $clusterIPs -ExpectedListenerIPs $agIPs
+                foreach ($detail in $ipHealth.Details) { $results.Details.Add($detail) }
+                if (-not $ipHealth.Passed) { $results.Passed = $false }
+                $activeClusterIPs = @($ipHealth.Entries | Where-Object {
+                        $_.Address -in $clusterIPs -and $_.State -eq 'Online'
+                    } | ForEach-Object { $_.Address })
+                if ($activeClusterIPs.Count -eq 0 -and $clusterIP) {
+                    $activeClusterIPs = @($clusterIP)
                 }
 
                 # Validate cluster name DNS points to the correct IP.
@@ -2226,14 +2316,16 @@ function Test-SQLAOFunctionality {
 
                     if ($clusterResolvedIPs.Count -gt 0) {
                         $results.Details.Add("OK: Cluster name '$clusterName' resolves to $($clusterResolvedIPs -join ', ')$clusterDnsSource")
-                        if ($clusterIP -and $clusterIP -notin $clusterResolvedIPs) {
+                        $activeDnsMatch = @($activeClusterIPs | Where-Object { $_ -in $clusterResolvedIPs })
+                        if ($activeClusterIPs.Count -gt 0 -and $activeDnsMatch.Count -eq 0) {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: Expected cluster IP '$clusterIP' not in DNS (found: $($clusterResolvedIPs -join ', '))")
+                            $activeIpText = $activeClusterIPs -join ', '
+                            $results.Details.Add("FAIL: Active cluster IP '$activeIpText' not in DNS (found: $($clusterResolvedIPs -join ', '))")
                         }
                         # Check for stale non-cluster IPs
                         foreach ($rip in $clusterResolvedIPs) {
-                            if ($clusterIP -and $rip -ne $clusterIP) {
-                                $results.Details.Add("WARN: Cluster DNS has unexpected IP '$rip' (expected '$clusterIP')")
+                            if ($clusterIPs.Count -gt 0 -and $rip -notin $clusterIPs) {
+                                $results.Details.Add("WARN: Cluster DNS has unexpected IP '$rip' (expected one of: $($clusterIPs -join ', '))")
                             }
                         }
                     }
@@ -3441,9 +3533,12 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
     # 5x20s + AG log backup 120s + endpoint cycling), so a healthy node never
     # hits it; on timeout Invoke-VmCommand returns ScriptBlockFailed and
     # Format-TestResult records a FAIL for the VM and the phase completes.
+    $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP)
+    $validationArguments += ,@($clusterIPs)
+    $validationArguments += ,@($agIPs)
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
-        -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP `
+        -ArgumentList $validationArguments `
         -DisplayName "Phase11-SQLAO-Test" -SuppressLog -AsJob -TimeoutSeconds 600 -PollProgress
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQLAO' -Result $result)
@@ -15219,8 +15314,12 @@ function Test-SQLAOPostPhase5 {
         $listenerName = $primaryAO.AlwaysOnListenerName
         $agName = $primaryAO.AlwaysOnGroupName
         $agIP = $primaryAO.AGIPAddress
+        $agIPs = @($primaryAO.AGIPAddresses | ForEach-Object { [string]$_ -replace '/.*$', '' } | Where-Object { $_ })
+        if ($agIPs.Count -eq 0 -and $agIP) { $agIPs = @([string]$agIP -replace '/.*$', '') }
         $clusterName = $primaryAO.ClusterName
         $clusterIP = $primaryAO.ClusterIPAddress
+        $clusterIPs = @($primaryAO.ClusterIPAddresses | ForEach-Object { [string]$_ -replace '/.*$', '' } | Where-Object { $_ })
+        if ($clusterIPs.Count -eq 0 -and $clusterIP) { $clusterIPs = @([string]$clusterIP -replace '/.*$', '') }
         $otherNode = $primaryAO.OtherNode
         $listenerPort = '1500'
 
@@ -15233,7 +15332,7 @@ function Test-SQLAOPostPhase5 {
         Add-Phase11Output "[Phase $Phase] $VMName [SQLAO]: Running post-Phase-5 validation"
 
         $scriptBlock = {
-            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domainName)
+            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domainName, $clusterIPs, $agIPs)
 
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
@@ -15288,9 +15387,11 @@ function Test-SQLAOPostPhase5 {
                             }
                             else {
                                 $results.Details.Add("OK: Cluster name '$clusterName' has DNS A record(s) on DC '$dc': $($resolvedIPs -join ', ')")
-                                if ($clusterIP -and $clusterIP -notin $resolvedIPs) {
+                                $expectedDnsMatch = @($clusterIPs | Where-Object { $_ -in $resolvedIPs })
+                                if ($clusterIPs.Count -gt 0 -and $expectedDnsMatch.Count -eq 0) {
                                     $results.Passed = $false
-                                    $results.Details.Add("FAIL: Expected cluster IP '$clusterIP' not in DNS on DC '$dc' (found: $($resolvedIPs -join ', '))")
+                                    $expectedIpText = $clusterIPs -join ', '
+                                    $results.Details.Add("FAIL: Expected one of cluster IPs '$expectedIpText' in DNS on DC '$dc' (found: $($resolvedIPs -join ', '))")
                                 }
                             }
                         }
@@ -15586,9 +15687,12 @@ ORDER BY ar.replica_server_name, adb.database_name
             return $results
         }
 
+        $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domain)
+        $validationArguments += ,@($clusterIPs)
+        $validationArguments += ,@($agIPs)
         $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock $scriptBlock `
-            -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domain `
+            -ArgumentList $validationArguments `
             -DisplayName "Phase5-SQLAO-Validate" -SuppressLog
 
         # Process results inline (Format-TestResult hardcodes Phase 11)

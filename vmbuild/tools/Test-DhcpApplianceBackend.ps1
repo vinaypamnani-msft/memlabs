@@ -139,7 +139,10 @@ Assert-True (-not $deploy.virtualMachines[5].PSObject.Properties['AssignedIP']) 
 $multiSubnetDeploy = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ network = '192.168.61.0'; domainName = 'multisubnet.test' }
     virtualMachines = @(
-        [pscustomobject]@{ vmName = 'SQL-MS1'; role = 'SQLAO'; OtherNode = 'SQL-MS2' },
+        [pscustomobject]@{
+            vmName = 'SQL-MS1'; role = 'SQLAO'; OtherNode = 'SQL-MS2'
+            ClusterName = 'MSCLUSTER'; AlwaysOnGroupName = 'MSAG'; AlwaysOnListenerName = 'MSLISTENER'; fileServerVM = 'FS1'
+        },
         [pscustomobject]@{ vmName = 'SQL-MS2'; role = 'SQLAO'; network = '192.168.62.0' }
     )
 }
@@ -151,6 +154,8 @@ Assert-Equal '192.168.61.201' $multiSubnetOwner.ClusterIPAddress 'legacy cluster
 Assert-Equal '192.168.61.202' $multiSubnetOwner.AGIPAddress 'legacy listener IP aliases the owner subnet'
 Assert-Equal '192.168.61.201,192.168.62.201' (@($multiSubnetDeploy.virtualMachines[1].ClusterIPAddresses) -join ',') 'appliance allocator persists cluster IP state on the partner'
 Assert-Equal '192.168.61.202,192.168.62.202' (@($multiSubnetDeploy.virtualMachines[1].AGIPAddresses) -join ',') 'appliance allocator persists listener IP state on the partner'
+Assert-Equal 'SQL-MS1' $multiSubnetDeploy.virtualMachines[1].SQLAOOwnerVM 'appliance allocator persists reciprocal owner identity on the partner'
+Assert-Equal 'MSLISTENER' $multiSubnetDeploy.virtualMachines[1].AlwaysOnListenerName 'appliance allocator persists listener identity on the partner'
 
 $mixedMultiSubnetDeploy = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ network = '192.168.69.0'; domainName = 'mixed.multisubnet.test' }
@@ -454,6 +459,8 @@ $global:Common | Add-Member -MemberType NoteProperty -Name MemLabsVersion -Value
 New-VmNote -VmName 'SQL-MS2' -DeployConfig $multiSubnetDeploy -InProgress $true
 Assert-Equal '192.168.61.201,192.168.62.201' (@($script:CapturedPartnerNote.ClusterIPAddresses) -join ',') 'partner VM note round-trip preserves cluster IP state'
 Assert-Equal '192.168.61.202,192.168.62.202' (@($script:CapturedPartnerNote.AGIPAddresses) -join ',') 'partner VM note round-trip preserves listener IP state'
+Assert-Equal 'SQL-MS1' $script:CapturedPartnerNote.SQLAOOwnerVM 'partner VM note round-trip preserves reciprocal owner identity'
+Assert-Equal 'MSLISTENER' $script:CapturedPartnerNote.AlwaysOnListenerName 'partner VM note round-trip preserves listener identity'
 
 # Exercise the native Windows DHCP allocation path without touching the host.
 function Test-MemLabsUsesDhcpAppliance { return $false }
@@ -495,6 +502,7 @@ Assert-Equal '192.168.71.201' $nativeOwner.ClusterIPAddress 'native DHCP retains
 Assert-Equal '192.168.71.202' $nativeOwner.AGIPAddress 'native DHCP retains the owner-subnet listener alias'
 Assert-Equal '192.168.71.201,192.168.72.201' (@($nativeMultiSubnetDeploy.virtualMachines[1].ClusterIPAddresses) -join ',') 'native DHCP persists cluster IP state on the partner'
 Assert-Equal '192.168.71.202,192.168.72.202' (@($nativeMultiSubnetDeploy.virtualMachines[1].AGIPAddresses) -join ',') 'native DHCP persists listener IP state on the partner'
+Assert-Equal 'SQL-N1' $nativeMultiSubnetDeploy.virtualMachines[1].SQLAOOwnerVM 'native DHCP persists reciprocal owner identity on the partner'
 
 function Get-VMNote {
     param($VMName)

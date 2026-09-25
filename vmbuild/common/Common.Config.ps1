@@ -1682,8 +1682,29 @@ function Add-RemoteSQLVMToDeployConfig {
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
     $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
     if (-not $remoteSQLVM) {
-        Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it does not, please modify the hyper-v config to reflect the new name" -Failure
-        return
+        $replacementCandidates = @(Get-List -Type VM -DomainName $configToModify.vmOptions.domainName -SmartUpdate |
+                Where-Object { $_.role -eq 'SQLAO' -and $_.SQLAOOwnerVM -eq $vmName })
+        if ($replacementCandidates.Count -eq 1) {
+            $replacement = $replacementCandidates[0]
+            Write-Log "SQLAO owner '$vmName' is missing; using surviving partner '$($replacement.vmName)' from reciprocal SQLAOOwnerVM metadata." -Warning
+            $missingOwnerName = $vmName
+            $vmName = [string]$replacement.vmName
+            Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
+            $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$false -Global:$true
+            if ($remoteSQLVM) {
+                foreach ($referencingVm in @($configToModify.virtualMachines)) {
+                    foreach ($referenceProperty in @('remoteSQLVM', 'wsusDataBaseServer', 'replicaSqlServerVM')) {
+                        if ($referencingVm.$referenceProperty -eq $missingOwnerName) {
+                            $referencingVm.$referenceProperty = $vmName
+                        }
+                    }
+                }
+            }
+        }
+        if (-not $remoteSQLVM) {
+            Write-Log "Could not get $vmName from List2. Please make sure this VM exists in Hyper-V, or that a surviving SQLAO partner carries reciprocal SQLAOOwnerVM metadata." -Failure
+            return
+        }
     }
     Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.VmName -configToModify $configToModify -hidden:$hidden
     if ($remoteSQLVM.OtherNode) {
@@ -1804,6 +1825,41 @@ function Add-Phase8DistributionPointMetadata {
     }
 
     $Config | Add-Member -MemberType NoteProperty -Name phase8ManagedDistributionPointScopes -Value @($managedDpScopes) -Force
+}
+
+function Repair-SqlAoMissingPartners {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Config,
+        [AllowNull()][object[]]$RefreshedVmInventory,
+        [bool]$InventoryRefreshVerified
+    )
+
+    foreach ($sqlao in @($Config.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and $_.hidden })) {
+        if (-not $InventoryRefreshVerified) {
+            Write-Log "$($sqlao.vmName): SQLAO partner presence could not be authoritatively verified; preserving OtherNode '$($sqlao.OtherNode)'." -Warning
+            continue
+        }
+        $partnerPresent = $RefreshedVmInventory | Where-Object { $_.vmName -eq $sqlao.OtherNode } | Select-Object -First 1
+        if (-not $partnerPresent) {
+            $missingPartner = [string]$sqlao.OtherNode
+            $note = Get-VMNote -VMName $sqlao.vmName
+            if (-not $note) {
+                Write-Log "$($sqlao.vmName): cannot persist degraded SQLAO state because its VM note could not be read; preserving OtherNode '$missingPartner'." -Failure
+                continue
+            }
+            $note | Add-Member -MemberType NoteProperty -Name OtherNode -Value $null -Force
+            Set-VMNote -VMName $sqlao.vmName -vmNote $note -Force
+            $verifiedNote = Get-VMNote -VMName $sqlao.vmName
+            $verifiedOtherNode = if ($verifiedNote) { $verifiedNote.PSObject.Properties['OtherNode'] } else { $null }
+            if (-not $verifiedOtherNode -or $null -ne $verifiedOtherNode.Value) {
+                Write-Log "$($sqlao.vmName): failed to persist the SQLAO partner tombstone for '$missingPartner'; preserving the in-memory pair." -Failure
+                continue
+            }
+            Write-Log "$($sqlao.vmName): SQLAO partner node '$missingPartner' was authoritatively absent and the tombstone was persisted. Treating '$($sqlao.vmName)' as a single-node (degraded) Availability Group using listener '$($sqlao.AlwaysOnListenerName)'." -Warning
+            $sqlao | Add-Member -MemberType NoteProperty -Name OtherNode -Value $null -Force
+        }
+    }
 }
 
 function Add-ExistingVMsToDeployConfig {
@@ -2178,18 +2234,9 @@ function Add-ExistingVMsToDeployConfig {
     # (degraded) Availability Group: the cluster / AG / listener built in Phase 5
     # still physically exist on the surviving node, AlwaysOnListenerName stays
     # set so $installToAO and CM Setup keep using the existing listener, and
-    # every OtherNode-gated step naturally no-ops (Get-SQLAOConfig already
-    # returns $null without OtherNode by design -- "we don't care about
-    # secondary"). This runs in Test-Configuration's Add-Existing pass, before
-    # ConvertTo-DeployConfigEx, so the whole deploy (every phase + ScriptWorkflow)
-    # sees the healed config.
-    foreach ($sqlao in @($config.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode })) {
-        $partnerPresent = $config.virtualMachines | Where-Object { $_.vmName -eq $sqlao.OtherNode } | Select-Object -First 1
-        if (-not $partnerPresent) {
-            Write-Log "$($sqlao.vmName): SQLAO partner node '$($sqlao.OtherNode)' was not found on this host (it appears to have been removed). Clearing OtherNode and treating '$($sqlao.vmName)' as a single-node (degraded) Availability Group -- CM Setup will keep using the existing AG listener '$($sqlao.AlwaysOnListenerName)'." -Warning
-            $sqlao.PSObject.Properties.Remove('OtherNode')
-        }
-    }
+    # every OtherNode-gated cluster-build step naturally no-ops while
+    # Get-SQLAOConfig still emits listener connection metadata.
+    Repair-SqlAoMissingPartners -Config $config -RefreshedVmInventory @($refreshedVmInventory) -InventoryRefreshVerified $inventoryRefreshVerified
 
     Add-Phase8DistributionPointMetadata -Config $config -ExistingVMs @($refreshedVmInventory) -InventoryRefreshVerified $inventoryRefreshVerified
 }
@@ -3104,12 +3151,24 @@ function Get-SQLAOConfig {
         Write-Log -Failure "Could not find Primary SQLAO VM $vmName"
         return $null
     }
-    if (-not ($PrimaryAO.OtherNode)) {
-        #ignore this.. We run this on all SQLAO nodes,and don't care about secondary
+    $ownerVmPresent = $false
+    if (-not $PrimaryAO.OtherNode -and $PrimaryAO.SQLAOOwnerVM) {
+        $ownerVmPresent = $null -ne ($deployConfig.virtualMachines | Where-Object { $_.vmName -eq $PrimaryAO.SQLAOOwnerVM } | Select-Object -First 1)
+    }
+    if (-not $PrimaryAO.OtherNode -and $PrimaryAO.SQLAOOwnerVM -and $ownerVmPresent) {
+        # Reciprocal metadata on a healthy secondary is for future recovery;
+        # only the owner emits the shared SQLAO configuration.
+        return $null
+    }
+    $isDegraded = -not [bool]$PrimaryAO.OtherNode
+    if ($isDegraded -and (-not $PrimaryAO.AlwaysOnListenerName -or -not $PrimaryAO.ClusterName)) {
+        # Normal secondary definitions have no OtherNode or shared cluster
+        # identity. A healed survivor carries both and still needs a listener
+        # connection object even though Phase 5 must not rebuild the pair.
         return $null
     }
 
-    $SecondAO = $PrimaryAO.OtherNode
+    $SecondAO = if ($PrimaryAO.OtherNode) { [string]$PrimaryAO.OtherNode } else { '' }
     $FSAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "FileServer" -and $_.vmName -eq $PrimaryAO.FileServerVM }
     #$DC = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }
 
@@ -3162,15 +3221,23 @@ function Get-SQLAOConfig {
         write-log "$vmName`: WARNING: AGIPAddress $($PrimaryAO.AGIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). AG listener may not be reachable." -Warning
     }
 
-    $SecondAOVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $SecondAO } | Select-Object -First 1
-    $primaryNetwork = if ($PrimaryAO.network) { [string]$PrimaryAO.network } else { [string]$deployConfig.vmOptions.network }
-    $secondaryNetwork = if ($SecondAOVM -and $SecondAOVM.network) { [string]$SecondAOVM.network } else { [string]$deployConfig.vmOptions.network }
-    $domainNetworks = @(@($primaryNetwork, $secondaryNetwork) | Where-Object { $_ } | Select-Object -Unique)
-
     $clusterIps = @($PrimaryAO.ClusterIPAddresses | Where-Object { $_ } | ForEach-Object { [string]$_ -replace '/.+$', '' })
     if ($clusterIps.Count -eq 0 -and $PrimaryAO.ClusterIPAddress) { $clusterIps = @([string]$PrimaryAO.ClusterIPAddress -replace '/.+$', '') }
     $listenerIps = @($PrimaryAO.AGIPAddresses | Where-Object { $_ } | ForEach-Object { [string]$_ -replace '/.+$', '' })
     if ($listenerIps.Count -eq 0 -and $PrimaryAO.AGIPAddress) { $listenerIps = @([string]$PrimaryAO.AGIPAddress -replace '/.+$', '') }
+
+    $SecondAOVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $SecondAO } | Select-Object -First 1
+    $primaryNetwork = if ($PrimaryAO.network) { [string]$PrimaryAO.network } else { [string]$deployConfig.vmOptions.network }
+    if ($isDegraded) {
+        $domainNetworks = @($clusterIps | ForEach-Object {
+                $octets = $_ -split '\.'
+                if ($octets.Count -eq 4) { "$($octets[0]).$($octets[1]).$($octets[2]).0" }
+            } | Where-Object { $_ } | Select-Object -Unique)
+    }
+    else {
+        $secondaryNetwork = if ($SecondAOVM -and $SecondAOVM.network) { [string]$SecondAOVM.network } else { [string]$deployConfig.vmOptions.network }
+        $domainNetworks = @(@($primaryNetwork, $secondaryNetwork) | Where-Object { $_ } | Select-Object -Unique)
+    }
 
     $orderedClusterIps = @()
     $orderedListenerIps = @()
@@ -3207,15 +3274,15 @@ function Get-SQLAOConfig {
 
     $config = [PSCustomObject]@{
         GroupName                  = $ClusterName + "Group"
-        GroupMembers               = @("$($PrimaryAO.vmName)$", "$($SecondAO)$", "$($ClusterName)$")
-        GroupMembersFQ             = @("$($netbiosName + "\" + $PrimaryAO.vmName)$", "$($netbiosName + "\" + $SecondAO)$", "$($netbiosName + "\" + $ClusterName)$")
+        GroupMembers               = @("$($PrimaryAO.vmName)$", $(if ($SecondAO) { "$($SecondAO)$" }), "$($ClusterName)$") | Where-Object { $_ }
+        GroupMembersFQ             = @("$($netbiosName + "\" + $PrimaryAO.vmName)$", $(if ($SecondAO) { "$netbiosName\$($SecondAO)$" }), "$($netbiosName + "\" + $ClusterName)$") | Where-Object { $_ }
         SqlServiceAccount          = $ServiceAccount
         SqlServiceAccountFQ        = $netbiosName + "\" + $ServiceAccount
         SqlAgentServiceAccount     = $AgentAccount
         SqlAgentServiceAccountFQ   = $netbiosName + "\" + $AgentAccount
         OULocationUser             = $cnUsersName
         OULocationDevice           = $cnComputersName
-        ClusterNodes               = @($PrimaryAO.vmName, $SecondAO)
+        ClusterNodes               = @($PrimaryAO.vmName, $SecondAO) | Where-Object { $_ }
         WitnessLocalPath           = "F:\$($ClusterNameNoPrefix)-Witness"
         BackupLocalPath            = "F:\$($ClusterNameNoPrefix)-Backup"
         AlwaysOnGroupName          = $PrimaryAO.AlwaysOnGroupName
@@ -3230,8 +3297,9 @@ function Get-SQLAOConfig {
         MultiSubnetFailover        = $multiSubnetFailover
         ListenerRegisterAllProvidersIP = $registerAllProvidersIP
         ListenerHostRecordTTL      = $hostRecordTTL
+        Degraded                   = $isDegraded
         PrimaryReplicaServerName   = $PrimaryAO.vmName + "." + $deployConfig.vmOptions.DomainName
-        SecondaryReplicaServerName = $PrimaryAO.OtherNode + "." + $deployConfig.vmOptions.DomainName
+        SecondaryReplicaServerName = if ($SecondAO) { $SecondAO + "." + $deployConfig.vmOptions.DomainName } else { '' }
         AlwaysOnListenerName       = $PrimaryAO.AlwaysOnListenerName
         AlwaysOnListenerNameFQDN   = $PrimaryAO.AlwaysOnListenerName + "." + $deployConfig.vmOptions.DomainName
         WitnessShareFQ             = "\\" + $PrimaryAO.fileServerVM + "\" + "$($ClusterNameNoPrefix)-Witness"

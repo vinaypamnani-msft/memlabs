@@ -32,7 +32,13 @@ function Remove-VmNamePrefix { param($Name, $Prefix) return $Name }
 function Get-List { return @() }
 
 . (Import-TestFunction -Path (Join-Path $RootPath 'vmbuild\common\Common.Config.ps1') -Name 'Get-SQLAOConfig')
+. (Import-TestFunction -Path (Join-Path $RootPath 'vmbuild\common\Common.Config.ps1') -Name 'Add-RemoteSQLVMToDeployConfig')
+. (Import-TestFunction -Path (Join-Path $RootPath 'vmbuild\common\Common.Config.ps1') -Name 'Repair-SqlAoMissingPartners')
 . (Import-TestFunction -Path (Join-Path $RootPath 'vmbuild\DSC\phases\InstallAndUpdateSCCM.ps1') -Name 'Get-CmOdbcPreflightCandidates')
+. (Import-TestFunction -Path (Join-Path $RootPath 'vmbuild\DSC\phases\InstallPSForHierarchy.ps1') -Name 'Get-HierarchyOdbcConnectionString')
+. (Import-TestFunction -Path (Join-Path $RootPath 'vmbuild\DSC\phases\InstallPSForHierarchy.ps1') -Name 'Get-HierarchyRecoveryAction')
+$stopHierarchyInstallSource = (Import-TestFunction -Path (Join-Path $RootPath 'vmbuild\DSC\phases\InstallPSForHierarchy.ps1') -Name 'Stop-HierarchyInstall').ToString()
+. (Import-TestFunction -Path (Join-Path $RootPath 'vmbuild\DSC\phases\ScriptFunctions.ps1') -Name 'Get-VmSqlConnectionTarget')
 
 $deploy = [pscustomobject]@{
     vmOptions = [pscustomobject]@{
@@ -59,6 +65,103 @@ Assert-Equal '10.10.1.202/255.255.255.0,10.10.2.202/255.255.255.0' (@($result.AG
 Assert-Equal $true $result.MultiSubnetFailover 'different node subnets enable multi-subnet failover'
 Assert-Equal $true $result.ListenerRegisterAllProvidersIP 'multi-subnet listener registers all provider IPs'
 Assert-Equal 300 $result.ListenerHostRecordTTL 'multi-subnet listener uses the default lab TTL'
+
+$healthySecondaryDeploy = $deploy | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+$healthySecondary = $healthySecondaryDeploy.virtualMachines | Where-Object vmName -eq 'SQL2'
+$healthySecondary | Add-Member -MemberType NoteProperty -Name SQLAOOwnerVM -Value 'SQL1' -Force
+$healthySecondary | Add-Member -MemberType NoteProperty -Name ClusterName -Value 'SQLCLUSTER' -Force
+$healthySecondary | Add-Member -MemberType NoteProperty -Name AlwaysOnListenerName -Value 'CM-LISTENER' -Force
+Assert-Equal $null (Get-SQLAOConfig -deployConfig $healthySecondaryDeploy -vmName 'SQL2') 'healthy reciprocal secondary does not emit a second SQLAO owner config'
+
+$degradedDeploy = $deploy | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+$degradedOwner = $degradedDeploy.virtualMachines | Where-Object vmName -eq 'SQL1'
+$degradedOwner.OtherNode = $null
+$degradedDeploy.virtualMachines = @($degradedDeploy.virtualMachines | Where-Object vmName -ne 'SQL2')
+$degradedResult = Get-SQLAOConfig -deployConfig $degradedDeploy -vmName 'SQL1'
+Assert-Equal $true $degradedResult.Degraded 'surviving SQLAO owner emits a degraded connection object'
+Assert-Equal 1500 $degradedResult.SQLAOPort 'degraded SQLAO connection preserves the listener port'
+Assert-Equal '10.10.1.0,10.10.2.0' (@($degradedResult.DomainNetworks) -join ',') 'degraded SQLAO connection preserves both listener subnets'
+$degradedOwner | Add-Member -MemberType NoteProperty -Name thisParams -Value ([pscustomobject]@{ SQLAO = $degradedResult }) -Force
+$degradedTarget = Get-VmSqlConnectionTarget -SiteVm ([pscustomobject]@{ vmName = 'SITE'; remoteSQLVM = 'SQL1' }) `
+    -DeployConfig $degradedDeploy -DomainFullName 'sqlao.test'
+Assert-Equal 'CM-LISTENER.sqlao.test,1500' $degradedTarget 'degraded site connection continues through the listener port'
+
+$survivingPartner = [pscustomobject]@{
+    vmName = 'SQL2'; role = 'SQLAO'; SQLAOOwnerVM = 'MISSING-SQL1'
+    AlwaysOnListenerName = 'CM-LISTENER'; ClusterName = 'SQLCLUSTER'
+}
+$replacementDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'sqlao.test' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'SITE'; role = 'Primary'; remoteSQLVM = 'MISSING-SQL1' },
+        [pscustomobject]@{ vmName = 'SUP'; role = 'WSUS'; wsusDataBaseServer = 'MISSING-SQL1' },
+        [pscustomobject]@{ vmName = 'MP'; role = 'SiteSystem'; replicaSqlServerVM = 'MISSING-SQL1' }
+    )
+}
+$script:ExistingSqlInventory = @($survivingPartner)
+function Get-List { return @($script:ExistingSqlInventory) }
+function Add-ExistingVMToDeployConfig {
+    param($vmName, $configToModify, [bool]$hidden)
+    if (-not ($configToModify.virtualMachines | Where-Object vmName -eq $vmName)) {
+        $candidate = $script:ExistingSqlInventory | Where-Object vmName -eq $vmName | Select-Object -First 1
+        if ($candidate) { $configToModify.virtualMachines += $candidate }
+    }
+}
+function Get-VMFromList2 {
+    param($deployConfig, $vmName, [bool]$SmartUpdate, [bool]$Global)
+    $candidate = $deployConfig.virtualMachines | Where-Object vmName -eq $vmName | Select-Object -First 1
+    if (-not $candidate -and $Global) {
+        $candidate = $script:ExistingSqlInventory | Where-Object vmName -eq $vmName | Select-Object -First 1
+    }
+    return $candidate
+}
+Add-RemoteSQLVMToDeployConfig -vmName 'MISSING-SQL1' -configToModify $replacementDeploy
+Assert-Equal 'SQL2' $replacementDeploy.virtualMachines[0].remoteSQLVM 'missing SQLAO owner reference is redirected to the surviving partner'
+Assert-Equal 'SQL2' $replacementDeploy.virtualMachines[1].wsusDataBaseServer 'missing SQLAO owner WSUS reference is redirected to the surviving partner'
+Assert-Equal 'SQL2' $replacementDeploy.virtualMachines[2].replicaSqlServerVM 'missing SQLAO owner MP replica reference is redirected to the surviving partner'
+Assert-Equal 1 @($replacementDeploy.virtualMachines | Where-Object vmName -eq 'SQL2').Count 'surviving SQLAO partner is added to the deploy config once'
+$configSource = Get-Content (Join-Path $RootPath 'vmbuild\common\Common.Config.ps1') -Raw
+Assert-Equal $true ($configSource -match 'Add-Member -MemberType NoteProperty -Name OtherNode -Value \$null -Force') 'degraded healing durably tombstones the missing partner'
+$script:ExistingSqlInventory = @(
+    [pscustomobject]@{ vmName = 'SQL2A'; role = 'SQLAO'; SQLAOOwnerVM = 'MISSING-SQL1' },
+    [pscustomobject]@{ vmName = 'SQL2B'; role = 'SQLAO'; SQLAOOwnerVM = 'MISSING-SQL1' }
+)
+$ambiguousDeploy = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'sqlao.test' }
+    virtualMachines = @([pscustomobject]@{ vmName = 'SITE2'; role = 'Primary'; remoteSQLVM = 'MISSING-SQL1' })
+}
+Add-RemoteSQLVMToDeployConfig -vmName 'MISSING-SQL1' -configToModify $ambiguousDeploy
+Assert-Equal 'MISSING-SQL1' $ambiguousDeploy.virtualMachines[0].remoteSQLVM 'ambiguous surviving partners do not rewrite SQL references'
+function Get-List { return @() }
+
+$healingOwner = [pscustomobject]@{
+    vmName = 'SQL1'; role = 'SQLAO'; hidden = $true; OtherNode = 'SQL2'; AlwaysOnListenerName = 'CM-LISTENER'
+}
+$healingConfig = [pscustomobject]@{ virtualMachines = @($healingOwner) }
+$script:StoredSqlAoNote = [pscustomobject]@{ vmName = 'SQL1'; OtherNode = 'SQL2' }
+$script:FailSqlAoNoteWrite = $false
+function Get-VMNote {
+    return ($script:StoredSqlAoNote | ConvertTo-Json -Depth 5 | ConvertFrom-Json)
+}
+function Set-VMNote {
+    param($VMName, $vmNote, [switch]$Force)
+    if (-not $script:FailSqlAoNoteWrite) {
+        $script:StoredSqlAoNote = $vmNote | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+    }
+}
+Repair-SqlAoMissingPartners -Config $healingConfig -RefreshedVmInventory @() -InventoryRefreshVerified $false
+Assert-Equal 'SQL2' $healingOwner.OtherNode 'unverified empty inventory does not degrade a healthy SQLAO pair'
+
+$script:FailSqlAoNoteWrite = $true
+Repair-SqlAoMissingPartners -Config $healingConfig -RefreshedVmInventory @() -InventoryRefreshVerified $true
+Assert-Equal 'SQL2' $healingOwner.OtherNode 'failed note persistence preserves the in-memory SQLAO pair'
+
+$script:FailSqlAoNoteWrite = $false
+Repair-SqlAoMissingPartners -Config $healingConfig -RefreshedVmInventory @() -InventoryRefreshVerified $true
+Assert-Equal $null $healingOwner.OtherNode 'verified missing partner degrades the in-memory SQLAO pair'
+Assert-Equal $null $script:StoredSqlAoNote.OtherNode 'verified missing partner persists a null tombstone'
+Repair-SqlAoMissingPartners -Config $healingConfig -RefreshedVmInventory @() -InventoryRefreshVerified $true
+Assert-Equal $null $script:StoredSqlAoNote.OtherNode 'second healing pass does not restore the stale partner'
 
 foreach ($invalidTtl in 0, 29, 86401) {
     $ttlDeploy = $deploy | ConvertTo-Json -Depth 10 | ConvertFrom-Json
@@ -99,6 +202,25 @@ Assert-Equal $true ($multiSubnetCandidates[0].ConnectionString -like '*Encrypt=n
 $singleSubnetCandidates = @(Get-CmOdbcPreflightCandidates -Target 'listener.test,1500' -MultiSubnet $false)
 Assert-Equal 2 $singleSubnetCandidates.Count 'single-subnet ODBC preflight preserves legacy fallback'
 Assert-Equal $false (($singleSubnetCandidates.ConnectionString -join ';') -like '*MultiSubnetFailover=*') 'single-subnet ODBC candidates do not change connection behavior'
+
+$hierarchyMultiSubnet = Get-HierarchyOdbcConnectionString -Target 'listener.test,1500' -MultiSubnet $true
+Assert-Equal $true ($hierarchyMultiSubnet -like '*MultiSubnetFailover=Yes*') 'hierarchy child Primary enables multi-subnet ODBC probing'
+Assert-Equal $true ($hierarchyMultiSubnet -like '*Encrypt=no;TrustServerCertificate=yes*') 'hierarchy ODBC probing supports the default lab SQL certificate'
+$hierarchySource = Get-Content (Join-Path $RootPath 'vmbuild\DSC\phases\InstallPSForHierarchy.ps1') -Raw
+Assert-Equal $true ($hierarchySource -match 'Start-Process[\s\S]+-PassThru') 'hierarchy setup captures the setup process exit code'
+Assert-Equal $true ($hierarchySource -match 'InstallSCCM\.Status -eq ''Running''') 'hierarchy setup detects stale Running state'
+Assert-Equal $true ($hierarchySource -match 'Running at preflight stage; resetting') 'hierarchy setup safely retries failures that occur before setup starts'
+Assert-Equal $true ($hierarchySource -match 'InstallPSForHierarchy\.setup\.stage') 'hierarchy setup persists resumable stage metadata'
+Assert-Equal $true ($hierarchySource -match "'LaunchConfirmed'") 'hierarchy setup distinguishes confirmed launch from preflight'
+Assert-Equal $true ($hierarchySource -match "'SetupCompleted'") 'hierarchy setup resumes failed postflight without reinstalling'
+Assert-Equal $true ($hierarchySource -match 'AddHours\(2\)') 'hierarchy Primary readiness wait has a hard deadline'
+Assert-Equal $true ($hierarchySource -match "'MSF Enabled'") 'hierarchy setup converges ConfigMgr MSF registry state'
+Assert-Equal 'RetrySetup' (Get-HierarchyRecoveryAction -Stage 'Preflight' -SiteReady $false -ModulePresent $false) 'hierarchy preflight failure is safely retryable'
+Assert-Equal 'RequireCheckpoint' (Get-HierarchyRecoveryAction -Stage 'LaunchConfirmed' -SiteReady $false -ModulePresent $false) 'hierarchy partial setup requires checkpoint recovery'
+Assert-Equal 'RequireCheckpoint' (Get-HierarchyRecoveryAction -Stage 'LaunchConfirmed' -SiteReady $true -ModulePresent $false) 'hierarchy launch without module evidence requires checkpoint recovery'
+Assert-Equal 'ResumePostflight' (Get-HierarchyRecoveryAction -Stage 'LaunchConfirmed' -SiteReady $true -ModulePresent $true) 'hierarchy completed launch resumes postflight'
+Assert-Equal 'ResumePostflight' (Get-HierarchyRecoveryAction -Stage 'SetupCompleted' -SiteReady $true -ModulePresent $false) 'hierarchy postflight failure resumes without reinstalling'
+Assert-Equal $false ($stopHierarchyInstallSource -match 'InstallSCCM\.Status') 'hierarchy prerequisite failures do not overwrite completed install state'
 
 $resourceModule = Get-Content (Join-Path $RootPath 'vmbuild\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1') -Raw
 Assert-Equal $true ($resourceModule -match 'Get-ClusterResourceDependency') 'Network Name desired-state test validates dependencies'

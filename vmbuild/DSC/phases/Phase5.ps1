@@ -41,7 +41,9 @@
     {
 
         $thisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $node.NodeName }
-        $primaryVMs = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SQLAO" -and $_.FileServerVM -eq $node.NodeName }
+        $primaryVMs = $deployConfig.virtualMachines | Where-Object {
+            $_.Role -eq "SQLAO" -and $_.OtherNode -and $_.FileServerVM -eq $node.NodeName
+        }
 
         WriteStatus ClusterShare {
             Status = "Configuring Cluster Share"

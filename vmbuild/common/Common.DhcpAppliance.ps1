@@ -409,6 +409,16 @@ function Set-DnsmasqDeployConfigIPAddresses {
             $partner | Add-Member -MemberType NoteProperty -Name $family.Plural -Value @($ips) -Force
             $partner | Add-Member -MemberType NoteProperty -Name $family.Singular -Value $ownerIp -Force
         }
+        foreach ($metadataName in @(
+                'ClusterName', 'AlwaysOnGroupName', 'AlwaysOnListenerName',
+                'fileServerVM', 'SqlServiceAccount', 'SqlAgentAccount',
+                'listenerRegisterAllProvidersIP', 'listenerHostRecordTTL'
+            )) {
+            if ($null -ne $owner.$metadataName) {
+                $partner | Add-Member -MemberType NoteProperty -Name $metadataName -Value $owner.$metadataName -Force
+            }
+        }
+        $partner | Add-Member -MemberType NoteProperty -Name SQLAOOwnerVM -Value $owner.vmName -Force
         $overlap = @($owner.ClusterIPAddresses | Where-Object { $_ -in $owner.AGIPAddresses })
         if ($overlap.Count -gt 0) {
             throw "$($owner.vmName): SQLAO cluster and listener addresses overlap: $($overlap -join ', ')."
