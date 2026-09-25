@@ -53,6 +53,7 @@ $addVmPath = Join-Path $RootPath 'common\Common.GenConfig.AddVM.ps1'
 $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
 $genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
 $existingPath = Join-Path $RootPath 'common\Common.GenConfig.Existing.ps1'
+$validationPath = Join-Path $RootPath 'common\Common.GenConfig.Validation.ps1'
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdEffectiveNetwork')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdFixedRoleIPv4')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdPxePaths')
@@ -76,6 +77,7 @@ foreach ($functionName in @(
     . (Import-TestFunction -Path $addVmPath -Name $functionName)
 }
 . (Import-TestFunction -Path $existingPath -Name 'Get-ValidNetworksForVM')
+. (Import-TestFunction -Path $validationPath -Name 'Get-AdditionalValidations')
 
 $script:SelectedNetwork = '172.16.3.0'
 $script:SelectorCalls = 0
@@ -183,6 +185,31 @@ $config = [pscustomobject]@{
         [pscustomobject]@{ vmName = 'W11CLIENT3'; role = 'DomainMember'; operatingSystem = 'Windows 11 25H2'; network = '10.0.1.0' }
     )
 }
+
+$sqlPrimary = [pscustomobject]@{
+    vmName = 'SQLAO1'
+    role = 'SQLAO'
+    OtherNode = 'SQLAO2'
+    sqlInstanceDir = 'E:\SQL'
+}
+$sqlSecondary = [pscustomobject]@{
+    vmName = 'SQLAO2'
+    role = 'SQLAO'
+    network = '172.16.2.0'
+    sqlInstanceDir = 'F:\SQL'
+}
+$sqlConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ Network = '172.16.1.0' }
+    virtualMachines = @($sqlPrimary, $sqlSecondary)
+}
+$mainConfig = $config
+$global:Config = $sqlConfig
+Get-AdditionalValidations -Property $sqlSecondary -Name 'network' -CurrentValue '172.16.1.0'
+Assert-Equal '' "$($sqlPrimary.network)" 'SQLAO network edit does not add the secondary subnet to the primary'
+Assert-Equal '172.16.2.0' $sqlSecondary.network 'SQLAO network edit remains scoped to the selected secondary node'
+Get-AdditionalValidations -Property $sqlSecondary -Name 'sqlInstanceDir' -CurrentValue 'E:\SQL'
+Assert-Equal 'F:\SQL' $sqlPrimary.sqlInstanceDir 'SQLAO shared SQL settings still propagate to the partner'
+$global:Config = $mainConfig
 
 $editedNetwork = Get-NetworkForVM -vm $siteSystem -ConfigToModify $config
 Assert-Equal '172.16.3.0' $editedNetwork 'interactive SiteSystem network edit returns the picker selection'

@@ -402,24 +402,8 @@ function Get-AdditionalValidations {
             $property.$name = $currentValue
         }
         "network" {
-            if ($property.Role -eq "SQLAO") {
-                $SQLAO = @($property)
-                if ($property.OtherNode) {
-                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
-                }
-                else {
-                    $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
-                }
-                foreach ($sql in $SQLAO) {
-                    if ($sql.$name) {
-                        $sql.$name = $value
-                    }
-                    else {
-                        $sql | Add-Member -MemberType NoteProperty -Name $name -Value $value -Force
-                    }
-                }
-            }
-
+            # SQLAO partners may intentionally occupy different subnets.
+            # Network is a per-VM property; do not mirror it to OtherNode.
         }
         "vmName" {
 
