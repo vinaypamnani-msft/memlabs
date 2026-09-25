@@ -54,6 +54,7 @@ $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
 $genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
 $existingPath = Join-Path $RootPath 'common\Common.GenConfig.Existing.ps1'
 $validationPath = Join-Path $RootPath 'common\Common.GenConfig.Validation.ps1'
+$authoritativeValidationPath = Join-Path $RootPath 'common\Common.Validation.ps1'
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdEffectiveNetwork')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdFixedRoleIPv4')
 . (Import-TestFunction -Path $configPath -Name 'Get-OsdPxePaths')
@@ -209,6 +210,9 @@ Assert-Equal '' "$($sqlPrimary.network)" 'SQLAO network edit does not add the se
 Assert-Equal '172.16.2.0' $sqlSecondary.network 'SQLAO network edit remains scoped to the selected secondary node'
 Get-AdditionalValidations -Property $sqlSecondary -Name 'sqlInstanceDir' -CurrentValue 'E:\SQL'
 Assert-Equal 'F:\SQL' $sqlPrimary.sqlInstanceDir 'SQLAO shared SQL settings still propagate to the partner'
+$authoritativeValidation = Get-Content -LiteralPath $authoritativeValidationPath -Raw
+Assert-Equal $false ($authoritativeValidation -match 'Both replicas must share one network') 'authoritative validation does not reject split-network SQLAO'
+Assert-Equal $true ($authoritativeValidation -match 'SQLAO partners may occupy different routed domain networks') 'authoritative validation documents multi-subnet SQLAO support'
 $global:Config = $mainConfig
 
 $editedNetwork = Get-NetworkForVM -vm $siteSystem -ConfigToModify $config
