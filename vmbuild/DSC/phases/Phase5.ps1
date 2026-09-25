@@ -1305,22 +1305,135 @@
         }
         $nextDepend = '[WaitForAll]AG'
 
-        if (-not $clusterIPOnHeartbeat) {
-        WriteStatus "ChangeNetwork-192" {
-            Status    = "Setting Domain Network $($Node1VM.thisParams.vmNetwork) to cluster + client (Role 3)"
-            DependsOn = $nextDepend
+        $_primaryAgTarget = $node1VM.thisParams.SQLAO.PrimaryReplicaServerName
+        if ($node1vm.sqlInstanceName -and $node1vm.sqlInstanceName -ine 'MSSQLSERVER') {
+            $_primaryAgTarget = "$_primaryAgTarget\$($node1vm.sqlInstanceName)"
         }
+        $_localAgTarget = if ($node1vm.sqlInstanceName -and $node1vm.sqlInstanceName -ine 'MSSQLSERVER') {
+            "localhost\$($node1vm.sqlInstanceName)"
+        }
+        else {
+            'localhost'
+        }
+        $_primaryAgName = $node1VM.thisParams.SQLAO.AlwaysOnGroupName
+        WriteStatus PrimaryAgReady {
+            DependsOn = $nextDepend
+            Status    = "Waiting for $_primaryAgTarget to report PRIMARY for availability group '$_primaryAgName'"
+        }
+        Script PrimaryAgReady {
+            GetScript = { @{ Result = '' } }
+            TestScript = {
+                function Get-AgStateCount {
+                    param([string]$Target, [string]$Query, [int]$TimeoutSeconds, [string]$AgName)
+                    $connection = $null
+                    try {
+                        $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$Target;Initial Catalog=master;Integrated Security=True;Connect Timeout=$TimeoutSeconds;Encrypt=False;TrustServerCertificate=True"
+                        $connection.Open()
+                        $command = $connection.CreateCommand()
+                        $command.CommandTimeout = $TimeoutSeconds
+                        $command.CommandText = $Query
+                        $parameter = $command.Parameters.Add('@ag', [System.Data.SqlDbType]::NVarChar, 128)
+                        $parameter.Value = $AgName
+                        return [int]$command.ExecuteScalar()
+                    }
+                    finally {
+                        if ($connection) {
+                            try { $connection.Close() } catch {}
+                            $connection.Dispose()
+                        }
+                    }
+                }
+                $membershipQuery = @'
+SELECT COUNT(*)
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+WHERE rs.is_local = 1
+  AND ag.name = @ag
+'@
+                $primaryQuery = @'
+SELECT COUNT(*)
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+WHERE rs.is_local = 1
+  AND rs.role_desc = 'PRIMARY'
+  AND ag.name = @ag
+'@
+                try {
+                    if ((Get-AgStateCount -Target $using:_localAgTarget -Query $membershipQuery -TimeoutSeconds 5 -AgName $using:_primaryAgName) -eq 1) {
+                        return $true
+                    }
+                    return (Get-AgStateCount -Target $using:_primaryAgTarget -Query $primaryQuery -TimeoutSeconds 5 -AgName $using:_primaryAgName) -eq 1
+                }
+                catch { return $false }
+            }
+            SetScript = {
+                function Get-AgStateCount {
+                    param([string]$Target, [string]$Query, [int]$TimeoutSeconds, [string]$AgName)
+                    $connection = $null
+                    try {
+                        $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$Target;Initial Catalog=master;Integrated Security=True;Connect Timeout=$TimeoutSeconds;Encrypt=False;TrustServerCertificate=True"
+                        $connection.Open()
+                        $command = $connection.CreateCommand()
+                        $command.CommandTimeout = $TimeoutSeconds
+                        $command.CommandText = $Query
+                        $parameter = $command.Parameters.Add('@ag', [System.Data.SqlDbType]::NVarChar, 128)
+                        $parameter.Value = $AgName
+                        return [int]$command.ExecuteScalar()
+                    }
+                    finally {
+                        if ($connection) {
+                            try { $connection.Close() } catch {}
+                            $connection.Dispose()
+                        }
+                    }
+                }
+                $membershipQuery = @'
+SELECT COUNT(*)
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+WHERE rs.is_local = 1
+  AND ag.name = @ag
+'@
+                $primaryQuery = @'
+SELECT COUNT(*)
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+WHERE rs.is_local = 1
+  AND rs.role_desc = 'PRIMARY'
+  AND ag.name = @ag
+'@
+                $lastError = ''
+                $deadline = [DateTime]::UtcNow.AddMinutes(10)
+                $attempt = 0
+                while ([DateTime]::UtcNow -lt $deadline) {
+                    $attempt++
+                    try {
+                        $remainingSeconds = [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalSeconds)
+                        if ($remainingSeconds -lt 2) { break }
+                        $operationTimeout = [Math]::Min(5, [Math]::Max(1, [int][Math]::Floor($remainingSeconds / 2)))
+                        if ((Get-AgStateCount -Target $using:_localAgTarget -Query $membershipQuery -TimeoutSeconds $operationTimeout -AgName $using:_primaryAgName) -eq 1) {
+                            return
+                        }
 
-        ClusterNetwork 'ChangeNetwork-192' {
-            Address              = $Node1VM.thisParams.vmNetwork
-            AddressMask          = '255.255.255.0'
-            Name                 = 'Domain Network'
-            Role                 = '3'
-            DependsOn            = $nextDepend
+                        $remainingSeconds = [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalSeconds)
+                        if ($remainingSeconds -lt 2) { break }
+                        $operationTimeout = [Math]::Min(5, [Math]::Max(1, [int][Math]::Floor($remainingSeconds)))
+                        $primaryReady = (Get-AgStateCount -Target $using:_primaryAgTarget -Query $primaryQuery -TimeoutSeconds $operationTimeout -AgName $using:_primaryAgName) -eq 1
+                        if ($primaryReady -and [DateTime]::UtcNow -le $deadline) { return }
+                        $lastError = 'local replica is absent and configured primary is not PRIMARY'
+                    }
+                    catch { $lastError = $_.Exception.Message }
+                    $remainingSeconds = [int][Math]::Floor(($deadline - [DateTime]::UtcNow).TotalSeconds)
+                    if ($remainingSeconds -gt 0) {
+                        Start-Sleep -Seconds ([Math]::Min(10, $remainingSeconds))
+                    }
+                }
+                throw "Local replica '$using:_localAgTarget' did not join '$using:_primaryAgName', and configured primary '$using:_primaryAgTarget' did not become PRIMARY during the 10-minute retry window. Last result: $lastError"
+            }
+            DependsOn            = '[WriteStatus]PrimaryAgReady'
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[ClusterNetwork]ChangeNetwork-192'
-        } # end if (-not $clusterIPOnHeartbeat)
+        $nextDepend = '[Script]PrimaryAgReady'
 
         WriteStatus SQLAO2 {
             DependsOn = $nextDepend

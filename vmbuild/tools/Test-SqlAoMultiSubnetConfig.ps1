@@ -188,6 +188,14 @@ Assert-Equal $true ($phase5 -match 'if \(-not \$using:listenerRegisterAllProvide
 Assert-Equal $true ($phase5 -match 'foreach \(\$repairDC in \$allDCs\)') 'listener DNS repair reconciles every DC on every attempt'
 Assert-Equal $true ($phase5 -match 'if \(\$primaryAddressMissing -and \$attempt -le 2\)') 'listener DNS bounce is limited to primary-DC address loss'
 Assert-Equal $true ($phase5.IndexOf('ClusterNetwork "ChangeDomainNetwork$domainNetworkIndex"') -lt $phase5.IndexOf('SqlAoMultiSubnetNetworkName MultiSubnetClusterName')) 'domain network convergence precedes core Network Name convergence'
+Assert-Equal $false ($phase5 -match 'Address\s+=\s+\$Node1VM\.thisParams\.vmNetwork') 'secondary Phase 5 does not configure the primary node subnet'
+Assert-Equal $false ($phase5 -match "ClusterNetwork 'ChangeNetwork-192'") 'secondary Phase 5 does not compete with primary-owned cluster network naming'
+Assert-Equal $true ($phase5 -match "Script PrimaryAgReady") 'secondary replica add waits for SQL-level primary readiness'
+Assert-Equal $true ($phase5 -match "rs\.role_desc = 'PRIMARY'") 'primary readiness gate verifies the local AG role'
+Assert-Equal $true ($phase5 -match '\$_localAgTarget') 'primary readiness gate checks existing local replica membership first'
+Assert-Equal $true ($phase5 -match 'local replica is absent and configured primary is not PRIMARY') 'primary readiness gate distinguishes initial add from converged failover state'
+Assert-Equal $true ($phase5 -match '\[DateTime\]::UtcNow\.AddMinutes\(10\)') 'primary readiness gate uses an absolute ten-minute deadline'
+Assert-Equal $true ($phase5 -match 'while \(\[DateTime\]::UtcNow -lt \$deadline\)') 'primary readiness retries stop at the deadline'
 
 $install = Get-Content (Join-Path $RootPath 'vmbuild\DSC\phases\InstallAndUpdateSCCM.ps1') -Raw
 Assert-Equal $true ($install -match 'MultiSubnetFailover=True') 'listener-targeted probes enable SQL client multi-subnet failover'
