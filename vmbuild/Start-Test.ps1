@@ -107,7 +107,14 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'TestName')]
-    [switch]$TheWorks
+    [switch]$TheWorks,
+
+    [Parameter(Mandatory = $true, HelpMessage = "Run only the main-to-develop VM-note compatibility tests", ParameterSetName = 'VMNoteCompatibility')]
+    [switch]$VMNoteCompatibilityOnly,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'TestName')]
+    [switch]$SkipVMNoteCompatibility
 )
 
 
@@ -461,6 +468,39 @@ function Invoke-TestGitPull {
     }
 }
 
+function Invoke-VMNoteCompatibilityPreflight {
+    $testPath = Join-Path $PSScriptRoot 'tools\Test-VMNoteMainToDevelopCompatibility.ps1'
+    if (-not (Test-Path -LiteralPath $testPath)) {
+        Write-Host "VM-note compatibility test not found: $testPath" -ForegroundColor Red
+        return $false
+    }
+
+    $engines = @(
+        [pscustomobject]@{ Name = 'PowerShell 7'; Path = (Join-Path $PSHOME 'pwsh.exe'); Arguments = @('-NoLogo', '-NoProfile', '-NonInteractive') }
+        [pscustomobject]@{ Name = 'Windows PowerShell 5.1'; Path = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'); Arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass') }
+    )
+
+    Write-Host '===== main-to-develop VM-note compatibility preflight =====' -ForegroundColor Magenta
+    foreach ($engine in $engines) {
+        if (-not (Test-Path -LiteralPath $engine.Path)) {
+            Write-Host "FAIL: $($engine.Name) executable not found at $($engine.Path)" -ForegroundColor Red
+            return $false
+        }
+
+        Write-Host "Running under $($engine.Name)..." -ForegroundColor Cyan
+        $global:LASTEXITCODE = 0
+        & $engine.Path @($engine.Arguments) -File $testPath | Out-Host
+        $exitCode = [int]$LASTEXITCODE
+        if ($exitCode -ne 0) {
+            Write-Host "FAIL: VM-note compatibility preflight returned $exitCode under $($engine.Name)." -ForegroundColor Red
+            return $false
+        }
+    }
+
+    Write-Host 'PASS: VM-note compatibility preflight passed under both PowerShell engines.' -ForegroundColor Green
+    return $true
+}
+
 function Invoke-NewLab {
     # Run one deployment and hand back ONLY its exit code. Two things here are load-bearing:
     #  1. '| Out-Host' -- New-Lab.ps1 leaks objects onto the success stream. Un-piped they
@@ -664,6 +704,19 @@ function Run-Test {
     
     [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory("./Remove-lab.ps1 -DomainName $domainName")
     return (-not $groupFailed)
+}
+
+Invoke-TestGitPull -Context 'before VM-note compatibility preflight'
+if ($SkipVMNoteCompatibility.IsPresent) {
+    Write-Host 'WARNING: main-to-develop VM-note compatibility preflight skipped by request.' -ForegroundColor Yellow
+}
+elseif (-not (Invoke-VMNoteCompatibilityPreflight)) {
+    Write-Host 'Start-Test stopped before lab mutation because the VM-note compatibility preflight failed.' -ForegroundColor Red
+    exit 1
+}
+
+if ($VMNoteCompatibilityOnly.IsPresent) {
+    exit 0
 }
 
 # Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
