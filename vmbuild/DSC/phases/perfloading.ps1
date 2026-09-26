@@ -130,10 +130,87 @@ Write-DscStatus "$Tag Starting perfloading"
         return $MemberKeys.ContainsKey($DistributionPointName.ToUpperInvariant())
     }
 
+    function Get-MemLabsDistributionPointGroup {
+        param (
+            [string] $SiteCode,
+            [string] $GroupName,
+            [string] $GroupId,
+            [switch] $AllowMissing
+        )
+
+        $namespace = "root\SMS\site_$SiteCode"
+        if ($GroupId) {
+            $escapedGroupId = $GroupId.Replace("'", "''")
+            $idGroups = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPointGroup -Filter "GroupID='$escapedGroupId'" -ErrorAction Stop |
+                Where-Object { $null -ne $_ })
+            if ($idGroups.Count -eq 0) {
+                if ($AllowMissing) { return $null }
+                throw "distribution point group ID '$GroupId' was not found"
+            }
+            if ($idGroups.Count -ne 1) { throw "distribution point group ID '$GroupId' resolved to $($idGroups.Count) rows" }
+            $selectedGroup = $idGroups[0]
+            if ($GroupName -and "$($selectedGroup.Name)" -ne $GroupName) {
+                throw "distribution point group ID '$GroupId' is named '$($selectedGroup.Name)', not '$GroupName'"
+            }
+            $GroupName = "$($selectedGroup.Name)"
+        }
+
+        $escapedGroupName = $GroupName.Replace("'", "''")
+        $groups = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" -ErrorAction Stop |
+            Where-Object { $null -ne $_ })
+        if ($groups.Count -eq 0) {
+            if ($AllowMissing) { return $null }
+            throw "distribution point group '$GroupName' was not found"
+        }
+
+        $identities = @($groups | ForEach-Object {
+                "GroupID=$($_.GroupID),SourceSite=$($_.SourceSite)"
+            }) -join '; '
+        if ($GroupId) {
+            $selectedRows = @($groups | Where-Object { "$($_.GroupID)" -eq $GroupId })
+            if ($selectedRows.Count -ne 1) {
+                throw "distribution point group ID '$GroupId' was not uniquely present among rows named '$GroupName' ($identities)"
+            }
+            $selectedGroup = $selectedRows[0]
+        }
+        else {
+            $localGroups = @($groups | Where-Object { "$($_.SourceSite)" -eq $SiteCode })
+            if ($localGroups.Count -eq 1) {
+                $selectedGroup = $localGroups[0]
+            }
+            elseif ($localGroups.Count -gt 1) {
+                throw "found $($localGroups.Count) distribution point groups named '$GroupName' owned by site $SiteCode ($identities)"
+            }
+            elseif ($groups.Count -eq 1) {
+                $selectedGroup = $groups[0]
+            }
+            else {
+                throw "found $($groups.Count) distribution point groups named '$GroupName', but none is owned by site $SiteCode ($identities)"
+            }
+        }
+
+        [pscustomobject]@{
+            Group      = $selectedGroup
+            MatchCount = $groups.Count
+            Identities = $identities
+        }
+    }
+
+    function Test-MemLabsShouldManageDistributionPointGroup {
+        param (
+            [string] $CurrentRole,
+            [string[]] $ManagedDistributionPointNames
+        )
+
+        $managedNames = @($ManagedDistributionPointNames | Where-Object { $_ })
+        return $CurrentRole -ne 'CAS' -or $managedNames.Count -gt 0
+    }
+
     function Sync-MemLabsDistributionPointGroupMembership {
         param (
             [string] $SiteCode,
             [string] $GroupName,
+            [string] $DistributionPointGroupId,
             [string[]] $ExpectedDistributionPointNames,
             [string] $StatusTag,
             [int] $Attempts = 6,
@@ -154,11 +231,13 @@ Write-DscStatus "$Tag Starting perfloading"
                     $liveDpName = ($liveDp.NetworkOSPath -replace '^\\\\', '') -split '\\' | Select-Object -First 1
                     if ($liveDpName) { $liveDpNames[$liveDpName.ToUpperInvariant()] = $liveDpName }
                 }
-                $group = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$GroupName'" -ErrorAction Stop
-                if (-not $group) { throw 'group was not found' }
+                $groupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $GroupName -GroupId $DistributionPointGroupId
+                $group = $groupResolution.Group
+                $groupId = "$($group.GroupID)"
+                if (-not $groupId) { throw "distribution point group '$GroupName' has no GroupID" }
 
                 $readMembership = {
-                    $rows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop)
+                    $rows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$groupId'" -ErrorAction Stop)
                     $keys = @{}
                     foreach ($row in $rows) {
                         $memberHostName = Get-MemLabsServerFromNalPath $row.DPNALPath
@@ -175,8 +254,8 @@ Write-DscStatus "$Tag Starting perfloading"
                     if (-not $liveDpNames.ContainsKey($expectedKey) -or $membership.Keys.ContainsKey($expectedKey)) { continue }
                     $addAttempted = $true
                     try {
-                        Add-CMDistributionPointToGroup -DistributionPointGroupName $GroupName -DistributionPointName $liveDpNames[$expectedKey] -ErrorAction Stop
-                        Write-DscStatus "$StatusTag Added Distribution Point '$($liveDpNames[$expectedKey])' to group '$GroupName'"
+                        $null = Add-CMDistributionPointToGroup -DistributionPointGroupId $groupId -DistributionPointName $liveDpNames[$expectedKey] -ErrorAction Stop
+                        Write-DscStatus "$StatusTag Added Distribution Point '$($liveDpNames[$expectedKey])' to group '$GroupName' ($groupId)"
                     }
                     catch {
                         $addFailures += "$expectedName ($($_.Exception.Message))"
@@ -215,6 +294,152 @@ Write-DscStatus "$Tag Starting perfloading"
         }
         Write-DscStatus "$StatusTag '$GroupName' membership could not be verified after $Attempts attempts ($reason). Content distribution was not requested." -Failure
         return $false
+    }
+
+    function Get-MemLabsContentPackageIds {
+        param (
+            [ValidateSet('Application', 'Package', 'DeploymentPackage')]
+            [string] $ContentType,
+            [string] $ContentName,
+            [string] $PackageId,
+            [string] $SiteCode
+        )
+
+        switch ($ContentType) {
+            'Application' {
+                $applications = @(Get-CMApplication -Name $ContentName -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($applications.Count -ne 1) { throw "expected one application named '$ContentName', found $($applications.Count)" }
+                return @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_CIContentPackage -Filter "CI_ID='$($applications[0].CI_ID)'" -ErrorAction Stop |
+                    ForEach-Object { $_.PackageID } | Where-Object { $_ } | Select-Object -Unique)
+            }
+            'Package' {
+                if ($PackageId) { return @($PackageId) }
+                $packages = @(Get-CMPackage -Name $ContentName -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($packages.Count -ne 1) { throw "expected one package named '$ContentName', found $($packages.Count)" }
+                return @($packages[0].PackageID | Where-Object { $_ })
+            }
+            'DeploymentPackage' {
+                $packages = @(Get-CMSoftwareUpdateDeploymentPackage -Name $ContentName -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($packages.Count -ne 1) { throw "expected one deployment package named '$ContentName', found $($packages.Count)" }
+                return @($packages[0].PackageID | Where-Object { $_ })
+            }
+        }
+    }
+
+    function Invoke-MemLabsDistributionPointGroupPackageMethod {
+        param (
+            [object] $Group,
+            [ValidateSet('AddPackages', 'RemovePackages')]
+            [string] $MethodName,
+            [string[]] $PackageIds
+        )
+
+        $ids = @($PackageIds | Where-Object { $_ } | Select-Object -Unique)
+        if ($ids.Count -eq 0) { throw "distribution point group method '$MethodName' received no package IDs" }
+        $result = Invoke-WmiMethod -InputObject $Group -Name $MethodName -ArgumentList (, [string[]]$ids) -ErrorAction Stop
+        if ($null -ne $result.ReturnValue -and [int]$result.ReturnValue -ne 0) {
+            throw "distribution point group method '$MethodName' returned $($result.ReturnValue)"
+        }
+    }
+
+    function Test-MemLabsContentDistributionTarget {
+        param (
+            [ValidateSet('Application', 'Package', 'DeploymentPackage')]
+            [string] $ContentType,
+            [string] $ContentName,
+            [string] $PackageId,
+            [string] $DistributionPointGroupName,
+            [string] $DistributionPointGroupId,
+            [string] $SiteCode,
+            [string] $StatusTag,
+            [int] $Attempts = 6,
+            [int] $RetrySeconds = 5
+        )
+
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            try {
+                $contentPackageIds = @(Get-MemLabsContentPackageIds -ContentType $ContentType -ContentName $ContentName -PackageId $PackageId -SiteCode $SiteCode)
+                $groupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $DistributionPointGroupName -GroupId $DistributionPointGroupId
+                $group = $groupResolution.Group
+                $groupPackages = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupPackages -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop |
+                    Where-Object { $null -ne $_ })
+                $groupPackageKeys = @{}
+                foreach ($groupPackage in $groupPackages) { $groupPackageKeys["$($groupPackage.PkgID)"] = $true }
+                $missingPackages = @($contentPackageIds | Where-Object { -not $groupPackageKeys.ContainsKey("$_") })
+                if ($contentPackageIds.Count -gt 0 -and $missingPackages.Count -eq 0) { return $true }
+                $reason = if ($contentPackageIds.Count -eq 0) { 'content has no package IDs' } else { "missing package assignment(s): $($missingPackages -join ', ')" }
+            }
+            catch {
+                $reason = $_.Exception.Message
+            }
+            if ($attempt -lt $Attempts) {
+                Write-DscStatus "$StatusTag $ContentType '$ContentName' target '$DistributionPointGroupName' is not ready ($reason); retry $attempt/$Attempts in ${RetrySeconds}s"
+                Start-Sleep -Seconds $RetrySeconds
+            }
+        }
+        return $false
+    }
+
+    function Sync-MemLabsContentDistribution {
+        param (
+            [ValidateSet('Application', 'Package', 'DeploymentPackage')]
+            [string] $ContentType,
+            [string] $ContentName,
+            [string] $PackageId,
+            [string] $DistributionPointGroupName,
+            [string] $DistributionPointGroupId,
+            [string] $StatusTag,
+            [string] $SiteCode
+        )
+
+        try {
+            $targetResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $DistributionPointGroupName -GroupId $DistributionPointGroupId
+            $targetGroup = $targetResolution.Group
+            $targetIdentity = "$DistributionPointGroupName (GroupID=$($targetGroup.GroupID), SourceSite=$($targetGroup.SourceSite))"
+            $contentPackageIds = @(Get-MemLabsContentPackageIds -ContentType $ContentType -ContentName $ContentName -PackageId $PackageId -SiteCode $SiteCode)
+        }
+        catch {
+            Write-DscStatus "$StatusTag Failed to resolve $ContentType '$ContentName' distribution target '$DistributionPointGroupName': $($_.Exception.Message)" -Failure
+            return $false
+        }
+
+        $distributionError = $null
+        try {
+            if ($targetResolution.MatchCount -gt 1) {
+                Invoke-MemLabsDistributionPointGroupPackageMethod -Group $targetGroup -MethodName AddPackages -PackageIds $contentPackageIds
+                Write-DscStatus "$StatusTag Requested $ContentType '$ContentName' distribution to exact target '$targetIdentity'; same-name rows: $($targetResolution.Identities)"
+            }
+            else {
+                switch ($ContentType) {
+                    'Application' { $null = Start-CMContentDistribution -ApplicationName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                    'Package' {
+                        if ($PackageId) {
+                            $null = Start-CMContentDistribution -PackageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop
+                        }
+                        else {
+                            $null = Start-CMContentDistribution -PackageName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop
+                        }
+                    }
+                    'DeploymentPackage' { $null = Start-CMContentDistribution -DeploymentPackageName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                }
+                Write-DscStatus "$StatusTag Requested $ContentType '$ContentName' distribution to '$targetIdentity'"
+            }
+        }
+        catch {
+            $distributionError = $_.Exception.Message
+            if ($distributionError -notmatch 'No content destination was found|already been distributed') {
+                Write-DscStatus "$StatusTag Failed to distribute $ContentType '$ContentName' to '$targetIdentity': $distributionError" -Failure
+                return $false
+            }
+        }
+
+        if (-not (Test-MemLabsContentDistributionTarget -ContentType $ContentType -ContentName $ContentName -PackageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -DistributionPointGroupId "$($targetGroup.GroupID)" -SiteCode $SiteCode -StatusTag $StatusTag)) {
+            $detail = if ($distributionError) { $distributionError } else { 'the distribution request returned without an error, but the target assignment was not visible' }
+            Write-DscStatus "$StatusTag Failed to verify $ContentType '$ContentName' on '$targetIdentity': $detail" -Failure
+            return $false
+        }
+        Write-DscStatus "$StatusTag Verified $ContentType '$ContentName' targeting to '$targetIdentity'"
+        return $true
     }
 
     function Sync-MemLabsScriptLibrary {
@@ -671,37 +896,49 @@ Write-DscStatus "$Tag Starting perfloading"
         }
     }
 
-    #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumerating all DPs)
+    # Replicated hierarchy rows can expose the same group name from more than one
+    # source site. Select the row owned by this site (or the sole row) and pin its
+    # exact GroupID for every membership and content operation.
     $DPGroupName = "ALL DPS"
-    $existingDPGroups = @(Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name)
-
-    if ($DPGroupName -in $existingDPGroups) {
-        Write-DscStatus "$Tag DP group: $DPGroupName already exists"
-    }
-    else {
-        $null = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
-    }
-
-    # ALWAYS reconcile group membership against the current DP list -- do NOT
-    # gate this on the group being newly created. "ALL DPS" is hierarchy-global
-    # data: on a child Primary the group is usually created+replicated by the
-    # CAS (which runs this same block first, before the role gate) BEFORE this
-    # site's DP exists, so it arrives here already-existing but EMPTY (or missing
-    # this site's DP). The old code only populated the group in the freshly-
-    # created branch, so on the child Primary the group stayed empty and every
-    # Start-CMContentDistribution -DistributionPointGroupName "ALL DPS" failed
-    # with "No content destination was found" -- silently skipping boot image,
-    # application, and package distribution to this site's DP. (Only the boot-
-    # image call surfaced it; the app/package calls use -ErrorAction
-    # SilentlyContinue and swallowed the same failure.)
     $distributionPrimarySiteCode = if ($CurrentRole -eq 'Secondary' -and $ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
     $managedDpNames = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $deployConfig.virtualMachines -DefaultDomainName $DomainFullName -PrimarySiteCode $distributionPrimarySiteCode -AdditionalDistributionPointScopes $deployConfig.phase8ManagedDistributionPointScopes)
-    if ($managedDpNames.Count -eq 0 -and $CurrentRole -eq 'CAS') {
-        Write-DscStatus "$Tag No CAS-local MemLabs-managed Distribution Points were identified; child Primary workers reconcile their own group membership."
+    $DPGroupId = ''
+    if (-not (Test-MemLabsShouldManageDistributionPointGroup -CurrentRole $CurrentRole -ManagedDistributionPointNames $managedDpNames)) {
+        Write-DscStatus "$Tag No CAS-local MemLabs-managed Distribution Points were identified; skipping empty CAS group creation. Child Primary workers create and reconcile their site-owned group."
     }
-    elseif (-not (Sync-MemLabsDistributionPointGroupMembership -SiteCode $SiteCode -GroupName $DPGroupName -ExpectedDistributionPointNames $managedDpNames -StatusTag $Tag)) {
-        return
+    else {
+        try {
+            $dpGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $DPGroupName -AllowMissing
+            if ($dpGroupResolution) {
+                Write-DscStatus "$Tag DP group: $DPGroupName already exists (GroupID=$($dpGroupResolution.Group.GroupID), SourceSite=$($dpGroupResolution.Group.SourceSite))"
+            }
+            else {
+                try {
+                    $null = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all MemLabs-managed Distribution Points for this site" -ErrorAction Stop
+                    Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
+                }
+                catch {
+                    Write-DscStatus "$Tag DP group '$DPGroupName' creation did not complete; membership reconciliation will re-query provider state: $($_.Exception.Message)"
+                }
+            }
+            for ($groupReadAttempt = 1; -not $dpGroupResolution -and $groupReadAttempt -le 6; $groupReadAttempt++) {
+                $dpGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $DPGroupName -AllowMissing
+                if ($dpGroupResolution) { break }
+                if ($groupReadAttempt -lt 6) { Start-Sleep -Seconds 5 }
+            }
+            if (-not $dpGroupResolution) { throw 'group was not visible after creation/reconciliation' }
+            if ($dpGroupResolution.MatchCount -gt 1) {
+                Write-DscStatus "$Tag WARNING: Found $($dpGroupResolution.MatchCount) groups named '$DPGroupName'. Using the site-owned exact row; remove stale duplicates after the build. $($dpGroupResolution.Identities)"
+            }
+            $DPGroupId = "$($dpGroupResolution.Group.GroupID)"
+        }
+        catch {
+            Write-DscStatus "$Tag Could not resolve DP group '$DPGroupName': $($_.Exception.Message). Content distribution was not requested." -Failure
+            return
+        }
+        if (-not (Sync-MemLabsDistributionPointGroupMembership -SiteCode $SiteCode -GroupName $DPGroupName -DistributionPointGroupId $DPGroupId -ExpectedDistributionPointNames $managedDpNames -StatusTag $Tag)) {
+            return
+        }
     }
 
 
@@ -766,7 +1003,7 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
 
             Write-DscStatus "$Tag Distributing MEMLABS application $($_.Name) to all DPs"
-            Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+            if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $appname -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -StatusTag $Tag -SiteCode $SiteCode)) { return }
             Write-DscStatus "$Tag Successfully distributed MEMLABS application $($_.Name) to all DPs"
 
             Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
@@ -790,7 +1027,7 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
 
             Write-DscStatus "$Tag Distributing MEMLABS package $($_.Name) to all DPs"
-            Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+            if (-not (Sync-MemLabsContentDistribution -ContentType Package -ContentName $pkgName -PackageId $Package.PackageID -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -StatusTag $Tag -SiteCode $SiteCode)) { return }
             Write-DscStatus "$Tag Successfully distributed MEMLABS package $($_.Name) to all DPs"
 
             Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
@@ -1098,20 +1335,42 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag OSDClient subnet(s) have no live ConfigMgr DP: $($uncoveredOsdSubnets -join ', '). OSD content cannot reach those clients and PXE cannot work, so it is created but NOT distributed. Add/install a DP on every listed subnet, then re-run Phase 8. Phase 11 validation FAILS on this." -Warning
         }
         else {
-            if ("$OsdDpGroupName" -notin @((Get-CMDistributionPointGroup -ErrorAction SilentlyContinue).Name)) {
-                $null = New-CMDistributionPointGroup -Name $OsdDpGroupName -Description "DPs on an OSDClient subnet (OSD content + PXE)" -ErrorAction SilentlyContinue
-                Write-DscStatus "$Tag Created DP group '$OsdDpGroupName'"
+            $osdGrpWmi = $null
+            $osdGroupId = ''
+            $osdGroupNameAmbiguous = $false
+            try {
+                $osdGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $OsdDpGroupName -AllowMissing
+                if (-not $osdGroupResolution) {
+                    try {
+                        $null = New-CMDistributionPointGroup -Name $OsdDpGroupName -Description "DPs on an OSDClient subnet (OSD content + PXE)" -ErrorAction Stop
+                        Write-DscStatus "$Tag Created DP group '$OsdDpGroupName'"
+                    }
+                    catch {
+                        Write-DscStatus "$Tag DP group '$OsdDpGroupName' creation did not complete; membership reconciliation will re-query provider state: $($_.Exception.Message)"
+                    }
+                    $osdGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $OsdDpGroupName -AllowMissing
+                }
+                if (-not $osdGroupResolution) { throw 'group was not visible after creation/reconciliation' }
+                if ($osdGroupResolution.MatchCount -gt 1) {
+                    $osdGroupNameAmbiguous = $true
+                    Write-DscStatus "$Tag WARNING: Found $($osdGroupResolution.MatchCount) groups named '$OsdDpGroupName'. Using the site-owned exact row; remove stale duplicates after the build. $($osdGroupResolution.Identities)"
+                }
+                $osdGrpWmi = $osdGroupResolution.Group
+                $osdGroupId = "$($osdGrpWmi.GroupID)"
             }
+            catch {
+                Write-DscStatus "$Tag Could not resolve OSD DP group '$OsdDpGroupName': $($_.Exception.Message). OSD content is not distributed; Phase 11 validation owns the OSD verdict." -Warning
+            }
+            if ($osdGrpWmi) {
             $osdMemberKeys = @{}
             $osdMembershipRead = $false
             try {
-                $osdGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$OsdDpGroupName'" -ErrorAction Stop
                 if ($osdGrpWmi) {
-                    foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction Stop)) {
+                    foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$osdGroupId'" -ErrorAction Stop)) {
                         $memberHostName = Get-MemLabsServerFromNalPath $memberRow.DPNALPath
                         if (-not $memberHostName) { continue }
-                        $osdMemberKeys[$memberHostName.ToUpper()] = $true
-                        $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+                        $osdMemberKeys[$memberHostName.ToUpperInvariant()] = $true
+                        $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpperInvariant()] = $true
                     }
                     $osdMembershipRead = $true
                 }
@@ -1125,11 +1384,11 @@ Write-DscStatus "$Tag Starting perfloading"
                 # name ('PL-PANCETTA') fails to match, the error is swallowed, and the group is left EMPTY
                 # -- so every Start-CMContentDistribution to 'OSD DPS' becomes a no-op and OSD content never
                 # lands (the Phase 11 'not on any DP' WARN). This mirrors the working 'ALL DPS' block above.
-                if ($osdMembershipRead -and ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpper()))) {
+                if ($osdMembershipRead -and ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpperInvariant()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpperInvariant()))) {
                     Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' is already in '$OsdDpGroupName' -- skipping add"
                 }
                 else {
-                    try { Add-CMDistributionPointToGroup -DistributionPointGroupName $OsdDpGroupName -DistributionPointName $d.Fqdn -ErrorAction Stop; Write-DscStatus "$Tag Added OSD DP '$($d.Fqdn)' to '$OsdDpGroupName'" }
+                    try { $null = Add-CMDistributionPointToGroup -DistributionPointGroupId $osdGroupId -DistributionPointName $d.Fqdn -ErrorAction Stop; Write-DscStatus "$Tag Added OSD DP '$($d.Fqdn)' to '$OsdDpGroupName' ($osdGroupId)" }
                     catch { Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' not added to '$OsdDpGroupName' (likely already a member): $($_.Exception.Message)" }
                 }
                 # Enable PXE. Prefer the NonWDS PXE responder (no separate WDS role);
@@ -1153,18 +1412,20 @@ Write-DscStatus "$Tag Starting perfloading"
             try {
                 $missingOsdGroupMembers = @()
                 for ($osdGroupTry = 1; $osdGroupTry -le 6; $osdGroupTry++) {
-                    $osdGrpWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointGroup -Filter "Name='$OsdDpGroupName'" -ErrorAction Stop
+                    $osdGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $OsdDpGroupName -GroupId $osdGroupId
+                    if ($osdGroupResolution.MatchCount -gt 1) { $osdGroupNameAmbiguous = $true }
+                    $osdGrpWmi = $osdGroupResolution.Group
                     $osdMemberKeys = @{}
                     if ($osdGrpWmi) {
-                        foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$($osdGrpWmi.GroupID)'" -ErrorAction Stop)) {
+                        foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$osdGroupId'" -ErrorAction Stop)) {
                             $memberHostName = Get-MemLabsServerFromNalPath $memberRow.DPNALPath
                             if (-not $memberHostName) { continue }
-                            $osdMemberKeys[$memberHostName.ToUpper()] = $true
-                            $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpper()] = $true
+                            $osdMemberKeys[$memberHostName.ToUpperInvariant()] = $true
+                            $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpperInvariant()] = $true
                         }
                     }
                     $missingOsdGroupMembers = @($osdDps | Where-Object {
-                            -not ($osdMemberKeys.ContainsKey($_.Fqdn.ToUpper()) -or $osdMemberKeys.ContainsKey($_.Short.ToUpper()))
+                            -not ($osdMemberKeys.ContainsKey($_.Fqdn.ToUpperInvariant()) -or $osdMemberKeys.ContainsKey($_.Short.ToUpperInvariant()))
                         })
                     if ($missingOsdGroupMembers.Count -eq 0) { break }
                     if ($osdGroupTry -lt 6) {
@@ -1177,12 +1438,18 @@ Write-DscStatus "$Tag Starting perfloading"
                 }
                 else {
                     Write-DscStatus "$Tag Verified every OSD DP is a member of '$OsdDpGroupName': $(($osdDps.Fqdn) -join ', ')"
-                    $osdDistTarget = $OsdDpGroupName
-                    $hasOsdTargets = $true
+                    if ($osdGroupNameAmbiguous) {
+                        Write-DscStatus "$Tag OSD content is not distributed by the ambiguous group name '$OsdDpGroupName'. Remove stale duplicate groups and rerun Phase 8." -Warning
+                    }
+                    else {
+                        $osdDistTarget = $OsdDpGroupName
+                        $hasOsdTargets = $true
+                    }
                 }
             }
             catch {
                 Write-DscStatus "$Tag Could not verify '$OsdDpGroupName' membership, so OSD content is NOT distributed rather than reported as covered without measuring it: $($_.Exception.Message). Phase 11 validation FAILS on this." -Warning
+            }
             }
         }
     }
@@ -2466,7 +2733,7 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                     -ErrorAction SilentlyContinue
 
                 Write-DscStatus "$Tag Distributing '$channelAppName' to all DPs"
-                Start-CMContentDistribution -ApplicationName $channelAppName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+                if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $channelAppName -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -StatusTag $Tag -SiteCode $SiteCode)) { continue }
 
                 # Deploy as Required to target VMs
                 $officeCollectionName = "MEMLABS-Office Install Targets"
@@ -4067,7 +4334,9 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 try {
                     New-CMSoftwareUpdateDeploymentPackage -Name $PackageName -Path $PackagePath -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created package: $PackageName"
-                    Start-CMContentDistribution -DeploymentPackageName $PackageName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+                    if (-not (Sync-MemLabsContentDistribution -ContentType DeploymentPackage -ContentName $PackageName -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -StatusTag $Tag -SiteCode $SiteCode)) {
+                        throw "content targeting failed for deployment package '$PackageName'"
+                    }
                     Write-DscStatus "$Tag Successfully distributed MEMLABS $PackageName to all DPs"
                     New-CMSoftwareUpdateGroup -Name $PackageName -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created SUG $PackageName"

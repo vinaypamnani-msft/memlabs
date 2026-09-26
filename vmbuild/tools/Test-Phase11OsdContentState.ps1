@@ -15,6 +15,14 @@ if ($parseErrors.Count -gt 0) {
     throw "Common.Validation.Functional.ps1 has $($parseErrors.Count) parse error(s): $($parseErrors -join '; ')"
 }
 
+$validationText = Get-Content -LiteralPath $validationPath -Raw
+if ($validationText -match "Name='OSD DPS'[^\r\n]*Select-Object -First 1") {
+    throw "Phase 11 validates only the first same-name 'OSD DPS' object."
+}
+if (-not $validationText.Contains('Get-MemLabsDistributionPointGroupValidationState -Namespace $ns -SiteCode $sc -GroupName ''OSD DPS''')) {
+    throw "Phase 11 does not use the duplicate-safe DP-group validation helper."
+}
+
 $installedConditions = @($ast.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.IfStatementAst] -and
@@ -58,4 +66,4 @@ foreach ($state in 0..8) {
     }
 }
 
-Write-Host "PASS -- Installed=0, transient=1/7, problems=2/3/4/5/6/8"
+Write-Host "PASS -- Installed=0, transient=1/7, problems=2/3/4/5/6/8, duplicate OSD groups combined by GroupID"

@@ -15,6 +15,37 @@ if ($parseErrors.Count -gt 0) {
     throw "perfloading.ps1 has $($parseErrors.Count) parse error(s): $($parseErrors -join '; ')"
 }
 
+$unsafeOsdGroupFilters = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Get-WmiObject' -and
+            $node.Extent.Text -match 'SMS_DPGroupMembers' -and
+            $node.Extent.Text -match '\$osdGrpWmi\.GroupID'
+        }, $true))
+if ($unsafeOsdGroupFilters.Count -ne 0) {
+    throw "Found $($unsafeOsdGroupFilters.Count) OSD membership query that interpolates GroupID from a possible group array."
+}
+$perGroupOsdFilters = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Get-WmiObject' -and
+            $node.Extent.Text -match 'SMS_DPGroupMembers' -and
+            $node.Extent.Text -match '\$osdGroupId'
+        }, $true))
+if ($perGroupOsdFilters.Count -ne 2) {
+    throw "Expected two exact-GroupID OSD membership queries; found $($perGroupOsdFilters.Count)."
+}
+$perfloadingText = Get-Content -LiteralPath $perfloadingPath -Raw
+if (-not $perfloadingText.Contains('Add-CMDistributionPointToGroup -DistributionPointGroupId $osdGroupId')) {
+    throw 'OSD membership add does not pin the resolved GroupID.'
+}
+if (-not $perfloadingText.Contains("OSD content is not distributed by the ambiguous group name")) {
+    throw 'Ambiguous OSD group names do not suppress unsafe name-based distribution.'
+}
+if ($perfloadingText -notmatch 'Could not resolve OSD DP group[\s\S]{0,300}-Warning') {
+    throw 'OSD DP-group resolver failures are not warning-only.'
+}
+
 $taskSequenceGuards = @($ast.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.IfStatementAst] -and

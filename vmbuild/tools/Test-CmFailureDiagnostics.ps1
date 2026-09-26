@@ -28,7 +28,17 @@ $collectorText = Get-Content -LiteralPath $collectorPath -Raw
 foreach ($logName in @('SMSProv.log', 'SMSProv.lo_', 'dmpdownloader.log', 'dmpdownloader.lo_', 'cmupdate.log', 'cmupdate.lo_', 'hman.log', 'hman.lo_', 'distmgr.log', 'smsexec.log', 'ConfigMgrPrereq.log', 'SmsAdminUI')) {
     Assert-Equal $true $collectorText.Contains($logName) "failure collector names $logName"
 }
-foreach ($className in @('SMS_CM_UpdatePackages', 'SMS_CM_UpdatePackDownloadMonitoring', 'SMS_CM_UpdatePackTopLevelMonitoring', 'SMS_CM_UpdatePackDetailedMonitoring')) {
+foreach ($className in @(
+        'SMS_CM_UpdatePackages',
+        'SMS_CM_UpdatePackDownloadMonitoring',
+        'SMS_CM_UpdatePackTopLevelMonitoring',
+        'SMS_CM_UpdatePackDetailedMonitoring',
+        'SMS_DistributionPointGroup',
+        'SMS_DPGroupMembers',
+        'SMS_DPGroupPackages',
+        'SMS_DPGroupCollections',
+        'SMS_DistributionPointInfo'
+    )) {
     Assert-Equal $true $collectorText.Contains("'$className'") "failure snapshot queries $className"
 }
 Assert-Equal $true ($collectorText -match "Mode -eq 'Failure'[\s\S]+CmArtifacts") 'ConfigMgr product diagnostics are failure-only'
@@ -37,6 +47,9 @@ Assert-Equal $true ($collectorText -match "-AsJob -TimeoutSeconds 120 -SessionMa
 Assert-Equal $true ($collectorText -match "-AsJob -TimeoutSeconds 180 -SessionMaxRetries 1 -SuppressLog -DisplayName 'Pull ConfigMgr failure diagnostics'") 'large product-log transfer is isolated and bounded'
 Assert-Equal $true ($collectorText -match 'OperationTimeoutSec 10') 'each direct provider query has a bounded operation timeout'
 Assert-Equal $true ($collectorText -match 'DirectCimErrors') 'provider snapshot records per-class failures'
+Assert-Equal $true ($collectorText -match 'DirectCimClassStats') 'provider snapshot records per-class capture metadata'
+Assert-Equal $true ($collectorText -match 'Select-Object -First 251') 'provider snapshot detects bounded-query truncation'
+Assert-Equal $true ($collectorText -match 'MinimumTotalRows') 'provider snapshot reports a lower bound when rows are truncated'
 Assert-Equal $true ($collectorText -match 'ProductLogInventory') 'static snapshot inventories missing and unreadable product logs'
 Assert-Equal $true ($collectorText -match 'tailLines=4000') 'product-log transfer uses bounded 4000-line tails'
 Assert-Equal $true ($collectorText -match 'Get-CMSiteUpdate -Fast -ErrorAction Stop') 'provider snapshot replays the broad cmdlet query'

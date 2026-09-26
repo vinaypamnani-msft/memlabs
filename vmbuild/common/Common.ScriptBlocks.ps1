@@ -2673,6 +2673,7 @@ function Save-CMSetupLogsFromVm {
                 SiteCode            = ''
                 Namespace           = ''
                 DirectCimClasses    = [ordered]@{}
+                DirectCimClassStats = [ordered]@{}
                 DirectCimErrors     = [ordered]@{}
                 CmdletModule        = $null
                 CmdletBroadQuery    = @()
@@ -2697,10 +2698,17 @@ function Save-CMSetupLogsFromVm {
                         'SMS_CM_UpdatePackages',
                         'SMS_CM_UpdatePackDownloadMonitoring',
                         'SMS_CM_UpdatePackTopLevelMonitoring',
-                        'SMS_CM_UpdatePackDetailedMonitoring'
+                        'SMS_CM_UpdatePackDetailedMonitoring',
+                        'SMS_DistributionPointGroup',
+                        'SMS_DPGroupMembers',
+                        'SMS_DPGroupPackages',
+                        'SMS_DPGroupCollections',
+                        'SMS_DistributionPointInfo'
                     )) {
                     try {
-                        $providerRows = @(Get-CimInstance -Namespace $probe.Namespace -ClassName $className -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 250)
+                        $boundedRows = @(Get-CimInstance -Namespace $probe.Namespace -ClassName $className -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 251)
+                        $truncated = $boundedRows.Count -gt 250
+                        $providerRows = @($boundedRows | Select-Object -First 250)
                         $serializedRows = @(
                             foreach ($providerRow in $providerRows) {
                                 $rowValues = [ordered]@{}
@@ -2709,6 +2717,11 @@ function Save-CMSetupLogsFromVm {
                             }
                         )
                         $probe.DirectCimClasses[$className] = $serializedRows
+                        $probe.DirectCimClassStats[$className] = [ordered]@{
+                            CapturedRows     = $serializedRows.Count
+                            Truncated        = $truncated
+                            MinimumTotalRows = if ($truncated) { 251 } else { $serializedRows.Count }
+                        }
                         if ($className -eq 'SMS_CM_UpdatePackages') {
                             $packageNames = @($providerRows | ForEach-Object { "$($_.Name)" } | Where-Object { $_ } | Select-Object -Unique)
                         }

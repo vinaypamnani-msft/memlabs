@@ -11602,6 +11602,34 @@ function Test-CMSiteWideFunctionality {
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
         param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner)
+
+        function Get-MemLabsDistributionPointGroupValidationState {
+            param(
+                [string]$Namespace,
+                [string]$SiteCode,
+                [string]$GroupName
+            )
+
+            $escapedGroupName = $GroupName.Replace("'", "''")
+            $groups = @(Get-WmiObject -Namespace $Namespace -Class SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" -ErrorAction Stop |
+                Where-Object { $null -ne $_ })
+            $memberNames = @(
+                foreach ($group in $groups) {
+                    Get-WmiObject -Namespace $Namespace -Class SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop |
+                        ForEach-Object {
+                            if ("$($_.DPNALPath)" -match '\\\\([^\\\"\]]+)') { $Matches[1] }
+                        }
+                }
+            ) | Where-Object { $_ } | Select-Object -Unique
+
+            [pscustomobject]@{
+                GroupCount      = $groups.Count
+                LocalGroupCount = @($groups | Where-Object { "$($_.SourceSite)" -eq $SiteCode }).Count
+                Identities      = @($groups | ForEach-Object { "GroupID=$($_.GroupID),SourceSite=$($_.SourceSite)" }) -join '; '
+                MemberNames     = @($memberNames)
+            }
+        }
+
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
@@ -12058,14 +12086,16 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $results.Details.Add("FAIL: OSDClient subnet(s) have no distribution point at all: $($uncoveredOsdSubnets -join ', '). PXE is a subnet-local broadcast, so those clients can never boot. Add a DP on every listed subnet.")
                 }
                 try {
-                    $osdDpGroup = Get-WmiObject -Namespace $ns -Class SMS_DistributionPointGroup -Filter "Name='OSD DPS'" -ErrorAction Stop | Select-Object -First 1
-                    if (-not $osdDpGroup) {
+                    $osdGroupState = Get-MemLabsDistributionPointGroupValidationState -Namespace $ns -SiteCode $sc -GroupName 'OSD DPS'
+                    if ($osdGroupState.GroupCount -eq 0) {
                         $results.Passed = $false
                         $results.Details.Add("FAIL: OSDClient exists but distribution point group 'OSD DPS' was not found")
                     }
                     else {
-                        $expectedOsdDpNames = @(Get-WmiObject -Namespace $ns -Class SMS_DPGroupMembers -Filter "GroupID='$($osdDpGroup.GroupID)'" -ErrorAction Stop |
-                            ForEach-Object { & $dpNameOf $_.DPNALPath } | Where-Object { $_ } | Select-Object -Unique)
+                        if ($osdGroupState.GroupCount -gt 1) {
+                            $results.Details.Add("WARN: Found $($osdGroupState.GroupCount) distribution point groups named 'OSD DPS'; validating the union of exact GroupID memberships. Remove stale duplicates after the build. $($osdGroupState.Identities)")
+                        }
+                        $expectedOsdDpNames = @($osdGroupState.MemberNames)
                         # The group's own membership cannot testify that it is complete. Judge it
                         # against the DPs the config puts on an OSDClient subnet, and require
                         # coverage on those even when the join silently failed.
