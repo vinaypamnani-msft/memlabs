@@ -2306,8 +2306,8 @@ Function Set-Window {
                 $afterW = $VerifyRect.Right - $VerifyRect.Left
                 $afterH = $VerifyRect.Bottom - $VerifyRect.Top
                 Write-Log "Set-Window: PID $ProcessID AFTER=${afterW}x${afterH} at ($($VerifyRect.Left),$($VerifyRect.Top))" -LogOnly
-                if ($afterW -eq $beforeW -and $afterH -eq $beforeH) {
-                    Write-Log "Set-Window: WARNING - window dimensions unchanged after MoveWindow! Window may be locked or handle is stale." -LogOnly -Warning
+                if ($VerifyRect.Left -ne $X -or $VerifyRect.Top -ne $Y -or $afterW -ne $Width -or $afterH -ne $Height) {
+                    Write-Log "Set-Window: requested ${Width}x${Height} at ($X,$Y), but actual window is ${afterW}x${afterH} at ($($VerifyRect.Left),$($VerifyRect.Top)). Window may be locked or handle is stale." -LogOnly -Warning
                 }
             }
         }

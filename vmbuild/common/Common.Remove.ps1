@@ -227,10 +227,12 @@ function Remove-VirtualMachine {
         # worker-process kill below -- the only things that recover it -- unreachable.
         # -ErrorAction/-WarningAction silence errors; they do not bound a hang.
         $turnOffAnswered = $false
+        $turnOffTimedOut = $false
         try {
             $stopJob = $VM | Stop-VM -TurnOff -Force -WarningAction SilentlyContinue -AsJob
             $null = $stopJob | Wait-Job -Timeout $TimeoutSeconds
             if ($stopJob.State -eq 'Running') {
+                $turnOffTimedOut = $true
                 Write-Log "VM '$($VM.Name)': TurnOff did not return within $TimeoutSeconds seconds; escalating." -Warning
                 Stop-Job $stopJob -ErrorAction SilentlyContinue
             }
@@ -245,7 +247,12 @@ function Remove-VirtualMachine {
             Remove-CompletedHyperVJob -Job $stopJob -Context "VM '$($VM.Name)': TurnOff"
         }
         catch {
-            Write-Log "TurnOff threw $($_.Exception.GetType().Name): $($_.Exception.Message)" -Warning
+            if ($turnOffTimedOut) {
+                Write-Log "VM '$($VM.Name)': TurnOff job cleanup after timeout threw $($_.Exception.GetType().Name): $($_.Exception.Message); continuing escalation." -LogOnly
+            }
+            else {
+                Write-Log "TurnOff threw $($_.Exception.GetType().Name): $($_.Exception.Message)" -Warning
+            }
         }
 
         # Only ask Hyper-V for the state if it just answered. A TurnOff that never
@@ -261,12 +268,13 @@ function Remove-VirtualMachine {
         # Safe here because the VM is being deleted regardless, and an already-Off VM
         # has no worker to match. Target vmwp.exe by VM id -- never vmms.exe, which is
         # shared by every VM on the host and takes the whole console down with it.
-        Write-Log "VM '$($VM.Name)' is not confirmed Off. Killing its worker process." -Warning
+        Write-Log "VM '$($VM.Name)' is not confirmed Off. Checking for a remaining worker process." -SubActivity
         try {
             $vmId = $VM.Id.ToString()
-            $targetProc = Get-CimInstance Win32_Process -Filter "Name='vmwp.exe'" -ErrorAction SilentlyContinue |
+            $targetProc = Get-CimInstance Win32_Process -Filter "Name='vmwp.exe'" -ErrorAction Stop |
                 Where-Object { $_.CommandLine -match [regex]::Escape($vmId) }
             if ($targetProc) {
+                Write-Log "VM '$($VM.Name)' still has worker process PID $($targetProc.ProcessId). Killing it." -Warning
                 Stop-Process -Id $targetProc.ProcessId -Force -ErrorAction Stop
                 if (Test-VMReachedOff -VmName $VM.Name -TimeoutSeconds $TimeoutSeconds) {
                     Write-Log "VM '$($VM.Name)' stopped after killing worker process (PID $($targetProc.ProcessId))." -Warning
@@ -274,7 +282,11 @@ function Remove-VirtualMachine {
                 }
             }
             else {
-                Write-Log "VM '$($VM.Name)': no vmwp.exe found for id $vmId." -Warning
+                # For deletion, the worker process is the lock-bearing resource. A
+                # timed-out Hyper-V job can remain stale after vmwp has exited even
+                # though the VM is already safe to detach and remove.
+                Write-Log "VM '$($VM.Name)': no vmwp.exe remains for id $vmId; treating it as stopped for removal." -SubActivity
+                return $true
             }
         }
         catch {

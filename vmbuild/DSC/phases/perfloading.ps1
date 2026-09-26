@@ -674,44 +674,72 @@ Write-DscStatus "$Tag Starting perfloading"
         $failed = 0
         $policyBlocked = 0
         $diagDumped = $false
+        $approvalMaxAttempts = 3
+        $approvalRetrySeconds = 5
+        $stopApprovals = $false
         for ($index = 0; $index -lt @($Queue).Count; $index++) {
             $entry = $Queue[$index]
-            try {
-                Approve-CMScript -ScriptGuid $entry.Guid -Comment 'MEMLABS auto approved' -ErrorAction Stop | Out-Null
-                $readBack = Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction Stop
-                if (-not $readBack -or [int]$readBack.ApprovalState -ne 3) {
-                    throw "approval returned without ApprovalState=3"
-                }
-                $approved++
-            }
-            catch {
-                $approvalError = Get-CmProviderError $_
-                if ($approvalError -match "Author can't approve their scripts") {
-                    # TwoKeyApproval is hierarchy policy and can lag the SCI write
-                    # on a fresh child. Every remaining call uses the same author
-                    # and policy, so more identical failures prove nothing.
-                    $policyBlocked = @($Queue).Count - $index
-                    Write-DscStatus "$Tag Script approval deferred: provider still requires a different approver after the TwoKeyApproval write. Stopped after one policy-blocked call; $policyBlocked script(s) remain unapproved and will be retried on the next Phase 8 pass." -Warning
+            for ($approvalAttempt = 1; $approvalAttempt -le $approvalMaxAttempts; $approvalAttempt++) {
+                try {
+                    # An approval can commit even when its provider response fails.
+                    # Read back before retrying so that case counts as success rather
+                    # than issuing a second mutation.
+                    if ($approvalAttempt -gt 1) {
+                        $alreadyApproved = Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction SilentlyContinue
+                        if ($alreadyApproved -and [int]$alreadyApproved.ApprovalState -eq 3) {
+                            $approved++
+                            break
+                        }
+                    }
+
+                    Approve-CMScript -ScriptGuid $entry.Guid -Comment 'MEMLABS auto approved' -ErrorAction Stop | Out-Null
+                    $readBack = Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction Stop
+                    if (-not $readBack -or [int]$readBack.ApprovalState -ne 3) {
+                        throw "approval returned without ApprovalState=3"
+                    }
+                    $approved++
                     break
                 }
-                # On the FIRST non-policy failure, dump the context ONCE so the log
-                # names WHY: the effective TwoKeyApproval value in the master SCI
-                # (FileType=2) and this script's live ApprovalState. A generic
-                # provider error with TwoKeyApproval=1 points at the policy write;
-                # with =0 it points elsewhere (and the ExtStatus above names it).
-                if (-not $diagDumped) {
-                    $diagDumped = $true
-                    try {
-                        $sdInst = @(Get-CimInstance -ClassName SMS_SCI_SiteDefinition -Namespace "ROOT\SMS\site_$SiteCode" -Filter "FileType=2 AND SiteCode='$HierarchySiteCode'" -ErrorAction Stop) | Select-Object -First 1
-                        $tkVal = ($sdInst.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1).Value
-                        $asVal = (Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction SilentlyContinue).ApprovalState
-                        Write-DscStatus "$Tag Approval DIAG: hierarchy site '$HierarchySiteCode' master SCI TwoKeyApproval='$tkVal'; script '$($entry.Name)' ApprovalState='$asVal'" -Warning
+                catch {
+                    $approvalError = Get-CmProviderError $_
+                    if ($approvalError -match "Author can't approve their scripts") {
+                        # TwoKeyApproval is hierarchy policy and can lag the SCI write
+                        # on a fresh child. Every remaining call uses the same author
+                        # and policy, so more identical failures prove nothing.
+                        $policyBlocked = @($Queue).Count - $index
+                        $stopApprovals = $true
+                        Write-DscStatus "$Tag Script approval deferred: provider still requires a different approver after the TwoKeyApproval write. Stopped after one policy-blocked call; $policyBlocked script(s) remain unapproved and will be retried on the next Phase 8 pass." -Warning
+                        break
                     }
-                    catch { Write-DscStatus "$Tag Approval DIAG read failed: $($_.Exception.Message)" -Warning }
+
+                    $transientProviderFailure = $approvalError -match '(?i)\b1205\b|deadlock|Error waiting for query to return'
+                    if ($transientProviderFailure -and $approvalAttempt -lt $approvalMaxAttempts) {
+                        Write-DscStatus "$Tag Transient provider failure approving script '$($entry.Name)' (attempt $approvalAttempt of $approvalMaxAttempts); retrying in ${approvalRetrySeconds}s: $approvalError"
+                        Start-Sleep -Seconds $approvalRetrySeconds
+                        continue
+                    }
+
+                    # On the FIRST non-policy failure, dump the context ONCE so the log
+                    # names WHY: the effective TwoKeyApproval value in the master SCI
+                    # (FileType=2) and this script's live ApprovalState. A generic
+                    # provider error with TwoKeyApproval=1 points at the policy write;
+                    # with =0 it points elsewhere (and the ExtStatus above names it).
+                    if (-not $diagDumped) {
+                        $diagDumped = $true
+                        try {
+                            $sdInst = @(Get-CimInstance -ClassName SMS_SCI_SiteDefinition -Namespace "ROOT\SMS\site_$SiteCode" -Filter "FileType=2 AND SiteCode='$HierarchySiteCode'" -ErrorAction Stop) | Select-Object -First 1
+                            $tkVal = ($sdInst.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1).Value
+                            $asVal = (Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction SilentlyContinue).ApprovalState
+                            Write-DscStatus "$Tag Approval DIAG: hierarchy site '$HierarchySiteCode' master SCI TwoKeyApproval='$tkVal'; script '$($entry.Name)' ApprovalState='$asVal'" -Warning
+                        }
+                        catch { Write-DscStatus "$Tag Approval DIAG read failed: $($_.Exception.Message)" -Warning }
+                    }
+                    $failed++
+                    Write-DscStatus "$Tag Failed to approve script '$($entry.Name)' after $approvalAttempt attempt(s): $approvalError" -Warning
+                    break
                 }
-                $failed++
-                Write-DscStatus "$Tag Failed to approve script '$($entry.Name)': $approvalError" -Warning
             }
+            if ($stopApprovals) { break }
         }
 
         $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)

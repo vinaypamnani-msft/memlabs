@@ -8884,6 +8884,7 @@ $global:VM_Config = {
                             [int] $MaxAttempts = 2
                         )
                         $useThreadJob = $null -ne (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+                        $lastError = $null
                         for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
                             $job = $null
                             try {
@@ -8896,17 +8897,29 @@ $global:VM_Config = {
                                     $jobErrors = $null
                                     $output = Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErrors
                                     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
-                                    $status = if ($jobErrors -and $jobErrors.Count -gt 0) { 'Error' } else { 'OK' }
-                                    return [pscustomobject]@{ Status = $status; Output = $output }
+                                    if ($jobErrors -and $jobErrors.Count -gt 0) {
+                                        $lastError = $jobErrors[0].ToString()
+                                        if ($attempt -lt $MaxAttempts) {
+                                            Start-Sleep -Seconds 2
+                                            continue
+                                        }
+                                        return [pscustomobject]@{ Status = 'Error'; Output = $output; Detail = $lastError; Attempts = $attempt }
+                                    }
+                                    return [pscustomobject]@{ Status = 'OK'; Output = $output; Detail = $null; Attempts = $attempt }
                                 }
                                 try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
                                 try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
                             }
                             catch {
+                                $lastError = $_.Exception.Message
                                 if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+                                if ($attempt -ge $MaxAttempts) {
+                                    return [pscustomobject]@{ Status = 'Error'; Output = $null; Detail = $lastError; Attempts = $attempt }
+                                }
+                                Start-Sleep -Seconds 2
                             }
                         }
-                        return [pscustomobject]@{ Status = 'TimedOut'; Output = $null }
+                        return [pscustomobject]@{ Status = 'TimedOut'; Output = $null; Detail = $lastError; Attempts = $MaxAttempts }
                     }
                     # Heartbeat / cluster NICs are the ONLY adapters that must never
                     # publish the host's name in DNS. Identify them POSITIVELY (an IP in
@@ -8987,11 +9000,17 @@ $global:VM_Config = {
                     # expensive DC query behind a cheap, bounded local resolve and (b) run every DC-side
                     # DNS call under the kill-and-retry watchdog above.
                     try {
-                        $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        $dnsServerAddress = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                             Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
+                        # Prefer the logon-server name for remote DNS cmdlets so
+                        # Kerberos can authenticate it. An IP target can force WinRM
+                        # into TrustedHosts/explicit-credential requirements.
+                        $logonServer = "$env:LOGONSERVER" -replace '^\\\\', ''
+                        $dnsServers = @(@($logonServer, $dnsServerAddress) | Where-Object { $_ } | Select-Object -Unique)
+                        $dnsServerCsv = $dnsServers -join ','
                         $zone = ($hostname -split '\.', 2)[1]
                         $shortName = ($hostname -split '\.')[0]
-                        if ($dnsServer -and $zone) {
+                        if ($dnsServers.Count -gt 0 -and $zone) {
                             # Helper: is this IP a heartbeat/VIP record that must NOT live under the node name?
                             $isBadIp = {
                                 param($ip)
@@ -9002,14 +9021,15 @@ $global:VM_Config = {
                                 return $bad
                             }
 
-                            # Pre-check (cheap, bounded): resolve our own name locally and see if any
-                            # heartbeat/VIP IP is actually published under it. The expensive DC RPC only
-                            # runs when there's genuinely something to remove -- on a clean deploy this
-                            # short-circuits and we never touch the DC at all.
+                            # Pre-check (cheap, bounded): query the configured DNS server directly
+                            # so the answer cannot come from the node's resolver cache. The
+                            # expensive DNS-management RPC only runs when there is something
+                            # to remove or this direct query fails.
                             $badIps = @()
-                            $resolveWd = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($hostname) -ScriptBlock {
-                                param($fqdn)
-                                @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction SilentlyContinue |
+                            $resolveServer = if ($dnsServerAddress) { $dnsServerAddress } else { $logonServer }
+                            $resolveWd = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($hostname, $resolveServer) -ScriptBlock {
+                                param($fqdn, $server)
+                                @(Resolve-DnsName -Name $fqdn -Type A -Server $server -DnsOnly -QuickTimeout -ErrorAction Stop |
                                     Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress)
                             }
                             if ($resolveWd.Status -eq 'OK') {
@@ -9019,16 +9039,25 @@ $global:VM_Config = {
                                 # Local resolve itself timed out/failed -- fall back to the authoritative
                                 # DC query (still watchdog'd) so we don't miss a stale record just because
                                 # the local resolver was slow.
-                                $listWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $dnsServer) -ScriptBlock {
-                                    param($z, $n, $srv)
-                                    @(Get-DnsServerResourceRecord -ZoneName $z -Name $n -RRType A -ComputerName $srv -ErrorAction SilentlyContinue |
-                                        ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                                $listWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $dnsServerCsv) -ScriptBlock {
+                                    param($z, $n, $serverCsv)
+                                    $serverErrors = @()
+                                    foreach ($srv in @("$serverCsv".Split(',') | Where-Object { $_ })) {
+                                        try {
+                                            return @(Get-DnsServerResourceRecord -ZoneName $z -RRType A -ComputerName $srv -ErrorAction Stop |
+                                                Where-Object { $_.HostName -ieq $n } |
+                                                ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                                        }
+                                        catch { $serverErrors += "${srv}: $($_.Exception.Message)" }
+                                    }
+                                    throw "DNS query failed against every candidate server: $($serverErrors -join '; ')"
                                 }
                                 if ($listWd.Status -eq 'OK') {
                                     foreach ($ip in @($listWd.Output)) { if (& $isBadIp $ip) { $badIps += $ip } }
                                 }
                                 else {
-                                    $results += "DNS record cleanup skipped (DC DNS query did not respond: $($listWd.Status))"
+                                    $listDetail = if ($listWd.Detail) { ": $($listWd.Detail)" } else { '' }
+                                    $results += "DNS record cleanup skipped (DC DNS query did not respond: $($listWd.Status)$listDetail)"
                                 }
                             }
 
@@ -9038,15 +9067,36 @@ $global:VM_Config = {
                             }
                             else {
                                 foreach ($ip in $badIps) {
-                                    $delWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $ip, $dnsServer) -ScriptBlock {
-                                        param($z, $n, $rip, $srv)
-                                        Remove-DnsServerResourceRecord -ZoneName $z -Name $n -RRType A -RecordData $rip -ComputerName $srv -Force -ErrorAction SilentlyContinue
+                                    $delWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $ip, $dnsServerCsv) -ScriptBlock {
+                                        param($z, $n, $rip, $serverCsv)
+                                        $serverErrors = @()
+                                        foreach ($srv in @("$serverCsv".Split(',') | Where-Object { $_ })) {
+                                            try {
+                                                # Query the whole zone so an already-absent node is
+                                                # an empty successful result, not DNS_ERROR_NAME_DOES_NOT_EXIST.
+                                                $records = @(Get-DnsServerResourceRecord -ZoneName $z -RRType A -ComputerName $srv -ErrorAction Stop |
+                                                        Where-Object { $_.HostName -ieq $n })
+                                                foreach ($record in @($records | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -eq $rip })) {
+                                                    Remove-DnsServerResourceRecord -ZoneName $z -InputObject $record -ComputerName $srv -Force -ErrorAction Stop
+                                                }
+                                                $remaining = @(Get-DnsServerResourceRecord -ZoneName $z -RRType A -ComputerName $srv -ErrorAction Stop |
+                                                        Where-Object {
+                                                            $_.HostName -ieq $n -and
+                                                            $_.RecordData.IPv4Address.IPAddressToString -eq $rip
+                                                        })
+                                                if ($remaining.Count -gt 0) { throw "DNS record $n.$z -> $rip still exists after removal" }
+                                                return
+                                            }
+                                            catch { $serverErrors += "${srv}: $($_.Exception.Message)" }
+                                        }
+                                        throw "DNS cleanup failed against every candidate server: $($serverErrors -join '; ')"
                                     }
                                     if ($delWd.Status -eq 'OK') {
                                         $results += "Removed stale DNS A record $ip"
                                     }
                                     else {
-                                        $results += "Stale DNS A record $ip removal did not complete ($($delWd.Status))"
+                                        $deleteDetail = if ($delWd.Detail) { ": $($delWd.Detail)" } else { '' }
+                                        $results += "Stale DNS A record $ip removal did not complete ($($delWd.Status)$deleteDetail)"
                                     }
                                 }
                             }
@@ -9076,6 +9126,9 @@ $global:VM_Config = {
                     -DisplayName "Scrub heartbeat DNS records"
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub failed: $($result.ScriptBlockOutput)" -Warning
+                }
+                elseif ("$($result.ScriptBlockOutput)" -match 'DNS record cleanup skipped|removal did not complete') {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub: $($result.ScriptBlockOutput)" -Warning
                 }
                 else {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub: $($result.ScriptBlockOutput)"
