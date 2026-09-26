@@ -4110,9 +4110,18 @@ function Update-VMFromHyperV {
 
 function Save-VMListDiskCache {
     if ($Common.InJob) { return }
-    if (-not $global:vm_List -or $global:vm_List.Count -eq 0) { return }
     try {
         $cachePath = Join-Path $Common.CachePath "vm-list-cache.clixml"
+        if (-not $global:vm_List -or $global:vm_List.Count -eq 0) {
+            # Reconciliation can legitimately remove every cached VM after a
+            # domain teardown. Leaving the old file in place resurrects those
+            # ghosts on every subsequent Get-List call in the same workflow.
+            if (Test-Path $cachePath) {
+                Remove-Item -LiteralPath $cachePath -Force -ErrorAction Stop
+                Write-Log "Save-VMListDiskCache: Removed disk cache because the live VM list is empty." -LogOnly
+            }
+            return
+        }
         @($global:vm_List) | Export-Clixml -Path $cachePath -Force -Depth 10
         Write-Log "Save-VMListDiskCache: Wrote $($global:vm_List.Count) VMs to disk cache." -LogOnly
     }
