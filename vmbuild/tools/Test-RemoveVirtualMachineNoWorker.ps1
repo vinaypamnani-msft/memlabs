@@ -71,9 +71,11 @@ function Remove-CompletedHyperVJob {
 
 function Get-CimInstance {
     param([string] $ClassName, [string] $Filter, $ErrorAction)
+    if ($script:CimQueryFails) { throw 'synthetic process-enumeration failure' }
     return $null
 }
 
+$script:CimQueryFails = $false
 $vm = [pscustomobject]@{ Name = 'TEST-VM'; State = 'Running'; Id = [guid]::NewGuid() }
 $stopped = Wait-VMStopped -VM $vm -TimeoutSeconds 1
 
@@ -82,6 +84,16 @@ if (-not $stopped) {
 }
 if (@($script:RemoveLogs | Where-Object Message -like '*could not be forced Off*').Count -ne 0) {
     throw 'Wait-VMStopped emitted the stale terminal failure after confirming that no worker remained.'
+}
+
+$script:RemoveLogs.Clear()
+$script:CimQueryFails = $true
+$stopped = Wait-VMStopped -VM $vm -TimeoutSeconds 1
+if ($stopped) {
+    throw 'Wait-VMStopped treated a failed worker-process query as proof that no worker remained.'
+}
+if (@($script:RemoveLogs | Where-Object { $_.Warning -and $_.Message -like '*worker-process enumeration/escalation failed*' }).Count -ne 1) {
+    throw 'A worker-process query failure did not retain an actionable warning.'
 }
 
 Write-Host 'PASS -- an absent vmwp process is accepted as safe for removal.'

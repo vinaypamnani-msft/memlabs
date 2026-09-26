@@ -9026,13 +9026,16 @@ $global:VM_Config = {
                             # expensive DNS-management RPC only runs when there is something
                             # to remove or this direct query fails.
                             $badIps = @()
+                            $dnsCheckSucceeded = $false
                             $resolveServer = if ($dnsServerAddress) { $dnsServerAddress } else { $logonServer }
+                            $dnsCheckSource = "direct DNS response from $resolveServer"
                             $resolveWd = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($hostname, $resolveServer) -ScriptBlock {
                                 param($fqdn, $server)
                                 @(Resolve-DnsName -Name $fqdn -Type A -Server $server -DnsOnly -QuickTimeout -ErrorAction Stop |
                                     Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress)
                             }
                             if ($resolveWd.Status -eq 'OK') {
+                                $dnsCheckSucceeded = $true
                                 foreach ($ip in @($resolveWd.Output)) { if (& $isBadIp $ip) { $badIps += $ip } }
                             }
                             else {
@@ -9053,6 +9056,8 @@ $global:VM_Config = {
                                     throw "DNS query failed against every candidate server: $($serverErrors -join '; ')"
                                 }
                                 if ($listWd.Status -eq 'OK') {
+                                    $dnsCheckSucceeded = $true
+                                    $dnsCheckSource = 'authoritative DNS-management fallback'
                                     foreach ($ip in @($listWd.Output)) { if (& $isBadIp $ip) { $badIps += $ip } }
                                 }
                                 else {
@@ -9062,8 +9067,12 @@ $global:VM_Config = {
                             }
 
                             $badIps = @($badIps | Select-Object -Unique)
-                            if ($badIps.Count -eq 0) {
-                                $results += "No stale heartbeat/VIP DNS records to clean"
+                            if (-not $dnsCheckSucceeded) {
+                                # The failure detail was added above. Do not follow it
+                                # with a contradictory success-shaped "no records" line.
+                            }
+                            elseif ($badIps.Count -eq 0) {
+                                $results += "No stale heartbeat/VIP DNS records to clean ($dnsCheckSource)"
                             }
                             else {
                                 foreach ($ip in $badIps) {
@@ -9085,14 +9094,16 @@ $global:VM_Config = {
                                                             $_.RecordData.IPv4Address.IPAddressToString -eq $rip
                                                         })
                                                 if ($remaining.Count -gt 0) { throw "DNS record $n.$z -> $rip still exists after removal" }
-                                                return
+                                                return $srv
                                             }
                                             catch { $serverErrors += "${srv}: $($_.Exception.Message)" }
                                         }
                                         throw "DNS cleanup failed against every candidate server: $($serverErrors -join '; ')"
                                     }
                                     if ($delWd.Status -eq 'OK') {
-                                        $results += "Removed stale DNS A record $ip"
+                                        $verifiedServer = $delWd.Output | Where-Object { $_ } | Select-Object -Last 1
+                                        $serverNote = if ($verifiedServer) { " (verified via $verifiedServer)" } else { '' }
+                                        $results += "Removed stale DNS A record $ip$serverNote"
                                     }
                                     else {
                                         $deleteDetail = if ($delWd.Detail) { ": $($delWd.Detail)" } else { '' }

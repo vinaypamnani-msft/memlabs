@@ -688,6 +688,7 @@ Write-DscStatus "$Tag Starting perfloading"
                         $alreadyApproved = Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction SilentlyContinue
                         if ($alreadyApproved -and [int]$alreadyApproved.ApprovalState -eq 3) {
                             $approved++
+                            Write-DscStatus "$Tag Script '$($entry.Name)' approval recovered after the provider failure: read-back is ApprovalState=3 before retry $approvalAttempt."
                             break
                         }
                     }
@@ -698,6 +699,9 @@ Write-DscStatus "$Tag Starting perfloading"
                         throw "approval returned without ApprovalState=3"
                     }
                     $approved++
+                    if ($approvalAttempt -gt 1) {
+                        Write-DscStatus "$Tag Script '$($entry.Name)' approval recovered on attempt $approvalAttempt of $approvalMaxAttempts."
+                    }
                     break
                 }
                 catch {

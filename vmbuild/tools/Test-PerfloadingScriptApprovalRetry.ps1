@@ -76,6 +76,9 @@ if (@($script:StatusMessages | Where-Object Warning).Count -ne 0) {
 if (@($script:StatusMessages | Where-Object Message -like '*Transient provider failure*').Count -ne 1) {
     throw 'The transient approval retry was not logged.'
 }
+if (@($script:StatusMessages | Where-Object Message -like "*approval recovered on attempt 2*").Count -ne 1) {
+    throw 'A successful approval retry was not logged explicitly.'
+}
 
 $script:ApprovalCalls = 0
 $script:Approved = $false
@@ -86,6 +89,9 @@ $result = Approve-MemLabsScriptQueue -Queue @([pscustomobject]@{ Guid = 'test-gu
 
 if ($result.Approved -ne 1 -or $result.Failed -ne 0 -or $script:ApprovalCalls -ne 1 -or $script:Sleeps -ne 1) {
     throw "Commit-on-error readback did not prevent a duplicate approval: result=$($result | ConvertTo-Json -Compress) calls=$script:ApprovalCalls sleeps=$script:Sleeps."
+}
+if (@($script:StatusMessages | Where-Object Message -like '*read-back is ApprovalState=3*').Count -ne 1) {
+    throw 'Commit-on-error recovery was not logged explicitly.'
 }
 
 Write-Host 'PASS -- transient script-approval deadlocks are retried and recovered.'

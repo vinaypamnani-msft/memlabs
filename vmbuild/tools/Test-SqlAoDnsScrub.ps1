@@ -84,4 +84,60 @@ if ($sourceText -notmatch '(?s)elseif \("\$\(\$result\.ScriptBlockOutput\)" -mat
     throw 'Incomplete DNS scrub results are not promoted to host warnings.'
 }
 
+$cleanupBlocks = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.ScriptBlockAst] -and
+            $node.Extent.Text -match '^\{\s*param\(\$z,\s*\$n,\s*\$rip,\s*\$serverCsv\)' -and
+            $node.Extent.Text -match 'DNS cleanup failed against every candidate server'
+        }, $true))
+if ($cleanupBlocks.Count -ne 1) {
+    throw "Expected one executable DNS cleanup block; found $($cleanupBlocks.Count)."
+}
+$cleanupBlock = Invoke-Expression $cleanupBlocks[0].Extent.Text
+
+$script:DnsRecordPresent = $true
+$script:DnsRemovalEffective = $true
+$script:DnsRemoveCalls = 0
+$script:DnsQueries = [System.Collections.Generic.List[string]]::new()
+$script:TargetIp = '10.250.251.20'
+function Get-DnsServerResourceRecord {
+    param([string] $ZoneName, [string] $RRType, [string] $ComputerName, $ErrorAction)
+    $script:DnsQueries.Add($ComputerName)
+    if ($ComputerName -eq 'LOGON-DC') { throw 'synthetic logon-server RPC failure' }
+    if (-not $script:DnsRecordPresent) { return }
+    [pscustomobject]@{
+        HostName   = 'SQLAO1'
+        RecordData = [pscustomobject]@{
+            IPv4Address = [pscustomobject]@{ IPAddressToString = $script:TargetIp }
+        }
+    }
+}
+function Remove-DnsServerResourceRecord {
+    param([string] $ZoneName, $InputObject, [string] $ComputerName, [switch] $Force, $ErrorAction)
+    $script:DnsRemoveCalls++
+    if ($script:DnsRemovalEffective) { $script:DnsRecordPresent = $false }
+}
+
+$usedServer = & $cleanupBlock 'contoso.test' 'SQLAO1' $script:TargetIp 'LOGON-DC,192.0.2.53'
+if ($usedServer -ne '192.0.2.53' -or $script:DnsRemoveCalls -ne 1 -or $script:DnsRecordPresent) {
+    throw "DNS cleanup did not fall back, remove, and verify: server='$usedServer' removes=$script:DnsRemoveCalls present=$script:DnsRecordPresent."
+}
+
+$script:DnsQueries.Clear()
+$script:DnsRecordPresent = $false
+$script:DnsRemoveCalls = 0
+$usedServer = & $cleanupBlock 'contoso.test' 'SQLAO1' $script:TargetIp '192.0.2.53'
+if ($usedServer -ne '192.0.2.53' -or $script:DnsRemoveCalls -ne 0) {
+    throw 'An already-absent authoritative DNS record was not treated as a verified no-op.'
+}
+
+$script:DnsRecordPresent = $true
+$script:DnsRemovalEffective = $false
+$cleanupFailure = $null
+try { $null = & $cleanupBlock 'contoso.test' 'SQLAO1' $script:TargetIp '192.0.2.53' }
+catch { $cleanupFailure = $_.Exception.Message }
+if ($cleanupFailure -notmatch 'still exists after removal') {
+    throw "Persistent stale DNS record did not fail closed: '$cleanupFailure'."
+}
+
 Write-Host 'PASS -- SQLAO DNS cleanup retries, verifies, and surfaces failures.'

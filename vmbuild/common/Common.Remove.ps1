@@ -290,7 +290,7 @@ function Remove-VirtualMachine {
             }
         }
         catch {
-            Write-Log "VM '$($VM.Name)': could not kill worker process: $($_.Exception.Message)" -Warning
+            Write-Log "VM '$($VM.Name)': worker-process enumeration/escalation failed: $($_.Exception.Message)" -Warning
         }
 
         Write-Log "VM '$($VM.Name)' could not be forced Off." -Warning
