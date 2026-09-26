@@ -11663,6 +11663,48 @@ function Test-CMSiteWideFunctionality {
 
         $ns = "root\SMS\site_$sc"
 
+        function Invoke-CmWmiQueryWithRetry {
+            param(
+                [Parameter(Mandatory)][string]$Class,
+                [string]$Filter,
+                [Parameter(Mandatory)][string]$Label,
+                [int]$Attempts = 3,
+                [int]$RetrySeconds = 2
+            )
+
+            $lastError = $null
+            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+                try {
+                    $query = @{
+                        Namespace   = $ns
+                        Class       = $Class
+                        ErrorAction = 'Stop'
+                    }
+                    if ($Filter) { $query.Filter = $Filter }
+                    $items = @(Get-WmiObject @query)
+                    if ($attempt -gt 1) {
+                        $results.Details.Add("RECOVERED: $Label query succeeded on attempt $attempt/$Attempts after a transient provider failure")
+                    }
+                    return $items
+                }
+                catch {
+                    $lastError = $_
+                    if ($attempt -lt $Attempts) {
+                        $results.Details.Add("INFO: $Label query attempt $attempt/$Attempts failed: $($_.Exception.Message); retrying in ${RetrySeconds}s")
+                        Start-Sleep -Seconds $RetrySeconds
+                    }
+                }
+            }
+
+            $exception = $lastError.Exception
+            $exceptionType = if ($exception) { $exception.GetType().FullName } else { '<none>' }
+            $message = if ($exception) { $exception.Message } else { "$lastError" }
+            $hresult = if ($exception) { $exception.HResult } else { '<none>' }
+            $errorCode = if ($exception -and $exception.PSObject.Properties['ErrorCode']) { $exception.ErrorCode } else { '<none>' }
+            $fqid = if ($lastError.FullyQualifiedErrorId) { $lastError.FullyQualifiedErrorId } else { '<none>' }
+            throw "$Label query failed after $Attempts attempts: Type=$exceptionType; Message=$message; HResult=$hresult; ErrorCode=$errorCode; FQID=$fqid"
+        }
+
         # 1. Boundary groups -- runs on EVERY Primary/CAS (NOT gated on
         # top-level): each site's own boundary group is created LOCALLY by its
         # InstallBoundaryGroups.ps1 run, so it is present without waiting for
@@ -11673,7 +11715,7 @@ function Test-CMSiteWideFunctionality {
         # site assignment, so existence alone is not enough.
         $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_BoundaryGroup")
         try {
-            $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
+            $bgs = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup')
             if ($bgs.Count -ge 1) {
                 $results.Details.Add("OK: $($bgs.Count) boundary group(s) defined: $(($bgs | Select-Object -First 5 -ExpandProperty Name) -join ', ')")
             }
@@ -11753,7 +11795,13 @@ function Test-CMSiteWideFunctionality {
             }
         }
         catch {
-            $results.Details.Add("WARN: SMS_BoundaryGroup query failed: $($_.Exception.Message)")
+            if ($isPrimary) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Required Primary boundary groups could not be measured. $($_.Exception.Message)")
+            }
+            else {
+                $results.Details.Add("WARN: SMS_BoundaryGroup query failed: $($_.Exception.Message)")
+            }
         }
 
         # --- Hierarchy-owned checks (only on top-level sites) ---
@@ -12014,10 +12062,14 @@ function Test-CMSiteWideFunctionality {
 
         # 5. Client push install account configured (warn-only -- some labs disable client push)
         try {
-            $cpComp = Get-WmiObject -Namespace $ns -Class SMS_SCI_Component `
-                -Filter "ComponentName='SMS_DISCOVERY_DATA_MANAGER' AND SiteCode='$sc'" -ErrorAction Stop
+            $cpComp = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_SCI_Component' `
+                    -Filter "ComponentName='SMS_DISCOVERY_DATA_MANAGER' AND SiteCode='$sc'" `
+                    -Label 'Client push pipeline component') | Select-Object -First 1
             if ($cpComp) {
                 $results.Details.Add("OK: SMS_DISCOVERY_DATA_MANAGER component present (client push pipeline reachable)")
+            }
+            else {
+                $results.Details.Add("WARN: SMS_DISCOVERY_DATA_MANAGER component not found (client push pipeline could not be confirmed)")
             }
         }
         catch {
