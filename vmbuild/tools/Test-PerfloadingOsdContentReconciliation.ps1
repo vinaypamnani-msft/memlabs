@@ -60,10 +60,10 @@ $taskSequenceGuard = $taskSequenceGuards[0]
 $helperDefinitions = @($ast.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -in @('Get-MemLabsServerFromNalPath', 'Get-MemLabsMissingContentTargets', 'Sync-MemLabsOsdContentDistribution')
+            $node.Name -in @('Get-MemLabsServerFromNalPath', 'Get-MemLabsBootImageSourceVersionProblem', 'Get-MemLabsMissingContentTargets', 'Sync-MemLabsOsdContentDistribution')
         }, $true))
-if ($helperDefinitions.Count -ne 3) {
-    throw "Expected three OSD content reconciliation helpers; found $($helperDefinitions.Count)."
+if ($helperDefinitions.Count -ne 4) {
+    throw "Expected four OSD content reconciliation helpers; found $($helperDefinitions.Count)."
 }
 foreach ($helperDefinition in $helperDefinitions | Sort-Object { $_.Extent.StartLineNumber }) {
     Invoke-Expression $helperDefinition.Extent.Text
@@ -118,6 +118,43 @@ while ($parent) {
 }
 if ($insideTaskSequenceGuard) { throw 'OSD content reconciliation is create-only and cannot heal existing task sequences.' }
 if (-not $insideOsdTargetGuard) { throw 'OSD content reconciliation is not gated by $hasOsdTargets.' }
+
+$publicationVersionCapture = $perfloadingText.IndexOf('$bootImagePublicationPreviousSourceVersion = [int]$bootImageBeforePublication.SourceVersion')
+$publicationRequest = $perfloadingText.IndexOf('Update-CMDistributionPoint -BootImageId $packageId')
+if ($publicationVersionCapture -lt 0 -or $publicationRequest -lt 0 -or $publicationVersionCapture -gt $publicationRequest) {
+    throw 'Boot-image publication does not capture SourceVersion before Update-CMDistributionPoint.'
+}
+
+$problem = Get-MemLabsBootImageSourceVersionProblem -CurrentSourceVersion 2 -CurrentStoredVersion 2 -CommandSupportChanged $false -CommandSupportPreviousSourceVersion $null -PublicationNeeded $true -PublicationStarted $true -PublicationPreviousSourceVersion 2
+if ($problem -notmatch 'has not advanced after publication') {
+    throw "Pre-publication SourceVersion was accepted: '$problem'."
+}
+$problem = Get-MemLabsBootImageSourceVersionProblem -CurrentSourceVersion 3 -CurrentStoredVersion 3 -CommandSupportChanged $false -CommandSupportPreviousSourceVersion $null -PublicationNeeded $true -PublicationStarted $true -PublicationPreviousSourceVersion 2
+if ($problem) {
+    throw "Advanced publication SourceVersion was rejected: '$problem'."
+}
+$problem = Get-MemLabsBootImageSourceVersionProblem -CurrentSourceVersion 2 -CurrentStoredVersion 2 -CommandSupportChanged $false -CommandSupportPreviousSourceVersion $null -PublicationNeeded $true -PublicationStarted $false -PublicationPreviousSourceVersion 2
+if ($problem -notmatch 'did not start') {
+    throw "Failed publication was accepted: '$problem'."
+}
+$problem = Get-MemLabsBootImageSourceVersionProblem -CurrentSourceVersion 3 -CurrentStoredVersion 2 -CommandSupportChanged $false -CommandSupportPreviousSourceVersion $null -PublicationNeeded $true -PublicationStarted $true -PublicationPreviousSourceVersion 2
+if ($problem -notmatch 'StoredPkgVersion=2') {
+    throw "Site content lag was accepted: '$problem'."
+}
+$problem = Get-MemLabsBootImageSourceVersionProblem -CurrentSourceVersion 2 -CurrentStoredVersion 2 -CommandSupportChanged $false -CommandSupportPreviousSourceVersion $null -PublicationNeeded $false -PublicationStarted $false -PublicationPreviousSourceVersion $null
+if ($problem) {
+    throw "Warm rerun without publication was blocked: '$problem'."
+}
+$problem = Get-MemLabsBootImageSourceVersionProblem -CurrentSourceVersion 3 -CurrentStoredVersion 3 -CommandSupportChanged $false -CommandSupportPreviousSourceVersion $null -PublicationNeeded $true -PublicationStarted $true -PublicationPreviousSourceVersion $null
+if ($problem -notmatch 'previous') {
+    throw "Missing publication baseline was accepted: '$problem'."
+}
+if ($perfloadingText -notmatch 'bootCoverageTerminalProblem[\s\S]{0,500}break') {
+    throw 'Unwinnable publication states do not skip the 15-minute coverage wait.'
+}
+if ($perfloadingText -notmatch 'for \(\$baselineTry = 1; \$baselineTry -le 3') {
+    throw 'Pre-publication SourceVersion does not use a bounded retry.'
+}
 
 $resolverAssignments = @($ast.FindAll({
             param($node)

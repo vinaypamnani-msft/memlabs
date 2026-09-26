@@ -23,47 +23,61 @@ if (-not $validationText.Contains('Get-MemLabsDistributionPointGroupValidationSt
     throw "Phase 11 does not use the duplicate-safe DP-group validation helper."
 }
 
-$installedConditions = @($ast.FindAll({
+$stateHelpers = @($ast.FindAll({
             param($node)
-            $node -is [System.Management.Automation.Language.IfStatementAst] -and
-            @($node.Clauses | Where-Object { $_.Item1.Extent.Text -match '^\s*\$osState\s+-eq\s+0\s*$' }).Count -eq 1
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-MemLabsContentDistributionStateKind'
         }, $true))
-$pendingConditions = @($ast.FindAll({
-            param($node)
-            $node -is [System.Management.Automation.Language.IfStatementAst] -and
-            @($node.Clauses | Where-Object { $_.Item1.Extent.Text -match '^\s*\$osState\s+-in\s+' }).Count -eq 1 -and
-            $node.Extent.Text -match '\$osPkgPending' -and
-            $node.Extent.Text -match '\$osPkgProblems'
-        }, $true))
-if ($installedConditions.Count -ne 1 -or $pendingConditions.Count -ne 1) {
-    throw "Expected one installed and one pending OSD state condition; found installed=$($installedConditions.Count), pending=$($pendingConditions.Count)."
+if ($stateHelpers.Count -ne 1) {
+    throw "Expected one Get-MemLabsContentDistributionStateKind definition; found $($stateHelpers.Count)."
 }
+Invoke-Expression $stateHelpers[0].Extent.Text
 
-$installedExpression = $installedConditions[0].Clauses[0].Item1.Extent.Text
-$pendingExpression = $pendingConditions[0].Clauses[0].Item1.Extent.Text
-$classify = [scriptblock]::Create(@"
-param([int]`$osState)
-if ($installedExpression) { return 'installed' }
-if ($pendingExpression) { return 'pending' }
-return 'problem'
-"@)
+$stateCalls = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Get-MemLabsContentDistributionStateKind'
+        }, $true))
+if ($stateCalls.Count -ne 2) {
+    throw "Expected boot-image and OS-package state classifier calls; found $($stateCalls.Count)."
+}
+function Get-EnclosingScriptBlockExpression {
+    param($Node)
+    for ($ancestor = $Node.Parent; $ancestor; $ancestor = $ancestor.Parent) {
+        if ($ancestor -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { return $ancestor }
+    }
+}
+$helperScope = Get-EnclosingScriptBlockExpression $stateHelpers[0]
+foreach ($stateCall in $stateCalls) {
+    $callScope = Get-EnclosingScriptBlockExpression $stateCall
+    if (-not $helperScope -or -not $callScope -or $helperScope.Extent.StartOffset -ne $callScope.Extent.StartOffset) {
+        throw 'The content-state helper is not defined inside the same remoted guest scriptblock as every call site.'
+    }
+}
 
 $expected = @{
-    0 = 'installed'
-    1 = 'pending'
-    2 = 'problem'
-    3 = 'problem'
-    4 = 'problem'
-    5 = 'problem'
-    6 = 'problem'
-    7 = 'pending'
-    8 = 'problem'
+    0 = 'Installed'
+    1 = 'Pending'
+    2 = 'Problem'
+    3 = 'Problem'
+    4 = 'Problem'
+    5 = 'Problem'
+    6 = 'Problem'
+    7 = 'Pending'
+    8 = 'Problem'
 }
 foreach ($state in 0..8) {
-    $actual = & $classify $state
+    $actual = Get-MemLabsContentDistributionStateKind -State $state
     if ($actual -ne $expected[$state]) {
         throw "State $state classified as '$actual'; expected '$($expected[$state])'."
     }
 }
 
-Write-Host "PASS -- Installed=0, transient=1/7, problems=2/3/4/5/6/8, duplicate OSD groups combined by GroupID"
+if (-not $validationText.Contains('for ($pendingTry = 1; $pendingTry -le 10')) {
+    throw 'Required boot-image pending states have no bounded convergence wait.'
+}
+if ($validationText -notmatch 'bootPendingWaitTimedOut[\s\S]{0,800}requiredOsdCoverageProblems \+= "\$pendingDetail still pending') {
+    throw 'A required boot-image DP that remains pending after the wait does not fail coverage.'
+}
+
+Write-Host "PASS -- shared remoted classifier: Installed=0, pending=1/7, problems=2/3/4/5/6/8"

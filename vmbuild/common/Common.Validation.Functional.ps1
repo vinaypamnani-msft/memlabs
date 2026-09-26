@@ -11630,6 +11630,14 @@ function Test-CMSiteWideFunctionality {
             }
         }
 
+        function Get-MemLabsContentDistributionStateKind {
+            param([int]$State)
+
+            if ($State -eq 0) { return 'Installed' }
+            if ($State -in 1, 7) { return 'Pending' }
+            return 'Problem'
+        }
+
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
@@ -12279,7 +12287,44 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                 }
                             }
 
+                            # States 1 and 7 are normal immediately after targeting or
+                            # RefreshPkgSource, but they cannot pass forever. Give required
+                            # OSD DPs a bounded five-minute convergence window, then let the
+                            # required-coverage verdict below fail any row still pending.
+                            $getRequiredPendingBootRows = {
+                                param([object[]]$Rows)
+                                @($Rows | Where-Object {
+                                        if ([int]$_.State -notin 1, 7) { return $false }
+                                        $rowName = & $dpNameOf $_.ServerNALPath
+                                        $rowShort = ($rowName -split '\.')[0]
+                                        return @($expectedOsdDpNames | Where-Object {
+                                                $_ -ieq $rowName -or ($_ -split '\.')[0] -ieq $rowShort
+                                            }).Count -gt 0
+                                    })
+                            }
+                            $requiredPendingBootRows = @()
+                            $bootPendingWaitAttempts = 0
+                            if ($expectOsd -and $biName -notmatch 'arm64' -and $expectedOsdDpNames.Count -gt 0) {
+                                $requiredPendingBootRows = @(& $getRequiredPendingBootRows $allDp)
+                                for ($pendingTry = 1; $pendingTry -le 10 -and $requiredPendingBootRows.Count -gt 0; $pendingTry++) {
+                                    Start-Sleep -Seconds 30
+                                    $bootPendingWaitAttempts++
+                                    $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                                        -Filter "PackageID='$($bi.PackageID)'" -ErrorAction SilentlyContinue)
+                                    $installed = @($allDp | Where-Object { $_.State -eq 0 })
+                                    $inProgress = @($allDp | Where-Object { $_.State -in 1, 2, 7 })
+                                    $failed = @($allDp | Where-Object { $_.State -in 3, 6, 8 })
+                                    $requiredPendingBootRows = @(& $getRequiredPendingBootRows $allDp)
+                                }
+                                if ($bootPendingWaitAttempts -gt 0 -and $requiredPendingBootRows.Count -eq 0) {
+                                    $results.Details.Add("INFO: required boot-image DP state converged after $($bootPendingWaitAttempts * 30) second(s)")
+                                }
+                            }
+                            $bootPendingWaitTimedOut = $requiredPendingBootRows.Count -gt 0
+                            $bootPendingWaitSeconds = $bootPendingWaitAttempts * 30
+
                             $requiredOsdCoverageProblems = @()
+                            $requiredOsdCoveragePending = @()
                             if ($expectOsd -and $biName -notmatch 'arm64') {
                                 $bootSourceVersion = "$($bi.SourceVersion)"
                                 $bootStoredVersion = "$($bi.StoredPkgVersion)"
@@ -12299,11 +12344,24 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                         if ($requiredDpRow.Count -eq 0) {
                                             $requiredOsdCoverageProblems += "$expectedDpName (no status row)"
                                         }
-                                        elseif ([int]$requiredDpRow[0].State -ne 0) {
-                                            $requiredOsdCoverageProblems += "$expectedDpName (State=$($requiredDpRow[0].State), DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
-                                        }
-                                        elseif (-not "$($requiredDpRow[0].SourceVersion)" -or [int]$requiredDpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
-                                            $requiredOsdCoverageProblems += "$expectedDpName (Installed but stale: DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                        else {
+                                            $requiredState = [int]$requiredDpRow[0].State
+                                            $requiredStateKind = Get-MemLabsContentDistributionStateKind -State $requiredState
+                                            if ($requiredStateKind -eq 'Pending') {
+                                                $pendingDetail = "$expectedDpName (State=$requiredState, DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                                if ($bootPendingWaitTimedOut) {
+                                                    $requiredOsdCoverageProblems += "$pendingDetail still pending after ${bootPendingWaitSeconds}s"
+                                                }
+                                                else {
+                                                    $requiredOsdCoveragePending += $pendingDetail
+                                                }
+                                            }
+                                            elseif ($requiredStateKind -eq 'Problem') {
+                                                $requiredOsdCoverageProblems += "$expectedDpName (State=$requiredState, DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                            }
+                                            elseif (-not "$($requiredDpRow[0].SourceVersion)" -or [int]$requiredDpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
+                                                $requiredOsdCoverageProblems += "$expectedDpName (Installed but stale: DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                            }
                                         }
                                     }
                                 }
@@ -12427,6 +12485,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     elseif ($hierarchySc -ne $sc -and -not $bootStoredVersion) {
                                         $results.Details.Add("DIAG: Parent-owned boot-image metadata was NOT measured for '$biName' because StoredPkgVersion could not be read")
                                     }
+                                }
+                                elseif ($requiredOsdCoveragePending.Count -gt 0) {
+                                    $results.Details.Add("INFO: Boot image '$biName' ($($bi.PackageID)) is current-version but still in an in-flight state on required OSD DP(s): $($requiredOsdCoveragePending -join '; '). States 1 and 7 are pending, not failures.")
                                 }
                                 else {
                                     $results.Details.Add("OK: Boot image '$biName' ($($bi.PackageID)) SourceVersion=$bootSourceVersion is Installed on every required OSD DP")
@@ -12610,8 +12671,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                 7 = 'ContentValidating'; 8 = 'ContentValidationFailed'
                             }[$osState]
                             if (-not $osStateName) { $osStateName = 'Unknown' }
-                            if ($osState -eq 0) { continue }
-                            if ($osState -in 1, 7) { $osPkgPending += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)" }
+                            $osStateKind = Get-MemLabsContentDistributionStateKind -State $osState
+                            if ($osStateKind -eq 'Installed') { continue }
+                            if ($osStateKind -eq 'Pending') { $osPkgPending += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)" }
                             else { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)" }
                         }
                     }

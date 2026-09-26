@@ -130,6 +130,38 @@ Write-DscStatus "$Tag Starting perfloading"
         return $MemberKeys.ContainsKey($DistributionPointName.ToUpperInvariant())
     }
 
+    function Get-MemLabsBootImageSourceVersionProblem {
+        param (
+            [string] $CurrentSourceVersion,
+            [string] $CurrentStoredVersion,
+            [bool] $CommandSupportChanged,
+            [AllowNull()]
+            [object] $CommandSupportPreviousSourceVersion,
+            [bool] $PublicationNeeded,
+            [bool] $PublicationStarted,
+            [AllowNull()]
+            [object] $PublicationPreviousSourceVersion
+        )
+
+        if (-not $CurrentSourceVersion) { return 'boot-image SourceVersion could not be read' }
+        if ($CommandSupportChanged -and
+            ($null -eq $CommandSupportPreviousSourceVersion -or [int]$CurrentSourceVersion -le [int]$CommandSupportPreviousSourceVersion)) {
+            return "boot-image SourceVersion has not advanced after enabling command support (still $CurrentSourceVersion, previous $CommandSupportPreviousSourceVersion)"
+        }
+        if ($PublicationNeeded -and -not $PublicationStarted) {
+            return 'boot-image publication was required but did not start'
+        }
+        if ($PublicationStarted -and
+            ($null -eq $PublicationPreviousSourceVersion -or [int]$CurrentSourceVersion -le [int]$PublicationPreviousSourceVersion)) {
+            return "boot-image SourceVersion has not advanced after publication started (still $CurrentSourceVersion, previous $PublicationPreviousSourceVersion)"
+        }
+        if (($CommandSupportChanged -or $PublicationNeeded) -and
+            (-not $CurrentStoredVersion -or [int]$CurrentStoredVersion -lt [int]$CurrentSourceVersion)) {
+            return "site boot-image content has not caught up to SourceVersion $CurrentSourceVersion (StoredPkgVersion=$CurrentStoredVersion)"
+        }
+        return $null
+    }
+
     function Get-MemLabsDistributionPointGroup {
         param (
             [string] $SiteCode,
@@ -1512,6 +1544,8 @@ Write-DscStatus "$Tag Starting perfloading"
     $packageId = ''
     $commandSupportChanged = $false
     $commandSupportPreviousSourceVersion = $null
+    $bootImagePublicationStarted = $false
+    $bootImagePublicationPreviousSourceVersion = $null
     $bootTemplateRestored = $false
     $pxeBootFlagSet = $false
 
@@ -1830,8 +1864,22 @@ Write-DscStatus "$Tag Starting perfloading"
                 # had no OSD targets yet.
                 $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0 -or $missingOsdDps.Count -gt 0
                 if ($bootImagePublicationNeeded) {
-                    $bootImagePublicationStarted = $false
                     $bootImagePublicationError = $null
+                    $bootPublicationBaselineError = ''
+                    for ($baselineTry = 1; $baselineTry -le 3 -and $null -eq $bootImagePublicationPreviousSourceVersion; $baselineTry++) {
+                        if ($baselineTry -gt 1) { Start-Sleep -Seconds 5 }
+                        try {
+                            $bootImageBeforePublication = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                            if (-not $bootImageBeforePublication) { throw 'the boot-image provider row was not found' }
+                            try { $bootImageBeforePublication.Get() } catch { }
+                            if (-not "$($bootImageBeforePublication.SourceVersion)") { throw 'SourceVersion was empty' }
+                            $bootImagePublicationPreviousSourceVersion = [int]$bootImageBeforePublication.SourceVersion
+                        }
+                        catch { $bootPublicationBaselineError = $_.Exception.Message }
+                    }
+                    if ($null -eq $bootImagePublicationPreviousSourceVersion) {
+                        Write-DscStatus "$Tag Could not read boot image '$biName' ($packageId) SourceVersion before publication after 3 attempts: $bootPublicationBaselineError. The coverage wait will be skipped because a later version advance cannot be proven." -Warning
+                    }
                     # Keep EVERY attempt's error, not just the last. Register() returns FALSE
                     # only when the ContextID is already in the map (sspbootimagepackage.cpp
                     # L747), and the failure paths above it never Delete the entry -- so a
@@ -1879,10 +1927,23 @@ Write-DscStatus "$Tag Starting perfloading"
                 $bootCoverageLastArm = @{}
                 $bootStoredVersion = ''
                 $bootSourceVersion = ''
+                $bootCoverageTerminalProblem = if ($bootImagePublicationNeeded -and -not $bootImagePublicationStarted) {
+                    'boot-image publication was required but did not start'
+                }
+                elseif ($bootImagePublicationStarted -and $null -eq $bootImagePublicationPreviousSourceVersion) {
+                    'pre-publication SourceVersion was not measured, so the publication advance cannot be verified'
+                }
+                else {
+                    ''
+                }
                 do {
                     $bootCoverageAttempt++
                     $bootCoverageProblems = @()
                     $bootIncompleteDps = @()
+                    if ($bootCoverageTerminalProblem) {
+                        $bootCoverageProblems += $bootCoverageTerminalProblem
+                        break
+                    }
                     $currentBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
                     # Get() refreshes the instance and populates the lazy properties. The old
                     # fallback read SMS_Package, a SIBLING of SMS_BootImagePackage under
@@ -1890,11 +1951,16 @@ Write-DscStatus "$Tag Starting perfloading"
                     if ($currentBootImage) { try { $currentBootImage.Get() } catch { } }
                     $bootSourceVersion = if ($currentBootImage) { "$($currentBootImage.SourceVersion)" } else { '' }
                     $bootStoredVersion = if ($currentBootImage) { "$($currentBootImage.StoredPkgVersion)" } else { '' }
-                    if (-not $bootSourceVersion) {
-                        $bootCoverageProblems += 'boot-image SourceVersion could not be read'
-                    }
-                    elseif ($commandSupportChanged -and [int]$bootSourceVersion -le $commandSupportPreviousSourceVersion) {
-                        $bootCoverageProblems += "boot-image SourceVersion has not advanced after enabling command support (still $bootSourceVersion, previous $commandSupportPreviousSourceVersion)"
+                    $bootSourceVersionProblem = Get-MemLabsBootImageSourceVersionProblem `
+                        -CurrentSourceVersion $bootSourceVersion `
+                        -CurrentStoredVersion $bootStoredVersion `
+                        -CommandSupportChanged $commandSupportChanged `
+                        -CommandSupportPreviousSourceVersion $commandSupportPreviousSourceVersion `
+                        -PublicationNeeded $bootImagePublicationNeeded `
+                        -PublicationStarted $bootImagePublicationStarted `
+                        -PublicationPreviousSourceVersion $bootImagePublicationPreviousSourceVersion
+                    if ($bootSourceVersionProblem) {
+                        $bootCoverageProblems += $bootSourceVersionProblem
                     }
                     else {
                         if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
@@ -1957,7 +2023,8 @@ Write-DscStatus "$Tag Starting perfloading"
                     # the OSD share, both OS packages and all five task sequences. Phase 11 owns the
                     # failure -- it builds $requiredOsdCoverageProblems per expected OSD DP, so it
                     # reports "(no status row)" and fails even with no summarizer or targeting row.
-                    Write-DscStatus "$Tag Boot image '$biName' ($packageId) did not reach every required OSD DP at the current source version within $bootCoverageWaitMinutes minutes: $($bootCoverageProblems -join '; '). Continuing so the rest of perfloading runs; PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
+                    $coverageTiming = if ($bootCoverageTerminalProblem) { 'without entering the timed coverage wait' } else { "within $bootCoverageWaitMinutes minutes" }
+                    Write-DscStatus "$Tag Boot image '$biName' ($packageId) did not reach every required OSD DP at the current source version ${coverageTiming}: $($bootCoverageProblems -join '; '). Continuing so the rest of perfloading runs; PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
                 }
                 else {
                     Write-DscStatus "$Tag Verified boot image '$biName' ($packageId) SourceVersion=$bootSourceVersion is Installed on every OSD DP: $($osdDpFqdns -join ', ')"
