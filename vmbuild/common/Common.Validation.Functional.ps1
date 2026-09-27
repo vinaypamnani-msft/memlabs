@@ -7008,8 +7008,10 @@ function Test-ForestTrustFunctionality {
         return $true
     }
 
+    $remoteCaConfig = if ($tp -and $tp.RootCA) { "$($tp.RootCA)" } else { '' }
+    $remoteIssuingHint = if ($tp -and $tp.IssuingCAHint) { "$($tp.IssuingCAHint)" } else { '' }
     $forestTrustScript = {
-        param($localDomain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios)
+        param($localDomain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios, $remoteCaConfig, $remoteIssuingHint)
 
         # Informational: Passed stays $true so the trust checks never fail the DC.
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
@@ -7020,7 +7022,125 @@ function Test-ForestTrustFunctionality {
         # MemLabs names CAs '<dns-first-label>-<vm>-CA' regardless of the NetBIOS name.
         $remoteDnsShort = ($remoteForest -split '\.')[0]
         if ([string]::IsNullOrWhiteSpace($remoteNetbios)) { $remoteNetbios = $remoteDnsShort }
+        $remoteCaCommonName = if ($remoteCaConfig) { ($remoteCaConfig -split '\\')[-1] } else { '' }
         $localDcFqdn = "$env:COMPUTERNAME.$localDomain"
+        $certificatesOf = {
+            param($rawCertificate)
+            $certificates = [System.Collections.Generic.List[System.Security.Cryptography.X509Certificates.X509Certificate2]]::new()
+            $blobs = [System.Collections.Generic.List[byte[]]]::new()
+            if ($rawCertificate -is [byte[]]) {
+                $blobs.Add([byte[]]$rawCertificate)
+            }
+            elseif ($rawCertificate -is [System.Array]) {
+                foreach ($item in $rawCertificate) {
+                    if ($item -is [byte[]]) { $blobs.Add([byte[]]$item) }
+                }
+            }
+            foreach ($blob in $blobs) {
+                try {
+                    $certificates.Add([System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$blob))
+                }
+                catch {}
+            }
+            return , $certificates.ToArray()
+        }
+        $containsExpectedCertificate = {
+            param($rawCertificate, [string[]]$expectedThumbprints)
+            if (-not $expectedThumbprints -or $expectedThumbprints.Count -eq 0) { return $null }
+            foreach ($cert in @(& $certificatesOf $rawCertificate)) {
+                if ($expectedThumbprints -contains "$($cert.Thumbprint)".ToUpperInvariant()) { return $true }
+            }
+            return $false
+        }
+        $publicationVerdict = {
+            param($label, $authoritativeState, $cacheState)
+            if ($authoritativeState -eq $true) {
+                if ($cacheState -eq $true) { return "OK: Remote CA present in authoritative AD $label and this DC's enterprise $label cache" }
+                $cacheNote = if ($cacheState -eq $false) { 'has not refreshed yet' } else { 'could not be measured' }
+                return "INFO: Remote CA is authoritatively published in AD $label; this DC's enterprise $label cache $cacheNote"
+            }
+            if ($authoritativeState -eq $false) {
+                if ($cacheState -eq $true) { return "WARN: Remote CA is absent from authoritative AD $label, but this DC still has a stale enterprise $label cache entry" }
+                if ($cacheState -eq $false) { return "WARN: Remote CA is absent from both authoritative AD $label and this DC's enterprise $label cache" }
+                return "WARN: Remote CA is absent from authoritative AD $label; this DC's enterprise $label cache could not be measured"
+            }
+            if ($cacheState -eq $true) { return "INFO: Remote CA is present in this DC's enterprise $label cache, but authoritative AD $label publication could not be measured" }
+            return "WARN: Remote CA $label trust could not be determined because authoritative AD publication could not be measured"
+        }
+
+        # Discover the actual remote issuing/root certificates from AD. RootCA is
+        # only a generation-time hint; exact thumbprints avoid same-CN stale certs
+        # and correctly distinguish a two-tier issuing CA from its root.
+        $remoteRootThumbprints = @()
+        $remoteIssuingThumbprints = @()
+        try {
+            $remoteCfg = "$(([ADSI]"LDAP://$remoteDcFqdn/RootDSE").configurationNamingContext)"
+            if ($remoteCfg -notmatch '^CN=Configuration,DC=') { throw "unusable remote configurationNamingContext '$remoteCfg'" }
+
+            $remoteRootsContainer = [ADSI]"LDAP://$remoteDcFqdn/CN=Certification Authorities,CN=Public Key Services,CN=Services,$remoteCfg"
+            $remoteRootCerts = [System.Collections.Generic.List[System.Security.Cryptography.X509Certificates.X509Certificate2]]::new()
+            foreach ($entry in @($remoteRootsContainer.Children | Where-Object { $null -ne $_ })) {
+                foreach ($cert in @(& $certificatesOf $entry.Properties['cACertificate'].Value)) { $remoteRootCerts.Add($cert) }
+            }
+
+            $remoteEnrollContainer = [ADSI]"LDAP://$remoteDcFqdn/CN=Enrollment Services,CN=Public Key Services,CN=Services,$remoteCfg"
+            $issuingEntries = @($remoteEnrollContainer.Children | Where-Object { $null -ne $_ })
+            $selectedIssuing = $null
+            foreach ($entry in $issuingEntries) {
+                $dns = "$($entry.Properties['dNSHostName'].Value)"
+                $cn = "$($entry.Properties['cn'].Value)"
+                $short = ($dns -split '\.')[0]
+                if (($remoteIssuingHint -and ($remoteIssuingHint -in @($dns, $short, $cn))) -or
+                    ($remoteCaCommonName -and $cn -eq $remoteCaCommonName)) {
+                    $selectedIssuing = $entry
+                    break
+                }
+            }
+            if (-not $selectedIssuing) { $selectedIssuing = $issuingEntries | Select-Object -First 1 }
+            $remoteIssuingCerts = @()
+            if ($selectedIssuing) { $remoteIssuingCerts = @(& $certificatesOf $selectedIssuing.Properties['cACertificate'].Value) }
+            $remoteIssuingThumbprints = @($remoteIssuingCerts | ForEach-Object { "$($_.Thumbprint)".ToUpperInvariant() } | Select-Object -Unique)
+
+            # Select the root that issued the chosen Enterprise issuing CA. A
+            # chain build verifies the signature/key relationship, avoiding a
+            # same-subject stale root after CA renewal.
+            $selectedRootCerts = @()
+            foreach ($issuingCert in $remoteIssuingCerts) {
+                if ($issuingCert.Subject -eq $issuingCert.Issuer) {
+                    $selectedRootCerts += $issuingCert
+                }
+                else {
+                    $chain = $null
+                    try {
+                        $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+                        $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+                        $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::AllowUnknownCertificateAuthority
+                        foreach ($candidateRoot in $remoteRootCerts) { [void]$chain.ChainPolicy.ExtraStore.Add($candidateRoot) }
+                        [void]$chain.Build($issuingCert)
+                        $remoteRootSet = @($remoteRootCerts | ForEach-Object { "$($_.Thumbprint)".ToUpperInvariant() })
+                        foreach ($element in @($chain.ChainElements)) {
+                            if ($remoteRootSet -contains "$($element.Certificate.Thumbprint)".ToUpperInvariant()) {
+                                $selectedRootCerts += $element.Certificate
+                            }
+                        }
+                    }
+                    finally {
+                        if ($chain) { $chain.Dispose() }
+                    }
+                }
+            }
+            if ($selectedRootCerts.Count -eq 0 -and $remoteRootCerts.Count -eq 1) {
+                $selectedRootCerts = @($remoteRootCerts[0])
+            }
+            $remoteRootThumbprints = @($selectedRootCerts | ForEach-Object { "$($_.Thumbprint)".ToUpperInvariant() } | Select-Object -Unique)
+            if ($remoteRootThumbprints.Count -eq 0 -or $remoteIssuingThumbprints.Count -eq 0) {
+                throw "could not resolve exact remote root/issuing certificate thumbprints (roots=$($remoteRootThumbprints.Count), issuing=$($remoteIssuingThumbprints.Count))"
+            }
+            $results.Details.Add("OK: Resolved exact remote PKI identity: root=$($remoteRootThumbprints -join ',') issuing=$($remoteIssuingThumbprints -join ',')")
+        }
+        catch {
+            $results.Details.Add("WARN: Could not resolve exact remote PKI certificate identity from '$remoteDcFqdn': $($_.Exception.Message)")
+        }
 
         # --- A1: Forest trust object ---
         $results.Details.Add("CMD: Get-ADTrust -Filter { Target -eq '$remoteForest' }")
@@ -7135,31 +7255,37 @@ function Test-ForestTrustFunctionality {
             $results.Details.Add("WARN: Could not enumerate local Administrators: $($_.Exception.Message)")
         }
 
-        # --- C1: Remote root CA trusted in the enterprise Root + NTAuth stores ---
+        # --- C1: Remote root CA cached in the enterprise Root + NTAuth stores ---
         # CA CN follows the '<dns-first-label>-<vm>-CA' naming convention, so match on the
         # DNS short name (NOT the NetBIOS name, which can differ in a disjoint namespace).
-        $results.Details.Add("CMD: certutil -store -enterprise Root / NTAuth (looking for '$remoteDnsShort-')")
+        $caNeedleLabel = if ($remoteCaCommonName) { $remoteCaCommonName } else { "$remoteDnsShort-*" }
+        $results.Details.Add("CMD: certutil -store -enterprise Root / NTAuth (matching exact remote root/issuing certificate thumbprints)")
+        $enterpriseRootCached = $null
+        $enterpriseNtauthCached = $null
         try {
             $rootStore = & certutil -store -enterprise Root 2>&1 | Out-String
+            $rootStoreExit = $LASTEXITCODE
             $ntauthStore = & certutil -store -enterprise NTAuth 2>&1 | Out-String
-            $needle = [regex]::Escape("$remoteDnsShort-")
-            if ($rootStore -match $needle) {
-                $results.Details.Add("OK: Remote CA '$remoteDnsShort-*' present in enterprise Root store")
+            $ntauthStoreExit = $LASTEXITCODE
+            if ($rootStoreExit -ne 0) {
+                $results.Details.Add("INFO: enterprise Root cache query exited $rootStoreExit; cache state is unknown")
+            }
+            elseif ($remoteRootThumbprints.Count -eq 0) {
+                $results.Details.Add("INFO: enterprise Root cache was readable, but exact remote root identity is unavailable; cache state is unknown")
             }
             else {
-                $extra = ''
-                # This is the same fact ccmsetup reports as "Unable to find any
-                # Certificate based on Certificate Issuers" -> CCM_E_NO_CLIENT_PKI_CERT.
-                if ($externalSiteCode -and $externalSiteCode -ne 'NONE') {
-                    $extra = " -- clients here are managed by remote site '$externalSiteCode' over HTTPS, so until this CA is trusted locally none of them can present a client cert (ccmsetup 0x87D00454)"
-                }
-                $results.Details.Add("WARN: Remote CA '$remoteDnsShort-*' NOT found in enterprise Root store (InstallRootCertificate dspublish RootCA may have failed)$extra")
+                $compactRootStore = ($rootStore -replace '\s+', '').ToUpperInvariant()
+                $enterpriseRootCached = @($remoteRootThumbprints | Where-Object { $compactRootStore.Contains($_) }).Count -gt 0
             }
-            if ($ntauthStore -match $needle) {
-                $results.Details.Add("OK: Remote CA present in enterprise NTAuth store")
+            if ($ntauthStoreExit -ne 0) {
+                $results.Details.Add("INFO: enterprise NTAuth cache query exited $ntauthStoreExit; cache state is unknown")
+            }
+            elseif ($remoteIssuingThumbprints.Count -eq 0) {
+                $results.Details.Add("INFO: enterprise NTAuth cache was readable, but exact remote issuing identity is unavailable; cache state is unknown")
             }
             else {
-                $results.Details.Add("WARN: Remote CA NOT found in enterprise NTAuth store (cross-forest client auth requires NTAuth)")
+                $compactNtauthStore = ($ntauthStore -replace '\s+', '').ToUpperInvariant()
+                $enterpriseNtauthCached = @($remoteIssuingThumbprints | Where-Object { $compactNtauthStore.Contains($_) }).Count -gt 0
             }
         }
         catch {
@@ -7168,16 +7294,30 @@ function Test-ForestTrustFunctionality {
 
         # --- C2: Remote CA published into the LOCAL forest Configuration NC,
         #         plus the synced certificate templates (RunPkiSync). ---
+        $rootPublishedInAd = $null
         try {
             $configNC = ([ADSI]"LDAP://RootDSE").configurationNamingContext.Value
             $caContainer = [ADSI]"LDAP://CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
             $names = @()
-            foreach ($c in $caContainer.Children) { $names += [string]$c.Properties['cn'].Value }
-            if (@($names | Where-Object { $_ -like "$remoteDnsShort-*" }).Count -gt 0) {
+            $localRootRaw = @()
+            foreach ($c in $caContainer.Children) {
+                $names += [string]$c.Properties['cn'].Value
+                $localRootRaw += , $c.Properties['cACertificate'].Value
+            }
+            if ($remoteRootThumbprints.Count -gt 0) {
+                $rootPublishedInAd = $false
+                foreach ($raw in $localRootRaw) {
+                    if (& $containsExpectedCertificate $raw $remoteRootThumbprints) { $rootPublishedInAd = $true; break }
+                }
+            }
+            if ($rootPublishedInAd -eq $true) {
                 $results.Details.Add("OK: Remote root CA published in local AD Certification Authorities [$($names -join ', ')]")
             }
-            else {
+            elseif ($rootPublishedInAd -eq $false) {
                 $results.Details.Add("WARN: Remote root CA not in local AD Certification Authorities [present: $($names -join ', ')] (InstallRootCertificate dspublish / RunPkiSync gap)")
+            }
+            else {
+                $results.Details.Add("INFO: Local AD Certification Authorities contains [$($names -join ', ')], but exact remote root identity was unavailable for comparison")
             }
 
             $tmplContainer = [ADSI]"LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$configNC"
@@ -7187,6 +7327,45 @@ function Test-ForestTrustFunctionality {
         catch {
             $results.Details.Add("WARN: Could not read local Configuration NC PKI containers: $($_.Exception.Message)")
         }
+
+        # NTAuthCertificates in AD is authoritative for every forest trust; the
+        # enterprise store checked above is only this machine's synced cache.
+        $ntAuthPublishedInAd = $null
+        try {
+            $ntAuth = [ADSI]"LDAP://CN=NTAuthCertificates,CN=Public Key Services,CN=Services,$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
+            $ntRaw = $ntAuth.Properties['cACertificate'].Value
+            $ntBlobs = [System.Collections.Generic.List[byte[]]]::new()
+            if ($ntRaw -is [byte[]]) {
+                $ntBlobs.Add([byte[]]$ntRaw)
+            }
+            elseif ($ntRaw -is [System.Array]) {
+                foreach ($item in $ntRaw) {
+                    if ($item -is [byte[]]) { $ntBlobs.Add([byte[]]$item) }
+                }
+            }
+            $ntAuthPublishedInAd = & $containsExpectedCertificate $ntRaw $remoteIssuingThumbprints
+            if ($ntAuthPublishedInAd -eq $true) {
+                $results.Details.Add("OK: this forest's AD NTAuthCertificates contains the remote '$caNeedleLabel' CA ($($ntBlobs.Count) total CA cert(s))")
+            }
+            elseif ($ntAuthPublishedInAd -eq $false -and $ntBlobs.Count -gt 0) {
+                $results.Details.Add("WARN: this forest's AD NTAuthCertificates has $($ntBlobs.Count) CA cert(s), but none match remote '$caNeedleLabel'")
+            }
+            elseif ($ntAuthPublishedInAd -eq $false) {
+                $results.Details.Add("WARN: this forest's AD NTAuthCertificates is EMPTY (certutil -dspublish NtauthCA never landed)")
+            }
+            else {
+                $results.Details.Add("INFO: this forest's AD NTAuthCertificates has $($ntBlobs.Count) CA cert(s), but exact remote issuing identity was unavailable for comparison")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: could not read this forest's NTAuthCertificates: $($_.Exception.Message)")
+        }
+
+        # AD publication is authoritative. certutil -enterprise reads this
+        # machine's policy-backed cache, which can lag immediately after
+        # dspublish even while clients already chain successfully.
+        $results.Details.Add((& $publicationVerdict 'RootCA' $rootPublishedInAd $enterpriseRootCached))
+        $results.Details.Add((& $publicationVerdict 'NTAuthCertificates' $ntAuthPublishedInAd $enterpriseNtauthCached))
 
         # --- C3: Can a computer in THIS domain actually autoenroll a ConfigMgr
         #         client cert from the remote CA? Read the template ACL in BOTH
@@ -7209,6 +7388,12 @@ function Test-ForestTrustFunctionality {
                 $results.Details.Add("CMD: read '$tplName' ACL in both forests for Enroll/AutoEnroll by $domainComputersSid ($localDomain\Domain Computers)")
                 $enrollGuid = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
                 $autoEnrollGuid = 'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+                $identitySidOf = {
+                    param($identityReference)
+                    $sidText = "$identityReference"
+                    try { $sidText = $identityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+                    return $sidText
+                }
                 $readTemplateAcl = {
                     param($server, $label)
                     $prefix = ''
@@ -7222,7 +7407,8 @@ function Test-ForestTrustFunctionality {
                     $granted = @()
                     foreach ($ace in @($tpl.ObjectSecurity.Access | Where-Object { $null -ne $_ })) {
                         if ("$($ace.AccessControlType)" -ne 'Allow') { continue }
-                        if ("$($ace.IdentityReference)" -ne $domainComputersSid) { continue }
+                        $aceSid = & $identitySidOf $ace.IdentityReference
+                        if ($aceSid -ne $domainComputersSid) { continue }
                         $ot = "$($ace.ObjectType)"
                         if ($ot -eq $enrollGuid) { $granted += 'Enroll' }
                         elseif ($ot -eq $autoEnrollGuid) { $granted += 'AutoEnroll' }
@@ -7267,23 +7453,6 @@ function Test-ForestTrustFunctionality {
                     $results.Details.Add("WARN: could not read this forest's Enrollment Services container: $($_.Exception.Message)")
                 }
 
-                # NTAuthCertificates in AD is the authoritative copy; the enterprise
-                # store checked above is only this machine's synced view of it.
-                try {
-                    $ntAuth = [ADSI]"LDAP://CN=NTAuthCertificates,CN=Public Key Services,CN=Services,$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
-                    # One published CA cert comes back as a single byte[]; piping that into
-                    # Where-Object unrolls it into individual bytes and counts 0, which read
-                    # as "EMPTY" on a forest whose publish had actually landed.
-                    $ntRaw = $ntAuth.Properties['cACertificate'].Value
-                    $ntCount = 0
-                    if ($ntRaw -is [byte[]]) { $ntCount = 1 }
-                    elseif ($ntRaw -is [System.Array]) { $ntCount = @($ntRaw | Where-Object { $_ -is [byte[]] }).Count }
-                    if ($ntCount -gt 0) { $results.Details.Add("OK: this forest's AD NTAuthCertificates holds $ntCount CA cert(s)") }
-                    else { $results.Details.Add("WARN: this forest's AD NTAuthCertificates is EMPTY (certutil -dspublish NtauthCA never landed)") }
-                }
-                catch {
-                    $results.Details.Add("WARN: could not read this forest's NTAuthCertificates: $($_.Exception.Message)")
-                }
             }
         }
 
@@ -7343,7 +7512,7 @@ function Test-ForestTrustFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $forestTrustScript -ArgumentList @($domain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios) `
+        -ScriptBlock $forestTrustScript -ArgumentList @($domain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios, $remoteCaConfig, $remoteIssuingHint) `
         -DisplayName "Phase11-ForestTrust-Test" -SuppressLog -AsJob -TimeoutSeconds 300
 
     $null = Format-TestResult -VMName $VMName -RoleLabel 'ForestTrust' -Result $result
@@ -9385,39 +9554,55 @@ function Test-DomainMemberFunctionality {
                 param($expSite)
                 $reg = @{ Details = [System.Collections.Generic.List[string]]::new() }
 
-                # Assigned site code (COM is authoritative; registry fallback).
                 $assigned = $null
-                try {
-                    $smsClient = New-Object -ComObject 'Microsoft.SMS.Client'
-                    $assigned = $smsClient.GetAssignedSite()
-                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($smsClient)
+                $clientId = $null
+                $registrationAttempt = 0
+                $registrationAttempts = 13 # initial read + 12 x 10s = 2 minutes
+                do {
+                    $registrationAttempt++
+                    $assigned = $null
+                    $clientId = $null
+
+                    # Assigned site code (COM is authoritative; registry fallback).
+                    try {
+                        $smsClient = New-Object -ComObject 'Microsoft.SMS.Client'
+                        try { $assigned = $smsClient.GetAssignedSite() }
+                        finally { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($smsClient) }
+                    }
+                    catch {
+                        try { $assigned = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Mobile Client' -Name 'AssignedSiteCode' -ErrorAction Stop).AssignedSiteCode } catch {}
+                    }
+
+                    # A populated registration GUID means MP_ClientRegistration completed.
+                    try { $clientId = (Get-CimInstance -Namespace 'root\ccm' -ClassName CCM_Client -ErrorAction Stop).ClientId } catch {}
+                    if (-not $clientId) {
+                        try { $clientId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Client\Configuration\Client Properties' -Name 'SMSID' -ErrorAction Stop).SMSID } catch {}
+                    }
+
+                    if ("$assigned" -eq "$expSite" -and $clientId) { break }
+                    if ($registrationAttempt -lt $registrationAttempts) { Start-Sleep -Seconds 10 }
                 }
-                catch {
-                    try { $assigned = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Mobile Client' -Name 'AssignedSiteCode' -ErrorAction Stop).AssignedSiteCode } catch {}
-                }
+                while ($registrationAttempt -lt $registrationAttempts)
+
                 if ($assigned) {
                     if ("$assigned" -eq "$expSite") {
-                        $reg.Details.Add("OK: ConfigMgr client assigned to remote site '$assigned' (matches externalDomainJoinSiteCode)")
+                        $recoveryNote = if ($registrationAttempt -gt 1) { " after $([int](($registrationAttempt - 1) * 10))s of polling" } else { '' }
+                        $reg.Details.Add("OK: ConfigMgr client assigned to remote site '$assigned' (matches externalDomainJoinSiteCode)$recoveryNote")
                     }
                     else {
-                        $reg.Details.Add("WARN: ConfigMgr client assigned site '$assigned' != expected remote site '$expSite' (cross-forest site assignment may not have applied)")
+                        $reg.Details.Add("WARN: ConfigMgr client assigned site '$assigned' != expected remote site '$expSite' after $([int](($registrationAttempt - 1) * 10))s (cross-forest site assignment may not have applied)")
                     }
                 }
                 else {
                     $reg.Details.Add("WARN: Could not read the client's assigned site code (expected remote site '$expSite')")
                 }
 
-                # A populated registration GUID means MP_ClientRegistration completed.
-                $clientId = $null
-                try { $clientId = (Get-CimInstance -Namespace 'root\ccm' -ClassName CCM_Client -ErrorAction Stop).ClientId } catch {}
-                if (-not $clientId) {
-                    try { $clientId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Client\Configuration\Client Properties' -Name 'SMSID' -ErrorAction Stop).SMSID } catch {}
-                }
                 if ($clientId) {
-                    $reg.Details.Add("OK: Client is registered (ClientId $clientId) -- MP registration with the remote site succeeded over the cross-forest trust/PKI")
+                    $recoveryNote = if ($registrationAttempt -gt 1) { " after $([int](($registrationAttempt - 1) * 10))s of polling" } else { '' }
+                    $reg.Details.Add("OK: Client is registered (ClientId $clientId) -- MP registration with the remote site succeeded over the cross-forest trust/PKI$recoveryNote")
                 }
                 else {
-                    $reg.Details.Add("WARN: Client has no registration GUID yet -- MP_ClientRegistration with the remote site's MP may not have completed (check the cross-forest PKI client cert + MP reachability)")
+                    $reg.Details.Add("WARN: Client has no registration GUID after $([int](($registrationAttempt - 1) * 10))s -- MP_ClientRegistration with the remote site's MP may not have completed (check the cross-forest PKI client cert + MP reachability)")
                 }
 
                 # The MP the client is actually talking to.
