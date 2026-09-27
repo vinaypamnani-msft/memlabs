@@ -2,14 +2,15 @@
 param (
     # Re-entry point: the removal relaunches this script with this switch so the uninstaller runs in
     # its own process and can never delay the VMBuild launch that is waiting on maintenance.
-    [switch] $WindowsAdminCenterRemovalOnly
+    [switch] $WindowsAdminCenterRemovalOnly,
+    [switch] $ScheduledTask
 )
 
 $ErrorActionPreference = 'Continue'
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $logsPath = Join-Path $scriptPath 'logs'
-$logPrefix = if ($WindowsAdminCenterRemovalOnly) { 'WacRemoval' } else { 'Maintenance' }
+$logPrefix = if ($WindowsAdminCenterRemovalOnly) { 'WacRemoval' } elseif ($ScheduledTask) { 'ScheduledMaintenance' } else { 'Maintenance' }
 $logFile = Join-Path $logsPath "${logPrefix}_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 if (-not (Test-Path $logsPath)) {
@@ -50,6 +51,94 @@ function Test-ChocoSuccessCode {
 
 function Test-ChocoAvailable {
     return ($null -ne (Get-Command choco -ErrorAction SilentlyContinue))
+}
+
+function Invoke-WithMemLabsMaintenanceMutex {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [scriptblock] $ScriptBlock,
+        [ValidateRange(0, 3600)]
+        [int] $TimeoutSeconds = 120,
+        [string] $Name = 'Global\MemLabs_HostMaintenance'
+    )
+
+    $mutex = $null
+    $acquired = $false
+    try {
+        try {
+            $mutex = [System.Threading.Mutex]::new($false, $Name)
+        }
+        catch {
+            Write-LogMessage "Maintenance mutex is unavailable; running without serialization ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -Level 'WARNING'
+            & $ScriptBlock | Out-Host
+            return $true
+        }
+
+        try {
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+
+        if (-not $acquired) {
+            return $false
+        }
+
+        & $ScriptBlock | Out-Host
+        return $true
+    }
+    finally {
+        if ($mutex) {
+            if ($acquired) {
+                try { $mutex.ReleaseMutex() } catch {}
+            }
+            try { $mutex.Dispose() } catch {}
+        }
+    }
+}
+
+function Install-MemLabsMaintenanceScheduledTask {
+    [CmdletBinding()]
+    param (
+        [string] $TaskName = 'MemLabs Host Maintenance',
+        [string] $TaskPath = '\',
+        [string] $MaintenanceScriptPath = $PSCommandPath
+    )
+
+    if (-not (Test-Path -LiteralPath $MaintenanceScriptPath -PathType Leaf)) {
+        throw "Maintenance script not found at '$MaintenanceScriptPath'."
+    }
+
+    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ScheduledTask' -f $MaintenanceScriptPath
+    $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments -WorkingDirectory (Split-Path -Parent $MaintenanceScriptPath)
+    $trigger = New-ScheduledTaskTrigger -Daily -At '11:00 PM'
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 4)
+    $definition = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+        -Description 'Keeps MemLabs host tools and packages current.'
+
+    Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -InputObject $definition -Force -ErrorAction Stop | Out-Null
+
+    $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+    $registeredAction = @($task.Actions)[0]
+    if ($null -eq $registeredAction -or $registeredAction.Execute -ne $powerShellPath -or $registeredAction.Arguments -ne $arguments) {
+        throw "Scheduled task '$TaskPath$TaskName' did not retain the expected maintenance action."
+    }
+
+    Write-LogMessage "Scheduled task '$TaskPath$TaskName' is current (daily at 11:00 PM; missed starts run when available)."
+}
+
+function Get-WindowsAdminCenterRemovalLockPath {
+    $programData = if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { 'C:\ProgramData' } else { $env:ProgramData }
+    $stateDirectory = Join-Path $programData 'memlabs'
+    if (-not (Test-Path -LiteralPath $stateDirectory)) {
+        New-Item -Path $stateDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    return (Join-Path $stateDirectory 'wac-removal.pid')
 }
 
 function Get-InstalledPwshVersion {
@@ -331,24 +420,33 @@ function Invoke-System32CurlMaintenance {
 }
 
 function Invoke-GitMaintenance {
+    param (
+        [switch] $SkipGarbageCollection
+    )
+
     Write-LogMessage 'Starting git maintenance...'
 
     # gc.auto is set to 0 in VMBuild.cmd to prevent pack-file contention
     # during fetch/pull on Windows (inline gc tries to rewrite packs while
     # fetch still holds handles -> "Unlink of file ... failed" hang).
-    # Run gc explicitly here where nothing else is using the repo.
+    # Run gc explicitly only on the interactive path, after VMBuild's pull.
     $repoRoot = Split-Path $scriptPath -Parent
-    try {
-        $gcOutput = & git -C $repoRoot gc 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-LogMessage 'git gc completed successfully.'
-        }
-        else {
-            Write-LogMessage "git gc returned exit code $LASTEXITCODE : $gcOutput" -Level 'WARNING'
-        }
+    if ($SkipGarbageCollection) {
+        Write-LogMessage 'Skipping git gc during scheduled maintenance to avoid overlapping VMBuild repository updates.'
     }
-    catch {
-        Write-LogMessage "git gc threw: $_" -Level 'WARNING'
+    else {
+        try {
+            $gcOutput = & git -C $repoRoot gc 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-LogMessage 'git gc completed successfully.'
+            }
+            else {
+                Write-LogMessage "git gc returned exit code $LASTEXITCODE : $gcOutput" -Level 'WARNING'
+            }
+        }
+        catch {
+            Write-LogMessage "git gc threw: $_" -Level 'WARNING'
+        }
     }
 
     # Keep Defender away from the host's high-I/O memlabs paths. In addition to
@@ -702,7 +800,7 @@ function Invoke-WindowsAdminCenterRemoval {
 
     # One removal at a time: a wedged uninstaller can outlive the launch that started it, and a
     # second one would fight the first for the unins*.dat lock.
-    $lockFile = Join-Path $env:TEMP 'memlabs_wac_removal.pid'
+    $lockFile = Get-WindowsAdminCenterRemovalLockPath
     if (Test-Path -LiteralPath $lockFile) {
         $existingPid = 0
         $lockText = @(Get-Content -LiteralPath $lockFile -ErrorAction SilentlyContinue)[0]
@@ -973,31 +1071,37 @@ function Install-DotNet9DesktopRuntime {
 }
 
 function Update-MRemoteNGShortcut {
-    param([string]$ExePath)
-    # Ensure desktop shortcut points to the correct exe and our connection XML
+    param(
+        [string]$ExePath,
+        [switch]$SkipUserConfiguration
+    )
+
     $xmlPath = Join-Path $env:ProgramData "memlabs\memlabs-mremoteng.xml"
-    $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "memlabs-mRemoteNG.lnk"
-    $expectedArgs = "/cons:`"$xmlPath`""
-    try {
-        $shell = New-Object -ComObject WScript.Shell
-        $needsUpdate = $true
-        if (Test-Path $shortcutPath) {
-            $existing = $shell.CreateShortcut($shortcutPath)
-            if ($existing.TargetPath -eq $ExePath -and $existing.Arguments -eq $expectedArgs) {
-                $needsUpdate = $false
+    if (-not $SkipUserConfiguration) {
+        # Ensure desktop shortcut points to the correct exe and our connection XML.
+        $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "memlabs-mRemoteNG.lnk"
+        $expectedArgs = "/cons:`"$xmlPath`""
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $needsUpdate = $true
+            if (Test-Path $shortcutPath) {
+                $existing = $shell.CreateShortcut($shortcutPath)
+                if ($existing.TargetPath -eq $ExePath -and $existing.Arguments -eq $expectedArgs) {
+                    $needsUpdate = $false
+                }
+            }
+            if ($needsUpdate) {
+                $shortcut = $shell.CreateShortcut($shortcutPath)
+                $shortcut.TargetPath = $ExePath
+                $shortcut.Arguments = $expectedArgs
+                $shortcut.WorkingDirectory = Split-Path $ExePath
+                $shortcut.Save()
+                Write-LogMessage "Updated desktop shortcut to $ExePath with /cons: $xmlPath"
             }
         }
-        if ($needsUpdate) {
-            $shortcut = $shell.CreateShortcut($shortcutPath)
-            $shortcut.TargetPath = $ExePath
-            $shortcut.Arguments = $expectedArgs
-            $shortcut.WorkingDirectory = Split-Path $ExePath
-            $shortcut.Save()
-            Write-LogMessage "Updated desktop shortcut to $ExePath with /cons: $xmlPath"
+        catch {
+            Write-LogMessage "Could not update desktop shortcut: $_" -Level 'WARNING'
         }
-    }
-    catch {
-        Write-LogMessage "Could not update desktop shortcut: $_" -Level 'WARNING'
     }
 
     # Workaround: mRemoteNG 1.78.2 /cons: CLI argument is broken — GetStartupConnectionFileName()
@@ -1008,11 +1112,11 @@ function Update-MRemoteNGShortcut {
     if (Test-Path $xmlPath) {
         # Portable edition: confCons.xml lives next to mRemoteNG.exe
         $installDir = Split-Path $ExePath
-        $symlinkTargets = @(
-            Join-Path $installDir "confCons.xml"
-            Join-Path $env:LOCALAPPDATA "mRemoteNG\confCons.xml"
-            Join-Path ([Environment]::GetFolderPath("ApplicationData")) "mRemoteNG\confCons.xml"
-        )
+        $symlinkTargets = @(Join-Path $installDir "confCons.xml")
+        if (-not $SkipUserConfiguration) {
+            $symlinkTargets += Join-Path $env:LOCALAPPDATA "mRemoteNG\confCons.xml"
+            $symlinkTargets += Join-Path ([Environment]::GetFolderPath("ApplicationData")) "mRemoteNG\confCons.xml"
+        }
         foreach ($defaultFile in $symlinkTargets) {
             try {
                 $defaultDir = Split-Path $defaultFile
@@ -1073,6 +1177,10 @@ function Set-MRemoteNGDpiCompatibility {
 }
 
 function Invoke-MRemoteNGMaintenance {
+    param (
+        [switch] $SkipUserConfiguration
+    )
+
     Write-LogMessage 'Starting mRemoteNG maintenance...'
 
     # mRemoteNG 1.77+ nightly builds support Hyper-V Console via UseVmId/UseEnhancedMode.
@@ -1097,8 +1205,8 @@ function Invoke-MRemoteNGMaintenance {
                     Write-LogMessage "mRemoteNG $ver found at $candidate. No upgrade needed."
                     # Still ensure .NET 9 Desktop Runtime is present (required by 1.78+ WinForms)
                     Install-DotNet9DesktopRuntime
-                    Update-MRemoteNGShortcut -ExePath $candidate
-                    Set-MRemoteNGDpiCompatibility -ExePath $candidate
+                    Update-MRemoteNGShortcut -ExePath $candidate -SkipUserConfiguration:$SkipUserConfiguration
+                    if (-not $SkipUserConfiguration) { Set-MRemoteNGDpiCompatibility -ExePath $candidate }
                     return
                 }
                 Write-LogMessage "mRemoteNG $ver at $candidate is below $minVersion (no Hyper-V Console support)."
@@ -1235,8 +1343,8 @@ function Invoke-MRemoteNGMaintenance {
     }
 
     Install-DotNet9DesktopRuntime
-    Update-MRemoteNGShortcut -ExePath $mRNGExe
-    Set-MRemoteNGDpiCompatibility -ExePath $mRNGExe
+    Update-MRemoteNGShortcut -ExePath $mRNGExe -SkipUserConfiguration:$SkipUserConfiguration
+    if (-not $SkipUserConfiguration) { Set-MRemoteNGDpiCompatibility -ExePath $mRNGExe }
 
     Write-LogMessage 'mRemoteNG maintenance completed.'
 }
@@ -1317,6 +1425,11 @@ function Invoke-RdcManMaintenance {
 }
 
 function Invoke-WeeklyUpgrades {
+    param (
+        [switch] $WaitForCompletion,
+        [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade'
+    )
+
     Write-LogMessage 'Starting weekly upgrades...'
 
     if (-not (Test-ChocoAvailable)) {
@@ -1396,7 +1509,10 @@ function Invoke-WeeklyUpgrades {
                 if ($chocoRc -eq 1603 -and $installedPwsh) {
                     $failureMessage += " PowerShell $installedPwsh is already installed; 1603 usually means the package is trying to install an older or equal build."
                 }
-                Write-LogMessage $failureMessage -Level 'WARNING'
+                Write-LogMessage $failureMessage -Level $(if ($WaitForCompletion) { 'ERROR' } else { 'WARNING' })
+                if ($WaitForCompletion) {
+                    $script:MaintenanceHadFailure = $true
+                }
             }
         }
     }
@@ -1405,27 +1521,69 @@ function Invoke-WeeklyUpgrades {
     }
 
     if ($doChocoUpgrade) {
-        # Launch choco upgrade all in a new window so it doesn't block the main script
-        Write-LogMessage 'Launching Chocolatey upgrade all in new window...'
         $timestamp = $now.ToString('o')
+        $exceptValue = 'pwsh,powershell-core'
+        if ($WaitForCompletion) {
+            $upgradeArguments = @('upgrade', 'all', '-y', '--ignore-checksums')
+            if ($pwshMsiWouldFail) {
+                $upgradeArguments += "--except='$exceptValue'"
+                Write-LogMessage "Excluding pwsh and powershell-core from upgrade all; PowerShell $installedPwsh is installed and the package offers $availablePwsh."
+            }
+
+            $upgradeRan = Invoke-WithMemLabsMaintenanceMutex -Name $UpgradeMutexName -TimeoutSeconds 0 -ScriptBlock {
+                Write-LogMessage 'Running Chocolatey upgrade all synchronously for scheduled maintenance...'
+                & choco @upgradeArguments
+                $upgradeExitCode = $LASTEXITCODE
+                Write-LogMessage "choco upgrade all returned exit code: $upgradeExitCode"
+                if ((Test-ChocoSuccessCode -Code $upgradeExitCode) -or $upgradeExitCode -eq 2) {
+                    $timestamp | Out-File $chocoAllFlag -Encoding ascii -NoNewline
+                    Write-LogMessage 'Chocolatey package upgrade completed successfully.'
+                }
+                else {
+                    Write-LogMessage "Chocolatey package upgrade failed (exit code: $upgradeExitCode)." -Level 'ERROR'
+                    $script:MaintenanceHadFailure = $true
+                }
+            }
+            if (-not $upgradeRan) {
+                Write-LogMessage 'Another Chocolatey upgrade is already running; skipping this scheduled upgrade.'
+            }
+
+            Write-LogMessage 'Weekly upgrades maintenance completed.'
+            return
+        }
+
+        # Interactive launches retain the non-blocking upgrade window used by VMBuild.
+        Write-LogMessage 'Launching Chocolatey upgrade all in new window...'
         $scriptLines = @()
         $scriptLines += '$Host.UI.RawUI.WindowTitle = "MemLabs - Chocolatey Upgrades"'
         $scriptLines += "Write-Host 'Upgrading all Chocolatey packages...' -ForegroundColor Cyan"
+        $scriptLines += '$mutex = $null'
+        $scriptLines += '$acquired = $false'
+        $scriptLines += 'try {'
+        $scriptLines += "    `$mutex = [System.Threading.Mutex]::new(`$false, '$UpgradeMutexName')"
+        $scriptLines += '    try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(120)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }'
+        $scriptLines += "    if (-not `$acquired) { Write-Host 'Another Chocolatey upgrade is already running. Skipping.' -ForegroundColor Yellow; exit 0 }"
 
         $upgradeAllCommand = '& choco upgrade all -y --ignore-checksums'
         if ($pwshMsiWouldFail) {
             # choco wants the value single-quoted inside the double quotes.
-            $upgradeAllCommand += ' --except="''pwsh,powershell-core''"'
+            $upgradeAllCommand += ' --except="''' + $exceptValue + '''"'
             Write-LogMessage "Excluding pwsh and powershell-core from upgrade all; PowerShell $installedPwsh is installed and the package offers $availablePwsh."
         }
 
-        $scriptLines += $upgradeAllCommand
+        $scriptLines += "    $upgradeAllCommand"
         # 2 is 'nothing to upgrade', returned only when the useEnhancedExitCodes feature is on.
-        $scriptLines += 'if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2 -or $LASTEXITCODE -eq 3010) {'
-        $scriptLines += "    '$timestamp' | Out-File '$chocoAllFlag' -Encoding ascii -NoNewline"
-        $scriptLines += "    Write-Host 'Chocolatey package upgrade completed successfully.' -ForegroundColor Green"
-        $scriptLines += '} else {'
-        $scriptLines += '    Write-Host "Chocolatey package upgrade failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
+        $scriptLines += '    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2 -or $LASTEXITCODE -eq 1641 -or $LASTEXITCODE -eq 3010) {'
+        $scriptLines += "        '$timestamp' | Out-File '$chocoAllFlag' -Encoding ascii -NoNewline"
+        $scriptLines += "        Write-Host 'Chocolatey package upgrade completed successfully.' -ForegroundColor Green"
+        $scriptLines += '    } else {'
+        $scriptLines += '        Write-Host "Chocolatey package upgrade failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
+        $scriptLines += '    }'
+        $scriptLines += '} finally {'
+        $scriptLines += '    if ($mutex) {'
+        $scriptLines += '        if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }'
+        $scriptLines += '        try { $mutex.Dispose() } catch {}'
+        $scriptLines += '    }'
         $scriptLines += '}'
         $scriptLines += "Write-Host ''"
         $scriptLines += "Write-Host 'Done. This window will close in 10 seconds...' -ForegroundColor Cyan"
@@ -1463,33 +1621,85 @@ if ($WindowsAdminCenterRemovalOnly) {
     finally {
         # Release the lock here rather than trusting liveness alone: a dead PID can be reused, and
         # a stale lock would make every later launch skip the removal.
-        Remove-Item -LiteralPath (Join-Path $env:TEMP 'memlabs_wac_removal.pid') -Force -ErrorAction SilentlyContinue
+        try {
+            Remove-Item -LiteralPath (Get-WindowsAdminCenterRemovalLockPath) -Force -ErrorAction Stop
+        }
+        catch {
+            Write-LogMessage "Could not remove the Windows Admin Center removal lock: $_" -Level 'WARNING'
+        }
     }
 
     Write-LogMessage 'Windows Admin Center removal worker completed'
     exit $workerExitCode
 }
 
+$maintenanceStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 Write-LogMessage '========================================' 
 Write-LogMessage 'Maintenance script started'
+if ($ScheduledTask) {
+    Write-LogMessage "Invocation mode: Scheduled task '\MemLabs Host Maintenance' (PID $PID)"
+}
+else {
+    Write-LogMessage "Invocation mode: Interactive VMBuild launch (PID $PID)"
+}
 Write-LogMessage "Script path: $scriptPath"
 Write-LogMessage "Log file: $logFile"
 Write-LogMessage '========================================' 
 
-try { Invoke-MemLabsFileAssociationMaintenance } catch { Write-LogMessage "File association maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-try { Invoke-GitMaintenance } catch { Write-LogMessage "Git maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-try { Invoke-WindowsAdminCenterRemoval } catch { Write-LogMessage "Windows Admin Center removal threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-# Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
-try { Invoke-SevenZipMaintenance } catch { Write-LogMessage "7-Zip maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-try { Invoke-MRemoteNGMaintenance } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-try { Invoke-WeeklyUpgrades } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+if (-not $ScheduledTask) {
+    try { Invoke-MemLabsFileAssociationMaintenance } catch { Write-LogMessage "File association maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+    try { Install-MemLabsMaintenanceScheduledTask -MaintenanceScriptPath $PSCommandPath } catch { Write-LogMessage "Scheduled task maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+}
+
+$mutexTimeoutSeconds = if ($ScheduledTask) { 0 } else { 120 }
+$maintenanceRunState = [pscustomobject]@{ PackagePhasesRan = $false }
+$maintenanceRan = Invoke-WithMemLabsMaintenanceMutex -TimeoutSeconds $mutexTimeoutSeconds -ScriptBlock {
+    $maintenanceRunState.PackagePhasesRan = Invoke-WithMemLabsMaintenanceMutex -Name 'Global\MemLabs_ChocolateyUpgrade' -TimeoutSeconds $mutexTimeoutSeconds -ScriptBlock {
+        try { Invoke-GitMaintenance -SkipGarbageCollection:$ScheduledTask } catch { Write-LogMessage "Git maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-WindowsAdminCenterRemoval } catch { Write-LogMessage "Windows Admin Center removal threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        # Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
+        try { Invoke-SevenZipMaintenance } catch { Write-LogMessage "7-Zip maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-MRemoteNGMaintenance -SkipUserConfiguration:$ScheduledTask } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-WeeklyUpgrades -WaitForCompletion:$ScheduledTask } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+    }
+}
+
+if (-not $maintenanceRan) {
+    if ($ScheduledTask) {
+        Write-LogMessage 'Another maintenance run is active; skipping this scheduled run.'
+    }
+    else {
+        Write-LogMessage 'Another maintenance run remained active for 120 seconds; continuing VMBuild without starting overlapping maintenance.' -Level 'WARNING'
+    }
+}
+elseif (-not $maintenanceRunState.PackagePhasesRan) {
+    if ($ScheduledTask) {
+        Write-LogMessage 'Another Chocolatey operation is active; skipping this scheduled maintenance run.'
+    }
+    else {
+        Write-LogMessage 'Another Chocolatey operation remained active for 120 seconds; continuing VMBuild without overlapping package maintenance.' -Level 'WARNING'
+    }
+}
+
+$maintenanceStopwatch.Stop()
+$maintenanceResult = if ($script:MaintenanceHadFailure) {
+    'FAILED'
+}
+elseif (-not $maintenanceRan -or -not $maintenanceRunState.PackagePhasesRan) {
+    'SKIPPED'
+}
+else {
+    'SUCCESS'
+}
+$maintenanceResultLevel = if ($maintenanceResult -eq 'FAILED') { 'ERROR' } elseif ($maintenanceResult -eq 'SKIPPED') { 'WARNING' } else { 'INFO' }
 
 Write-LogMessage '========================================' 
 Write-LogMessage 'Maintenance script completed'
+Write-LogMessage ("Maintenance result: {0}; elapsed: {1:N1}s" -f $maintenanceResult, $maintenanceStopwatch.Elapsed.TotalSeconds) -Level $maintenanceResultLevel
 Write-LogMessage "Log file: $logFile"
 Write-LogMessage '========================================' 
 
