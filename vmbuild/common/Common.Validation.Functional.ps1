@@ -1897,7 +1897,26 @@ function Test-SQLAOFunctionality {
     $scriptBlock = {
         param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP)
 
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $dnsDiagnostics = [ordered]@{
+            SchemaVersion      = 1
+            CapturedAtUtc      = [DateTime]::UtcNow.ToString('o')
+            ComputerName       = $env:COMPUTERNAME
+            Domain             = ''
+            LogonServer        = ''
+            DataTargets        = @()
+            ManagementTargets  = @()
+            Adapters           = @()
+            DefaultRoutes      = @()
+            ManagementQueries  = [System.Collections.Generic.List[object]]::new()
+            DataQueries        = [System.Collections.Generic.List[object]]::new()
+            FailureEvidence    = [System.Collections.Generic.List[object]]::new()
+            Classification     = 'NotEvaluated'
+        }
+        $results = @{
+            Passed         = $true
+            Details        = [System.Collections.Generic.List[string]]::new()
+            DnsDiagnostics = $dnsDiagnostics
+        }
 
         # Live status — Write-Progress records emitted here are confined to this
         # -AsJob nested job; Invoke-VmCommand -PollProgress polls and re-emits the
@@ -1925,6 +1944,8 @@ function Test-SQLAOFunctionality {
                 Select-Object -Unique
         )
         $dnsServer = if ($dnsCandidates.Count -gt 0) { $dnsCandidates[0] } else { $null }
+        $dnsDiagnostics.Domain = $domain
+        $dnsDiagnostics.DataTargets = @($dnsCandidates)
 
         # Watchdog: run a scriptblock under Start-ThreadJob (or Start-Job
         # fallback) with a per-attempt timeout and retry. A few SQLAO probes
@@ -1967,6 +1988,7 @@ function Test-SQLAOFunctionality {
                             AttemptLog = $attemptLog
                         }
                     }
+
                     $attemptLog.Add("attempt $attempt timed out after ${TimeoutSec}s")
                     try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
                     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
@@ -1983,6 +2005,266 @@ function Test-SQLAOFunctionality {
                 Attempts   = $MaxAttempts
                 AttemptLog = $attemptLog
             }
+        }
+
+        function Get-DnsWatchdogError {
+            param($WatchdogResult)
+
+            $record = if ($WatchdogResult.Errors -and $WatchdogResult.Errors.Count -gt 0) {
+                $WatchdogResult.Errors[0]
+            }
+            else { $null }
+            $exception = if ($record -and $record.Exception) { $record.Exception } else { $null }
+            return [ordered]@{
+                Status                = "$($WatchdogResult.Status)"
+                Attempts              = $WatchdogResult.Attempts
+                Message               = if ($exception) { $exception.Message } elseif ($record) { "$record" } else { "$($WatchdogResult.AttemptLog -join '; ')" }
+                ExceptionType         = if ($exception) { $exception.GetType().FullName } else { '' }
+                HResult               = if ($exception) { $exception.HResult } else { $null }
+                FullyQualifiedErrorId = if ($record) { "$($record.FullyQualifiedErrorId)" } else { '' }
+                Category              = if ($record) { "$($record.CategoryInfo.Category)" } else { '' }
+                TargetObject          = if ($record) { "$($record.TargetObject)" } else { '' }
+                AttemptLog            = @($WatchdogResult.AttemptLog)
+            }
+        }
+
+        function Add-DnsManagementFailureEvidence {
+            param([string]$Purpose)
+
+            if (@($dnsDiagnostics.FailureEvidence | Where-Object { $_.Purpose -ne 'Topology' }).Count -gt 0) { return }
+            $evidence = [ordered]@{
+                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                Purpose       = $Purpose
+                Ports         = @()
+                DnsCache      = @()
+                Nrpt          = @()
+                HostsEntries  = @()
+                Authentication = $null
+                CimSessions   = @()
+                Events        = @()
+                Errors        = @()
+            }
+
+            $portRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in @($dnsManagementTargets | Where-Object { $_ } | Select-Object -Unique)) {
+                foreach ($port in @(53, 88, 135, 445, 5985, 5986)) {
+                    $client = $null
+                    $connected = $false
+                    $errorText = ''
+                    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                    try {
+                        $client = [System.Net.Sockets.TcpClient]::new()
+                        $async = $client.BeginConnect($target, $port, $null, $null)
+                        if ($async.AsyncWaitHandle.WaitOne(2000, $false)) {
+                            $client.EndConnect($async)
+                            $connected = $client.Connected
+                        }
+                        else { $errorText = 'timeout after 2000ms' }
+                    }
+                    catch { $errorText = $_.Exception.Message }
+                    finally {
+                        $timer.Stop()
+                        if ($client) { try { $client.Close() } catch {} }
+                    }
+                    $portRows.Add([ordered]@{
+                            Target    = $target
+                            Port      = $port
+                            Connected = $connected
+                            ElapsedMs = $timer.ElapsedMilliseconds
+                            Error     = $errorText
+                        })
+                }
+            }
+            $evidence.Ports = $portRows.ToArray()
+
+            try {
+                $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                $klistOutput = @(& klist.exe 2>&1 | Select-Object -First 120)
+                $hostTarget = @($dnsManagementTargets | Where-Object {
+                        $parsedIp = $null
+                        -not [System.Net.IPAddress]::TryParse("$_", [ref]$parsedIp)
+                    } | Select-Object -First 1)
+                $spnOutput = @()
+                if ($hostTarget.Count -gt 0) {
+                    $spnProbe = Invoke-WithWatchdog -TimeoutSec 8 -MaxAttempts 1 -ArgumentList @("$($hostTarget[0])") -ScriptBlock {
+                        param($target)
+                        @(& setspn.exe -Q "HOST/$target" 2>&1 | Select-Object -First 80)
+                    }
+                    $spnOutput = @($spnProbe.Output)
+                }
+                $evidence.Authentication = [ordered]@{
+                    Identity = "$($identity.Name)"
+                    ImpersonationLevel = "$($identity.ImpersonationLevel)"
+                    AuthenticationType = "$($identity.AuthenticationType)"
+                    Klist = $klistOutput
+                    HostSpnQuery = $spnOutput
+                }
+            }
+            catch { $evidence.Errors += "Authentication context: $($_.Exception.Message)" }
+
+            $cimRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in @($dnsManagementTargets | Where-Object { $_ } | Select-Object -Unique)) {
+                $cimTimer = [System.Diagnostics.Stopwatch]::StartNew()
+                $cimProbe = Invoke-WithWatchdog -TimeoutSec 8 -MaxAttempts 1 -ArgumentList @("$target") -ScriptBlock {
+                    param($server)
+                    $session = $null
+                    try {
+                        $option = New-CimSessionOption -Protocol Wsman
+                        $session = New-CimSession -ComputerName $server -SessionOption $option -OperationTimeoutSec 5 -ErrorAction Stop
+                        $os = Get-CimInstance -CimSession $session -ClassName Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop
+                        [pscustomobject]@{ ComputerName = "$($os.CSName)"; Protocol = "$($session.Protocol)" }
+                    }
+                    finally {
+                        if ($session) { Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue }
+                    }
+                }
+                $cimTimer.Stop()
+                $cimRows.Add([ordered]@{
+                        Target    = $target
+                        Status    = "$($cimProbe.Status)"
+                        ElapsedMs = $cimTimer.ElapsedMilliseconds
+                        Output    = @($cimProbe.Output)
+                        Error     = Get-DnsWatchdogError $cimProbe
+                    })
+            }
+            $evidence.CimSessions = $cimRows.ToArray()
+
+            try {
+                $interestingNames = @(@($env:COMPUTERNAME, $clusterName, $listenerName) | Where-Object { $_ })
+                $evidence.DnsCache = @(Get-DnsClientCache -ErrorAction Stop |
+                    Where-Object {
+                        $entryName = "$($_.Entry)"
+                        @($interestingNames | Where-Object { $entryName -like "$_*" }).Count -gt 0
+                    } |
+                    Select-Object Entry, RecordName, RecordType, Data, TimeToLive, Status)
+            }
+            catch { $evidence.Errors += "DNS cache: $($_.Exception.Message)" }
+            try {
+                $evidence.Nrpt = @(Get-DnsClientNrptPolicy -Effective -ErrorAction Stop |
+                    Select-Object Namespace, NameServers, DirectAccessDnsServers, QueryPolicy)
+            }
+            catch { $evidence.Errors += "NRPT: $($_.Exception.Message)" }
+            try {
+                $hostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+                $evidence.HostsEntries = @(Get-Content -LiteralPath $hostsPath -ErrorAction Stop |
+                    Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' })
+            }
+            catch { $evidence.Errors += "Hosts file: $($_.Exception.Message)" }
+            foreach ($eventLog in @(
+                    'Microsoft-Windows-WMI-Activity/Operational',
+                    'Microsoft-Windows-WinRM/Operational',
+                    'Microsoft-Windows-DNS-Client/Operational'
+                )) {
+                try {
+                    $events = @(Get-WinEvent -FilterHashtable @{
+                            LogName   = $eventLog
+                            StartTime = (Get-Date).AddMinutes(-20)
+                        } -ErrorAction Stop |
+                        Where-Object { $_.Level -in @(2, 3) } |
+                        Select-Object -First 20 TimeCreated, Id, LevelDisplayName, ProviderName, Message)
+                    if ($events.Count -gt 0) {
+                        $evidence.Events += [ordered]@{ LogName = $eventLog; Records = $events }
+                    }
+                }
+                catch { $evidence.Errors += "Event log '$eventLog': $($_.Exception.Message)" }
+            }
+            $dnsDiagnostics.FailureEvidence.Add($evidence)
+        }
+
+        function Invoke-DnsManagementQuery {
+            param(
+                [Parameter(Mandatory)][string]$Purpose,
+                [Parameter(Mandatory)][string]$Zone,
+                [Parameter(Mandatory)][string]$Name,
+                [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Targets
+            )
+
+            $lastResult = $null
+            foreach ($target in @($Targets | Where-Object { $_ } | Select-Object -Unique)) {
+                $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$Zone' -Name '$Name' -RRType A -ComputerName '$target'")
+                $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                $watchdog = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($Zone, $Name, $target) -ScriptBlock {
+                    param($queryZone, $queryName, $server)
+                    $records = Get-DnsServerResourceRecord -ZoneName $queryZone -Name $queryName -RRType A -ComputerName $server -ErrorAction Stop
+                    @($records | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                }
+                $timer.Stop()
+                $errorDetail = Get-DnsWatchdogError $watchdog
+                $dnsDiagnostics.ManagementQueries.Add([ordered]@{
+                        CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                        Purpose       = $Purpose
+                        Target        = $target
+                        Zone          = $Zone
+                        Name          = $Name
+                        Status        = "$($watchdog.Status)"
+                        Attempts      = $watchdog.Attempts
+                        ElapsedMs     = $timer.ElapsedMilliseconds
+                        Addresses     = @($watchdog.Output | Where-Object { $_ })
+                        Error         = $errorDetail
+                    })
+                $lastResult = [pscustomobject]@{
+                    Status     = "$($watchdog.Status)"
+                    Output     = @($watchdog.Output | Where-Object { $_ })
+                    Errors     = @($watchdog.Errors)
+                    Attempts   = $watchdog.Attempts
+                    AttemptLog = @($watchdog.AttemptLog)
+                    Target     = $target
+                    Error      = $errorDetail
+                }
+                if ($watchdog.Status -eq 'OK') { return $lastResult }
+                Add-DnsManagementFailureEvidence -Purpose $Purpose
+                $results.Details.Add("  DNS management query against '$target' $("$($watchdog.Status)".ToLowerInvariant()): $($errorDetail.Message)")
+            }
+            return $lastResult
+        }
+
+        $logonServer = ("$env:LOGONSERVER" -replace '^\\\\', '').Trim()
+        $dnsManagementTargets = [System.Collections.Generic.List[string]]::new()
+        if ($logonServer) {
+            $logonFqdn = if ($logonServer.Contains('.')) { $logonServer } else { "$logonServer.$domain" }
+            $dnsManagementTargets.Add($logonFqdn)
+            if ($logonServer -ine $logonFqdn) { $dnsManagementTargets.Add($logonServer) }
+        }
+        foreach ($candidate in $dnsCandidates) {
+            if (-not $dnsManagementTargets.Contains("$candidate")) { $dnsManagementTargets.Add("$candidate") }
+        }
+        $dnsDiagnostics.LogonServer = $logonServer
+        $dnsDiagnostics.ManagementTargets = $dnsManagementTargets.ToArray()
+        try {
+            $adapterRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($iface in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop)) {
+                $dnsClient = Get-DnsClient -InterfaceIndex $iface.InterfaceIndex -ErrorAction SilentlyContinue
+                $dnsAddresses = Get-DnsClientServerAddress -InterfaceIndex $iface.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                $addresses = @(Get-NetIPAddress -InterfaceIndex $iface.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    ForEach-Object {
+                        [ordered]@{
+                            Address      = "$($_.IPAddress)"
+                            PrefixLength = $_.PrefixLength
+                            PrefixOrigin = "$($_.PrefixOrigin)"
+                            SkipAsSource = $_.SkipAsSource
+                        }
+                    })
+                $adapterRows.Add([ordered]@{
+                        InterfaceIndex                 = $iface.InterfaceIndex
+                        Alias                          = "$($iface.InterfaceAlias)"
+                        ConnectionState                = "$($iface.ConnectionState)"
+                        InterfaceMetric                = $iface.InterfaceMetric
+                        ConnectionSpecificSuffix       = "$($dnsClient.ConnectionSpecificSuffix)"
+                        RegisterThisConnectionsAddress = $dnsClient.RegisterThisConnectionsAddress
+                        DnsServers                     = @($dnsAddresses.ServerAddresses)
+                        Addresses                      = $addresses
+                    })
+            }
+            $dnsDiagnostics.Adapters = $adapterRows.ToArray()
+            $dnsDiagnostics.DefaultRoutes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Select-Object InterfaceIndex, InterfaceAlias, NextHop, RouteMetric, State)
+        }
+        catch {
+            $dnsDiagnostics.FailureEvidence.Add([ordered]@{
+                    CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                    Purpose       = 'Topology'
+                    Errors        = @($_.Exception.Message)
+                })
         }
 
         try {
@@ -2089,43 +2371,43 @@ function Test-SQLAOFunctionality {
                     # killed). Run BOTH the zone-RPC probe and the port-53 fallback
                     # under Invoke-WithWatchdog (kill+retry on hang), exactly like
                     # the Step 5b listener-DNS probe.
-                    $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$clusterName' -RRType A -ComputerName '$dnsServer'")
-                    $cwd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $clusterName, $dnsServer) -ScriptBlock {
-                        param($zone, $name, $server)
-                        # Project to plain IP strings INSIDE the job. The watchdog runs this
-                        # under Start-Job when Start-ThreadJob is unavailable (the in-guest
-                        # WinPS 5.1 case), and Receive-Job then hands back DESERIALIZED CIM
-                        # records whose RecordData.IPv4Address has lost its IPAddress type --
-                        # .IPAddressToString returns $null, which surfaced as a spurious
-                        # "cluster IP not in DNS (found: )" FAIL even though DNS was correct.
-                        # Strings serialize losslessly, so do the extraction here.
-                        $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                        @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                    }
-                    if ($cwd.Status -eq 'OK') {
+                    $cwd = Invoke-DnsManagementQuery -Purpose 'ClusterName' -Zone $domain -Name $clusterName -Targets $dnsManagementTargets.ToArray()
+                    if ($cwd -and $cwd.Status -eq 'OK') {
                         $clusterDnsRpcOk = $true
                         $clusterResolvedIPs = @($cwd.Output | Where-Object { $_ })
+                        $clusterDnsSource = " (DNS management via '$($cwd.Target)')"
                     }
                     else {
-                        if ($cwd.Status -eq 'Error') {
-                            $clusterDnsErr = if ($cwd.Errors -and $cwd.Errors[0].Exception) { $cwd.Errors[0].Exception.Message } else { ($cwd.Errors -join '; ') }
-                            $results.Details.Add("  RPC against '$dnsServer' errored: $clusterDnsErr -- falling back to direct DNS (port 53)")
-                        }
-                        else {
-                            $clusterDnsErr = "DnsServer RPC timed out after $($cwd.Attempts) attempt(s)"
-                            $results.Details.Add("  RPC against '$dnsServer' timed out -- falling back to direct DNS (port 53)")
-                        }
+                        $clusterDnsErr = if ($cwd) { "$($cwd.Error.Message)" } else { 'no DNS management target was available' }
+                        $results.Details.Add("  DNS management failed against all targets [$($dnsManagementTargets -join ', ')]: $clusterDnsErr -- falling back to direct DNS (port 53)")
                         $clusterFqdn = "$clusterName.$domain"
-                        $results.Details.Add("CMD: Resolve-DnsName -Name '$clusterFqdn' -Type A -Server '$dnsServer' -DnsOnly -NoHostsFile")
-                        $cwd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($clusterFqdn, $dnsServer) -ScriptBlock {
-                            param($n, $s)
-                            # Project to plain IP strings inside the job (Start-Job serialization-safe).
-                            $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
-                            @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
-                        }
-                        if ($cwd2.Status -eq 'OK') {
-                            $clusterResolvedIPs = @($cwd2.Output | Where-Object { $_ })
-                            if ($clusterResolvedIPs.Count -gt 0) { $clusterDnsSource = ' (direct DNS, port 53)' }
+                        foreach ($candidate in $dnsCandidates) {
+                            $results.Details.Add("CMD: Resolve-DnsName -Name '$clusterFqdn' -Type A -Server '$candidate' -DnsOnly -NoHostsFile")
+                            $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                            $cwd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($clusterFqdn, $candidate) -ScriptBlock {
+                                param($n, $s)
+                                $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                                @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                            }
+                            $timer.Stop()
+                            $dnsDiagnostics.DataQueries.Add([ordered]@{
+                                    CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                                    Purpose       = 'ClusterName'
+                                    Target        = $candidate
+                                    Name          = $clusterFqdn
+                                    Status        = "$($cwd2.Status)"
+                                    Attempts      = $cwd2.Attempts
+                                    ElapsedMs     = $timer.ElapsedMilliseconds
+                                    Addresses     = @($cwd2.Output | Where-Object { $_ })
+                                    Error         = Get-DnsWatchdogError $cwd2
+                                })
+                            if ($cwd2.Status -eq 'OK') {
+                                $clusterResolvedIPs = @($cwd2.Output | Where-Object { $_ })
+                                if ($clusterResolvedIPs.Count -gt 0) {
+                                    $clusterDnsSource = " (direct DNS via '$candidate', port 53)"
+                                    break
+                                }
+                            }
                         }
                     }
 
@@ -2460,7 +2742,8 @@ function Test-SQLAOFunctionality {
                 $hostname = $env:COMPUTERNAME
                 $staleRecords = @()
                 $hostZoneRpcOk = $false
-                if ($dnsServer -and $domain) {
+                $hostZoneTarget = $null
+                if ($dnsManagementTargets.Count -gt 0 -and $domain) {
                     # Same cross-subnet caveat as the cluster-name probe above PLUS the
                     # same CIM-hang risk: Get-DnsServerResourceRecord is a CDXML/WMI
                     # cmdlet that opens an implicit CIM session to the DC, so it can both
@@ -2471,24 +2754,16 @@ function Test-SQLAOFunctionality {
                     # fall through to the informational skip instead of stalling the whole
                     # per-VM job. If we can't read the zone we simply can't audit stale
                     # heartbeat records remotely (informational), which is not a fault.
-                    $hwd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $hostname, $dnsServer) -ScriptBlock {
-                        param($zone, $name, $server)
-                        # Project to plain IP strings inside the job: deserialized CIM records
-                        # from the Start-Job fallback lose RecordData.IPv4Address, so the
-                        # subnet match below must run on strings, not record objects.
-                        $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                        @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                    }
-                    if ($hwd.Status -eq 'OK') {
+                    $hwd = Invoke-DnsManagementQuery -Purpose 'NodeStaleRecordAudit' -Zone $domain -Name $hostname -Targets $dnsManagementTargets.ToArray()
+                    if ($hwd -and $hwd.Status -eq 'OK') {
                         $hostZoneRpcOk = $true
+                        $hostZoneTarget = $hwd.Target
                         # $hwd.Output is now plain IP strings; $staleRecords holds IP strings.
                         $staleRecords = @($hwd.Output | Where-Object { $_ -and $_ -like "${clusterSubnet}*" })
                     }
                     else {
-                        $hwdErr = if ($hwd.Status -eq 'Error' -and $hwd.Errors -and $hwd.Errors[0].Exception) { $hwd.Errors[0].Exception.Message }
-                                  elseif ($hwd.Status -eq 'Error') { ($hwd.Errors -join '; ') }
-                                  else { "DnsServer CIM query timed out after $($hwd.Attempts) attempt(s)" }
-                        $results.Details.Add("INFO: Could not query DNS zone '$domain' on '$dnsServer' to audit stale heartbeat A records for '$hostname' ($hwdErr); skipping remote stale-record check (DNS-management CIM unavailable or unresponsive)")
+                        $hwdErr = if ($hwd) { "$($hwd.Error.Message)" } else { 'no DNS management target was available' }
+                        $results.Details.Add("INFO: Could not query DNS zone '$domain' via targets [$($dnsManagementTargets -join ', ')] to audit stale heartbeat A records for '$hostname' ($hwdErr); skipping remote stale-record check (DNS-management CIM unavailable or unresponsive)")
                     }
                 }
                 if ($staleRecords.Count -gt 0) {
@@ -2518,11 +2793,11 @@ function Test-SQLAOFunctionality {
                         }
                         # Remove stale A records from DNS server ($staleRecords = IP strings)
                         foreach ($ip in $staleRecords) {
-                            Remove-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
+                            Remove-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -RecordData $ip -ComputerName $hostZoneTarget -Force -ErrorAction SilentlyContinue
                             $results.Details.Add("REMEDIATE: Removed stale A record $hostname -> $ip")
                         }
                         # Recheck the DNS server directly (no LLMNR ambiguity)
-                        $recheckRecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
+                        $recheckRecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $hostZoneTarget -ErrorAction SilentlyContinue)
                         $staleRecords2 = @($recheckRecords | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
                         if ($staleRecords2.Count -gt 0) {
                             $staleIPs2 = @($staleRecords2 | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
@@ -2824,76 +3099,88 @@ WHERE drs.is_local = 1
             # WARN/INFO decision until after Step 6 has voted.
             $dnsProbeFailureMsg = $null  # null = succeeded or skipped, string = failure detail
             if ($listenerName) {
-                if (-not $dnsServer) {
-                    $dnsProbeFailureMsg = "no usable DNS server found on this VM (Get-DnsClientServerAddress returned no IPv4 entries outside loopback/APIPA)"
+                if ($dnsManagementTargets.Count -eq 0 -and $dnsCandidates.Count -eq 0) {
+                    $dnsProbeFailureMsg = "no usable DNS management or data-plane target was found on this VM"
                 }
                 else {
                     $resolvedIPs = @()
+                    $directResolvedIPs = @()
                     $sourceNote = ''
                     $rpcStatus = 'Skipped'
-                    foreach ($candidate in $dnsCandidates) {
-                        $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$candidate'")
-                        $wd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $listenerName, $candidate) -ScriptBlock {
-                            param($zone, $name, $server)
-                            # Project to plain IP strings inside the job (Start-Job-safe);
-                            # deserialized CIM records lose RecordData.IPv4Address otherwise,
-                            # producing a spurious blank "'<listener>' resolves to" line.
-                            $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                            @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                        }
+                    $wd = Invoke-DnsManagementQuery -Purpose 'Listener' -Zone $domain -Name $listenerName -Targets $dnsManagementTargets.ToArray()
+                    if ($wd) {
                         $rpcStatus = $wd.Status
                         if ($wd.Status -eq 'OK') {
                             $resolvedIPs = @($wd.Output | Where-Object { $_ })
                             $attemptNote = if ($wd.Attempts -gt 1) { ", attempt $($wd.Attempts)" } else { '' }
-                            if ($candidate -ne $dnsCandidates[0] -or $wd.Attempts -gt 1) {
-                                $sourceNote = " (via '$candidate'$attemptNote)"
-                            }
-                            break
-                        }
-                        elseif ($wd.Status -eq 'Error') {
-                            $results.Details.Add("  RPC against '$candidate' errored: $($wd.Errors[0].Exception.Message)")
-                        }
-                        else {
-                            $results.Details.Add("  RPC against '$candidate' timed out after $($wd.Attempts) attempts")
+                            $sourceNote = " (DNS management via '$($wd.Target)'$attemptNote)"
                         }
                     }
 
-                    if ($resolvedIPs.Count -eq 0 -and $rpcStatus -ne 'OK') {
-                        # RPC failed against every candidate -- try direct DNS port 53 next.
-                        $fqdn = "$listenerName.$domain"
-                        foreach ($candidate in $dnsCandidates) {
-                            $results.Details.Add("CMD: Resolve-DnsName -Name '$fqdn' -Type A -Server '$candidate' -DnsOnly -NoHostsFile")
-                            $wd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($fqdn, $candidate) -ScriptBlock {
-                                param($n, $s)
-                                # Project to plain IP strings inside the job (Start-Job-safe).
-                                $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
-                                @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
-                            }
-                            if ($wd2.Status -eq 'OK') {
-                                $resolvedIPs = @($wd2.Output | Where-Object { $_ })
-                                if ($resolvedIPs.Count -gt 0) {
-                                    $sourceNote = " (direct DNS via '$candidate')"
-                                    break
-                                }
-                            }
+                    # Always exercise the DNS data plane independently. This distinguishes
+                    # an RPC/CIM authentication problem from bad authoritative DNS data even
+                    # when the hostname-based management query succeeds.
+                    $fqdn = "$listenerName.$domain"
+                    foreach ($candidate in $dnsCandidates) {
+                        $results.Details.Add("CMD: Resolve-DnsName -Name '$fqdn' -Type A -Server '$candidate' -DnsOnly -NoHostsFile")
+                        $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                        $wd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($fqdn, $candidate) -ScriptBlock {
+                            param($n, $s)
+                            # Project to plain IP strings inside the job (Start-Job serialization-safe).
+                            $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                            @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                        }
+                        $timer.Stop()
+                        $dnsDiagnostics.DataQueries.Add([ordered]@{
+                                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                                Purpose       = 'Listener'
+                                Target        = $candidate
+                                Name          = $fqdn
+                                Status        = "$($wd2.Status)"
+                                Attempts      = $wd2.Attempts
+                                ElapsedMs     = $timer.ElapsedMilliseconds
+                                Addresses     = @($wd2.Output | Where-Object { $_ })
+                                Error         = Get-DnsWatchdogError $wd2
+                            })
+                        if ($wd2.Status -eq 'OK') {
+                            $directResolvedIPs = @($wd2.Output | Where-Object { $_ })
+                            if ($directResolvedIPs.Count -gt 0) { break }
                         }
                     }
 
-                    if ($resolvedIPs.Count -gt 0) {
+                    if ($rpcStatus -eq 'OK' -and $resolvedIPs.Count -gt 0 -and $directResolvedIPs.Count -gt 0) {
+                        $managementSet = @($resolvedIPs | Sort-Object -Unique)
+                        $dataSet = @($directResolvedIPs | Sort-Object -Unique)
+                        if (($managementSet -join ',') -ne ($dataSet -join ',')) {
+                            $results.Details.Add("INFO: DNS management and direct port-53 answers disagree for '$listenerName' (management=$($managementSet -join ','); data=$($dataSet -join ',')); targets may be different DCs with transient replication lag")
+                        }
+                    }
+                    elseif ($resolvedIPs.Count -eq 0 -and $directResolvedIPs.Count -gt 0) {
+                        $resolvedIPs = $directResolvedIPs
+                        $sourceNote = ' (direct DNS, port 53)'
+                        if ($rpcStatus -eq 'OK') {
+                            $results.Details.Add("WARN: DNS management returned no '$listenerName' record while direct port-53 DNS returned $($directResolvedIPs -join ', ')")
+                        }
+                    }
+
+                    if ($resolvedIPs.Count -eq 0 -and $rpcStatus -ne 'OK' -and $directResolvedIPs.Count -eq 0) {
+                        $dnsProbeFailureMsg = "DNS zone probes (management + port 53) did not complete against management targets [$($dnsManagementTargets -join ', ')] and data targets [$($dnsCandidates -join ', ')]"
+                    }
+                    elseif ($resolvedIPs.Count -gt 0) {
                         $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$sourceNote")
                         if ($agIP -and $agIP -notin $resolvedIPs) {
                             $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
                         }
                     }
                     elseif ($rpcStatus -eq 'OK') {
-                        # RPC succeeded but returned no records => listener has no A record in the zone.
-                        # This is a genuine fault, not a probe glitch -- emit FAIL immediately.
+                        # Both management and direct DNS completed without an A record.
                         $results.Passed = $false
                         $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
                     }
                     else {
-                        # All probes failed. Defer the WARN/INFO decision until after Step 6.
-                        $dnsProbeFailureMsg = "DNS zone probes (RPC + port 53) did not complete against any of $($dnsCandidates.Count) DNS server(s) [$($dnsCandidates -join ', ')]"
+                        if (-not $dnsProbeFailureMsg) {
+                            $dnsProbeFailureMsg = "DNS zone probes (management + port 53) did not return an A record"
+                        }
                     }
                 }
             }
@@ -3290,6 +3577,32 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
             $results.Details.Add("FAIL: SQLAO validation failed: $($_.Exception.Message)")
         }
 
+        $managementRows = @($dnsDiagnostics.ManagementQueries)
+        $dataRows = @($dnsDiagnostics.DataQueries)
+        $managementSuccess = @($managementRows | Where-Object { $_.Status -eq 'OK' }).Count -gt 0
+        $managementFailure = @($managementRows | Where-Object { $_.Status -ne 'OK' }).Count -gt 0
+        $dataSuccess = @($dataRows | Where-Object { $_.Status -eq 'OK' -and $_.Addresses.Count -gt 0 }).Count -gt 0
+        if (-not $managementFailure) {
+            $dnsDiagnostics.Classification = if ($managementSuccess -and $dataSuccess) {
+                'ManagementAndDataHealthy'
+            }
+            elseif ($managementSuccess) {
+                'ManagementHealthyDataPlaneUnmeasured'
+            }
+            else {
+                'NoManagementProbeRequired'
+            }
+        }
+        elseif ($managementSuccess) {
+            $dnsDiagnostics.Classification = 'TargetSpecificManagementFailure'
+        }
+        elseif ($dataSuccess -or $listenerSqlOk) {
+            $dnsDiagnostics.Classification = 'ManagementPlaneUnavailableDataPlaneHealthy'
+        }
+        else {
+            $dnsDiagnostics.Classification = 'DnsPathUnresolved'
+        }
+
         return $results
     }
 
@@ -3309,6 +3622,105 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
         -ScriptBlock $scriptBlock `
         -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP `
         -DisplayName "Phase11-SQLAO-Test" -SuppressLog -AsJob -TimeoutSeconds 600 -PollProgress
+
+    try {
+        $sqlAoOutput = $result.ScriptBlockOutput
+        if ($sqlAoOutput -is [System.Collections.IEnumerable] -and
+            $sqlAoOutput -isnot [System.Collections.IDictionary] -and
+            $sqlAoOutput -isnot [string]) {
+            $sqlAoOutput = @($sqlAoOutput | Where-Object {
+                    $_ -is [System.Collections.IDictionary] -and $_.Contains('DnsDiagnostics')
+                }) | Select-Object -Last 1
+        }
+        if ($sqlAoOutput -is [System.Collections.IDictionary] -and $sqlAoOutput.Contains('DnsDiagnostics') -and
+            $sqlAoOutput.DnsDiagnostics -and $Common -and $Common.LogPath) {
+            $dnsDiagnosticObject = $sqlAoOutput.DnsDiagnostics
+            $managementFailures = @($dnsDiagnosticObject.ManagementQueries | Where-Object { $_.Status -ne 'OK' })
+            $managementSuccesses = @($dnsDiagnosticObject.ManagementQueries | Where-Object { $_.Status -eq 'OK' })
+            if ($managementFailures.Count -gt 0 -and $managementSuccesses.Count -eq 0) {
+                $dcControl = $null
+                $dcVm = @($DeployConfig.virtualMachines | Where-Object {
+                        -not $_.hidden -and "$($_.role)" -in @('DC', 'OtherDC') -and
+                        (-not $_.domain -or "$($_.domain)" -ieq "$domain")
+                    }) | Select-Object -First 1
+                if ($dcVm -and $dcVm.vmName) {
+                    $queryNames = @(@($VMName, $clusterName, $listenerName) | Where-Object { $_ } | Select-Object -Unique)
+                    try {
+                        $dcResult = Invoke-VmCommand -VmName "$($dcVm.vmName)" -VmDomainName $domain `
+                            -SuppressLog -AsJob -TimeoutSeconds 60 -SessionMaxRetries 1 `
+                            -ArgumentList $domain, ($queryNames -join ',') -ScriptBlock {
+                            param($zone, $namesCsv)
+                            $rows = [System.Collections.Generic.List[object]]::new()
+                            foreach ($name in @("$namesCsv".Split(',') | Where-Object { $_ })) {
+                                try {
+                                    $records = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ErrorAction Stop)
+                                    $rows.Add([ordered]@{
+                                            Name      = $name
+                                            Status    = 'OK'
+                                            Addresses = @($records | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                                        })
+                                }
+                                catch {
+                                    $rows.Add([ordered]@{
+                                            Name                  = $name
+                                            Status                = 'Error'
+                                            Message               = $_.Exception.Message
+                                            ExceptionType         = $_.Exception.GetType().FullName
+                                            HResult               = $_.Exception.HResult
+                                            FullyQualifiedErrorId = "$($_.FullyQualifiedErrorId)"
+                                        })
+                                }
+                            }
+                            [ordered]@{
+                                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                                ComputerName  = $env:COMPUTERNAME
+                                Zone          = $zone
+                                Records       = $rows.ToArray()
+                            }
+                        }
+                        if ($dcResult -and -not $dcResult.ScriptBlockFailed -and $dcResult.ScriptBlockOutput) {
+                            $dcControl = $dcResult.ScriptBlockOutput
+                        }
+                        else {
+                            $dcControl = [ordered]@{
+                                ComputerName = "$($dcVm.vmName)"
+                                Status       = 'HostInvocationFailed'
+                                TimedOut     = [bool]($dcResult -and $dcResult.TimedOut)
+                                Errors       = @($dcResult.ErrorDetails)
+                            }
+                        }
+                    }
+                    catch {
+                        $dcControl = [ordered]@{
+                            ComputerName = "$($dcVm.vmName)"
+                            Status       = 'HostInvocationFailed'
+                            Error        = $_.Exception.Message
+                        }
+                    }
+                }
+                else {
+                    $dcControl = [ordered]@{
+                        Status = 'Skipped'
+                        Reason = 'No DC VM for this domain was present in the deployment configuration.'
+                    }
+                }
+                if ($dnsDiagnosticObject -is [System.Collections.IDictionary]) {
+                    $dnsDiagnosticObject['DcLocalAuthoritativeControl'] = $dcControl
+                }
+                else {
+                    $dnsDiagnosticObject | Add-Member -MemberType NoteProperty -Name DcLocalAuthoritativeControl -Value $dcControl -Force
+                }
+            }
+            $dnsDiagDir = Split-Path $Common.LogPath -Parent
+            $dnsDiagPath = Join-Path $dnsDiagDir ("{0}-Phase11-{1}-SqlAoDnsMatrix.json" -f $VMName, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+            $sqlAoOutput.DnsDiagnostics | ConvertTo-Json -Depth 12 -ErrorAction Stop |
+                Set-Content -LiteralPath $dnsDiagPath -Encoding UTF8 -ErrorAction Stop
+            Write-Log "[Phase 11] $VMName [SQLAO]: Captured DNS transport diagnostics -> $dnsDiagPath" -LogOnly
+        }
+    }
+    catch {
+        Write-Log "[Phase 11] $VMName [SQLAO]: Could not persist DNS transport diagnostics: $($_.Exception.Message)" -LogOnly
+    }
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQLAO' -Result $result)
 }

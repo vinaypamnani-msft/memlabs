@@ -2157,6 +2157,7 @@ function Save-CMSetupLogsFromVm {
             <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.head30000-tail5000.log (>64MB only)
             <VmName>-Phase<N>-<timestamp>-InstallCMLog.log            (always: full)
             <VmName>-Phase<N>-<timestamp>-DSC_Log.log                 (always: tail 4000)
+            <VmName>-Phase8-<timestamp>-ClientPackageTimeline.jsonl   (when package coverage runs)
             <VmName>-Phase<N>-<timestamp>-adksetup-*.log/.txt          (failure only)
             <VmName>-Phase8-<timestamp>-SMSProv.log, dmpdownloader.log, etc. (failure only)
             <VmName>-Phase8-<timestamp>-ConfigMgrUpdateDiagnostics.json
@@ -2183,6 +2184,10 @@ function Save-CMSetupLogsFromVm {
             DscLogExists   = $false
             DscLogBytes    = 0
             DscLogContent  = $null
+            ClientPackageTimelineExists = $false
+            ClientPackageTimelineBytes  = 0
+            ClientPackageTimelineContent = $null
+            ClientPackageTimelineTail   = $false
             AdkArtifacts   = @()
             CmArtifacts    = @()
             UpdateDiagnostics = $null
@@ -2225,6 +2230,23 @@ function Save-CMSetupLogsFromVm {
                 $out.DscLogExists  = $true
                 $out.DscLogBytes   = $fi.Length
                 $out.DscLogContent = (Get-Content -LiteralPath $fi.FullName -Tail 4000 -ErrorAction SilentlyContinue) -join "`r`n"
+            }
+        }
+        if ($Phase -eq 8 -and (Test-Path 'C:\staging\DSC\ClientPackageTimeline.jsonl')) {
+            $fi = Get-Item 'C:\staging\DSC\ClientPackageTimeline.jsonl' -ErrorAction SilentlyContinue
+            if ($fi) {
+                $out.ClientPackageTimelineExists = $true
+                $out.ClientPackageTimelineBytes = $fi.Length
+                if ($fi.Length -le 16MB) {
+                    $out.ClientPackageTimelineContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
+                }
+                else {
+                    $out.ClientPackageTimelineTail = $true
+                    $head = @(Get-Content -LiteralPath $fi.FullName -TotalCount 2000 -ErrorAction SilentlyContinue)
+                    $tail = @(Get-Content -LiteralPath $fi.FullName -Tail 2000 -ErrorAction SilentlyContinue)
+                    $marker = "{`"Truncated`":true,`"OriginalBytes`":$($fi.Length),`"Message`":`"Middle omitted; retained first and last 2000 records.`"}"
+                    $out.ClientPackageTimelineContent = (@($head) + @($marker) + @($tail)) -join "`r`n"
+                }
             }
         }
         if ($Mode -eq 'Failure' -and (Test-Path 'C:\staging\DSC\ADKSetupLogs' -PathType Container)) {
@@ -2471,6 +2493,7 @@ function Save-CMSetupLogsFromVm {
             SetupExists   = $false
             WrapperExists = $false
             DscLogExists  = $false
+            ClientPackageTimelineExists = $false
             AdkArtifacts  = @()
         }
         $baselineStatusData = [ordered]@{
@@ -2577,6 +2600,19 @@ function Save-CMSetupLogsFromVm {
         }
         catch {
             Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write DSC_Log copy: $_" -Warning
+        }
+    }
+
+    if ($r.ClientPackageTimelineExists -and $r.ClientPackageTimelineContent) {
+        $dest = Join-Path $logDir "$base-ClientPackageTimeline.jsonl"
+        try {
+            Set-Content -LiteralPath $dest -Value $r.ClientPackageTimelineContent -Encoding UTF8 -ErrorAction Stop
+            $kb = [math]::Round($r.ClientPackageTimelineBytes / 1KB, 1)
+            $note = if ($r.ClientPackageTimelineTail) { "first and last 2000 records of ${kb}KB" } else { "full ${kb}KB" }
+            Write-Log "[Phase $Phase]: $VmName`: Pulled client-package timeline ($note) -> $dest" -OutputStream
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write client-package timeline: $_" -Warning
         }
     }
 
@@ -9010,6 +9046,7 @@ $global:VM_Config = {
                         $logonServer = "$env:LOGONSERVER" -replace '^\\\\', ''
                         $dnsServers = @(@($logonServer, $dnsServerAddress) | Where-Object { $_ } | Select-Object -Unique)
                         $dnsServerCsv = $dnsServers -join ','
+                        $results += "DNS diagnostic targets: management hostname first [$($dnsServers -join ', ')]; direct DNS server [$dnsServerAddress]; logon server [$logonServer]"
                         $zone = ($hostname -split '\.', 2)[1]
                         $shortName = ($hostname -split '\.')[0]
                         if ($dnsServers.Count -gt 0 -and $zone) {

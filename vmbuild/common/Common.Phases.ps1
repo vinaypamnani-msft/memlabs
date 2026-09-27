@@ -218,7 +218,15 @@ function Write-JobProgress {
                         # Status is kept unconcatenated (Line mixes in id/activity/percent) so
                         # Wait-Phase can read "Waiting on <VM> to Complete" and spot a wait on a
                         # dependency that has already failed.
-                        $global:JobProgressHistory[$jobKey] = @{ Line = $HistoryLine; Time = $now; Status = $latestStatus; JobName = $jobName; StatusSince = $statusSince }
+                        $global:JobProgressHistory[$jobKey] = @{
+                            Line            = $HistoryLine
+                            Time            = $now
+                            Status          = $latestStatus
+                            Activity        = $latestActivity
+                            PercentComplete = $latestPercentComplete
+                            JobName         = $jobName
+                            StatusSince     = $statusSince
+                        }
                         if ($secondsRemaining -gt 0) {
                             $latestStatus += " (Remaining: $($secondsRemaining)s)"
                         }
@@ -3145,6 +3153,151 @@ function Get-JobWaitTargets {
     return $targets.ToArray()
 }
 
+function Write-Phase8DiagnosticSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Jobs,
+        [Parameter(Mandatory)][datetime]$PhaseStart,
+        [Parameter(Mandatory)][string]$Trigger,
+        [object]$DeployConfig,
+        [switch]$IncludeHostMetrics
+    )
+
+    $now = Get-Date
+    $jobRows = [System.Collections.Generic.List[object]]::new()
+    foreach ($job in @($Jobs | Where-Object { $null -ne $_ } | Sort-Object Id)) {
+        $vmName = ''
+        $role = ''
+        if ("$($job.Name)" -match '^(.+?)\s+\[(.+?)\]') {
+            $vmName = $Matches[1]
+            $role = $Matches[2]
+        }
+        $history = $null
+        if ($global:JobProgressHistory) { $history = $global:JobProgressHistory[$job.Id] }
+        $jobStart = if ($job.PSBeginTime) { [datetime]$job.PSBeginTime } else { $PhaseStart }
+        $heldSeconds = $null
+        if ($history -and $history.StatusSince) {
+            $heldSeconds = [math]::Round(([DateTime]::UtcNow - [datetime]$history.StatusSince).TotalSeconds, 1)
+        }
+        $streamCounts = [ordered]@{ Output = 0; Error = 0; Warning = 0; Progress = 0 }
+        try {
+            $streamSource = Get-JobStreamSource -Job $job
+            if ($streamSource) {
+                foreach ($streamName in @('Output', 'Error', 'Warning', 'Progress')) {
+                    if ($streamSource.PSObject.Properties.Name -contains $streamName -and $streamSource.$streamName) {
+                        $streamCounts[$streamName] = $streamSource.$streamName.Count
+                    }
+                }
+            }
+        }
+        catch {
+            $streamCounts['ErrorReadingStreams'] = $_.Exception.Message
+        }
+        $jobRows.Add([ordered]@{
+                Id              = $job.Id
+                Name            = "$($job.Name)".Trim()
+                VMName          = $vmName
+                Role            = $role
+                State           = "$($job.State)"
+                ElapsedSeconds  = [math]::Round(($now - $jobStart).TotalSeconds, 1)
+                Activity        = if ($history) { "$($history.Activity)" } else { '' }
+                Status          = if ($history) { "$($history.Status)" } else { '' }
+                StatusHeldSec   = $heldSeconds
+                PercentComplete = if ($history) { $history.PercentComplete } else { $null }
+                Streams         = $streamCounts
+            })
+    }
+
+    $snapshot = [ordered]@{
+        SchemaVersion       = 1
+        CapturedAtUtc       = $now.ToUniversalTime().ToString('o')
+        Trigger             = $Trigger
+        Phase               = 8
+        PhaseElapsedSeconds = [math]::Round(($now - $PhaseStart).TotalSeconds, 1)
+        Jobs                = $jobRows.ToArray()
+    }
+
+    if ($IncludeHostMetrics) {
+        $hostMetrics = [ordered]@{
+            ComputerName = $env:COMPUTERNAME
+            ProcessId    = $PID
+        }
+        try {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            $hostMetrics['Memory'] = [ordered]@{
+                TotalVisibleMB = [math]::Round([double]$os.TotalVisibleMemorySize / 1KB, 1)
+                AvailableMB    = [math]::Round([double]$os.FreePhysicalMemory / 1KB, 1)
+                CommittedMB    = [math]::Round(([double]$os.TotalVirtualMemorySize - [double]$os.FreeVirtualMemory) / 1KB, 1)
+            }
+        }
+        catch { $hostMetrics['MemoryError'] = $_.Exception.Message }
+        try {
+            $cpu = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop)
+            $hostMetrics['CpuLoadPercent'] = if ($cpu.Count -gt 0) {
+                [math]::Round([double](($cpu | Measure-Object -Property LoadPercentage -Average).Average), 1)
+            }
+            else { $null }
+        }
+        catch { $hostMetrics['CpuError'] = $_.Exception.Message }
+        try {
+            $counterPaths = @(
+                '\System\Processor Queue Length',
+                '\Memory\Available MBytes',
+                '\PhysicalDisk(_Total)\Avg. Disk sec/Read',
+                '\PhysicalDisk(_Total)\Avg. Disk sec/Write',
+                '\PhysicalDisk(_Total)\Current Disk Queue Length'
+            )
+            $counterValues = [ordered]@{}
+            foreach ($sample in @((Get-Counter -Counter $counterPaths -MaxSamples 1 -ErrorAction Stop).CounterSamples)) {
+                $counterValues[$sample.Path] = [math]::Round([double]$sample.CookedValue, 4)
+            }
+            $hostMetrics['Counters'] = $counterValues
+        }
+        catch { $hostMetrics['CounterError'] = $_.Exception.Message }
+        try {
+            $powershellProcesses = @(Get-Process -Name 'powershell', 'pwsh' -ErrorAction SilentlyContinue)
+            $hostMetrics['PowerShell'] = [ordered]@{
+                ProcessCount = $powershellProcesses.Count
+                WorkingSetMB = [math]::Round([double](($powershellProcesses | Measure-Object -Property WorkingSet64 -Sum).Sum) / 1MB, 1)
+            }
+        }
+        catch { $hostMetrics['PowerShellError'] = $_.Exception.Message }
+        try {
+            $wantedVmNames = @()
+            if ($DeployConfig -and $DeployConfig.virtualMachines) {
+                $wantedVmNames = @($DeployConfig.virtualMachines | Where-Object { -not $_.hidden -and $_.vmName } | ForEach-Object { "$($_.vmName)" })
+            }
+            $vmRows = [System.Collections.Generic.List[object]]::new()
+            if (Get-Command Get-VM -ErrorAction SilentlyContinue) {
+                foreach ($vm in @(Get-VM -ErrorAction Stop | Where-Object { $wantedVmNames.Count -eq 0 -or $_.Name -in $wantedVmNames })) {
+                    $vmRows.Add([ordered]@{
+                            Name             = "$($vm.Name)"
+                            State            = "$($vm.State)"
+                            Status           = "$($vm.Status)"
+                            CpuUsagePercent  = $vm.CPUUsage
+                            MemoryAssignedMB = [math]::Round([double]$vm.MemoryAssigned / 1MB, 1)
+                            MemoryDemandMB   = [math]::Round([double]$vm.MemoryDemand / 1MB, 1)
+                            UptimeSeconds    = if ($vm.Uptime) { [math]::Round($vm.Uptime.TotalSeconds, 1) } else { $null }
+                            Heartbeat        = "$($vm.Heartbeat)"
+                        })
+                }
+            }
+            $hostMetrics['VMs'] = $vmRows.ToArray()
+        }
+        catch { $hostMetrics['VmError'] = $_.Exception.Message }
+
+        $snapshot['Host'] = $hostMetrics
+    }
+
+    $parent = Split-Path -Parent $Path
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        [void](New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop)
+    }
+    $line = $snapshot | ConvertTo-Json -Depth 9 -Compress -ErrorAction Stop -WarningAction SilentlyContinue
+    [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
+
 function Wait-Phase {
 
     param(
@@ -3214,6 +3367,25 @@ function Wait-Phase {
         }
 
         $global:JobProgressHistory = @{}
+
+        $phase8TimelinePath = $null
+        $phase8SeenJobs = @{}
+        foreach ($phase8Job in @($Jobs)) { if ($phase8Job) { $phase8SeenJobs[$phase8Job.Id] = $phase8Job } }
+        $phase8NextPeriodicUtc = [DateTime]::UtcNow
+        $phase8CapturedFingerprint = ''
+        $phase8LastChangeSnapshotUtc = [DateTime]::MinValue
+        if ($phaseStr -eq '8') {
+            try {
+                $phase8LogDir = if ($Common -and $Common.LogPath) { Split-Path $Common.LogPath -Parent } else { $null }
+                if (-not $phase8LogDir) { throw 'The host log directory is unavailable.' }
+                $phase8TimelinePath = Join-Path $phase8LogDir ("Phase8-Timeline-{0}.jsonl" -f $StartTime.ToString('yyyyMMdd-HHmmss'))
+                Write-Log "[Phase 8] Critical-path diagnostics will be written to $phase8TimelinePath" -LogOnly
+            }
+            catch {
+                Write-Log "[Phase 8] Could not initialize critical-path diagnostics: $($_.Exception.Message)" -LogOnly
+                $phase8TimelinePath = $null
+            }
+        }
 
         # A VM blocked in DSC WaitForAll shows LCM=Busy, so none of the host's stall
         # recovery paths (which need Idle/PendingConfiguration) ever fire, and the
@@ -3905,6 +4077,40 @@ function Wait-Phase {
                 }
             }
 
+            if ($phase8TimelinePath) {
+                try {
+                    foreach ($phase8Job in @($jobs)) {
+                        if ($phase8Job) { $phase8SeenJobs[$phase8Job.Id] = $phase8Job }
+                    }
+                    $phase8FingerprintParts = foreach ($phase8Job in $runningJobs) {
+                        $phase8History = $global:JobProgressHistory[$phase8Job.Id]
+                        '{0}|{1}|{2}' -f $phase8Job.Id, $phase8Job.State,
+                            $(if ($phase8History) { "$($phase8History.Status)" } else { '' })
+                    }
+                    $phase8Fingerprint = @($phase8FingerprintParts) -join "`n"
+                    $phase8NowUtc = [DateTime]::UtcNow
+                    if ($phase8NowUtc -ge $phase8NextPeriodicUtc) {
+                        $null = Write-Phase8DiagnosticSnapshot -Path $phase8TimelinePath -Jobs @($phase8SeenJobs.Values) `
+                            -PhaseStart $StartTime -Trigger 'periodic' -DeployConfig $DeployConfig -IncludeHostMetrics
+                        $phase8NextPeriodicUtc = $phase8NowUtc.AddMinutes(5)
+                        $phase8CapturedFingerprint = $phase8Fingerprint
+                        $phase8LastChangeSnapshotUtc = $phase8NowUtc
+                    }
+                    elseif ($phase8Fingerprint -ne $phase8CapturedFingerprint -and
+                        ((Get-Date) - $StartTime).TotalMinutes -ge 5 -and
+                        ($phase8NowUtc - $phase8LastChangeSnapshotUtc).TotalSeconds -ge 30) {
+                        $null = Write-Phase8DiagnosticSnapshot -Path $phase8TimelinePath -Jobs @($phase8SeenJobs.Values) `
+                            -PhaseStart $StartTime -Trigger 'status-change' -DeployConfig $DeployConfig
+                        $phase8CapturedFingerprint = $phase8Fingerprint
+                        $phase8LastChangeSnapshotUtc = $phase8NowUtc
+                    }
+                }
+                catch {
+                    Write-Log "[Phase 8] Critical-path diagnostic snapshot failed: $($_.Exception.Message)" -LogOnly
+                    $phase8TimelinePath = $null
+                }
+            }
+
             # Sleep
             Start-Sleep -Milliseconds 500
 
@@ -3941,6 +4147,17 @@ function Wait-Phase {
             if ($cacheCount -gt 0) { Write-Log "[Phase $Phase] $(Get-VmSessionCacheCensus)" -LogOnly }
         }
         catch { Write-Log "[Phase $Phase] PSDirect leak diag failed: $_" -LogOnly -Verbose }
+
+        if ($phase8TimelinePath) {
+            try {
+                $null = Write-Phase8DiagnosticSnapshot -Path $phase8TimelinePath -Jobs @($phase8SeenJobs.Values) `
+                    -PhaseStart $StartTime -Trigger 'phase-complete' -DeployConfig $DeployConfig -IncludeHostMetrics
+                Write-Log "[Phase 8] Critical-path diagnostics completed -> $phase8TimelinePath" -LogOnly
+            }
+            catch {
+                Write-Log "[Phase 8] Final critical-path diagnostic snapshot failed: $($_.Exception.Message)" -LogOnly
+            }
+        }
 
         $return.Elapsed = $(get-date) - $StartTime
         return $return
