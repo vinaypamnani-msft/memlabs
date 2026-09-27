@@ -29,7 +29,8 @@ function Import-ConsoleUpgradeFunction {
 $fixPath = Join-Path $RootPath 'Fixes\Fix-Upgrade-Console.ps1'
 $upgradePath = Join-Path $RootPath 'DSC\phases\Upgrade-Console.ps1'
 $validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
-$paths = @($fixPath, $upgradePath, $validationPath)
+$phaseJobsPath = Join-Path $RootPath 'common\Common.ScriptBlocks.ps1'
+$paths = @($fixPath, $upgradePath, $validationPath, $phaseJobsPath)
 
 foreach ($path in $paths) {
     $tokens = $null
@@ -42,9 +43,10 @@ foreach ($path in $paths) {
 $fixText = Get-Content -LiteralPath $fixPath -Raw
 $upgradeText = Get-Content -LiteralPath $upgradePath -Raw
 $validationText = Get-Content -LiteralPath $validationPath -Raw
+$phaseJobsText = Get-Content -LiteralPath $phaseJobsPath -Raw
 
 Assert-ConsoleUpgrade ($fixText -match 'NeededOnFreshDeploy\s*=\s*\$true' -and $fixText -match 'AppliesToExisting\s*=\s*\$true') 'console fix is reachable from Phase 10 and fresh-deploy maintenance'
-Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"260922\.0"') 'console fix version forces deployment of the repaired runner'
+Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"260927\.0"') 'console fix version forces deployment of the repaired runner'
 Assert-ConsoleUpgrade ($fixText -match 'returned no result' -and $fixText -match "Properties\['Success'\]") 'maintenance wrapper requires an explicit result'
 Assert-ConsoleUpgrade ($upgradeText -match 'Get-ConsoleVersionState' -and $upgradeText -match 'ConsoleRelease\s*=') 'upgrader compares the installed console release'
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Get-ConsoleSetupFailureDetail')))
@@ -52,17 +54,34 @@ Assert-ConsoleUpgrade ($upgradeText -match 'Get-ConsoleVersionState' -and $upgra
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Uninstall-Console')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Install-Console')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Invoke-ConsoleUpgrade')))
+. ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Get-ConsoleVersionState')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Resolve-ExpectedConsoleRelease')))
 $numericVM = [pscustomobject]@{}
 $symbolicVM = [pscustomobject]@{ thisParams = [pscustomobject]@{ cmDownloadVersion = [pscustomobject]@{ baselineVersion = '2603' } } }
+$offlineVM = [pscustomobject]@{ thisParams = [pscustomobject]@{ cmDownloadVersion = [pscustomobject]@{ baselineVersion = '2509' } } }
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2509' }) -VM $numericVM) -eq '2509') 'numeric console release passes through unchanged'
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = 'current-branch' }) -VM $symbolicVM) -eq '2603') 'current-branch resolves through deployed media metadata'
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = 'tech-preview' }) -VM $symbolicVM) -eq '2603') 'tech-preview resolves through deployed media metadata'
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2603'; OfflineSCP = $true }) -VM $offlineVM) -eq '2509') 'OfflineSCP pins console expectation to deployed baseline media'
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2509'; OfflineSCP = $true }) -VM $numericVM) -eq '2509') 'OfflineSCP with no per-VM media metadata preserves a concrete baseline target'
+$childOfflineVM = [pscustomobject]@{ parentSiteCode = 'CAS' }
+$offlineHierarchy = [pscustomobject]@{
+    virtualMachines = @(
+        [pscustomobject]@{
+            siteCode  = 'CAS'
+            thisParams = [pscustomobject]@{
+                cmDownloadVersion = [pscustomobject]@{ baselineVersion = '2509' }
+            }
+        }
+    )
+}
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2603'; OfflineSCP = $true }) -VM $childOfflineVM -DeployConfig $offlineHierarchy) -eq '2509') 'OfflineSCP child Primary inherits deployed baseline metadata from its CAS'
 $unresolvedFailed = $false
 try { $null = Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = 'tech-preview' }) -VM $numericVM }
 catch { $unresolvedFailed = $_.Exception.Message -match 'could not resolve symbolic' }
 Assert-ConsoleUpgrade $unresolvedFailed 'unresolved symbolic console release fails explicitly'
 Assert-ConsoleUpgrade ($upgradeText -match 'RequiredExtensionSiteVersion' -and $upgradeText -match 'RequiredExtensionVersion') 'upgrader compares the site-required extension version'
+Assert-ConsoleUpgrade ($upgradeText -match 'expected release.+ReleaseMatches' -and $upgradeText -match 'ExtensionMatches') 'upgrade failure names release and extension comparisons independently'
 Assert-ConsoleUpgrade ($upgradeText -match 'MaximumAttempts = 2' -and $upgradeText -match 'for \(\$attempt = 1; \$attempt -le \$MaximumAttempts; \$attempt\+\+\)') 'upgrader makes at most two install attempts'
 Assert-ConsoleUpgrade ($upgradeText -match "Tools\\ConsoleSetup" -and $upgradeText -notmatch "Join-Path \$CMInstallDir 'bin\\I386\\Consolesetup\.exe'") 'upgrader uses the site-maintained console payload instead of baseline media'
 Assert-ConsoleUpgrade ($upgradeText -match 'AdminConsole\.msi' -and $upgradeText -match 'ConfigMgr\.AC_Extension\.i386\.cab' -and $upgradeText -match 'ConfigMgr\.AC_Extension\.amd64\.cab') 'upgrader requires the complete console payload'
@@ -73,6 +92,26 @@ Assert-ConsoleUpgrade ($upgradeText -match 'C:\\ConfigMgrAdminUISetup\.log' -and
 Assert-ConsoleUpgrade ($upgradeText -match 'Stop-Process -Id \$ownedProcess\.Id' -and $upgradeText -match '\$preExistingIds') 'timed-out attempts stop only ConsoleSetup processes owned by that attempt'
 Assert-ConsoleUpgrade ($upgradeText -match 'Console upgrade did not converge' -and $upgradeText -match 'throw "Upgrade-Console: CM install directory' -and $upgradeText -match 'site-maintained console source.+is incomplete') 'missing prerequisites and retry exhaustion are terminating failures'
 Assert-ConsoleUpgrade ($validationText -match 'ConfigMgr admin console is release' -and $validationText -match 'ConfigMgr admin console extension is' -and $validationText -match '\$results\.Passed = \$false') 'Phase 11 fails stale console release and extension versions'
+Assert-ConsoleUpgrade ($validationText -match 'OfflineSCP pins the effective ConfigMgr release to deployed baseline' -and
+    $validationText -match 'Get-CMBaselineVersion -CMVersion \$effectiveCmVersion') 'Phase 11 derives missing OfflineSCP metadata from the baseline catalog'
+Assert-ConsoleUpgrade ($phaseJobsText -match 'Start-VMMaintenance reported failure.+preceding per-fix result') 'Phase 10 reports explicit maintenance failure instead of claiming no data'
+
+$script:ConsoleSetupState = [pscustomobject]@{
+    AdminConsoleVersion      = ' 5.2509.1036.1200 '
+    RequiredExtensionVersion = ' 5.0.9141.1002 '
+}
+function Get-ItemProperty {
+    param($Path, $ErrorAction)
+    $script:ConsoleSetupState
+}
+function Get-WmiObject {
+    param($Namespace, $Query, $ErrorAction)
+    [pscustomobject]@{ FileVersion = ' 5.0.9141.1002 ' }
+}
+$currentState = Get-ConsoleVersionState -SiteCode 'SPC' -ExpectedRelease '2509'
+Assert-ConsoleUpgrade ($currentState.Current -and $currentState.ReleaseMatches -and $currentState.ExtensionMatches) 'console state normalizes provider and registry version strings before comparison'
+Remove-Item Function:\Get-ItemProperty -ErrorAction SilentlyContinue
+Remove-Item Function:\Get-WmiObject -ErrorAction SilentlyContinue
 
 $script:ProcessExitCodes = New-Object System.Collections.Generic.Queue[object]
 $script:ProcessCalls = New-Object System.Collections.Generic.List[object]

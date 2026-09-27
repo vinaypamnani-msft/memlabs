@@ -12074,6 +12074,33 @@ function Test-CMSiteWideFunctionality {
     # literal name "Configuration Manager current-branch" returns zero rows and
     # the deliberately conservative zero-row path can only report NOT measured.
     $effectiveCmVersion = Resolve-CmVersionAlias -Version ([string]$effectiveCmOptions.version)
+    if ([bool]$effectiveCmOptions.OfflineSCP) {
+        $offlineBaselineVersion = "$($CurrentItem.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+        if (-not $offlineBaselineVersion -and $CurrentItem.parentSiteCode) {
+            $parentSite = @($DeployConfig.virtualMachines | Where-Object {
+                    "$($_.siteCode)" -ieq "$($CurrentItem.parentSiteCode)" -and $_.thisParams.cmDownloadVersion.baselineVersion
+                }) | Select-Object -First 1
+            if ($parentSite) {
+                $offlineBaselineVersion = "$($parentSite.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+            }
+        }
+        if (-not $offlineBaselineVersion) {
+            try {
+                $catalogBaseline = Get-CMBaselineVersion -CMVersion $effectiveCmVersion | Select-Object -First 1
+                $offlineBaselineVersion = "$($catalogBaseline.baselineVersion)".Trim()
+            }
+            catch {
+                Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not derive the OfflineSCP baseline from the ConfigMgr catalog: $($_.Exception.Message)" -Warning
+            }
+        }
+        if ($offlineBaselineVersion -and $offlineBaselineVersion -notin @('current-branch', 'tech-preview')) {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP pins the effective ConfigMgr release to deployed baseline $offlineBaselineVersion (configured online target is $effectiveCmVersion)." -LogOnly
+            $effectiveCmVersion = $offlineBaselineVersion
+        }
+        else {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP is enabled but deployed baseline metadata is missing or symbolic ('$offlineBaselineVersion'); falling back to configured release $effectiveCmVersion for validation." -Warning
+        }
+    }
     $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
 
     # OfflineSUP deployments deliberately skip subscribing any products /
@@ -12447,7 +12474,10 @@ function Test-CMSiteWideFunctionality {
             $results.Details.Add("WARN: SMS_Site mode query failed: $($_.Exception.Message)")
         }
 
-        # 3a. The site actually REACHED cmOptions.version. Nothing else in the build compares
+        # 3a. The site actually reached the effective expected release. For OfflineSCP this
+        # is the deployed baseline because InstallAndUpdateSCCM deliberately disables the
+        # in-console upgrade; otherwise it is cmOptions.version.
+        # Nothing else in the build compares
         # the running site against what was asked for: when the update workflow dies mid-script
         # Invoke-DotSource logs the throw as a WARNING without -Failure, so Phase 8 still reports
         # success -- WGB 2026-09-02 shipped the baseline twice while the config said 2503.
@@ -12472,10 +12502,10 @@ function Test-CMSiteWideFunctionality {
                 if ($updRows.Count -eq 0) {
                     # No update record exists to judge, so this was NOT measured -- never report
                     # the absence of evidence as a pass.
-                    $results.Details.Add("INFO: no in-console update named '$updName' exists, so whether cmOptions.version was applied was NOT measured (expected when the baseline media is already $cmVersionInner, or the SCP is offline/absent). Site build is $siteBuild.")
+                    $results.Details.Add("INFO: no in-console update named '$updName' exists, so whether expected release $cmVersionInner was applied was NOT measured (expected when the baseline media is already $cmVersionInner, or the SCP is offline/absent). Site build is $siteBuild.")
                 }
                 elseif ($installedRows.Count -gt 0) {
-                    $results.Details.Add("OK: site is at cmOptions.version $cmVersionInner -- '$updName' is INSTALL_SUCCESS, site build $siteBuild")
+                    $results.Details.Add("OK: site is at expected release $cmVersionInner -- '$updName' is INSTALL_SUCCESS, site build $siteBuild")
                 }
                 else {
                     # The row carries the build it delivers, so no version->build table is needed
@@ -12493,20 +12523,20 @@ function Test-CMSiteWideFunctionality {
                         $results.Details.Add("OK: site build $siteBuild is at or past $targetBuild, the build '$updName' delivers -- the un-installed row (State $states) is the same-version no-op the upgrade deliberately skips")
                     }
                     elseif ($targetBuild -le 0 -or $siteBuild -le 0) {
-                        $results.Details.Add("INFO: '$updName' is not installed (State $states) but the build comparison could NOT be made (site build '$siteBuild', update FullVersion '$fullVer') -- cmOptions.version was NOT verified")
+                        $results.Details.Add("INFO: '$updName' is not installed (State $states) but the build comparison could NOT be made (site build '$siteBuild', update FullVersion '$fullVer') -- expected release was NOT verified")
                     }
                     else {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: cmOptions.version is $cmVersionInner but this site is still on build $siteBuild -- '$updName' delivers build $targetBuild and is NOT installed (SMS_CM_UpdatePackages.State = $states; 196612 = INSTALL_SUCCESS). Phase 8 does not fail on this: a throw inside InstallAndUpdateSCCM.ps1 is logged by Invoke-DotSource as a WARNING only, so the build reports success with the site left on the baseline. Re-run Phase 8 (UpgradeSCCM.Status is left at 'Running', so the upgrade is retried) and read InstallCMLog.log on this server for why it stopped.")
+                        $results.Details.Add("FAIL: expected ConfigMgr release is $cmVersionInner but this site is still on build $siteBuild -- '$updName' delivers build $targetBuild and is NOT installed (SMS_CM_UpdatePackages.State = $states; 196612 = INSTALL_SUCCESS). Phase 8 does not fail on this: a throw inside InstallAndUpdateSCCM.ps1 is logged by Invoke-DotSource as a WARNING only, so the build reports success with the site left on the baseline. Re-run Phase 8 (UpgradeSCCM.Status is left at 'Running', so the upgrade is retried) and read InstallCMLog.log on this server for why it stopped.")
                     }
                 }
             }
             catch {
-                $results.Details.Add("INFO: SMS_CM_UpdatePackages query failed, so cmOptions.version ($cmVersionInner) was NOT verified: $($_.Exception.Message)")
+                $results.Details.Add("INFO: SMS_CM_UpdatePackages query failed, so expected release $cmVersionInner was NOT verified: $($_.Exception.Message)")
             }
         }
 
-        # 3b. The local admin console must match the requested release and the
+        # 3b. The local admin console must match the effective expected release and the
         # extension version published by this site. Site upgrade success does
         # not update an already-installed console by itself.
         if ($vmRole -in @('Primary', 'CAS') -and $cmVersionInner) {
@@ -12527,7 +12557,7 @@ function Test-CMSiteWideFunctionality {
                 }
                 elseif ($consoleRelease -ne "$cmVersionInner") {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: ConfigMgr admin console is release $consoleRelease ($adminConsoleVersion), but cmOptions.version is $cmVersionInner. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
+                    $results.Details.Add("FAIL: ConfigMgr admin console is release $consoleRelease ($adminConsoleVersion), but the effective expected release is $cmVersionInner. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
                 }
                 elseif (-not $requiredExtensionSiteVersion) {
                     $results.Passed = $false

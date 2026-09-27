@@ -117,7 +117,7 @@ function Invoke-ConsoleUpgrade {
             Write-DscStatus -NoStatus "Upgrade-Console: Checking if the console installed successfully"
             $lastState = Get-ConsoleVersionState -SiteCode $SiteCode -ExpectedRelease $ExpectedRelease
             if ($lastState.Current) { return $lastState }
-            $lastError = "installed '$($lastState.AdminConsoleVersion)' release '$($lastState.ConsoleRelease)'; extension '$($lastState.RequiredExtensionVersion)' expected '$($lastState.RequiredExtensionSiteVersion)'"
+            $lastError = "installed '$($lastState.AdminConsoleVersion)' release '$($lastState.ConsoleRelease)' expected release '$($lastState.ExpectedRelease)' (match=$($lastState.ReleaseMatches)); extension '$($lastState.RequiredExtensionVersion)' expected '$($lastState.RequiredExtensionSiteVersion)' (match=$($lastState.ExtensionMatches))"
         }
         catch {
             $lastError = $_.Exception.Message
@@ -139,12 +139,15 @@ function Get-ConsoleVersionState {
     )
 
     $setup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup' -ErrorAction SilentlyContinue
-    $adminConsoleVersion = [string]$setup.AdminConsoleVersion
-    $requiredExtensionVersion = [string]$setup.RequiredExtensionVersion
-    $requiredExtensionSiteVersion = [string](Get-WmiObject -Namespace "root\sms\Site_$SiteCode" -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' -ErrorAction Stop).FileVersion
+    $adminConsoleVersion = ([string]$setup.AdminConsoleVersion).Trim()
+    $requiredExtensionVersion = ([string]$setup.RequiredExtensionVersion).Trim()
+    $consoleSetupInfo = Get-WmiObject -Namespace "root\sms\Site_$SiteCode" -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' -ErrorAction Stop |
+        Select-Object -First 1
+    $requiredExtensionSiteVersion = ([string]$consoleSetupInfo.FileVersion).Trim()
     if (-not $requiredExtensionSiteVersion) {
         throw "SMS_ConsoleSetupInfo returned no required extension version for site $SiteCode"
     }
+    $expectedReleaseNormalized = ([string]$ExpectedRelease).Trim()
 
     $consoleRelease = ''
     $parsedConsoleVersion = $null
@@ -152,27 +155,46 @@ function Get-ConsoleVersionState {
         $consoleRelease = "$($parsedConsoleVersion.Minor)"
     }
 
+    $releaseMatches = $consoleRelease -eq $expectedReleaseNormalized
+    $extensionMatches = $requiredExtensionVersion -eq $requiredExtensionSiteVersion
     [pscustomobject]@{
         AdminConsoleVersion          = $adminConsoleVersion
         ConsoleRelease               = $consoleRelease
-        ExpectedRelease              = $ExpectedRelease
+        ExpectedRelease              = $expectedReleaseNormalized
         RequiredExtensionVersion     = $requiredExtensionVersion
         RequiredExtensionSiteVersion = $requiredExtensionSiteVersion
-        Current                      = $consoleRelease -eq $ExpectedRelease -and $requiredExtensionVersion -eq $requiredExtensionSiteVersion
+        ReleaseMatches               = $releaseMatches
+        ExtensionMatches             = $extensionMatches
+        Current                      = $releaseMatches -and $extensionMatches
     }
 }
 
 function Resolve-ExpectedConsoleRelease {
     param(
         [object]$CmOptions,
-        [object]$VM
+        [object]$VM,
+        [object]$DeployConfig
     )
 
-    $configuredRelease = "$($CmOptions.Version)"
+    $configuredRelease = "$($CmOptions.Version)".Trim()
     if (-not $configuredRelease) { throw 'Upgrade-Console: cmOptions.Version is missing from deployConfig' }
+
+    $deployedRelease = "$($VM.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+    if (-not $deployedRelease -and $DeployConfig -and $VM.parentSiteCode) {
+        $parentSite = @($DeployConfig.virtualMachines | Where-Object {
+                "$($_.siteCode)" -ieq "$($VM.parentSiteCode)" -and $_.thisParams.cmDownloadVersion.baselineVersion
+            }) | Select-Object -First 1
+        if ($parentSite) {
+            $deployedRelease = "$($parentSite.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+        }
+    }
+    if ([bool]$CmOptions.OfflineSCP -and $deployedRelease -and
+        $deployedRelease -notin @('current-branch', 'tech-preview')) {
+        return $deployedRelease
+    }
+
     if ($configuredRelease -notin @('current-branch', 'tech-preview')) { return $configuredRelease }
 
-    $deployedRelease = "$($VM.thisParams.cmDownloadVersion.baselineVersion)"
     if (-not $deployedRelease -or $deployedRelease -in @('current-branch', 'tech-preview')) {
         throw "Upgrade-Console: could not resolve symbolic cmOptions.Version '$configuredRelease' to the deployed media release"
     }
@@ -190,7 +212,7 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployco
 $sitecode = $ThisVM.SiteCode
 $cmOptions = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
 if (-not $sitecode) { throw 'Upgrade-Console: this machine has no SiteCode in deployConfig' }
-$expectedRelease = Resolve-ExpectedConsoleRelease -CmOptions $cmOptions -VM $ThisVM
+$expectedRelease = Resolve-ExpectedConsoleRelease -CmOptions $cmOptions -VM $ThisVM -DeployConfig $deployConfig
 
 $state = Get-ConsoleVersionState -SiteCode $sitecode -ExpectedRelease $expectedRelease
 if ($state.Current) {
@@ -240,4 +262,3 @@ $state = Invoke-ConsoleUpgrade -ConsoleUIExe $ConsoleUIExe -LangPackDir $LangPac
 
 Write-DscStatus "Console installed successfully Console: $($state.AdminConsoleVersion) Extensions: $($state.RequiredExtensionVersion)"
 [pscustomobject]@{ Success = $true; Message = "Console upgraded to $($state.AdminConsoleVersion)" }
-

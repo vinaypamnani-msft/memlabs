@@ -65,7 +65,7 @@ $global:Phase10Job = {
         $null = Repair-VmPSDirectChannel -VmName $currentItem.vmName -VmDomainName $domainNameForLogging -Phase "$Phase"
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -FreshDeployOnly:$FreshDeployOnly
         if (-not $worked) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance reported failure. See the preceding per-fix result and transcript diagnostics." -OutputStream -Failure
             throw "Could not run VM Maintenance on $($currentItem.vmName)"
         }
         else {
