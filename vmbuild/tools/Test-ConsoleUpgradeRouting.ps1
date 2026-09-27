@@ -46,8 +46,10 @@ $validationText = Get-Content -LiteralPath $validationPath -Raw
 $phaseJobsText = Get-Content -LiteralPath $phaseJobsPath -Raw
 
 Assert-ConsoleUpgrade ($fixText -match 'NeededOnFreshDeploy\s*=\s*\$true' -and $fixText -match 'AppliesToExisting\s*=\s*\$true') 'console fix is reachable from Phase 10 and fresh-deploy maintenance'
-Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"260927\.0"') 'console fix version forces deployment of the repaired runner'
+Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"260927\.1"') 'console fix version forces deployment of the repaired runner'
 Assert-ConsoleUpgrade ($fixText -match 'returned no result' -and $fixText -match "Properties\['Success'\]") 'maintenance wrapper requires an explicit result'
+Assert-ConsoleUpgrade ($fixText -match 'ToBase64String.+ReadAllBytes' -and
+    $fixText -match 'WriteAllBytes\(\$script.+FromBase64String') 'maintenance carries the current console script into Phase 10-only reruns'
 Assert-ConsoleUpgrade ($upgradeText -match 'Get-ConsoleVersionState' -and $upgradeText -match 'ConsoleRelease\s*=') 'upgrader compares the installed console release'
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Get-ConsoleSetupFailureDetail')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Invoke-ConsoleSetupProcess')))
@@ -95,6 +97,19 @@ Assert-ConsoleUpgrade ($validationText -match 'ConfigMgr admin console is releas
 Assert-ConsoleUpgrade ($validationText -match 'OfflineSCP pins the effective ConfigMgr release to deployed baseline' -and
     $validationText -match 'Get-CMBaselineVersion -CMVersion \$effectiveCmVersion') 'Phase 11 derives missing OfflineSCP metadata from the baseline catalog'
 Assert-ConsoleUpgrade ($phaseJobsText -match 'Start-VMMaintenance reported failure.+preceding per-fix result') 'Phase 10 reports explicit maintenance failure instead of claiming no data'
+
+$fixesToPerform = @()
+. $fixPath
+$upgradeFix = @($fixesToPerform | Where-Object { $_.FixName -eq 'Fix-Upgrade-Console' }) | Select-Object -Last 1
+$payloadBytes = if ($upgradeFix -and $upgradeFix.ArgumentList.Count -eq 1) {
+    [Convert]::FromBase64String("$($upgradeFix.ArgumentList[0])")
+}
+else {
+    @()
+}
+$sourceBytes = [IO.File]::ReadAllBytes($upgradePath)
+Assert-ConsoleUpgrade ($payloadBytes.Count -eq $sourceBytes.Count -and
+    [Convert]::ToBase64String($payloadBytes) -eq [Convert]::ToBase64String($sourceBytes)) 'maintenance payload exactly matches the current Upgrade-Console.ps1 bytes'
 
 $script:ConsoleSetupState = [pscustomobject]@{
     AdminConsoleVersion      = ' 5.2509.1036.1200 '
