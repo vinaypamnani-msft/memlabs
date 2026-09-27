@@ -2774,6 +2774,17 @@ class DelegateControl {
     [DscProperty()]
     [bool] $IsGroup
 
+    # Explicit credentials for a principal in a trusted forest. During trust
+    # creation the local LSA often cannot translate the foreign name yet, while
+    # LDAP against that forest can already return its objectSid.
+    [DscProperty()]
+    [System.Management.Automation.PSCredential] $RemoteCreds
+
+    # Specific DC in the trustee's forest for deterministic direct-LDAP SID
+    # lookup while the new trust is still converging.
+    [DscProperty()]
+    [string] $RemoteServer
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
@@ -2822,6 +2833,132 @@ class DelegateControl {
         return $false
     }
 
+    hidden [string] ResolveIdentitySid([string] $identity) {
+        try {
+            $sid = (New-Object System.Security.Principal.NTAccount($identity)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+            Write-Status "Identity '$identity' resolves to $sid"
+            return $sid
+        }
+        catch {
+            Write-Status "Identity '$identity' does not resolve through the local LSA yet: $($_.Exception.Message)"
+        }
+
+        $parts = $identity -split '\\', 2
+        if ($parts.Count -ne 2 -or $parts[0] -notmatch '\.') { return '' }
+        try {
+            $server = if ($this.RemoteServer) { $this.RemoteServer } else { $parts[0] }
+            $rootPath = "LDAP://$server/RootDSE"
+            $user = if ($this.RemoteCreds) { $this.RemoteCreds.UserName } else { $null }
+            $password = if ($this.RemoteCreds) { $this.RemoteCreds.GetNetworkCredential().Password } else { $null }
+            $rootDse = if ($this.RemoteCreds) {
+                [System.DirectoryServices.DirectoryEntry]::new($rootPath, $user, $password)
+            }
+            else {
+                [System.DirectoryServices.DirectoryEntry]::new($rootPath)
+            }
+            $defaultNc = [string]$rootDse.Properties['defaultNamingContext'].Value
+            if ([string]::IsNullOrWhiteSpace($defaultNc)) { throw "defaultNamingContext came back empty from $server" }
+            $searchRootPath = "LDAP://$server/$defaultNc"
+            $searchRoot = if ($this.RemoteCreds) {
+                [System.DirectoryServices.DirectoryEntry]::new($searchRootPath, $user, $password)
+            }
+            else {
+                [System.DirectoryServices.DirectoryEntry]::new($searchRootPath)
+            }
+            $escapedLeaf = $parts[1].Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29')
+            $searcher = [System.DirectoryServices.DirectorySearcher]::new($searchRoot)
+            $searcher.Filter = "(&(objectClass=group)(sAMAccountName=$escapedLeaf))"
+            [void]$searcher.PropertiesToLoad.Add('objectSid')
+            $hit = $searcher.FindOne()
+            $sid = ''
+            if ($hit -and $hit.Properties['objectsid'].Count -gt 0) {
+                $sid = [System.Security.Principal.SecurityIdentifier]::new([byte[]]$hit.Properties['objectsid'][0], 0).Value
+            }
+            if ($sid -notmatch '^S-1-5-') {
+                Write-Status "LDAP lookup of '$identity' returned no usable SID ('$sid')"
+                return ''
+            }
+            Write-Status "Identity '$identity' resolved to $sid via direct LDAP against $server"
+            return $sid
+        }
+        catch {
+            Write-Status "LDAP SID lookup for '$identity' failed: $($_.Exception.Message)"
+            return ''
+        }
+    }
+
+    hidden [string] SidCachePath() {
+        $leaf = ("$($this.DomainFullName)-$($this.Machine)" -replace '[^A-Za-z0-9_.-]', '_')
+        return "C:\ProgramData\MemLabs\DelegateControl\$leaf.sid"
+    }
+
+    hidden [void] SaveSidCache([string] $sidText) {
+        if ($sidText -notmatch '^S-1-5-') { return }
+        $path = $this.SidCachePath()
+        $parent = Split-Path -Parent $path
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        [System.IO.File]::WriteAllText($path, $sidText)
+    }
+
+    hidden [string] ReadSidCache() {
+        try {
+            $path = $this.SidCachePath()
+            if (-not (Test-Path $path)) { return '' }
+            $sidText = [System.IO.File]::ReadAllText($path).Trim()
+            if ($sidText -match '^S-1-5-') { return $sidText }
+        }
+        catch {}
+        return ''
+    }
+
+    hidden [bool] HasSidPermission([string] $distinguishedName, [string] $sidText) {
+        if ([string]::IsNullOrWhiteSpace($sidText)) { return $false }
+        try {
+            $entry = [ADSI]"LDAP://$distinguishedName"
+            $entry.psbase.Options.SecurityMasks = [System.DirectoryServices.SecurityMasks]::Dacl
+            foreach ($ace in @($entry.psbase.ObjectSecurity.Access | Where-Object { $null -ne $_ })) {
+                if ("$($ace.AccessControlType)" -ne 'Allow') { continue }
+                $aceSid = "$($ace.IdentityReference)"
+                try { $aceSid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+                if ($aceSid -ne $sidText) { continue }
+                if ("$($ace.ActiveDirectoryRights)" -match 'GenericAll' -and
+                    "$($ace.InheritanceType)" -eq 'All') { return $true }
+            }
+        }
+        catch {
+            Write-Status "SID permission read-back for $sidText failed: $($_.Exception.Message)"
+        }
+        return $false
+    }
+
+    # Write the foreign trustee ACE directly by SID. This is the same AD-native
+    # fallback used for cross-forest certificate-template ACLs and does not
+    # depend on the new trust being present in the local LSA name cache.
+    hidden [string] GrantSidOnSystemManagement([string] $distinguishedName, [string] $sidText) {
+        try {
+            $entry = [ADSI]"LDAP://$distinguishedName"
+            $entry.psbase.Options.SecurityMasks = [System.DirectoryServices.SecurityMasks]::Dacl
+            $sid = New-Object System.Security.Principal.SecurityIdentifier($sidText)
+            $security = $entry.psbase.ObjectSecurity
+            $security.AddAccessRule((New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                        $sid,
+                        [System.DirectoryServices.ActiveDirectoryRights]::GenericAll,
+                        [System.Security.AccessControl.AccessControlType]::Allow,
+                        [System.DirectoryServices.ActiveDirectorySecurityInheritance]::All)))
+            $entry.psbase.ObjectSecurity = $security
+            $entry.psbase.CommitChanges()
+            if (-not $this.HasSidPermission($distinguishedName, $sidText)) {
+                return "committed the ACE but read-back did not find inheritable GenericAll for $sidText"
+            }
+            $this.SaveSidCache($sidText)
+            Write-Status "Granted and verified FULL CONTROL on '$distinguishedName' for foreign SID $sidText"
+            return ''
+        }
+        catch {
+            return "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+        }
+    }
+
     [void] Set() {
         $_machinename = $this.Machine
         $root = (Get-ADRootDSE).defaultNamingContext
@@ -2839,6 +2976,21 @@ class DelegateControl {
             Write-Status "Creating new AD Object: CN=System Management,CN=System,$root"
             $ou = New-ADObject -Type Container -name "System Management" -Path "CN=System,$root" -Passthru
         }
+        $arg1 = "CN=System Management,CN=System,$root"
+
+        if ($this.IsGroup) {
+            $identity = "$($this.DomainFullName)\$($this.Machine)"
+            # Live LDAP is authoritative. The cache only preserves idempotent
+            # read-back when the remote forest is temporarily unavailable.
+            $sidText = $this.ResolveIdentitySid($identity)
+            if (-not $sidText) { $sidText = $this.ReadSidCache() }
+            if ($sidText) {
+                $sidGrantError = $this.GrantSidOnSystemManagement($arg1, $sidText)
+                if (-not $sidGrantError) { return }
+                Write-Status "Direct SID grant for '$identity' ($sidText) failed: $sidGrantError. Falling back to dsacls name resolution."
+            }
+        }
+
         # Use actual NetBIOS name for SID resolution, not the first DNS
         # label. In disjoint namespaces (e.g. DNS "wacky.sandwich.lab" with
         # NetBIOS "TACO"), .split('.')[0] gives "wacky" which dsacls can't
@@ -2849,7 +3001,6 @@ class DelegateControl {
         }
         #Delegate Control
         $cmd = "dsacls.exe"
-        $arg1 = "CN=System Management,CN=System,$root"
         $arg2 = "/G"
         if ($this.IsGroup) {
             $arg3 = "" + $this.DomainFullName + "\" + $this.Machine + "`:GA;;"
@@ -2967,7 +3118,8 @@ class DelegateControl {
             $permissioninfo = & $tcmd $targ1
 
             # Use helper method to check permissions
-            if ($this.CheckPermissions($permissioninfo, $_machinename, $DomainName)) {
+            $verificationDomain = if ($this.IsGroup) { $this.DomainFullName } else { $DomainName }
+            if ($this.CheckPermissions($permissioninfo, $_machinename, $verificationDomain)) {
                 Write-Verbose "Permissions verified successfully"
                 $granted = $true
                 break
@@ -2977,7 +3129,7 @@ class DelegateControl {
             # (the ACL may not have replicated locally yet).
             if ($successDcArg1) {
                 $remotePerm = & $tcmd $successDcArg1
-                if ($this.CheckPermissions($remotePerm, $_machinename, $DomainName)) {
+                if ($this.CheckPermissions($remotePerm, $_machinename, $verificationDomain)) {
                     Write-Status "Permissions verified on remote DC"
                     $granted = $true
                     break
@@ -3038,10 +3190,21 @@ class DelegateControl {
         Write-Verbose "Testing for permissions. IsGroup: $($this.IsGroup)"
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
+
+        if ($this.IsGroup) {
+            $sidText = $this.ResolveIdentitySid("$($this.DomainFullName)\$($this.Machine)")
+            if (-not $sidText) { $sidText = $this.ReadSidCache() }
+            if ($sidText -and $this.HasSidPermission($arg1, $sidText)) {
+                Write-Status "Verified System Management delegation for foreign SID $sidText"
+                return $true
+            }
+        }
+
         $permissioninfo = & $cmd $arg1
 
         # Use helper method to check permissions (strict pattern)
-        if ($this.CheckPermissions($permissioninfo, $_machinename, $DomainName)) {
+        $verificationDomain = if ($this.IsGroup) { $this.DomainFullName } else { $DomainName }
+        if ($this.CheckPermissions($permissioninfo, $_machinename, $verificationDomain)) {
             return $true
         }
 
@@ -8502,10 +8665,29 @@ class InstallRootCertificate {
     [DscProperty()]
     [string]$RemoteForestDC
 
+    # Explicit remote-forest credential used while a newly created trust is not
+    # yet usable for ambient LDAP authentication.
+    [DscProperty()]
+    [System.Management.Automation.PSCredential]$RemoteCreds
+
     # Optional issuing-CA host hint (short or FQDN) to disambiguate when the
     # remote forest publishes more than one Enterprise issuing CA.
     [DscProperty()]
     [string]$IssuingCAHint
+
+    hidden [System.DirectoryServices.DirectoryEntry] OpenRemoteEntry([string]$relativePath) {
+        $path = if ([string]::IsNullOrWhiteSpace($relativePath)) {
+            "LDAP://$($this.RemoteForestDC)/RootDSE"
+        }
+        else {
+            "LDAP://$($this.RemoteForestDC)/$relativePath"
+        }
+        if ($this.RemoteCreds) {
+            $password = $this.RemoteCreds.GetNetworkCredential().Password
+            return [System.DirectoryServices.DirectoryEntry]::new($path, $this.RemoteCreds.UserName, $password)
+        }
+        return [System.DirectoryServices.DirectoryEntry]::new($path)
+    }
 
     # Resolve the issuing CA's certutil -config string ("<dNSHostName>\<cn>")
     # by enumerating the remote forest's Enrollment Services container -- the
@@ -8520,14 +8702,13 @@ class InstallRootCertificate {
             return $fallback
         }
         try {
-            $rootDSE = [ADSI]"LDAP://$($this.RemoteForestDC)/RootDSE"
-            $configNC = [string]$rootDSE.configurationNamingContext.Value
+            $rootDSE = $this.OpenRemoteEntry('')
+            $configNC = [string]$rootDSE.Properties['configurationNamingContext'].Value
             if ([string]::IsNullOrWhiteSpace($configNC)) {
                 Write-Status "CA discovery: could not read configurationNamingContext from $($this.RemoteForestDC); using fallback '$fallback'"
                 return $fallback
             }
-            $enrollPath = "LDAP://$($this.RemoteForestDC)/CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC"
-            $enroll = [ADSI]$enrollPath
+            $enroll = $this.OpenRemoteEntry("CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC")
             $cas = @()
             foreach ($child in $enroll.Children) {
                 $cn = [string]$child.Properties['cn'].Value
@@ -8667,56 +8848,65 @@ class InstallRootCertificate {
         # succeeds); the retrieval verb was the bug. AD read is naming-, IP-,
         # tier-, and DCOM-agnostic and works for single- and multi-tier PKI.
         if (-not [string]::IsNullOrWhiteSpace($this.RemoteForestDC)) {
-            try {
-                $configNC = [string]([ADSI]"LDAP://$($this.RemoteForestDC)/RootDSE").configurationNamingContext.Value
-                if ([string]::IsNullOrWhiteSpace($configNC)) {
-                    throw "configurationNamingContext came back empty from $($this.RemoteForestDC)"
-                }
-
-                # Root (self-signed) CA cert(s): CN=Certification Authorities
-                $caContainer = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
-                $caKids = @($caContainer.Children | Where-Object { $null -ne $_ })
-                Write-Status "Remote CN=Certification Authorities holds $($caKids.Count) entr(ies): $(($caKids | ForEach-Object { "$($_.Properties['cn'].Value)" }) -join ', ')"
-                foreach ($ca in $caKids) {
-                    $b = $this.FirstCertBytes($ca.Properties['cACertificate'].Value)
-                    if ($b) {
-                        $rootBytes = $b
-                        Write-Status "Read root CA '$([string]$ca.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
-                        break
+            $adMaxAttempts = 3
+            for ($adAttempt = 1; $adAttempt -le $adMaxAttempts; $adAttempt++) {
+                try {
+                    $rootDSE = $this.OpenRemoteEntry('')
+                    $configNC = [string]$rootDSE.Properties['configurationNamingContext'].Value
+                    if ([string]::IsNullOrWhiteSpace($configNC)) {
+                        throw "configurationNamingContext came back empty from $($this.RemoteForestDC)"
                     }
-                }
 
-                # Issuing CA cert: the pKIEnrollmentService object (prefer the
-                # host hint when more than one issuing CA is published).
-                $enroll = [ADSI]"LDAP://$($this.RemoteForestDC)/CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC"
-                $enrollKids = @($enroll.Children | Where-Object { $null -ne $_ })
-                Write-Status "Remote CN=Enrollment Services holds $($enrollKids.Count) issuing CA(s): $(($enrollKids | ForEach-Object { "$($_.Properties['cn'].Value)" }) -join ', ')"
-                $picked = $null
-                foreach ($svc in $enrollKids) {
-                    if (-not [string]::IsNullOrWhiteSpace($this.IssuingCAHint)) {
-                        $dns = [string]$svc.Properties['dNSHostName'].Value
-                        $short = ($dns -split '\.')[0]
-                        if ($short -eq $this.IssuingCAHint -or $dns -eq $this.IssuingCAHint) {
-                            $picked = $svc
+                    # Root (self-signed) CA cert(s): CN=Certification Authorities
+                    $caContainer = $this.OpenRemoteEntry("CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC")
+                    $caKids = @($caContainer.Children | Where-Object { $null -ne $_ })
+                    Write-Status "Remote CN=Certification Authorities holds $($caKids.Count) entr(ies): $(($caKids | ForEach-Object { "$($_.Properties['cn'].Value)" }) -join ', ')"
+                    foreach ($ca in $caKids) {
+                        $b = $this.FirstCertBytes($ca.Properties['cACertificate'].Value)
+                        if ($b) {
+                            $rootBytes = $b
+                            Write-Status "Read root CA '$([string]$ca.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
                             break
                         }
                     }
-                    if (-not $picked) { $picked = $svc }
-                }
-                if ($picked) {
-                    $b = $this.FirstCertBytes($picked.Properties['cACertificate'].Value)
-                    if ($b) {
-                        $issuingBytes = $b
-                        Write-Status "Read issuing CA '$([string]$picked.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
+
+                    # Issuing CA cert: the pKIEnrollmentService object (prefer the
+                    # host hint when more than one issuing CA is published).
+                    $enroll = $this.OpenRemoteEntry("CN=Enrollment Services,CN=Public Key Services,CN=Services,$configNC")
+                    $enrollKids = @($enroll.Children | Where-Object { $null -ne $_ })
+                    Write-Status "Remote CN=Enrollment Services holds $($enrollKids.Count) issuing CA(s): $(($enrollKids | ForEach-Object { "$($_.Properties['cn'].Value)" }) -join ', ')"
+                    $picked = $null
+                    foreach ($svc in $enrollKids) {
+                        if (-not [string]::IsNullOrWhiteSpace($this.IssuingCAHint)) {
+                            $dns = [string]$svc.Properties['dNSHostName'].Value
+                            $short = ($dns -split '\.')[0]
+                            if ($short -eq $this.IssuingCAHint -or $dns -eq $this.IssuingCAHint) {
+                                $picked = $svc
+                                break
+                            }
+                        }
+                        if (-not $picked) { $picked = $svc }
+                    }
+                    if ($picked) {
+                        $b = $this.FirstCertBytes($picked.Properties['cACertificate'].Value)
+                        if ($b) {
+                            $issuingBytes = $b
+                            Write-Status "Read issuing CA '$([string]$picked.Properties['cn'].Value)' from AD ($($b.Length) bytes)"
+                        }
+                    }
+                    if (-not ($rootBytes -or $issuingBytes)) {
+                        $adReadNote = "AD read of $($this.RemoteForestDC) bound OK but no cACertificate was published (CertAuthorities=$($caKids.Count), EnrollmentServices=$($enrollKids.Count))"
                     }
                 }
-                if (-not ($rootBytes -or $issuingBytes)) {
-                    $adReadNote = "AD read of $($this.RemoteForestDC) bound OK but no cACertificate was published (CertAuthorities=$($caKids.Count), EnrollmentServices=$($enrollKids.Count))"
+                catch {
+                    $adReadNote = "AD read of $($this.RemoteForestDC) failed: $_"
+                    Write-Status "WARNING: Reading CA certs from AD ($($this.RemoteForestDC)) failed on attempt $adAttempt/${adMaxAttempts}: $_"
                 }
-            }
-            catch {
-                $adReadNote = "AD read of $($this.RemoteForestDC) failed: $_"
-                Write-Status "WARNING: Reading CA certs from AD ($($this.RemoteForestDC)) failed: $_"
+                if ($rootBytes -or $issuingBytes) { break }
+                if ($adAttempt -lt $adMaxAttempts) {
+                    Write-Status "Remote CA certificates are not available yet; retrying the credentialed AD read in 5 seconds."
+                    Start-Sleep -Seconds 5
+                }
             }
         }
         else {
@@ -8738,16 +8928,10 @@ class InstallRootCertificate {
             Write-Status "AD CA read produced nothing ($adReadNote); re-publishing cached $_FileName ($($rootBytes.Length) bytes)"
         }
         else {
-            # FALLBACK: legacy certutil retrieval. Known to mis-parse on Server 2022
-            # (certutil matches the '-CA' verb and reports "Too many arguments"), so
-            # treat anything it produces as a bonus, not a dependency.
-            $caConfig = $this.ResolveCAConfig()
-            Write-Status "AD CA read unavailable (RemoteForestDC='$($this.RemoteForestDC)' rootBytes=none issuingBytes=none); falling back to certutil -ca.cert against '$caConfig'"
-            $certutilOut = certutil.exe -config $caConfig -ca.cert $_FileName 2>&1 | Out-String
-            $certutilNote = (($certutilOut -replace '\s+', ' ').Trim())
-            Write-Status "certutil -ca.cert exit=$LASTEXITCODE output: $certutilNote"
-            if (Test-Path $_FileName) { $rootBytes = [System.IO.File]::ReadAllBytes($_FileName) }
-            $adReadNote = "$adReadNote; certutil -ca.cert fallback: $certutilNote"
+            # Server 2022 parses the historical '-ca.cert <file>' fallback as
+            # the unrelated '-CA' verb and always returns "Too many arguments".
+            # Do not obscure the actionable LDAP failure with that known-bad call.
+            $adReadNote = "$adReadNote; no cached certificate was available after credentialed AD retries"
         }
 
         # Fail with a clear, actionable error so the LCM retries on a real
@@ -10364,5 +10548,3 @@ class PromoteDomainController {
         return $this
     }
 }
-
-

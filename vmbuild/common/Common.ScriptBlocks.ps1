@@ -3992,7 +3992,9 @@ $global:VM_Config = {
         # Only the phase-start call reaps. The retry/post-reboot calls below deliberately
         # omit it: after a reboot there is nothing left to reap, and a retry runs while the
         # premise ("nothing else is using them") is no longer established.
-        $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -ArgumentList @($hostRunStartUtc) -DisplayName "Stop Any Running DSC's"
+        # This probe is classified and recovered below. Suppress its low-level
+        # ERROR so a successful retry/reboot does not leave a false run error.
+        $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -ArgumentList @($hostRunStartUtc) -DisplayName "Stop Any Running DSC's" -SuppressLog
         $Format_StopDscFailure = {
             param($StopResult)
             try {
