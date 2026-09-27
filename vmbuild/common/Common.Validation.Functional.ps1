@@ -12258,9 +12258,10 @@ function Test-CMSiteWideFunctionality {
             param([int]$State)
 
             if ($State -eq 0) { return 'Installed' }
-            if ($State -in 1, 7) { return 'Pending' }
+            if ($State -in 1, 2, 7) { return 'Pending' }
             return 'Problem'
         }
+        $osdProgressActivity = "$env:COMPUTERNAME [OSD content validation]"
 
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
@@ -12957,6 +12958,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             # box the boot image sat InstallFailed for 12h, so it fails here.
                             if ($failed.Count -ge 1) {
                                 for ($dpTry = 1; $dpTry -le 3 -and $failed.Count -ge 1; $dpTry++) {
+                                    Write-Progress -Activity $osdProgressActivity -Status "Rechecking failed boot-image distribution for '$biName' (attempt $dpTry/3)"
                                     Start-Sleep -Seconds 30
                                     $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
                                         -Filter "PackageID='$($bi.PackageID)'" -ErrorAction SilentlyContinue)
@@ -12966,14 +12968,14 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                 }
                             }
 
-                            # States 1 and 7 are normal immediately after targeting or
+                            # States 1, 2 and 7 are nonterminal immediately after targeting or
                             # RefreshPkgSource, but they cannot pass forever. Give required
                             # OSD DPs a bounded five-minute convergence window, then let the
                             # required-coverage verdict below fail any row still pending.
                             $getRequiredPendingBootRows = {
                                 param([object[]]$Rows)
                                 @($Rows | Where-Object {
-                                        if ([int]$_.State -notin 1, 7) { return $false }
+                                        if ([int]$_.State -notin 1, 2, 7) { return $false }
                                         $rowName = & $dpNameOf $_.ServerNALPath
                                         $rowShort = ($rowName -split '\.')[0]
                                         return @($expectedOsdDpNames | Where-Object {
@@ -12986,6 +12988,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             if ($expectOsd -and $biName -notmatch 'arm64' -and $expectedOsdDpNames.Count -gt 0) {
                                 $requiredPendingBootRows = @(& $getRequiredPendingBootRows $allDp)
                                 for ($pendingTry = 1; $pendingTry -le 10 -and $requiredPendingBootRows.Count -gt 0; $pendingTry++) {
+                                    Write-Progress -Activity $osdProgressActivity -Status "Waiting for required boot-image content '$biName' (attempt $pendingTry/10)"
                                     Start-Sleep -Seconds 30
                                     $bootPendingWaitAttempts++
                                     $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
@@ -13166,7 +13169,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     }
                                 }
                                 elseif ($requiredOsdCoveragePending.Count -gt 0) {
-                                    $results.Details.Add("INFO: Boot image '$biName' ($($bi.PackageID)) is current-version but still in an in-flight state on required OSD DP(s): $($requiredOsdCoveragePending -join '; '). States 1 and 7 are pending, not failures.")
+                                    $results.Details.Add("INFO: Boot image '$biName' ($($bi.PackageID)) is current-version but still in an in-flight state on required OSD DP(s): $($requiredOsdCoveragePending -join '; '). States 1, 2 and 7 are pending, not failures.")
                                 }
                                 else {
                                     $results.Details.Add("OK: Boot image '$biName' ($($bi.PackageID)) SourceVersion=$bootSourceVersion is Installed on every required OSD DP")
@@ -13309,7 +13312,231 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             # same OSD DP as the boot image. The boot image alone gets WinPE onto the machine;
             # the client then fails inside the task sequence looking for content that never
             # shipped. Only the boot image was ever checked.
-            foreach ($pkgClass in @(@{ Class = 'SMS_ImagePackage'; Label = 'OS image' }, @{ Class = 'SMS_OperatingSystemInstallPackage'; Label = 'OS upgrade package' })) {
+            $osdPackageClasses = @(
+                @{ Class = 'SMS_ImagePackage'; Label = 'OS image' }
+                @{ Class = 'SMS_OperatingSystemInstallPackage'; Label = 'OS upgrade package' }
+            )
+            $getOsdContentTargetRows = {
+                param([string]$PackageId, [string]$RequiredDp)
+
+                $requiredShort = ($RequiredDp -split '\.')[0]
+                @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageId'" -ErrorAction Stop |
+                    Where-Object {
+                        $targetDp = & $dpNameOf $_.ServerNALPath
+                        $targetDp -ieq $RequiredDp -or ($targetDp -split '\.')[0] -ieq $requiredShort
+                    })
+            }
+            $readPendingOsdContent = {
+                $pendingRows = [System.Collections.Generic.List[object]]::new()
+                foreach ($contentClass in $osdPackageClasses) {
+                    foreach ($contentPackage in @(Get-WmiObject -Namespace $ns -Class $contentClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)) {
+                        $statusRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($contentPackage.PackageID)'" -ErrorAction Stop)
+                        foreach ($requiredDp in $expectedOsdDpNames) {
+                            $requiredShort = ($requiredDp -split '\.')[0]
+                            $statusRow = @($statusRows | Where-Object {
+                                    $statusDp = & $dpNameOf $_.ServerNALPath
+                                    $statusDp -ieq $requiredDp -or ($statusDp -split '\.')[0] -ieq $requiredShort
+                                } | Select-Object -First 1)
+                            if ($statusRow.Count -eq 1 -and
+                                (Get-MemLabsContentDistributionStateKind -State ([int]$statusRow[0].State)) -eq 'Pending') {
+                                $stateNumber = [int]$statusRow[0].State
+                                $pendingRows.Add([pscustomobject]@{
+                                        PackageId = "$($contentPackage.PackageID)"
+                                        Name      = "$($contentPackage.Name)"
+                                        Label     = "$($contentClass.Label)"
+                                        DP        = "$requiredDp"
+                                        State     = $stateNumber
+                                        StateName = @{ 1 = 'InstallPending'; 2 = 'InstallRetrying'; 7 = 'ContentValidating' }[$stateNumber]
+                                    })
+                            }
+                            elseif ($statusRow.Count -eq 0 -and
+                                @(& $getOsdContentTargetRows "$($contentPackage.PackageID)" "$requiredDp").Count -gt 0) {
+                                $pendingRows.Add([pscustomobject]@{
+                                        PackageId = "$($contentPackage.PackageID)"
+                                        Name      = "$($contentPackage.Name)"
+                                        Label     = "$($contentClass.Label)"
+                                        DP        = "$requiredDp"
+                                        State     = -1
+                                        StateName = 'TargetedNoStatus'
+                                    })
+                            }
+                        }
+                    }
+                }
+                return $pendingRows.ToArray()
+            }
+            $osdContentWaitSeconds = 900
+            $osdContentWaitStarted = $false
+            $osdContentWaitTimedOut = $false
+            $osdContentWaitProbeFailed = $false
+            $osdContentWaitFailure = ''
+            $osdContentWaitElapsedSeconds = 0
+            $osdContentRearmed = @{}
+            $osdRetryingSince = @{}
+            $pendingOsdContent = @()
+            try { $pendingOsdContent = @(& $readPendingOsdContent) }
+            catch {
+                $osdContentWaitProbeFailed = $true
+                $osdContentWaitFailure = "pre-check failed: $($_.Exception.Message)"
+                $results.Details.Add("WARN: Could not perform the OSD content convergence pre-check: $($_.Exception.Message)")
+            }
+            if ($pendingOsdContent.Count -gt 0) {
+                $osdContentWaitStarted = $true
+                $pendingStart = Get-Date
+                $pendingDeadline = $pendingStart.AddSeconds($osdContentWaitSeconds)
+                $initialPendingSummary = @($pendingOsdContent | ForEach-Object {
+                        "$($_.PackageId) '$($_.Name)' on $($_.DP) is $($_.StateName) (State=$($_.State))"
+                    }) -join '; '
+                $results.Details.Add("INFO: Waiting up to ${osdContentWaitSeconds}s for required OSD content to finish distributing: $initialPendingSummary")
+                while ($pendingOsdContent.Count -gt 0 -and (Get-Date) -lt $pendingDeadline) {
+                    $now = Get-Date
+                    $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
+                    $remainingSeconds = [math]::Max(0, [int]($pendingDeadline - $now).TotalSeconds)
+                    Write-Progress -Activity $osdProgressActivity -Status "Waiting for $($pendingOsdContent.Count) required OSD content target(s); ${elapsedSeconds}s elapsed, ${remainingSeconds}s remaining"
+                    $currentRetryKeys = @{}
+                    foreach ($retrying in @($pendingOsdContent | Where-Object { $_.State -eq 2 })) {
+                        $retryKey = "$($retrying.PackageId)|$($retrying.DP)".ToUpperInvariant()
+                        $currentRetryKeys[$retryKey] = $true
+                        if (-not $osdRetryingSince.ContainsKey($retryKey)) {
+                            $osdRetryingSince[$retryKey] = $now
+                        }
+                        if ($osdContentRearmed.ContainsKey($retryKey) -or
+                            ($now - $osdRetryingSince[$retryKey]).TotalSeconds -lt 300) {
+                            continue
+                        }
+                        $osdContentRearmed[$retryKey] = $true
+                        try {
+                            $targetRows = @(& $getOsdContentTargetRows "$($retrying.PackageId)" "$($retrying.DP)")
+                            foreach ($targetRow in $targetRows) {
+                                $targetRow.RefreshNow = $true
+                                [void]$targetRow.Put()
+                            }
+                            if ($targetRows.Count -gt 0) {
+                                $results.Details.Add("DIAG: OSD content $($retrying.PackageId) remained InstallRetrying on $($retrying.DP) for 300s; validation re-armed its existing targeting row with RefreshNow once and continued waiting.")
+                            }
+                        }
+                        catch {
+                            $results.Details.Add("DIAG: Could not re-arm retrying OSD content $($retrying.PackageId) on $($retrying.DP): $($_.Exception.Message)")
+                        }
+                    }
+                    foreach ($knownRetryKey in @($osdRetryingSince.Keys)) {
+                        if (-not $currentRetryKeys.ContainsKey($knownRetryKey)) { $osdRetryingSince.Remove($knownRetryKey) }
+                    }
+                    if ($remainingSeconds -le 0) { break }
+                    Start-Sleep -Seconds ([math]::Min(30, $remainingSeconds))
+                    try { $pendingOsdContent = @(& $readPendingOsdContent) }
+                    catch {
+                        $osdContentWaitProbeFailed = $true
+                        $osdContentWaitElapsedSeconds = [int]((Get-Date) - $pendingStart).TotalSeconds
+                        $osdContentWaitFailure = "recheck failed after ${osdContentWaitElapsedSeconds}s: $($_.Exception.Message)"
+                        $results.Details.Add("WARN: OSD content convergence recheck failed after ${osdContentWaitElapsedSeconds}s: $($_.Exception.Message)")
+                        break
+                    }
+                }
+                $osdContentWaitElapsedSeconds = [int]((Get-Date) - $pendingStart).TotalSeconds
+                Write-Progress -Activity $osdProgressActivity -Completed
+                if (-not $osdContentWaitProbeFailed -and $pendingOsdContent.Count -eq 0) {
+                    $results.Details.Add("RECOVERED: Required OSD content left its pending/retrying state after ${osdContentWaitElapsedSeconds}s.")
+                }
+                elseif (-not $osdContentWaitProbeFailed -and (Get-Date) -ge $pendingDeadline) {
+                    $osdContentWaitTimedOut = $true
+                }
+            }
+
+            $getOsdContentFailureDiagnostic = {
+                param($Package, [string]$RequiredDp, [string]$StateDescription)
+
+                $parts = [System.Collections.Generic.List[string]]::new()
+                $parts.Add("package SourceVersion=$($Package.SourceVersion) StoredPkgVersion=$($Package.StoredPkgVersion) SourceSite=$($Package.SourceSite)")
+                try {
+                    $targetRows = @(& $getOsdContentTargetRows "$($Package.PackageID)" "$RequiredDp")
+                    if ($targetRows.Count -eq 0) {
+                        $parts.Add('targeting row=MISSING')
+                    }
+                    else {
+                        $target = $targetRows[0]
+                        $parts.Add("targeting row=present RefreshNow=$($target.RefreshNow) LastRefresh=$($target.LastRefreshTime) SourceVersion=$($target.SourceVersion) StoredPkgVersion=$($target.StoredPkgVersion)")
+                    }
+                }
+                catch { $parts.Add("targeting query failed: $($_.Exception.Message)") }
+                try {
+                    $detailRows = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionDPStatus -Filter "PackageID='$($Package.PackageID)'" -ErrorAction Stop |
+                        Where-Object {
+                            $detailDp = & $dpNameOf $_.ServerNALPath
+                            $detailDp -ieq $RequiredDp -or ($detailDp -split '\.')[0] -ieq ($RequiredDp -split '\.')[0]
+                        })
+                    if ($detailRows.Count -gt 0) {
+                        $detail = $detailRows[0]
+                        $detailParts = foreach ($propertyName in @('MessageID', 'MessageState', 'LastUpdateDate', 'Description', 'Status')) {
+                            if ($detail.PSObject.Properties.Name -contains $propertyName -and $null -ne $detail.$propertyName) {
+                                "$propertyName=$($detail.$propertyName)"
+                            }
+                        }
+                        if ($detailParts) { $parts.Add("provider detail: $($detailParts -join ' ')") }
+                    }
+                    else {
+                        $parts.Add('provider detail: no matching SMS_DistributionDPStatus row')
+                    }
+                }
+                catch { $parts.Add("provider detail query failed: $($_.Exception.Message)") }
+                try {
+                    $smsDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory'
+                    $distmgrLog = Join-Path $smsDir 'Logs\distmgr.log'
+                    $distmgrLines = @(Get-Content -LiteralPath $distmgrLog -Tail 5000 -ErrorAction Stop |
+                        Where-Object { $_ -match [regex]::Escape("$($Package.PackageID)") } |
+                        Select-Object -Last 8)
+                    if ($distmgrLines.Count -gt 0) {
+                        $parts.Add("distmgr tail: $(@($distmgrLines | ForEach-Object {
+                                    $match = [regex]::Match("$_", '<!\[LOG\[(.*?)\]LOG\]!>')
+                                    if ($match.Success) { $match.Groups[1].Value } else { "$_" }
+                                }) -join ' | ')")
+                    }
+                }
+                catch { $parts.Add("distmgr diagnostic failed: $($_.Exception.Message)") }
+                try {
+                    $dpHost = ($RequiredDp -split '\.')[0]
+                    $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 60000
+                    $dpDiagnostic = Invoke-Command -ComputerName $dpHost -SessionOption $sessionOption -ErrorAction Stop -ArgumentList "$($Package.PackageID)" -ScriptBlock {
+                        param($PackageId)
+                        $result = [ordered]@{ ContentRoot = ''; PkgLibFiles = @(); SmsDpProv = @(); Errors = @() }
+                        try {
+                            $result.ContentRoot = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath)"
+                            if ($result.ContentRoot) {
+                                $pkgLib = Join-Path $result.ContentRoot 'PkgLib'
+                                if (Test-Path -LiteralPath $pkgLib) {
+                                    $result.PkgLibFiles = @((Get-ChildItem -LiteralPath $pkgLib -Filter "$PackageId*.INI" -ErrorAction SilentlyContinue).Name)
+                                }
+                            }
+                        }
+                        catch { $result.Errors += "content library: $($_.Exception.Message)" }
+                        try {
+                            $dpLog = $null
+                            foreach ($drive in @('E:', 'D:', 'F:', 'C:')) {
+                                $candidate = "$drive\SMS_DP`$\sms\logs\smsdpprov.log"
+                                if (Test-Path -LiteralPath $candidate) { $dpLog = $candidate; break }
+                            }
+                            if ($dpLog) {
+                                $result.SmsDpProv = @(Get-Content -LiteralPath $dpLog -Tail 3000 -ErrorAction Stop |
+                                    Where-Object { $_ -match [regex]::Escape($PackageId) -or $_ -match 'error|failed|0x8' } |
+                                    Select-Object -Last 8)
+                            }
+                            else {
+                                $result.Errors += 'smsdpprov.log was not found on E:, D:, F:, or C:'
+                            }
+                        }
+                        catch { $result.Errors += "smsdpprov: $($_.Exception.Message)" }
+                        [pscustomobject]$result
+                    }
+                    $parts.Add("DP $RequiredDp state=$StateDescription ContentRoot='$($dpDiagnostic.ContentRoot)' PkgLib=[$(@($dpDiagnostic.PkgLibFiles) -join ',')] errors=[$(@($dpDiagnostic.Errors) -join '; ')]")
+                    if ($dpDiagnostic.SmsDpProv) {
+                        $parts.Add("DP smsdpprov tail: $(@($dpDiagnostic.SmsDpProv) -join ' | ')")
+                    }
+                }
+                catch { $parts.Add("DP diagnostic failed: $($_.Exception.Message)") }
+                return ($parts -join ' ; ')
+            }
+
+            foreach ($pkgClass in $osdPackageClasses) {
                 try {
                     $osPkgs = @(Get-WmiObject -Namespace $ns -Class $pkgClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)
                     if ($osPkgs.Count -eq 0) {
@@ -13325,12 +13552,11 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     # Same state vocabulary as the boot-image check above: 0=Installed,
                     # 1=InstallPending, 2=InstallRetrying, 3=InstallFailed, 4=RemovalPending,
                     # 5=RemovalRetrying, 6=RemovalFailed, 7=ContentValidating,
-                    # 8=ContentValidationFailed. InstallPending and ContentValidating are normal
-                    # shortly after these multi-GB WIMs are targeted. InstallRetrying is not:
-                    # the content attempted installation and is now waiting to retry, so OSD is
-                    # unusable and final functional validation must not report success.
+                    # 8=ContentValidationFailed. InstallPending, InstallRetrying and
+                    # ContentValidating are nonterminal states. The shared convergence wait
+                    # above gives them time to advance; none may pass indefinitely.
                     $osPkgProblems = @()
-                    $osPkgPending = @()
+                    $osPkgProblemRows = [System.Collections.Generic.List[object]]::new()
                     foreach ($osPkg in $osPkgs) {
                         $rows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($osPkg.PackageID)'" -ErrorAction SilentlyContinue)
                         foreach ($wantDp in $expectedOsdDpNames) {
@@ -13340,7 +13566,27 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     $rowName -ieq $wantDp -or ($rowName -split '\.')[0] -ieq $wantShort
                                 } | Select-Object -First 1)
                             if ($row.Count -eq 0) {
-                                $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' not targeted to $wantDp"
+                                $targetRows = @()
+                                try { $targetRows = @(& $getOsdContentTargetRows "$($osPkg.PackageID)" "$wantDp") }
+                                catch { }
+                                if ($targetRows.Count -gt 0) {
+                                    $missingStatusDetail = "$($osPkg.PackageID) '$($osPkg.Name)' is targeted to $wantDp but has no summarizer row"
+                                    if ($osdContentWaitProbeFailed) {
+                                        $missingStatusDetail += " (convergence probe failed after ${osdContentWaitElapsedSeconds}s: $osdContentWaitFailure)"
+                                    }
+                                    elseif ($osdContentWaitTimedOut) {
+                                        $missingStatusDetail += " after ${osdContentWaitElapsedSeconds}s of convergence waiting"
+                                    }
+                                    else {
+                                        $missingStatusDetail += ' and no successful bounded wait covered this final state'
+                                    }
+                                    $osPkgProblems += $missingStatusDetail
+                                    $osPkgProblemRows.Add([pscustomobject]@{ Package = $osPkg; DP = $wantDp; State = 'TargetedNoStatus' })
+                                }
+                                else {
+                                    $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' not targeted to $wantDp"
+                                    $osPkgProblemRows.Add([pscustomobject]@{ Package = $osPkg; DP = $wantDp; State = 'NoTargetingRow' })
+                                }
                                 continue
                             }
                             $osState = [int]$row[0].State
@@ -13352,25 +13598,42 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             if (-not $osStateName) { $osStateName = 'Unknown' }
                             $osStateKind = Get-MemLabsContentDistributionStateKind -State $osState
                             if ($osStateKind -eq 'Installed') { continue }
-                            if ($osStateKind -eq 'Pending') { $osPkgPending += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)" }
-                            else { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)" }
+                            $stateDetail = "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)"
+                            if ($osStateKind -eq 'Pending') {
+                                if ($osdContentWaitProbeFailed) {
+                                    $stateDetail += " (convergence probe failed after ${osdContentWaitElapsedSeconds}s: $osdContentWaitFailure)"
+                                }
+                                elseif ($osdContentWaitTimedOut) {
+                                    $stateDetail += " after ${osdContentWaitElapsedSeconds}s of convergence waiting"
+                                }
+                                elseif (-not $osdContentWaitStarted) {
+                                    $stateDetail += ' but no successful bounded wait covered this final state'
+                                }
+                                else {
+                                    $stateDetail += ' after it had appeared to leave the bounded convergence set'
+                                }
+                            }
+                            $osPkgProblems += $stateDetail
+                            $osPkgProblemRows.Add([pscustomobject]@{ Package = $osPkg; DP = $wantDp; State = "$osStateName (State=$osState)" })
                         }
                     }
                     if ($osPkgProblems.Count -gt 0) {
                         $results.Passed = $false
                         $results.Details.Add("FAIL: $($pkgClass.Label) content cannot reach every required OSD DP: $($osPkgProblems -join '; '). PXE will boot into WinPE and the task sequence will then fail to find its content.")
-                    }
-                    elseif ($osPkgPending.Count -gt 0) {
-                        $results.Details.Add("INFO: $($pkgClass.Label) content is still distributing to the OSD DP(s): $($osPkgPending -join '; '). These are in-flight states, not failures; OSD cannot run until they reach Installed.")
+                        foreach ($problemRow in $osPkgProblemRows) {
+                            $results.Details.Add("DIAG: $(& $getOsdContentFailureDiagnostic $problemRow.Package $problemRow.DP $problemRow.State)")
+                        }
                     }
                     else {
                         $results.Details.Add("OK: all $($osPkgs.Count) $($pkgClass.Label)(s) are Installed on every required OSD DP ($($expectedOsdDpNames -join ', '))")
                     }
                 }
                 catch {
-                    $results.Details.Add("WARN: $($pkgClass.Class) query failed, so $($pkgClass.Label) distribution was NOT measured: $($_.Exception.Message)")
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: $($pkgClass.Class) query failed, so required $($pkgClass.Label) distribution was NOT measured: $($_.Exception.Message)")
                 }
             }
+            Write-Progress -Activity $osdProgressActivity -Completed
         }
 
         # 7c. The only check that puts a packet on the wire. Everything above is state:
@@ -14202,7 +14465,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 600
+        -AsJob -TimeoutSeconds 600 -PollProgress
 
     # Capture both sides when CM reports a long-running sync that native WSUS
     # cannot confirm. SUP-side evidence explains the native sync; site-server
