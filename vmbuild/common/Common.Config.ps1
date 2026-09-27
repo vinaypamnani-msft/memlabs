@@ -4381,7 +4381,10 @@ function Get-List {
             }
 
         }
-        $return = $global:vm_List
+        # PowerShell unwraps a one-item pipeline result to a scalar PSCustomObject.
+        # Get-List then merges deployConfig VMs with += below, which invokes the
+        # nonexistent PSCustomObject.op_Addition when exactly one VM is cached.
+        $return = @($global:vm_List)
 
         foreach ($vm in $return) {
             $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
@@ -4410,7 +4413,7 @@ function Get-List {
                     }
                 }
                 if ($found) {
-                    $return = $return | where-object { $_.vmName -ne $vm.vmName }
+                    $return = @($return | Where-Object { $_.vmName -ne $vm.vmName })
                 }
                 $newVM = $vm
                 $newVM | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
@@ -4424,7 +4427,7 @@ function Get-List {
             $return = $return | Where-Object { $_.domain -and ($_.domain.ToLowerInvariant() -eq $DomainName.ToLowerInvariant()) }
         }
 
-        $return = $return | Sort-Object -Property * #-Unique
+        $return = @($return | Sort-Object -Property *) #-Unique
 
         if ($Type -eq "VM") {
             return $return
