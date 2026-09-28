@@ -181,18 +181,58 @@ try {
 
     . (Import-TestFunction -Path $functionalPath -Name 'Test-SQLAOFunctionality')
     . (Import-TestFunction -Path $functionalPath -Name 'Test-SQLAOPostPhase5')
+    $tokens = $null
+    $parseErrors = $null
+    $functionalAst = [Management.Automation.Language.Parser]::ParseFile($functionalPath, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors) { throw "Could not parse ${functionalPath}: $($parseErrors[0].Message)" }
+    $basicSqlAst = @($functionalAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-SQLFunctionality'
+            }, $true)) | Select-Object -First 1
+    $basicSqlParameterNames = @($basicSqlAst.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+    Assert-Validation ($basicSqlParameterNames -notcontains 'RecoveryRetry') 'basic SQL validation does not own the SQLAO recovery retry switch'
     function Write-Log {}
+    function Add-Phase11Output { param($Text, $Level) }
     function Test-SQLFunctionality { return $true }
-    function Format-TestResult { return $true }
+    function Format-TestResult {
+        param($VMName, $RoleLabel, $Result)
+        return [bool]$Result.ScriptBlockOutput.Passed
+    }
     $script:Phase11SqlAoArguments = $null
     $script:Phase5SqlAoArguments = $null
+    $script:RecoveryScenario = 'None'
+    $script:RecoveryValidationCalls = 0
+    $script:RecoveryRestartCalls = 0
     function Invoke-VmCommand {
         param(
             $VmName, $VmDomainName, $ScriptBlock, [object[]]$ArgumentList,
             $DisplayName, $TimeoutSeconds, [switch]$SuppressLog, [switch]$AsJob,
             [switch]$PollProgress
         )
-        if ($DisplayName -eq 'Phase11-SQLAO-Test') { $script:Phase11SqlAoArguments = $ArgumentList }
+        if ($DisplayName -eq 'Phase11-SQLAO-Test') {
+            $script:Phase11SqlAoArguments = $ArgumentList
+            if ($script:RecoveryScenario -ne 'None') {
+                $script:RecoveryValidationCalls++
+                $requestRecovery = $script:RecoveryScenario -eq 'AlwaysRequest' -or
+                    ($script:RecoveryScenario -in 'RecoverOnce', 'RestartFailure' -and $script:RecoveryValidationCalls -eq 1)
+                return [pscustomobject]@{
+                    ScriptBlockFailed = $false
+                    ScriptBlockOutput = @{
+                        Passed = -not $requestRecovery
+                        Details = @()
+                        RecoveryTarget = if ($requestRecovery) { 'FAB-PS1SQLAO2' } else { '' }
+                        RecoveryService = if ($requestRecovery) { 'MSSQLSERVER' } else { '' }
+                    }
+                }
+            }
+        }
+        if ($DisplayName -eq 'Phase11-SQLAO-Recovery-Restart') {
+            $script:RecoveryRestartCalls++
+            return [pscustomobject]@{
+                ScriptBlockFailed = $script:RecoveryScenario -eq 'RestartFailure'
+                ScriptBlockOutput = if ($script:RecoveryScenario -eq 'RestartFailure') { 'injected restart failure' } else { [string]$ArgumentList[0] }
+            }
+        }
         if ($DisplayName -eq 'Phase5-SQLAO-Validate') { $script:Phase5SqlAoArguments = $ArgumentList }
         [pscustomobject]@{
             ScriptBlockFailed = $false
@@ -252,8 +292,12 @@ try {
     Assert-Validation $phase5MetadataPassed 'post-Phase-5 SQLAO fixture accepts saved nested metadata'
     Assert-Validation ($script:Phase11SqlAoArguments[10] -eq '192.168.3.201,172.16.4.201') 'Phase 11 sends every nested cluster IP through the scalar remoting contract'
     Assert-Validation ($script:Phase11SqlAoArguments[11] -eq '192.168.3.202,172.16.4.202') 'Phase 11 sends every nested listener IP through the scalar remoting contract'
+    Assert-Validation ($script:Phase11SqlAoArguments[13] -eq 'FAB-PS1SQLAO1,FAB-PS1SQLAO2') 'Phase 11 owner validation receives the exact configured replica set'
     Assert-Validation ($script:Phase5SqlAoArguments[10] -eq '192.168.3.201,172.16.4.201') 'post-Phase-5 validation sends every nested cluster IP'
     Assert-Validation ($script:Phase5SqlAoArguments[11] -eq '192.168.3.202,172.16.4.202') 'post-Phase-5 validation sends every nested listener IP'
+    $phase11CallsBeforeSecondary = $script:RecoveryValidationCalls
+    $secondaryValidationPassed = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO2' -CurrentItem $savedMetadataDeploy.virtualMachines[1] -DeployConfig $savedMetadataDeploy
+    Assert-Validation ($secondaryValidationPassed -and $script:RecoveryValidationCalls -eq $phase11CallsBeforeSecondary) 'secondary performs local SQL validation without duplicate concurrent AG validation'
     $savedMetadataOwner.sqlInstanceName = 'AO'
     $savedMetadataDeploy.virtualMachines[1].sqlInstanceName = 'AO'
     $null = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
@@ -265,6 +309,33 @@ try {
     Assert-Validation ($script:Phase5SqlAoArguments[17] -eq '300') 'post-Phase-5 guest receives listener DNS TTL policy'
     $savedMetadataOwner.sqlInstanceName = 'MSSQLSERVER'
     $savedMetadataDeploy.virtualMachines[1].sqlInstanceName = 'MSSQLSERVER'
+
+    Assert-Validation ((Get-Command Test-SQLAOFunctionality).Parameters.ContainsKey('RecoveryRetry')) 'SQLAO validation declares the bounded recovery retry switch'
+    function Start-Sleep {}
+    $script:RecoveryScenario = 'RecoverOnce'
+    $script:RecoveryValidationCalls = 0
+    $script:RecoveryRestartCalls = 0
+    $recoverySucceeded = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
+    Assert-Validation ($recoverySucceeded -and $script:RecoveryValidationCalls -eq 2 -and $script:RecoveryRestartCalls -eq 1) 'host recovery performs one restart and exactly one validation retry'
+
+    $script:RecoveryScenario = 'AlwaysRequest'
+    $script:RecoveryValidationCalls = 0
+    $script:RecoveryRestartCalls = 0
+    $boundedRetryResult = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
+    Assert-Validation (-not $boundedRetryResult -and $script:RecoveryValidationCalls -eq 2 -and $script:RecoveryRestartCalls -eq 1) 'persistent recovery request is bounded to two validations and one restart'
+
+    $script:RecoveryValidationCalls = 0
+    $script:RecoveryRestartCalls = 0
+    $directRetryResult = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy -RecoveryRetry
+    Assert-Validation (-not $directRetryResult -and $script:RecoveryValidationCalls -eq 1 -and $script:RecoveryRestartCalls -eq 0) 'RecoveryRetry cannot recurse or restart a second time'
+
+    $script:RecoveryScenario = 'RestartFailure'
+    $script:RecoveryValidationCalls = 0
+    $script:RecoveryRestartCalls = 0
+    $restartFailureResult = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
+    Assert-Validation (-not $restartFailureResult -and $script:RecoveryValidationCalls -eq 1 -and $script:RecoveryRestartCalls -eq 1) 'restart failure remains failed without recursive validation'
+
+    $script:RecoveryScenario = 'None'
 
     . (Import-TestFunction -Path $functionalPath -Name 'Test-DCFunctionality')
     $script:ExpectedDnsArgument = $null
@@ -413,8 +484,10 @@ try {
         [pscustomobject]@{ IPAddress = '172.16.4.202'; InterfaceIndex = 7; SkipAsSource = $false }
     )
     $script:DnsClientState = [pscustomobject]@{ InterfaceIndex = 7; RegisterThisConnectionsAddress = $false }
+    $script:FailNetIpQuery = $false
     function Get-NetIPAddress {
         param($AddressFamily, $InterfaceIndex, $ErrorAction)
+        if ($script:FailNetIpQuery) { throw 'injected Get-NetIPAddress failure' }
         $filterByInterface = $PSBoundParameters.ContainsKey('InterfaceIndex')
         @($script:RegistrationAddresses | Where-Object { -not $filterByInterface -or $_.InterfaceIndex -eq $InterfaceIndex })
     }
@@ -453,6 +526,11 @@ try {
     Assert-Validation ($functionalSource -match '(?s)agHealthDeferred.+?Exact AG health query through' -and $functionalSource -match 'after listener recovery') 'initial listener failure defers exact AG verdict until listener recovery'
     Assert-Validation ($functionalSource.Contains('Invoke-Sqlcmd -ServerInstance $healthSqlTarget -Query $healthQuery')) 'Phase 11 AG health queries the active primary through the listener'
     Assert-Validation ($functionalSource.Contains('"MSSQL`$$sqlInstName"')) 'named SQLAO recovery targets the named SQL service'
+    Assert-Validation ($functionalSource -match 'Phase11-SQLAO-Recovery-Restart' -and
+        $functionalSource -match 'Invoke-VmCommand -VmName \$recoveryTarget') 'disconnected replica restart uses host PowerShell Direct'
+    Assert-Validation (-not ($functionalSource -match 'Invoke-Command -ComputerName \$restartTarget')) 'SQLAO recovery does not depend on cross-subnet guest WinRM'
+    Assert-Validation ($functionalSource -match 'expectedReplicaCsv -split' -and $functionalSource -match '\(\$expectedReplicaNames -join '',''\)') 'owner validation consumes the host-normalized configured replica set'
+    Assert-Validation ($functionalSource -match 'shared cluster/AG validation and recovery are owned by') 'shared AG validation is serialized to the configured owner'
     Assert-Validation ($functionalSource -match 'AG replica set is.+expected exactly') 'post-Phase-5 validation requires the exact replica set'
     Assert-Validation ($functionalSource.Contains('$activeClusterIPs = @(Get-ClusterResource') -and
         $functionalSource.Contains('Where-Object { $_ -in $clusterIPs })')) 'post-Phase-5 derives the active core provider before exact cluster DNS validation'
@@ -480,6 +558,30 @@ try {
     Assert-Validation ($functionalSource -match 'Exact listener DNS RRset verified on DC') 'post-Phase-5 DNS remediation verifies exact state on every DC'
     Assert-Validation ($functionalSource -match 'no expected provider set could be identified; refusing to synthesize') 'post-Phase-5 DNS remediation refuses an unverified provider set'
     Assert-Validation ($functionalSource -match 'if \(\$keep\) \{ \$null = \$seenExpected\.Add\(\$recordIp\) \}') 'wrong-TTL records are not marked as retained before replacement'
+    $physicalAddressScript = Import-AssignedScriptBlock -Path $functionalPath -VariableName 'physicalAddressScript'
+    $script:RegistrationAddresses = @(
+        [pscustomobject]@{ IPAddress = '172.16.4.20'; InterfaceIndex = 7; SkipAsSource = $false },
+        [pscustomobject]@{ IPAddress = '172.16.4.201'; InterfaceIndex = 7; SkipAsSource = $true },
+        [pscustomobject]@{ IPAddress = '172.16.4.202'; InterfaceIndex = 7; SkipAsSource = $true }
+    )
+    $physicalHealthy = & $physicalAddressScript '172.16.4.20' '192.168.3.201,172.16.4.201' '192.168.3.202,172.16.4.202'
+    Assert-Validation ($physicalHealthy.Valid -and $physicalHealthy.NodeCount -eq 1 -and -not $physicalHealthy.NodeSkipAsSource) 'shipped physical-address check accepts one registrable node IP and skipped VIPs'
+    $script:RegistrationAddresses[0].SkipAsSource = $true
+    $physicalNodeSkipped = & $physicalAddressScript '172.16.4.20' '192.168.3.201,172.16.4.201' '192.168.3.202,172.16.4.202'
+    Assert-Validation (-not $physicalNodeSkipped.Valid) 'shipped physical-address check rejects a skipped node IP'
+    $script:RegistrationAddresses[0].SkipAsSource = $false
+    $script:RegistrationAddresses[1].SkipAsSource = $false
+    $physicalVipRegistrable = & $physicalAddressScript '172.16.4.20' '192.168.3.201,172.16.4.201' '192.168.3.202,172.16.4.202'
+    Assert-Validation (-not $physicalVipRegistrable.Valid -and @($physicalVipRegistrable.BadVirtualIps) -contains '172.16.4.201') 'shipped physical-address check rejects a registrable cluster VIP'
+    $script:RegistrationAddresses = @($script:RegistrationAddresses | Where-Object { $_.IPAddress -ne '172.16.4.20' })
+    $physicalNodeMissing = & $physicalAddressScript '172.16.4.20' '192.168.3.201,172.16.4.201' '192.168.3.202,172.16.4.202'
+    Assert-Validation (-not $physicalNodeMissing.Valid -and $physicalNodeMissing.NodeCount -eq 0) 'shipped physical-address check rejects a missing node IP'
+    $script:FailNetIpQuery = $true
+    $physicalQueryFailed = $false
+    try { $null = & $physicalAddressScript '172.16.4.20' '192.168.3.201,172.16.4.201' '192.168.3.202,172.16.4.202' }
+    catch { $physicalQueryFailed = $_.Exception.Message -like '*injected Get-NetIPAddress failure*' }
+    Assert-Validation $physicalQueryFailed 'shipped physical-address check surfaces address query failures'
+    $script:FailNetIpQuery = $false
     $scriptBlocksSource = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Raw
     Assert-Validation ([regex]::Matches($scriptBlocksSource, 'Resolve-SqlAoNodeAddress').Count -ge 3) 'LastKnownIP, Phase 5 preflight, and Phase 5 scrub share physical-node resolution'
     Assert-Validation (-not ($scriptBlocksSource -match 'GetIPs-unfiltered')) 'SQLAO LastKnownIP refresh has no unfiltered virtual-IP fallback'

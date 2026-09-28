@@ -1737,7 +1737,12 @@ function Repair-StoppedSQLServices {
     Write-Log "[Phase $Phase] $VMName`: Scanning for stopped SQL services" -LogOnly
 
     $scriptBlock = {
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $results = @{
+            Passed = $true
+            Details = [System.Collections.Generic.List[string]]::new()
+            RecoveryTarget = ''
+            RecoveryService = ''
+        }
 
         # Find all SQL engine services (MSSQLSERVER for default, MSSQL$<instance> for named)
         $sqlServices = @(Get-Service -Name 'MSSQL*' -ErrorAction SilentlyContinue |
@@ -2220,7 +2225,8 @@ function Test-SQLAOFunctionality {
     param(
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][object]$CurrentItem,
-        [Parameter(Mandatory)][object]$DeployConfig
+        [Parameter(Mandatory)][object]$DeployConfig,
+        [switch]$RecoveryRetry
     )
 
     $Phase = 11
@@ -2310,12 +2316,21 @@ function Test-SQLAOFunctionality {
         Write-Log "[Phase $Phase] $VMName [SQLAO]: no AG partner found in config (single-node / degraded Availability Group). AG health check skipped; using basic SQL validation result." -Warning
         return $sqlOk
     }
+    if ($VMName -ine $primaryAO.vmName) {
+        Write-Log "[Phase $Phase] $VMName [SQLAO]: shared cluster/AG validation and recovery are owned by '$($primaryAO.vmName)'. Local SQL validation passed; skipping duplicate concurrent AG validation." -LogOnly
+        return $sqlOk
+    }
 
     $sqlInstName = $CurrentItem.sqlInstanceName
     if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
+    $expectedReplicaNames = @(
+        foreach ($nodeName in @($primaryAO.vmName, $primaryAO.OtherNode)) {
+            if ($sqlInstName -ieq 'MSSQLSERVER') { $nodeName } else { "$nodeName\$sqlInstName" }
+        }
+    )
 
     $scriptBlock = {
-        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $clusterIpCsv, $agIpCsv, $recoveryOwner, $listenerRegisterAllProvidersIP, $listenerHostRecordTTL)
+        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $clusterIpCsv, $agIpCsv, $recoveryOwner, $expectedReplicaCsv, $listenerRegisterAllProvidersIP, $listenerHostRecordTTL)
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
         $clusterIPs = @($clusterIpCsv -split ',' | Where-Object { $_ })
@@ -2333,11 +2348,8 @@ function Test-SQLAOFunctionality {
             $instanceName = if ($parts.Count -gt 1) { $parts[1] } else { 'MSSQLSERVER' }
             "$hostName\$($instanceName.ToUpperInvariant())"
         }
-        $expectedNodeNames = @($recoveryOwner, $otherNode) | Where-Object { $_ }
-        $expectedReplicaSet = @($expectedNodeNames | ForEach-Object {
-                $name = if ($isDefaultInstance) { $_ } else { "$_\$sqlInstName" }
-                & $normalizeReplica $name
-            } | Sort-Object)
+        $expectedReplicaSet = @($expectedReplicaCsv -split ',' | Where-Object { $_ } |
+            ForEach-Object { & $normalizeReplica $_ } | Sort-Object)
         $isLocalReplica = {
             param([string]$ReplicaName)
             $replicaParts = $ReplicaName -split '\\', 2
@@ -3337,61 +3349,19 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                     # Determine restart target: prefer restarting the other node
                     # (we are already up and listening), fall back to local.
                     $restartTarget = $null
-                    $restartIsRemote = $false
                     if ($remoteStillDisc.Count -gt 0 -and $otherNode) {
                         $restartTarget = $otherNode
-                        $restartIsRemote = $true
-                        $results.Details.Add("REMEDIATE: Remote replica '$otherNode' DISCONNECTED — restarting SQL on '$otherNode' (local node is up and listening)")
+                        $results.Details.Add("REMEDIATE: Remote replica '$otherNode' DISCONNECTED — requesting a host-mediated SQL restart")
                     }
                     elseif ($localStillDisc.Count -gt 0) {
                         $restartTarget = $env:COMPUTERNAME
-                        $restartIsRemote = $false
-                        $results.Details.Add("REMEDIATE: Local replica DISCONNECTED — restarting SQL locally")
+                        $results.Details.Add("REMEDIATE: Local replica DISCONNECTED — requesting a host-mediated SQL restart")
                     }
 
                     if ($restartTarget) {
-                        try {
-                            if ($restartIsRemote) {
-                                Invoke-Command -ComputerName $restartTarget -ArgumentList $sqlServiceName -ScriptBlock {
-                                    param($serviceName)
-                                    Restart-Service -Name $serviceName -Force -ErrorAction Stop
-                                } -ErrorAction Stop
-                            }
-                            else {
-                                Restart-Service -Name $sqlServiceName -Force -ErrorAction Stop
-                            }
-                            Start-Sleep -Seconds 30
-                            $results.Details.Add("OK: SQL Server on '$restartTarget' restarted, rechecking AG health")
-
-                            # Re-run health check after restart
-                            for ($attempt2 = 1; $attempt2 -le 5; $attempt2++) {
-                                $ag = @(Invoke-Sqlcmd -ServerInstance $healthSqlTarget -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                                $unhealthy2 = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                                $actualReplicaSet2 = @($ag | ForEach-Object { & $normalizeReplica ([string]$_.Replica) } | Sort-Object)
-                                $replicaSetExact2 = $actualReplicaSet2.Count -eq $expectedReplicaSet.Count -and
-                                    ($actualReplicaSet2 -join ',') -eq ($expectedReplicaSet -join ',')
-                                if ($unhealthy2.Count -eq 0 -and $replicaSetExact2) {
-                                    $healthy = $true
-                                    foreach ($r in $ag) {
-                                        $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
-                                    }
-                                    break
-                                }
-                                if ($attempt2 -lt 5) {
-                                    $results.Details.Add("WARN: Post-restart attempt $attempt2/5 — $($unhealthy2.Count) replica(s) not healthy, waiting 20s...")
-                                    Start-Sleep -Seconds 20
-                                }
-                                else {
-                                    foreach ($r in $ag) {
-                                        $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
-                                        $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
-                                    }
-                                }
-                            }
-                        }
-                        catch {
-                            $results.Details.Add("WARN: Failed to restart SQL Server on '$restartTarget': $($_.Exception.Message)")
-                        }
+                        $results.RecoveryTarget = $restartTarget
+                        $results.RecoveryService = $sqlServiceName
+                        $results.Details.Add("REMEDIATE: Requesting host PowerShell Direct restart of service '$sqlServiceName' on '$restartTarget'")
                     }
                 }
             }
@@ -4016,11 +3986,42 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
     # 5x20s + AG log backup 120s + endpoint cycling), so a healthy node never
     # hits it; on timeout Invoke-VmCommand returns ScriptBlockFailed and
     # Format-TestResult records a FAIL for the VM and the phase completes.
-    $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, ($clusterIPs -join ','), ($agIPs -join ','), $recoveryOwner, ([string]$listenerRegisterAllProvidersIP), ([string]$listenerHostRecordTTL))
+    $validationArguments = @(
+        $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare,
+        $agIP, $sqlInstName, $clusterName, $clusterIP, ($clusterIPs -join ','), ($agIPs -join ','),
+        $recoveryOwner, ($expectedReplicaNames -join ','), ([string]$listenerRegisterAllProvidersIP),
+        ([string]$listenerHostRecordTTL)
+    )
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
         -ArgumentList $validationArguments `
         -DisplayName "Phase11-SQLAO-Test" -SuppressLog -AsJob -TimeoutSeconds 600 -PollProgress
+
+    $recoveryTarget = if ($result -and $result.ScriptBlockOutput) { [string]$result.ScriptBlockOutput.RecoveryTarget } else { '' }
+    $recoveryService = if ($result -and $result.ScriptBlockOutput) { [string]$result.ScriptBlockOutput.RecoveryService } else { '' }
+    if (-not $RecoveryRetry -and $recoveryTarget -and $recoveryService) {
+        Write-Log "[Phase $Phase] $VMName [SQLAO]: Restarting '$recoveryService' on '$recoveryTarget' through host PowerShell Direct, then retrying validation once." -Warning -LogOnly
+        $restartResult = Invoke-VmCommand -VmName $recoveryTarget -VmDomainName $domain `
+            -ArgumentList $recoveryService -AsJob -TimeoutSeconds 120 -SuppressLog `
+            -DisplayName "Phase11-SQLAO-Recovery-Restart" -ScriptBlock {
+                param($serviceName)
+                Restart-Service -Name $serviceName -Force -ErrorAction Stop
+                $deadline = (Get-Date).AddSeconds(60)
+                do {
+                    $service = Get-Service -Name $serviceName -ErrorAction Stop
+                    if ($service.Status -eq 'Running') { return $service.Name }
+                    Start-Sleep -Seconds 2
+                } while ((Get-Date) -lt $deadline)
+                throw "Service '$serviceName' did not reach Running within 60 seconds."
+            }
+        if ($restartResult -and -not $restartResult.ScriptBlockFailed -and
+            [string]$restartResult.ScriptBlockOutput -eq $recoveryService) {
+            Start-Sleep -Seconds 30
+            return Test-SQLAOFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig -RecoveryRetry
+        }
+        $detail = if ($restartResult) { $restartResult.ScriptBlockOutput } else { 'no PowerShell Direct result' }
+        Add-Phase11Output -Text "[Phase $Phase] $VMName [SQLAO]: FAIL: Host PowerShell Direct could not restart '$recoveryService' on '$recoveryTarget': $detail" -Level Failure
+    }
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQLAO' -Result $result)
 }
@@ -15937,6 +15938,20 @@ function Test-SQLAOPostPhase5 {
                     if ($fallbackDC) { $fallbackDC = $fallbackDC.TrimStart('\\') }
                     $allDCs = @($fallbackDC | Where-Object { $_ })
                 }
+                $physicalAddressScript = {
+                    param($expectedIp, $clusterIpCsv, $listenerIpCsv)
+                    $virtualIps = @($clusterIpCsv -split ',' | Where-Object { $_ }) + @($listenerIpCsv -split ',' | Where-Object { $_ })
+                    $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop)
+                    $nodeAddresses = @($addresses | Where-Object { $_.IPAddress -eq $expectedIp })
+                    $badVirtual = @($addresses | Where-Object { $_.IPAddress -in $virtualIps -and -not $_.SkipAsSource })
+                    $nodeSkipAsSource = $nodeAddresses.Count -eq 1 -and [bool]$nodeAddresses[0].SkipAsSource
+                    [pscustomobject]@{
+                        Valid = $nodeAddresses.Count -eq 1 -and -not $nodeSkipAsSource -and $badVirtual.Count -eq 0
+                        NodeCount = $nodeAddresses.Count
+                        NodeSkipAsSource = $nodeSkipAsSource
+                        BadVirtualIps = @($badVirtual.IPAddress)
+                    }
+                }
                 foreach ($pair in $nodeDnsPairs) {
                     if ($pair -notmatch '^([^=]+)=(.+)$') {
                         $results.Passed = $false
@@ -15963,21 +15978,14 @@ function Test-SQLAOPostPhase5 {
                         }
                     }
                     try {
-                        $addressState = Invoke-Command -ComputerName $nodeName -ArgumentList $nodeIp, ($clusterIPs -join ','), ($agIPs -join ',') -ScriptBlock {
-                            param($expectedIp, $clusterIpCsv, $listenerIpCsv)
-                            $virtualIps = @($clusterIpCsv -split ',' | Where-Object { $_ }) + @($listenerIpCsv -split ',' | Where-Object { $_ })
-                            $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop)
-                            $nodeAddresses = @($addresses | Where-Object { $_.IPAddress -eq $expectedIp })
-                            $badVirtual = @($addresses | Where-Object { $_.IPAddress -in $virtualIps -and -not $_.SkipAsSource })
-                            [pscustomobject]@{
-                                NodeCount = $nodeAddresses.Count
-                                NodeSkipAsSource = if ($nodeAddresses.Count -eq 1) { [bool]$nodeAddresses[0].SkipAsSource } else { $null }
-                                BadVirtualIps = @($badVirtual.IPAddress)
-                            }
-                        } -ErrorAction Stop
-                        if ($addressState.NodeCount -ne 1 -or $addressState.NodeSkipAsSource -or @($addressState.BadVirtualIps).Count -gt 0) {
+                        $addressState = Invoke-Command -ComputerName $nodeName -ArgumentList $nodeIp, ($clusterIPs -join ','), ($agIPs -join ',') -ScriptBlock $physicalAddressScript -ErrorAction Stop
+                        $nodeCount = [int]$addressState.NodeCount
+                        $nodeSkipAsSource = "$($addressState.NodeSkipAsSource)" -eq 'True'
+                        $registrableVirtualIps = @($addressState.BadVirtualIps | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                        $addressValid = "$($addressState.Valid)" -eq 'True'
+                        if (-not $addressValid) {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: Physical node '$nodeName' SkipAsSource state is invalid (nodeCount=$($addressState.NodeCount), nodeSkip=$($addressState.NodeSkipAsSource), registrableVIPs=$(@($addressState.BadVirtualIps) -join ','))")
+                            $results.Details.Add("FAIL: Physical node '$nodeName' SkipAsSource state is invalid (nodeCount=$nodeCount, nodeSkip=$nodeSkipAsSource, registrableVIPs=$($registrableVirtualIps -join ','))")
                         }
                         else {
                             $results.Details.Add("OK: Physical node '$nodeName' is registrable and all present cluster/listener VIPs are SkipAsSource")
