@@ -78,6 +78,20 @@ function Get-MemlabsCacheUrlForKey {
     # Resolve a cacheable key to its URL from the resolved file list.
     param($Key)
     if (-not $Common.AzureFileList -or -not $Common.AzureFileList.Urls) { return $null }
+    if ($Key -eq 'ODBC') {
+        $versionText = "$($Common.AzureFileList.UrlsMeta.ODBC.version)".Trim()
+        $fwlinkText = "$($Common.AzureFileList.UrlsMeta.ODBC.fwlink)".Trim()
+        [version]$version = $null
+        [int]$fwlink = 0
+        if (-not ([version]::TryParse($versionText, [ref]$version) -and
+                [int]::TryParse($fwlinkText, [ref]$fwlink) -and $fwlink -gt 0)) {
+            if ($null -ne $Common.AzureFileList.UrlsMeta.ODBC) {
+                Write-Warning "ODBC UrlsMeta is incomplete or invalid; caching compatibility payload linkid=2358430."
+            }
+            $fwlink = 2358430
+        }
+        return "https://go.microsoft.com/fwlink/?linkid=$fwlink"
+    }
     foreach ($u in $Common.AzureFileList.Urls) {
         $p = $u.psobject.properties[$Key]
         if ($p -and $p.Value) { return [string]$p.Value }

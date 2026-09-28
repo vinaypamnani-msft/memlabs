@@ -1115,6 +1115,46 @@ function Invoke-SmartStartVMsBackground {
     Write-Log "Background Start: launched job '$jobName' for $($allNames.Count) VM(s) in '$domain'" -LogOnly
 }
 
+function Resolve-DeployUrlCatalog {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$AzureFileList)
+
+    $deployUrls = @($AzureFileList.Urls | ConvertTo-Json -Depth 6 | ConvertFrom-Json)[0]
+    if (-not $deployUrls) { $deployUrls = [pscustomobject]@{} }
+    $urlMetadata = if ($AzureFileList.UrlsMeta) {
+        $AzureFileList.UrlsMeta | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+    }
+    else {
+        [pscustomobject]@{}
+    }
+    $odbcMetaVersion = "$($urlMetadata.ODBC.version)".Trim()
+    $odbcMetaFwlink = "$($urlMetadata.ODBC.fwlink)".Trim()
+    [version]$parsedOdbcVersion = $null
+    [int]$parsedOdbcFwlink = 0
+    if (-not ([version]::TryParse($odbcMetaVersion, [ref]$parsedOdbcVersion) -and
+            [int]::TryParse($odbcMetaFwlink, [ref]$parsedOdbcFwlink) -and $parsedOdbcFwlink -gt 0)) {
+        if ($null -ne $urlMetadata.ODBC) {
+            Write-Warning "ODBC UrlsMeta is incomplete or invalid; using compatibility pair 18.6.2.1/linkid=2358430."
+        }
+        $odbcMetaVersion = '18.6.2.1'
+        $parsedOdbcFwlink = 2358430
+        $odbcFallback = [pscustomobject]@{
+            fwlink       = $parsedOdbcFwlink
+            version      = $odbcMetaVersion
+            released     = '2026-03-31'
+            releaseNotes = 'https://learn.microsoft.com/sql/connect/odbc/windows/release-notes-odbc-sql-server-windows'
+        }
+        $urlMetadata | Add-Member -MemberType NoteProperty -Name ODBC -Value $odbcFallback -Force
+    }
+    # Keep URL and required version atomic. This also upgrades an older cached
+    # main-branch file list whose ODBC URL still points at the 18.4 fwlink.
+    $deployUrls | Add-Member -MemberType NoteProperty -Name ODBC -Value "https://go.microsoft.com/fwlink/?linkid=$parsedOdbcFwlink" -Force
+    return [pscustomobject]@{
+        Urls     = $deployUrls
+        Metadata = $urlMetadata
+    }
+}
+
 Function Show-StatusEraseLine {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "role")]
@@ -1732,7 +1772,9 @@ function ConvertTo-DeployConfigEx {
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "DNSForwarders" -Value $IPAddresses -Force
     # Add Apps
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
-    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
+    $urlCatalog = Resolve-DeployUrlCatalog -AzureFileList $Common.AzureFileList
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $urlCatalog.Urls -Force
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLMetadata" -Value $urlCatalog.Metadata -Force
 
     return $deployConfigEx
 }

@@ -56,6 +56,75 @@ function Get-InstalledProducts {
     return $InstalledProducts
 }
 
+function Get-MsiProductVersion {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "MSI not found at $Path"
+    }
+    $installer = $null
+    $database = $null
+    $view = $null
+    $record = $null
+    try {
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
+        $view = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database, @('SELECT `Value` FROM `Property` WHERE `Property`=''ProductVersion'''))
+        $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+        $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+        if (-not $record) { throw "MSI Property table has no ProductVersion row" }
+        return [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+    }
+    finally {
+        foreach ($comObject in @($record, $view, $database, $installer)) {
+            if ($comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($comObject) }
+                catch { Write-Verbose "Could not release Windows Installer COM object: $($_.Exception.Message)" }
+            }
+        }
+    }
+}
+
+function Get-MemLabsOdbcCatalogState {
+    param([string]$DeployConfigPath = 'C:\staging\DSC\deployConfig.json')
+
+    $fallbackVersion = [version]'18.6.2.1'
+    $fallbackUrl = 'https://go.microsoft.com/fwlink/?linkid=2358430'
+    if (Test-Path -LiteralPath $DeployConfigPath -PathType Leaf) {
+        try {
+            $config = Get-Content -LiteralPath $DeployConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            throw "Could not read ODBC catalog metadata from '$DeployConfigPath': $($_.Exception.Message)"
+        }
+        if ($null -ne $config.URLMetadata.ODBC) {
+            $catalogText = "$($config.URLMetadata.ODBC.version)".Trim()
+            $catalogFwlink = "$($config.URLMetadata.ODBC.fwlink)".Trim()
+            [version]$catalogVersion = $null
+            [int]$fwlink = 0
+            if ($catalogText -and [version]::TryParse($catalogText, [ref]$catalogVersion) -and
+                [int]::TryParse($catalogFwlink, [ref]$fwlink) -and $fwlink -gt 0) {
+                return [pscustomobject]@{
+                    Version = $catalogVersion
+                    Url     = "https://go.microsoft.com/fwlink/?linkid=$fwlink"
+                    Source  = 'deployConfig URLMetadata'
+                }
+            }
+            Write-Warning "ODBC URLMetadata in '$DeployConfigPath' is incomplete or invalid; using compatibility pair 18.6.2.1/linkid=2358430."
+        }
+    }
+    return [pscustomobject]@{
+        Version = $fallbackVersion
+        Url     = $fallbackUrl
+        Source  = 'compatibility fallback'
+    }
+}
+
+function Get-MemLabsOdbcRequiredVersion {
+    param([string]$DeployConfigPath = 'C:\staging\DSC\deployConfig.json')
+    return (Get-MemLabsOdbcCatalogState -DeployConfigPath $DeployConfigPath).Version
+}
+
 
 function Copy-MemlabsCachedFile {
     # Cache-first delivery: if the MemLabs download-cache DVD (volume label
@@ -157,18 +226,21 @@ function Write-DownloadFileHashSidecar {
 function Invoke-DownloadFile {
     param(
         [string] $url,
-        [string] $dest
+        [string] $dest,
+        [switch] $BypassCache
     )
 
     # Cache-first: serve from the mounted MemLabs cache DVD when available. On any
     # miss this is a no-op and we fall through to the normal download chain.
-    try {
-        if (Copy-MemlabsCachedFile -Url $url -Dest $dest) {
-            Write-Status "Using cached $([System.IO.Path]::GetFileName($dest)) from MemLabs cache DVD"
-            return
+    if (-not $BypassCache) {
+        try {
+            if (Copy-MemlabsCachedFile -Url $url -Dest $dest) {
+                Write-Status "Using cached $([System.IO.Path]::GetFileName($dest)) from MemLabs cache DVD"
+                return
+            }
         }
+        catch { Write-Verbose "Cache-first lookup failed: $($_.Exception.Message)" }
     }
-    catch { Write-Verbose "Cache-first lookup failed: $($_.Exception.Message)" }
 
     if ((Test-Path $dest)) {
         Remove-Item $dest -Force -ErrorAction SilentlyContinue | Out-Null
@@ -1715,9 +1787,27 @@ class InstallODBCDriver {
 
     [void] Set() {
         $_odbcpath = $this.ODBCPath
-        $_URL = $this.URL
+        $catalog = Get-MemLabsOdbcCatalogState
+        $_URL = $catalog.Url
 
         Invoke-DownloadFile $_URL $_odbcpath
+
+        [version]$requiredVersionParsed = $catalog.Version
+        [version]$payloadVersion = $null
+        $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath
+        if (-not [version]::TryParse($payloadVersionText, [ref]$payloadVersion)) {
+            throw "Microsoft ODBC Driver 18 MSI at $_odbcpath has invalid ProductVersion '$payloadVersionText'"
+        }
+        if ($payloadVersion -lt $requiredVersionParsed) {
+            Write-Status "Cached Microsoft ODBC Driver 18 MSI is stale (payload $payloadVersion, required $requiredVersionParsed). Retrying once from $($_URL) without the cache DVD."
+            Remove-Item -LiteralPath $_odbcpath -Force -ErrorAction SilentlyContinue
+            Invoke-DownloadFile $_URL $_odbcpath -BypassCache
+            $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath
+            $payloadVersion = $null
+            if (-not [version]::TryParse($payloadVersionText, [ref]$payloadVersion) -or $payloadVersion -lt $requiredVersionParsed) {
+                throw "Microsoft ODBC Driver 18 network MSI is stale: payload '$payloadVersionText' is below required $requiredVersionParsed"
+            }
+        }
 
         Install-MSIPackage `
             -MsiPath $_odbcpath `
@@ -1726,6 +1816,13 @@ class InstallODBCDriver {
             -LogPath "C:\temp\odbcinstallation.log" `
             -VerifyRegistryPath "HKLM:\Software\Microsoft\MSODBCSQL18" `
             -VerifyRegistryValueName "InstalledVersion"
+
+        $installedVersionText = [string](Get-ItemPropertyValue -Path 'HKLM:\Software\Microsoft\MSODBCSQL18' -Name 'InstalledVersion' -ErrorAction SilentlyContinue)
+        [version]$installedVersion = $null
+        if (-not [version]::TryParse($installedVersionText, [ref]$installedVersion) -or $installedVersion -lt $requiredVersionParsed) {
+            throw "Microsoft ODBC Driver 18 install completed but InstalledVersion '$installedVersionText' is below required $requiredVersionParsed"
+        }
+        Write-Status "Microsoft ODBC Driver 18 converged to $installedVersion (required $requiredVersionParsed; payload $payloadVersion)"
     }
 
     [bool] Test() {
@@ -1750,14 +1847,19 @@ class InstallODBCDriver {
                 return $false
             }
 
-            If ($ODBCVersion.InstalledVersion -ge "18.1.2.1") {
-                Write-Host "Microsoft ODBC Driver for SQL Server 18.1.2.1 or greater $($ODBCVersion.InstalledVersion) is installed"
+            [version]$requiredVersionParsed = $null
+            [version]$installedVersion = $null
+            $requiredVersionParsed = Get-MemLabsOdbcRequiredVersion
+            if ([version]::TryParse([string]$ODBCVersion.InstalledVersion, [ref]$installedVersion) -and $installedVersion -ge $requiredVersionParsed) {
+                Write-Status "Microsoft ODBC Driver 18 $installedVersion is installed (required $requiredVersionParsed)"
                 return $true
             }
 
+            Write-Status "Microsoft ODBC Driver 18 '$($ODBCVersion.InstalledVersion)' is below required $requiredVersionParsed"
             return $false
         }
         catch {
+            Write-Status "Microsoft ODBC Driver 18 compliance check failed: $($_.Exception.Message)"
             return $false
         }
     }

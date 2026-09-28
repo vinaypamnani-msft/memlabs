@@ -85,12 +85,22 @@ function Start-Maintenance {
             # subsequent runs use the per-fix check above.
             $seeded = @{}
             foreach ($fix in $allFixDefs) {
+                if ($fix.PSObject.Properties.Name -contains 'DoNotSeedFromWatermark' -and $fix.DoNotSeedFromWatermark) {
+                    continue
+                }
                 $seeded[$fix.FixName] = [string]$fix.FixVersion
             }
             $note | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$seeded) -Force
             $note | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
             $json = ($note | ConvertTo-Json) -replace "`r`n","" -replace "    "," " -replace "  "," "
             try { Set-VM -Name $_.vmName -Notes $json -ErrorAction SilentlyContinue } catch {}
+            $unseededRelevant = @($relevantFixes | Where-Object {
+                    $_.PSObject.Properties.Name -contains 'DoNotSeedFromWatermark' -and $_.DoNotSeedFromWatermark
+                })
+            if ($unseededRelevant.Count -gt 0) {
+                Write-Log "$($_.vmName): Seeded legacy fixes from watermark ($($note.memLabsVersion)); running non-seedable compliance fix(es): $($unseededRelevant.FixName -join ', ')." -Verbose
+                return $true
+            }
             Write-Log "$($_.vmName): Seeded appliedFixes from watermark ($($note.memLabsVersion)), skipping." -Verbose
             $countUpToDate++
             return $false
