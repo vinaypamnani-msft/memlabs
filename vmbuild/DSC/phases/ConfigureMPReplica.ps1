@@ -212,6 +212,244 @@ function Invoke-ReplSql {
     }
 }
 
+function Get-MPReplicaAgentJobState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Instance,
+        [Parameter(Mandatory)][ValidateSet('Snapshot', 'Distribution')][string]$Subsystem,
+        [string]$Database = 'master'
+    )
+
+    $databaseSql = $Database.Replace("'", "''")
+    $agentLookup = if ($Subsystem -eq 'Distribution') {
+@"
+DECLARE @distributionAgent SYSNAME = NULL;
+IF OBJECT_ID('dbo.MSreplication_subscriptions') IS NOT NULL
+BEGIN
+    EXEC sys.sp_executesql
+        N'SELECT TOP (1) @agent = CONVERT(sysname, distribution_agent)
+          FROM dbo.MSreplication_subscriptions
+          WHERE publication = N''ConfigMgr_MPReplica''
+          ORDER BY publisher_db, publisher',
+        N'@agent sysname OUTPUT',
+        @agent = @distributionAgent OUTPUT;
+END;
+"@
+    }
+    else {
+        'DECLARE @distributionAgent SYSNAME = NULL;'
+    }
+    $scopeRank = if ($Subsystem -eq 'Distribution') {
+@"
+CASE
+    WHEN @distributionAgent IS NOT NULL AND j.name = @distributionAgent THEN 0
+    WHEN CHARINDEX(N'-SubscriberDB [$databaseSql]', s.command) > 0 THEN 1
+    ELSE 2
+END
+"@
+    }
+    else {
+        'CONVERT(int, 0)'
+    }
+    $selectionMethodExpression = if ($Subsystem -eq 'Distribution') {
+@"
+CASE j.ScopeRank
+    WHEN 0 THEN N'MSreplication_subscriptions'
+    WHEN 1 THEN N'SubscriberDB command'
+    ELSE N'Single broad candidate'
+END
+"@
+    }
+    else {
+        "N'Snapshot subsystem'"
+    }
+    $row = @(Invoke-ReplSql -Instance $Instance -Database $Database -Query @"
+$agentLookup
+;WITH CandidateJobs AS
+(
+    SELECT DISTINCT
+           j.job_id,
+           j.name,
+           j.date_created,
+           ScopeRank = $scopeRank
+    FROM msdb.dbo.sysjobs AS j
+    JOIN msdb.dbo.sysjobsteps AS s ON s.job_id = j.job_id
+    WHERE s.subsystem = N'$Subsystem'
+      AND s.command LIKE '%ConfigMgr_MPReplica%'
+),
+BestRank AS
+(
+    SELECT ScopeRank = MIN(ScopeRank) FROM CandidateJobs
+),
+MatchingJobs AS
+(
+    SELECT c.job_id, c.name, c.date_created, c.ScopeRank
+    FROM CandidateJobs AS c
+    CROSS JOIN BestRank AS b
+    WHERE c.ScopeRank = b.ScopeRank
+)
+SELECT TOP (1)
+       JobName = j.name,
+       MatchCount = (SELECT COUNT(*) FROM MatchingJobs),
+       CandidateCount = (SELECT COUNT(*) FROM CandidateJobs),
+       SelectionMethod = $selectionMethodExpression,
+       AgentRunning = CONVERT(int, CASE WHEN EXISTS
+       (
+           SELECT 1
+           FROM sys.dm_server_services
+           WHERE servicename LIKE N'SQL Server Agent%'
+             AND status_desc = N'Running'
+       ) THEN 1 ELSE 0 END),
+       ActivitySaysRunning = CONVERT(int, CASE WHEN ja.start_execution_date IS NOT NULL AND ja.stop_execution_date IS NULL THEN 1 ELSE 0 END),
+       IsRunning = CONVERT(int, CASE WHEN ja.start_execution_date IS NOT NULL
+                                          AND ja.stop_execution_date IS NULL
+                                          AND EXISTS
+                                          (
+                                              SELECT 1
+                                              FROM sys.dm_server_services
+                                              WHERE servicename LIKE N'SQL Server Agent%'
+                                                AND status_desc = N'Running'
+                                          )
+                                     THEN 1 ELSE 0 END),
+       LastStartTime = ja.start_execution_date,
+       LastStopTime = ja.stop_execution_date,
+       LastHistoryInstanceId = ISNULL(h.instance_id, 0),
+       LastRunStatus = ISNULL(h.run_status, -1)
+FROM MatchingJobs AS j
+LEFT JOIN msdb.dbo.sysjobactivity AS ja
+  ON ja.job_id = j.job_id
+ AND ja.session_id = (SELECT MAX(session_id) FROM msdb.dbo.syssessions)
+OUTER APPLY
+(
+    SELECT TOP (1) instance_id, run_status
+    FROM msdb.dbo.sysjobhistory
+    WHERE job_id = j.job_id AND step_id = 0
+    ORDER BY instance_id DESC
+) AS h
+ORDER BY j.date_created DESC, j.name;
+"@) | Select-Object -First 1
+    if (-not $row) { return $null }
+
+    [pscustomobject]@{
+        JobName               = "$($row.JobName)"
+        MatchCount             = [int]$row.MatchCount
+        CandidateCount         = [int]$row.CandidateCount
+        SelectionMethod        = "$($row.SelectionMethod)"
+        AgentRunning           = ([int]$row.AgentRunning -eq 1)
+        ActivitySaysRunning    = ([int]$row.ActivitySaysRunning -eq 1)
+        IsRunning             = ([int]$row.IsRunning -eq 1)
+        LastStartTime         = $row.LastStartTime
+        LastStopTime          = $row.LastStopTime
+        LastHistoryInstanceId = [int64]$row.LastHistoryInstanceId
+        LastRunStatus         = [int]$row.LastRunStatus
+    }
+}
+
+function Start-MPReplicaAgentJob {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Instance,
+        [Parameter(Mandatory)][ValidateSet('Snapshot', 'Distribution')][string]$Subsystem,
+        [string]$Database = 'master',
+        [ValidateRange(1, 12)][int]$ReadbackAttempts = 6,
+        [ValidateRange(0, 30)][int]$ReadbackSeconds = 5,
+        [switch]$RestartIfAlreadyRunning,
+        [ValidateRange(1, 360)][int]$RunningWaitAttempts = 240
+    )
+
+    $before = Get-MPReplicaAgentJobState -Instance $Instance -Database $Database -Subsystem $Subsystem
+    if (-not $before -or -not $before.JobName) {
+        throw "No SQL Agent job was found for subsystem '$Subsystem' and publication ConfigMgr_MPReplica on '$Instance'."
+    }
+    if ($before.MatchCount -ne 1) {
+        throw "Expected one best SQL Agent job for subsystem '$Subsystem', publication ConfigMgr_MPReplica, database '$Database' on '$Instance'; found $($before.MatchCount) best of $($before.CandidateCount) candidate(s) using '$($before.SelectionMethod)'."
+    }
+    if (-not $before.AgentRunning) {
+        $staleActivity = if ($before.ActivitySaysRunning) { ' sysjobactivity still says Running from a stale Agent session.' } else { '' }
+        throw "SQL Server Agent is not Running on '$Instance'; cannot start '$($before.JobName)'.$staleActivity"
+    }
+    if ($before.IsRunning) {
+        if (-not $RestartIfAlreadyRunning) {
+            return [pscustomobject]@{
+                JobName = $before.JobName
+                Status  = 'AlreadyRunning'
+                Text    = "already running $($before.JobName) (confirmed before start request)"
+            }
+        }
+
+        if (Get-Command Write-DscStatus -ErrorAction SilentlyContinue) {
+            Write-DscStatus "$Tag SQL Agent $Subsystem job '$($before.JobName)' was already running before the new subscription. Waiting for it to finish, then starting one fresh run that can initialize this subscriber."
+        }
+        $stopped = $null
+        for ($waitAttempt = 1; $waitAttempt -le $RunningWaitAttempts; $waitAttempt++) {
+            if ($ReadbackSeconds -gt 0) { Start-Sleep -Seconds $ReadbackSeconds }
+            $stopped = Get-MPReplicaAgentJobState -Instance $Instance -Database $Database -Subsystem $Subsystem
+            if (-not $stopped -or $stopped.JobName -ne $before.JobName) {
+                throw "SQL Agent job selection changed while waiting for '$($before.JobName)' to finish on '$Instance'."
+            }
+            if (-not $stopped.AgentRunning) {
+                throw "SQL Server Agent stopped while waiting for '$($before.JobName)' to finish on '$Instance'."
+            }
+            if (-not $stopped.IsRunning) { break }
+            if ($waitAttempt % 12 -eq 0 -and (Get-Command Write-DscStatus -ErrorAction SilentlyContinue)) {
+                Write-DscStatus "$Tag SQL Agent $Subsystem job '$($before.JobName)' is still running after $($waitAttempt * $ReadbackSeconds)s; waiting before the fresh subscriber-aware start."
+            }
+        }
+        if (-not $stopped -or $stopped.IsRunning) {
+            throw "SQL Agent job '$($before.JobName)' was already running before the new subscription and did not finish within $($RunningWaitAttempts * $ReadbackSeconds) seconds; a fresh Snapshot run could not be started for this subscription."
+        }
+        $before = $stopped
+    }
+
+    $escapedJobName = $before.JobName.Replace("'", "''")
+    try {
+        $null = Invoke-ReplSql -Instance $Instance -Database $Database -Query "EXEC msdb.dbo.sp_start_job @job_name = N'$escapedJobName';"
+        return [pscustomobject]@{
+            JobName = $before.JobName
+            Status  = 'Started'
+            Text    = "started $($before.JobName)"
+        }
+    }
+    catch {
+        $startError = $_.Exception.Message
+        if ($startError -notmatch '(?i)already running|request to run job.+refused.+job is already running') {
+            throw
+        }
+
+        for ($attempt = 1; $attempt -le $ReadbackAttempts; $attempt++) {
+            $after = Get-MPReplicaAgentJobState -Instance $Instance -Database $Database -Subsystem $Subsystem
+            if ($after -and $after.JobName -ne $before.JobName) {
+                throw "SQL Agent job selection changed from '$($before.JobName)' to '$($after.JobName)' during start-collision readback."
+            }
+            if ($after -and -not $after.AgentRunning) {
+                throw "SQL Server Agent stopped during start-collision readback for '$($before.JobName)' on '$Instance'. Original start error: $startError"
+            }
+            if ($after -and $after.IsRunning) {
+                return [pscustomobject]@{
+                    JobName = $after.JobName
+                    Status  = 'RecoveredAlreadyRunning'
+                    Text    = "already running $($after.JobName) (confirmed after the manual-start collision)"
+                }
+            }
+            if ($after -and $after.LastHistoryInstanceId -gt $before.LastHistoryInstanceId) {
+                if ($after.LastRunStatus -eq 1) {
+                    return [pscustomobject]@{
+                        JobName = $after.JobName
+                        Status  = 'RecoveredCompleted'
+                        Text    = "completed $($after.JobName) successfully while the manual-start collision was read back"
+                    }
+                }
+                throw "SQL Agent job '$($after.JobName)' raced the manual start and then completed with run_status=$($after.LastRunStatus). Original start error: $startError"
+            }
+            if ($attempt -lt $ReadbackAttempts -and $ReadbackSeconds -gt 0) {
+                Start-Sleep -Seconds $ReadbackSeconds
+            }
+        }
+
+        throw "SQL Agent reported that '$($before.JobName)' was already running, but $ReadbackAttempts read-back attempt(s) found neither a running job nor a newer successful outcome. Original start error: $startError"
+    }
+}
+
 # The site DB and every replica DB are named CM_<SiteCode>, so a DatabaseName read-back
 # cannot tell a repointed MP from one still on the site DB. v_BgbMP.DBID can: it is a
 # view computed live from these same rows that falls back to the site code when either
@@ -672,6 +910,7 @@ END
             # repairs a stuck replica instead of skipping over the broken state.
             # -------------------------------------------------------------------
             $alreadySynced = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "IF OBJECT_ID('dbo.XMLConfigStore') IS NOT NULL SELECT c = COUNT(*) FROM dbo.XMLConfigStore WHERE Name = N'MPReplicaServiceBrokerConfiguration' ELSE SELECT c = 0"
+            $subscriptionCreated = $false
             if ([int]$alreadySynced.c -gt 0) {
                 Write-DscStatus "$Tag [$rlabel] replica already synced (XMLConfigStore present); leaving subscription untouched."
             }
@@ -722,33 +961,7 @@ EXEC sp_addpullsubscription @publisher = N'$sitePublisherName', @publication = N
 EXEC sp_addpullsubscription_agent @publisher = N'$sitePublisherName', @publisher_db = N'$siteDbName', @publication = N'ConfigMgr_MPReplica', @distributor = N'$sitePublisherName', @job_login = NULL, @job_password = NULL, @distributor_security_mode = 1, @frequency_type = 4, @frequency_interval = 1, @frequency_relative_interval = 0, @frequency_recurrence_factor = 0, @frequency_subday = 4, @frequency_subday_interval = 5, @active_start_time_of_day = 0, @active_end_time_of_day = 235959;
 "@
                 Write-DscStatus "$Tag [$rlabel] pull subscription (re)created clean."
-
-                # Start the Snapshot Agent (distributor) to generate the snapshot for the
-                # now-pending subscription, then start the pull Distribution Agent (replica;
-                # created stopped -> only runs at SQL Agent startup) to apply it. Report each
-                # job by name: a job that is missing, or refuses to start, is the usual reason
-                # the snapshot never appears and a blanket "started" message hides it.
-                $snapStart = Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
-DECLARE @job SYSNAME, @res NVARCHAR(400) = N'NO JOB FOUND (subsystem=Snapshot)';
-SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Snapshot' AND s.command LIKE '%ConfigMgr_MPReplica%';
-IF @job IS NOT NULL
-BEGIN
-    BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; SET @res = N'started ' + @job; END TRY
-    BEGIN CATCH SET @res = N'start failed (' + @job + '): ' + ERROR_MESSAGE(); END CATCH
-END
-SELECT r = @res;
-"@
-                $distStart = Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query @"
-DECLARE @job SYSNAME, @res NVARCHAR(400) = N'NO JOB FOUND (subsystem=Distribution)';
-SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%';
-IF @job IS NOT NULL
-BEGIN
-    BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; SET @res = N'started ' + @job; END TRY
-    BEGIN CATCH SET @res = N'start failed (' + @job + '): ' + ERROR_MESSAGE(); END CATCH
-END
-SELECT r = @res;
-"@
-                Write-DscStatus "$Tag [$rlabel] Snapshot Agent: $($snapStart.r) | Distribution Agent: $($distStart.r)"
+                $subscriptionCreated = $true
             }
 
             # MP machine account: sysadmin on the replica instance.
@@ -929,6 +1142,25 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
         }
         catch { Write-DscStatus "$Tag WARNING [$rlabel] could not enable IIS Windows Authentication on $($t.MPShort): $($_.Exception.Message)" }
 
+        if ($subscriptionCreated) {
+            # STEP 4 may restart the replica SQL engine, which stops SQL Agent as a
+            # dependent service. Reassert the prerequisites before nudging replication.
+            Set-InstancePrereqs -Instance $t.ReplicaConn -IsReplica $true -Label "$rlabel post-certificate" -SqlHost $t.ReplicaShort
+            try {
+                # A Snapshot run already active before this subscription existed cannot
+                # initialize it: wait for that run, then start one fresh subscriber-aware run.
+                $snapStart = Start-MPReplicaAgentJob -Instance $siteSqlConn -Database $siteDbName -Subsystem Snapshot -RestartIfAlreadyRunning
+                $distStart = Start-MPReplicaAgentJob -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Subsystem Distribution
+                Write-DscStatus "$Tag [$rlabel] Snapshot Agent: $($snapStart.Text) | Distribution Agent: $($distStart.Text)"
+            }
+            catch {
+                # STEP 5.0 waits for the replicated XMLConfigStore row and re-nudges
+                # both agents every ~2.5 minutes. Preserve this first failure as
+                # evidence, but let that bounded recovery loop make the final verdict.
+                Write-DscStatus "$Tag WARNING [$rlabel] initial replication-agent start did not complete: $($_.Exception.Message). Continuing to the bounded initial-sync recovery loop."
+            }
+        }
+
         # -------------------------------------------------------------------
         # STEP 5 - Service Broker wiring + directional routes.
         #   @ServerName / @DestSQLServerName MUST match the Step-6 -SqlServerFqdn
@@ -1004,10 +1236,15 @@ IF IS_SRVROLEMEMBER('sysadmin', N'$mpLogin') <> 1
                     }
                     $lastTableCount = $tabs
                     try {
-                        Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query "DECLARE @job SYSNAME; SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Snapshot' AND s.command LIKE '%ConfigMgr_MPReplica%'; IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH END END"
-                        Invoke-ReplSql -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Query "DECLARE @job SYSNAME; SELECT TOP 1 @job = j.name FROM msdb.dbo.sysjobs j JOIN msdb.dbo.sysjobsteps s ON s.job_id = j.job_id WHERE s.subsystem = 'Distribution' AND s.command LIKE '%ConfigMgr_MPReplica%'; IF @job IS NOT NULL BEGIN BEGIN TRY EXEC msdb.dbo.sp_start_job @job_name = @job; END TRY BEGIN CATCH END END"
+                        $snapNudge = Start-MPReplicaAgentJob -Instance $siteSqlConn -Database $siteDbName -Subsystem Snapshot
+                        Write-DscStatus "$Tag [$rlabel] Snapshot Agent recovery nudge: $($snapNudge.Text)"
                     }
-                    catch { }
+                    catch { Write-DscStatus "$Tag WARNING [$rlabel] Snapshot Agent recovery nudge failed: $($_.Exception.Message)" }
+                    try {
+                        $distNudge = Start-MPReplicaAgentJob -Instance $t.ReplicaConn -Database $t.ReplicaDbName -Subsystem Distribution
+                        Write-DscStatus "$Tag [$rlabel] Distribution Agent recovery nudge: $($distNudge.Text)"
+                    }
+                    catch { Write-DscStatus "$Tag WARNING [$rlabel] Distribution Agent recovery nudge failed: $($_.Exception.Message)" }
                 }
                 Start-Sleep -Seconds 30
             }
