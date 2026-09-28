@@ -75,10 +75,15 @@ try {
     $expectedListenerIps = @('10.0.1.202', '10.0.2.202')
     $healthyIpState = Get-SqlAoIpResourceHealth -Resources $ipResources -ExpectedClusterIPs $expectedClusterIps -ExpectedListenerIPs $expectedListenerIps
     Assert-Validation $healthyIpState.Passed 'multi-subnet validation accepts one online and one offline provider per OR group'
+    Assert-Validation ($healthyIpState.ExpectedStandbyNames.Count -eq 2) 'healthy multi-subnet validation identifies only inactive-subnet standbys'
 
     $ipResources[0].State = 'Offline'
     $zeroOnlineState = Get-SqlAoIpResourceHealth -Resources $ipResources -ExpectedClusterIPs $expectedClusterIps -ExpectedListenerIPs $expectedListenerIps
     Assert-Validation (-not $zeroOnlineState.Passed) 'multi-subnet validation rejects a resource group with no online provider'
+    Assert-Validation (
+        $zeroOnlineState.ExpectedStandbyNames -notcontains 'Core-A' -and
+        $zeroOnlineState.ExpectedStandbyNames -notcontains 'Core-B'
+    ) 'zero-online group exposes no standby exclusions for its broken providers'
     $ipResources[0].State = 'Failed'
     $failedProviderState = Get-SqlAoIpResourceHealth -Resources $ipResources -ExpectedClusterIPs $expectedClusterIps -ExpectedListenerIPs $expectedListenerIps
     Assert-Validation (-not $failedProviderState.Passed) 'multi-subnet validation rejects a failed provider'
@@ -99,9 +104,29 @@ try {
         })
     $collapsedGroupState = Get-SqlAoIpResourceHealth -Resources $collapsedResources -ExpectedClusterIPs $expectedClusterIps -ExpectedListenerIPs $expectedListenerIps
     Assert-Validation (-not $collapsedGroupState.Passed) 'multi-subnet validation rejects core and listener addresses collapsed into one group'
+    $singleOffline = @([pscustomobject]@{ Name = 'Single'; State = 'Offline'; OwnerGroup = $coreGroup; Parameters = @{ Address = '10.0.1.201'; Network = 'Net1' } })
+    $singleOfflineState = Get-SqlAoIpResourceHealth -Resources $singleOffline -ExpectedClusterIPs @('10.0.1.201') -ExpectedListenerIPs @()
+    Assert-Validation (-not $singleOfflineState.Passed) 'single-subnet offline IP remains actionable'
+    Assert-Validation ($singleOfflineState.ExpectedStandbyNames.Count -eq 0) 'single-subnet offline IP is not filtered as expected standby'
     $functionalSource = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Raw
-    Assert-Validation ([regex]::Matches($functionalSource, 'validationArguments \+= ,@\(\$clusterIPs\)').Count -eq 2) 'Phase 5 and Phase 11 preserve nested cluster IP arrays in remote argument lists'
-    Assert-Validation ([regex]::Matches($functionalSource, 'validationArguments \+= ,@\(\$agIPs\)').Count -eq 2) 'Phase 5 and Phase 11 preserve nested listener IP arrays in remote argument lists'
+    Assert-Validation ([regex]::Matches($functionalSource, '\(\$clusterIPs -join '',''\)').Count -eq 2) 'Phase 5 and Phase 11 serialize cluster IP arrays as scalar remoting arguments'
+    Assert-Validation ([regex]::Matches($functionalSource, '\(\$agIPs -join '',''\)').Count -eq 2) 'Phase 5 and Phase 11 serialize listener IP arrays as scalar remoting arguments'
+    Assert-Validation ([regex]::Matches($functionalSource, '\$clusterIpCsv -split '',''').Count -eq 2) 'Phase 5 and Phase 11 reconstruct cluster IP arrays in the guest'
+    Assert-Validation ([regex]::Matches($functionalSource, '\$agIpCsv -split '',''').Count -eq 2) 'Phase 5 and Phase 11 reconstruct listener IP arrays in the guest'
+    $argumentContract = {
+        param($a1, $a2, $a3, $a4, $a5, $a6, $a7, $a8, $a9, $a10, $clusterCsv, $listenerCsv)
+        [pscustomobject]@{
+            Cluster = @($clusterCsv -split ',' | Where-Object { $_ })
+            Listener = @($listenerCsv -split ',' | Where-Object { $_ })
+        }
+    }
+    $contractArgs = @('1','2','3','4','5','6','7','8','9','10', ($expectedClusterIps -join ','), ($expectedListenerIps -join ','))
+    $contractResult = & $argumentContract @contractArgs
+    Assert-Validation (($contractResult.Cluster -join ',') -eq ($expectedClusterIps -join ',')) 'scalar argument contract round-trips cluster IP arrays'
+    Assert-Validation (($contractResult.Listener -join ',') -eq ($expectedListenerIps -join ',')) 'scalar argument contract round-trips listener IP arrays'
+    Assert-Validation ($functionalSource.Contains("-notmatch '^Domain Network(?: \d+)?$'")) 'cluster network validation accepts only deterministic Domain Network names'
+    Assert-Validation ($functionalSource -match '\$registrationIp = \$activeAgIPs\[0\]') 'post-Phase-5 DNS remediation uses the online listener provider'
+    Assert-Validation ($functionalSource -match 'no online configured listener IP could be identified; refusing to synthesize') 'post-Phase-5 DNS remediation refuses an unverified listener IP'
 }
 finally {
     Pop-Location

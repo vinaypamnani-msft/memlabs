@@ -1996,9 +1996,11 @@ function Test-SQLAOFunctionality {
     if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
 
     $scriptBlock = {
-        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $clusterIPs, $agIPs)
+        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $clusterIpCsv, $agIpCsv)
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $clusterIPs = @($clusterIpCsv -split ',' | Where-Object { $_ })
+        $agIPs = @($agIpCsv -split ',' | Where-Object { $_ })
 
         # Live status — Write-Progress records emitted here are confined to this
         # -AsJob nested job; Invoke-VmCommand -PollProgress polls and re-emits the
@@ -2106,6 +2108,7 @@ function Test-SQLAOFunctionality {
                     }
                 })
             $details = [System.Collections.Generic.List[string]]::new()
+            $expectedStandbyNames = [System.Collections.Generic.List[string]]::new()
             $passed = $true
             if ($ExpectedIPs.Count -gt 0) {
                 foreach ($expectedIp in $ExpectedIPs) {
@@ -2154,7 +2157,9 @@ function Test-SQLAOFunctionality {
                         $details.Add("FAIL: Multi-subnet resource group '$($group.Name)' has no online IP resource")
                     }
                     elseif ($badStates.Count -eq 0) {
-                        $details.Add("OK: Multi-subnet resource group '$($group.Name)' has $($online.Count) online IP and $(@($desiredEntries | Where-Object { $_.State -eq 'Offline' }).Count) expected offline IP(s)")
+                        $offlineStandby = @($desiredEntries | Where-Object { $_.State -eq 'Offline' })
+                        foreach ($entry in $offlineStandby) { $expectedStandbyNames.Add($entry.Name) }
+                        $details.Add("OK: Multi-subnet resource group '$($group.Name)' has $($online.Count) online IP and $($offlineStandby.Count) expected offline IP(s)")
                     }
                 }
                 else {
@@ -2166,7 +2171,12 @@ function Test-SQLAOFunctionality {
                     }
                 }
             }
-            return [pscustomobject]@{ Passed = $passed; Entries = $entries; Details = $details }
+            return [pscustomobject]@{
+                Passed = $passed
+                Entries = $entries
+                Details = $details
+                ExpectedStandbyNames = @($expectedStandbyNames)
+            }
         }
 
         try {
@@ -2230,11 +2240,18 @@ function Test-SQLAOFunctionality {
                 $ipHealth = Get-SqlAoIpResourceHealth -Resources $clusterIPRes -ExpectedClusterIPs $clusterIPs -ExpectedListenerIPs $agIPs
                 foreach ($detail in $ipHealth.Details) { $results.Details.Add($detail) }
                 if (-not $ipHealth.Passed) { $results.Passed = $false }
+                $expectedOfflineIpNames = @($ipHealth.ExpectedStandbyNames)
                 $activeClusterIPs = @($ipHealth.Entries | Where-Object {
                         $_.Address -in $clusterIPs -and $_.State -eq 'Online'
                     } | ForEach-Object { $_.Address })
+                $activeAgIPs = @($ipHealth.Entries | Where-Object {
+                        $_.Address -in $agIPs -and $_.State -eq 'Online'
+                    } | ForEach-Object { $_.Address })
                 if ($activeClusterIPs.Count -eq 0 -and $clusterIP) {
                     $activeClusterIPs = @($clusterIP)
+                }
+                if ($activeAgIPs.Count -eq 0 -and $agIP) {
+                    $activeAgIPs = @($agIP)
                 }
 
                 # Validate cluster name DNS points to the correct IP.
@@ -2392,10 +2409,17 @@ function Test-SQLAOFunctionality {
             try {
                 $allResources = @(Get-ClusterResource -ErrorAction Stop)
                 $failedResources = @($allResources | Where-Object { $_.State -notin @('Online', 'Offline') })
-                $offlineResources = @($allResources | Where-Object { $_.State -eq 'Offline' })
+                $offlineResources = @($allResources | Where-Object {
+                        $_.State -eq 'Offline' -and $_.Name -notin $expectedOfflineIpNames
+                    })
 
                 if ($failedResources.Count -eq 0 -and $offlineResources.Count -eq 0) {
-                    $results.Details.Add("OK: All $($allResources.Count) cluster resource(s) are Online")
+                    if ($expectedOfflineIpNames.Count -gt 0) {
+                        $results.Details.Add("OK: All required cluster resources are Online; $($expectedOfflineIpNames.Count) inactive-subnet IP provider(s) are expected standby")
+                    }
+                    else {
+                        $results.Details.Add("OK: All $($allResources.Count) cluster resource(s) are Online")
+                    }
                 }
                 else {
                     foreach ($res in $failedResources) {
@@ -2645,7 +2669,8 @@ function Test-SQLAOFunctionality {
                     $results.Details.Add("WARN: Could not check RegisterAllProvidersIP: $($_.Exception.Message)")
                 }
 
-                # Cluster Group IP resources should be on Domain Network, not heartbeat
+                # Cluster Group IP resources should be on a domain network, not heartbeat.
+                # Multi-subnet clusters use deterministic names Domain Network 1, 2, ...
                 $clusterGroupIPs = if ($coreClusterGroupName) {
                     @(Get-ClusterResource -ErrorAction SilentlyContinue |
                         Where-Object { $_.OwnerGroup.Name -eq $coreClusterGroupName -and $_.ResourceType -eq 'IP Address' })
@@ -2654,8 +2679,8 @@ function Test-SQLAOFunctionality {
                 foreach ($cgIP in $clusterGroupIPs) {
                     $ipNetwork = ($cgIP | Get-ClusterParameter -Name Network -ErrorAction SilentlyContinue).Value
                     $ipAddr    = ($cgIP | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
-                    if ($ipNetwork -and $ipAddr -notlike "${clusterSubnet}*" -and $ipNetwork -ne 'Domain Network') {
-                        $results.Details.Add("WARN: Cluster Group IP '$($cgIP.Name)' ($ipAddr) is on '$ipNetwork' (expected 'Domain Network')")
+                    if ($ipNetwork -and $ipAddr -notlike "${clusterSubnet}*" -and $ipNetwork -notmatch '^Domain Network(?: \d+)?$') {
+                        $results.Details.Add("WARN: Cluster Group IP '$($cgIP.Name)' ($ipAddr) is on '$ipNetwork' (expected 'Domain Network' or 'Domain Network <number>')")
                     }
                 }
 
@@ -3088,8 +3113,15 @@ WHERE drs.is_local = 1
 
                     if ($resolvedIPs.Count -gt 0) {
                         $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$sourceNote")
-                        if ($agIP -and $agIP -notin $resolvedIPs) {
-                            $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
+                        $activeListenerMatch = @($activeAgIPs | Where-Object { $_ -in $resolvedIPs })
+                        if ($activeAgIPs.Count -gt 0 -and $activeListenerMatch.Count -eq 0) {
+                            $activeListenerText = $activeAgIPs -join ', '
+                            $results.Details.Add("WARN: Active AG listener IP '$activeListenerText' not in resolved addresses")
+                        }
+                        foreach ($resolvedIp in $resolvedIPs) {
+                            if ($agIPs.Count -gt 0 -and $resolvedIp -notin $agIPs) {
+                                $results.Details.Add("WARN: Listener DNS returned unexpected IP '$resolvedIp' (expected one of: $($agIPs -join ', '))")
+                            }
                         }
                     }
                     elseif ($rpcStatus -eq 'OK') {
@@ -3533,9 +3565,7 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
     # 5x20s + AG log backup 120s + endpoint cycling), so a healthy node never
     # hits it; on timeout Invoke-VmCommand returns ScriptBlockFailed and
     # Format-TestResult records a FAIL for the VM and the phase completes.
-    $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP)
-    $validationArguments += ,@($clusterIPs)
-    $validationArguments += ,@($agIPs)
+    $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, ($clusterIPs -join ','), ($agIPs -join ','))
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
         -ArgumentList $validationArguments `
@@ -15332,9 +15362,11 @@ function Test-SQLAOPostPhase5 {
         Add-Phase11Output "[Phase $Phase] $VMName [SQLAO]: Running post-Phase-5 validation"
 
         $scriptBlock = {
-            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domainName, $clusterIPs, $agIPs)
+            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domainName, $clusterIpCsv, $agIpCsv)
 
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+            $clusterIPs = @($clusterIpCsv -split ',' | Where-Object { $_ })
+            $agIPs = @($agIpCsv -split ',' | Where-Object { $_ })
 
             try {
                 Import-Module FailoverClusters -ErrorAction SilentlyContinue
@@ -15365,6 +15397,10 @@ function Test-SQLAOPostPhase5 {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: Cluster not found or inaccessible: $($_.Exception.Message)")
                 }
+                $activeAgIPs = @(Get-ClusterResource -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |
+                        ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value } |
+                        Where-Object { $_ -in $agIPs })
 
                 # 2. Cluster name DNS — query ALL DCs directly to avoid LLMNR.
                 #    With DC + BDC, the record may exist on one but not the other.
@@ -15553,8 +15589,10 @@ ORDER BY ar.replica_server_name, adb.database_name
                             $resolvedIPs = @($listenerRecs | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
                             if ($resolvedIPs.Count -gt 0) {
                                 $results.Details.Add("OK: Listener '$listenerName' has DNS A record(s) on DC '$dc': $($resolvedIPs -join ', ')")
-                                if ($agIP -and $agIP -notin $resolvedIPs) {
-                                    $results.Details.Add("WARN: Expected AG IP '$agIP' not in DNS A records on DC '$dc'")
+                                $activeDnsMatch = @($activeAgIPs | Where-Object { $_ -in $resolvedIPs })
+                                if ($activeAgIPs.Count -gt 0 -and $activeDnsMatch.Count -eq 0) {
+                                    $activeAgText = $activeAgIPs -join ', '
+                                    $results.Details.Add("WARN: Active AG listener IP '$activeAgText' not in DNS A records on DC '$dc'")
                                 }
                             }
                             else {
@@ -15572,16 +15610,17 @@ ORDER BY ar.replica_server_name, adb.database_name
 
                     # Remediate: if any DC is missing the record, register on
                     # the first available DC and force AD replication to all.
-                    if (-not $listenerDnsOk -and $agIP) {
+                    if (-not $listenerDnsOk -and $activeAgIPs.Count -gt 0) {
+                        $registrationIp = $activeAgIPs[0]
                         $regDC = $allDCs[0]
-                        $results.Details.Add("Attempting to register DNS A record: '$listenerName' -> $agIP on DC '$regDC' and replicate")
+                        $results.Details.Add("Attempting to register DNS A record: '$listenerName' -> $registrationIp on DC '$regDC' and replicate")
                         try {
                             if ($regDC -and $dnsZone) {
                                 # Only add the record if the first DC doesn't already have it
                                 $existingRec = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $listenerName -RRType A -ComputerName $regDC -ErrorAction SilentlyContinue)
                                 if ($existingRec.Count -eq 0) {
                                     Add-DnsServerResourceRecordA -ZoneName $dnsZone -Name $listenerName `
-                                        -IPv4Address $agIP -ComputerName $regDC -ErrorAction Stop
+                                        -IPv4Address $registrationIp -ComputerName $regDC -ErrorAction Stop
                                 }
 
                                 # Force AD replication so all DCs get the record
@@ -15618,6 +15657,9 @@ ORDER BY ar.replica_server_name, adb.database_name
                         catch {
                             $results.Details.Add("FAIL: DNS registration failed: $($_.Exception.Message)")
                         }
+                    }
+                    elseif (-not $listenerDnsOk) {
+                        $results.Details.Add("FAIL: Listener DNS is missing and no online configured listener IP could be identified; refusing to synthesize an A record")
                     }
                     if (-not $listenerDnsOk) {
                         $results.Passed = $false
@@ -15687,9 +15729,7 @@ ORDER BY ar.replica_server_name, adb.database_name
             return $results
         }
 
-        $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domain)
-        $validationArguments += ,@($clusterIPs)
-        $validationArguments += ,@($agIPs)
+        $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domain, ($clusterIPs -join ','), ($agIPs -join ','))
         $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock $scriptBlock `
             -ArgumentList $validationArguments `
