@@ -144,7 +144,7 @@ function Get-VMNote {
     return ($script:StoredSqlAoNote | ConvertTo-Json -Depth 5 | ConvertFrom-Json)
 }
 function Set-VMNote {
-    param($VMName, $vmNote, [switch]$Force)
+    param($VMName, $vmNote, [bool]$Force)
     if (-not $script:FailSqlAoNoteWrite) {
         $script:StoredSqlAoNote = $vmNote | ConvertTo-Json -Depth 5 | ConvertFrom-Json
     }
@@ -239,6 +239,8 @@ Assert-Equal $true ($resourceModule -match 'DependencyExpression') 'Network Name
 Assert-Equal $false ($resourceModule -match '\$dependencyInfo \| Out-String') 'Network Name dependency validation does not rely on formatted output'
 Assert-Equal $true ($resourceModule -match "parameters\.EnableDhcp -ne 0") 'Network Name desired-state test validates static IP resources'
 Assert-Equal $true ($resourceModule -match "networkName\.State -ne 'Online'") 'Network Name desired-state test requires an online resource'
+Assert-Equal $true ($resourceModule -match '\$onlineIpCount -ne 1') 'Network Name desired-state test requires exactly one online provider'
+Assert-Equal $true ($resourceModule -match '\$matchingResources\.Count -ne 1') 'Network Name desired-state test rejects duplicate same-address resources'
 
 $templateManifest = Join-Path $RootPath 'vmbuild\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1'
 Import-Module $templateManifest -Force -ErrorAction Stop
@@ -260,10 +262,11 @@ $mockResults = & $templateModule {
         Parameters = @{ Address = '10.1.2.202'; SubnetMask = '255.255.255.0'; Network = 'Net2'; EnableDhcp = 0 }
     }
     $script:dependencyExpression = '[IP1] or [IP2]'
+    $script:extraResources = @()
 
     function Get-ClusterResource {
         param($Cluster, $Name)
-        $resources = @($script:networkName, $script:ip1, $script:ip2)
+        $resources = @($script:networkName, $script:ip1, $script:ip2) + @($script:extraResources)
         if ($Name) { return @($resources | Where-Object Name -eq $Name) }
         return $resources
     }
@@ -308,6 +311,15 @@ $mockResults = & $templateModule {
     $script:ip2.Parameters.Network = 'Net2'
     $script:networkName.State = 'Offline'
     $offlineName = $resource.Test()
+    $script:networkName.State = 'Online'
+    $script:ip2.State = 'Online'
+    $bothOnline = $resource.Test()
+    $script:ip2.State = 'Offline'
+    $script:extraResources = @([pscustomobject]@{
+            Name = 'IP2-Duplicate'; ResourceType = 'IP Address'; OwnerGroup = $group; State = 'Offline'
+            Parameters = @{ Address = '10.1.2.202'; SubnetMask = '255.255.255.0'; Network = 'Net2'; EnableDhcp = 0 }
+        })
+    $duplicateAddress = $resource.Test()
 
     return [pscustomobject]@{
         Valid = $valid
@@ -315,6 +327,8 @@ $mockResults = & $templateModule {
         MixedAnd = $mixedAnd
         WrongNetwork = $wrongNetwork
         OfflineName = $offlineName
+        BothOnline = $bothOnline
+        DuplicateAddress = $duplicateAddress
     }
 }
 Assert-Equal $true $mockResults.Valid 'Network Name Test accepts the exact healthy OR dependency'
@@ -322,6 +336,8 @@ Assert-Equal $false $mockResults.ExtraProvider 'Network Name Test rejects an ext
 Assert-Equal $false $mockResults.MixedAnd 'Network Name Test rejects mixed AND/OR dependencies'
 Assert-Equal $false $mockResults.WrongNetwork 'Network Name Test rejects an IP bound to the wrong cluster network'
 Assert-Equal $false $mockResults.OfflineName 'Network Name Test rejects an offline Network Name'
+Assert-Equal $false $mockResults.BothOnline 'Network Name Test rejects two online providers'
+Assert-Equal $false $mockResults.DuplicateAddress 'Network Name Test rejects duplicate same-address resources'
 
 $setResults = & $templateModule {
     function Import-Module { param($Name) }

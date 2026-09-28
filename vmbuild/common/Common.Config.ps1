@@ -1849,7 +1849,7 @@ function Repair-SqlAoMissingPartners {
                 continue
             }
             $note | Add-Member -MemberType NoteProperty -Name OtherNode -Value $null -Force
-            Set-VMNote -VMName $sqlao.vmName -vmNote $note -Force
+            Set-VMNote -VMName $sqlao.vmName -vmNote $note -Force $true
             $verifiedNote = Get-VMNote -VMName $sqlao.vmName
             $verifiedOtherNode = if ($verifiedNote) { $verifiedNote.PSObject.Properties['OtherNode'] } else { $null }
             if (-not $verifiedOtherNode -or $null -ne $verifiedOtherNode.Value) {

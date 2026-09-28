@@ -388,8 +388,9 @@ function Get-RDCManDisplayName {
             if ($vm.ParentSiteCode) { $displayName += "->$($vm.ParentSiteCode)" }
             $displayName += ")"
         }
-        elseif ($clientPushSiteMap -and $clientPushSiteMap.ContainsKey($vm.vmName)) {
-            $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
+        else {
+            $siteCode = Get-RDCVmSiteCode -vm $vm -siteHierarchy $siteHierarchy -clientPushSiteMap $clientPushSiteMap
+            if ($siteCode) { $displayName += " ($siteCode)" }
         }
     }
     return $displayName

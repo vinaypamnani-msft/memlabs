@@ -44,6 +44,142 @@ function Add-Phase11Output {
     $script:Phase11OutputBuffer.Add(@{ Text = $Text; Level = $Level })
 }
 
+function Get-SqlAoVirtualIpAddresses {
+    [CmdletBinding()]
+    param([object[]]$Sources)
+
+    $addresses = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($source in @($Sources | Where-Object { $null -ne $_ })) {
+        $containers = [System.Collections.Generic.List[object]]::new()
+        $containers.Add($source)
+        $thisParamsProperty = $source.PSObject.Properties['thisParams']
+        if ($thisParamsProperty -and $null -ne $thisParamsProperty.Value) {
+            $nestedSqlAoProperty = $thisParamsProperty.Value.PSObject.Properties['SQLAO']
+            if ($nestedSqlAoProperty -and $null -ne $nestedSqlAoProperty.Value) {
+                $containers.Add($nestedSqlAoProperty.Value)
+            }
+        }
+        $sqlAoProperty = $source.PSObject.Properties['SQLAO']
+        if ($sqlAoProperty -and $null -ne $sqlAoProperty.Value) {
+            $containers.Add($sqlAoProperty.Value)
+        }
+
+        foreach ($container in $containers) {
+            foreach ($propertyName in 'ClusterIPAddress', 'AGIPAddress', 'ClusterIPAddresses', 'AGIPAddresses', 'ClusterHeartbeatIP') {
+                $property = $container.PSObject.Properties[$propertyName]
+                if (-not $property) { continue }
+                foreach ($value in @($property.Value)) {
+                    $address = ([string]$value -replace '/.*$', '').Trim()
+                    $parsedAddress = $null
+                    if ([Net.IPAddress]::TryParse($address, [ref]$parsedAddress) -and
+                        $parsedAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
+                        $null = $addresses.Add($address)
+                    }
+                }
+            }
+        }
+    }
+
+    return @($addresses)
+}
+
+function Resolve-SqlAoNodeAddress {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Vm,
+        [AllowNull()][object]$VmNote,
+        [AllowNull()][string]$DhcpAddress,
+        [string[]]$AdapterAddresses = @(),
+        [object[]]$SqlAoSources = @()
+    )
+
+    $sources = [System.Collections.Generic.List[object]]::new()
+    foreach ($source in @($SqlAoSources | Where-Object { $null -ne $_ })) { $sources.Add($source) }
+    if (-not $sources.Contains($Vm)) { $sources.Add($Vm) }
+    if ($VmNote -and -not $sources.Contains($VmNote)) { $sources.Add($VmNote) }
+    $excluded = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($address in @(Get-SqlAoVirtualIpAddresses -Sources $sources)) { $null = $excluded.Add($address) }
+
+    $isUsable = {
+        param([string]$Address)
+        $parsed = $null
+        return -not [string]::IsNullOrWhiteSpace($Address) -and
+            [Net.IPAddress]::TryParse($Address, [ref]$parsed) -and
+            $parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and
+            $Address -notlike '169.254.*' -and
+            $Address -notlike '10.250.250.*' -and
+            $Address -notlike '10.250.251.*' -and
+            -not $excluded.Contains($Address)
+    }
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    $vmAssigned = $Vm.PSObject.Properties['AssignedIP']
+    if ($vmAssigned) { $candidates.Add([pscustomobject]@{ Address = [string]$vmAssigned.Value; Source = 'AssignedIP' }) }
+    if ($VmNote) {
+        $noteAssigned = $VmNote.PSObject.Properties['AssignedIP']
+        if ($noteAssigned) { $candidates.Add([pscustomobject]@{ Address = [string]$noteAssigned.Value; Source = 'NoteAssignedIP' }) }
+    }
+    if ($DhcpAddress) { $candidates.Add([pscustomobject]@{ Address = $DhcpAddress; Source = 'DHCP' }) }
+
+    $filteredAdapterAddresses = @($AdapterAddresses | Where-Object { & $isUsable ([string]$_) } | Select-Object -Unique)
+    foreach ($address in $filteredAdapterAddresses) {
+        $candidates.Add([pscustomobject]@{ Address = [string]$address; Source = 'Adapter' })
+    }
+
+    if ($VmNote) {
+        $noteLastKnown = $VmNote.PSObject.Properties['LastKnownIP']
+        if ($noteLastKnown) { $candidates.Add([pscustomobject]@{ Address = [string]$noteLastKnown.Value; Source = 'NoteLastKnownIP' }) }
+    }
+    $vmLastKnown = $Vm.PSObject.Properties['LastKnownIP']
+    if ($vmLastKnown) { $candidates.Add([pscustomobject]@{ Address = [string]$vmLastKnown.Value; Source = 'LastKnownIP' }) }
+
+    $selected = $candidates | Where-Object { & $isUsable $_.Address } | Select-Object -First 1
+    return [pscustomobject]@{
+        Address = if ($selected) { [string]$selected.Address } else { $null }
+        Source = if ($selected) { [string]$selected.Source } else { 'None' }
+        ExcludedAddresses = @($excluded)
+        FilteredAdapterAddresses = @($filteredAdapterAddresses)
+    }
+}
+
+function Get-SqlAoConfigValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Vm,
+        [Parameter(Mandatory)][string]$Name,
+        [switch]$AsArray
+    )
+
+    $containers = [System.Collections.Generic.List[object]]::new()
+    $containers.Add($Vm)
+    $thisParamsProperty = $Vm.PSObject.Properties['thisParams']
+    if ($thisParamsProperty -and $null -ne $thisParamsProperty.Value) {
+        $nestedSqlAoProperty = $thisParamsProperty.Value.PSObject.Properties['SQLAO']
+        if ($nestedSqlAoProperty -and $null -ne $nestedSqlAoProperty.Value) {
+            $containers.Add($nestedSqlAoProperty.Value)
+        }
+    }
+    $sqlAoProperty = $Vm.PSObject.Properties['SQLAO']
+    if ($sqlAoProperty -and $null -ne $sqlAoProperty.Value) {
+        $containers.Add($sqlAoProperty.Value)
+    }
+
+    foreach ($container in $containers) {
+        $property = $container.PSObject.Properties[$Name]
+        if (-not $property -or $null -eq $property.Value) { continue }
+        if ($AsArray) {
+            $values = @($property.Value | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) })
+            if ($values.Count -gt 0) { return $values }
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return $property.Value
+        }
+    }
+
+    if ($AsArray) { return @() }
+    return $null
+}
+
 function Test-VmFunctionality {
     <#
     .SYNOPSIS
@@ -548,29 +684,32 @@ function Test-DCFunctionality {
     # where roles got reassigned) which otherwise cause cascading secure-channel
     # failures on clients that resolve a DC name to the wrong IP.
     $expectedDnsCsv = ''
+    $sqlAoNodeCsv = ''
     if ($DeployConfig) {
         $entries = New-Object System.Collections.Generic.List[string]
+        $sqlAoNodeCsv = @($DeployConfig.virtualMachines |
+            Where-Object { $_.role -eq 'SQLAO' } |
+            ForEach-Object { $_.vmName } |
+            Where-Object { $_ }) -join ','
 
         # Build set of cluster/AG virtual IPs to exclude when resolving SQLAO
         # node IPs from Get-VMNetworkAdapter. These virtual IPs float between
         # nodes and are NOT the node's own address.
-        $virtualIps = [System.Collections.Generic.HashSet[string]]::new()
+        $virtualIpSources = [System.Collections.Generic.List[object]]::new()
+        $vmNotes = @{}
         foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-            if ($sqlaoVm.ClusterIPAddress) { $null = $virtualIps.Add(($sqlaoVm.ClusterIPAddress -replace '/\d+$','')) }
-            if ($sqlaoVm.AGIPAddress)      { $null = $virtualIps.Add(($sqlaoVm.AGIPAddress -replace '/\d+$','')) }
+            $virtualIpSources.Add($sqlaoVm)
+            try {
+                $note = Get-VMNote -VMName $sqlaoVm.vmName
+                if ($note) {
+                    $vmNotes[$sqlaoVm.vmName] = $note
+                    $virtualIpSources.Add($note)
+                }
+            } catch {}
         }
-        # On reruns (-StartPhase 2+), ClusterIPAddress/AGIPAddress may not be
-        # on the deployConfig objects. Check VM Notes as fallback.
-        if ($virtualIps.Count -eq 0) {
-            foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-                try {
-                    $note = Get-VMNote -VMName $sqlaoVm.vmName
-                    if ($note) {
-                        if ($note.ClusterIPAddress) { $null = $virtualIps.Add(($note.ClusterIPAddress -replace '/\d+$','')) }
-                        if ($note.AGIPAddress)      { $null = $virtualIps.Add(($note.AGIPAddress -replace '/\d+$','')) }
-                    }
-                } catch {}
-            }
+        $virtualIps = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($virtualIp in @(Get-SqlAoVirtualIpAddresses -Sources $virtualIpSources)) {
+            $null = $virtualIps.Add($virtualIp)
         }
         if ($virtualIps.Count -gt 0) {
             Write-Log "[Phase $Phase] ${VMName}: SQLAO virtual IPs to exclude: $($virtualIps -join ', ')" -LogOnly
@@ -584,11 +723,19 @@ function Test-DCFunctionality {
             try {
                 # IP source priority for DNS validation:
                 # 1. AssignedIP from deployConfig (set before Phase 1)
-                # 2. DHCP reservation (authoritative — set by us in Phase 1)
-                # 3. Get-VMNetworkAdapter (live Hyper-V data, with SQLAO virtual IP filtering)
-                # 4. LastKnownIP from VM Notes (last resort only)
+                # 2. AssignedIP from VM Notes (persisted by either DHCP allocator)
+                # 3. DHCP reservation (authoritative for the native DHCP backend)
+                # 4. Get-VMNetworkAdapter (live Hyper-V data, with SQLAO virtual IP filtering)
+                # 5. LastKnownIP from VM Notes (last resort only)
                 $ip = $null
                 $ipSource = 'none'
+                $vmNote = $vmNotes[$vm.vmName]
+                if (-not $vmNote) {
+                    try {
+                        $vmNote = Get-VMNote -VMName $vm.vmName
+                        if ($vmNote) { $vmNotes[$vm.vmName] = $vmNote }
+                    } catch {}
+                }
 
                 # 1. AssignedIP — stamped by Set-DeployConfigIPAddresses
                 if ($vm.AssignedIP) {
@@ -596,7 +743,13 @@ function Test-DCFunctionality {
                     $ipSource = 'AssignedIP'
                 }
 
-                # 2. DHCP reservation
+                # 2. AssignedIP persisted in the VM note by either allocator
+                if (-not $ip -and $vmNote -and $vmNote.AssignedIP) {
+                    $ip = $vmNote.AssignedIP
+                    $ipSource = 'NoteAssignedIP'
+                }
+
+                # 3. DHCP reservation
                 if (-not $ip) {
                     try {
                         $vmnet = Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop |
@@ -614,7 +767,7 @@ function Test-DCFunctionality {
                     } catch {}
                 }
 
-                # 3. Get-VMNetworkAdapter — filter heartbeat, cluster and AG virtual IPs
+                # 4. Get-VMNetworkAdapter — filter heartbeat, cluster and AG virtual IPs
                 if (-not $ip) {
                     try {
                         $allIps = @((Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
@@ -634,20 +787,15 @@ function Test-DCFunctionality {
                     } catch {}
                 }
 
-                # 4. LastKnownIP from VM Notes — last resort only
-                if (-not $ip) {
-                    try {
-                        $vmNote = Get-VMNote -VMName $vm.vmName
-                        if ($vmNote -and $vmNote.LastKnownIP) {
-                            $ip = $vmNote.LastKnownIP
-                            $ipSource = 'LastKnownIP'
-                        }
-                    } catch {}
+                # 5. LastKnownIP from VM Notes — last resort only
+                if (-not $ip -and $vmNote -and $vmNote.LastKnownIP) {
+                    $ip = $vmNote.LastKnownIP
+                    $ipSource = 'LastKnownIP'
                 }
 
                 if ($ip) {
                     $entries.Add("$($vm.vmName)=$ip")
-                    if ($ipSource -notin 'AssignedIP', 'DHCP') {
+                    if ($ipSource -notin 'AssignedIP', 'NoteAssignedIP', 'DHCP') {
                         Write-Log "[Phase $Phase] ${VMName}: $($vm.vmName) expected IP $ip resolved via $ipSource (no AssignedIP or DHCP reservation found)" -LogOnly
                     }
                 }
@@ -664,7 +812,7 @@ function Test-DCFunctionality {
         # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList, so any bool we pass
         # in arrives as the string 'True'/'False' (both truthy in `if`). Compare to
         # the string 'True' explicitly to avoid the BDC branch firing on every DC.
-        param($domainFqdn, $isBdcInner, $expectedDnsCsv, $hasCmSitesInner, $expectedReverseZonesCsv)
+        param($domainFqdn, $isBdcInner, $expectedDnsCsv, $hasCmSitesInner, $expectedReverseZonesCsv, $sqlAoNodeCsv)
         $isBdc = ($isBdcInner -eq 'True')
         $hasCmSites = ($hasCmSitesInner -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
@@ -839,123 +987,275 @@ function Test-DCFunctionality {
             }
         }
 
-        # Per-VM DNS sanity check: for each non-hidden VM in the deploy, confirm
-        # its A record on this DC resolves to its actual Hyper-V-reported IPv4.
-        # Catches stale static records (no aging) left by older code paths or
-        # earlier deploys -- e.g. an ADA-DC1 -> 192.168.x.21 entry from when a
-        # role used to live at .21, which now causes clients to talk to the
-        # wrong host and see "server is not operational" / secure-channel breaks.
+        $prepareSqlAoNodeDns = {
+            param([string]$ComputerName, [string]$ExpectedIp)
+
+            $job = $null
+            try {
+                $registrationScript = {
+                    param($expectedIp, $computerName)
+
+                    $expectedAddress = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                        Where-Object { $_.IPAddress -eq $expectedIp })
+                    if ($expectedAddress.Count -ne 1) {
+                        throw "Expected exactly one local address '$expectedIp', found $($expectedAddress.Count)."
+                    }
+
+                    $interfaceIndex = $expectedAddress[0].InterfaceIndex
+                    foreach ($address in @(Get-NetIPAddress -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -ErrorAction Stop)) {
+                        $shouldSkip = $address.IPAddress -ne $expectedIp
+                        if ([bool]$address.SkipAsSource -ne $shouldSkip) {
+                            Set-NetIPAddress -InterfaceIndex $interfaceIndex -IPAddress $address.IPAddress -SkipAsSource $shouldSkip -ErrorAction Stop
+                        }
+                    }
+                    $dnsClient = Get-DnsClient -InterfaceIndex $interfaceIndex -ErrorAction Stop
+                    if (-not $dnsClient.RegisterThisConnectionsAddress) {
+                        Set-DnsClient -InterfaceIndex $interfaceIndex -RegisterThisConnectionsAddress $true -ErrorAction Stop
+                    }
+
+                    $null = & ipconfig.exe /registerdns 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "ipconfig /registerdns exited with code $LASTEXITCODE." }
+
+                    $remainingBadAddresses = @(Get-NetIPAddress -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -ErrorAction Stop |
+                        Where-Object {
+                            ($_.IPAddress -eq $expectedIp -and $_.SkipAsSource) -or
+                            ($_.IPAddress -ne $expectedIp -and -not $_.SkipAsSource)
+                        })
+                    if ($remainingBadAddresses.Count -gt 0) {
+                        throw "SkipAsSource postcondition failed for: $($remainingBadAddresses.IPAddress -join ', ')."
+                    }
+                    "Prepared '$computerName' to register only $expectedIp"
+                }
+                $job = Invoke-Command -ComputerName $ComputerName -AsJob -ErrorAction Stop -ArgumentList $ExpectedIp, $ComputerName -ScriptBlock $registrationScript
+
+                $completed = Wait-Job -Job $job -Timeout 20
+                if (-not $completed) { throw "Timed out after 20 seconds." }
+                $jobErrors = $null
+                $output = @(Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErrors)
+                if ($job.State -ne 'Completed') {
+                    $reason = $job.ChildJobs[0].JobStateInfo.Reason
+                    throw "Remote job ended in state '$($job.State)'$(if ($reason) { ": $($reason.Message)" })."
+                }
+                if ($jobErrors) {
+                    throw (@($jobErrors | ForEach-Object { $_.Exception.Message }) -join '; ')
+                }
+                return [pscustomobject]@{ Passed = $true; Message = ($output -join '; ') }
+            }
+            catch {
+                return [pscustomobject]@{ Passed = $false; Message = $_.Exception.Message }
+            }
+            finally {
+                if ($job) {
+                    if ($job.State -notin 'Completed', 'Failed', 'Stopped') {
+                        Stop-Job -Job $job -ErrorAction SilentlyContinue
+                    }
+                    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        $reconcileDnsARecord = {
+            param(
+                [string]$Zone,
+                [string]$Name,
+                [string]$ExpectedIp,
+                [string]$DnsServer,
+                [int]$MaxAttempts = 3
+            )
+
+            $errors = [System.Collections.Generic.List[string]]::new()
+            $beforeIps = @()
+            $afterIps = @()
+            $beforeCaptured = $false
+            $changed = $false
+            $isRecordNotFound = {
+                param([Management.Automation.ErrorRecord]$ErrorRecord)
+                $exception = $ErrorRecord.Exception
+                $nativeCodes = [System.Collections.Generic.List[int]]::new()
+                while ($exception) {
+                    $nativeCodeProperty = $exception.PSObject.Properties['NativeErrorCode']
+                    if ($nativeCodeProperty) { $nativeCodes.Add([int]$nativeCodeProperty.Value) }
+                    $exception = $exception.InnerException
+                }
+                $identity = "$($ErrorRecord.FullyQualifiedErrorId) $($ErrorRecord.Exception.Message)"
+                return 9701 -in $nativeCodes -or
+                    $identity -match '(?i)DNS_ERROR_NAME_DOES_NOT_EXIST|WIN32\s+9701|record.+(?:does not exist|not found)|name.+does not exist'
+            }
+
+            for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+                try {
+                    try {
+                        $records = @(Get-DnsServerResourceRecord -ZoneName $Zone -Name $Name -RRType A -ComputerName $DnsServer -ErrorAction Stop)
+                    }
+                    catch {
+                        if (& $isRecordNotFound $_) { $records = @() }
+                        else { throw }
+                    }
+                    $recordIps = @($records | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                    if (-not $beforeCaptured) {
+                        $beforeIps = @($recordIps)
+                        $beforeCaptured = $true
+                    }
+
+                    $expectedRecords = @($records | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -eq $ExpectedIp })
+                    if ($expectedRecords.Count -eq 0) {
+                        try {
+                            Add-DnsServerResourceRecordA -ZoneName $Zone -Name $Name -IPv4Address $ExpectedIp -ComputerName $DnsServer -ErrorAction Stop
+                            $changed = $true
+                        }
+                        catch {
+                            $errors.Add("attempt $attempt add '$ExpectedIp': $($_.Exception.Message)")
+                        }
+                    }
+
+                    $keepExpected = $false
+                    foreach ($record in $records) {
+                        $recordIp = $record.RecordData.IPv4Address.IPAddressToString
+                        if ($recordIp -eq $ExpectedIp -and -not $keepExpected) {
+                            $keepExpected = $true
+                            continue
+                        }
+                        try {
+                            Remove-DnsServerResourceRecord -ZoneName $Zone -InputObject $record -ComputerName $DnsServer -Force -ErrorAction Stop
+                            $changed = $true
+                        }
+                        catch {
+                            $errors.Add("attempt $attempt remove '$recordIp': $($_.Exception.Message)")
+                        }
+                    }
+
+                    try {
+                        $finalRecords = @(Get-DnsServerResourceRecord -ZoneName $Zone -Name $Name -RRType A -ComputerName $DnsServer -ErrorAction Stop)
+                    }
+                    catch {
+                        if (& $isRecordNotFound $_) { $finalRecords = @() }
+                        else { throw }
+                    }
+                    $afterIps = @($finalRecords | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                    if ($afterIps.Count -eq 1 -and $afterIps[0] -eq $ExpectedIp) {
+                        return [pscustomobject]@{
+                            Passed = $true
+                            Changed = $changed
+                            Before = @($beforeIps)
+                            After = @($afterIps)
+                            Errors = @($errors)
+                        }
+                    }
+                }
+                catch {
+                    $errors.Add("attempt $attempt query: $($_.Exception.Message)")
+                }
+                if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds 2 }
+            }
+
+            return [pscustomobject]@{
+                Passed = $false
+                Changed = $changed
+                Before = @($beforeIps)
+                After = @($afterIps)
+                Errors = @($errors)
+            }
+        }
+
+        # Per-VM DNS sanity check: reconcile every node name to exactly its
+        # allocator-owned IPv4 address on the PDC's authoritative zone.
         if ($expectedDnsCsv) {
             $expected = @{}
             foreach ($pair in $expectedDnsCsv.Split(',')) {
                 if ($pair -match '^([^=]+)=(.+)$') { $expected[$Matches[1]] = $Matches[2] }
             }
+            $sqlAoNodes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($sqlAoNode in @($sqlAoNodeCsv -split ',' | Where-Object { $_ })) {
+                $null = $sqlAoNodes.Add($sqlAoNode)
+            }
+            $dnsTarget = (Get-ADDomain -ErrorAction SilentlyContinue).PDCEmulator
+            if (-not $dnsTarget) { $dnsTarget = $env:COMPUTERNAME }
             $mismatches = 0
             foreach ($name in $expected.Keys) {
                 $expectedIp = $expected[$name]
                 $fqdn = "$name.$domainFqdn"
-                try {
-                    $recs = @(Get-DnsServerResourceRecord -ZoneName $domainFqdn -Name $name -RRType A -ErrorAction Stop)
-                    $resolvedIps = @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                    if (-not $resolvedIps -or $resolvedIps.Count -eq 0) {
+                $dnsOutcome = & $reconcileDnsARecord -Zone $domainFqdn -Name $name -ExpectedIp $expectedIp -DnsServer $dnsTarget
+                if ($dnsOutcome.Passed -and $sqlAoNodes.Contains($name)) {
+                    $nodePreparation = & $prepareSqlAoNodeDns -ComputerName $name -ExpectedIp $expectedIp
+                    if ($nodePreparation.Passed) {
+                        # Registration is intentionally followed by another exact
+                        # reconciliation because a pre-fix SQLAO node can publish
+                        # its virtual IP during this very registration attempt.
+                        $postRegistrationOutcome = & $reconcileDnsARecord -Zone $domainFqdn -Name $name -ExpectedIp $expectedIp -DnsServer $dnsTarget
+                        $dnsOutcome = [pscustomobject]@{
+                            Passed = $postRegistrationOutcome.Passed
+                            Changed = ($dnsOutcome.Changed -or $postRegistrationOutcome.Changed)
+                            Before = @($dnsOutcome.Before)
+                            After = @($postRegistrationOutcome.After)
+                            Errors = @($dnsOutcome.Errors) + @($postRegistrationOutcome.Errors)
+                        }
+                    }
+                    else {
+                        $results.Passed = $false
                         $mismatches++
-                        $results.Details.Add("WARN: DNS '$fqdn' returned no A records (expected $expectedIp)")
-                    }
-                    elseif ($resolvedIps -notcontains $expectedIp) {
-                        # Stale record — remove wrong A records on the PDC, then trigger
-                        # /registerdns on the target VM via its NetBIOS name (short name
-                        # bypasses DNS, uses WINS/NetBIOS resolution instead).
-                        $fixStatus = 'failed'
-                        try {
-                            $zone = $domainFqdn
-                            $dnsTarget = (Get-ADDomain -ErrorAction SilentlyContinue).PDCEmulator
-                            if (-not $dnsTarget) { $dnsTarget = $env:COMPUTERNAME }
-                            $existingRecs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dnsTarget -ErrorAction SilentlyContinue
-                            $removedCount = 0
-                            foreach ($staleIp in $resolvedIps) {
-                                $matchRec = $existingRecs | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -eq $staleIp }
-                                if ($matchRec) {
-                                    Remove-DnsServerResourceRecord -ZoneName $zone -InputObject $matchRec -ComputerName $dnsTarget -Force -ErrorAction Stop
-                                    $removedCount++
-                                }
-                                else {
-                                    Remove-DnsServerResourceRecord -ZoneName $zone -RRType A -Name $name -RecordData $staleIp -ComputerName $dnsTarget -Force -ErrorAction Stop
-                                    $removedCount++
-                                }
-                            }
-                            # Trigger /registerdns via NetBIOS name (doesn't depend on DNS)
-                            if ($removedCount -gt 0) {
-                                $registered = Invoke-Command -ComputerName $name -ScriptBlock {
-                                    ipconfig /registerdns 2>&1 | Out-Null
-                                    return $true
-                                } -ErrorAction SilentlyContinue
-                                # If /registerdns failed (Linux VM, unreachable, etc.),
-                                # add the correct A record directly on the DC.
-                                if (-not $registered) {
-                                    try {
-                                        Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $expectedIp -ComputerName $dnsTarget -ErrorAction Stop
-                                    }
-                                    catch {
-                                        # Best-effort; re-verify below will catch success/failure
-                                    }
-                                }
-                                Start-Sleep -Seconds 3
-                                # Re-verify via zone database on the PDC
-                                $zoneRec = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dnsTarget -ErrorAction SilentlyContinue
-                                $zoneIps = @($zoneRec | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                                if ($zoneIps -contains $expectedIp) {
-                                    $fixStatus = 'verified'
-                                }
-                                elseif ($registered) {
-                                    $fixStatus = 'registered'
-                                }
-                                else {
-                                    $fixStatus = 'removed'
-                                }
-                            }
-                        }
-                        catch {
-                            $results.Details.Add("DIAG: DNS auto-fix for '$fqdn' threw: $_")
-                        }
-                        if ($fixStatus -eq 'verified') {
-                            $results.Details.Add("OK: DNS '$fqdn' had stale record(s) ($($resolvedIps -join ',')); removed + /registerdns -> $expectedIp")
-                        }
-                        elseif ($fixStatus -eq 'registered') {
-                            $results.Details.Add("WARN: DNS '$fqdn' had stale record(s) ($($resolvedIps -join ',')); removed + /registerdns sent (re-verify pending replication)")
-                        }
-                        elseif ($fixStatus -eq 'removed') {
-                            $results.Details.Add("WARN: DNS '$fqdn' had stale record(s) ($($resolvedIps -join ',')); removed but /registerdns failed — reboot VM to re-register")
-                        }
-                        else {
-                            $mismatches++
-                            $results.Details.Add("WARN: DNS '$fqdn' -> $($resolvedIps -join ',') (expected $expectedIp; auto-fix failed)")
-                        }
-                    }
-                    elseif ($resolvedIps.Count -gt 1) {
-                        # Extra records alongside the correct one — remove the extras.
-                        $extras = @($resolvedIps | Where-Object { $_ -ne $expectedIp })
-                        try {
-                            if (-not $dnsTarget) {
-                                $dnsTarget = (Get-ADDomain -ErrorAction SilentlyContinue).PDCEmulator
-                                if (-not $dnsTarget) { $dnsTarget = $env:COMPUTERNAME }
-                            }
-                            foreach ($extraIp in $extras) {
-                                Remove-DnsServerResourceRecord -ZoneName $domainFqdn -RRType A -Name $name -RecordData $extraIp -ComputerName $dnsTarget -Force -ErrorAction Stop
-                            }
-                            $results.Details.Add("OK: DNS '$fqdn' had extra A record(s) ($($extras -join ',')); removed, keeping $expectedIp")
-                        }
-                        catch {
-                            $results.Details.Add("WARN: DNS '$fqdn' has extra A record(s): $($extras -join ',') (expected only $expectedIp; cleanup failed)")
-                        }
+                        $results.Details.Add("FAIL: SQLAO node '$fqdn' DNS registration safeguards failed: $($nodePreparation.Message)")
                     }
                 }
-                catch {
+
+                if ($dnsOutcome.Passed) {
+                    if ($dnsOutcome.Changed) {
+                        $beforeText = if ($dnsOutcome.Before.Count -gt 0) { $dnsOutcome.Before -join ',' } else { '(none)' }
+                        $results.Details.Add("OK: DNS '$fqdn' reconciled from $beforeText to $expectedIp")
+                    }
+                }
+                else {
+                    $results.Passed = $false
                     $mismatches++
-                    $results.Details.Add("WARN: DNS lookup for '$fqdn' threw: $($_.Exception.Message)")
+                    $beforeText = if ($dnsOutcome.Before.Count -gt 0) { $dnsOutcome.Before -join ',' } else { '(none)' }
+                    $afterText = if ($dnsOutcome.After.Count -gt 0) { $dnsOutcome.After -join ',' } else { '(none)' }
+                    $errorText = if ($dnsOutcome.Errors.Count -gt 0) { "; $($dnsOutcome.Errors -join ' | ')" } else { '' }
+                    $results.Details.Add("FAIL: DNS '$fqdn' did not converge to exactly $expectedIp (before=$beforeText; after=$afterText$errorText)")
                 }
             }
+
+            if ($isBdc) {
+                $staleLocalNames = [System.Collections.Generic.List[string]]::new()
+                foreach ($name in $expected.Keys) {
+                    try {
+                        $localRecords = @(Get-DnsServerResourceRecord -ZoneName $domainFqdn -Name $name -RRType A -ErrorAction Stop)
+                        $localIps = @($localRecords | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                        if ($localIps.Count -ne 1 -or $localIps[0] -ne $expected[$name]) {
+                            $staleLocalNames.Add($name)
+                        }
+                    }
+                    catch {
+                        $staleLocalNames.Add($name)
+                    }
+                }
+                if ($staleLocalNames.Count -gt 0) {
+                    $savedErrorActionPreference = $ErrorActionPreference
+                    try {
+                        $ErrorActionPreference = 'Continue'
+                        $null = & repadmin.exe /syncall /e /d /A 2>&1
+                    }
+                    finally {
+                        $ErrorActionPreference = $savedErrorActionPreference
+                    }
+                    Start-Sleep -Seconds 5
+                    foreach ($name in $staleLocalNames) {
+                        try {
+                            $localRecords = @(Get-DnsServerResourceRecord -ZoneName $domainFqdn -Name $name -RRType A -ErrorAction Stop)
+                            $localIps = @($localRecords | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                            if ($localIps.Count -ne 1 -or $localIps[0] -ne $expected[$name]) {
+                                throw "local RRset is '$($localIps -join ',')'"
+                            }
+                        }
+                        catch {
+                            $results.Passed = $false
+                            $mismatches++
+                            $results.Details.Add("FAIL: DNS '$name.$domainFqdn' did not replicate exactly to BDC '$env:COMPUTERNAME': $($_.Exception.Message)")
+                        }
+                    }
+                }
+            }
+
             if ($mismatches -eq 0) {
-                $results.Details.Add("OK: DNS A records for $($expected.Count) deploy VM(s) match Hyper-V IPs")
+                $results.Details.Add("OK: DNS A records for $($expected.Count) deploy VM(s) match allocator-owned node addresses")
             }
             else {
                 # Collect recent DNS-related event log entries for diagnostics
@@ -1246,7 +1546,7 @@ function Test-DCFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv, ([string]$hasCmSites), $expectedReverseZonesCsv `
+        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv, ([string]$hasCmSites), $expectedReverseZonesCsv, $sqlAoNodeCsv `
         -DisplayName "Phase11-$label-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
@@ -1958,25 +2258,44 @@ function Test-SQLAOFunctionality {
     $clusterName = ''
     $clusterIP = ''
     $clusterIPs = @()
+    $recoveryOwner = ''
+    $listenerRegisterAllProvidersIP = $true
+    $listenerHostRecordTTL = 300
 
     if ($primaryAO) {
-        $listenerName = $primaryAO.AlwaysOnListenerName
-        $agName = $primaryAO.AlwaysOnGroupName
-        $agIP = $primaryAO.AGIPAddress   # without CIDR
-        $agIPs = @($primaryAO.AGIPAddresses | ForEach-Object { [string]$_ -replace '/.*$', '' } | Where-Object { $_ })
+        $listenerName = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'AlwaysOnListenerName')
+        $recoveryOwner = [string]$primaryAO.vmName
+        $agName = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'AlwaysOnGroupName')
+        $agIP = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'AGIPAddress')
+        $agIPs = @(Get-SqlAoConfigValue -Vm $primaryAO -Name 'AGIPAddresses' -AsArray |
+            ForEach-Object { [string]$_ -replace '/.*$', '' } |
+            Where-Object { $_ })
         if ($agIPs.Count -eq 0 -and $agIP) { $agIPs = @([string]$agIP -replace '/.*$', '') }
         # "Other node" relative to THIS VM
         $otherNode = if ($VMName -eq $primaryAO.vmName) { $primaryAO.OtherNode } else { $primaryAO.vmName }
         # Derive share UNC paths (same logic as Get-SQLAOConfig)
         $prefix = $DeployConfig.vmOptions.prefix
-        $clusterNameNoPrefix = Remove-VmNamePrefix -Name $primaryAO.ClusterName -Prefix $prefix
-        $fileServerVM = $primaryAO.FileServerVM
-        $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness"
-        $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"
-        $clusterName = $primaryAO.ClusterName
-        $clusterIP = $primaryAO.ClusterIPAddress   # raw IP without CIDR
-        $clusterIPs = @($primaryAO.ClusterIPAddresses | ForEach-Object { [string]$_ -replace '/.*$', '' } | Where-Object { $_ })
+        $clusterName = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'ClusterName')
+        $clusterNameNoPrefix = Remove-VmNamePrefix -Name $clusterName -Prefix $prefix
+        $fileServerVM = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'FileServerVM')
+        if (-not $fileServerVM) { $fileServerVM = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'FileServerName') }
+        $witnessShare = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'WitnessShareFQ')
+        if (-not $witnessShare) { $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness" }
+        $backupShare = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'BackupShareFQ')
+        if (-not $backupShare) { $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup" }
+        $clusterIP = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'ClusterIPAddress')
+        $clusterIPs = @(Get-SqlAoConfigValue -Vm $primaryAO -Name 'ClusterIPAddresses' -AsArray |
+            ForEach-Object { [string]$_ -replace '/.*$', '' } |
+            Where-Object { $_ })
         if ($clusterIPs.Count -eq 0 -and $clusterIP) { $clusterIPs = @([string]$clusterIP -replace '/.*$', '') }
+        $configuredListenerPort = Get-SqlAoConfigValue -Vm $primaryAO -Name 'SQLAOPort'
+        if ($configuredListenerPort) { $listenerPort = [string]$configuredListenerPort }
+        $listenerRegisterAllProvidersIP = $true
+        $configuredRegisterAll = Get-SqlAoConfigValue -Vm $primaryAO -Name 'ListenerRegisterAllProvidersIP'
+        if ($null -ne $configuredRegisterAll) { $listenerRegisterAllProvidersIP = [bool]$configuredRegisterAll }
+        $listenerHostRecordTTL = 300
+        $configuredTtl = Get-SqlAoConfigValue -Vm $primaryAO -Name 'ListenerHostRecordTTL'
+        if ($configuredTtl) { $listenerHostRecordTTL = [int]$configuredTtl }
     }
 
     # Degraded / single-node Availability Group: the partner node (OtherNode)
@@ -1996,11 +2315,36 @@ function Test-SQLAOFunctionality {
     if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
 
     $scriptBlock = {
-        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $clusterIpCsv, $agIpCsv)
+        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $clusterIpCsv, $agIpCsv, $recoveryOwner, $listenerRegisterAllProvidersIP, $listenerHostRecordTTL)
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
         $clusterIPs = @($clusterIpCsv -split ',' | Where-Object { $_ })
         $agIPs = @($agIpCsv -split ',' | Where-Object { $_ })
+        $listenerRegisterAllProvidersIP = $listenerRegisterAllProvidersIP -eq 'True'
+        $listenerHostRecordTTL = [int]$listenerHostRecordTTL
+        $isDefaultInstance = [string]::IsNullOrWhiteSpace($sqlInstName) -or $sqlInstName -ieq 'MSSQLSERVER'
+        $localSqlTarget = if ($isDefaultInstance) { 'localhost' } else { "localhost\$sqlInstName" }
+        $sqlServiceName = if ($isDefaultInstance) { 'MSSQLSERVER' } else { "MSSQL`$$sqlInstName" }
+        $healthSqlTarget = if ($listenerName -and $listenerPort) { "$listenerName,$listenerPort" } else { $localSqlTarget }
+        $normalizeReplica = {
+            param([string]$ReplicaName)
+            $parts = $ReplicaName -split '\\', 2
+            $hostName = (($parts[0] -split '\.')[0]).ToUpperInvariant()
+            $instanceName = if ($parts.Count -gt 1) { $parts[1] } else { 'MSSQLSERVER' }
+            "$hostName\$($instanceName.ToUpperInvariant())"
+        }
+        $expectedNodeNames = @($recoveryOwner, $otherNode) | Where-Object { $_ }
+        $expectedReplicaSet = @($expectedNodeNames | ForEach-Object {
+                $name = if ($isDefaultInstance) { $_ } else { "$_\$sqlInstName" }
+                & $normalizeReplica $name
+            } | Sort-Object)
+        $isLocalReplica = {
+            param([string]$ReplicaName)
+            $replicaParts = $ReplicaName -split '\\', 2
+            $replicaHost = ($replicaParts[0] -split '\.')[0]
+            $replicaInstance = if ($replicaParts.Count -gt 1) { $replicaParts[1] } else { 'MSSQLSERVER' }
+            return $replicaHost -ieq $env:COMPUTERNAME -and $replicaInstance -ieq $(if ($isDefaultInstance) { 'MSSQLSERVER' } else { $sqlInstName })
+        }
 
         # Live status — Write-Progress records emitted here are confined to this
         # -AsJob nested job; Invoke-VmCommand -PollProgress polls and re-emits the
@@ -2095,8 +2439,10 @@ function Test-SQLAOFunctionality {
                 [string[]]$ExpectedListenerIPs
             )
 
-            $ExpectedClusterIPs = @($ExpectedClusterIPs | Where-Object { $_ } | Sort-Object -Unique)
-            $ExpectedListenerIPs = @($ExpectedListenerIPs | Where-Object { $_ } | Sort-Object -Unique)
+            $rawExpectedClusterIPs = @($ExpectedClusterIPs | Where-Object { $_ })
+            $rawExpectedListenerIPs = @($ExpectedListenerIPs | Where-Object { $_ })
+            $ExpectedClusterIPs = @($rawExpectedClusterIPs | Sort-Object -Unique)
+            $ExpectedListenerIPs = @($rawExpectedListenerIPs | Sort-Object -Unique)
             $ExpectedIPs = @($ExpectedClusterIPs + $ExpectedListenerIPs | Sort-Object -Unique)
             $entries = @($Resources | ForEach-Object {
                     [pscustomobject]@{
@@ -2110,6 +2456,14 @@ function Test-SQLAOFunctionality {
             $details = [System.Collections.Generic.List[string]]::new()
             $expectedStandbyNames = [System.Collections.Generic.List[string]]::new()
             $passed = $true
+            if ($rawExpectedClusterIPs.Count -ne $ExpectedClusterIPs.Count) {
+                $passed = $false
+                $details.Add("FAIL: Expected core cluster IP list contains duplicates: $($rawExpectedClusterIPs -join ', ')")
+            }
+            if ($rawExpectedListenerIPs.Count -ne $ExpectedListenerIPs.Count) {
+                $passed = $false
+                $details.Add("FAIL: Expected listener IP list contains duplicates: $($rawExpectedListenerIPs -join ', ')")
+            }
             if ($ExpectedIPs.Count -gt 0) {
                 foreach ($expectedIp in $ExpectedIPs) {
                     $matches = @($entries | Where-Object { $_.Address -eq $expectedIp })
@@ -2152,9 +2506,9 @@ function Test-SQLAOFunctionality {
                         $passed = $false
                         $details.Add("FAIL: Multi-subnet IP resource '$($entry.Name)' is $($entry.State), expected Online or Offline")
                     }
-                    if ($online.Count -lt 1) {
+                    if ($online.Count -ne 1) {
                         $passed = $false
-                        $details.Add("FAIL: Multi-subnet resource group '$($group.Name)' has no online IP resource")
+                        $details.Add("FAIL: Multi-subnet resource group '$($group.Name)' has $($online.Count) online IP resources, expected exactly one")
                     }
                     elseif ($badStates.Count -eq 0) {
                         $offlineStandby = @($desiredEntries | Where-Object { $_.State -eq 'Offline' })
@@ -2275,6 +2629,7 @@ function Test-SQLAOFunctionality {
                 # informational only.
                 if ($clusterName) {
                     $clusterResolvedIPs = @()
+                    $clusterDnsEntries = @()
                     $clusterDnsSource = ''
                     $clusterDnsRpcOk = $false
                     $clusterDnsErr = $null
@@ -2299,11 +2654,14 @@ function Test-SQLAOFunctionality {
                         # "cluster IP not in DNS (found: )" FAIL even though DNS was correct.
                         # Strings serialize losslessly, so do the extraction here.
                         $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                        @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                        @($recs | ForEach-Object {
+                                '{0}|{1}' -f $_.RecordData.IPv4Address.IPAddressToString, [int]$_.TimeToLive.TotalSeconds
+                            })
                     }
                     if ($cwd.Status -eq 'OK') {
                         $clusterDnsRpcOk = $true
-                        $clusterResolvedIPs = @($cwd.Output | Where-Object { $_ })
+                        $clusterDnsEntries = @($cwd.Output | Where-Object { $_ })
+                        $clusterResolvedIPs = @($clusterDnsEntries | ForEach-Object { ($_ -split '\|', 2)[0] })
                     }
                     else {
                         if ($cwd.Status -eq 'Error') {
@@ -2320,27 +2678,33 @@ function Test-SQLAOFunctionality {
                             param($n, $s)
                             # Project to plain IP strings inside the job (Start-Job serialization-safe).
                             $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
-                            @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                            @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object {
+                                    '{0}|{1}' -f $_.IPAddress, [int]$_.TTL
+                                })
                         }
                         if ($cwd2.Status -eq 'OK') {
-                            $clusterResolvedIPs = @($cwd2.Output | Where-Object { $_ })
+                            $clusterDnsEntries = @($cwd2.Output | Where-Object { $_ })
+                            $clusterResolvedIPs = @($clusterDnsEntries | ForEach-Object { ($_ -split '\|', 2)[0] })
                             if ($clusterResolvedIPs.Count -gt 0) { $clusterDnsSource = ' (direct DNS, port 53)' }
                         }
                     }
 
                     if ($clusterResolvedIPs.Count -gt 0) {
                         $results.Details.Add("OK: Cluster name '$clusterName' resolves to $($clusterResolvedIPs -join ', ')$clusterDnsSource")
-                        $activeDnsMatch = @($activeClusterIPs | Where-Object { $_ -in $clusterResolvedIPs })
-                        if ($activeClusterIPs.Count -gt 0 -and $activeDnsMatch.Count -eq 0) {
+                        $expectedClusterDns = @($activeClusterIPs | Sort-Object)
+                        $actualClusterDns = @($clusterResolvedIPs | Sort-Object)
+                        if ($expectedClusterDns.Count -eq 0 -or
+                            $expectedClusterDns.Count -ne $actualClusterDns.Count -or
+                            ($expectedClusterDns -join ',') -ne ($actualClusterDns -join ',')) {
                             $results.Passed = $false
-                            $activeIpText = $activeClusterIPs -join ', '
-                            $results.Details.Add("FAIL: Active cluster IP '$activeIpText' not in DNS (found: $($clusterResolvedIPs -join ', '))")
+                            $results.Details.Add("FAIL: Cluster DNS RRset is '$($actualClusterDns -join ',')', expected exactly active provider '$($expectedClusterDns -join ',')'")
                         }
-                        # Check for stale non-cluster IPs
-                        foreach ($rip in $clusterResolvedIPs) {
-                            if ($clusterIPs.Count -gt 0 -and $rip -notin $clusterIPs) {
-                                $results.Details.Add("WARN: Cluster DNS has unexpected IP '$rip' (expected one of: $($clusterIPs -join ', '))")
-                            }
+                        $wrongClusterTtls = @($clusterDnsEntries | Where-Object {
+                                [int](($_ -split '\|', 2)[1]) -ne $listenerHostRecordTTL
+                            })
+                        if ($wrongClusterTtls.Count -gt 0) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Cluster DNS TTL differs from expected $listenerHostRecordTTL second(s): $($wrongClusterTtls -join ', ')")
                         }
                     }
                     elseif ($clusterDnsRpcOk) {
@@ -2602,7 +2966,8 @@ function Test-SQLAOFunctionality {
                     # No default gateway on heartbeat NIC
                     $gw = Get-NetRoute -InterfaceIndex $hb.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue
                     if ($gw) {
-                        $results.Details.Add("WARN: Heartbeat adapter '$($hb.Name)' has a default gateway")
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Heartbeat adapter '$($hb.Name)' has a default gateway")
                     }
                 }
 
@@ -2624,10 +2989,12 @@ function Test-SQLAOFunctionality {
                     $roleDesc = switch ([int]$cn.Role) { 0 { 'None' }; 1 { 'Cluster Only' }; 3 { 'Cluster + Client' }; default { "Unknown ($($cn.Role))" } }
                     $isHeartbeat = $cn.Address -like "${clusterSubnet}*"
                     if ($isHeartbeat -and $cn.Role -ne 1) {
-                        $results.Details.Add("WARN: Heartbeat network '$($cn.Name)' ($($cn.Address)) role is '$roleDesc' (expected 'Cluster Only')")
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Heartbeat network '$($cn.Name)' ($($cn.Address)) role is '$roleDesc' (expected 'Cluster Only')")
                     }
                     elseif (-not $isHeartbeat -and $cn.Role -ne 3) {
-                        $results.Details.Add("WARN: Domain network '$($cn.Name)' ($($cn.Address)) role is '$roleDesc' (expected 'Cluster + Client')")
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Domain network '$($cn.Name)' ($($cn.Address)) role is '$roleDesc' (expected 'Cluster + Client')")
                     }
                     else {
                         $results.Details.Add("OK: Network '$($cn.Name)' ($($cn.Address)) role is '$roleDesc'")
@@ -2652,18 +3019,40 @@ function Test-SQLAOFunctionality {
                     }
                     $coreClusterGroupName = [string]$clusNameRes.OwnerGroup.Name
                     $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction Stop).Value
-                    if ($null -ne $regAll -and $regAll -ne 0) {
-                        $results.Details.Add("WARN: Cluster Name RegisterAllProvidersIP = $regAll (expected 0)")
-                    }
-                    elseif ($null -eq $regAll) {
-                        $results.Details.Add("WARN: Cluster Name RegisterAllProvidersIP has no value (expected 0)")
+                    $coreTtl = ($clusNameRes | Get-ClusterParameter -Name HostRecordTTL -ErrorAction Stop).Value
+                    if ($null -eq $regAll -or [uint32]$regAll -ne 0 -or [uint32]$coreTtl -ne [uint32]$listenerHostRecordTTL) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Cluster Name DNS parameters are RegisterAllProvidersIP='$regAll', HostRecordTTL='$coreTtl' (expected 0/$listenerHostRecordTTL)")
                     }
                     else {
-                        $results.Details.Add("OK: Cluster Name RegisterAllProvidersIP = 0")
+                        $results.Details.Add("OK: Cluster Name RegisterAllProvidersIP = 0, HostRecordTTL = $coreTtl")
                     }
                 }
                 catch {
-                    $results.Details.Add("WARN: Could not check RegisterAllProvidersIP: $($_.Exception.Message)")
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Could not validate core Network Name DNS parameters: $($_.Exception.Message)")
+                }
+
+                try {
+                    $listenerNameRes = $networkNameResources | Where-Object {
+                        $resourceDnsName = ($_ | Get-ClusterParameter -Name DnsName -ErrorAction SilentlyContinue).Value
+                        $_.Name -ieq $listenerName -or $resourceDnsName -ieq $listenerName
+                    } | Select-Object -First 1
+                    if (-not $listenerNameRes) { throw "Could not find listener Network Name resource '$listenerName'" }
+                    $listenerRegAll = ($listenerNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction Stop).Value
+                    $listenerTtl = ($listenerNameRes | Get-ClusterParameter -Name HostRecordTTL -ErrorAction Stop).Value
+                    $expectedRegAll = [uint32][bool]$listenerRegisterAllProvidersIP
+                    if ([uint32]$listenerRegAll -ne $expectedRegAll -or [uint32]$listenerTtl -ne [uint32]$listenerHostRecordTTL) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Listener DNS parameters are RegisterAllProvidersIP='$listenerRegAll', HostRecordTTL='$listenerTtl' (expected $expectedRegAll/$listenerHostRecordTTL)")
+                    }
+                    else {
+                        $results.Details.Add("OK: Listener RegisterAllProvidersIP = $listenerRegAll, HostRecordTTL = $listenerTtl")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Could not validate listener Network Name DNS parameters: $($_.Exception.Message)")
                 }
 
                 # Cluster Group IP resources should be on a domain network, not heartbeat.
@@ -2791,13 +3180,13 @@ JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group
 JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
 WHERE drs.is_local = 1 AND drs.is_suspended = 1
 "@
-            $suspended = @(Invoke-Sqlcmd -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            $suspended = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
             if ($suspended.Count -gt 0) {
                 foreach ($db in $suspended) {
                     $results.Details.Add("REMEDIATE: Resuming suspended database '$($db.database_name)' in AG '$($db.GroupName)'")
                     try {
                         $resumeQuery = "ALTER DATABASE [$($db.database_name)] SET HADR RESUME"
-                        Invoke-Sqlcmd -Query $resumeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $resumeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Resumed '$($db.database_name)'")
                     }
                     catch {
@@ -2810,12 +3199,12 @@ WHERE drs.is_local = 1 AND drs.is_suspended = 1
 
             # 2b. Check endpoint state and restart if stopped
             $epQuery = "SELECT name, state_desc FROM sys.database_mirroring_endpoints"
-            $endpoints = @(Invoke-Sqlcmd -Query $epQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            $endpoints = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $epQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
             foreach ($ep in $endpoints) {
                 if ($ep.state_desc -ne 'STARTED') {
                     $results.Details.Add("REMEDIATE: Endpoint '$($ep.name)' is '$($ep.state_desc)', starting it")
                     try {
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Endpoint '$($ep.name)' started")
                         Start-Sleep -Seconds 5
                     }
@@ -2832,8 +3221,8 @@ FROM sys.dm_hadr_availability_replica_states rs
 JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
 WHERE rs.connected_state_desc = 'DISCONNECTED'
 "@
-            $disconnected = @(Invoke-Sqlcmd -Query $disconnectedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
-            if ($disconnected.Count -gt 0) {
+            $disconnected = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $disconnectedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            if ($disconnected.Count -gt 0 -and $env:COMPUTERNAME -ieq $recoveryOwner) {
                 $localDisc = @($disconnected | Where-Object { $_.is_local -eq 1 })
                 $remoteDisc = @($disconnected | Where-Object { $_.is_local -eq 0 })
                 if ($localDisc.Count -gt 0) {
@@ -2844,9 +3233,9 @@ WHERE rs.connected_state_desc = 'DISCONNECTED'
                 }
                 foreach ($ep in $endpoints) {
                     try {
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STOPPED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name)] STATE = STOPPED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         Start-Sleep -Seconds 5
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Cycled endpoint '$($ep.name)' (STOPPED -> STARTED)")
                     }
                     catch {
@@ -2857,12 +3246,12 @@ WHERE rs.connected_state_desc = 'DISCONNECTED'
                 Start-Sleep -Seconds 20
 
                 # Re-check for suspended databases after reconnect and resume them
-                $suspended2 = @(Invoke-Sqlcmd -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+                $suspended2 = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
                 if ($suspended2.Count -gt 0) {
                     foreach ($db2 in $suspended2) {
                         $results.Details.Add("REMEDIATE: Resuming database '$($db2.database_name)' after endpoint cycle")
                         try {
-                            Invoke-Sqlcmd -Query "ALTER DATABASE [$($db2.database_name)] SET HADR RESUME" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                            Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER DATABASE [$($db2.database_name)] SET HADR RESUME" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                             $results.Details.Add("OK: Resumed '$($db2.database_name)'")
                         }
                         catch {
@@ -2871,6 +3260,9 @@ WHERE rs.connected_state_desc = 'DISCONNECTED'
                     }
                     Start-Sleep -Seconds 10
                 }
+            }
+            elseif ($disconnected.Count -gt 0) {
+                $results.Details.Add("INFO: Endpoint recovery is owned by '$recoveryOwner'; '$env:COMPUTERNAME' will not cycle the shared HADR endpoint")
             }
 
             # ==============================================================
@@ -2890,15 +3282,26 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
             $results.Details.Add("CMD: AG health query with replica detail")
             $maxRetries = 5
             $healthy = $false
+            $agHealthDeferred = $false
             for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
-                $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                try {
+                    $ag = @(Invoke-Sqlcmd -ServerInstance $healthSqlTarget -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                }
+                catch {
+                    $agHealthDeferred = $true
+                    $ag = @()
+                    $results.Details.Add("WARN: Exact AG health query through listener '$healthSqlTarget' failed before listener recovery: $($_.Exception.Message)")
+                    break
+                }
                 if (-not $ag -or $ag.Count -eq 0) {
-                    $results.Passed = $false
                     $results.Details.Add("FAIL: No availability group replicas found")
                     break
                 }
                 $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                if ($unhealthy.Count -eq 0) {
+                $actualReplicaSet = @($ag | ForEach-Object { & $normalizeReplica ([string]$_.Replica) } | Sort-Object)
+                $replicaSetExact = $actualReplicaSet.Count -eq $expectedReplicaSet.Count -and
+                    ($actualReplicaSet -join ',') -eq ($expectedReplicaSet -join ',')
+                if ($unhealthy.Count -eq 0 -and $replicaSetExact) {
                     $healthy = $true
                     foreach ($r in $ag) {
                         $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
@@ -2906,11 +3309,10 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                     break
                 }
                 if ($attempt -lt $maxRetries) {
-                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries — $($unhealthy.Count) replica(s) not healthy, waiting 20s...")
+                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries — replicas='$($actualReplicaSet -join ',')' expected='$($expectedReplicaSet -join ',')', unhealthy=$($unhealthy.Count); waiting 20s...")
                     Start-Sleep -Seconds 20
                 }
                 else {
-                    $results.Passed = $false
                     foreach ($r in $ag) {
                         $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
                         $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
@@ -2926,10 +3328,10 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
             # this validation (the "other" node) so it freshly attempts to
             # connect while we are already up and listening.  If only the
             # local replica shows DISCONNECTED, restart locally instead.
-            if (-not $healthy) {
+            if (-not $healthy -and -not $agHealthDeferred -and $env:COMPUTERNAME -ieq $recoveryOwner) {
                 $stillDisconnected = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' })
-                $localStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.Replica -eq $env:COMPUTERNAME })
-                $remoteStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.Replica -ne $env:COMPUTERNAME })
+                $localStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and (& $isLocalReplica ([string]$_.Replica)) })
+                $remoteStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and -not (& $isLocalReplica ([string]$_.Replica)) })
 
                 if ($stillDisconnected.Count -gt 0) {
                     # Determine restart target: prefer restarting the other node
@@ -2950,23 +3352,26 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                     if ($restartTarget) {
                         try {
                             if ($restartIsRemote) {
-                                Invoke-Command -ComputerName $restartTarget -ScriptBlock {
-                                    Restart-Service MSSQLSERVER -Force -ErrorAction Stop
+                                Invoke-Command -ComputerName $restartTarget -ArgumentList $sqlServiceName -ScriptBlock {
+                                    param($serviceName)
+                                    Restart-Service -Name $serviceName -Force -ErrorAction Stop
                                 } -ErrorAction Stop
                             }
                             else {
-                                Restart-Service MSSQLSERVER -Force -ErrorAction Stop
+                                Restart-Service -Name $sqlServiceName -Force -ErrorAction Stop
                             }
                             Start-Sleep -Seconds 30
                             $results.Details.Add("OK: SQL Server on '$restartTarget' restarted, rechecking AG health")
 
                             # Re-run health check after restart
                             for ($attempt2 = 1; $attempt2 -le 5; $attempt2++) {
-                                $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                                $ag = @(Invoke-Sqlcmd -ServerInstance $healthSqlTarget -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                                 $unhealthy2 = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                                if ($unhealthy2.Count -eq 0) {
+                                $actualReplicaSet2 = @($ag | ForEach-Object { & $normalizeReplica ([string]$_.Replica) } | Sort-Object)
+                                $replicaSetExact2 = $actualReplicaSet2.Count -eq $expectedReplicaSet.Count -and
+                                    ($actualReplicaSet2 -join ',') -eq ($expectedReplicaSet -join ',')
+                                if ($unhealthy2.Count -eq 0 -and $replicaSetExact2) {
                                     $healthy = $true
-                                    $results.Passed = $true
                                     foreach ($r in $ag) {
                                         $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
                                     }
@@ -2990,9 +3395,12 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                     }
                 }
             }
+            elseif (-not $healthy -and -not $agHealthDeferred) {
+                $results.Details.Add("INFO: AG recovery is owned by '$recoveryOwner'; '$env:COMPUTERNAME' will not perform destructive restart/cycle remediation")
+            }
 
             # 3c. Collect DB-level sync state for diagnostics if still unhealthy
-            if (-not $healthy) {
+            if (-not $healthy -and -not $agHealthDeferred) {
                 $dbStateQuery = @"
 SELECT adb.database_name, drs.synchronization_state_desc, drs.synchronization_health_desc,
        drs.is_suspended, drs.suspend_reason_desc
@@ -3000,11 +3408,16 @@ FROM sys.dm_hadr_database_replica_states drs
 JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
 WHERE drs.is_local = 1
 "@
-                $dbStates = @(Invoke-Sqlcmd -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+                $dbStates = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
                 foreach ($ds in $dbStates) {
                     $suspInfo = if ($ds.is_suspended) { " (SUSPENDED: $($ds.suspend_reason_desc))" } else { '' }
                     $results.Details.Add("  DB '$($ds.database_name)': sync=$($ds.synchronization_state_desc), health=$($ds.synchronization_health_desc)$suspInfo")
                 }
+                if ($actualReplicaSet -and (($actualReplicaSet -join ',') -ne ($expectedReplicaSet -join ',') -or $actualReplicaSet.Count -ne $expectedReplicaSet.Count)) {
+                    $results.Details.Add("FAIL: AG replica set is '$($actualReplicaSet -join ',')', expected exactly '$($expectedReplicaSet -join ',')'")
+                }
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Availability Group replica health did not converge after bounded recovery")
             }
 
             # ==============================================================
@@ -3014,7 +3427,7 @@ WHERE drs.is_local = 1
             if ($agName) {
                 $results.Details.Add("CMD: Check TESTDB membership in AG '$agName'")
                 try {
-                    $agDBs = @(Invoke-Sqlcmd -Query "SELECT database_name FROM sys.availability_databases_cluster" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                    $agDBs = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "SELECT database_name FROM sys.availability_databases_cluster" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                     if ($agDBs.database_name -contains 'TESTDB') {
                         $results.Details.Add("OK: TESTDB is a member of the availability group")
                     }
@@ -3064,6 +3477,7 @@ WHERE drs.is_local = 1
                 }
                 else {
                     $resolvedIPs = @()
+                    $listenerDnsEntries = @()
                     $sourceNote = ''
                     $rpcStatus = 'Skipped'
                     foreach ($candidate in $dnsCandidates) {
@@ -3074,11 +3488,14 @@ WHERE drs.is_local = 1
                             # deserialized CIM records lose RecordData.IPv4Address otherwise,
                             # producing a spurious blank "'<listener>' resolves to" line.
                             $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                            @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                            @($recs | ForEach-Object {
+                                    '{0}|{1}' -f $_.RecordData.IPv4Address.IPAddressToString, [int]$_.TimeToLive.TotalSeconds
+                                })
                         }
                         $rpcStatus = $wd.Status
                         if ($wd.Status -eq 'OK') {
-                            $resolvedIPs = @($wd.Output | Where-Object { $_ })
+                            $listenerDnsEntries = @($wd.Output | Where-Object { $_ })
+                            $resolvedIPs = @($listenerDnsEntries | ForEach-Object { ($_ -split '\|', 2)[0] })
                             $attemptNote = if ($wd.Attempts -gt 1) { ", attempt $($wd.Attempts)" } else { '' }
                             if ($candidate -ne $dnsCandidates[0] -or $wd.Attempts -gt 1) {
                                 $sourceNote = " (via '$candidate'$attemptNote)"
@@ -3102,10 +3519,13 @@ WHERE drs.is_local = 1
                                 param($n, $s)
                                 # Project to plain IP strings inside the job (Start-Job-safe).
                                 $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
-                                @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                                @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object {
+                                        '{0}|{1}' -f $_.IPAddress, [int]$_.TTL
+                                    })
                             }
                             if ($wd2.Status -eq 'OK') {
-                                $resolvedIPs = @($wd2.Output | Where-Object { $_ })
+                                $listenerDnsEntries = @($wd2.Output | Where-Object { $_ })
+                                $resolvedIPs = @($listenerDnsEntries | ForEach-Object { ($_ -split '\|', 2)[0] })
                                 if ($resolvedIPs.Count -gt 0) {
                                     $sourceNote = " (direct DNS via '$candidate')"
                                     break
@@ -3116,16 +3536,25 @@ WHERE drs.is_local = 1
 
                     if ($resolvedIPs.Count -gt 0) {
                         $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$sourceNote")
-                        $activeListenerMatch = @($activeAgIPs | Where-Object { $_ -in $resolvedIPs })
-                        if ($activeAgIPs.Count -gt 0 -and $activeListenerMatch.Count -eq 0) {
-                            $activeListenerText = $activeAgIPs -join ', '
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: Active AG listener IP '$activeListenerText' not in resolved addresses")
+                        $expectedListenerDns = if ($listenerRegisterAllProvidersIP) {
+                            @($agIPs | Sort-Object)
                         }
-                        foreach ($resolvedIp in $resolvedIPs) {
-                            if ($agIPs.Count -gt 0 -and $resolvedIp -notin $agIPs) {
-                                $results.Details.Add("WARN: Listener DNS returned unexpected IP '$resolvedIp' (expected one of: $($agIPs -join ', '))")
-                            }
+                        else {
+                            @($activeAgIPs | Sort-Object)
+                        }
+                        $actualListenerDns = @($resolvedIPs | Sort-Object)
+                        if ($expectedListenerDns.Count -eq 0 -or
+                            $expectedListenerDns.Count -ne $actualListenerDns.Count -or
+                            ($expectedListenerDns -join ',') -ne ($actualListenerDns -join ',')) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Listener DNS RRset is '$($actualListenerDns -join ',')', expected exactly '$($expectedListenerDns -join ',')' for RegisterAllProvidersIP=$([uint32][bool]$listenerRegisterAllProvidersIP)")
+                        }
+                        $wrongListenerTtls = @($listenerDnsEntries | Where-Object {
+                                [int](($_ -split '\|', 2)[1]) -ne $listenerHostRecordTTL
+                            })
+                        if ($wrongListenerTtls.Count -gt 0) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Listener DNS TTL differs from expected $listenerHostRecordTTL second(s): $($wrongListenerTtls -join ', ')")
                         }
                     }
                     elseif ($rpcStatus -eq 'OK') {
@@ -3159,9 +3588,8 @@ WHERE drs.is_local = 1
                     $results.Details.Add("WARN: SQL connection via listener '$listenerConnStr' did not complete after $($wd.Attempts) attempts (30s each); skipping. $($wd.AttemptLog -join '; ')")
                 }
                 elseif ($wd.Status -eq 'Error') {
-                    $results.Passed = $false
                     $errMsg = if ($wd.Errors -and $wd.Errors[0].Exception) { $wd.Errors[0].Exception.Message } else { ($wd.Errors -join '; ') }
-                    $results.Details.Add("FAIL: SQL connection via listener '$listenerConnStr' failed: $errMsg")
+                    $results.Details.Add("WARN: Initial SQL connection via listener '$listenerConnStr' failed: $errMsg")
                 }
                 else {
                     $lr = $wd.Output
@@ -3171,8 +3599,7 @@ WHERE drs.is_local = 1
                         $listenerSqlOk = $true
                     }
                     else {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: Listener query returned unexpected result")
+                        $results.Details.Add("WARN: Initial listener query returned unexpected result")
                     }
                 }
 
@@ -3189,51 +3616,34 @@ WHERE drs.is_local = 1
                 # DNS registration, on Online the cluster re-registers an
                 # A record for whichever IP is currently active. Do this
                 # once and retry the listener SQL connect.
-                if (-not $listenerSqlOk -and $agName) {
+                if (-not $listenerSqlOk -and $agName -and $env:COMPUTERNAME -ieq $recoveryOwner) {
                     try {
                         $agGroup = Get-ClusterGroup -Name $agName -ErrorAction Stop
                         $agIpResources = @(Get-ClusterResource -ErrorAction Stop |
                             Where-Object { $_.OwnerGroup -eq $agName -and $_.ResourceType -eq 'IP Address' })
                         if ($agIpResources.Count -gt 0 -and $agGroup.State -eq 'Online') {
-                            $ipNames = ($agIpResources | ForEach-Object { $_.Name }) -join ', '
-                            $results.Details.Add("REMEDIATE: Listener SQL connect failed; cycling AG IP resource(s) [$ipNames] to force DNS re-registration")
-                            foreach ($ipRes in $agIpResources) {
-                                try {
-                                    $ipRes | Stop-ClusterResource -ErrorAction Stop | Out-Null
-                                }
-                                catch {
-                                    $results.Details.Add("  WARN: Stop-ClusterResource '$($ipRes.Name)' failed: $($_.Exception.Message)")
-                                }
+                            $activeIpResources = @($agIpResources | Where-Object { [string]$_.State -eq 'Online' })
+                            if ($activeIpResources.Count -ne 1) {
+                                throw "Listener group has $($activeIpResources.Count) online IP providers; expected exactly one before recovery."
                             }
+                            $activeIp = $activeIpResources[0]
+                            $results.Details.Add("REMEDIATE: Listener SQL connect failed; cycling active AG IP resource '$($activeIp.Name)' while leaving inactive-subnet providers offline")
+                            $activeIp | Stop-ClusterResource -ErrorAction Stop | Out-Null
                             Start-Sleep -Seconds 5
-                            foreach ($ipRes in $agIpResources) {
-                                try {
-                                    $ipRes | Start-ClusterResource -ErrorAction Stop | Out-Null
-                                }
-                                catch {
-                                    $results.Details.Add("  WARN: Start-ClusterResource '$($ipRes.Name)' failed: $($_.Exception.Message)")
-                                }
-                            }
-                            # Also start the AG group so the Network Name +
-                            # AG resources come back up if cycling the IP
-                            # took dependents offline.
+                            $activeIp | Start-ClusterResource -ErrorAction Stop | Out-Null
                             try { Start-ClusterGroup -Name $agName -ErrorAction SilentlyContinue | Out-Null } catch { }
 
-                            # Wait up to 60s for the IPs and the listener
-                            # Network Name resource to be Online again.
+                            # Wait up to 60s for the active provider and listener
+                            # Network Name. Inactive subnet providers must stay Offline.
                             $deadline = (Get-Date).AddSeconds(60)
                             do {
                                 Start-Sleep -Seconds 5
-                                $allOnline = $true
-                                foreach ($ipRes in $agIpResources) {
-                                    $st = (Get-ClusterResource -Name $ipRes.Name -ErrorAction SilentlyContinue).State
-                                    if ($st -ne 'Online') { $allOnline = $false; break }
-                                }
-                                if ($allOnline -and $listenerName) {
+                                $ready = [string](Get-ClusterResource -Name $activeIp.Name -ErrorAction SilentlyContinue).State -eq 'Online'
+                                if ($ready -and $listenerName) {
                                     $nn = Get-ClusterResource -Name $listenerName -ErrorAction SilentlyContinue
-                                    if ($nn -and $nn.State -ne 'Online') { $allOnline = $false }
+                                    if ($nn -and $nn.State -ne 'Online') { $ready = $false }
                                 }
-                            } while (-not $allOnline -and (Get-Date) -lt $deadline)
+                            } while (-not $ready -and (Get-Date) -lt $deadline)
                             $finalStates = ($agIpResources | ForEach-Object { "$($_.Name)=$((Get-ClusterResource -Name $_.Name -ErrorAction SilentlyContinue).State)" }) -join ', '
                             $results.Details.Add("  Post-cycle states: $finalStates")
 
@@ -3256,6 +3666,47 @@ WHERE drs.is_local = 1
                         $results.Details.Add("WARN: AG IP recycle remediation failed: $($_.Exception.Message)")
                     }
                 }
+                elseif (-not $listenerSqlOk -and $agName) {
+                    $results.Details.Add("INFO: Listener recovery is owned by '$recoveryOwner'; '$env:COMPUTERNAME' will only report the final connectivity result")
+                }
+
+                if (-not $listenerSqlOk) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SQL connection via listener '$listenerConnStr' did not succeed after bounded recovery")
+                }
+            }
+
+            if ($agHealthDeferred) {
+                if ($listenerSqlOk) {
+                    $results.Details.Add("CMD: Exact AG health query through '$healthSqlTarget' after listener recovery")
+                    $agWd = Invoke-WithWatchdog -TimeoutSec 30 -MaxAttempts 2 -ArgumentList @($healthSqlTarget, $healthQuery) -ScriptBlock {
+                        param($target, $query)
+                        Invoke-Sqlcmd -ServerInstance $target -Query $query -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                    }
+                    if ($agWd.Status -eq 'OK') {
+                        $ag = @($agWd.Output)
+                        $actualReplicaSet = @($ag | ForEach-Object { & $normalizeReplica ([string]$_.Replica) } | Sort-Object)
+                        $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' -or $_.ConnState -ne 'CONNECTED' })
+                        $replicaSetExact = $actualReplicaSet.Count -eq $expectedReplicaSet.Count -and
+                            ($actualReplicaSet -join ',') -eq ($expectedReplicaSet -join ',')
+                        if ($replicaSetExact -and $unhealthy.Count -eq 0) {
+                            $healthy = $true
+                            $results.Details.Add("OK: Exact AG health query succeeded after listener recovery for '$($actualReplicaSet -join ',')'")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Post-recovery AG state has replicas '$($actualReplicaSet -join ',')' with $($unhealthy.Count) unhealthy/disconnected row(s); expected '$($expectedReplicaSet -join ',')'")
+                        }
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Exact AG health query still unavailable after listener recovery (status=$($agWd.Status))")
+                    }
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Exact AG health could not be measured because listener recovery did not restore connectivity")
+                }
             }
 
             # ==============================================================
@@ -3266,12 +3717,8 @@ WHERE drs.is_local = 1
             # via the OS resolver -- the WARN would be misleading. Demote
             # to INFO. Only emit a real WARN when neither path worked.
             if ($dnsProbeFailureMsg) {
-                if ($listenerSqlOk) {
-                    $results.Details.Add("INFO: $dnsProbeFailureMsg, but SQL listener connect in Step 6 succeeded -- DNS is functional via the OS resolver; explicit zone probe is informational only")
-                }
-                else {
-                    $results.Details.Add("WARN: $dnsProbeFailureMsg; skipping listener DNS check")
-                }
+                $results.Passed = $false
+                $results.Details.Add("FAIL: $dnsProbeFailureMsg; exact listener DNS RRset and TTL could not be validated")
             }
 
             # ==============================================================
@@ -3365,14 +3812,14 @@ WHERE drs.is_local = 1
             Write-Progress -Activity $progressActivity -Status "Verifying TESTDB recovery model and log backups"
             if ($otherNode -and $healthy) {
                 $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
-                $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
+                $localRole = (Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
 
                 if ($localRole -eq 'PRIMARY') {
                     # 8a. Recovery model must be FULL for AG databases
                     $results.Details.Add("CMD: Check TESTDB recovery model")
                     try {
                         $rmQuery = "SELECT name, recovery_model_desc FROM sys.databases WHERE name = 'TESTDB'"
-                        $rmResult = Invoke-Sqlcmd -Query $rmQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $rmResult = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $rmQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         if ($rmResult.recovery_model_desc -eq 'FULL') {
                             $results.Details.Add("OK: TESTDB recovery model is FULL")
                         }
@@ -3401,7 +3848,7 @@ LEFT JOIN (
 ) h ON h.job_id = j.job_id AND h.rn = 1
 WHERE j.name LIKE 'MemLabs DatabaseBackup%'
 "@
-                        $jobs = @(Invoke-Sqlcmd -Query $jobQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                        $jobs = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $jobQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                         if ($jobs.Count -eq 0) {
                             $results.Passed = $false
                             $results.Details.Add("FAIL: No MemLabs DatabaseBackup agent jobs found")
@@ -3450,7 +3897,7 @@ EXECUTE [dbo].[DatabaseBackup]
     @LogToTable = 'Y',
     @ChangeBackupType = 'Y'
 "@
-                        Invoke-Sqlcmd -Query $agBackupQuery -QueryTimeout 120 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $agBackupQuery -QueryTimeout 120 -TrustServerCertificate -ErrorAction Stop
                         $activeTestMsg = "OK: AG log backup completed successfully on primary"
                         if ($agJobLastRunFailed) {
                             $activeTestMsg += " (scheduled job failure above was transient)"
@@ -3464,12 +3911,12 @@ EXECUTE [dbo].[DatabaseBackup]
                     # 8c. Run a log backup and verify log space is recycled
                     $results.Details.Add("CMD: BACKUP LOG [TESTDB] TO DISK = 'NUL' (validate log backup works)")
                     try {
-                        Invoke-Sqlcmd -Query "BACKUP LOG [TESTDB] TO DISK = 'NUL'" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "BACKUP LOG [TESTDB] TO DISK = 'NUL'" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Log backup of TESTDB completed successfully")
 
                         # After a successful log backup, log_reuse_wait should no longer be LOG_BACKUP
                         $logQuery = "SELECT log_reuse_wait_desc FROM sys.databases WHERE name = 'TESTDB'"
-                        $logResult = Invoke-Sqlcmd -Query $logQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $logResult = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $logQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $waitReason = $logResult.log_reuse_wait_desc
                         if ($waitReason -eq 'LOG_BACKUP') {
                             $results.Details.Add("WARN: TESTDB log_reuse_wait is still LOG_BACKUP after backup (may need a checkpoint)")
@@ -3493,7 +3940,7 @@ EXECUTE [dbo].[DatabaseBackup]
                 # Reuse localRole from check #8 if available, otherwise query it
                 if (-not $localRole) {
                     $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
-                    $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
+                    $localRole = (Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
                 }
 
                 $secondaryConnStr = $otherNode
@@ -3513,7 +3960,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'MemLabsValidation' AND ty
 DELETE FROM dbo.MemLabsValidation WHERE CreatedAt < DATEADD(HOUR, -1, SYSUTCDATETIME());
 INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
 "@
-                        Invoke-Sqlcmd -Query $writeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $writeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Wrote test value '$testId' to TESTDB on primary")
 
                         # SynchronousCommit hardens the log on both replicas before commit
@@ -3539,7 +3986,7 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
                     # On secondary role, verify TESTDB is readable
                     $results.Details.Add("CMD: Verify TESTDB readable on secondary role")
                     try {
-                        $readCheck = Invoke-Sqlcmd -Query "USE [TESTDB]; SELECT COUNT(*) AS Cnt FROM sys.tables" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $readCheck = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "USE [TESTDB]; SELECT COUNT(*) AS Cnt FROM sys.tables" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: TESTDB is readable on secondary ($($readCheck.Cnt) user table(s))")
                     }
                     catch {
@@ -3569,7 +4016,7 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
     # 5x20s + AG log backup 120s + endpoint cycling), so a healthy node never
     # hits it; on timeout Invoke-VmCommand returns ScriptBlockFailed and
     # Format-TestResult records a FAIL for the VM and the phase completes.
-    $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, ($clusterIPs -join ','), ($agIPs -join ','))
+    $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, ($clusterIPs -join ','), ($agIPs -join ','), $recoveryOwner, ([string]$listenerRegisterAllProvidersIP), ([string]$listenerHostRecordTTL))
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
         -ArgumentList $validationArguments `
@@ -15345,32 +15792,104 @@ function Test-SQLAOPostPhase5 {
 
     foreach ($primaryAO in $primaryNodes) {
         $VMName = $primaryAO.vmName
-        $listenerName = $primaryAO.AlwaysOnListenerName
-        $agName = $primaryAO.AlwaysOnGroupName
-        $agIP = $primaryAO.AGIPAddress
-        $agIPs = @($primaryAO.AGIPAddresses | ForEach-Object { [string]$_ -replace '/.*$', '' } | Where-Object { $_ })
+        $listenerName = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'AlwaysOnListenerName')
+        $agName = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'AlwaysOnGroupName')
+        $agIP = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'AGIPAddress')
+        $agIPs = @(Get-SqlAoConfigValue -Vm $primaryAO -Name 'AGIPAddresses' -AsArray |
+            ForEach-Object { [string]$_ -replace '/.*$', '' } |
+            Where-Object { $_ })
         if ($agIPs.Count -eq 0 -and $agIP) { $agIPs = @([string]$agIP -replace '/.*$', '') }
-        $clusterName = $primaryAO.ClusterName
-        $clusterIP = $primaryAO.ClusterIPAddress
-        $clusterIPs = @($primaryAO.ClusterIPAddresses | ForEach-Object { [string]$_ -replace '/.*$', '' } | Where-Object { $_ })
+        $clusterName = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'ClusterName')
+        $clusterIP = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'ClusterIPAddress')
+        $clusterIPs = @(Get-SqlAoConfigValue -Vm $primaryAO -Name 'ClusterIPAddresses' -AsArray |
+            ForEach-Object { [string]$_ -replace '/.*$', '' } |
+            Where-Object { $_ })
         if ($clusterIPs.Count -eq 0 -and $clusterIP) { $clusterIPs = @([string]$clusterIP -replace '/.*$', '') }
         $otherNode = $primaryAO.OtherNode
         $listenerPort = '1500'
+        $configuredListenerPort = Get-SqlAoConfigValue -Vm $primaryAO -Name 'SQLAOPort'
+        if ($configuredListenerPort) { $listenerPort = [string]$configuredListenerPort }
+        $listenerRegisterAllProvidersIP = $true
+        $configuredRegisterAll = Get-SqlAoConfigValue -Vm $primaryAO -Name 'ListenerRegisterAllProvidersIP'
+        if ($null -ne $configuredRegisterAll) { $listenerRegisterAllProvidersIP = [bool]$configuredRegisterAll }
+        $listenerHostRecordTTL = 300
+        $configuredTtl = Get-SqlAoConfigValue -Vm $primaryAO -Name 'ListenerHostRecordTTL'
+        if ($configuredTtl) { $listenerHostRecordTTL = [int]$configuredTtl }
 
         $prefix = $DeployConfig.vmOptions.prefix
         $clusterNameNoPrefix = Remove-VmNamePrefix -Name $clusterName -Prefix $prefix
-        $fileServerVM = $primaryAO.fileServerVM
-        $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness"
-        $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"
+        $fileServerVM = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'FileServerVM')
+        if (-not $fileServerVM) { $fileServerVM = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'FileServerName') }
+        $witnessShare = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'WitnessShareFQ')
+        if (-not $witnessShare) { $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness" }
+        $backupShare = [string](Get-SqlAoConfigValue -Vm $primaryAO -Name 'BackupShareFQ')
+        if (-not $backupShare) { $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup" }
+        $sqlInstName = if ($primaryAO.sqlInstanceName) { [string]$primaryAO.sqlInstanceName } else { 'MSSQLSERVER' }
+        $isDefaultInstance = $sqlInstName -ieq 'MSSQLSERVER'
+        $listenerTarget = if ($listenerPort -and [int]$listenerPort -ne 1433) { "$listenerName,$listenerPort" } else { $listenerName }
+        $expectedReplicaNames = @(
+            foreach ($nodeName in @($primaryAO.vmName, $otherNode)) {
+                if ($isDefaultInstance) { $nodeName } else { "$nodeName\$sqlInstName" }
+            }
+        )
+
+        $sqlAoSources = [System.Collections.Generic.List[object]]::new()
+        $sqlAoNotes = @{}
+        foreach ($sqlAoVm in @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+            $sqlAoSources.Add($sqlAoVm)
+            try {
+                $sqlAoNote = Get-VMNote -VMName $sqlAoVm.vmName
+                if ($sqlAoNote) {
+                    $sqlAoNotes[$sqlAoVm.vmName] = $sqlAoNote
+                    $sqlAoSources.Add($sqlAoNote)
+                }
+            }
+            catch {}
+        }
+        $nodeDnsPairs = [System.Collections.Generic.List[string]]::new()
+        $nodeAddressFailure = $false
+        foreach ($nodeName in @($primaryAO.vmName, $otherNode)) {
+            $nodeVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $nodeName } | Select-Object -First 1
+            if (-not $nodeVm) {
+                Add-Phase11Output "[Phase $Phase] $VMName [SQLAO]: FAIL - configured replica '$nodeName' is missing from deployConfig" -Level Failure
+                $nodeAddressFailure = $true
+                continue
+            }
+            $adapterAddresses = @((Get-VMNetworkAdapter -VMName $nodeName -ErrorAction SilentlyContinue).IPAddresses)
+            $nodeState = Resolve-SqlAoNodeAddress -Vm $nodeVm -VmNote $sqlAoNotes[$nodeName] `
+                -AdapterAddresses $adapterAddresses -SqlAoSources $sqlAoSources
+            if (-not $nodeState.Address) {
+                Add-Phase11Output "[Phase $Phase] $VMName [SQLAO]: FAIL - no physical address resolved for '$nodeName' after excluding '$(@($nodeState.ExcludedAddresses) -join ',')'" -Level Failure
+                $nodeAddressFailure = $true
+                continue
+            }
+            $nodeDnsPairs.Add("$nodeName=$($nodeState.Address)")
+        }
+        if ($nodeAddressFailure) {
+            $allPassed = $false
+            continue
+        }
 
         Add-Phase11Output "[Phase $Phase] $VMName [SQLAO]: Running post-Phase-5 validation"
 
         $scriptBlock = {
-            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domainName, $clusterIpCsv, $agIpCsv)
+            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domainName, $clusterIpCsv, $agIpCsv, $listenerTarget, $expectedReplicaCsv, $nodeDnsCsv, $sqlInstName, $listenerRegisterAllProvidersIP, $listenerHostRecordTTL)
 
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
             $clusterIPs = @($clusterIpCsv -split ',' | Where-Object { $_ })
             $agIPs = @($agIpCsv -split ',' | Where-Object { $_ })
+            $expectedReplicas = @($expectedReplicaCsv -split ',' | Where-Object { $_ })
+            $nodeDnsPairs = @($nodeDnsCsv -split ',' | Where-Object { $_ })
+            $listenerRegisterAllProvidersIP = $listenerRegisterAllProvidersIP -eq 'True'
+            $listenerHostRecordTTL = [int]$listenerHostRecordTTL
+            $normalizeReplica = {
+                param([string]$ReplicaName)
+                $parts = $ReplicaName -split '\\', 2
+                $hostName = (($parts[0] -split '\.')[0]).ToUpperInvariant()
+                $instanceName = if ($parts.Count -gt 1) { $parts[1] } else { 'MSSQLSERVER' }
+                "$hostName\$($instanceName.ToUpperInvariant())"
+            }
+            $expectedReplicaSet = @($expectedReplicas | ForEach-Object { & $normalizeReplica $_ } | Sort-Object)
 
             try {
                 Import-Module FailoverClusters -ErrorAction SilentlyContinue
@@ -15405,33 +15924,97 @@ function Test-SQLAOPostPhase5 {
                         Where-Object { $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |
                         ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value } |
                         Where-Object { $_ -in $agIPs })
+                $activeClusterIPs = @(Get-ClusterResource -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |
+                        ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value } |
+                        Where-Object { $_ -in $clusterIPs })
 
-                # 2. Cluster name DNS — query ALL DCs directly to avoid LLMNR.
+                # 2. Physical SQLAO node DNS and SkipAsSource state.
+                $dnsZone = if ($domainName) { $domainName } else { [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName }
+                $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
+                if ($allDCs.Count -eq 0) {
+                    $fallbackDC = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
+                    if ($fallbackDC) { $fallbackDC = $fallbackDC.TrimStart('\\') }
+                    $allDCs = @($fallbackDC | Where-Object { $_ })
+                }
+                foreach ($pair in $nodeDnsPairs) {
+                    if ($pair -notmatch '^([^=]+)=(.+)$') {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Invalid physical-node DNS contract '$pair'")
+                        continue
+                    }
+                    $nodeName = $Matches[1]
+                    $nodeIp = $Matches[2]
+                    foreach ($dc in $allDCs) {
+                        try {
+                            $nodeRecords = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $nodeName -RRType A -ComputerName $dc -ErrorAction Stop)
+                            $nodeRecordIps = @($nodeRecords | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                            if ($nodeRecordIps.Count -ne 1 -or $nodeRecordIps[0] -ne $nodeIp) {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: Physical node '$nodeName' DNS on '$dc' is '$($nodeRecordIps -join ',')', expected exactly '$nodeIp'")
+                            }
+                            else {
+                                $results.Details.Add("OK: Physical node '$nodeName' DNS on '$dc' is exactly '$nodeIp'")
+                            }
+                        }
+                        catch {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Physical node '$nodeName' DNS query on '$dc' failed: $($_.Exception.Message)")
+                        }
+                    }
+                    try {
+                        $addressState = Invoke-Command -ComputerName $nodeName -ArgumentList $nodeIp, ($clusterIPs -join ','), ($agIPs -join ',') -ScriptBlock {
+                            param($expectedIp, $clusterIpCsv, $listenerIpCsv)
+                            $virtualIps = @($clusterIpCsv -split ',' | Where-Object { $_ }) + @($listenerIpCsv -split ',' | Where-Object { $_ })
+                            $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop)
+                            $nodeAddresses = @($addresses | Where-Object { $_.IPAddress -eq $expectedIp })
+                            $badVirtual = @($addresses | Where-Object { $_.IPAddress -in $virtualIps -and -not $_.SkipAsSource })
+                            [pscustomobject]@{
+                                NodeCount = $nodeAddresses.Count
+                                NodeSkipAsSource = if ($nodeAddresses.Count -eq 1) { [bool]$nodeAddresses[0].SkipAsSource } else { $null }
+                                BadVirtualIps = @($badVirtual.IPAddress)
+                            }
+                        } -ErrorAction Stop
+                        if ($addressState.NodeCount -ne 1 -or $addressState.NodeSkipAsSource -or @($addressState.BadVirtualIps).Count -gt 0) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Physical node '$nodeName' SkipAsSource state is invalid (nodeCount=$($addressState.NodeCount), nodeSkip=$($addressState.NodeSkipAsSource), registrableVIPs=$(@($addressState.BadVirtualIps) -join ','))")
+                        }
+                        else {
+                            $results.Details.Add("OK: Physical node '$nodeName' is registrable and all present cluster/listener VIPs are SkipAsSource")
+                        }
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Physical node '$nodeName' SkipAsSource validation failed: $($_.Exception.Message)")
+                    }
+                }
+
+                # 3. Cluster name DNS — query ALL DCs directly to avoid LLMNR.
                 #    With DC + BDC, the record may exist on one but not the other.
                 if ($clusterName) {
-                    $dnsZone = if ($domainName) { $domainName } else { [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName }
-                    $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
-                    if ($allDCs.Count -eq 0) {
-                        $fallbackDC = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
-                        if ($fallbackDC) { $fallbackDC = $fallbackDC.TrimStart('\\') }
-                        $allDCs = @($fallbackDC)
-                    }
                     foreach ($dc in $allDCs) {
                         $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$dnsZone' -Name '$clusterName' -RRType A -ComputerName '$dc'")
                         try {
                             $clusterRecs = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $clusterName -RRType A -ComputerName $dc -ErrorAction Stop)
-                            $resolvedIPs = @($clusterRecs | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
+                            $resolvedIPs = @($clusterRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                             if ($resolvedIPs.Count -eq 0) {
                                 $results.Passed = $false
                                 $results.Details.Add("FAIL: Cluster name '$clusterName' has no A record on DC '$dc'")
                             }
                             else {
                                 $results.Details.Add("OK: Cluster name '$clusterName' has DNS A record(s) on DC '$dc': $($resolvedIPs -join ', ')")
-                                $expectedDnsMatch = @($clusterIPs | Where-Object { $_ -in $resolvedIPs })
-                                if ($clusterIPs.Count -gt 0 -and $expectedDnsMatch.Count -eq 0) {
+                                $expectedCoreDns = @($activeClusterIPs | Sort-Object)
+                                $actualCoreDns = @($resolvedIPs | Sort-Object)
+                                if ($expectedCoreDns.Count -eq 0 -or
+                                    $expectedCoreDns.Count -ne $actualCoreDns.Count -or
+                                    ($expectedCoreDns -join ',') -ne ($actualCoreDns -join ',')) {
                                     $results.Passed = $false
-                                    $expectedIpText = $clusterIPs -join ', '
-                                    $results.Details.Add("FAIL: Expected one of cluster IPs '$expectedIpText' in DNS on DC '$dc' (found: $($resolvedIPs -join ', '))")
+                                    $results.Details.Add("FAIL: Cluster DNS on '$dc' is '$($actualCoreDns -join ',')', expected exactly active provider '$($expectedCoreDns -join ',')'")
+                                }
+                                $wrongCoreTtl = @($clusterRecs | Where-Object { [int]$_.TimeToLive.TotalSeconds -ne $listenerHostRecordTTL })
+                                if ($wrongCoreTtl.Count -gt 0) {
+                                    $results.Passed = $false
+                                    $results.Details.Add("FAIL: Cluster DNS TTL on '$dc' differs from expected $listenerHostRecordTTL second(s)")
                                 }
                             }
                         }
@@ -15442,7 +16025,7 @@ function Test-SQLAOPostPhase5 {
                     }
                 }
 
-                # 3. Phase 5-owned AG health (bounded settle period, no remediation)
+                # 4. Phase 5-owned AG health (bounded settle period, no remediation)
                 $results.Details.Add("CMD: AG replica connectivity + TESTDB health query (up to 5 attempts, 20s apart)")
                 try {
                     $phase5DatabaseName = 'TESTDB'
@@ -15477,7 +16060,7 @@ ORDER BY ar.replica_server_name, adb.database_name
                     $dbStates = @()
                     $healthy = $false
                     for ($attempt = 1; $attempt -le $maxHealthAttempts; $attempt++) {
-                        $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                        $ag = @(Invoke-Sqlcmd -ServerInstance $listenerTarget -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                         if (-not $ag -or $ag.Count -eq 0) {
                             if ($attempt -lt $maxHealthAttempts) {
                                 $results.Details.Add("WARN: AG health attempt $attempt/$maxHealthAttempts returned no replicas; waiting 20s")
@@ -15489,17 +16072,22 @@ ORDER BY ar.replica_server_name, adb.database_name
                             break
                         }
 
-                        $dbStates = @(Invoke-Sqlcmd -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                        $dbStates = @(Invoke-Sqlcmd -ServerInstance $listenerTarget -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                         $disconnected = @($ag | Where-Object { $_.ConnState -ne 'CONNECTED' })
                         $testDbStates = @($dbStates | Where-Object { $_.database_name -eq $phase5DatabaseName })
-                        $testDbReplicas = @($testDbStates | ForEach-Object { "$($_.Replica)" })
-                        $missingTestDb = @($ag | Where-Object { $testDbReplicas -notcontains "$($_.Replica)" })
+                        $actualReplicaSet = @($ag | ForEach-Object { & $normalizeReplica ([string]$_.Replica) } | Sort-Object)
+                        $testDbReplicaSet = @($testDbStates | ForEach-Object { & $normalizeReplica ([string]$_.Replica) } | Sort-Object)
+                        $replicaSetExact = $actualReplicaSet.Count -eq $expectedReplicaSet.Count -and
+                            ($actualReplicaSet -join ',') -eq ($expectedReplicaSet -join ',')
+                        $testDbReplicaSetExact = $testDbReplicaSet.Count -eq $expectedReplicaSet.Count -and
+                            ($testDbReplicaSet -join ',') -eq ($expectedReplicaSet -join ',')
                         $unhealthyTestDb = @($testDbStates | Where-Object {
                                 $_.synchronization_state_desc -ne 'SYNCHRONIZED' -or
                                 $_.synchronization_health_desc -ne 'HEALTHY' -or
                                 $_.is_suspended
                             })
-                        $phase5Healthy = $disconnected.Count -eq 0 -and $missingTestDb.Count -eq 0 -and $unhealthyTestDb.Count -eq 0
+                        $phase5Healthy = $replicaSetExact -and $testDbReplicaSetExact -and
+                            $disconnected.Count -eq 0 -and $unhealthyTestDb.Count -eq 0
 
                         if ($phase5Healthy) {
                             $healthy = $true
@@ -15527,8 +16115,9 @@ ORDER BY ar.replica_server_name, adb.database_name
 
                         if ($attempt -lt $maxHealthAttempts) {
                             $healthSummary = @(
+                                "replicas=$($actualReplicaSet -join '|') expected=$($expectedReplicaSet -join '|')"
+                                "TESTDB=$($testDbReplicaSet -join '|')"
                                 @($disconnected | ForEach-Object { "$($_.Replica)=conn:$($_.ConnState)" })
-                                @($missingTestDb | ForEach-Object { "$($_.Replica)=${phase5DatabaseName}:MISSING" })
                                 @($unhealthyTestDb | ForEach-Object { "$($_.Replica)=${phase5DatabaseName}:$($_.synchronization_state_desc)/$($_.synchronization_health_desc)" })
                             ) -join ', '
                             $results.Details.Add("WARN: Phase 5-owned AG health attempt $attempt/$maxHealthAttempts not ready ($healthSummary); waiting 20s")
@@ -15536,12 +16125,15 @@ ORDER BY ar.replica_server_name, adb.database_name
                         }
                         else {
                             $results.Passed = $false
+                            if (-not $replicaSetExact) {
+                                $results.Details.Add("FAIL: AG replica set is '$($actualReplicaSet -join ',')', expected exactly '$($expectedReplicaSet -join ',')'")
+                            }
+                            if (-not $testDbReplicaSetExact) {
+                                $results.Details.Add("FAIL: TESTDB replica set is '$($testDbReplicaSet -join ',')', expected exactly '$($expectedReplicaSet -join ',')'")
+                            }
                             foreach ($r in $ag) {
                                 $level = if ($r.ConnState -ne 'CONNECTED') { 'FAIL' } else { 'OK' }
                                 $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), aggregate health=$($r.Health)")
-                            }
-                            foreach ($r in $missingTestDb) {
-                                $results.Details.Add("FAIL: Phase 5 DB '$phase5DatabaseName' has no state row for replica '$($r.Replica)'")
                             }
                             foreach ($dbState in $testDbStates) {
                                 $suspendInfo = if ($dbState.is_suspended) { " (SUSPENDED: $($dbState.suspend_reason_desc))" } else { '' }
@@ -15592,19 +16184,28 @@ ORDER BY ar.replica_server_name, adb.database_name
                     }
                     $listenerDnsOk = $true  # will be set to $false if ANY DC is missing
                     $dcsMissingRecord = @()
+                    $expectedListenerDns = if ($listenerRegisterAllProvidersIP) {
+                        @($agIPs | Sort-Object)
+                    }
+                    else {
+                        @($activeAgIPs | Sort-Object)
+                    }
                     foreach ($dc in $allDCs) {
                         $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$dnsZone' -Name '$listenerName' -RRType A -ComputerName '$dc'")
                         try {
                             $listenerRecs = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $listenerName -RRType A -ComputerName $dc -ErrorAction Stop)
-                            $resolvedIPs = @($listenerRecs | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
+                            $resolvedIPs = @($listenerRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                             if ($resolvedIPs.Count -gt 0) {
                                 $results.Details.Add("OK: Listener '$listenerName' has DNS A record(s) on DC '$dc': $($resolvedIPs -join ', ')")
-                                $activeDnsMatch = @($activeAgIPs | Where-Object { $_ -in $resolvedIPs })
-                                if ($activeAgIPs.Count -gt 0 -and $activeDnsMatch.Count -eq 0) {
-                                    $activeAgText = $activeAgIPs -join ', '
+                                $actualListenerDns = @($resolvedIPs | Sort-Object)
+                                $wrongTtl = @($listenerRecs | Where-Object { [int]$_.TimeToLive.TotalSeconds -ne $listenerHostRecordTTL })
+                                if ($expectedListenerDns.Count -eq 0 -or
+                                    $expectedListenerDns.Count -ne $actualListenerDns.Count -or
+                                    ($expectedListenerDns -join ',') -ne ($actualListenerDns -join ',') -or
+                                    $wrongTtl.Count -gt 0) {
                                     $listenerDnsOk = $false
                                     $dcsMissingRecord += $dc
-                                    $results.Details.Add("FAIL: Active AG listener IP '$activeAgText' not in DNS A records on DC '$dc'")
+                                    $results.Details.Add("FAIL: Listener DNS on '$dc' is '$($actualListenerDns -join ',')' with $($wrongTtl.Count) wrong-TTL record(s); expected exactly '$($expectedListenerDns -join ',')' at TTL $listenerHostRecordTTL")
                                 }
                             }
                             else {
@@ -15620,20 +16221,31 @@ ORDER BY ar.replica_server_name, adb.database_name
                         }
                     }
 
-                    # Remediate: if any DC is missing the record, register on
-                    # the first available DC and force AD replication to all.
-                    if (-not $listenerDnsOk -and $activeAgIPs.Count -gt 0) {
-                        $registrationIp = $activeAgIPs[0]
+                    # Remediate the exact listener RRset on one writable DC,
+                    # then replicate and verify exact multiplicity/TTL everywhere.
+                    if (-not $listenerDnsOk -and $expectedListenerDns.Count -gt 0) {
                         $regDC = $allDCs[0]
-                        $results.Details.Add("Attempting to register DNS A record: '$listenerName' -> $registrationIp on DC '$regDC' and replicate")
+                        $results.Details.Add("Attempting to reconcile listener DNS '$listenerName' to [$($expectedListenerDns -join ', ')] on DC '$regDC' and replicate")
                         try {
                             if ($regDC -and $dnsZone) {
-                                # Only add the record if the first DC doesn't already have it
                                 $existingRec = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $listenerName -RRType A -ComputerName $regDC -ErrorAction SilentlyContinue)
-                                $existingIps = @($existingRec | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
-                                if ($registrationIp -notin $existingIps) {
-                                    Add-DnsServerResourceRecordA -ZoneName $dnsZone -Name $listenerName `
-                                        -IPv4Address $registrationIp -ComputerName $regDC -ErrorAction Stop
+                                $seenExpected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                                foreach ($record in $existingRec) {
+                                    $recordIp = $record.RecordData.IPv4Address.IPAddressToString
+                                    $keep = $recordIp -in $expectedListenerDns -and
+                                        -not $seenExpected.Contains($recordIp) -and
+                                        [int]$record.TimeToLive.TotalSeconds -eq $listenerHostRecordTTL
+                                    if ($keep) { $null = $seenExpected.Add($recordIp) }
+                                    if (-not $keep) {
+                                        Remove-DnsServerResourceRecord -ZoneName $dnsZone -InputObject $record -ComputerName $regDC -Force -ErrorAction Stop
+                                    }
+                                }
+                                foreach ($expectedIp in $expectedListenerDns) {
+                                    if (-not $seenExpected.Contains($expectedIp)) {
+                                        Add-DnsServerResourceRecordA -ZoneName $dnsZone -Name $listenerName `
+                                            -IPv4Address $expectedIp -TimeToLive ([TimeSpan]::FromSeconds($listenerHostRecordTTL)) `
+                                            -ComputerName $regDC -ErrorAction Stop
+                                    }
                                 }
 
                                 # Force AD replication so all DCs get the record
@@ -15654,13 +16266,16 @@ ORDER BY ar.replica_server_name, adb.database_name
                                 foreach ($dc in $allDCs) {
                                     $recheck = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $listenerName `
                                         -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
-                                    $recheckIps = @($recheck | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
-                                    if ($registrationIp -in $recheckIps) {
-                                        $results.Details.Add("OK: Active listener DNS A record '$registrationIp' verified on DC '$dc' after remediation")
+                                    $recheckIps = @($recheck | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString } | Sort-Object)
+                                    $wrongTtl = @($recheck | Where-Object { [int]$_.TimeToLive.TotalSeconds -ne $listenerHostRecordTTL })
+                                    if ($recheckIps.Count -eq $expectedListenerDns.Count -and
+                                        ($recheckIps -join ',') -eq ($expectedListenerDns -join ',') -and
+                                        $wrongTtl.Count -eq 0) {
+                                        $results.Details.Add("OK: Exact listener DNS RRset verified on DC '$dc' after remediation")
                                     }
                                     else {
                                         $listenerDnsOk = $false
-                                        $results.Details.Add("FAIL: Active listener DNS A record '$registrationIp' still missing on DC '$dc' after remediation + replication")
+                                        $results.Details.Add("FAIL: Listener DNS on '$dc' remains '$($recheckIps -join ',')' with $($wrongTtl.Count) wrong-TTL record(s) after remediation")
                                     }
                                 }
                             }
@@ -15673,7 +16288,7 @@ ORDER BY ar.replica_server_name, adb.database_name
                         }
                     }
                     elseif (-not $listenerDnsOk) {
-                        $results.Details.Add("FAIL: Listener DNS is missing and no online configured listener IP could be identified; refusing to synthesize an A record")
+                        $results.Details.Add("FAIL: Listener DNS is invalid and no expected provider set could be identified; refusing to synthesize records")
                     }
                     if (-not $listenerDnsOk) {
                         $results.Passed = $false
@@ -15743,11 +16358,16 @@ ORDER BY ar.replica_server_name, adb.database_name
             return $results
         }
 
-        $validationArguments = @($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domain, ($clusterIPs -join ','), ($agIPs -join ','))
+        $validationArguments = @(
+            $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare,
+            $agIP, $clusterName, $clusterIP, $domain, ($clusterIPs -join ','), ($agIPs -join ','),
+            $listenerTarget, ($expectedReplicaNames -join ','), ($nodeDnsPairs -join ','), $sqlInstName,
+            ([string]$listenerRegisterAllProvidersIP), ([string]$listenerHostRecordTTL)
+        )
         $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock $scriptBlock `
             -ArgumentList $validationArguments `
-            -DisplayName "Phase5-SQLAO-Validate" -SuppressLog
+            -DisplayName "Phase5-SQLAO-Validate" -SuppressLog -AsJob -TimeoutSeconds 600
 
         # Process results inline (Format-TestResult hardcodes Phase 11)
         if (-not $result -or $result.ScriptBlockFailed) {

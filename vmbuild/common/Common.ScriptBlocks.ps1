@@ -4347,12 +4347,9 @@ $global:VM_Config = {
                 }
             }
 
-            # Persist the VM's real IP as LastKnownIP. Priority:
-            # 1. DHCP reservation (authoritative — created by us in Phase 1)
-            # 2. AssignedIP from deployConfig (set before Phase 1)
-            # 3. GetIPs from guest, filtered to exclude SQLAO virtual IPs
-            # LastKnownIP from a previous run is NOT used here — it may
-            # itself have been poisoned by a virtual IP (the bug we're fixing).
+            # Persist the VM's real IP as LastKnownIP. SQLAO nodes use the shared
+            # physical-node resolver so every singular/plural VIP and heartbeat
+            # address is excluded before any adapter candidate can be selected.
             if ($success -and $IPAddress.ScriptBlockOutput) {
                 $resolvedIP = $null
                 $ipSource = 'none'
@@ -4391,51 +4388,40 @@ $global:VM_Config = {
                 }
                 catch {}
 
-                # 2. AssignedIP from pre-Phase-1 allocation
-                if (-not $resolvedIP -and $currentItem.AssignedIP) {
-                    $resolvedIP = $currentItem.AssignedIP
-                    $ipSource = 'AssignedIP'
-                }
-
-                # 3. GetIPs result, filtered for SQLAO virtual IPs
-                if (-not $resolvedIP) {
-                    # Build exclusion set from SQLAO virtual IPs in deployConfig
-                    $sqlaoExclude = [System.Collections.Generic.HashSet[string]]::new()
-                    foreach ($sqlaoVm in ($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-                        if ($sqlaoVm.ClusterIPAddress)    { $null = $sqlaoExclude.Add(($sqlaoVm.ClusterIPAddress -replace '/\d+$','')) }
-                        if ($sqlaoVm.AGIPAddress)         { $null = $sqlaoExclude.Add(($sqlaoVm.AGIPAddress -replace '/\d+$','')) }
-                        if ($sqlaoVm.ClusterHeartbeatIP)  { $null = $sqlaoExclude.Add($sqlaoVm.ClusterHeartbeatIP) }
-                    }
-                    # Also check VM Notes for the IPs (available on reruns)
-                    if ($sqlaoExclude.Count -eq 0 -and $currentItem.role -eq 'SQLAO') {
+                if ($currentItem.role -eq 'SQLAO') {
+                    $currentVmNote = $null
+                    $sqlAoSources = [System.Collections.Generic.List[object]]::new()
+                    foreach ($sqlAoVm in @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+                        $sqlAoSources.Add($sqlAoVm)
                         try {
-                            foreach ($sqlaoVm in ($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-                                $note = Get-VMNote -VMName $sqlaoVm.vmName
-                                if ($note) {
-                                    if ($note.ClusterIPAddress)    { $null = $sqlaoExclude.Add(($note.ClusterIPAddress -replace '/\d+$','')) }
-                                    if ($note.AGIPAddress)         { $null = $sqlaoExclude.Add(($note.AGIPAddress -replace '/\d+$','')) }
-                                    if ($note.ClusterHeartbeatIP)  { $null = $sqlaoExclude.Add($note.ClusterHeartbeatIP) }
-                                }
+                            $sqlAoNote = Get-VMNote -VMName $sqlAoVm.vmName
+                            if ($sqlAoNote) {
+                                $sqlAoSources.Add($sqlAoNote)
+                                if ($sqlAoVm.vmName -eq $currentItem.vmName) { $currentVmNote = $sqlAoNote }
                             }
-                        } catch {}
-                    }
-
-                    $filteredIPs = @($IPAddress.ScriptBlockOutput | Where-Object {
-                        $_ -and
-                        -not $_.StartsWith("169.254") -and
-                        -not $sqlaoExclude.Contains($_)
-                    })
-                    if ($filteredIPs.Count -gt 0) {
-                        $resolvedIP = $filteredIPs[0]
-                        $ipSource = 'GetIPs'
-                        if ($filteredIPs.Count -gt 1 -or $sqlaoExclude.Count -gt 0) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): GetIPs returned $($IPAddress.ScriptBlockOutput -join ', '); after filtering ($($sqlaoExclude.Count) SQLAO IPs): $($filteredIPs -join ', ')" -LogOnly
                         }
+                        catch {}
                     }
-                    else {
-                        # Last resort: take first non-APIPA even if it might be virtual
-                        $resolvedIP = $IPAddress.ScriptBlockOutput | Where-Object { $_ -and -not $_.StartsWith("169.254") } | Select-Object -First 1
-                        if ($resolvedIP) { $ipSource = 'GetIPs-unfiltered' }
+                    $nodeAddress = Resolve-SqlAoNodeAddress -Vm $currentItem -VmNote $currentVmNote `
+                        -DhcpAddress $reservationIP -AdapterAddresses @($IPAddress.ScriptBlockOutput) `
+                        -SqlAoSources $sqlAoSources
+                    $resolvedIP = $nodeAddress.Address
+                    $ipSource = $nodeAddress.Source
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO node resolver selected '$resolvedIP' via $ipSource; adapters='$(@($IPAddress.ScriptBlockOutput) -join ',')'; excluded='$(@($nodeAddress.ExcludedAddresses) -join ',')'" -LogOnly
+                    if (-not $resolvedIP) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not determine a physical SQLAO node IP after excluding all cluster/listener/heartbeat addresses; LastKnownIP was not changed." -Failure
+                    }
+                }
+                else {
+                    if (-not $resolvedIP -and $currentItem.AssignedIP) {
+                        $resolvedIP = $currentItem.AssignedIP
+                        $ipSource = 'AssignedIP'
+                    }
+                    if (-not $resolvedIP) {
+                        $resolvedIP = $IPAddress.ScriptBlockOutput |
+                            Where-Object { $_ -and -not $_.StartsWith('169.254') } |
+                            Select-Object -First 1
+                        if ($resolvedIP) { $ipSource = 'GetIPs' }
                     }
                 }
 
@@ -6430,11 +6416,26 @@ $global:VM_Config = {
         # re-register. No-op (single DC DNS query) on healthy/fresh nodes.
         if ($currentItem.role -eq 'SQLAO' -and $skipStartDsc) {
             $pfFqdn = "$($currentItem.vmName).$($deployConfig.vmOptions.domainName)"
-            $pfOwnIp = $currentItem.AssignedIP
-            if (-not $pfOwnIp) { $pfOwnIp = $currentItem.LastKnownIP }
-            $pfVips = @()
-            foreach ($vp in @('ClusterIPAddress', 'AGIPAddress')) {
-                if ($currentItem.$vp) { $pfVips += ($currentItem.$vp -replace '/\d+$', '') }
+            $pfCurrentNote = $null
+            $pfSources = [System.Collections.Generic.List[object]]::new()
+            foreach ($pfSqlAoVm in @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+                $pfSources.Add($pfSqlAoVm)
+                try {
+                    $pfSqlAoNote = Get-VMNote -VMName $pfSqlAoVm.vmName
+                    if ($pfSqlAoNote) {
+                        $pfSources.Add($pfSqlAoNote)
+                        if ($pfSqlAoVm.vmName -eq $currentItem.vmName) { $pfCurrentNote = $pfSqlAoNote }
+                    }
+                }
+                catch {}
+            }
+            $pfAdapterIps = @((Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction SilentlyContinue).IPAddresses)
+            $pfNodeState = Resolve-SqlAoNodeAddress -Vm $currentItem -VmNote $pfCurrentNote `
+                -AdapterAddresses $pfAdapterIps -SqlAoSources $pfSources
+            $pfOwnIp = $pfNodeState.Address
+            $pfVips = @($pfNodeState.ExcludedAddresses)
+            if (-not $pfOwnIp) {
+                throw "Phase 5 DNS preflight cannot determine the physical IP for SQLAO node '$($currentItem.vmName)'; adapters='$($pfAdapterIps -join ',')', excluded='$($pfVips -join ',')'. Refusing to publish a possible cluster/listener VIP."
             }
             # Ask the DC VM where it actually is. vmOptions.network is the network of the
             # VMs in THIS config, which on an add-to-existing-domain deploy is a DIFFERENT
@@ -6444,6 +6445,7 @@ $global:VM_Config = {
             # back empty and declared "not published" on every phase.
             $pfDcVm = $deployConfig.virtualMachines | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1
             $pfDcVmName = $pfDcVm.vmName
+            if (-not $pfDcVmName) { throw "Phase 5 DNS preflight cannot identify the domain controller VM for '$pfFqdn'." }
             $pfDcIp = $pfDcVm.AssignedIP
             if (-not $pfDcIp) { $pfDcIp = $pfDcVm.LastKnownIP }
             if (-not $pfDcIp) { $pfDcIp = ($deployConfig.vmOptions.network -replace '\.\d+$', '.1') }
@@ -6457,17 +6459,7 @@ $global:VM_Config = {
                 $pfResolvedIps = @($pfResolved | ForEach-Object { $_.IPAddress } | Where-Object { $_ })
                 # A node that resolves ONLY to its cluster VIP(s) still needs its own A
                 # record, so judge "healthy" on the non-VIP records only.
-                $pfNodeOwnResolved = @($pfResolvedIps | Where-Object { $pfVips -notcontains $_ })
-                if ($pfOwnIp) {
-                    if ($pfResolvedIps -notcontains $pfOwnIp) { $needsDnsFix = $true }
-                }
-                elseif (-not $pfNodeOwnResolved.Count) {
-                    # Node's own IP not known host-side: fix unless the DC already
-                    # returns at least one non-VIP A record for this name.
-                    $needsDnsFix = $true
-                }
-                # A cluster VIP published under the node's own name is also wrong.
-                foreach ($v in $pfVips) { if ($pfResolvedIps -contains $v) { $needsDnsFix = $true } }
+                $needsDnsFix = $pfResolvedIps.Count -ne 1 -or $pfResolvedIps[0] -ne $pfOwnIp
             }
             catch {
                 $needsDnsFix = $true
@@ -6535,11 +6527,42 @@ $global:VM_Config = {
                     -ScriptBlock $preflightFix -ArgumentList @($pfNodeSubnet, $pfOwnIp, $pfVips, $pfDcIp, $pfFqdn) `
                     -DisplayName "Ensure node DNS published"
                 if ($pf.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight fix failed: $($pf.ScriptBlockOutput)" -Warning
+                    throw "Phase 5 DNS preflight could not prepare '$($currentItem.vmName)' for safe registration: $($pf.ScriptBlockOutput)"
                 }
                 else {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight fix: $($pf.ScriptBlockOutput)"
                 }
+
+                $pfDnsReconcile = Invoke-VmCommand -VmName $pfDcVmName -VmDomainName $domainName -ArgumentList @(
+                    $deployConfig.vmOptions.domainName, $currentItem.vmName, $pfOwnIp
+                ) -ScriptBlock {
+                    param($zoneName, $recordName, $expectedIp)
+                    $records = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $recordName -RRType A -ErrorAction SilentlyContinue)
+                    $keptExpected = $false
+                    foreach ($record in $records) {
+                        $recordIp = $record.RecordData.IPv4Address.IPAddressToString
+                        if ($recordIp -eq $expectedIp -and -not $keptExpected) {
+                            $keptExpected = $true
+                            continue
+                        }
+                        Remove-DnsServerResourceRecord -ZoneName $zoneName -InputObject $record -Force -ErrorAction Stop
+                    }
+                    if (-not $keptExpected) {
+                        Add-DnsServerResourceRecordA -ZoneName $zoneName -Name $recordName -IPv4Address $expectedIp -ErrorAction Stop
+                    }
+                    $finalRecords = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $recordName -RRType A -ErrorAction Stop)
+                    $finalIps = @($finalRecords | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                    if ($finalIps.Count -ne 1 -or $finalIps[0] -ne $expectedIp) {
+                        throw "DNS postcondition is '$($finalIps -join ',')', expected exactly '$expectedIp'."
+                    }
+                    return $finalIps[0]
+                } -DisplayName "Reconcile physical SQLAO node DNS"
+                if (-not $pfDnsReconcile -or $pfDnsReconcile.ScriptBlockFailed -or
+                    [string]$pfDnsReconcile.ScriptBlockOutput -ne $pfOwnIp) {
+                    $detail = if ($pfDnsReconcile) { $pfDnsReconcile.ScriptBlockOutput } else { 'no result' }
+                    throw "Phase 5 DNS preflight failed exact RRset reconciliation for '$pfFqdn': $detail"
+                }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS preflight reconciled '$pfFqdn' exactly to '$pfOwnIp' on '$pfDcVmName'."
             }
 
             # Flush the DC's resolver cache before the DC pushes DSC to this node --
@@ -9307,20 +9330,29 @@ $global:VM_Config = {
                     }
                     return ($results -join '; ')
                 }
-                # Use the NODE's own network (it may sit on a non-default network),
-                # not vmOptions.network, so the domain NIC is correctly identified.
-                $nodeNetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-                $nodeSubnet = ($nodeNetwork -replace '\.\d+$', '.')
                 $fqdn = "$($currentItem.vmName).$($deployConfig.vmOptions.domainName)"
-                # Pass the node's own IP and the known cluster/AG VIPs so the in-guest
-                # self-heal registers ONLY the node's own IP and marks the VIPs
-                # SkipAsSource (so they never resolve under the node's own name).
-                $nodeOwnIp = $currentItem.AssignedIP
-                if (-not $nodeOwnIp) { $nodeOwnIp = $currentItem.LastKnownIP }
-                $clusterVips = @()
-                foreach ($vipProp in @('ClusterIPAddress', 'AGIPAddress')) {
-                    if ($currentItem.$vipProp) { $clusterVips += ($currentItem.$vipProp -replace '/\d+$', '') }
+                $currentVmNote = $null
+                $sqlAoSources = [System.Collections.Generic.List[object]]::new()
+                foreach ($sqlAoVm in @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+                    $sqlAoSources.Add($sqlAoVm)
+                    try {
+                        $sqlAoNote = Get-VMNote -VMName $sqlAoVm.vmName
+                        if ($sqlAoNote) {
+                            $sqlAoSources.Add($sqlAoNote)
+                            if ($sqlAoVm.vmName -eq $currentItem.vmName) { $currentVmNote = $sqlAoNote }
+                        }
+                    }
+                    catch {}
                 }
+                $adapterIps = @((Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction SilentlyContinue).IPAddresses)
+                $nodeState = Resolve-SqlAoNodeAddress -Vm $currentItem -VmNote $currentVmNote `
+                    -AdapterAddresses $adapterIps -SqlAoSources $sqlAoSources
+                $nodeOwnIp = $nodeState.Address
+                if (-not $nodeOwnIp) {
+                    throw "Cannot scrub SQLAO DNS for '$($currentItem.vmName)' because no physical node IP remained after excluding: $(@($nodeState.ExcludedAddresses) -join ', ')"
+                }
+                $nodeSubnet = ($nodeOwnIp -replace '\.\d+$', '.')
+                $clusterVips = @($nodeState.ExcludedAddresses)
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
                     -ScriptBlock $scrubDns -ArgumentList @($fqdn, $nodeSubnet, $clusterVips, $nodeOwnIp) `
                     -DisplayName "Scrub heartbeat DNS records"

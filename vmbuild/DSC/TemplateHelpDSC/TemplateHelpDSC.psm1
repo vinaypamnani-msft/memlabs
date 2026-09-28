@@ -7183,9 +7183,13 @@ class SqlAoMultiSubnetNetworkName {
         Import-Module FailoverClusters -ErrorAction Stop
         $networkName = $this.GetNetworkNameResource()
         $groupName = [string]$networkName.OwnerGroup.Name
-        $desired = @($this.IPAddresses | ForEach-Object { $this.StripMask($_) } | Sort-Object -Unique)
+        $rawDesired = @($this.IPAddresses | ForEach-Object { $this.StripMask($_) })
+        $desired = @($rawDesired | Sort-Object -Unique)
         if ($desired.Count -eq 0) {
             throw "$($this.Kind) Network Name '$($this.Name)' has no desired IP addresses."
+        }
+        if ($rawDesired.Count -ne $desired.Count) {
+            throw "$($this.Kind) Network Name '$($this.Name)' has duplicate desired IP addresses: $($rawDesired -join ', ')."
         }
 
         $groupIps = @(Get-ClusterResource -Cluster $this.ClusterName -ErrorAction Stop |
@@ -7195,7 +7199,13 @@ class SqlAoMultiSubnetNetworkName {
         foreach ($resource in $groupIps) {
             $byName[[string]$resource.Name] = $resource
             $address = ($resource | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
-            if ($address) { $byAddress[[string]$address] = $resource }
+            if ($address) {
+                $addressKey = [string]$address
+                if (-not $byAddress.ContainsKey($addressKey)) {
+                    $byAddress[$addressKey] = [System.Collections.Generic.List[object]]::new()
+                }
+                $byAddress[$addressKey].Add($resource)
+            }
         }
 
         # Allocate each existing resource to at most one desired address before
@@ -7212,9 +7222,11 @@ class SqlAoMultiSubnetNetworkName {
         }
         foreach ($address in $desired) {
             if ($resourcePlan.ContainsKey($address)) { continue }
-            $addressResource = $byAddress[$address]
-            if ($addressResource -and $claimedResourceNames.Add([string]$addressResource.Name)) {
-                $resourcePlan[$address] = $addressResource
+            $addressResource = @($byAddress[$address] | Where-Object {
+                    -not $claimedResourceNames.Contains([string]$_.Name)
+                } | Sort-Object Name | Select-Object -First 1)
+            if ($addressResource.Count -eq 1 -and $claimedResourceNames.Add([string]$addressResource[0].Name)) {
+                $resourcePlan[$address] = $addressResource[0]
             }
         }
 
@@ -7239,10 +7251,6 @@ class SqlAoMultiSubnetNetworkName {
                 $resourcePlan[$address] = $resource
                 $null = $claimedResourceNames.Add([string]$resource.Name)
             }
-            foreach ($entry in @($byAddress.GetEnumerator() | Where-Object { $_.Value.Name -eq $resource.Name })) {
-                $byAddress.Remove($entry.Key)
-            }
-            $byAddress[$address] = $resource
 
             $desiredParameters = @{
                 Address    = $address
@@ -7280,21 +7288,21 @@ class SqlAoMultiSubnetNetworkName {
                     catch {
                         throw "Failed to initialize new cluster IP resource '$($resource.Name)': $($initializationError.Exception.Message). Cleanup also failed: $($_.Exception.Message)"
                     }
-                    $byAddress.Remove($address)
                     $byName.Remove($resourceName)
+                    $resourcePlan.Remove($address)
+                    $null = $claimedResourceNames.Remove([string]$resource.Name)
                 }
                 throw $initializationError
             }
         }
 
-        foreach ($entry in @($byAddress.GetEnumerator())) {
-            if ($entry.Key -notin $desired) {
-                Remove-ClusterResource -Cluster $this.ClusterName -Name $entry.Value.Name -Force -ErrorAction Stop
-                $byAddress.Remove($entry.Key)
+        foreach ($resource in $groupIps) {
+            if (-not $claimedResourceNames.Contains([string]$resource.Name)) {
+                Remove-ClusterResource -Cluster $this.ClusterName -Name $resource.Name -Force -ErrorAction Stop
             }
         }
 
-        $providers = @($desired | ForEach-Object { "[$($byAddress[$_].Name)]" })
+        $providers = @($desired | ForEach-Object { "[$($resourcePlan[$_].Name)]" })
         $dependency = $providers -join ' or '
         Set-ClusterResourceDependency -Resource $networkName.Name -Dependency $dependency -ErrorAction Stop
 
@@ -7320,11 +7328,16 @@ class SqlAoMultiSubnetNetworkName {
             Import-Module FailoverClusters -ErrorAction Stop
             $networkName = $this.GetNetworkNameResource()
             $groupName = [string]$networkName.OwnerGroup.Name
-            $desired = @($this.IPAddresses | ForEach-Object { $this.StripMask($_) } | Sort-Object -Unique)
+            $rawDesired = @($this.IPAddresses | ForEach-Object { $this.StripMask($_) })
+            $desired = @($rawDesired | Sort-Object -Unique)
+            if ($rawDesired.Count -ne $desired.Count) {
+                Write-Verbose "Network Name '$($this.Name)' has duplicate desired IP addresses: $($rawDesired -join ', ')"
+                return $false
+            }
             $ipResources = @(Get-ClusterResource -Cluster $this.ClusterName -ErrorAction Stop |
                     Where-Object { $_.OwnerGroup.Name -eq $groupName -and $_.ResourceType -eq 'IP Address' })
-            $actual = @($ipResources | ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction Stop).Value } | Sort-Object -Unique)
-            if (($desired -join ',') -ne ($actual -join ',')) {
+            $actual = @($ipResources | ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction Stop).Value } | Sort-Object)
+            if ($ipResources.Count -ne $desired.Count -or ($desired -join ',') -ne ($actual -join ',')) {
                 Write-Verbose "Network Name '$($this.Name)' IP set mismatch: desired='$($desired -join ',')' actual='$($actual -join ',')'"
                 return $false
             }
@@ -7333,15 +7346,20 @@ class SqlAoMultiSubnetNetworkName {
             $onlineIpCount = 0
             foreach ($source in $this.IPAddresses) {
                 $address = $this.StripMask($source)
-                $resource = $ipResources | Where-Object {
+                $matchingResources = @($ipResources | Where-Object {
                     ($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value -eq $address
-                } | Select-Object -First 1
-                if (-not $resource) {
-                    Write-Verbose "Network Name '$($this.Name)' has no IP resource for $address"
+                })
+                if ($matchingResources.Count -ne 1) {
+                    Write-Verbose "Network Name '$($this.Name)' has $($matchingResources.Count) IP resources for $address; expected exactly one"
                     return $false
                 }
+                $resource = $matchingResources[0]
                 $desiredResourceNames.Add([string]$resource.Name)
                 if ([string]$resource.State -eq 'Online') { $onlineIpCount++ }
+                elseif ([string]$resource.State -ne 'Offline') {
+                    Write-Verbose "Network Name '$($this.Name)' IP resource '$($resource.Name)' is '$($resource.State)', expected Online or Offline"
+                    return $false
+                }
 
                 $parameters = @{}
                 foreach ($parameter in @($resource | Get-ClusterParameter -ErrorAction Stop)) {
@@ -7362,8 +7380,8 @@ class SqlAoMultiSubnetNetworkName {
                     return $false
                 }
             }
-            if ($onlineIpCount -lt 1 -or [string]$networkName.State -ne 'Online') {
-                Write-Verbose "Network Name '$($this.Name)' is not online with at least one online IP resource"
+            if ($onlineIpCount -ne 1 -or [string]$networkName.State -ne 'Online') {
+                Write-Verbose "Network Name '$($this.Name)' is not online with exactly one online IP resource (online count=$onlineIpCount)"
                 return $false
             }
 
