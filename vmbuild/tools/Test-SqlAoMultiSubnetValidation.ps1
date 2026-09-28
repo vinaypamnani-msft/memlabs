@@ -125,7 +125,11 @@ try {
     Assert-Validation (($contractResult.Cluster -join ',') -eq ($expectedClusterIps -join ',')) 'scalar argument contract round-trips cluster IP arrays'
     Assert-Validation (($contractResult.Listener -join ',') -eq ($expectedListenerIps -join ',')) 'scalar argument contract round-trips listener IP arrays'
     Assert-Validation ($functionalSource.Contains("-notmatch '^Domain Network(?: \d+)?$'")) 'cluster network validation accepts only deterministic Domain Network names'
+    Assert-Validation ([regex]::Matches($functionalSource, 'AG health checks above can move ownership').Count -eq 2) 'Phase 5 and Phase 11 refresh active listener ownership immediately before DNS checks'
+    Assert-Validation ($functionalSource -match '\$results\.Passed = \$false[\r\n\s]+\$results\.Details\.Add\("FAIL: Active AG listener IP') 'Phase 11 fails DNS that omits the active listener provider'
     Assert-Validation ($functionalSource -match '\$registrationIp = \$activeAgIPs\[0\]') 'post-Phase-5 DNS remediation uses the online listener provider'
+    Assert-Validation ($functionalSource -match '\$registrationIp -notin \$existingIps') 'post-Phase-5 remediation adds an active record even when stale records exist'
+    Assert-Validation ($functionalSource -match '\$registrationIp -in \$recheckIps') 'post-Phase-5 remediation verifies the active provider on every DC'
     Assert-Validation ($functionalSource -match 'no online configured listener IP could be identified; refusing to synthesize') 'post-Phase-5 DNS remediation refuses an unverified listener IP'
 }
 finally {

@@ -2250,9 +2250,6 @@ function Test-SQLAOFunctionality {
                 if ($activeClusterIPs.Count -eq 0 -and $clusterIP) {
                     $activeClusterIPs = @($clusterIP)
                 }
-                if ($activeAgIPs.Count -eq 0 -and $agIP) {
-                    $activeAgIPs = @($agIP)
-                }
 
                 # Validate cluster name DNS points to the correct IP.
                 # Query the DC's DNS zone directly (Get-DnsServerResourceRecord)
@@ -3056,6 +3053,12 @@ WHERE drs.is_local = 1
             # WARN/INFO decision until after Step 6 has voted.
             $dnsProbeFailureMsg = $null  # null = succeeded or skipped, string = failure detail
             if ($listenerName) {
+                # AG health checks above can move ownership. Refresh the active
+                # listener provider immediately before judging DNS.
+                $activeAgIPs = @(Get-ClusterResource -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |
+                        ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value } |
+                        Where-Object { $_ -in $agIPs })
                 if (-not $dnsServer) {
                     $dnsProbeFailureMsg = "no usable DNS server found on this VM (Get-DnsClientServerAddress returned no IPv4 entries outside loopback/APIPA)"
                 }
@@ -3116,7 +3119,8 @@ WHERE drs.is_local = 1
                         $activeListenerMatch = @($activeAgIPs | Where-Object { $_ -in $resolvedIPs })
                         if ($activeAgIPs.Count -gt 0 -and $activeListenerMatch.Count -eq 0) {
                             $activeListenerText = $activeAgIPs -join ', '
-                            $results.Details.Add("WARN: Active AG listener IP '$activeListenerText' not in resolved addresses")
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Active AG listener IP '$activeListenerText' not in resolved addresses")
                         }
                         foreach ($resolvedIp in $resolvedIPs) {
                             if ($agIPs.Count -gt 0 -and $resolvedIp -notin $agIPs) {
@@ -15568,6 +15572,12 @@ ORDER BY ar.replica_server_name, adb.database_name
                 #    With DC + BDC, check every DC so the CAS (which might use
                 #    the BDC) finds the record.
                 if ($listenerName) {
+                    # AG health checks above can move ownership. Refresh the
+                    # online listener provider immediately before DNS checks.
+                    $activeAgIPs = @(Get-ClusterResource -ErrorAction SilentlyContinue |
+                            Where-Object { $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |
+                            ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value } |
+                            Where-Object { $_ -in $agIPs })
                     # $allDCs and $dnsZone were set in check #2; reuse if available
                     if (-not $allDCs -or $allDCs.Count -eq 0) {
                         $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
@@ -15592,7 +15602,9 @@ ORDER BY ar.replica_server_name, adb.database_name
                                 $activeDnsMatch = @($activeAgIPs | Where-Object { $_ -in $resolvedIPs })
                                 if ($activeAgIPs.Count -gt 0 -and $activeDnsMatch.Count -eq 0) {
                                     $activeAgText = $activeAgIPs -join ', '
-                                    $results.Details.Add("WARN: Active AG listener IP '$activeAgText' not in DNS A records on DC '$dc'")
+                                    $listenerDnsOk = $false
+                                    $dcsMissingRecord += $dc
+                                    $results.Details.Add("FAIL: Active AG listener IP '$activeAgText' not in DNS A records on DC '$dc'")
                                 }
                             }
                             else {
@@ -15618,7 +15630,8 @@ ORDER BY ar.replica_server_name, adb.database_name
                             if ($regDC -and $dnsZone) {
                                 # Only add the record if the first DC doesn't already have it
                                 $existingRec = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $listenerName -RRType A -ComputerName $regDC -ErrorAction SilentlyContinue)
-                                if ($existingRec.Count -eq 0) {
+                                $existingIps = @($existingRec | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
+                                if ($registrationIp -notin $existingIps) {
                                     Add-DnsServerResourceRecordA -ZoneName $dnsZone -Name $listenerName `
                                         -IPv4Address $registrationIp -ComputerName $regDC -ErrorAction Stop
                                 }
@@ -15641,12 +15654,13 @@ ORDER BY ar.replica_server_name, adb.database_name
                                 foreach ($dc in $allDCs) {
                                     $recheck = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $listenerName `
                                         -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
-                                    if ($recheck.Count -gt 0) {
-                                        $results.Details.Add("OK: DNS A record verified on DC '$dc' after remediation")
+                                    $recheckIps = @($recheck | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
+                                    if ($registrationIp -in $recheckIps) {
+                                        $results.Details.Add("OK: Active listener DNS A record '$registrationIp' verified on DC '$dc' after remediation")
                                     }
                                     else {
                                         $listenerDnsOk = $false
-                                        $results.Details.Add("FAIL: DNS A record still missing on DC '$dc' after remediation + replication")
+                                        $results.Details.Add("FAIL: Active listener DNS A record '$registrationIp' still missing on DC '$dc' after remediation + replication")
                                     }
                                 }
                             }
