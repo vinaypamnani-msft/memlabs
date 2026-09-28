@@ -1354,6 +1354,7 @@ $ensureClientPkgCoverage = {
     $lastCoverageTimelineCapture = $null
     $lastCoverageFingerprint = ''
     $optionalGraceStart = $null
+    $coverageExitReason = ''
     $try = 0
     while ((Get-Date) -lt $coverageDeadline) {
         $try++
@@ -1400,6 +1401,7 @@ $ensureClientPkgCoverage = {
                     "$_=$(if ($state.ContainsKey($stateKey)) { $state[$stateKey] } else { -1 })"
                 }) -join ';')
         if ($notInstalled.Count -eq 0) {
+            $coverageExitReason = 'Installed'
             $null = & $writeCoverageSnapshot 'content-installed' $bgDpFqdns @($secLinkSites.Keys) $true
             Write-DscStatus "Client package is Installed on all $($bgDpFqdns.Count) boundary-group DP(s)."
             break
@@ -1428,7 +1430,8 @@ $ensureClientPkgCoverage = {
                 Write-DscStatus "Client pkg coverage: every DP with clients depending on it is Installed; giving $($notInstalled -join ', ') up to $optionalGraceMinutes more minute(s) before moving on (no client is blocked by them)."
             }
             elseif (((Get-Date) - $optionalGraceStart).TotalMinutes -ge $optionalGraceMinutes) {
-                Write-DscStatus "Client pkg coverage: moving on after the ${optionalGraceMinutes}-minute grace -- $($notInstalled -join ', ') still not Installed, but no push client is assigned to them and every other boundary-group DP holds the content. Phase 11 re-checks and reports them." -Warning
+                $coverageExitReason = 'OptionalGrace'
+                Write-DscStatus "Client pkg coverage: optional ${optionalGraceMinutes}-minute grace complete -- $($notInstalled -join ', ') still not Installed in the site summarizer, but no push client is assigned to them and every required boundary-group DP holds the content. Verifying physical content before deciding whether diagnostics are needed."
                 break
             }
         }
@@ -1641,12 +1644,51 @@ $ensureClientPkgCoverage = {
     foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
         $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State; $stateVer[$f.ToUpper()] = "$($r.SourceVersion)" }
     }
+    if (-not $coverageExitReason) { $coverageExitReason = 'Deadline' }
     $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
-    $null = & $writeCoverageSnapshot $(if ($stillBad.Count -gt 0) { 'coverage-deadline' } else { 'coverage-complete' }) $bgDpFqdns @($secLinkSites.Keys) $true $true
-    if ($stillBad.Count -gt 0) {
+    $finalSnapshotTrigger = if ($stillBad.Count -eq 0) {
+        'coverage-complete'
+    }
+    elseif ($coverageExitReason -eq 'OptionalGrace') {
+        'optional-grace-complete'
+    }
+    else {
+        'coverage-deadline'
+    }
+    $null = & $writeCoverageSnapshot $finalSnapshotTrigger $bgDpFqdns @($secLinkSites.Keys) $true $true
+
+    $optionalStatusLag = [System.Collections.Generic.List[string]]::new()
+    $needsDiagnostics = [System.Collections.Generic.List[string]]::new()
+    foreach ($dp in $stillBad) {
+        if ($dp -notin $optionalDpFqdns) {
+            $needsDiagnostics.Add($dp)
+            continue
+        }
+        $dpKey = $dp.ToUpper()
+        $physicalContent = & $dpHasPackageContent $dp
+        $dpReportedVersion = if ($stateVer.ContainsKey($dpKey)) { "$($stateVer[$dpKey])" } else { '' }
+        $versionMatches = $dpReportedVersion -and $pkgSourceVersion -and $dpReportedVersion -eq "$pkgSourceVersion"
+        if ($physicalContent -eq $true -and $versionMatches) {
+            $optionalStatusLag.Add("$dp (DPSourceVersion=$dpReportedVersion)")
+        }
+        else {
+            $needsDiagnostics.Add($dp)
+        }
+    }
+    if ($optionalStatusLag.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: optional DP(s) $($optionalStatusLag -join ', ') physically contain $PackageID in PkgLib at the current package version; only the site summarizer acknowledgement is lagging. No client depends on these DPs, so this is informational. Phase 11 validates each Secondary's implicit MP/DP roles."
+    }
+    $diagnosticTargets = $needsDiagnostics.ToArray()
+
+    if ($diagnosticTargets.Count -gt 0) {
         $coverageElapsedSec = [math]::Round(((Get-Date) - $coverageStart).TotalSeconds)
-        Write-DscStatus "Client pkg coverage: STILL not Installed at the wall-clock deadline after ${coverageElapsedSec}s and $try attempt(s) on: $($stillBad -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics..." -Warning
-        foreach ($dp in $stillBad) {
+        if ($coverageExitReason -eq 'OptionalGrace') {
+            Write-DscStatus "Client pkg coverage: optional grace ended, but final verification could not prove current physical content plus matching DP source version on: $($diagnosticTargets -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics because safe summarizer lag is not proven." -Warning
+        }
+        else {
+            Write-DscStatus "Client pkg coverage: STILL not Installed at the wall-clock deadline after ${coverageElapsedSec}s and $try attempt(s) on: $($diagnosticTargets -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics..." -Warning
+        }
+        foreach ($dp in $diagnosticTargets) {
             $dpHost = ("$dp" -split '\.')[0]
             $u = $dp.ToUpper()
             $diagVm = $vmByHost[$dpHost.ToUpper()]

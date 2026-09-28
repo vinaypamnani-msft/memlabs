@@ -218,6 +218,11 @@ function Test-VmFunctionality {
         'Secondary' {
             Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Secondary site"
             $testsPassed = Test-SecondaryFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            if ($testsPassed) {
+                Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying implicit MP and DP roles"
+                $siteSystemRolesOk = Test-SiteSystemFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+                $testsPassed = $testsPassed -and $siteSystemRolesOk
+            }
         }
         'SiteSystem' {
             Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying site system roles"
@@ -5357,9 +5362,11 @@ function Test-SiteSystemFunctionality {
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
     $allPassed = $true
+    $isSecondary = "$($CurrentItem.role)" -eq 'Secondary'
 
-    # Test MP if installed
-    if ($CurrentItem.installMP) {
+    # Secondary sites include MP and DP roles even when the config does not
+    # explicitly set installMP/installDP.
+    if ($CurrentItem.installMP -or $isSecondary) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Management Point"
         Write-Log "[Phase $Phase] $VMName [MP]: Testing Management Point" -LogOnly
 
@@ -5679,7 +5686,7 @@ function Test-SiteSystemFunctionality {
     # Test DP: local checks only. DP WMI registration (SMS_DistributionPointInfo)
     # is verified by the site server's own Phase 11 job in Test-CMSiteFunctionality,
     # avoiding cross-VM PSDirect calls that fail when the Primary is unresponsive.
-    if ($CurrentItem.installDP) {
+    if ($CurrentItem.installDP -or $isSecondary) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Distribution Point"
         Write-Log "[Phase $Phase] $VMName [DP]: Local content + PXE checks" -LogOnly
         # memlabs turns PXE on for EVERY DP (Add-CMDistributionPoint -EnablePxe in
@@ -5697,12 +5704,22 @@ function Test-SiteSystemFunctionality {
         }
         $osdClientNets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
                 ForEach-Object { & $netOfVm $_ } | Where-Object { $_ } | Select-Object -Unique)
-        $dpServesOsd = [bool]($osdClientNets.Count -gt 0 -and $osdClientNets -contains (& $netOfVm $CurrentItem))
+        # MemLabs does not configure PXE on the implicit Secondary DP. Only
+        # explicit SiteSystem DPs go through Add-CMDistributionPoint -EnablePxe.
+        $dpServesOsd = [bool](-not $isSecondary -and $osdClientNets.Count -gt 0 -and $osdClientNets -contains (& $netOfVm $CurrentItem))
         if ($dpServesOsd) {
             Write-Log "[Phase $Phase] $VMName [DP]: OSDClient subnet(s) $($osdClientNets -join ', ') include this DP's $(& $netOfVm $CurrentItem) -- PXE chain will be checked and failures are fatal" -LogOnly
         }
         else {
-            $osdNote = if ($osdClientNets.Count) { "OSDClient subnet(s) $($osdClientNets -join ', ') do not include this DP's $(& $netOfVm $CurrentItem)" } else { 'this lab has no OSDClient' }
+            $osdNote = if ($isSecondary) {
+                'this is an implicit Secondary DP and MemLabs does not enable PXE on Secondary sites'
+            }
+            elseif ($osdClientNets.Count) {
+                "OSDClient subnet(s) $($osdClientNets -join ', ') do not include this DP's $(& $netOfVm $CurrentItem)"
+            }
+            else {
+                'this lab has no OSDClient'
+            }
             Write-Log "[Phase $Phase] $VMName [DP]: skipping all PXE checks -- $osdNote, so perfloading never distributed the boot image and nothing here can PXE boot" -LogOnly
         }
         $localDpScript = {
