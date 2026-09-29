@@ -551,6 +551,44 @@ function Flush-LogBuffer {
     finally { [System.Threading.Monitor]::Exit($entry.Builder) }
 }
 
+function Remove-StaleLogBuffers {
+    [CmdletBinding()]
+    param(
+        [string[]]$KeepPath
+    )
+
+    $keep = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($path in @($KeepPath)) {
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        [void]$keep.Add($path)
+        [void]$keep.Add([System.IO.Path]::ChangeExtension($path, '.jsonl'))
+    }
+
+    Flush-LogBuffer -All
+    $removed = 0
+    foreach ($path in @($global:LogBuffers.Keys)) {
+        if ($keep.Contains("$path")) { continue }
+        $entry = $global:LogBuffers[$path]
+        if (-not $entry -or -not $entry.Builder) {
+            [void]$global:LogBuffers.Remove($path)
+            $removed++
+            continue
+        }
+
+        [System.Threading.Monitor]::Enter($entry.Builder)
+        try {
+            # A failed flush leaves its text in place; retain that entry so a later
+            # timer/main-thread pass can retry instead of trading memory for log loss.
+            if ($entry.Builder.Length -eq 0) {
+                [void]$global:LogBuffers.Remove($path)
+                $removed++
+            }
+        }
+        finally { [System.Threading.Monitor]::Exit($entry.Builder) }
+    }
+    return $removed
+}
+
 function Register-LogBufferExitFlush {
     # Global, NOT $Script:. New-Lab.ps1 dot-sources Common.ps1 from its OWN script
     # scope and Start-Test invokes New-Lab once per test in a single shell, so a
