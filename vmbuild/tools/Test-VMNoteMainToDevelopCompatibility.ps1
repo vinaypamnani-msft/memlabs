@@ -202,6 +202,7 @@ function Set-VMNote {
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Get-VMNote)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Get-DomainNetbiosName)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Test-VmPhase1Incomplete)))
+. ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Test-SiteSystemClientOperatingSystem)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Update-VMFromHyperV)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.GenConfig.Existing.ps1' -Name New-UserConfig)))
 
