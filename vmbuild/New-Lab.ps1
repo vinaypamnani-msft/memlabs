@@ -56,6 +56,8 @@ param (
     [switch]$KeepFailedVMs,
     [Parameter(Mandatory = $false, HelpMessage = "Release retained ErrorRecords when returning to a long-lived launcher.")]
     [switch]$ClearErrorHistoryOnExit,
+    [Parameter(Mandatory = $false, HelpMessage = "Fail before deployment unless Git is clean, loaded code is current, and source sidecars are written.")]
+    [switch]$RequireCleanSource,
     [Parameter(Mandatory = $false, HelpMessage = "Disable mouse support in menus.")]
     [switch]$DisableMouse,
     [Parameter(Mandatory = $false, HelpMessage = "Open a secondary window showing verbose log output in real time.")]
@@ -663,6 +665,7 @@ try {
         Phases = @{}   # keyed by phase number -> @{ Elapsed; Success; Warning; Failed; VMCount }
         VMs    = @{}   # keyed by vmName      -> @{ Role; Phases = @{ N -> @{ Elapsed } } }
     }
+    $global:CurrentDeploymentSourceIdentity = $null
 
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
@@ -678,6 +681,10 @@ try {
     # self-contained.
     $configSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".config.json")
     $jsonlSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".jsonl")
+    $sourceSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".source.json")
+    $sourceIdentity = Get-MemLabsSourceIdentity
+    $global:CurrentDeploymentSourceIdentity = $sourceIdentity
+    $global:BuildStats.Source = $sourceIdentity
 
     #Rename the old log (and its config/jsonl sidecars) with a shared timestamp so history is preserved and they stay matched.
     try {
@@ -694,6 +701,9 @@ try {
         if (Test-Path $jsonlSidecar) {
             # Match the rotated log's stem: VMBuild.<domain><stamp>.jsonl
             Rename-Item -Path $jsonlSidecar -NewName ($logStem + $rotateStamp + ".jsonl") -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $sourceSidecar) {
+            Rename-Item -Path $sourceSidecar -NewName ($logStem + $rotateStamp + ".source.json") -ErrorAction SilentlyContinue
         }
     }
     catch {
@@ -743,26 +753,24 @@ try {
         # throws there too, and there it degrades silently to an unbiased stamp.
         Write-Log "Timezone: could not determine the host/lab timezone relationship: $($_.Exception.Message). Log timestamps will carry no UTC bias, so host and guest lines cannot be aligned." -Warning
     }
-    try {
-        $gitBranch = git -C $PSScriptRoot rev-parse --abbrev-ref HEAD 2>$null
-        $gitHash   = git -C $PSScriptRoot rev-parse --short HEAD 2>$null
-        if ($gitBranch -and $gitHash) {
-            Write-Log "Git: $gitBranch @ $gitHash" -LogOnly
-        }
-    } catch { }
-    # The Git line above describes the working tree; this one describes the code this
-    # process is actually running. They diverge whenever the launcher outlives a pull.
-    try {
-        $staleSource = @(Get-MemLabsStaleSourceFile)
-        $loadedAt = $global:MemLabsCodeLoadStamp.LoadedUtc.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')
-        if ($staleSource.Count -gt 0) {
-            $names = ($staleSource | Select-Object -First 5 -ExpandProperty Name) -join ', '
-            Write-Log "STALE LAUNCHER: this process (PID $PID) parsed its code at $loadedAt; $($staleSource.Count) source file(s) have changed since -- $names. Phase scriptblock bodies are frozen at load, so those edits are NOT running in this deployment. Restart New-Lab to pick them up." -Warning
-        }
-        else {
-            Write-Log "Code loaded at $loadedAt (PID $PID); no source file has changed since." -LogOnly
-        }
-    } catch { }
+    if ($sourceIdentity.GitAvailable) {
+        $sourceState = if ($sourceIdentity.Reproducible) { 'REPRODUCIBLE' } else { 'NON-REPRODUCIBLE' }
+        Write-Log "Source: $sourceState branch=$($sourceIdentity.Branch) commit=$($sourceIdentity.Commit) dirty=$($sourceIdentity.IsDirty) staleLoadedFiles=$($sourceIdentity.StaleSourceCount)" -LogOnly
+    }
+    else {
+        Write-Log "Source: NON-REPRODUCIBLE -- Git identity is unavailable." -Warning
+    }
+    if ($sourceIdentity.IsDirty) {
+        $dirtyPreview = @($sourceIdentity.DirtyPaths | Select-Object -First 10) -join '; '
+        Write-Log "DIRTY SOURCE: $($sourceIdentity.DirtyTrackedCount) tracked and $($sourceIdentity.UntrackedCount) untracked path(s). $dirtyPreview" -Warning
+    }
+    if ($sourceIdentity.StaleSourceCount -gt 0) {
+        $stalePreview = @($sourceIdentity.StaleSourcePaths | Select-Object -First 5 | ForEach-Object { Split-Path $_ -Leaf }) -join ', '
+        Write-Log "STALE LAUNCHER: code loaded at $($sourceIdentity.LoadedAtUtc); $($sourceIdentity.StaleSourceCount) source file(s) changed afterward -- $stalePreview. Restart New-Lab before release qualification." -Warning
+    }
+    elseif ($sourceIdentity.LoadedAtUtc) {
+        Write-Log "Code loaded at $($sourceIdentity.LoadedAtUtc) (PID $PID); no source file has changed since." -LogOnly
+    }
     Write-Log "PowerShell: $($PSVersionTable.PSVersion) (PID $PID)" -LogOnly
     Write-Log "Host PID: $PID | Parent PID: $((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId)" -LogOnly
     Write-Log "StartPhase: $StartPhase | Phase: $Phase" -LogOnly
@@ -785,15 +793,30 @@ try {
         Write-Log "Host storage: could not read the volume behind '$($deployConfig.vmOptions.basePath)': $($_.Exception.Message). Filesystem is UNKNOWN -- do not assume NTFS when reading this log." -Warning
     }
     Write-Log "----------------------------------------" -LogOnly
+    $sourceSidecarWritten = $false
+    try {
+        $sourceIdentity | ConvertTo-Json -Depth 6 | Set-Content -Path $sourceSidecar -Encoding UTF8 -ErrorAction Stop
+        $sourceSidecarWritten = $true
+        Write-Log "Source identity JSON written to: $sourceSidecar" -LogOnly
+    }
+    catch {
+        Write-Log "Source identity sidecar write failed: $($_.Exception.Message)" -Warning
+    }
+    $configSidecarWritten = $false
     try {
         # Pretty-print (no -Compress) to the sidecar so it's readable + diffable.
         ($deployConfig | ConvertTo-Json -Depth 10) | Set-Content -Path $configSidecar -Encoding UTF8 -ErrorAction Stop
+        $configSidecarWritten = $true
         Write-Log "Deploy config JSON written to: $configSidecar" -LogOnly
     }
     catch {
         # Fall back to inline if the sidecar can't be written, so the deployment stays self-contained.
         Write-Log "Deploy config JSON (sidecar write failed: $($_.Exception.Message)):" -LogOnly
         Write-Log ($deployConfig | ConvertTo-Json -Depth 10 -Compress) -LogOnly
+    }
+    if ($RequireCleanSource -and
+        (-not $sourceIdentity.Reproducible -or -not $sourceSidecarWritten -or -not $configSidecarWritten)) {
+        throw "Release qualification requires a clean/current Git source plus source and config sidecars. Review $sourceSidecar and $configSidecar."
     }
     Write-Log "========================================" -LogOnly
     try { Flush-LogBuffer -Path $Common.LogPath } catch { }

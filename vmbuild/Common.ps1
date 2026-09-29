@@ -11981,6 +11981,121 @@ function Get-BranchName {
     }
 }
 
+function Get-MemLabsSourceIdentity {
+    [CmdletBinding()]
+    param(
+        [string]$RepositoryRoot = $PSScriptRoot,
+        [string]$DscArchivePath = (Join-Path $PSScriptRoot 'DSC\DSC.zip'),
+        [string]$VersionPath = (Join-Path $PSScriptRoot 'version.json')
+    )
+
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $identity = [ordered]@{
+        SchemaVersion       = 1
+        CapturedAtUtc       = [DateTime]::UtcNow.ToString('o')
+        RepositoryRoot      = $RepositoryRoot
+        GitAvailable        = $false
+        Branch              = $null
+        Commit              = $null
+        CommitTimestampUtc  = $null
+        IsDirty             = $true
+        DirtyTrackedCount   = 0
+        UntrackedCount      = 0
+        DirtyPaths          = @()
+        LoadedAtUtc         = $null
+        StaleSourceCount    = 0
+        StaleSourcePaths    = @()
+        MemLabsVersion      = $null
+        VersionFileSha256   = $null
+        DscArchiveSha256    = $null
+        DscArchiveBytes     = $null
+        Reproducible        = $false
+        Errors              = @()
+    }
+
+    try {
+        $inside = @(& git -C $RepositoryRoot rev-parse --is-inside-work-tree 2>$null | Select-Object -First 1)
+        if ($LASTEXITCODE -eq 0 -and "$inside".Trim() -eq 'true') {
+            $identity.GitAvailable = $true
+            $identity.Commit = "$(@(& git -C $RepositoryRoot rev-parse HEAD 2>$null | Select-Object -First 1))".Trim()
+            $identity.Branch = "$(@(& git -C $RepositoryRoot rev-parse --abbrev-ref HEAD 2>$null | Select-Object -First 1))".Trim()
+            if ($identity.Branch -eq 'HEAD') { $identity.Branch = 'DETACHED' }
+            $identity.CommitTimestampUtc = "$(@(& git -C $RepositoryRoot show -s --format=%cI HEAD 2>$null | Select-Object -First 1))".Trim()
+
+            $statusLines = @(& git -C $RepositoryRoot status --porcelain=v1 --untracked-files=all 2>$null)
+            if ($LASTEXITCODE -ne 0) { throw "git status exited $LASTEXITCODE" }
+            $dirtyPaths = [System.Collections.Generic.List[string]]::new()
+            foreach ($line in $statusLines) {
+                if ([string]::IsNullOrWhiteSpace("$line")) { continue }
+                $status = if ("$line".Length -ge 2) { "$line".Substring(0, 2) } else { "$line" }
+                $path = if ("$line".Length -gt 3) { "$line".Substring(3) } else { '<unknown>' }
+                $dirtyPaths.Add("$status $path")
+                if ($status -eq '??') { $identity.UntrackedCount++ }
+                else { $identity.DirtyTrackedCount++ }
+            }
+            $identity.DirtyPaths = @($dirtyPaths | Select-Object -First 200)
+            $identity.IsDirty = $dirtyPaths.Count -gt 0
+        }
+        else {
+            $errors.Add("No Git worktree was found at '$RepositoryRoot'.")
+        }
+    }
+    catch {
+        $errors.Add("Git identity: $($_.Exception.Message)")
+    }
+
+    try {
+        if ($global:MemLabsCodeLoadStamp) {
+            $identity.LoadedAtUtc = $global:MemLabsCodeLoadStamp.LoadedUtc.ToString('o')
+            $staleSource = @(Get-MemLabsStaleSourceFile)
+            $identity.StaleSourceCount = $staleSource.Count
+            $identity.StaleSourcePaths = @($staleSource | Select-Object -First 200 -ExpandProperty FullName)
+        }
+    }
+    catch {
+        $errors.Add("Loaded-source identity: $($_.Exception.Message)")
+    }
+
+    try {
+        if (Test-Path -LiteralPath $VersionPath -PathType Leaf) {
+            $identity.VersionFileSha256 = (Get-FileHash -LiteralPath $VersionPath -Algorithm SHA256 -ErrorAction Stop).Hash
+            $versionData = Get-Content -LiteralPath $VersionPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $identity.MemLabsVersion = "$($versionData.memLabsVersion)"
+        }
+        else {
+            $errors.Add("Version file not found: $VersionPath")
+        }
+    }
+    catch {
+        $errors.Add("Version identity: $($_.Exception.Message)")
+    }
+
+    try {
+        if (Test-Path -LiteralPath $DscArchivePath -PathType Leaf) {
+            $archive = Get-Item -LiteralPath $DscArchivePath -ErrorAction Stop
+            $identity.DscArchiveBytes = $archive.Length
+            $identity.DscArchiveSha256 = (Get-FileHash -LiteralPath $DscArchivePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+        else {
+            $errors.Add("DSC archive not found: $DscArchivePath")
+        }
+    }
+    catch {
+        $errors.Add("DSC archive identity: $($_.Exception.Message)")
+    }
+
+    $identity.Errors = $errors.ToArray()
+    $identity.Reproducible = $identity.GitAvailable -and
+        $identity.Commit -match '^[0-9a-fA-F]{40}$' -and
+        -not $identity.IsDirty -and
+        $identity.StaleSourceCount -eq 0 -and
+        $identity.DscArchiveSha256 -match '^[0-9A-F]{64}$' -and
+        $identity.VersionFileSha256 -match '^[0-9A-F]{64}$' -and
+        $identity.Errors.Count -eq 0
+
+    return [pscustomobject]$identity
+}
+
 Function Set-PS7ProgressWidth {
     if ($PSVersionTable.PSVersion.Major -eq 7) {
         $maxWidth = 500
