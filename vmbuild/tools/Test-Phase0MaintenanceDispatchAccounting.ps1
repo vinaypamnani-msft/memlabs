@@ -104,10 +104,12 @@ function Start-NormalJobs {
     param($machines, $ScriptBlock, $Phase, $argument1, $argument2, $argument3, [switch] $PreferThreadJob)
     $script:LastArgument3 = $argument3
     $requested = @($machines).Count
+    $jobs = [System.Collections.ArrayList]::new()
+    foreach ($job in @($script:DispatchJobsToReturn)) { $null = $jobs.Add($job) }
     return [pscustomobject]@{
         Failed         = $script:DispatchFailedCount
         Success        = ($requested - $script:DispatchFailedCount)
-        Jobs           = @($script:DispatchJobsToReturn)
+        Jobs           = $jobs
         Applicable     = $true
         AdditionalData = $null
     }
@@ -116,6 +118,10 @@ function Start-NormalJobs {
 function Wait-Phase {
     param($Phase, $Jobs, $AdditionalData)
     $script:WaitPhaseCalled = $true
+    if ($script:DrainJobsDuringWait) {
+        while ($Jobs.Count -gt 0) { $Jobs.RemoveAt(0) }
+    }
+    $script:LastWaitJobsRemaining = $Jobs.Count
     return $script:WaitPhaseResult
 }
 
@@ -149,18 +155,35 @@ function Reset-TestState {
     $script:DispatchJobsToReturn = @()
     $script:WaitPhaseResult = $null
     $script:LastArgument3 = $null
+    $script:DrainJobsDuringWait = $false
+    $script:LastWaitJobsRemaining = $null
 }
 
-# --- Scenario A: a dispatch failure must fail the gate and must never even
-#     reach Wait-Phase (there is nothing safe to wait on for the undispatched
-#     target, so calling Wait-Phase at all would be the wrong signal). -------
+# --- Scenario A: a dispatch failure must fail the gate, but any job that was
+#     created must drain before target ownership is released. ----------------
 Reset-TestState
 $script:DispatchFailedCount = 1
 $script:DispatchJobsToReturn = @([pscustomobject]@{ Id = 1 })
+$script:WaitPhaseResult = [pscustomobject]@{ Success = 1; Failed = 0 }
+$script:DrainJobsDuringWait = $true
 $resultA = Start-RequiredExistingVMMaintenance -DeployConfig (New-TestDeployConfig) -OwnedMutexVmNames @('DISPATCH-A', 'DISPATCH-B')
 Assert-Equal $false $resultA 'a Start-NormalJobs dispatch failure fails the gate'
-Assert-Equal $false $script:WaitPhaseCalled 'a dispatch failure short-circuits before Wait-Phase is ever called'
+Assert-Equal $true $script:WaitPhaseCalled 'a dispatch failure drains jobs that were created'
+Assert-Equal 0 $script:LastWaitJobsRemaining 'dispatch failure leaves no created maintenance job active'
 Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -match 'failed to dispatch' })) 'the dispatch failure is logged as a failure'
+
+# --- Scenario A2: the dispatcher can under-return Jobs while reporting
+#     Failed=0. The immutable count must independently fail closed. ----------
+Reset-TestState
+$script:DispatchFailedCount = 0
+$script:DispatchJobsToReturn = @([pscustomobject]@{ Id = 1 })
+$script:WaitPhaseResult = [pscustomobject]@{ Success = 1; Failed = 0 }
+$script:DrainJobsDuringWait = $true
+$resultA2 = Start-RequiredExistingVMMaintenance -DeployConfig (New-TestDeployConfig) -OwnedMutexVmNames @('DISPATCH-A', 'DISPATCH-B')
+Assert-Equal $false $resultA2 'too few created jobs fails dispatch even when dispatcher Failed is zero'
+Assert-Equal $true $script:WaitPhaseCalled 'created-job count mismatch drains returned jobs'
+Assert-Equal 0 $script:LastWaitJobsRemaining 'created-job count mismatch leaves no returned maintenance job active'
+Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -match 'created 1 of 2' })) 'created-job count mismatch logs exact cardinality'
 
 # --- Scenario B: Wait-Phase accounting for fewer jobs than were dispatched
 #     (e.g. a lost/unaccounted job) must fail the gate even though Wait-Phase
@@ -192,6 +215,17 @@ $script:WaitPhaseResult = [pscustomobject]@{ Success = 2; Failed = 0 }
 $resultD = Start-RequiredExistingVMMaintenance -DeployConfig (New-TestDeployConfig) -OwnedMutexVmNames @('DISPATCH-A', 'DISPATCH-B')
 Assert-Equal $true $resultD 'fully dispatched and fully accounted-for success returns $true'
 Assert-Equal $true $script:LastArgument3 'the mandatory gate passes the in-progress override to its dispatcher'
+
+# --- Scenario D2: the real Wait-Phase drains the mutable collection while
+#     accounting completed jobs. The gate must use the pre-wait dispatch count,
+#     not the now-empty collection. ------------------------------------------
+Reset-TestState
+$script:DispatchJobsToReturn = @([pscustomobject]@{ Id = 1 }, [pscustomobject]@{ Id = 2 })
+$script:WaitPhaseResult = [pscustomobject]@{ Success = 2; Failed = 0 }
+$script:DrainJobsDuringWait = $true
+$resultD2 = Start-RequiredExistingVMMaintenance -DeployConfig (New-TestDeployConfig) -OwnedMutexVmNames @('DISPATCH-A', 'DISPATCH-B')
+Assert-Equal $true $resultD2 'fully accounted success remains successful when Wait-Phase drains the job collection'
+Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Message -match 'Dispatched: 2 of 2; Success: 2; Failures: 0' })) 'maintenance summary retains the immutable pre-wait dispatch count'
 
 # --- Scenario E: live Hyper-V inventory cannot be enumerated at all -- must
 #     fail closed (regression guard), never silently read as zero targets. --

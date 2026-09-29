@@ -388,21 +388,37 @@ function Start-RequiredExistingVMMaintenance {
     # this mandatory Phase 0 path to repair that VM; interactive maintenance and
     # normal Phase 10 retain the default in-progress guard.
     $start = Start-NormalJobs -machines $vmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false -argument3 $true -PreferThreadJob
+    # Wait-Phase owns and drains the mutable job collection as jobs complete.
+    # Capture dispatch cardinality before handing that collection over.
+    $dispatchedJobCount = @($start.Jobs).Count
 
     # Fail closed on dispatch: Start-NormalJobs.Failed counts VMs whose job never
     # got created at all -- those VMs are absent from $start.Jobs, so Wait-Phase
-    # never sees them and cannot report them as failed. Silently proceeding to
-    # Wait-Phase here would let an undispatched required target's maintenance go
-    # completely unverified while the gate still returns success.
-    if ($start.Failed -gt 0) {
-        Write-Log "[Phase 0] Maintenance gate: failed to dispatch $($start.Failed) of $expectedJobCount required maintenance job(s); those target(s) were never verified. Deployment cannot proceed safely." -Failure
+    # never sees them and cannot report them as failed. Wait for any created jobs
+    # to finish, but preserve the predetermined dispatch failure so an undispatched
+    # target can never be mistaken for success.
+    if ($start.Failed -gt 0 -or $dispatchedJobCount -ne $expectedJobCount) {
+        if ($dispatchedJobCount -gt 0) {
+            try {
+                $partialResult = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
+                Write-Log "[Phase 0] Maintenance gate: drained $dispatchedJobCount created job(s) before rejecting dispatch (Success: $($partialResult.Success); Failures: $($partialResult.Failed))." -SubActivity
+            }
+            catch {
+                Write-Log "[Phase 0] Maintenance gate: waiting for partially dispatched maintenance jobs failed: $($_.Exception.Message). Stopping remaining jobs before releasing target ownership." -Failure
+                foreach ($job in @($start.Jobs)) {
+                    try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                }
+            }
+        }
+        Write-Log "[Phase 0] Maintenance gate: failed to dispatch or record all required maintenance jobs: created $dispatchedJobCount of $expectedJobCount with $($start.Failed) dispatcher failure(s); undispatched target(s) were never verified. Deployment cannot proceed safely." -Failure
         return $false
     }
 
     $result = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
     $accountedFor = $result.Success + $result.Failed
 
-    Write-Log "[Phase 0] Maintenance gate finished. Dispatched: $($start.Jobs.Count) of $expectedJobCount; Success: $($result.Success); Failures: $($result.Failed)." -SubActivity
+    Write-Log "[Phase 0] Maintenance gate finished. Dispatched: $dispatchedJobCount of $expectedJobCount; Success: $($result.Success); Failures: $($result.Failed)." -SubActivity
     if ($result.Failed -gt 0) {
         Write-Log "[Phase 0] Maintenance gate: required maintenance failed for $($result.Failed) existing VM deployment target(s). Deployment cannot proceed safely." -Failure
         return $false
@@ -412,8 +428,8 @@ function Start-RequiredExistingVMMaintenance {
     # Wait-Phase's own Success+Failed tally. A mismatch means some pending target
     # was never actually verified one way or the other, which is not a safe basis
     # for calling the gate a success.
-    if ($accountedFor -ne $start.Jobs.Count -or $accountedFor -ne $expectedJobCount) {
-        Write-Log "[Phase 0] Maintenance gate: Wait-Phase accounted for $accountedFor of $($start.Jobs.Count) dispatched job(s) ($expectedJobCount required target(s) total); at least one required target was never verified. Deployment cannot proceed safely." -Failure
+    if ($accountedFor -ne $dispatchedJobCount -or $accountedFor -ne $expectedJobCount) {
+        Write-Log "[Phase 0] Maintenance gate: Wait-Phase accounted for $accountedFor of $dispatchedJobCount dispatched job(s) ($expectedJobCount required target(s) total); at least one required target was never verified. Deployment cannot proceed safely." -Failure
         return $false
     }
     return $true
