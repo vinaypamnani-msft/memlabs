@@ -1965,6 +1965,119 @@ function Copy-ItemSafe {
 
 }
 
+function Copy-ItemFromVmBounded {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$VMDomainName,
+        [ValidateRange(10, 1800)][int]$TimeoutSeconds = 180
+    )
+
+    $commonPath = Join-Path $PSScriptRoot 'Common.ps1'
+    if (-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) {
+        $commonPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'Common.ps1'
+    }
+    if (-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) {
+        Write-Log "[Copy-ItemFromVmBounded] Could not locate Common.ps1." -Warning
+        return $false
+    }
+
+    $destinationParent = Split-Path $Destination -Parent
+    if ($destinationParent -and -not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+        New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+    }
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    }
+
+    $copyConfig = [ordered]@{
+        CommonPath  = $commonPath
+        SourcePath  = $Path
+        Destination = $Destination
+        VMName      = $VMName
+        DomainName  = $VMDomainName
+        DevBranch   = [bool]$Common.DevBranch
+    }
+    $configBase64 = [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes(($copyConfig | ConvertTo-Json -Compress)))
+    $workerText = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$cfgJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__CONFIG_BASE64__'))
+$cfg = $cfgJson | ConvertFrom-Json
+$devBranch = [bool]$cfg.DevBranch
+try {
+    . $cfg.CommonPath -InJob -VerboseEnabled:$false -DevBranch:$devBranch
+    if ($cfg.DomainName) {
+        $Common.LogPath = $Common.LogPath -replace 'VMBuild\.log', "VMBuild.$($cfg.DomainName).log"
+    }
+    $session = Get-VmSession -VmName $cfg.VMName -VmDomainName $cfg.DomainName
+    if (-not $session) { exit 2 }
+    Copy-Item -FromSession $session -Path $cfg.SourcePath -Destination $cfg.Destination -Force -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $cfg.Destination -PathType Leaf)) { exit 3 }
+    exit 0
+}
+catch {
+    try { Write-Log "[Copy-ItemFromVmBounded] $($cfg.VMName): $($_.Exception.Message)" -Warning } catch { }
+    exit 4
+}
+'@.Replace('__CONFIG_BASE64__', $configBase64)
+    $encodedWorker = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($workerText))
+
+    $process = $null
+    $copyStart = Get-Date
+    try {
+        $enginePath = Join-Path $PSHOME 'pwsh.exe'
+        if (-not (Test-Path -LiteralPath $enginePath -PathType Leaf)) {
+            throw "PowerShell 7 worker not found at '$enginePath'."
+        }
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $enginePath
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        [void]$startInfo.ArgumentList.Add('-NoLogo')
+        [void]$startInfo.ArgumentList.Add('-NoProfile')
+        [void]$startInfo.ArgumentList.Add('-NonInteractive')
+        [void]$startInfo.ArgumentList.Add('-EncodedCommand')
+        [void]$startInfo.ArgumentList.Add($encodedWorker)
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        if (-not $process) { throw 'The copy worker process did not start.' }
+
+        Write-Log "[Copy-ItemFromVmBounded] [$VMName] Pulling $Path to $Destination with a ${TimeoutSeconds}s hard timeout (worker pid=$($process.Id))." -LogOnly
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            try { $process.WaitForExit(10000) | Out-Null } catch { }
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            Write-Log "[Copy-ItemFromVmBounded] [$VMName] Timed out after ${TimeoutSeconds}s pulling $Path; terminated worker pid=$($process.Id)." -Warning
+            return $false
+        }
+
+        if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            Write-Log "[Copy-ItemFromVmBounded] [$VMName] Copy worker exited $($process.ExitCode) pulling $Path." -Warning
+            return $false
+        }
+        $copiedItem = Get-Item -LiteralPath $Destination -ErrorAction SilentlyContinue
+        $copiedKB = if ($copiedItem) { [math]::Round($copiedItem.Length / 1KB, 1) } else { 0 }
+        $elapsedSeconds = [math]::Round(((Get-Date) - $copyStart).TotalSeconds, 1)
+        Write-Log "[Copy-ItemFromVmBounded] [$VMName] Pulled ${copiedKB}KB in ${elapsedSeconds}s -> $Destination" -LogOnly
+        return $true
+    }
+    catch {
+        if ($process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        Write-Log "[Copy-ItemFromVmBounded] [$VMName] Failed: $($_.Exception.Message)" -Warning
+        return $false
+    }
+    finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
 function Test-URL {
     [CmdletBinding()]
     param (

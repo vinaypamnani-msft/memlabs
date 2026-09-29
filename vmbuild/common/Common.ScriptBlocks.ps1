@@ -2146,6 +2146,8 @@ function Save-CMSetupLogsFromVm {
         On failure, files from C:\staging\DSC\ADKSetupLogs modified in the
         last eight hours are also pulled. Files over 16MB retain their first
         and last 5000 lines so one large Burn log cannot swamp PSDirect.
+        Baseline files are packaged into one guest ZIP; only its small manifest
+        crosses PSDirect, and a separately bounded host worker copies the ZIP.
         On Phase 8 failure, collection also pulls bounded copies
         of the provider and update-engine logs and records service, registry,
         and console-version state in JSON. After those files are safely written
@@ -2172,25 +2174,32 @@ function Save-CMSetupLogsFromVm {
     )
 
     $probeAndRead = {
-        param([string]$Mode, [int]$Phase, [bool]$CollectCmEvidenceOnly)
+        param([string]$Mode, [int]$Phase, [bool]$CollectCmEvidenceOnly, [string]$BundleToken)
         $out = [ordered]@{
             SetupExists    = $false
             SetupBytes     = 0
             SetupContent   = $null
             SetupTail      = $false
+            SetupBundleName = $null
             WrapperExists  = $false
             WrapperBytes   = 0
             WrapperContent = $null
+            WrapperBundleName = $null
             DscLogExists   = $false
             DscLogBytes    = 0
             DscLogContent  = $null
+            DscLogBundleName = $null
             ClientPackageTimelineExists = $false
             ClientPackageTimelineBytes  = 0
             ClientPackageTimelineContent = $null
             ClientPackageTimelineTail   = $false
+            ClientPackageTimelineBundleName = $null
             AdkArtifacts   = @()
             CmArtifacts    = @()
             UpdateDiagnostics = $null
+            BundlePath     = $null
+            BundleBytes    = 0
+            BundleError    = $null
         }
         if (-not $CollectCmEvidenceOnly) {
         if (Test-Path 'C:\ConfigMgrSetup.log') {
@@ -2201,13 +2210,13 @@ function Save-CMSetupLogsFromVm {
                 if ($fi.Length -le 64MB) {
                     # Whole file on success too: the AI import sits ~4% in and index
                     # creation ~39% in, 17k lines apart, so no tail window covers both
-                    # regions where Init_Database has actually died.
+                    # regions where Init_Database has actually died. The content is
+                    # packaged in-guest below; it is never returned in the manifest.
                     $out.SetupContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
                 }
                 else {
-                    # The content crosses PSDirect as one string, so a 100-300MB CAS log
-                    # gets both ends instead of one: Init_Database and index creation live
-                    # in the head, the upgrade outcome in the tail.
+                    # Bound 100-300MB CAS logs before packaging: Init_Database and index
+                    # creation live in the head, while the upgrade outcome is in the tail.
                     $out.SetupTail = $true
                     $head = @(Get-Content -LiteralPath $fi.FullName -TotalCount 30000 -ErrorAction SilentlyContinue)
                     $tail = @(Get-Content -LiteralPath $fi.FullName -Tail 5000 -ErrorAction SilentlyContinue)
@@ -2464,6 +2473,78 @@ function Save-CMSetupLogsFromVm {
             try { $out.UpdateDiagnostics = $updateDiagnostic | ConvertTo-Json -Depth 10 }
             catch { $out.UpdateDiagnostics = "{`"CollectorSerializationError`":`"$($_.Exception.Message -replace '"', '\"')`"}" }
         }
+
+        if (-not $CollectCmEvidenceOnly -and $BundleToken) {
+            $bundleRoot = Join-Path $env:TEMP "MemLabs-CMLogs-$BundleToken"
+            try {
+                # A killed transfer worker may leave its guest staging directory.
+                # Reap only old directories with our exact prefix.
+                Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'MemLabs-CMLogs-*' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddHours(-1) } |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+                if (Test-Path -LiteralPath $bundleRoot) {
+                    Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction Stop
+                }
+                New-Item -ItemType Directory -Path $bundleRoot -Force -ErrorAction Stop | Out-Null
+
+                if ($out.SetupExists -and $null -ne $out.SetupContent) {
+                    $out.SetupBundleName = if ($out.SetupTail) { 'ConfigMgrSetup.head30000-tail5000.log' } else { 'ConfigMgrSetup.log' }
+                    Set-Content -LiteralPath (Join-Path $bundleRoot $out.SetupBundleName) -Value $out.SetupContent -Encoding UTF8 -ErrorAction Stop
+                }
+                if ($out.WrapperExists -and $null -ne $out.WrapperContent) {
+                    $out.WrapperBundleName = 'InstallCMLog.log'
+                    Set-Content -LiteralPath (Join-Path $bundleRoot $out.WrapperBundleName) -Value $out.WrapperContent -Encoding UTF8 -ErrorAction Stop
+                }
+                if ($out.DscLogExists -and $null -ne $out.DscLogContent) {
+                    $out.DscLogBundleName = 'DSC_Log.log'
+                    Set-Content -LiteralPath (Join-Path $bundleRoot $out.DscLogBundleName) -Value $out.DscLogContent -Encoding UTF8 -ErrorAction Stop
+                }
+                if ($out.ClientPackageTimelineExists -and $null -ne $out.ClientPackageTimelineContent) {
+                    $out.ClientPackageTimelineBundleName = 'ClientPackageTimeline.jsonl'
+                    Set-Content -LiteralPath (Join-Path $bundleRoot $out.ClientPackageTimelineBundleName) -Value $out.ClientPackageTimelineContent -Encoding UTF8 -ErrorAction Stop
+                }
+                $adkIndex = 0
+                foreach ($artifact in @($out.AdkArtifacts)) {
+                    $adkIndex++
+                    $bundleName = "ADK-$adkIndex-$($artifact.Name)"
+                    Add-Member -InputObject $artifact -NotePropertyName BundleName -NotePropertyValue $bundleName -Force
+                    Set-Content -LiteralPath (Join-Path $bundleRoot $bundleName) -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
+                }
+
+                $bundleFiles = @(Get-ChildItem -LiteralPath $bundleRoot -File -ErrorAction Stop)
+                if ($bundleFiles.Count -gt 0) {
+                    $bundlePath = Join-Path $bundleRoot 'CMLogs.zip'
+                    Compress-Archive -LiteralPath @($bundleFiles.FullName) -DestinationPath $bundlePath -CompressionLevel Optimal -Force -ErrorAction Stop
+                    $out.BundlePath = $bundlePath
+                    $out.BundleBytes = (Get-Item -LiteralPath $bundlePath -ErrorAction Stop).Length
+
+                    # Only the small manifest crosses PSDirect. The bounded external
+                    # copy worker retrieves the ZIP after this command returns.
+                    $out.SetupContent = $null
+                    $out.WrapperContent = $null
+                    $out.DscLogContent = $null
+                    $out.ClientPackageTimelineContent = $null
+                    foreach ($artifact in @($out.AdkArtifacts)) { $artifact.Content = $null }
+                }
+                else {
+                    Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+            catch {
+                $out.BundleError = $_.Exception.Message
+            }
+            finally {
+                # A packaging error must never fall back to serializing the large
+                # contents through PSDirect; the small manifest + BundleError is the
+                # only allowed return shape.
+                $out.SetupContent = $null
+                $out.WrapperContent = $null
+                $out.DscLogContent = $null
+                $out.ClientPackageTimelineContent = $null
+                foreach ($artifact in @($out.AdkArtifacts)) { $artifact.Content = $null }
+            }
+        }
         [pscustomobject]$out
     }
 
@@ -2477,18 +2558,88 @@ function Save-CMSetupLogsFromVm {
     $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
     $base  = "$VmName-Phase$Phase-$stamp"
     $res = $null
+    $r = $null
     $baselineCaptureError = ''
+    $baselineCaptureStatus = 'HostInvocationFailed'
+    $bundleToken = [guid]::NewGuid().ToString('N')
     try {
-        $res = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $probeAndRead -ArgumentList @($Mode, $Phase, $false) -AsJob -TimeoutSeconds 300 -SessionMaxRetries 1 -SuppressLog -DisplayName "Pull CM setup logs ($Mode)"
+        $res = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -ScriptBlock $probeAndRead -ArgumentList @($Mode, $Phase, $false, $bundleToken) -AsJob -TimeoutSeconds 180 -SessionMaxRetries 1 -SuppressLog -DisplayName "Package CM setup logs ($Mode)"
     }
     catch {
         $baselineCaptureError = "PSDirect call threw: $($_.Exception.Message)"
     }
     if (-not $res -or $res.ScriptBlockFailed -or -not $res.ScriptBlockOutput) {
         if (-not $baselineCaptureError) {
-            $baselineCaptureError = if ($res -and $res.TimedOut) { 'baseline log transfer timed out after 300 seconds' } else { 'baseline log transfer returned no usable response' }
+            $baselineCaptureError = if ($res -and $res.TimedOut) { 'baseline log packaging timed out after 180 seconds' } else { 'baseline log packaging returned no usable response' }
         }
-        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: $baselineCaptureError; continuing with independent failure diagnostics" -Warning
+    }
+    else {
+        $r = @($res.ScriptBlockOutput | Where-Object { $null -ne $_ }) | Select-Object -Last 1
+        if ($r.BundleError) {
+            $baselineCaptureStatus = 'GuestBundleFailed'
+            $baselineCaptureError = "guest log bundle failed: $($r.BundleError)"
+        }
+        elseif ($r.BundlePath) {
+            $baselineCaptureStatus = 'BundleTransferFailed'
+            $bundleArchive = Join-Path $logDir ".$base-CMLogs.zip"
+            $bundleExtractDir = Join-Path $logDir ".$base-CMLogs"
+            $bundleReady = $false
+            try {
+                if (Test-Path -LiteralPath $bundleExtractDir) {
+                    Remove-Item -LiteralPath $bundleExtractDir -Recurse -Force -ErrorAction Stop
+                }
+                $copied = Copy-ItemFromVmBounded -Path $r.BundlePath -Destination $bundleArchive `
+                    -VMName $VmName -VMDomainName $DomainName -TimeoutSeconds 180
+                if (-not $copied) { throw 'bounded guest bundle transfer failed' }
+
+                $bundleItem = Get-Item -LiteralPath $bundleArchive -ErrorAction Stop
+                if ([int64]$r.BundleBytes -gt 0 -and $bundleItem.Length -ne [int64]$r.BundleBytes) {
+                    throw "bundle size mismatch: guest=$($r.BundleBytes) host=$($bundleItem.Length)"
+                }
+                Expand-Archive -LiteralPath $bundleArchive -DestinationPath $bundleExtractDir -Force -ErrorAction Stop
+
+                $readBundleContent = {
+                    param([string]$Name)
+                    if (-not $Name) { return $null }
+                    $bundleFile = Join-Path $bundleExtractDir $Name
+                    if (-not (Test-Path -LiteralPath $bundleFile -PathType Leaf)) {
+                        throw "bundle member '$Name' is missing"
+                    }
+                    return [System.IO.File]::ReadAllText($bundleFile)
+                }
+                if ($r.SetupBundleName) { $r.SetupContent = & $readBundleContent $r.SetupBundleName }
+                if ($r.WrapperBundleName) { $r.WrapperContent = & $readBundleContent $r.WrapperBundleName }
+                if ($r.DscLogBundleName) { $r.DscLogContent = & $readBundleContent $r.DscLogBundleName }
+                if ($r.ClientPackageTimelineBundleName) {
+                    $r.ClientPackageTimelineContent = & $readBundleContent $r.ClientPackageTimelineBundleName
+                }
+                foreach ($artifact in @($r.AdkArtifacts)) {
+                    if ($artifact.BundleName) { $artifact.Content = & $readBundleContent $artifact.BundleName }
+                }
+                $bundleReady = $true
+                $baselineCaptureStatus = 'Completed'
+            }
+            catch {
+                $baselineCaptureError = "baseline bundle transfer/materialization failed: $($_.Exception.Message)"
+                if (Test-Path -LiteralPath $bundleArchive -PathType Leaf) {
+                    $failedBundle = Join-Path $logDir "$base-CMLogs.failed.zip"
+                    try { Move-Item -LiteralPath $bundleArchive -Destination $failedBundle -Force -ErrorAction Stop } catch { }
+                }
+            }
+            finally {
+                if (Test-Path -LiteralPath $bundleExtractDir) {
+                    Remove-Item -LiteralPath $bundleExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                if ($bundleReady -and (Test-Path -LiteralPath $bundleArchive)) {
+                    Remove-Item -LiteralPath $bundleArchive -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    if ($baselineCaptureError) {
+        $continuation = if ($Mode -eq 'Failure') { 'continuing with independent failure diagnostics' } else { 'continuing; phase success is unchanged' }
+        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: $baselineCaptureError; $continuation" -Warning
         $r = [pscustomobject]@{
             SetupExists   = $false
             WrapperExists = $false
@@ -2499,7 +2650,7 @@ function Save-CMSetupLogsFromVm {
         $baselineStatusData = [ordered]@{
             CapturedAtUtc     = (Get-Date).ToUniversalTime().ToString('o')
             ComputerName      = $VmName
-            CaptureStatus     = 'HostInvocationFailed'
+            CaptureStatus     = $baselineCaptureStatus
             TimedOut          = [bool]($res -and $res.TimedOut)
             ScriptBlockFailed = [bool]($res -and $res.ScriptBlockFailed)
             Error             = $baselineCaptureError
@@ -2515,9 +2666,6 @@ function Save-CMSetupLogsFromVm {
         catch {
             Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write baseline capture status: $_" -Warning
         }
-    }
-    else {
-        $r = @($res.ScriptBlockOutput | Where-Object { $null -ne $_ }) | Select-Object -Last 1
     }
 
     if ($r.SetupExists) {
@@ -8715,7 +8863,12 @@ $global:VM_Config = {
                         }
                         # Any role/phase: DSC_Log.log is the only host-visible record of what
                         # the guest's DSC resources reported before giving up.
-                        Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+                        try {
+                            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+                        }
+                        catch {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture threw after failure was already determined: $($_.Exception.Message)" -Warning -OutputStream
+                        }
                         return
                     }
                 }
@@ -8745,7 +8898,12 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
             Write-Progress2 "Exception" -Status "Failed end $_" -force
-            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+            try {
+                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture also threw while preserving monitoring-failure evidence: $($_.Exception.Message)" -Warning -OutputStream
+            }
             return
         }
 
@@ -8762,7 +8920,12 @@ $global:VM_Config = {
                          ($using:Phase -eq 2 -and $currentItem.role -in @('DC', 'OtherDC'))
         if ($pullGuestLogs) {
             $cmLogMode = if ($complete) { 'Success' } else { 'Failure' }
-            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode $cmLogMode
+            try {
+                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode $cmLogMode
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture threw after the phase result was already determined: $($_.Exception.Message)" -Warning -OutputStream
+            }
         }
 
 
