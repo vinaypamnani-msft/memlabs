@@ -306,9 +306,9 @@ function Wait-Phase2DcDscStart {
 }
 
 # A Start-Job whose scriptblock RAN TO COMPLETION (emitting its terminal
-# "VM Creation completed successfully" / "...Preparation completed successfully"
-# line) can still end up State=Failed when the runspace/transport Close that
-# happens AFTER the scriptblock returns times out. The usual trigger: an
+# VM-create/preparation success line or "[Phase N] ... Completed in ..." line)
+# can still end up State=Failed when the runspace/transport Close that happens
+# AFTER the scriptblock returns times out. The usual trigger: an
 # Invoke-VmCommand -AsJob step inside the scriptblock timed out under
 # concurrent-boot load and was abandoned via StopJobAsync (Common.ps1) -- the
 # abandoned PSDirect pipeline never acknowledges cancellation, so closing the
@@ -340,10 +340,15 @@ function Test-JobTransportCloseFalseFailure {
     $isTransportClose = $reasonText -match 'Close operation in the specified time interval|not responding to a Stop message|PSRemotingTransportException|PSRemotingDataStructureException'
     if (-not $isTransportClose) { return $false }
 
-    # 2. No failure-level output, AND a terminal VM-create success line present.
+    # 2. No failure-level output, AND a terminal per-VM success line present.
     $jobOutput = @($streamSource | Select-Object -ExpandProperty Output -ErrorAction SilentlyContinue)
     if ($jobOutput | Where-Object { $_.LogLevel -eq 3 }) { return $false }
-    $hasSuccessSentinel = $jobOutput | Where-Object { $_.LogLevel -eq 1 -and $_.Text -match 'VM Creation completed successfully|Preparation completed successfully' }
+    $hasSuccessSentinel = $jobOutput | Where-Object {
+        if ($_.LogLevel -ne 1) { return $false }
+        $text = "$($_.Text)".Trim()
+        return $text -match 'VM Creation completed successfully|Preparation completed successfully' -or
+            $text -match '^\[Phase \d+\]: .+\s+\[[^\]]+\]\s+:\s+Completed in \d{2}:\d{2}:\d{2}$'
+    }
     return [bool]$hasSuccessSentinel
 }
 
