@@ -5669,6 +5669,7 @@ function Save-BuildStats {
             TotalElapsed    = if ($TotalElapsed) { $TotalElapsed.ToString("hh\:mm\:ss") } else { $null }
             TotalSeconds    = if ($TotalElapsed) { [Math]::Round($TotalElapsed.TotalSeconds, 1) } else { $null }
             HostName        = $env:COMPUTERNAME
+            Source          = $global:CurrentDeploymentSourceIdentity
             Phases          = $phasesOut
             VMs             = $vmsOut
             Components      = $compsOut
@@ -5676,7 +5677,7 @@ function Save-BuildStats {
 
         $fileName = "${configShort}_${timestamp}.json"
         $filePath = Join-Path $statsDir $fileName
-        $statsObj | ConvertTo-Json -Depth 5 | Out-File -FilePath $filePath -Encoding utf8 -Force
+        $statsObj | ConvertTo-Json -Depth 8 | Out-File -FilePath $filePath -Encoding utf8 -Force
         Write-Log "Build stats saved to: $filePath" -LogOnly
     }
     catch {

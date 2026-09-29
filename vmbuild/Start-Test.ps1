@@ -114,7 +114,11 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'TestName')]
-    [switch]$SkipVMNoteCompatibility
+    [switch]$SkipVMNoteCompatibility,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'TestName')]
+    [switch]$RequireCleanSource
 )
 
 
@@ -521,7 +525,7 @@ function Invoke-NewLab {
     $script:LastNewLabResumeCommand = $null
     $global:NewLabResumeCommand = $null
     $global:LASTEXITCODE = 0
-    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit | Out-Host
+    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit -RequireCleanSource:$RequireCleanSource | Out-Host
     $code = [int]$LASTEXITCODE
     $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
 
@@ -529,7 +533,7 @@ function Invoke-NewLab {
     if ($code -eq 55) {
         $global:NewLabResumeCommand = $null
         $global:LASTEXITCODE = 0
-        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit | Out-Host
+        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit -RequireCleanSource:$RequireCleanSource | Out-Host
         $code = [int]$LASTEXITCODE
         $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
     }
