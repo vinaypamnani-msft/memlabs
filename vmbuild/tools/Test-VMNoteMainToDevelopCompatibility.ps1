@@ -5,8 +5,7 @@
 .DESCRIPTION
     The producer functions are lifted from the pinned main Git object and run against an
     in-memory Hyper-V mock. Their serialized Notes JSON is then consumed by the functions
-    in the current worktree. Known compatibility defects are reported as XFAIL; an XPASS
-    fails the test so the expectation must be reviewed when a defect is fixed.
+    in the current worktree.
 #>
 [CmdletBinding()]
 param(
@@ -17,7 +16,6 @@ param(
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $repoRoot = Split-Path -Parent $RootPath
 $script:Failures = 0
-$script:ExpectedFailures = 0
 $script:ProducerVm = $null
 $script:VmStore = @{}
 $script:Inventory = @()
@@ -64,16 +62,12 @@ function Assert-True {
     Write-TestResult -State FAIL -What $What -Detail $Detail
 }
 
-function Assert-KnownFailure {
-    param([bool] $Condition, [string] $What, [string] $Detail)
+function Assert-ThrowsLike {
+    param([scriptblock] $Action, [string] $Pattern, [string] $What)
 
-    if (-not $Condition) {
-        $script:ExpectedFailures++
-        Write-TestResult -State XFAIL -What $What -Detail $Detail
-        return
-    }
-    $script:Failures++
-    Write-TestResult -State XPASS -What $What -Detail 'The known defect no longer reproduces; convert this case to a passing assertion.'
+    $message = $null
+    try { & $Action } catch { $message = $_.Exception.Message }
+    Assert-True ($message -like $Pattern) $What "actual=[$message]"
 }
 
 function Get-GitFileText {
@@ -92,7 +86,7 @@ function Get-FunctionText {
     $tokens = $null
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
-    if (@($errors).Count -ne 0) { throw "$Source has $(@($errors).Count) parse error(s)." }
+    if ($errors.Count -ne 0) { throw "$Source has $($errors.Count) parse error(s)." }
     $definitions = @($ast.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
@@ -202,6 +196,8 @@ function Set-VMNote {
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Get-VMNote)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Get-DomainNetbiosName)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Test-VmPhase1Incomplete)))
+. ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Get-TopLevelSiteServer)))
+. ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Get-ConfigCmOptions)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Update-VMFromHyperV)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.GenConfig.Existing.ps1' -Name New-UserConfig)))
 
@@ -298,10 +294,16 @@ Assert-Equal $false ($null -ne $nocmNote.PSObject.Properties['thisParams']) 'mai
 Assert-Equal $false ($null -ne $nocmNote.PSObject.Properties['SQLAO']) 'main writer excludes generated SQLAO metadata'
 
 $nocmProjection = Convert-MainNoteToInventory -RawNote $nocmRaw
+$script:LegacyNetbiosNames['nocm.com'] = 'nocm'
 Assert-Equal 'DC' $nocmProjection.role 'develop hydrates the main role'
 Assert-Equal 'nocm.com' $nocmProjection.domain 'develop hydrates the main domain'
 Assert-Equal 'Server 2022' $nocmProjection.OperatingSystem 'develop maps deployedOS to OperatingSystem'
 Assert-Equal $true ([bool]$nocmProjection.vmBuild) 'develop recognizes the main note as MemLabs-managed'
+$blankProjection = [pscustomobject]@{ vmName = 'BLANK-TEST'; vmId = [guid]::NewGuid(); Memory = '4GB' }
+Update-VMFromHyperV -vm ([pscustomobject]@{ Name = 'BLANK-TEST'; State = 'Off'; vmID = $blankProjection.vmId }) `
+    -vmObject $blankProjection -vmNoteObject ([pscustomobject]@{ role = 'DomainMember'; blankSetting = '' })
+Assert-True ($blankProjection.blankSetting -is [string]) 'blank VM-note property remains a string instead of coercing to integer zero'
+Assert-Equal '' $blankProjection.blankSetting 'blank VM-note property remains blank'
 
 $readBack = Get-VMNote -VMName $nocmDcName
 Assert-True ($null -ne $readBack) 'develop Get-VMNote admits the exact-main note'
@@ -317,7 +319,6 @@ Assert-Equal $false ([bool]$legacyState.Incomplete) 'older main note without pha
 Assert-True ($legacyState.Reason -like 'built by older build*') 'legacy safety decision reports its version basis' $legacyState.Reason
 
 $script:Inventory = @($nocmProjection)
-$script:LegacyNetbiosNames['nocm.com'] = 'nocm'
 $nocmExisting = New-UserConfig -Domain 'nocm.com' -Subnet '10.220.202.0'
 Assert-Equal 'nocm' $nocmExisting.vmOptions.domainNetBiosName 'ordinary DNS label reconstructs the expected NetBIOS name'
 Assert-Equal 'NOC-' $nocmExisting.vmOptions.prefix 'existing-domain config preserves prefix'
@@ -349,9 +350,21 @@ $script:RecoveredCmOptions['legacypki.lab'] = [pscustomobject]@{
 $legacyPkiExisting = New-UserConfig -Domain 'legacypki.lab' -Subnet '10.220.202.0'
 Assert-Equal $true ([bool]$legacyPkiExisting.pkiOptions.EnablePKI) 'legacy CA metadata reconstructs pkiOptions'
 Assert-Equal $true ([bool]$legacyPkiExisting.cmOptions.UsePKI) 'legacy ConfigMgr PKI mode is recovered from the original guest config'
+$legacyExpansionConfig = [pscustomobject]@{
+    vmOptions       = [pscustomobject]@{ domainName = 'legacypki.lab' }
+    virtualMachines = @([pscustomobject]@{ vmName = 'LPK-MEM1'; role = 'DomainMember' })
+}
+Assert-Equal $true ([bool](Get-ConfigCmOptions -Config $legacyExpansionConfig).UsePKI) 'deploy-time resolver recovers authoritative legacy ConfigMgr PKI mode'
+
+$script:RecoveredCmOptions['legacypki.lab'] = $null
+Assert-ThrowsLike {
+    Get-ConfigCmOptions -Config $legacyExpansionConfig
+} '*no authoritative deployConfig backup was readable*' 'deploy-time ambiguous legacy ConfigMgr mode fails closed'
+Assert-ThrowsLike {
+    New-UserConfig -Domain 'legacypki.lab' -Subnet '10.220.202.0'
+} '*no authoritative deployConfig backup was readable*' 'ambiguous legacy ConfigMgr mode fails closed'
 
 Write-Host ''
-Write-Host "expected failures : $script:ExpectedFailures" -ForegroundColor Yellow
 if ($script:Failures -gt 0) {
     Write-Host "FAIL: $script:Failures unexpected result(s)." -ForegroundColor Red
     exit 1

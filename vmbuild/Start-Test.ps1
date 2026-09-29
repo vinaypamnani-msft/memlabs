@@ -1,4 +1,27 @@
-﻿#Start-Test.ps1
+﻿<#
+.SYNOPSIS
+    Runs MemLabs deployment test fixtures.
+
+.EXAMPLE
+    .\Start-Test.ps1 -All -MainToDevelopExpansion -CrossRevisionPlanOnly
+
+    Prints the pinned main-to-develop expansion matrix without touching Hyper-V.
+
+.EXAMPLE
+    .\Start-Test.ps1 -Test NOCM -MainToDevelopExpansion
+
+    Deploys NOCM-A once with pinned main, then runs develop's NOCM B+ fixtures
+    twice before validating and removing the family.
+
+.EXAMPLE
+    .\Start-Test.ps1 -All -MainToDevelopExpansion
+
+    Runs every family that has an A fixture in pinned main and B+ fixtures in
+    pinned develop. Completed stages are checkpointed under
+    ProgramData\MemLabs\CrossRevision. If exact-main A is interrupted, remove
+    that family lab and reset its state; the runner will not replay or adopt an
+    uncheckpointed baseline.
+#>
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true, HelpMessage = "Prefix of tests to perform", ParameterSetName = 'TestName')]
@@ -116,9 +139,23 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'TestName')]
     [switch]$SkipVMNoteCompatibility,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'TestName')]
+    [switch]$MainToDevelopExpansion,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'TestName')]
+    [switch]$CrossRevisionPlanOnly,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'TestName')]
+    [switch]$ResetCrossRevisionState,
+
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'TestName')]
-    [switch]$RequireCleanSource
+    [switch]$RequireCleanSource,
+
+    [string]$MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
 )
 
 
@@ -473,6 +510,8 @@ function Invoke-TestGitPull {
 }
 
 function Invoke-VMNoteCompatibilityPreflight {
+    param([string] $PinnedMainRevision)
+
     $testPath = Join-Path $PSScriptRoot 'tools\Test-VMNoteMainToDevelopCompatibility.ps1'
     if (-not (Test-Path -LiteralPath $testPath)) {
         Write-Host "VM-note compatibility test not found: $testPath" -ForegroundColor Red
@@ -493,7 +532,7 @@ function Invoke-VMNoteCompatibilityPreflight {
 
         Write-Host "Running under $($engine.Name)..." -ForegroundColor Cyan
         $global:LASTEXITCODE = 0
-        & $engine.Path @($engine.Arguments) -File $testPath | Out-Host
+        & $engine.Path @($engine.Arguments) -File $testPath -MainRevision $PinnedMainRevision | Out-Host
         $exitCode = [int]$LASTEXITCODE
         if ($exitCode -ne 0) {
             Write-Host "FAIL: VM-note compatibility preflight returned $exitCode under $($engine.Name)." -ForegroundColor Red
@@ -503,6 +542,39 @@ function Invoke-VMNoteCompatibilityPreflight {
 
     Write-Host 'PASS: VM-note compatibility preflight passed under both PowerShell engines.' -ForegroundColor Green
     return $true
+}
+
+function Invoke-MainToDevelopExpansionCycle {
+    param(
+        [string] $PinnedMainRevision,
+        [string] $PinnedDevelopRevision,
+        [string] $TestPrefix,
+        [switch] $RunAll,
+        [switch] $PlanOnly,
+        [switch] $ResetState,
+        [switch] $RequireCleanSource
+    )
+
+    $runnerPath = Join-Path $PSScriptRoot 'tools\Invoke-MainToDevelopExpansionTest.ps1'
+    if (-not (Test-Path -LiteralPath $runnerPath)) {
+        Write-Host "Cross-revision expansion runner not found: $runnerPath" -ForegroundColor Red
+        return 2
+    }
+
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $runnerPath,
+        '-RepositoryRoot', (Split-Path -Parent $PSScriptRoot),
+        '-MainRevision', $PinnedMainRevision,
+        '-DevelopRevision', $PinnedDevelopRevision
+    )
+    if ($RunAll.IsPresent) { $arguments += '-All' } else { $arguments += @('-Test', $TestPrefix) }
+    if ($PlanOnly.IsPresent) { $arguments += '-PlanOnly' }
+    if ($ResetState.IsPresent) { $arguments += '-ResetState' }
+    if ($RequireCleanSource.IsPresent) { $arguments += '-RequireCleanSource' }
+
+    $global:LASTEXITCODE = 0
+    & (Join-Path $PSHOME 'pwsh.exe') @arguments | Out-Host
+    return [int]$LASTEXITCODE
 }
 
 function Invoke-NewLab {
@@ -710,17 +782,80 @@ function Run-Test {
     return (-not $groupFailed)
 }
 
-Invoke-TestGitPull -Context 'before VM-note compatibility preflight'
+$script:TestMutationMutex = $null
+$script:TestMutationMutexHeld = $false
+if (-not $MainToDevelopExpansion.IsPresent -and -not $VMNoteCompatibilityOnly.IsPresent) {
+    try {
+        $script:TestMutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+        try { $script:TestMutationMutexHeld = $script:TestMutationMutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $script:TestMutationMutexHeld = $true }
+        if (-not $script:TestMutationMutexHeld) {
+            Write-Host 'Another MemLabs test cycle owns the host mutation lock. Stop it or wait for it to finish.' -ForegroundColor Red
+            exit 2
+        }
+    }
+    catch {
+        Write-Host "Could not acquire the host mutation lock: $($_.Exception.Message)" -ForegroundColor Red
+        exit 2
+    }
+}
+
+if ($MainToDevelopExpansion.IsPresent) {
+    Write-Host 'Mixed-revision mode will use the current committed HEAD without pulling.' -ForegroundColor DarkGray
+}
+else {
+    Invoke-TestGitPull -Context 'before VM-note compatibility preflight'
+}
 if ($SkipVMNoteCompatibility.IsPresent) {
     Write-Host 'WARNING: main-to-develop VM-note compatibility preflight skipped by request.' -ForegroundColor Yellow
 }
-elseif (-not (Invoke-VMNoteCompatibilityPreflight)) {
+elseif (-not (Invoke-VMNoteCompatibilityPreflight -PinnedMainRevision $MainRevision)) {
     Write-Host 'Start-Test stopped before lab mutation because the VM-note compatibility preflight failed.' -ForegroundColor Red
     exit 1
 }
 
 if ($VMNoteCompatibilityOnly.IsPresent) {
     exit 0
+}
+
+if (($CrossRevisionPlanOnly.IsPresent -or $ResetCrossRevisionState.IsPresent) -and -not $MainToDevelopExpansion.IsPresent) {
+    Write-Host '-CrossRevisionPlanOnly and -ResetCrossRevisionState require -MainToDevelopExpansion.' -ForegroundColor Red
+    exit 2
+}
+
+if ($MainToDevelopExpansion.IsPresent) {
+    if ($cmVersion -or $dynamicMemory.IsPresent -or $DoNotInstallCM.IsPresent -or $serverVersion -or
+        $EnableBLM.IsPresent -or $EnableProxy.IsPresent -or $TwoTierPKI.IsPresent -or $Office.IsPresent -or $TheWorks.IsPresent) {
+        Write-Host 'Feature and platform overrides are not supported in a pinned main-to-develop cycle; use the committed fixtures unchanged.' -ForegroundColor Red
+        exit 2
+    }
+
+    $startTestRepoRoot = Split-Path -Parent $PSScriptRoot
+    $branchOutput = @(& git -C $startTestRepoRoot branch --show-current 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $branchOutput.Count -gt 1) {
+        Write-Host 'Could not determine the current Git branch.' -ForegroundColor Red
+        exit 2
+    }
+    $currentBranch = if ($branchOutput.Count -eq 1) { $branchOutput[0].Trim() } else { '' }
+    if (-not $CrossRevisionPlanOnly.IsPresent -and $currentBranch -ne 'develop') {
+        Write-Host "A live main-to-develop cycle must run from the develop branch; current branch is '$currentBranch'." -ForegroundColor Red
+        exit 2
+    }
+    $developOutput = @(& git -C $startTestRepoRoot rev-parse HEAD 2>$null)
+    $developRevision = if ($developOutput.Count -eq 1) { $developOutput[0].Trim() } else { '' }
+    if ($LASTEXITCODE -ne 0 -or $developRevision -notmatch '^[0-9a-f]{40}$') {
+        Write-Host 'Could not pin the current develop commit.' -ForegroundColor Red
+        exit 2
+    }
+    $crossRevisionExit = Invoke-MainToDevelopExpansionCycle `
+        -PinnedMainRevision $MainRevision `
+        -PinnedDevelopRevision $developRevision `
+        -TestPrefix $Test `
+        -RunAll:$All `
+        -PlanOnly:$CrossRevisionPlanOnly `
+        -ResetState:$ResetCrossRevisionState `
+        -RequireCleanSource:$RequireCleanSource
+    exit $crossRevisionExit
 }
 
 # Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
@@ -800,4 +935,8 @@ finally {
         }
     }
     Write-host "Delete C:\temp\CompletedTests.txt to re-run all tests"
+    if ($script:TestMutationMutexHeld) {
+        try { $script:TestMutationMutex.ReleaseMutex() } catch { }
+    }
+    if ($script:TestMutationMutex) { $script:TestMutationMutex.Dispose() }
 }

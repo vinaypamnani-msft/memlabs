@@ -1,0 +1,898 @@
+<#
+.SYNOPSIS
+    Runs existing-domain expansion tests across pinned main and develop revisions.
+
+.DESCRIPTION
+    For each selected test family, deploys the A fixture once with exact-main code,
+    then deploys every B-and-later fixture twice with the pinned develop candidate.
+    Families without a follow-on fixture are skipped. Each family is removed only
+    after every stage and its idempotence pass succeeds.
+
+    Develop failures retain their VMs. Exact-main has no KeepFailedVMs switch and
+    may remove Phase 1 VMs when its baseline deployment fails; this runner does not
+    patch that historical behavior.
+
+    The runner uses separate Git worktrees and never pulls during the cycle. State
+    is written after every completed stage. Follow-on stages resume without replaying
+    the main baseline. An interruption while exact-main A itself is running fails
+    closed because no pre-mutation VM/domain identity exists to prove what survived;
+    remove that family lab and reset its state before retrying. Use -PlanOnly to
+    inspect the revision and fixture matrix without creating worktrees, writing
+    state, or touching Hyper-V.
+
+.EXAMPLE
+    .\Invoke-MainToDevelopExpansionTest.ps1 -All -PlanOnly
+
+.EXAMPLE
+    .\Invoke-MainToDevelopExpansionTest.ps1 -Test NOCM
+
+.EXAMPLE
+    .\Invoke-MainToDevelopExpansionTest.ps1 -Test NOCM -ResetState
+
+    Resets checkpoint metadata only. Existing matching VMs still block a new baseline
+    and must be deliberately removed first.
+#>
+[CmdletBinding(DefaultParameterSetName = 'All')]
+param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'All')]
+    [switch] $All,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Test')]
+    [string] $Test,
+
+    [string] $RepositoryRoot,
+
+    [string] $MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf',
+
+    [string] $DevelopRevision = 'HEAD',
+
+    [string] $StateRoot = (Join-Path $env:ProgramData 'MemLabs\CrossRevision'),
+
+    [switch] $PlanOnly,
+
+    [switch] $ResetState,
+
+    [switch] $RequireCleanSource
+)
+
+if (-not $RepositoryRoot) {
+    $vmbuildRoot = Split-Path -Parent $PSScriptRoot
+    $RepositoryRoot = Split-Path -Parent $vmbuildRoot
+}
+$RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
+$pwshPath = Join-Path $PSHOME 'pwsh.exe'
+$script:MutationMutex = $null
+$script:MutationMutexHeld = $false
+$script:MainBaselineFailureCleanupPossible = $false
+
+function Invoke-Git {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments
+    )
+
+    $output = @(& git -C $RepositoryRoot @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "git $($Arguments -join ' ') failed with exit code $exitCode`: $($output -join [Environment]::NewLine)"
+    }
+    return @($output | ForEach-Object { "$_" })
+}
+
+function Resolve-GitRevision {
+    param([string] $Revision)
+
+    $resolved = @(Invoke-Git -Arguments @('rev-parse', "$Revision^{commit}"))
+    if ($resolved.Count -ne 1 -or $resolved[0] -notmatch '^[0-9a-f]{40}$') {
+        throw "Could not resolve '$Revision' to one commit."
+    }
+    return $resolved[0]
+}
+
+function Get-GitText {
+    param([string] $Revision, [string] $Path)
+
+    $lines = @(Invoke-Git -Arguments @('show', "$Revision`:$Path"))
+    return [string]::Join([Environment]::NewLine, $lines)
+}
+
+function Get-GitJson {
+    param([string] $Revision, [string] $Path)
+
+    try {
+        return (Get-GitText -Revision $Revision -Path $Path) | ConvertFrom-Json
+    }
+    catch {
+        throw "Could not parse $Revision`:$Path as JSON. $($_.Exception.Message)"
+    }
+}
+
+function Get-FixtureRecords {
+    param([string] $Revision)
+
+    $paths = @(Invoke-Git -Arguments @('ls-tree', '-r', '--name-only', $Revision, '--', 'vmbuild/config/tests'))
+    $records = @()
+    foreach ($path in $paths) {
+        $trimmedPath = $path.Trim()
+        $name = [IO.Path]::GetFileName($trimmedPath)
+        if ($name -notmatch '^(?<Family>.+?)-(?<Stage>[A-Z])(?:-|\.json$)') { continue }
+        $records += [pscustomobject]@{
+            Family = $Matches.Family
+            Stage  = $Matches.Stage
+            Name   = $name
+            Path   = $trimmedPath
+        }
+    }
+    return @($records)
+}
+
+function Get-CrossRevisionPlan {
+    param(
+        [string] $MainCommit,
+        [string] $DevelopCommit,
+        [string] $TestPrefix
+    )
+
+    $mainFixtures = @(Get-FixtureRecords -Revision $MainCommit)
+    $developFixtures = @(Get-FixtureRecords -Revision $DevelopCommit)
+    $families = @($mainFixtures | Where-Object { $_.Stage -eq 'A' } | Select-Object -ExpandProperty Family -Unique | Sort-Object)
+    if ($TestPrefix) {
+        $families = @($families | Where-Object { $_.StartsWith($TestPrefix, [StringComparison]::OrdinalIgnoreCase) })
+    }
+
+    $plan = @()
+    foreach ($family in $families) {
+        $baseline = @($mainFixtures | Where-Object { $_.Family -eq $family -and $_.Stage -eq 'A' })
+        $followOns = @($developFixtures |
+                Where-Object { $_.Family -eq $family -and $_.Stage -ne 'A' } |
+                Sort-Object Stage, Name)
+        if ($baseline.Count -ne 1 -or $followOns.Count -eq 0) { continue }
+
+        $baselineConfig = Get-GitJson -Revision $MainCommit -Path $baseline[0].Path
+        $baselineDomain = [string]$baselineConfig.vmOptions.domainName
+        $domains = @($baselineDomain)
+        $expectedVmNames = @(Get-ExpectedVmNames -Config $baselineConfig)
+        $vmNamesByDomain = @{}
+        $vmNamesByDomain[$baselineDomain.ToLowerInvariant()] = @($expectedVmNames)
+        foreach ($followOn in $followOns) {
+            $followOnConfig = Get-GitJson -Revision $DevelopCommit -Path $followOn.Path
+            $followOnDomain = [string]$followOnConfig.vmOptions.domainName
+            $followOnVmNames = @(Get-ExpectedVmNames -Config $followOnConfig)
+            $domains += $followOnDomain
+            $expectedVmNames += $followOnVmNames
+            $domainKey = $followOnDomain.ToLowerInvariant()
+            $combinedNames = @($vmNamesByDomain[$domainKey]) + $followOnVmNames
+            $vmNamesByDomain[$domainKey] = @($combinedNames | Select-Object -Unique)
+        }
+
+        $plan += [pscustomobject]@{
+            Family         = $family
+            Baseline       = $baseline[0]
+            FollowOns      = $followOns
+            Domains        = @($domains | Where-Object { $_ } | Select-Object -Unique)
+            ExpectedVmNames = @($expectedVmNames | Select-Object -Unique)
+            VmNamesByDomain = $vmNamesByDomain
+            BaselineConfig = $baselineConfig
+        }
+    }
+    return @($plan)
+}
+
+function Write-CrossRevisionPlan {
+    param([object[]] $Plan, [string] $MainCommit, [string] $DevelopCommit)
+
+    Write-Host 'Main-to-develop expansion plan' -ForegroundColor Magenta
+    Write-Host "  main    : $MainCommit"
+    Write-Host "  develop : $DevelopCommit"
+    Write-Host '  cycle   : main A once; develop B+ twice; validate; cleanup'
+    Write-Host ''
+    foreach ($item in $Plan) {
+        Write-Host ("{0}: {1}" -f $item.Family, $item.Baseline.Name) -ForegroundColor Cyan
+        foreach ($followOn in $item.FollowOns) {
+            Write-Host ("  {0}: {1}" -f $followOn.Stage, $followOn.Name)
+        }
+        Write-Host ("  domains: {0}" -f ($item.Domains -join ', ')) -ForegroundColor DarkGray
+    }
+    Write-Host ''
+    Write-Host ("{0} family/families, {1} follow-on fixture(s), {2} develop deployment pass(es)." -f `
+            $Plan.Count,
+            (@($Plan | ForEach-Object { $_.FollowOns.Count }) | Measure-Object -Sum).Sum,
+            (2 * (@($Plan | ForEach-Object { $_.FollowOns.Count }) | Measure-Object -Sum).Sum))
+    Write-Host 'Coverage boundary: B+ fixture files test deployment over main-era VMs, but do not invoke the interactive existing-domain GenConfig path.' -ForegroundColor Yellow
+    Write-Host 'The VM-note preflight remains the gate for legacy NetBIOS and PKI reconstruction.' -ForegroundColor Yellow
+}
+
+function Get-OrderedCrossRevisionPlan {
+    param([object[]] $Plan, [string] $CurrentStep)
+
+    if ([string]::IsNullOrWhiteSpace($CurrentStep)) { return @($Plan) }
+    $activeFamily = ($CurrentStep -split '\|', 2)[0]
+    $active = @($Plan | Where-Object { $_.Family -ieq $activeFamily })
+    if ($active.Count -ne 1) {
+        throw "Checkpoint '$CurrentStep' belongs to family '$activeFamily', which is not in this selection. Resume that family or remove its labs and use -ResetCrossRevisionState."
+    }
+    $remaining = @($Plan | Where-Object { $_.Family -ine $activeFamily })
+    Write-Host "RESUME: '$activeFamily' has an in-progress checkpoint and will run before other selected families." -ForegroundColor Yellow
+    return @($active + $remaining)
+}
+
+function Get-FullVmName {
+    param([string] $Prefix, [string] $VmName)
+
+    if ($VmName.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) { return $VmName }
+    return "$Prefix$VmName"
+}
+
+function Get-ExpectedVmNames {
+    param([object] $Config)
+
+    $prefix = [string]$Config.vmOptions.prefix
+    return @($Config.virtualMachines | ForEach-Object { Get-FullVmName -Prefix $prefix -VmName ([string]$_.vmName) })
+}
+
+function Get-DomainVms {
+    param([string[]] $Domains)
+
+    $domainVms = @()
+    $inventory = @(Get-VM -ErrorAction Stop)
+    foreach ($vm in $inventory) {
+        if ([string]::IsNullOrWhiteSpace([string]$vm.Notes)) { continue }
+        try { $note = $vm.Notes | ConvertFrom-Json } catch { continue }
+        if ($note.domain -and $Domains -contains [string]$note.domain) {
+            $domainVms += $vm
+        }
+    }
+    return @($domainVms)
+}
+
+function Get-ExistingNamedVms {
+    param([string[]] $VmNames)
+
+    $inventory = @(Get-VM -ErrorAction Stop)
+    return @($inventory | Where-Object { $VmNames -contains $_.Name })
+}
+
+function Get-VmIdentity {
+    param([string[]] $VmNames)
+
+    $identities = @()
+    foreach ($vmName in $VmNames) {
+        $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+        if (-not $vm) { throw "Expected baseline VM '$vmName' was not found after main deployment." }
+        $paths = @(Get-VMHardDiskDrive -VMName $vmName -ErrorAction Stop |
+                Sort-Object ControllerType, ControllerNumber, ControllerLocation |
+                Select-Object -ExpandProperty Path)
+        $identities += [ordered]@{
+            Name     = $vmName
+            Id       = "$($vm.Id)"
+            VhdPaths = @($paths)
+        }
+    }
+    return @($identities)
+}
+
+function Assert-BaselineIdentity {
+    param([object[]] $Identity)
+
+    foreach ($expected in $Identity) {
+        $vm = Get-VM -Name $expected.Name -ErrorAction SilentlyContinue
+        if (-not $vm) { throw "Baseline VM '$($expected.Name)' disappeared during expansion." }
+        if ("$($vm.Id)" -ne "$($expected.Id)") {
+            throw "Baseline VM '$($expected.Name)' was replaced: expected ID $($expected.Id), found $($vm.Id)."
+        }
+        $actualPaths = @(Get-VMHardDiskDrive -VMName $expected.Name -ErrorAction Stop |
+                Sort-Object ControllerType, ControllerNumber, ControllerLocation |
+                Select-Object -ExpandProperty Path)
+        if (($actualPaths -join '|') -ne (@($expected.VhdPaths) -join '|')) {
+            throw "Baseline VM '$($expected.Name)' disk attachment paths changed during expansion."
+        }
+    }
+}
+
+function New-DomainCredential {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '',
+        Justification = 'MemLabs already stores this deployment credential as plaintext in its local ignored cache; this process-local PSCredential is required for PowerShell Direct.')]
+    param([string] $Domain, [string] $AdminName, [string] $AdminCachePath)
+
+    if (-not (Test-Path -LiteralPath $AdminCachePath -PathType Leaf)) {
+        throw "Cached VM credential not found: $AdminCachePath"
+    }
+    $password = (Get-Content -LiteralPath $AdminCachePath -Raw -ErrorAction Stop).Trim()
+    if ([string]::IsNullOrWhiteSpace($password)) { throw "Cached VM credential is empty: $AdminCachePath" }
+    $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+    return New-Object Management.Automation.PSCredential("$AdminName@$Domain", $securePassword)
+}
+
+function Get-DomainIdentity {
+    param([object] $Config, [string] $AdminCachePath)
+
+    $dc = @($Config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1)
+    if ($dc.Count -ne 1) { throw 'The main baseline must contain one DC to capture the AD domain SID.' }
+
+    $domain = [string]$Config.vmOptions.domainName
+    $adminName = [string]$Config.vmOptions.adminName
+    $dcVmName = Get-FullVmName -Prefix ([string]$Config.vmOptions.prefix) -VmName ([string]$dc[0].vmName)
+    $credential = New-DomainCredential -Domain $domain -AdminName $adminName -AdminCachePath $AdminCachePath
+    $domainSidValues = @(Invoke-Command -VMName $dcVmName -Credential $credential -ScriptBlock {
+            (Get-ADDomain -ErrorAction Stop).DomainSID.Value
+        } -ErrorAction Stop)
+    if ($domainSidValues.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$domainSidValues[0])) {
+        throw "The domain SID probe returned $($domainSidValues.Count) value(s) from '$dcVmName'; expected exactly one."
+    }
+    return [ordered]@{
+        Domain    = $domain
+        AdminName = $adminName
+        DcVmName  = $dcVmName
+        Sid       = "$($domainSidValues[0])"
+    }
+}
+
+function Assert-DomainJoinedVmHealth {
+    param([object] $Config, [string] $FixtureName, [string] $AdminCachePath)
+
+    $domainJoinedRoles = @('DomainMember', 'FileServer', 'PassiveSite', 'Primary', 'Secondary', 'SiteSystem', 'SQLAO', 'WSUS')
+    $domain = [string]$Config.vmOptions.domainName
+    $adminName = [string]$Config.vmOptions.adminName
+    $prefix = [string]$Config.vmOptions.prefix
+    $credential = $null
+
+    foreach ($vmConfig in @($Config.virtualMachines | Where-Object { $_.role -in $domainJoinedRoles })) {
+        if (-not $credential) {
+            $credential = New-DomainCredential -Domain $domain -AdminName $adminName -AdminCachePath $AdminCachePath
+        }
+        $vmName = Get-FullVmName -Prefix $prefix -VmName ([string]$vmConfig.vmName)
+        $healthValues = @(Invoke-Command -VMName $vmName -Credential $credential -ScriptBlock {
+                param($ExpectedDomain)
+                $computerSystem = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+                $secureChannel = Test-ComputerSecureChannel -ErrorAction Stop
+                $fqdn = "$env:COMPUTERNAME.$ExpectedDomain"
+                $dnsAddresses = @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop |
+                        Where-Object { $_.IPAddress } |
+                        Select-Object -ExpandProperty IPAddress -Unique)
+                [pscustomobject]@{
+                    PartOfDomain  = [bool]$computerSystem.PartOfDomain
+                    Domain        = [string]$computerSystem.Domain
+                    SecureChannel = [bool]$secureChannel
+                    DnsAddresses  = @($dnsAddresses)
+                }
+            } -ArgumentList $domain -ErrorAction Stop)
+        if ($healthValues.Count -ne 1) {
+            throw "$FixtureName domain health probe returned $($healthValues.Count) value(s) from '$vmName'; expected exactly one."
+        }
+        $health = $healthValues[0]
+        if (-not $health.PartOfDomain -or $health.Domain -ine $domain) {
+            throw "$FixtureName left '$vmName' outside '$domain' (PartOfDomain=$($health.PartOfDomain), Domain=$($health.Domain))."
+        }
+        if (-not $health.SecureChannel) {
+            throw "$FixtureName left '$vmName' with a broken secure channel to '$domain'."
+        }
+        if (@($health.DnsAddresses | Where-Object { $null -ne $_ }).Count -eq 0) {
+            throw "$FixtureName left '$vmName' without an A record for '$vmName.$domain'."
+        }
+    }
+}
+
+function Assert-DomainIdentity {
+    param([object] $Identity, [string] $AdminCachePath)
+
+    $config = [pscustomobject]@{
+        vmOptions       = [pscustomobject]@{ domainName = $Identity.Domain; adminName = $Identity.AdminName; prefix = '' }
+        virtualMachines = @([pscustomobject]@{ role = 'DC'; vmName = $Identity.DcVmName })
+    }
+    $vm = Get-VM -Name $Identity.DcVmName -ErrorAction SilentlyContinue
+    if (-not $vm) { throw "Domain controller '$($Identity.DcVmName)' disappeared during expansion." }
+    $actual = Get-DomainIdentity -Config $config -AdminCachePath $AdminCachePath
+    if ($actual.Sid -ne $Identity.Sid) {
+        throw "Domain '$($Identity.Domain)' was replaced: expected SID $($Identity.Sid), found $($actual.Sid)."
+    }
+}
+
+function Assert-DevelopStageComplete {
+    param([object] $Config, [string] $FixtureName)
+
+    $prefix = [string]$Config.vmOptions.prefix
+    foreach ($vmConfig in @($Config.virtualMachines)) {
+        $vmName = Get-FullVmName -Prefix $prefix -VmName ([string]$vmConfig.vmName)
+        $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+        if (-not $vm) { throw "$FixtureName completed but expected VM '$vmName' does not exist." }
+        try { $note = $vm.Notes | ConvertFrom-Json } catch { throw "$FixtureName produced unreadable VM notes on '$vmName'." }
+        $successIsTrue = $note.PSObject.Properties['success'] -and $note.success -is [bool] -and $note.success
+        $inProgressIsFalse = $note.PSObject.Properties['inProgress'] -and $note.inProgress -is [bool] -and -not $note.inProgress
+        if (-not $successIsTrue -or -not $inProgressIsFalse) {
+            throw "$FixtureName left '$vmName' incomplete (success=$($note.success), inProgress=$($note.inProgress))."
+        }
+
+        if ($vmConfig.role -eq 'OSDClient') {
+            continue
+        }
+        if ($vmConfig.role -eq 'AADClient') {
+            if ($note.oobeComplete -isnot [bool] -or -not $note.oobeComplete) {
+                throw "$FixtureName left AAD client '$vmName' without oobeComplete=true."
+            }
+            continue
+        }
+        if (-not $note.lastPhaseComplete -or [int]$note.lastPhaseComplete -lt 11) {
+            throw "$FixtureName left '$vmName' below phase 11 (lastPhaseComplete=$($note.lastPhaseComplete))."
+        }
+    }
+}
+
+function Initialize-PinnedWorktree {
+    param(
+        [string] $Path,
+        [string] $Commit,
+        [string] $BranchName
+    )
+
+    if (Test-Path -LiteralPath $Path) {
+        $existingCommit = @(& git -C $Path rev-parse HEAD 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $existingCommit.Count -ne 1 -or $existingCommit[0].Trim() -ne $Commit) {
+            throw "Existing worktree '$Path' is not pinned to $Commit. Remove or rename it before retrying."
+        }
+    }
+    else {
+        $parent = Split-Path -Parent $Path
+        $null = New-Item -ItemType Directory -Path $parent -Force
+        if ($BranchName) {
+            $branchExists = $false
+            & git -C $RepositoryRoot show-ref --verify --quiet "refs/heads/$BranchName"
+            $branchExists = $LASTEXITCODE -eq 0
+            if ($branchExists) {
+                $null = Invoke-Git -Arguments @('worktree', 'add', $Path, $BranchName)
+            }
+            else {
+                $null = Invoke-Git -Arguments @('worktree', 'add', '-b', $BranchName, $Path, $Commit)
+            }
+        }
+        else {
+            $null = Invoke-Git -Arguments @('worktree', 'add', '--detach', $Path, $Commit)
+        }
+    }
+
+    $actualCommit = @(& git -C $Path rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $actualCommit.Count -ne 1 -or $actualCommit[0].Trim() -ne $Commit) {
+        throw "Worktree '$Path' resolved to '$($actualCommit -join '')', expected $Commit."
+    }
+    if ($BranchName) {
+        $actualBranch = @(& git -C $Path branch --show-current 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $actualBranch.Count -ne 1 -or $actualBranch[0].Trim() -ne $BranchName) {
+            throw "Worktree '$Path' is on branch '$($actualBranch -join '')', expected '$BranchName'. Remove the stale worktree before retrying."
+        }
+    }
+
+    $untrackedMode = if ($RequireCleanSource) { 'all' } else { 'no' }
+    $worktreeChanges = @(& git -C $Path status --porcelain "--untracked-files=$untrackedMode")
+    if ($LASTEXITCODE -ne 0 -or $worktreeChanges.Count -gt 0) {
+        $scope = if ($RequireCleanSource) { 'tracked or untracked' } else { 'tracked' }
+        throw "Pinned worktree '$Path' has $scope changes and cannot be used for this release test."
+    }
+}
+
+function Initialize-WorktreeRuntime {
+    param([string] $WorktreePath)
+
+    $sourceVmbuild = Join-Path $RepositoryRoot 'vmbuild'
+    $targetVmbuild = Join-Path $WorktreePath 'vmbuild'
+    $sourceAssets = Join-Path $sourceVmbuild 'azureFiles'
+    $targetAssets = Join-Path $targetVmbuild 'azureFiles'
+    if (-not (Test-Path -LiteralPath $sourceAssets -PathType Container)) {
+        throw "Shared media directory not found: $sourceAssets"
+    }
+    if (Test-Path -LiteralPath $targetAssets) {
+        $assetLink = Get-Item -LiteralPath $targetAssets -Force -ErrorAction Stop
+        $targets = @($assetLink.Target | Where-Object { $null -ne $_ })
+        if ($assetLink.LinkType -notin @('Junction', 'SymbolicLink') -or $targets.Count -ne 1) {
+            throw "Pinned worktree media path '$targetAssets' is not a single junction/symbolic link. Remove the stale worktree before retrying."
+        }
+        $actualTarget = [string]$targets[0]
+        if (-not [IO.Path]::IsPathRooted($actualTarget)) {
+            $actualTarget = Join-Path $assetLink.Parent.FullName $actualTarget
+        }
+        $actualTarget = [IO.Path]::GetFullPath($actualTarget).TrimEnd('\')
+        $expectedTarget = [IO.Path]::GetFullPath($sourceAssets).TrimEnd('\')
+        if ($actualTarget -ine $expectedTarget) {
+            throw "Pinned worktree media link '$targetAssets' targets '$actualTarget', expected '$expectedTarget'. Remove the stale worktree before retrying."
+        }
+    }
+    else {
+        $null = New-Item -ItemType Junction -Path $targetAssets -Target $sourceAssets -ErrorAction Stop
+    }
+
+    $targetCache = Join-Path $targetVmbuild 'cache'
+    $null = New-Item -ItemType Directory -Path $targetCache -Force
+    $branchCache = Join-Path $targetCache 'git-branch-context.json'
+    if (Test-Path -LiteralPath $branchCache) {
+        Remove-Item -LiteralPath $branchCache -Force -ErrorAction Stop
+    }
+    foreach ($cacheItem in @('vmbuildadmin.txt', 'latest-hotfix-version.json', 'supported-options.json')) {
+        $source = Join-Path (Join-Path $sourceVmbuild 'cache') $cacheItem
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $targetCache $cacheItem) -Force
+        }
+    }
+    $sourceSsh = Join-Path (Join-Path $sourceVmbuild 'cache') 'ssh'
+    if (Test-Path -LiteralPath $sourceSsh -PathType Container) {
+        Copy-Item -LiteralPath $sourceSsh -Destination $targetCache -Recurse -Force
+    }
+
+    $targetConfig = Join-Path $targetVmbuild 'config'
+    foreach ($storageConfig in @(Get-ChildItem (Join-Path $sourceVmbuild 'config') -Filter '_StorageConfig*.json' -File -Force)) {
+        Copy-Item -LiteralPath $storageConfig.FullName -Destination (Join-Path $targetConfig $storageConfig.Name) -Force
+    }
+}
+
+function Save-State {
+    $script:State.LastUpdateUtc = [DateTime]::UtcNow.ToString('o')
+    $tempPath = "$script:StatePath.$PID.tmp"
+    $json = $script:State | ConvertTo-Json -Depth 12
+    [IO.File]::WriteAllText($tempPath, $json, (New-Object Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $tempPath -Destination $script:StatePath -Force
+}
+
+function Test-StepComplete {
+    param([string] $Step)
+    return @($script:State.CompletedSteps) -contains $Step
+}
+
+function Test-StepInProgress {
+    param([string] $Step)
+    return $script:State.CurrentStep -eq $Step
+}
+
+function Start-Step {
+    param([string] $Step)
+    $script:State.Status = 'Running'
+    $script:State.CurrentStep = $Step
+    $script:State.LastError = $null
+    Save-State
+}
+
+function Complete-Step {
+    param([string] $Step)
+    $script:State.CompletedSteps = @($script:State.CompletedSteps) + $Step
+    $script:State.CompletedSteps = @($script:State.CompletedSteps | Select-Object -Unique)
+    $script:State.CurrentStep = $null
+    Save-State
+}
+
+function Invoke-ChildScript {
+    param(
+        [string] $WorktreePath,
+        [string] $ScriptName,
+        [string[]] $Arguments,
+        [string] $Label
+    )
+
+    $vmbuildPath = Join-Path $WorktreePath 'vmbuild'
+    $scriptPath = Join-Path $vmbuildPath $ScriptName
+    $safeLabel = $Label -replace '[^A-Za-z0-9_.-]', '_'
+    $logPath = Join-Path $StateRoot "$safeLabel.log"
+    Write-Host "===== $Label =====" -ForegroundColor Magenta
+    Push-Location $vmbuildPath
+    try {
+        $global:LASTEXITCODE = 0
+        & $pwshPath -NoLogo -NoProfile -NonInteractive -File $scriptPath @Arguments 2>&1 |
+            Tee-Object -FilePath $logPath -Append |
+            Out-Host
+        return [int]$LASTEXITCODE
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Invoke-NewLabFixture {
+    param(
+        [string] $WorktreePath,
+        [string] $FixturePath,
+        [string] $Label,
+        [switch] $KeepFailedVms
+    )
+
+    $arguments = @('-Configuration', $FixturePath, '-NoSnapshot', '-NoWindowResize')
+    if ($KeepFailedVms.IsPresent) { $arguments += '-KeepFailedVMs' }
+    $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' -Arguments $arguments -Label $Label
+    if ($exitCode -eq 55) {
+        Write-Host "$Label requested one restart after rebuilding DSC.zip; rerunning." -ForegroundColor Yellow
+        $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' -Arguments $arguments -Label "$Label-restart"
+    }
+    return $exitCode
+}
+
+function Assert-DomainsAbsent {
+    param([string[]] $Domains, [string[]] $VmNames)
+
+    $existing = @(Get-DomainVms -Domains $Domains)
+    $existing += @(Get-ExistingNamedVms -VmNames $VmNames)
+    $existing = @($existing | Sort-Object Name -Unique)
+    if ($existing.Count -gt 0) {
+        throw "Cannot start a clean main baseline; planned domain VM(s) already exist: $($existing.Name -join ', ')."
+    }
+}
+
+function Assert-MainBaselineCanStart {
+    param([object] $Config, [string[]] $Domains, [bool] $WasStarted)
+
+    if ($WasStarted) {
+        throw 'The exact-main baseline mutation began but was not checkpointed complete. Automatic replay or adoption is unsafe because no pre-mutation VM/domain identity exists. Remove every VM and residual lab state for this family, then use -ResetState.'
+    }
+    Assert-DomainsAbsent -Domains $Domains -VmNames @(Get-ExpectedVmNames -Config $Config)
+}
+
+try {
+    if (-not (Test-Path -LiteralPath $RepositoryRoot -PathType Container)) {
+        throw "Repository root not found: $RepositoryRoot"
+    }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git.exe was not found.' }
+
+    $mainCommit = Resolve-GitRevision -Revision $MainRevision
+    $developCommit = Resolve-GitRevision -Revision $DevelopRevision
+    if ($mainCommit -eq $developCommit) { throw 'Main and develop resolved to the same commit.' }
+    $plan = @(Get-CrossRevisionPlan -MainCommit $mainCommit -DevelopCommit $developCommit -TestPrefix $Test)
+    if ($plan.Count -eq 0) {
+        $selection = if ($Test) { " matching '$Test'" } else { '' }
+        throw "No main-A/develop-follow-on test families were found$selection."
+    }
+
+    Write-CrossRevisionPlan -Plan $plan -MainCommit $mainCommit -DevelopCommit $developCommit
+    if ($PlanOnly.IsPresent) { exit 0 }
+
+    $trackedChanges = @(Invoke-Git -Arguments @('status', '--porcelain', '--untracked-files=no'))
+    if ($trackedChanges.Count -gt 0) {
+        throw "The source worktree has tracked changes. Commit or remove them before running a pinned live cycle: $($trackedChanges -join '; ')"
+    }
+
+    $script:MutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+    try { $script:MutationMutexHeld = $script:MutationMutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $script:MutationMutexHeld = $true }
+    if (-not $script:MutationMutexHeld) {
+        throw 'Another MemLabs test cycle owns the host mutation lock.'
+    }
+
+    if (-not (Get-Command Get-VM -ErrorAction SilentlyContinue)) {
+        throw 'The Hyper-V PowerShell module is unavailable. Run the live cycle on a LabHost.'
+    }
+    if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) {
+        throw "PowerShell 7 executable not found: $pwshPath"
+    }
+
+    $selfProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
+    $parentId = if ($selfProcess) { [int]$selfProcess.ParentProcessId } else { -1 }
+    $otherRunners = @(Get-CimInstance Win32_Process -Filter "Name='pwsh.exe' OR Name='powershell.exe'" -ErrorAction Stop |
+            Where-Object {
+                $_.ProcessId -notin @($PID, $parentId) -and
+                $_.CommandLine -match '(?:Start-Test|New-Lab|Remove-Lab)\.ps1'
+            })
+    if ($otherRunners.Count -gt 0) {
+        throw "Another MemLabs test/deployment process is active (PID(s): $($otherRunners.ProcessId -join ', ')). Do not share Hyper-V infrastructure between test cycles."
+    }
+
+    $null = New-Item -ItemType Directory -Path $StateRoot -Force
+    $shortMain = $mainCommit.Substring(0, 8)
+    $shortDevelop = $developCommit.Substring(0, 8)
+    $worktreeRoot = Join-Path $StateRoot 'worktrees'
+    $mainWorktree = Join-Path $worktreeRoot "main-$shortMain"
+    $developWorktree = Join-Path $worktreeRoot "develop-$shortDevelop"
+    $mainBranch = "memlabs-cross-main-$shortMain"
+    $developBranch = "memlabs-cross-develop-$shortDevelop"
+
+    Initialize-PinnedWorktree -Path $mainWorktree -Commit $mainCommit -BranchName $mainBranch
+    Initialize-PinnedWorktree -Path $developWorktree -Commit $developCommit -BranchName $developBranch
+    Initialize-WorktreeRuntime -WorktreePath $mainWorktree
+    Initialize-WorktreeRuntime -WorktreePath $developWorktree
+
+    $mainBranchActual = @(& git -C $mainWorktree branch --show-current)
+    if ($LASTEXITCODE -ne 0 -or $mainBranchActual.Count -ne 1 -or $mainBranchActual[0].Trim() -ne $mainBranch) {
+        throw "Main worktree branch '$($mainBranchActual -join '')' will not select main media metadata."
+    }
+    $developBranchActual = @(& git -C $developWorktree branch --show-current)
+    if ($LASTEXITCODE -ne 0 -or $developBranchActual.Count -ne 1 -or $developBranchActual[0].Trim() -ne $developBranch) {
+        throw "Develop worktree branch '$($developBranchActual -join '')' will not select develop media metadata."
+    }
+
+    $script:StatePath = Join-Path $StateRoot "state-$shortMain-to-$shortDevelop.json"
+    if ($ResetState.IsPresent -and (Test-Path -LiteralPath $script:StatePath)) {
+        Remove-Item -LiteralPath $script:StatePath -Force
+    }
+    if (Test-Path -LiteralPath $script:StatePath) {
+        $script:State = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json -AsHashtable
+    }
+    else {
+        $script:State = [ordered]@{
+            SchemaVersion   = 1
+            MainRevision    = $mainCommit
+            DevelopRevision = $developCommit
+            StartedUtc      = [DateTime]::UtcNow.ToString('o')
+            LastUpdateUtc   = $null
+            Status          = 'Ready'
+            CurrentStep     = $null
+            LastError       = $null
+            CompletedSteps  = @()
+            Baselines       = @{}
+            DomainIdentities = @{}
+            DevelopIdentities = @{}
+            DevelopDomainIdentities = @{}
+        }
+        Save-State
+    }
+    if ($script:State.MainRevision -ne $mainCommit -or $script:State.DevelopRevision -ne $developCommit) {
+        throw "State file '$script:StatePath' belongs to different revisions."
+    }
+    if (-not $script:State.Contains('DomainIdentities')) {
+        $script:State.DomainIdentities = @{}
+        Save-State
+    }
+    if (-not $script:State.Contains('DevelopIdentities')) {
+        $script:State.DevelopIdentities = @{}
+        $script:State.DevelopDomainIdentities = @{}
+        Save-State
+    }
+
+    $plan = @(Get-OrderedCrossRevisionPlan -Plan $plan -CurrentStep ([string]$script:State.CurrentStep))
+
+    $credentialPath = Join-Path $mainWorktree 'vmbuild\cache\vmbuildadmin.txt'
+
+    foreach ($familyPlan in $plan) {
+        $family = [string]$familyPlan.Family
+        $familyKey = $family.ToLowerInvariant()
+        $completeKey = "$familyKey|complete"
+        if (Test-StepComplete -Step $completeKey) {
+            Write-Host "SKIP: $family already completed for this revision pair." -ForegroundColor DarkGray
+            continue
+        }
+
+        Write-Host "`n######## $family ########" -ForegroundColor Cyan
+        $baselineStep = "$familyKey|main|A"
+        if (-not (Test-StepComplete -Step $baselineStep)) {
+            Assert-MainBaselineCanStart -Config $familyPlan.BaselineConfig -Domains $familyPlan.Domains `
+                -WasStarted:(Test-StepInProgress -Step $baselineStep)
+            Start-Step -Step $baselineStep
+            $mainFixturePath = Join-Path $mainWorktree ($familyPlan.Baseline.Path -replace '/', '\')
+            $script:MainBaselineFailureCleanupPossible = $true
+            $exitCode = Invoke-NewLabFixture -WorktreePath $mainWorktree -FixturePath $mainFixturePath -Label "$family-main-A"
+            if ($exitCode -eq 0) { $script:MainBaselineFailureCleanupPossible = $false }
+            if ($exitCode -ne 0) { throw "$family main baseline failed with exit code $exitCode." }
+            $baselineNames = @(Get-ExpectedVmNames -Config $familyPlan.BaselineConfig)
+            $script:State.Baselines[$familyKey] = @(Get-VmIdentity -VmNames $baselineNames)
+            $script:State.DomainIdentities[$familyKey] = Get-DomainIdentity -Config $familyPlan.BaselineConfig -AdminCachePath $credentialPath
+            Complete-Step -Step $baselineStep
+        }
+
+        $baselineIdentity = @($script:State.Baselines[$familyKey])
+        if ($baselineIdentity.Count -eq 0) {
+            throw "$family baseline is marked complete but has no saved identity. Use -ResetState after removing its lab."
+        }
+        $domainIdentity = $script:State.DomainIdentities[$familyKey]
+        if (-not $domainIdentity) {
+            throw "$family baseline is marked complete but has no saved domain SID. Use -ResetState after removing its lab."
+        }
+
+        $cleanupStarted = $script:State.CurrentStep -like "$familyKey|cleanup|*" -or
+            @($script:State.CompletedSteps | Where-Object { $_ -like "$familyKey|cleanup|*" }).Count -gt 0
+        if (-not $cleanupStarted) {
+            Assert-BaselineIdentity -Identity $baselineIdentity
+            Assert-DomainIdentity -Identity $domainIdentity -AdminCachePath $credentialPath
+        }
+
+        for ($pass = 1; $pass -le 2; $pass++) {
+            foreach ($followOn in $familyPlan.FollowOns) {
+                $step = "$familyKey|develop|$pass|$($followOn.Name)"
+                $identityKey = "$familyKey|$($followOn.Name.ToLowerInvariant())"
+                $followOnConfig = Get-GitJson -Revision $developCommit -Path $followOn.Path
+                $followOnVmNames = @(Get-ExpectedVmNames -Config $followOnConfig)
+                $followOnHasDc = @($followOnConfig.virtualMachines | Where-Object { $_.role -eq 'DC' }).Count -gt 0
+                if (Test-StepComplete -Step $step) {
+                    Write-Host "SKIP: completed $step" -ForegroundColor DarkGray
+                    if (-not $cleanupStarted) {
+                        Assert-DevelopStageComplete -Config $followOnConfig -FixtureName $followOn.Name
+                        Assert-DomainJoinedVmHealth -Config $followOnConfig -FixtureName $followOn.Name -AdminCachePath $credentialPath
+                        $savedDevelopIdentity = @($script:State.DevelopIdentities[$identityKey])
+                        if ($savedDevelopIdentity.Count -eq 0) {
+                            throw "$($followOn.Name) is checkpointed complete without saved first-pass VM identity."
+                        }
+                        Assert-BaselineIdentity -Identity $savedDevelopIdentity
+                        if ($followOnHasDc) {
+                            $savedDevelopDomainIdentity = $script:State.DevelopDomainIdentities[$identityKey]
+                            if (-not $savedDevelopDomainIdentity) {
+                                throw "$($followOn.Name) is checkpointed complete without saved first-pass domain SID."
+                            }
+                            Assert-DomainIdentity -Identity $savedDevelopDomainIdentity -AdminCachePath $credentialPath
+                        }
+                    }
+                    continue
+                }
+                if ($cleanupStarted) {
+                    throw "$family cleanup was already started before all expansion stages completed. Remove the family labs and use -ResetState."
+                }
+                if ($pass -eq 2) {
+                    $savedDevelopIdentity = @($script:State.DevelopIdentities[$identityKey])
+                    if ($savedDevelopIdentity.Count -eq 0) {
+                        throw "$($followOn.Name) has no first-pass VM identity for the idempotence check."
+                    }
+                    Assert-BaselineIdentity -Identity $savedDevelopIdentity
+                    if ($followOnHasDc) {
+                        $savedDevelopDomainIdentity = $script:State.DevelopDomainIdentities[$identityKey]
+                        if (-not $savedDevelopDomainIdentity) {
+                            throw "$($followOn.Name) has no first-pass domain SID for the idempotence check."
+                        }
+                        Assert-DomainIdentity -Identity $savedDevelopDomainIdentity -AdminCachePath $credentialPath
+                    }
+                }
+                Start-Step -Step $step
+                $fixturePath = Join-Path $developWorktree ($followOn.Path -replace '/', '\')
+                $exitCode = Invoke-NewLabFixture -WorktreePath $developWorktree -FixturePath $fixturePath -Label "$family-develop-pass$pass-$($followOn.Stage)" -KeepFailedVms
+                if ($exitCode -ne 0) { throw "$($followOn.Name) failed on develop pass $pass with exit code $exitCode." }
+                Assert-BaselineIdentity -Identity $baselineIdentity
+                Assert-DomainIdentity -Identity $domainIdentity -AdminCachePath $credentialPath
+                Assert-DevelopStageComplete -Config $followOnConfig -FixtureName $followOn.Name
+                Assert-DomainJoinedVmHealth -Config $followOnConfig -FixtureName $followOn.Name -AdminCachePath $credentialPath
+                if ($pass -eq 1) {
+                    $script:State.DevelopIdentities[$identityKey] = @(Get-VmIdentity -VmNames $followOnVmNames)
+                    if ($followOnHasDc) {
+                        $script:State.DevelopDomainIdentities[$identityKey] = Get-DomainIdentity -Config $followOnConfig -AdminCachePath $credentialPath
+                    }
+                }
+                else {
+                    Assert-BaselineIdentity -Identity @($script:State.DevelopIdentities[$identityKey])
+                    if ($followOnHasDc) {
+                        Assert-DomainIdentity -Identity $script:State.DevelopDomainIdentities[$identityKey] -AdminCachePath $credentialPath
+                    }
+                }
+                Complete-Step -Step $step
+            }
+        }
+
+        if (-not $cleanupStarted) {
+            foreach ($followOn in $familyPlan.FollowOns) {
+                $identityKey = "$familyKey|$($followOn.Name.ToLowerInvariant())"
+                Assert-BaselineIdentity -Identity @($script:State.DevelopIdentities[$identityKey])
+                if ($script:State.DevelopDomainIdentities[$identityKey]) {
+                    Assert-DomainIdentity -Identity $script:State.DevelopDomainIdentities[$identityKey] -AdminCachePath $credentialPath
+                }
+            }
+        }
+
+        foreach ($domain in $familyPlan.Domains) {
+            $cleanupStep = "$familyKey|cleanup|$($domain.ToLowerInvariant())"
+            if (Test-StepComplete -Step $cleanupStep) { continue }
+            Start-Step -Step $cleanupStep
+            $exitCode = Invoke-ChildScript -WorktreePath $developWorktree -ScriptName 'Remove-Lab.ps1' `
+                -Arguments @('-DomainName', $domain) -Label "$family-cleanup-$domain"
+            if ($exitCode -ne 0) { throw "Cleanup of $domain failed with exit code $exitCode." }
+            $remaining = @(Get-DomainVms -Domains @($domain))
+            $remaining += @(Get-ExistingNamedVms -VmNames @($familyPlan.VmNamesByDomain[$domain.ToLowerInvariant()]))
+            $remaining = @($remaining | Sort-Object Name -Unique)
+            if ($remaining.Count -gt 0) { throw "Cleanup of $domain left VM(s): $($remaining.Name -join ', ')." }
+            Complete-Step -Step $cleanupStep
+        }
+        Complete-Step -Step $completeKey
+        Write-Host "PASS: $family main-to-develop expansion cycle completed." -ForegroundColor Green
+    }
+
+    $script:State.Status = 'Passed'
+    $script:State.CurrentStep = $null
+    $script:State.LastError = $null
+    Save-State
+    Write-Host "`nPASS: all selected main-to-develop expansion cycles completed." -ForegroundColor Green
+    Write-Host "State: $script:StatePath" -ForegroundColor DarkGray
+    exit 0
+}
+catch {
+    if ($script:State -and $script:StatePath) {
+        $script:State.Status = 'Failed'
+        $script:State.LastError = $_.Exception.Message
+        Save-State
+    }
+    Write-Host "FAIL: $($_.Exception.Message)" -ForegroundColor Red
+    if ($script:MainBaselineFailureCleanupPossible) {
+        Write-Host 'Exact-main may have removed failed Phase 1 VMs using its historical cleanup behavior.' -ForegroundColor Yellow
+    }
+    if ($script:StatePath) { Write-Host "State: $script:StatePath" -ForegroundColor DarkGray }
+    exit 1
+}
+finally {
+    if ($script:MutationMutexHeld) {
+        try { $script:MutationMutex.ReleaseMutex() } catch { }
+    }
+    if ($script:MutationMutex) { $script:MutationMutex.Dispose() }
+}
