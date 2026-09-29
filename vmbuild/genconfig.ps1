@@ -962,6 +962,7 @@ function Select-MainMenu {
             "z" {
                 $i = 0
                 $filename = Save-Config $Global:Config
+                if (-not $filename) { continue }
                 #$creds = New-Object System.Management.Automation.PSCredential ($Global:Config.vmOptions.adminName, $Global:Common.LocalAdmin.GetNetworkCredential().Password)
                 $t = Test-Configuration -InputObject $Global:Config
                 $response = Get-Menu2 -MenuName "Generate DSC.Zip" -Prompt "Select menu option" -OptionArray $($t.DeployConfig.virtualMachines.vmName) -Test:$false
@@ -1122,7 +1123,14 @@ function Save-Config {
 
 
     $file = "$($config.vmOptions.domainName)"
-    $cfgCmOptions = Get-ConfigCmOptions -Config $config
+    try {
+        $cfgCmOptions = Get-ConfigCmOptions -Config $config
+    }
+    catch {
+        Write-Log "Could not safely determine ConfigMgr options before saving: $($_.Exception.Message)" -Failure
+        Write-RedX "Configuration was not saved. Start the existing site server if it is stopped, then retry. $($_.Exception.Message)"
+        return $null
+    }
     if ($config.vmOptions.existingDCNameWithPrefix) {
         $file += "-ADD-"
     }
@@ -1312,6 +1320,11 @@ do {
 } while ($null -ne $Global:SavedConfig -and (($global:StartOver -eq $true) -or ($global:GoBack -eq $true)))
 
 $return.ConfigFileName = Save-Config $Global:Config
+if (-not $return.ConfigFileName) {
+    $return.DeployNow = $false
+    if ($InternalUseOnly.IsPresent) { return $return }
+    exit 1
+}
 
 
 if (-not $InternalUseOnly.IsPresent) {
@@ -1342,4 +1355,3 @@ if ($InternalUseOnly.IsPresent) {
     }
     return $return
 }
-

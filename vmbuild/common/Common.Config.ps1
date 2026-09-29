@@ -85,62 +85,27 @@ function Get-ConfigCmOptions {
     # existing VMs in the domain from the Hyper-V VM-note cache.
     if ($Config.vmOptions.domainName) {
         try {
-            $existingVMs = Get-List -Type VM -DomainName $Config.vmOptions.domainName
-            $existingSiteServer = $existingVMs | Where-Object {
-                $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
-            } | Select-Object -First 1
-            if ($existingSiteServer) { return $existingSiteServer.cmOptions }
-
-            # CAS/Primary exists but has no cmOptions in its VM note (deployed
-            # before cmOptions was persisted). Synthesize from domainDefaults
-            # and safe defaults so validation passes and new VMs deploy.
-            $anySiteServerInDomain = $existingVMs | Where-Object {
-                $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
-            } | Select-Object -First 1
-            if ($anySiteServerInDomain) {
-                # RECOVERY: the note has no cmOptions, but the site server keeps a timestamped
-                # backup of its deployConfig before every overwrite (C:\staging\DSC\deployConfig_*.json).
-                # The OLDEST backup is the ORIGINAL build's config, which DID carry cmOptions --
-                # including the authoritative UsePKI -- even in legacy builds that never persisted
-                # cmOptions to the VM note. Remote in, read it, stamp it onto the note (so future
-                # runs read it directly), and return it. This is far more reliable than inferring
-                # UsePKI from per-VM flags: legacy defaulted DC.InstallCA=$true even for NON-PKI
-                # labs, so InstallCA/derived pkiOptions.EnablePKI cannot distinguish PKI from eHTTP.
-                # Guarded to host context (needs PSDirect); silently falls through to synthesize.
-                $recoveredCm = Get-CmOptionsFromSiteServerBackup -VmName $anySiteServerInDomain.vmName -DomainName $Config.vmOptions.domainName
-                if ($recoveredCm) {
-                    Write-Log "Get-ConfigCmOptions: Recovered cmOptions (UsePKI=$($recoveredCm.UsePKI)) from '$($anySiteServerInDomain.vmName)' deployConfig backup on disk; stamping onto its VM note." -Verbose
-                    try { Set-VMNote -vmName $anySiteServerInDomain.vmName -vmNote ([PSCustomObject]@{ cmOptions = $recoveredCm }) } catch {}
-                    return $recoveredCm
-                }
-
-                # CAS/Primary exists but has no cmOptions in its VM note (deployed
-                # before cmOptions was persisted). Synthesize from domainDefaults
-                # and safe defaults so validation passes and new VMs deploy.
-                $dcVM = $existingVMs | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
-                $inferredVersion = if ($dcVM -and $dcVM.domainDefaults -and $dcVM.domainDefaults.CMVersion) {
-                    $dcVM.domainDefaults.CMVersion
-                } else {
-                    Get-CMLatestBaselineVersion
-                }
-                $inferredUsePKI = if ($dcVM -and $dcVM.pkiOptions -and $dcVM.pkiOptions.EnablePKI) { $true } else { $false }
-                $synthesized = [PSCustomObject]@{
-                    Version             = $inferredVersion
-                    Install             = $true
-                    PrePopulateObjects  = $true
-                    EVALVersion         = $false
-                    OfflineSCP          = $false
-                    OfflineSUP          = $false
-                    UsePKI              = $inferredUsePKI
-                    EnableBLM           = $false
-                    WsusImportBaseline  = $true
-                }
-                Write-Log "Get-ConfigCmOptions: Synthesized cmOptions from defaults (Version=$inferredVersion, UsePKI=$inferredUsePKI) - existing site server $($anySiteServerInDomain.vmName) had no cmOptions in VM note." -Verbose
-                return $synthesized
-            }
+            $existingVMs = @(Get-List -Type VM -DomainName $Config.vmOptions.domainName)
         }
         catch {
-            # Cache may not be available (e.g. in-job context). Fall through.
+            throw "Get-ConfigCmOptions: Cannot safely inspect existing domain '$($Config.vmOptions.domainName)' for ConfigMgr options. $($_.Exception.Message)"
+        }
+        $existingSiteServer = $existingVMs | Where-Object {
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+        } | Select-Object -First 1
+        if ($existingSiteServer) { return $existingSiteServer.cmOptions }
+
+        $anySiteServerInDomain = $existingVMs | Where-Object {
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
+        } | Select-Object -First 1
+        if ($anySiteServerInDomain) {
+            $recoveredCm = Get-CmOptionsFromSiteServerBackup -VmName $anySiteServerInDomain.vmName -DomainName $Config.vmOptions.domainName
+            if (-not $recoveredCm) {
+                throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($Config.vmOptions.domainName)': site server '$($anySiteServerInDomain.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
+            }
+            Write-Log "Get-ConfigCmOptions: Recovered cmOptions (UsePKI=$($recoveredCm.UsePKI)) from '$($anySiteServerInDomain.vmName)' deployConfig backup on disk; stamping onto its VM note." -Verbose
+            try { Set-VMNote -vmName $anySiteServerInDomain.vmName -vmNote ([PSCustomObject]@{ cmOptions = $recoveredCm }) } catch {}
+            return $recoveredCm
         }
     }
     return $null
@@ -1071,29 +1036,30 @@ function New-DeployConfig {
                 $topSiteServer = $existingDomainVMs | Where-Object { $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode } | Select-Object -First 1
                 if ($topSiteServer -and -not $topSiteServer.cmOptions) {
                     $backupCm = Get-CmOptionsFromSiteServerBackup -VmName $topSiteServer.vmName -DomainName $configObject.vmOptions.domainName
-                    if ($backupCm) {
-                        Write-Log "New-DeployConfig: '$($topSiteServer.vmName)' VM note had no cmOptions (legacy build); recovered cmOptions (UsePKI=$($backupCm.UsePKI)) from its oldest deployConfig backup. Stamping note and adopting for this deploy (prevents eHTTP/MP 25055)." -Verbose
-                        try { Set-VMNote -vmName $topSiteServer.vmName -vmNote ([PSCustomObject]@{ cmOptions = $backupCm }) } catch {}
-                        # Adopt for THIS deploy, overriding the stale block the regenerated
-                        # config carries. Move-CmOptionsToTopLevelSiteServer may already have
-                        # copied that stale (UsePKI=$false) block onto the in-config top site
-                        # server VM, and Resolve-VmCmOptions walks VM->VM (it does NOT read root),
-                        # so we must overwrite it THERE for the corrected value to propagate to
-                        # this hierarchy's child site systems. Also mirror onto root for the guest
-                        # fallback read ($deployConfig.cmOptions). We deliberately touch ONLY this
-                        # recovered top site server (not every site VM) so a second hierarchy in
-                        # the same config keeps its own cmOptions.
-                        $topInConfig = $configObject.virtualMachines | Where-Object { $_.vmName -eq $topSiteServer.vmName } | Select-Object -First 1
-                        if ($topInConfig) {
-                            $topClone = $backupCm | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
-                            $topInConfig | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $topClone -Force
-                        }
-                        $configObject | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $backupCm -Force
+                    if (-not $backupCm) {
+                        throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($configObject.vmOptions.domainName)': site server '$($topSiteServer.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
                     }
+                    Write-Log "New-DeployConfig: '$($topSiteServer.vmName)' VM note had no cmOptions (legacy build); recovered cmOptions (UsePKI=$($backupCm.UsePKI)) from its oldest deployConfig backup. Stamping note and adopting for this deploy (prevents eHTTP/MP 25055)." -Verbose
+                    try { Set-VMNote -vmName $topSiteServer.vmName -vmNote ([PSCustomObject]@{ cmOptions = $backupCm }) } catch {}
+                    # Adopt for THIS deploy, overriding the stale block the regenerated
+                    # config carries. Move-CmOptionsToTopLevelSiteServer may already have
+                    # copied that stale (UsePKI=$false) block onto the in-config top site
+                    # server VM, and Resolve-VmCmOptions walks VM->VM (it does NOT read root),
+                    # so we must overwrite it THERE for the corrected value to propagate to
+                    # this hierarchy's child site systems. Also mirror onto root for the guest
+                    # fallback read ($deployConfig.cmOptions). We deliberately touch ONLY this
+                    # recovered top site server (not every site VM) so a second hierarchy in
+                    # the same config keeps its own cmOptions.
+                    $topInConfig = $configObject.virtualMachines | Where-Object { $_.vmName -eq $topSiteServer.vmName } | Select-Object -First 1
+                    if ($topInConfig) {
+                        $topClone = $backupCm | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+                        $topInConfig | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $topClone -Force
+                    }
+                    $configObject | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $backupCm -Force
                 }
             }
             catch {
-                Write-Log "New-DeployConfig: legacy PKI cmOptions recovery check failed: $($_.Exception.Message)" -LogOnly
+                throw "New-DeployConfig: legacy ConfigMgr option recovery failed closed. $($_.Exception.Message)"
             }
         }
 
@@ -1266,6 +1232,7 @@ function New-DeployConfig {
     }
     catch {
         Write-Exception -ExceptionInfo $_ -AdditionalInfo ($configObject | ConvertTo-Json)
+        throw
     }
 }
 #Add-ExistingVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config

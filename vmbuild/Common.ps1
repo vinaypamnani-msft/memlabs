@@ -3924,8 +3924,9 @@ function Get-DomainNetbiosName {
         DomainNetBiosName) onto every VM note of the domain. This reads it back so a
         CROSS-domain caller (e.g. a forest-trust peer) can get the correct NetBIOS name
         of another domain on the host by reading that domain's notes instead of guessing
-        from its FQDN. Returns $null when no note carries the value (caller may then fall
-        back to the DNS label with a warning).
+        from its FQDN. Legacy notes predate this field, so the domain controller is
+        queried through PowerShell Direct and the recovered value is persisted back
+        to its note. Returns $null only when neither source can provide the value.
     .PARAMETER DomainName
         DNS/FQDN of the domain whose NetBIOS name is wanted.
     #>
@@ -3934,12 +3935,33 @@ function Get-DomainNetbiosName {
         [Parameter(Mandatory = $true)][string]$DomainName
     )
     try {
-        $vms = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate | Where-Object { $_.domainNetBiosName })
-        if ($vms.Count -eq 0) { return $null }
+        $domainVms = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate)
+        $vms = @($domainVms | Where-Object { $_.domainNetBiosName })
         # Prefer the DC's note (the canonical per-domain record); else any VM in the domain.
         $dc = @($vms | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1)
         $pick = if ($dc) { $dc } else { @($vms | Select-Object -First 1) }
         if ($pick -and $pick.domainNetBiosName) { return [string]$pick.domainNetBiosName }
+
+        $legacyDc = $domainVms | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+        if ($legacyDc -and (Get-Command Invoke-VmCommand -ErrorAction SilentlyContinue)) {
+            $probe = {
+                try {
+                    Import-Module ActiveDirectory -ErrorAction Stop
+                    return [string](Get-ADDomain -ErrorAction Stop).NetBIOSName
+                }
+                catch { return '' }
+            }
+            $probeResult = Invoke-VmCommand -VmName $legacyDc.vmName -VmDomainName $DomainName -ScriptBlock $probe -SuppressLog
+            $values = @($probeResult.ScriptBlockOutput | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+            if ($values.Count -eq 1) {
+                $recovered = "$($values[0])".Trim()
+                if ($recovered.Length -le 15 -and $recovered -notmatch '[\\/:*?"<>|]') {
+                    try { Set-VMNote -vmName $legacyDc.vmName -vmNote ([pscustomobject]@{ domainNetBiosName = $recovered }) } catch { }
+                    Write-Log "Get-DomainNetbiosName: Recovered '$recovered' from legacy DC '$($legacyDc.vmName)' and stamped its VM note." -Verbose
+                    return $recovered
+                }
+            }
+        }
     }
     catch {
         Write-Log "Get-DomainNetbiosName failed for '$DomainName': $($_.Exception.Message)" -LogOnly -Verbose

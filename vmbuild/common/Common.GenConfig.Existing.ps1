@@ -265,8 +265,14 @@ function Show-ExistingNetwork2 {
     }
 
     Write-verbose "[Show-ExistingNetwork] Calling Get-ExistingConfig '$domain' '$subnet' '$role' '$SiteCode'"
-    $newConfig = Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -parentSiteCode $parentSiteCode -SiteCode $Sitecode
-    return $newConfig
+    try {
+        return Get-ExistingConfig -Domain $domain -Subnet $subnet -role $role -parentSiteCode $parentSiteCode -SiteCode $Sitecode
+    }
+    catch {
+        Write-Log "Could not safely load existing domain '$domain': $($_.Exception.Message)" -Failure
+        Write-RedX "Could not safely load existing domain '$domain'. Start its DC/site server if stopped, then retry. $($_.Exception.Message)"
+        return $null
+    }
 }
 
 function Select-RolesForExistingList {
@@ -988,7 +994,7 @@ function New-UserConfig {
     } | Select-Object -First 1
     $existingCmOptions = $topLevelSite.cmOptions
     # Also locate any CAS/Primary regardless of cmOptions presence, for the
-    # synthesis fallback below when cmOptions was never persisted.
+    # authoritative backup recovery below when cmOptions was never persisted.
     if (-not $topLevelSite) {
         $topLevelSite = $allDomainVMs | Where-Object {
             $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
@@ -1002,7 +1008,16 @@ function New-UserConfig {
     if ([string]::IsNullOrWhiteSpace($prefix)) {
         $prefix = "NULL-"
     }
-    $netbiosName = $Domain.Split(".")[0]
+    if ($DC) {
+        $netbiosName = Get-DomainNetbiosName -DomainName $Domain
+        if ([string]::IsNullOrWhiteSpace($netbiosName)) {
+            throw "Cannot safely reconstruct existing domain '$Domain': its authoritative NetBIOS name is absent from VM notes and could not be read from DC '$($DC.vmName)'."
+        }
+    }
+    else {
+        # New-domain template initialization has no existing DC to query.
+        $netbiosName = $Domain.Split(".")[0]
+    }
     $vmOptions = [PSCustomObject]@{
         prefix            = $prefix
         basePath          = (Get-MemlabsVmStorageRoot)
@@ -1036,24 +1051,13 @@ function New-UserConfig {
         $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $existingCmOptions -force
     }
     elseif ($topLevelSite) {
-        # CAS/Primary exists but has no cmOptions in its VM note (deployed before
-        # cmOptions was persisted). Synthesize from domainDefaults and defaults so
-        # validation and new-VM deployment have a usable block.
-        $inferredVersion = if ($domainDefaults -and $domainDefaults.CMVersion) { $domainDefaults.CMVersion } else { Get-CMLatestBaselineVersion }
-        $inferredUsePKI = if ($existingPkiOptions -and $existingPkiOptions.EnablePKI) { $true } else { $false }
-        $synthesized = [PSCustomObject]@{
-            Version            = $inferredVersion
-            Install             = $true
-            PrePopulateObjects = $true
-            EVALVersion        = $false
-            OfflineSCP         = $false
-            OfflineSUP         = $false
-            UsePKI             = $inferredUsePKI
-            EnableBLM          = $false
-            WsusImportBaseline = $true
+        $recoveredCmOptions = Get-CmOptionsFromSiteServerBackup -VmName $topLevelSite.vmName -DomainName $Domain
+        if (-not $recoveredCmOptions) {
+            throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$Domain': site server '$($topLevelSite.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
         }
-        $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $synthesized -force
-        Write-Log "New-UserConfig: Synthesized cmOptions from defaults (Version=$inferredVersion, UsePKI=$inferredUsePKI) for domain $Domain - existing site server $($topLevelSite.vmName) had no cmOptions in VM note." -Verbose
+        $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $recoveredCmOptions -force
+        try { Set-VMNote -vmName $topLevelSite.vmName -vmNote ([pscustomobject]@{ cmOptions = $recoveredCmOptions }) } catch { }
+        Write-Log "New-UserConfig: Recovered authoritative cmOptions (UsePKI=$($recoveredCmOptions.UsePKI)) from legacy site server '$($topLevelSite.vmName)' and stamped its VM note." -Verbose
     }
 
     # Import PKI settings from existing DC so new VMs inherit CA configuration

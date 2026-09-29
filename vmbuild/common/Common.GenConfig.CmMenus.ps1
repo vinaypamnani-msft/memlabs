@@ -1515,7 +1515,14 @@ Function Get-CMVersionMenu {
 
     $valid = $false
     $noteColor = $Global:Common.Colors.GenConfigTip
-    $effectiveCmOptions = if ($Global:Config) { Get-ConfigCmOptions -Config $Global:Config } else { $null }
+    try {
+        $effectiveCmOptions = if ($Global:Config) { Get-ConfigCmOptions -Config $Global:Config } else { $null }
+    }
+    catch {
+        Write-Log "Could not safely load ConfigMgr options: $($_.Exception.Message)" -Failure
+        Write-RedX "Could not safely load ConfigMgr options. Start the existing site server if it is stopped, then retry. $($_.Exception.Message)"
+        return
+    }
 
     if ($effectiveCmOptions.OfflineSCP) {   
         write-host2 -ForegroundColor $noteColor "Note: "-NoNewLine
