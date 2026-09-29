@@ -2940,6 +2940,34 @@ function Test-SQLAOFunctionality {
                 $quorum = Get-ClusterQuorum -ErrorAction Stop
                 $results.Details.Add("OK: Quorum type '$($quorum.QuorumType)', resource '$($quorum.QuorumResource)'")
 
+                try {
+                    $expectedPreferredOwners = @(@($recoveryOwner, $otherNode) | Where-Object { $_ })
+                    $expectedPossibleOwners = @($expectedPreferredOwners | Sort-Object)
+                    $agClusterResource = Get-ClusterResource -Name $agName -ErrorAction Stop
+                    $possibleInfo = Get-ClusterOwnerNode -Resource $agClusterResource.Name -ErrorAction Stop
+                    $preferredInfo = Get-ClusterOwnerNode -Group $agName -ErrorAction Stop
+                    $possibleOwners = @($possibleInfo.OwnerNodes | ForEach-Object {
+                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
+                        } | Sort-Object)
+                    $preferredOwners = @($preferredInfo.OwnerNodes | ForEach-Object {
+                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
+                        })
+                    if ($possibleOwners.Count -ne $expectedPossibleOwners.Count -or
+                        ($possibleOwners -join ',') -ne ($expectedPossibleOwners -join ',') -or
+                        $preferredOwners.Count -ne $expectedPreferredOwners.Count -or
+                        ($preferredOwners -join ',') -ne ($expectedPreferredOwners -join ',')) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: AG owner policy mismatch: resource possible='$($possibleOwners -join ',')', group preferred='$($preferredOwners -join ',')', expected possible='$($expectedPossibleOwners -join ',')', expected preferred='$($expectedPreferredOwners -join ',')'")
+                    }
+                    else {
+                        $results.Details.Add("OK: AG resource possible owners and ordered group preferred owners are '$($expectedPreferredOwners -join ',')'")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Could not validate AG possible/preferred owners: $($_.Exception.Message)")
+                }
+
                 # Validate cluster resource IPs
                 $results.Details.Add("CMD: Validate cluster resource IPs and DNS")
                 $clusterIPRes = @(Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { $_.ResourceType -eq 'IP Address' })
@@ -17110,6 +17138,33 @@ function Test-SQLAOPostPhase5 {
                 catch {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: Cluster not found or inaccessible: $($_.Exception.Message)")
+                }
+                try {
+                    $expectedPreferredOwners = @($expectedReplicas | ForEach-Object { (($_ -split '\\', 2)[0] -split '\.')[0] })
+                    $expectedPossibleOwners = @($expectedPreferredOwners | Sort-Object)
+                    $agClusterResource = Get-ClusterResource -Name $agName -ErrorAction Stop
+                    $possibleInfo = Get-ClusterOwnerNode -Resource $agClusterResource.Name -ErrorAction Stop
+                    $preferredInfo = Get-ClusterOwnerNode -Group $agName -ErrorAction Stop
+                    $possibleOwners = @($possibleInfo.OwnerNodes | ForEach-Object {
+                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
+                        } | Sort-Object)
+                    $preferredOwners = @($preferredInfo.OwnerNodes | ForEach-Object {
+                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
+                        })
+                    if ($possibleOwners.Count -ne $expectedPossibleOwners.Count -or
+                        ($possibleOwners -join ',') -ne ($expectedPossibleOwners -join ',') -or
+                        $preferredOwners.Count -ne $expectedPreferredOwners.Count -or
+                        ($preferredOwners -join ',') -ne ($expectedPreferredOwners -join ',')) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: AG owner policy mismatch: resource possible='$($possibleOwners -join ',')', group preferred='$($preferredOwners -join ',')', expected possible='$($expectedPossibleOwners -join ',')', expected preferred='$($expectedPreferredOwners -join ',')'")
+                    }
+                    else {
+                        $results.Details.Add("OK: AG resource possible owners and ordered group preferred owners are '$($expectedPreferredOwners -join ',')'")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Could not validate AG possible/preferred owners: $($_.Exception.Message)")
                 }
                 $activeAgIPs = @(Get-ClusterResource -ErrorAction SilentlyContinue |
                         Where-Object { $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |

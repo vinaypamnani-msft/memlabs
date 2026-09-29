@@ -600,6 +600,9 @@ try {
     Assert-Validation ($functionalSource -match 'Exact listener DNS RRset verified on DC') 'post-Phase-5 DNS remediation verifies exact state on every DC'
     Assert-Validation ($functionalSource -match 'no expected provider set could be identified; refusing to synthesize') 'post-Phase-5 DNS remediation refuses an unverified provider set'
     Assert-Validation ($functionalSource -match 'if \(\$keep\) \{ \$null = \$seenExpected\.Add\(\$recordIp\) \}') 'wrong-TTL records are not marked as retained before replacement'
+    Assert-Validation ([regex]::Matches($functionalSource, 'Get-ClusterOwnerNode -Resource').Count -ge 2) 'Phase 11 and post-Phase-5 validate AG resource possible owners'
+    Assert-Validation ([regex]::Matches($functionalSource, 'Get-ClusterOwnerNode -Group').Count -ge 2) 'Phase 11 and post-Phase-5 validate group preferred owners'
+    Assert-Validation ([regex]::Matches($functionalSource, 'AG owner policy mismatch').Count -ge 2) 'owner-policy drift is an actionable failure in both validators'
     $physicalAddressScript = Import-AssignedScriptBlock -Path $functionalPath -VariableName 'physicalAddressScript'
     $script:RegistrationAddresses = @(
         [pscustomobject]@{ IPAddress = '172.16.4.20'; InterfaceIndex = 7; SkipAsSource = $false },

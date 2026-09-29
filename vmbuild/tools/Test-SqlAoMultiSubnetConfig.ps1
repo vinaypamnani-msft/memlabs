@@ -199,6 +199,10 @@ Assert-Equal $false ($phase5 -match "SqlWaitForAG 'SQLConfigureAG-WaitAG'") 'loc
 Assert-Equal $false ($phase5 -match 'WaitForAll AG \{') 'local membership gate has no remote listener WaitForAll predecessor'
 Assert-Equal $true ($phase5 -match '\[DateTime\]::UtcNow\.AddMinutes\(10\)') 'primary readiness gate uses an absolute ten-minute deadline'
 Assert-Equal $true ($phase5 -match 'while \(\[DateTime\]::UtcNow -lt \$deadline\)') 'primary readiness retries stop at the deadline'
+Assert-Equal $true ($phase5 -match 'Script EnsureAgPossibleOwners') 'Phase 5 converges AG resource possible owners after replica join'
+Assert-Equal $true ($phase5 -match 'Set-ClusterOwnerNode.+?-Resource.+?-Owners') 'Phase 5 assigns both nodes as AG resource possible owners'
+Assert-Equal $true ($phase5 -match 'Set-ClusterOwnerNode.+?-Group.+?-Owners') 'Phase 5 assigns both nodes as clustered-role preferred owners'
+Assert-Equal $true ($phase5 -match '(?s)Script EnsureAgPossibleOwners.+?DependsOn\s*=\s*''\[WaitForAll\]AddReplica''') 'owner convergence waits for the secondary replica'
 
 $install = Get-Content (Join-Path $RootPath 'vmbuild\DSC\phases\InstallAndUpdateSCCM.ps1') -Raw
 Assert-Equal $true ($install -match 'MultiSubnetFailover=True') 'listener-targeted probes enable SQL client multi-subnet failover'

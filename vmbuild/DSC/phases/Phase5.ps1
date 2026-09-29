@@ -924,9 +924,55 @@
             PsDscRunAsCredential = $Admincreds
         }
 
+        $_agOwnerResource = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
+        $_agOwnerCluster = $thisVM.ClusterName
+        $_agOwnerNodes = @($thisVM.thisParams.SQLAO.ClusterNodes)
+        Script EnsureAgPossibleOwners {
+            GetScript = {
+                Import-Module FailoverClusters -ErrorAction Stop
+                $possible = Get-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Resource $using:_agOwnerResource -ErrorAction Stop
+                $preferred = Get-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Group $using:_agOwnerResource -ErrorAction Stop
+                return @{
+                    PossibleOwners = @($possible.OwnerNodes | ForEach-Object {
+                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
+                        }) -join ','
+                    PreferredOwners = @($preferred.OwnerNodes | ForEach-Object {
+                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
+                        }) -join ','
+                }
+            }
+            TestScript = {
+                try {
+                    Import-Module FailoverClusters -ErrorAction Stop
+                    $expectedPreferred = @($using:_agOwnerNodes | ForEach-Object { [string]$_ })
+                    $expectedPossible = @($expectedPreferred | Sort-Object)
+                    $possibleResult = Get-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Resource $using:_agOwnerResource -ErrorAction Stop
+                    $preferredResult = Get-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Group $using:_agOwnerResource -ErrorAction Stop
+                    $possible = @($possibleResult.OwnerNodes | ForEach-Object {
+                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
+                        } | Sort-Object)
+                    $preferred = @($preferredResult.OwnerNodes | ForEach-Object {
+                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
+                        })
+                    return $possible.Count -eq $expectedPossible.Count -and
+                        ($possible -join ',') -eq ($expectedPossible -join ',') -and
+                        $preferred.Count -eq $expectedPreferred.Count -and
+                        ($preferred -join ',') -eq ($expectedPreferred -join ',')
+                }
+                catch { return $false }
+            }
+            SetScript = {
+                Import-Module FailoverClusters -ErrorAction Stop
+                Set-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Resource $using:_agOwnerResource -Owners $using:_agOwnerNodes -ErrorAction Stop
+                Set-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Group $using:_agOwnerResource -Owners $using:_agOwnerNodes -ErrorAction Stop
+            }
+            DependsOn = '[WaitForAll]AddReplica'
+            PsDscRunAsCredential = $Admincreds
+        }
+
         $dbName = "TESTDB"
 
-        $nextDepend = '[WaitForAll]AddReplica'
+        $nextDepend = '[Script]EnsureAgPossibleOwners'
         if ($dbName) {
 
             WriteStatus SetRecoveryModel {
