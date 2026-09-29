@@ -3984,8 +3984,9 @@ function Get-DomainNetbiosName {
         DomainNetBiosName) onto every VM note of the domain. This reads it back so a
         CROSS-domain caller (e.g. a forest-trust peer) can get the correct NetBIOS name
         of another domain on the host by reading that domain's notes instead of guessing
-        from its FQDN. Returns $null when no note carries the value (caller may then fall
-        back to the DNS label with a warning).
+        from its FQDN. Legacy notes predate this field, so the domain controller is
+        queried through PowerShell Direct and the recovered value is persisted back
+        to its note. Returns $null only when neither source can provide the value.
     .PARAMETER DomainName
         DNS/FQDN of the domain whose NetBIOS name is wanted.
     #>
@@ -3994,12 +3995,33 @@ function Get-DomainNetbiosName {
         [Parameter(Mandatory = $true)][string]$DomainName
     )
     try {
-        $vms = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate | Where-Object { $_.domainNetBiosName })
-        if ($vms.Count -eq 0) { return $null }
+        $domainVms = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate)
+        $vms = @($domainVms | Where-Object { $_.domainNetBiosName })
         # Prefer the DC's note (the canonical per-domain record); else any VM in the domain.
         $dc = @($vms | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1)
         $pick = if ($dc) { $dc } else { @($vms | Select-Object -First 1) }
         if ($pick -and $pick.domainNetBiosName) { return [string]$pick.domainNetBiosName }
+
+        $legacyDc = $domainVms | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+        if ($legacyDc -and (Get-Command Invoke-VmCommand -ErrorAction SilentlyContinue)) {
+            $probe = {
+                try {
+                    Import-Module ActiveDirectory -ErrorAction Stop
+                    return [string](Get-ADDomain -ErrorAction Stop).NetBIOSName
+                }
+                catch { return '' }
+            }
+            $probeResult = Invoke-VmCommand -VmName $legacyDc.vmName -VmDomainName $DomainName -ScriptBlock $probe -SuppressLog
+            $values = @($probeResult.ScriptBlockOutput | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+            if ($values.Count -eq 1) {
+                $recovered = "$($values[0])".Trim()
+                if ($recovered.Length -le 15 -and $recovered -notmatch '[\\/:*?"<>|]') {
+                    try { Set-VMNote -vmName $legacyDc.vmName -vmNote ([pscustomobject]@{ domainNetBiosName = $recovered }) } catch { }
+                    Write-Log "Get-DomainNetbiosName: Recovered '$recovered' from legacy DC '$($legacyDc.vmName)' and stamped its VM note." -Verbose
+                    return $recovered
+                }
+            }
+        }
     }
     catch {
         Write-Log "Get-DomainNetbiosName failed for '$DomainName': $($_.Exception.Message)" -LogOnly -Verbose
@@ -4460,9 +4482,9 @@ function Clear-SqlAoBackupShare {
     switch ($out.Outcome) {
         'NotPresent' { Write-Log "No AG backup folder '$BackupLocalPath' on $FileServerVM yet$suffix." -LogOnly }
         'AlreadyEmpty' { Write-Log "No stale AG seeding backups in '$BackupLocalPath' on $FileServerVM$suffix." -LogOnly }
-        'Cleared' { Write-GreenCheck "Removed $(@($out.Removed).Count) stale AG seeding backup(s) from $FileServerVM`:$BackupLocalPath$suffix -- $(@($out.Removed) -join '; ')" -WriteLog }
+        'Cleared' { Write-GreenCheck "Removed $($out.Removed.Count) stale AG seeding backup(s) from $FileServerVM`:$BackupLocalPath$suffix -- $(@($out.Removed) -join '; ')" -WriteLog }
         'ScanFailed' { Write-OrangePoint "Could not read '$BackupLocalPath' on $FileServerVM$suffix`: $($out.Error). Not treating this as 'clean'; a leftover .trn fails the Phase 8 restore with SQL 3154." -WriteLog }
-        'PartialFailure' { Write-OrangePoint "Removed $(@($out.Removed).Count) stale AG seeding backup(s) from $FileServerVM but $(@($out.Failed).Count) could NOT be deleted$suffix`: $(@($out.Failed) -join '; '). Phase 8 may fail its restore with SQL 3154." -WriteLog }
+        'PartialFailure' { Write-OrangePoint "Removed $($out.Removed.Count) stale AG seeding backup(s) from $FileServerVM but $($out.Failed.Count) could NOT be deleted$suffix`: $(@($out.Failed) -join '; '). Phase 8 may fail its restore with SQL 3154." -WriteLog }
         default { Write-OrangePoint "Unexpected result clearing AG seeding backups on $FileServerVM$suffix`: $($out.Outcome)" -WriteLog }
     }
     "$($out.Outcome)"
@@ -4731,8 +4753,9 @@ function Write-DhcpLeaseFailureDiag {
             Get-DhcpServerv4Lease -ScopeId $scope -ErrorAction SilentlyContinue |
                 ForEach-Object { "$($_.IPAddress)|$($_.ClientId)|$($_.AddressState)|$($_.LeaseExpiryTime)" }
         }
-        Write-DhcpDiagLine "scope $ScopeId currently holds $(@($leases).Count) lease(s)."
-        foreach ($lease in @($leases)) { Write-Log "$Tag $VmName`:   lease $lease" -LogOnly }
+        $leases = @($leases | Where-Object { $null -ne $_ })
+        Write-DhcpDiagLine "scope $ScopeId currently holds $($leases.Count) lease(s)."
+        foreach ($lease in $leases) { Write-Log "$Tag $VmName`:   lease $lease" -LogOnly }
     }
     catch { }
 
@@ -7610,7 +7633,7 @@ function Wait-ForVm {
                         $channelBrokenCount++
                         # The reboot decision below is taken on this counter, so record each
                         # step of it. Bounded: the branch stops firing once it reaches 3.
-                        Write-Log "$VmName`: PSDirect channel-broken evidence $channelBrokenCount/3 (poll=$count elapsed=$([int]$stopWatch.Elapsed.TotalSeconds)s heartbeat=$hb timedOut=$($out.TimedOut) parkedRunspaces=$(@($global:ps_orphanRunspaces).Count))" -LogOnly
+                        Write-Log "$VmName`: PSDirect channel-broken evidence $channelBrokenCount/3 (poll=$count elapsed=$([int]$stopWatch.Elapsed.TotalSeconds)s heartbeat=$hb timedOut=$($out.TimedOut) parkedRunspaces=$($global:ps_orphanRunspaces.Count))" -LogOnly
                         if ($channelBrokenCount -ge 3 -and $stopWatch.Elapsed.TotalMinutes -ge 3) {
                             $psdirectRebootDone = $true
                             Write-Log "$VmName`: PSDirect channel broken after $channelBrokenCount consecutive failures despite healthy heartbeat ($hb). Rebooting VM to recover VMBus." -Warning
@@ -8105,7 +8128,7 @@ function Invoke-VmCommand {
                                     try { if ($cj.JobStateInfo.Reason) { $rt = $cj.JobStateInfo.Reason.GetType().FullName } } catch { }
                                     $counts = @()
                                     foreach ($s in @('Error', 'Warning', 'Verbose', 'Information', 'Output', 'Progress')) {
-                                        try { $counts += "$s=$(@($cj.$s).Count)" } catch { $counts += "$s=?" }
+                                        try { $counts += "$s=$(($cj.$s).Count)" } catch { $counts += "$s=?" }
                                     }
                                     $f += "child${ci}=[state=$($cj.State) reasonType=$rt $($counts -join ' ') hasData=$($cj.HasMoreData)]"
                                     if ($jobTimedOut) {
@@ -9060,7 +9083,7 @@ function Clear-OrphanRunspaces {
     }
     catch { }
     if ($reclaimed -gt 0) {
-        try { Write-Log "Reclaimed $reclaimed orphaned runspace(s); $(@($global:ps_orphanRunspaces).Count) still parked." -LogOnly } catch { }
+        try { Write-Log "Reclaimed $reclaimed orphaned runspace(s); $($global:ps_orphanRunspaces.Count) still parked." -LogOnly } catch { }
     }
     return $reclaimed
 }
@@ -10293,7 +10316,7 @@ function Install-Tools {
         # refresh only this VM's State, the one field acted on below.
         $allVMs = @(Get-List -Type VM | Where-Object { $_.vmName -in $VmName })
         $toolListPath = 'cached + per-VM state'
-        if ($allVMs.Count -ne @($VmName).Count) {
+        if ($allVMs.Count -ne $VmName.Count) {
             # Cache miss (e.g. a VM created earlier in this run): pay for the full refresh.
             $allVMs = @(Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -in $VmName })
             $toolListPath = 'cache miss -> full SmartUpdate'
@@ -10316,7 +10339,7 @@ function Install-Tools {
     }
     $swToolList.Stop()
     Write-Log ("[StepTiming] {0} ToolInject-GetList completed in {1} seconds ({2} VM(s) matched, {3}{4})" -f `
-            ($VmName -join ','), [Math]::Round($swToolList.Elapsed.TotalSeconds, 1), @($allVMs).Count, $toolListPath,
+            ($VmName -join ','), [Math]::Round($swToolList.Elapsed.TotalSeconds, 1), $allVMs.Count, $toolListPath,
         $(if ($staleState -gt 0) { ", $staleState stale state" } else { '' })) -LogOnly
 
     $success = $true

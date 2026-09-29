@@ -1669,7 +1669,7 @@ if ($licensed) { Write-Output 'Activated' }
         $approvalMaxAttempts = 3
         $approvalRetrySeconds = 5
         $stopApprovals = $false
-        for ($index = 0; $index -lt @($Queue).Count; $index++) {
+        for ($index = 0; $index -lt $Queue.Count; $index++) {
             $entry = $Queue[$index]
             for ($approvalAttempt = 1; $approvalAttempt -le $approvalMaxAttempts; $approvalAttempt++) {
                 try {
@@ -1702,7 +1702,7 @@ if ($licensed) { Write-Output 'Activated' }
                         # TwoKeyApproval is hierarchy policy and can lag the SCI write
                         # on a fresh child. Every remaining call uses the same author
                         # and policy, so more identical failures prove nothing.
-                        $policyBlocked = @($Queue).Count - $index
+                        $policyBlocked = $Queue.Count - $index
                         $stopApprovals = $true
                         Write-DscStatus "$Tag Script approval deferred: provider still requires a different approver after the TwoKeyApproval write. Stopped after one policy-blocked call; $policyBlocked script(s) remain unapproved and will be retried on the next Phase 8 pass." -Warning
                         break
@@ -4484,7 +4484,7 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             [Parameter(Mandatory)][string]$Desired,
             [string[]]$Catalog
         )
-        if (-not $Catalog -or @($Catalog).Count -eq 0) { return $null }
+        if (-not $Catalog -or $Catalog.Count -eq 0) { return $null }
 
         # 1. Exact, case-insensitive.
         $exact = @($Catalog | Where-Object { $_ -ieq $Desired })
@@ -5722,7 +5722,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
 
     # Delay approval until the other provider operations have given the
     # TwoKeyApproval write time to become effective on a new hierarchy child.
-    if (@($scriptApprovalQueue).Count -gt 0) {
+    if ($scriptApprovalQueue.Count -gt 0) {
         $null = Approve-MemLabsScriptQueue -Queue $scriptApprovalQueue
     }
 

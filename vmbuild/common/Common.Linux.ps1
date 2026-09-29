@@ -4116,7 +4116,7 @@ function Install-LinuxProxyServer {
 
     # Make sure the VM is up and SSH-reachable before doing anything.
     $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
-    $vmCount = @($deployConfig.virtualMachines).Count
+    $vmCount = @($deployConfig.virtualMachines | Where-Object { $null -ne $_ }).Count
     $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $ProxyVM -VmCount $vmCount
     $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
     if (-not $ip) {
@@ -4657,7 +4657,7 @@ function Invoke-LinuxRoleConfiguration {
     # Wait for SSH first; the VM may have rebooted between phases.
     Write-Progress2 -Activity $activity -Status "Waiting for SSH" -force
     $expectedIp  = Get-LinuxVmExpectedStaticIP -VmObject $Vm -DeployConfig $DeployConfig
-    $vmCount = @($DeployConfig.virtualMachines).Count
+    $vmCount = @($DeployConfig.virtualMachines | Where-Object { $null -ne $_ }).Count
     $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $Vm -VmCount $vmCount
     $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
     if (-not $ip) {

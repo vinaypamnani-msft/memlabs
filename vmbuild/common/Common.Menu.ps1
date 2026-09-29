@@ -551,8 +551,8 @@ function Select-StartDomain {
             }
             else {
                 Invoke-SmartStartVMsBackground -CritList $crit -CriticalOnly:$CriticalOnly -domain $domain
-                $count = @($crit.ALLCRIT).Count
-                if (-not $CriticalOnly) { $count += @($crit.NONCRIT).Count }
+                $count = $crit.ALLCRIT.Count
+                if (-not $CriticalOnly) { $count += $crit.NONCRIT.Count }
                 Write-GreenCheck "Starting $count VM(s) in '$domain' in the background..."
             }
 
@@ -661,7 +661,7 @@ function Select-StopDomain {
             }
             else {
                 Invoke-StopVMsBackground -domain $domain -vmList $vmList
-                Write-GreenCheck "Stopping $(@($vmList).Count) VM(s) in '$domain' in the background..."
+                Write-GreenCheck "Stopping $($vmList.Count) VM(s) in '$domain' in the background..."
             }
 
             return

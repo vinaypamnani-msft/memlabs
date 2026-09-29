@@ -1,5 +1,251 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 
+function Get-CriticalVMs {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain,
+        [Parameter(Mandatory = $false, HelpMessage = "VMs to bucketize, names only")]
+        [object] $vmNames = $null
+    )
+
+    $return = [pscustomObject]@{
+        DC      = @()
+        FS      = @()
+        SQL     = @()
+        CAS     = @()
+        PRI     = @()
+        ALLCRIT = @()
+        NONCRIT = @()
+    }
+
+    $allvms = @()
+    if ($vmNames) {
+        write-log -LogOnly "[Get-CriticalVMs] Requested $vmNames"
+        $allvms += get-list -type vm -SmartUpdate
+    }
+    else {
+        $allvms += get-list -type vm -DomainName $domain -SmartUpdate
+    }
+
+    $vms = @()
+    if ($vmNames) {
+        $vms += $allvms | Where-Object { $_.vmName -in $vmNames }
+        write-log -verbose "[Get-CriticalVMs] Adding $($vms.VmName)"
+    }
+    else {
+        $vms += $allvms
+    }
+
+    $vms = $vms | Where-Object { $_.Role -ne "StandaloneRootCA" }
+
+    $return.dc += $vms | Where-Object { $_.Role -in "DC", "BDC" }
+    $return.ALLCRIT += $vms | Where-Object { $_.Role -in "DC", "BDC" }
+    $vms = $vms | Where-Object { $_.Role -notin "DC", "BDC" }
+
+    $sqlServerNames = ($vms | Where-Object { $_.remoteSQLVM }).remoteSQLVM | Select-Object -Unique
+
+    foreach ($sqlName in $sqlServerNames) {
+        $thisSql = $vms | Where-Object { $_.vmName -eq $sqlName }
+        $vms = $vms | Where-Object { $_.vmName -ne $sqlName }
+        $return.SQL += $thisSql
+        $return.ALLCRIT += $thisSql
+        if ($thisSql.OtherNode) {
+            $return.SQL += $vms | Where-Object { $_.vmName -eq $thisSql.OtherNode }
+            $return.ALLCRIT += $vms | Where-Object { $_.vmName -eq $thisSql.OtherNode }
+            $vms = $vms | Where-Object { $_.vmName -ne $thisSql.OtherNode }
+        }
+    }
+
+    $fileServerNames = @()
+    $fileServerNames += ($vms | Where-Object { $_.remoteContentLibVM }).remoteContentLibVM
+    $fileServerNames += ($vms | Where-Object { $_.fileServerVM }).fileServerVM
+    $fileServerNames += ($vms | Where-Object { $_.patchMyPCFileServer }).patchMyPCFileServer
+    $fileServerNames = $fileServerNames | Select-Object -Unique
+
+    foreach ($fsName in $fileServerNames) {
+        $thisfs = $vms | Where-Object { $_.vmName -eq $fsName }
+        $vms = $vms | Where-Object { $_.vmName -ne $fsName }
+        $return.FS += $thisfs
+        $return.ALLCRIT += $thisfs
+    }
+
+    $return.CAS += $vms | Where-Object { $_.Role -eq "CAS" }
+    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "CAS" }
+    $vms = $vms | Where-Object { $_.Role -ne "CAS" }
+    $return.PRI += $vms | Where-Object { $_.Role -eq "Primary" }
+    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "Primary" }
+    $vms = $vms | Where-Object { $_.Role -ne "Primary" }
+    $return.NONCRIT += $vms
+
+    return $return
+}
+
+Function Show-StatusEraseLine {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "role")]
+        [string] $data,
+        [Parameter(Mandatory = $false, HelpMessage = "role")]
+        [switch] $indent
+    )
+    if ($indent) {
+        Write-Host "  " -NoNewline
+    }
+    Write-Host $data -NoNewline
+    Write-Host "`r" -NoNewline
+}
+
+function Invoke-SmartStartVMs {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "VMs To Start, from Get-CriticalVMs")]
+        [psCustomObject] $CritList,
+        [Parameter(Mandatory = $false, HelpMessage = "Critical Only")]
+        [switch] $CriticalOnly = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Non Critical Only")]
+        [switch] $NonCriticalOnly = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "quiet mode")]
+        [bool] $quiet = $false
+    )
+    $waitSecondsDC = 20
+    $waitSeconds = 10
+
+    function invoke-StartVM {
+        param(
+            [object] $vm,
+            [bool] $quiet,
+            [int] $wait = 0
+        )
+
+        $worked = $true
+        $returnWait = $null
+        if ($vm.State -ne "Running") {
+            if (-not $quiet ) { Show-StatusEraseLine "$($vm.Role) [$($vm.vmName)] state is [$($vm.State)]. Starting VM" -indent }
+            $worked = start-vm2 $vm.vmName -PassThru
+            if (-not $quiet) {
+                if ($worked) {
+                    if ($wait -ne 0) {
+                        Write-GreenCheck "VM [$($vm.vmName)] has been started. Waiting $wait Seconds.                                                                "
+                        $returnWait = $wait
+                    }
+                    else {
+                        Write-GreenCheck "VM [$($vm.vmName)] has been started.                                                                 "
+                    }
+                }
+                else {
+                    Write-Redx "VM [$($vm.vmName)] could not be started."
+                }
+            }
+        }
+        if (-not $worked) {
+            if ($quiet) {
+                Write-Log -Failure "Failed to start $($vm.vmName)" -LogOnly
+            }
+            else {
+                Write-Log -Failure "Failed to start $($vm.vmName)"
+            }
+        }
+        if ($returnWait) {
+            return $returnWait
+        }
+        else {
+            return $worked
+        }
+    }
+
+    $worked = $true
+    $failures = 0
+    if ($NonCriticalOnly) {
+        foreach ($vm in $CritList.NONCRIT) {
+            $worked = invoke-StartVM -vm $vm -quiet:$quiet
+            if (-not $worked) {
+                $failures++
+            }
+            if ($worked -is [int]) {
+                $sleepSecs = $worked
+            }
+        }
+        return $failures
+    }
+
+    $sleepSecs = $null
+    if ($CritList.DC) {
+        foreach ($dc in $CritList.DC) {
+            $worked = invoke-StartVM -vm $dc -quiet:$quiet -wait $waitSecondsDC
+            if (-not $worked) {
+                $failures++
+            }
+            elseif ($worked -is [int]) {
+                $sleepSecs = $worked
+            }
+        }
+        if ($sleepSecs) { start-Sleep -Seconds $sleepSecs }
+    }
+    $sleepSecs = $null
+    if ($CritList.FS) {
+        foreach ($fs in $CritList.FS) {
+            $worked = invoke-StartVM -vm $fs -quiet:$quiet -wait $waitSeconds
+            if (-not $worked) {
+                $failures++
+            }
+            elseif ($worked -is [int]) {
+                $sleepSecs = $worked
+            }
+        }
+        if ($sleepSecs) { start-Sleep -Seconds $sleepSecs }
+    }
+    $sleepSecs = $null
+    if ($CritList.SQL) {
+        foreach ($sql in $CritList.SQL) {
+            $worked = invoke-StartVM -vm $sql -quiet:$quiet -wait $waitSeconds
+            if (-not $worked) {
+                $failures++
+            }
+            elseif ($worked -is [int]) {
+                $sleepSecs = $worked
+            }
+        }
+        if ($sleepSecs) { start-Sleep -Seconds $sleepSecs }
+    }
+    $sleepSecs = $null
+    if ($CritList.CAS) {
+        foreach ($ss in $CritList.CAS) {
+            $worked = invoke-StartVM -vm $ss -quiet:$quiet -wait $waitSeconds
+            if (-not $worked) {
+                $failures++
+            }
+            elseif ($worked -is [int]) {
+                $sleepSecs = $worked
+            }
+        }
+        if ($sleepSecs) { start-Sleep -Seconds $sleepSecs }
+    }
+    $sleepSecs = $null
+    if ($CritList.PRI) {
+        foreach ($ss in $CritList.PRI) {
+            $worked = invoke-StartVM -vm $ss -quiet:$quiet -wait $waitSeconds
+            if (-not $worked) {
+                $failures++
+            }
+            elseif ($worked -is [int]) {
+                $sleepSecs = $worked
+            }
+        }
+        if ($sleepSecs) { start-Sleep -Seconds $sleepSecs }
+    }
+    if ($CriticalOnly -eq $false) {
+        foreach ($vm in $CritList.NONCRIT) {
+            $worked = invoke-StartVM -vm $vm -quiet:$quiet
+            if (-not $worked) {
+                $failures++
+            }
+        }
+    }
+    $global:vm_List_LastUpdate = $null
+    get-list -type VM -SmartUpdate | out-null
+    return $failures
+}
+
 # ThreadJob (PS7+) exposes its data streams directly on the job object and
 # has an empty ChildJobs collection, whereas Start-Job wraps the work in a
 # child PSRemotingChildJob whose streams hold the data. Return whichever
@@ -1227,7 +1473,8 @@ function Start-Phase {
                         # it did not abort, and the log recorded nothing about why. Log
                         # exactly what came back so a repeat is diagnosable.
                         $memAnswer = "$(@($memResp) | Where-Object { "$_" -match '^[YyNn]$' } | Select-Object -Last 1)"
-                        Write-Log "[Phase 1] Memory pre-flight prompt returned type='$(if ($null -eq $memResp) { '<null>' } else { $memResp.GetType().Name })' count=$(@($memResp).Count) raw='$(@($memResp) -join '|')' -> answer='$memAnswer'" -LogOnly
+                        $memResponseCount = @($memResp | Where-Object { $null -ne $_ }).Count
+                        Write-Log "[Phase 1] Memory pre-flight prompt returned type='$(if ($null -eq $memResp) { '<null>' } else { $memResp.GetType().Name })' count=$memResponseCount raw='$(@($memResp) -join '|')' -> answer='$memAnswer'" -LogOnly
                         if ($memAnswer -notmatch '^[Yy]$') {
                             Write-RedX "[Phase 1] Aborting: insufficient available memory (~$($needGB)GB needed, $($availGB)GB available after waiting). Shut down VMs from a previous lab, or re-run and answer 'y' to proceed anyway." -WriteLog
                             return $false
@@ -1556,7 +1803,7 @@ function Start-NormalJobs {
     # A throttle below the machine count silently splits one parallel phase into waves,
     # which looks like "the lab got slower", not like an error. Start-ThreadJob's own
     # default is 5. Scale to the work unless the caller asked for a specific limit.
-    $machineCount = @($machines).Count
+    $machineCount = @($machines | Where-Object { $null -ne $_ }).Count
     if (-not $PSBoundParameters.ContainsKey('ThreadJobThrottle')) {
         $ThreadJobThrottle = [Math]::Max($ThreadJobThrottle, $machineCount)
     }
@@ -2955,7 +3202,7 @@ DROP TABLE #memlabs_idxprobe;
     # phase into waves -- which shows up as "the lab got slower", not as a limit being reached.
     # The fixed 16 already did that: phase 11 dispatched 19-24 VMs in four separate lab runs.
     if ($usePhaseThreadJob -and ($Phase -eq 10 -or $Phase -eq 11)) {
-        $phaseDispatchCount = @($vmDispatchList).Count
+        $phaseDispatchCount = @($vmDispatchList | Where-Object { $null -ne $_ }).Count
         $phaseThreadJobThrottle = [Math]::Max($phaseThreadJobThrottle, $phaseDispatchCount)
         Write-Log "[Phase $Phase] ThreadJob throttle $phaseThreadJobThrottle for $phaseDispatchCount candidate VM(s)." -LogOnly
     }
@@ -4116,7 +4363,7 @@ function Wait-Phase {
                                 $dtOutsideSec = [int]($dtElapsedSec - $dt.TotalSec)
                                 if ($dtOutsideSec -lt 0) { $dtOutsideSec = 0 }
                                 Write-Log "[DscTiming] $dtVmName [$dtRole] Phase $Phase job=${dtElapsedSec}s; record '$($dt.Source)': $($dt.ResourceCount) resources, applied-sum $($dt.TotalSec)s, ~${dtOutsideSec}s outside resources (host push/copy + LCM warmup), reboot=$($dt.Reboot). Slowest resources:" -LogOnly
-                                Write-Log "[DscTiming]   $dtVmName - config started $($dt.ConfigStart); WmiPrvSE: $(if ($dt.WmiHosts -and @($dt.WmiHosts).Count -gt 0) { @($dt.WmiHosts) -join ' | ' } else { 'none' })" -LogOnly
+                                Write-Log "[DscTiming]   $dtVmName - config started $($dt.ConfigStart); WmiPrvSE: $(if ($dt.WmiHosts -and $dt.WmiHosts.Count -gt 0) { @($dt.WmiHosts) -join ' | ' } else { 'none' })" -LogOnly
                                 foreach ($tl in $dt.Top) {
                                     Write-Log "[DscTiming]   $dtVmName - $tl" -LogOnly
                                 }

@@ -7282,7 +7282,8 @@ function Test-ReportingFunctionality {
                         $results.Details.Add("  autopsy rsconfig IsInitialized=$($cfg.IsInitialized) InstanceName=$($cfg.InstanceName) DB=$($cfg.DatabaseServerName)/$($cfg.DatabaseName) SecureConnectionLevel=$($cfg.SecureConnectionLevel) Version=$($cfg.Version)")
                         try {
                             $urls = $cfg.ListReportServerUrls()
-                            for ($u = 0; $u -lt @($urls.UrlString).Count; $u++) {
+                            $urlStrings = @($urls.UrlString | Where-Object { $null -ne $_ })
+                            for ($u = 0; $u -lt $urlStrings.Count; $u++) {
                                 $results.Details.Add("  autopsy rsconfig url app='$(@($urls.Application)[$u])' url='$(@($urls.UrlString)[$u])'")
                             }
                         }
@@ -8785,7 +8786,7 @@ function Test-ForestTrustFunctionality {
                 $searcher = [ADSISearcher]::new()
                 $searcher.SearchRoot = [ADSI]"LDAP://$schemaNC"
                 $searcher.Filter = "(cn=MS-SMS-*)"
-                $smsClasses = @($searcher.FindAll()).Count
+                $smsClasses = ($searcher.FindAll()).Count
                 if ($smsClasses -gt 0) {
                     $results.Details.Add("OK: AD schema extended for ConfigMgr ($smsClasses MS-SMS-* schema object(s) present)")
                 }
@@ -13088,7 +13089,7 @@ function Test-AdditionalDisks {
         if ($sbOut -is [System.Collections.IDictionary] -and $sbOut.Details -and
             (@($sbOut.Details | Where-Object { $_ -match 'disks/partitions claim drive letter' }).Count -gt 0)) {
 
-            $expectedDataDisks = @($disks).Count
+            $expectedDataDisks = $disks.Count
             $hostLines = [System.Collections.Generic.List[string]]::new()
             $hostDup = $false
             try {
@@ -15374,16 +15375,16 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
                 # ---- gather raw signals (each guarded; never throws) ----
                 $taxCats = $null; $taxClas = $null
-                try { $taxCats = @($wsusSrv.GetUpdateCategories()).Count } catch {}
-                try { $taxClas = @($wsusSrv.GetUpdateClassifications()).Count } catch {}
+                try { $taxCats = ($wsusSrv.GetUpdateCategories()).Count } catch {}
+                try { $taxClas = ($wsusSrv.GetUpdateClassifications()).Count } catch {}
 
                 $subCats = $null; $subClas = $null
                 $lastResult = $null; $syncState = $null; $lastSyncTime = $null
                 try {
                     $sub = $wsusSrv.GetSubscription()
                     try { $syncState = $sub.GetSynchronizationStatus().ToString() } catch {}
-                    try { $subCats = @($sub.GetUpdateCategories()).Count } catch {}
-                    try { $subClas = @($sub.GetUpdateClassifications()).Count } catch {}
+                    try { $subCats = ($sub.GetUpdateCategories()).Count } catch {}
+                    try { $subClas = ($sub.GetUpdateClassifications()).Count } catch {}
                     $history = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
                     if ($history.Count -gt 0) {
                         $lastResult = $history[0].Result.ToString()

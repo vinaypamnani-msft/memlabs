@@ -1160,7 +1160,7 @@ function Invoke-StartAction {
                 elseif ($rpcWait) {
                     $verdict = 'BLOCKED ON RPC: a DSC thread is parked on an LpcReply (waiting on another process) -- see conns'
                 }
-                elseif (@($winDeep | Where-Object { @($_.conns).Count -gt 0 }).Count -gt 0) {
+                elseif (@($winDeep | Where-Object { @($_.conns | Where-Object { $null -ne $_ }).Count -gt 0 }).Count -gt 0) {
                     $verdict = 'BLOCKED, possibly on the network -- see conns in the log'
                 }
                 $tag = ($verdict -split ':')[0]
@@ -1186,8 +1186,9 @@ function Invoke-StartAction {
                     $tp = @()
                     foreach ($p in $last.threads.PSObject.Properties) { $tp += ('{0}={1}' -f $p.Name, $p.Value) }
                     Write-Report ("    thread waits  : {0}" -f (($tp | Sort-Object) -join '  ')) -FileOnly
-                    if (@($last.conns).Count -gt 0) {
-                        Write-Report ("    conns         : {0}" -f ((@($last.conns)) -join '  ')) -FileOnly
+                    $lastConnections = @($last.conns | Where-Object { $null -ne $_ })
+                    if ($lastConnections.Count -gt 0) {
+                        Write-Report ("    conns         : {0}" -f ($lastConnections -join '  ')) -FileOnly
                     }
                     Write-Report ("    top cpu       : {0}" -f ((@($last.topCpu)) -join '  ')) -FileOnly
                     Write-Report ("    probe cost    : {0} ms (high = the thread probe itself was starved)" -f $last.probeMs) -FileOnly
@@ -1240,13 +1241,13 @@ function Invoke-StartAction {
         if ($gaps.Count -lt 1) { $fail += 'the injected 8s freeze produced NO gap record' }
         elseif ([double]$gaps[0].lateMs -lt 6000) { $fail += "gap lateMs=$($gaps[0].lateMs), expected >=6000" }
         if ($deeps.Count -lt 1) { $fail += 'no deep sample was taken while the status was static' }
-        elseif (@($deeps[0].threads.PSObject.Properties).Count -lt 1) { $fail += 'deep sample carried no thread wait data' }
+        elseif ($deeps[0].threads.PSObject.Properties.Count -lt 1) { $fail += 'deep sample carried no thread wait data' }
 
         Write-Host ("  ticks={0} gaps={1} deep={2}" -f $ticks.Count, $gaps.Count, $deeps.Count)
         if ($gaps.Count -gt 0) { Write-Host ("  gap: lateMs={0} skewMs={1}" -f $gaps[0].lateMs, $gaps[0].skewMs) }
         if ($deeps.Count -gt 0) {
             $names = @($deeps[0].threads.PSObject.Properties | Select-Object -First 4 | ForEach-Object { "$($_.Name)=$($_.Value)" })
-            Write-Host ("  deep: pids={0} waits={1}" -f (@($deeps[0].watchPids).Count), ($names -join ' '))
+            Write-Host ("  deep: pids={0} waits={1}" -f $deeps[0].watchPids.Count, ($names -join ' '))
         }
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
         if ($fail.Count -gt 0) {

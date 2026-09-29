@@ -1536,7 +1536,7 @@ $global:VM_Create = {
             # PSDirect step simultaneously and a slow-but-healthy VM can exceed a
             # fixed 240s. Scale the timeout with lab size (same pattern as the DSC
             # stop): +10s per VM over 10, capped at 480s, floor 240s.
-            $settingsVmCount = @($deployConfig.virtualMachines).Count
+            $settingsVmCount = $deployConfig.virtualMachines.Count
             $settingsTimeout = if ($settingsVmCount -gt 10) { [Math]::Min(480, 240 + 10 * ($settingsVmCount - 10)) } else { 240 }
             $swSettings = [System.Diagnostics.Stopwatch]::StartNew()
             $settingsAttempts = 1
@@ -2072,9 +2072,9 @@ $global:VM_Create = {
 
                 $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
 
-                $isoFiles = $azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet }
+                $isoFiles = @($azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet })
                 $isoIndex = 0
-                $isoTotal = @($isoFiles).Count
+                $isoTotal = $isoFiles.Count
 
                 foreach ($isoFile in $isoFiles) {
                     $isoIndex++
@@ -3349,7 +3349,7 @@ WHERE d.name LIKE 'CM[_]%'
                 catch { Write-Log "[Phase $Phase]: $VmName`: failed to write $($d.Name): $_" -Warning }
             }
         }
-        if ($runCheckDb -and @($e.SuspectPages).Count -eq 0) {
+        if ($runCheckDb -and $e.SuspectPages.Count -eq 0) {
             Write-Log "[Phase $Phase]: $VmName`: msdb.dbo.suspect_pages on $sqlHost is EMPTY -- the engine has never recorded a page-level fault here" -OutputStream
         }
         foreach ($sp in @($e.SuspectPages)) {
@@ -4073,7 +4073,7 @@ $global:VM_Config = {
         # WinRM/PSDirect transport setup grows with lab size under host CPU/disk
         # contention. Add 10s per VM over 10, capped at 180s so a genuinely dead
         # VM still escalates to the reboot that actually fixes it.
-        $stopVmCount = @($deployConfig.virtualMachines).Count
+        $stopVmCount = $deployConfig.virtualMachines.Count
         $stopTimeout = if ($stopVmCount -gt 10) { [Math]::Min(180, 60 + 10 * ($stopVmCount - 10)) } else { 60 }
         # Cutoff for the guest's orphaned-PSDirect reap. Take the EARLIER of this process
         # and its parent (Start-Job worker -> launcher), so a session the launcher opened
@@ -4209,7 +4209,8 @@ $global:VM_Config = {
                     return $ips
                 } -DisplayName "GetIPs"
                 $swGetIps.Stop()
-                Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] GetIPs completed in $([math]::Round($swGetIps.Elapsed.TotalSeconds, 1)) seconds (attempt $($retryCount + 1), returned $(@($IPAddress.ScriptBlockOutput).Count))" -LogOnly
+                $ipAddressCount = @($IPAddress.ScriptBlockOutput | Where-Object { $null -ne $_ }).Count
+                Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] GetIPs completed in $([math]::Round($swGetIps.Elapsed.TotalSeconds, 1)) seconds (attempt $($retryCount + 1), returned $ipAddressCount)" -LogOnly
                 $success = $true
                 if ($IPAddress.ScriptBlockOutput) {
                     # A VM with multiple NICs (e.g. SQLAO with a ClusterV2 NIC)
@@ -6779,7 +6780,7 @@ $global:VM_Config = {
                     $readyProbeState = @{}
                     $useThreadProbe = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -and ($nonReadyNodes.Count -gt 1) -and ($probeVmIds.Count -gt 0)
                     # Throttle must be >= node count; below it the fan-out silently splits into waves.
-                    $readyProbeThrottle = if ($useThreadProbe) { [Math]::Max(1, @($nonReadyNodes).Count) } else { 1 }
+                    $readyProbeThrottle = if ($useThreadProbe) { [Math]::Max(1, $nonReadyNodes.Count) } else { 1 }
                     $readyProbeTimeoutSec = 45
 
                     $threadProbeBlock = {

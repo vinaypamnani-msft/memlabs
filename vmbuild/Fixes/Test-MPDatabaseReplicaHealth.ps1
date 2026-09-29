@@ -431,8 +431,8 @@ WHERE name LIKE 'ConfigMgrEndpoint%' OR name LIKE 'ConfigMgrEndPoint%'
 
     # 4b. Message types + contract (CM DB) -- created by sp_BgbConfigSSBForReplicaDB.
     try {
-        $mt = Invoke-Sql -Instance $Instance -Database $DbName -Query "SELECT name FROM sys.service_message_types WHERE name IN ('BGB_ChannelStart','BGB_ResourceTaskPush')"
-        $mtCount = @($mt).Count
+        $mt = @(Invoke-Sql -Instance $Instance -Database $DbName -Query "SELECT name FROM sys.service_message_types WHERE name IN ('BGB_ChannelStart','BGB_ResourceTaskPush')")
+        $mtCount = $mt.Count
         if ($mtCount -ge 2) { Add-Result PASS "$Label SSB" 'BGB message types present' (@($mt).name -join ', ') }
         else { Add-Result WARN "$Label SSB" "BGB message types incomplete ($mtCount/2)" 'Expected BGB_ChannelStart + BGB_ResourceTaskPush.' }
 
@@ -520,9 +520,9 @@ catch { Add-Result WARN 'Replication' 'syspublications query failed' "$($_.Excep
 # ===========================================================================
 # DISCOVER + VALIDATE EVERY REPLICA
 # ===========================================================================
-$replicaTargets = Get-ReplicaTargets
+$replicaTargets = @(Get-ReplicaTargets)
 
-if (@($replicaTargets).Count -eq 0) {
+if ($replicaTargets.Count -eq 0) {
     Add-Result INFO 'Discovery' 'No MP database replicas configured' 'No MP is configured to use a database replica (all MPs use the site database). Replica-specific checks skipped.'
 }
 
@@ -668,7 +668,7 @@ FROM dbo.MSreplication_subscriptions
 # ---------------------------------------------------------------------------
 # 8-distribution. Distribution / latency (best effort; needs the distribution DB).
 # ---------------------------------------------------------------------------
-if (@($replicaTargets).Count -gt 0) {
+if ($replicaTargets.Count -gt 0) {
     try {
         $mon = Invoke-Sql -Instance $SiteServerSqlInstance -Database 'distribution' -Query @"
 SELECT TOP 50 da.publisher_db, da.publication, da.subscriber_name, da.subscriber_db,
@@ -700,7 +700,7 @@ WHERE da.subscriber_name IS NOT NULL
 # 9a. OPTIONAL OS-LEVEL CHECKS on the SITE SERVER (this box): local group
 #     ConfigMgr_MPReplicaAccess + share ConfigMgr_MPReplica.
 # ---------------------------------------------------------------------------
-if ($RunOSChecks -and @($replicaTargets).Count -gt 0) {
+if ($RunOSChecks -and $replicaTargets.Count -gt 0) {
     try {
         $g = Get-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -ErrorAction SilentlyContinue
         if ($g) {

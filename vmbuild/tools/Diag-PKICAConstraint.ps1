@@ -224,7 +224,7 @@ $diagScript = {
         _R "dsServiceName: $($rootDSE.dsServiceName)"
         _R "isSynchronized: $($rootDSE.isSynchronized)   isGlobalCatalogReady: $($rootDSE.isGlobalCatalogReady)"
         _R "highestCommittedUSN: $($rootDSE.highestCommittedUSN)"
-        _R "supportedCapabilities count: $(@($rootDSE.supportedCapabilities).Count)"
+        _R "supportedCapabilities count: $($rootDSE.supportedCapabilities.Count)"
     }
     catch { _R "RootDSE error: $($_.Exception.Message)" }
 

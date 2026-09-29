@@ -189,12 +189,13 @@ $probe = {
     Show 'every globalModule image in applicationHost.config'
     try {
         $ahc = [xml](Get-Content "$env:windir\system32\inetsrv\config\applicationHost.config" -Raw)
+        $globalModules = @($ahc.configuration.'system.webServer'.globalModules.add | Where-Object { $null -ne $_ })
         $missing = 0
-        foreach ($gm in $ahc.configuration.'system.webServer'.globalModules.add) {
+        foreach ($gm in $globalModules) {
             $img = [Environment]::ExpandEnvironmentVariables("$($gm.image)")
             if ($img -and -not (Test-Path -LiteralPath $img)) { "  MISSING  $($gm.name)  ->  $img"; $missing++ }
         }
-        "  $missing of $(@($ahc.configuration.'system.webServer'.globalModules.add).Count) globalModule image(s) missing"
+        "  $missing of $($globalModules.Count) globalModule image(s) missing"
         "  (several missing => servicing/feature damage; only one => targeted)"
     }
     catch { "  applicationHost.config read failed: $($_.Exception.Message)" }

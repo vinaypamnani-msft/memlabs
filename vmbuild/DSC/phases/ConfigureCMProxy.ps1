@@ -62,7 +62,8 @@ try {
 
     if (-not $hasEnableWork -and -not $hasDisableWork) {
         $proxyState = if ($proxyVm) { "Proxy=$($proxyVm.vmName)" } else { "Proxy=<none>" }
-        Write-DscStatus "ConfigureCMProxy: nothing to do. $proxyState; opted-in clients=$($proxyClients.Count); remove clients=$($proxyRemoveClients.Count); total VMs in deployConfig=$(@($deployConfig.virtualMachines).Count)"
+        $configuredVmCount = @($deployConfig.virtualMachines | Where-Object { $null -ne $_ }).Count
+        Write-DscStatus "ConfigureCMProxy: nothing to do. $proxyState; opted-in clients=$($proxyClients.Count); remove clients=$($proxyRemoveClients.Count); total VMs in deployConfig=$configuredVmCount"
         $Configuration.ConfigureCMProxy.Status = 'NotStart'
     }
     else {

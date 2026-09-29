@@ -83,9 +83,10 @@ function Test-MemLabsBuildServer {
         Is this host designated to BUILD DSC.zip / Host.zip?
 
     .DESCRIPTION
-        Building rewrites DSC.zip and version.json in the repo and installs 15 DSC modules
-        machine-wide. Lab hosts consume those artifacts and must never produce them, so the
-        build scripts refuse to run unless this host was explicitly designated.
+        Building rewrites DSC.zip, version.json and DSC.build.json in the repo and
+        installs DSC modules machine-wide. Lab hosts consume those artifacts and
+        must never produce them, so the build scripts refuse to run unless this
+        host was explicitly designated.
     #>
     [CmdletBinding()]
     param ()
@@ -150,7 +151,7 @@ function Deny-MemLabsNonBuildServer {
 
     Write-Host
     Write-Host "$ScriptName refused to run: $env:COMPUTERNAME is not a designated MemLabs DSC build server." -ForegroundColor Red
-    Write-Host "Building rewrites DSC.zip/version.json in the repo and installs DSC modules machine-wide," -ForegroundColor Yellow
+    Write-Host "Building rewrites DSC.zip/version.json/DSC.build.json in the repo and installs DSC modules machine-wide," -ForegroundColor Yellow
     Write-Host "which is not something a lab host should ever do." -ForegroundColor Yellow
     Write-Host
     Write-Host "If this IS the build server, designate it once (elevated):" -ForegroundColor Cyan
@@ -211,8 +212,8 @@ function Get-MemLabsDscArtifactState {
     }
 
     try {
-        $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256 -ErrorAction Stop).Hash
-        $moduleHash = (Get-FileHash -LiteralPath $modulePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        $manifestHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        $moduleHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $modulePath -Algorithm SHA256 -ErrorAction Stop).Hash
         $embeddedManifestHash = Get-MemLabsZipEntrySha256 -ArchivePath $archivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psd1'
         $embeddedModuleHash = Get-MemLabsZipEntrySha256 -ArchivePath $archivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psm1'
     }
@@ -227,7 +228,7 @@ function Get-MemLabsDscArtifactState {
     }
 
     $expected = [ordered]@{
-        ArchiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        ArchiveSha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $archivePath -Algorithm SHA256 -ErrorAction Stop).Hash
         TemplateHelpDscPsd1Sha256 = $manifestHash
         TemplateHelpDscPsm1Sha256 = $moduleHash
         EmbeddedTemplateHelpDscPsd1Sha256 = $embeddedManifestHash
@@ -249,26 +250,29 @@ function Get-MemLabsDscArtifactState {
 function Write-MemLabsDscArtifactReceipt {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)][string]$DscRoot
+        [Parameter(Mandatory = $true)][string]$DscRoot,
+        [string]$ArchivePath,
+        [string]$VersionPath,
+        [string]$ReceiptPath
     )
 
-    $archivePath = Join-Path $DscRoot 'DSC.zip'
+    if ([string]::IsNullOrWhiteSpace($ArchivePath)) { $ArchivePath = Join-Path $DscRoot 'DSC.zip' }
+    if ([string]::IsNullOrWhiteSpace($VersionPath)) { $VersionPath = Join-Path (Split-Path $DscRoot -Parent) 'version.json' }
+    if ([string]::IsNullOrWhiteSpace($ReceiptPath)) { $ReceiptPath = Join-Path $DscRoot 'DSC.build.json' }
     $manifestPath = Join-Path $DscRoot 'TemplateHelpDSC\TemplateHelpDSC.psd1'
     $modulePath = Join-Path $DscRoot 'TemplateHelpDSC\TemplateHelpDSC.psm1'
-    $versionPath = Join-Path (Split-Path $DscRoot -Parent) 'version.json'
-    $receiptPath = Join-Path $DscRoot 'DSC.build.json'
-    $version = Get-Content -LiteralPath $versionPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256 -ErrorAction Stop).Hash
-    $moduleHash = (Get-FileHash -LiteralPath $modulePath -Algorithm SHA256 -ErrorAction Stop).Hash
-    $embeddedManifestHash = Get-MemLabsZipEntrySha256 -ArchivePath $archivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psd1'
-    $embeddedModuleHash = Get-MemLabsZipEntrySha256 -ArchivePath $archivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psm1'
+    $version = Get-Content -LiteralPath $VersionPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $manifestHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256 -ErrorAction Stop).Hash
+    $moduleHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $modulePath -Algorithm SHA256 -ErrorAction Stop).Hash
+    $embeddedManifestHash = Get-MemLabsZipEntrySha256 -ArchivePath $ArchivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psd1'
+    $embeddedModuleHash = Get-MemLabsZipEntrySha256 -ArchivePath $ArchivePath -EntryPath 'TemplateHelpDSC\TemplateHelpDSC.psm1'
     if ($manifestHash -ne $embeddedManifestHash -or $moduleHash -ne $embeddedModuleHash) {
         throw 'DSC.zip contains TemplateHelpDSC bytes that do not match the loose source files.'
     }
     $receipt = [ordered]@{
         SchemaVersion = 1
         CreatedUtc = [datetime]::UtcNow.ToString('o')
-        ArchiveSha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256 -ErrorAction Stop).Hash
+        ArchiveSha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256 -ErrorAction Stop).Hash
         TemplateHelpDscPsd1Sha256 = $manifestHash
         TemplateHelpDscPsm1Sha256 = $moduleHash
         EmbeddedTemplateHelpDscPsd1Sha256 = $embeddedManifestHash
@@ -276,16 +280,16 @@ function Write-MemLabsDscArtifactReceipt {
         MemLabsVersion = [string]$version.memLabsVersion
         LatestHotfixVersion = [string]$version.latestHotfixVersion
     }
-    $temporaryPath = "$receiptPath.$([guid]::NewGuid().ToString('N')).tmp"
+    $temporaryPath = "$ReceiptPath.$([guid]::NewGuid().ToString('N')).tmp"
     $backupPath = "$temporaryPath.backup"
     try {
         $receipt | ConvertTo-Json | Set-Content -LiteralPath $temporaryPath -Encoding UTF8 -ErrorAction Stop
-        if (Test-Path -LiteralPath $receiptPath -PathType Leaf) {
-            [IO.File]::Replace($temporaryPath, $receiptPath, $backupPath)
+        if (Test-Path -LiteralPath $ReceiptPath -PathType Leaf) {
+            [IO.File]::Replace($temporaryPath, $ReceiptPath, $backupPath)
             Remove-Item -LiteralPath $backupPath -Force -ErrorAction Stop
         }
         else {
-            [IO.File]::Move($temporaryPath, $receiptPath)
+            [IO.File]::Move($temporaryPath, $ReceiptPath)
         }
     }
     finally {
@@ -459,10 +463,16 @@ function Install-ModuleFromNupkg {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][ValidateSet('AllUsers', 'CurrentUser')][string]$Scope
+        [Parameter(Mandatory = $true)][ValidateSet('AllUsers', 'CurrentUser')][string]$Scope,
+        [string]$RequiredVersion,
+        [string]$DestinationRoot
     )
 
-    $work = Join-Path $env:TEMP ('memlabs-nupkg-' + [guid]::NewGuid().ToString('N'))
+    $workRoot = if ($DestinationRoot) { Split-Path $DestinationRoot -Parent } else { $env:TEMP }
+    if (-not (Test-Path -LiteralPath $workRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $workRoot -Force -ErrorAction Stop | Out-Null
+    }
+    $work = Join-Path $workRoot ('memlabs-nupkg-' + [guid]::NewGuid().ToString('N'))
     $extractDir = Join-Path $work 'x'
     $nupkg = Join-Path $work "$Name.zip"
     $oldProgress = $Global:ProgressPreference
@@ -474,7 +484,12 @@ function Install-ModuleFromNupkg {
             Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
         }
 
-        $url = "https://www.powershellgallery.com/api/v2/package/$Name"
+        $url = if ($RequiredVersion) {
+            "https://www.powershellgallery.com/api/v2/package/$Name/$RequiredVersion"
+        }
+        else {
+            "https://www.powershellgallery.com/api/v2/package/$Name"
+        }
         $valid = $false
         for ($attempt = 1; $attempt -le 3 -and -not $valid; $attempt++) {
             if (Test-Path -LiteralPath $nupkg) { Remove-Item -LiteralPath $nupkg -Force -ErrorAction SilentlyContinue }
@@ -525,6 +540,10 @@ function Install-ModuleFromNupkg {
             Write-PrereqLog "Could not determine a version for $Name from the downloaded package." -Level Warning
             return $false
         }
+        if ($RequiredVersion -and [version]$version -ne [version]$RequiredVersion) {
+            Write-PrereqLog "Downloaded $Name package version '$version' does not match required version '$RequiredVersion'." -Level Warning
+            return $false
+        }
 
         # NuGet packaging artifacts; brackets in the path make -LiteralPath mandatory.
         foreach ($junk in @('_rels', 'package', '[Content_Types].xml')) {
@@ -533,7 +552,8 @@ function Install-ModuleFromNupkg {
         }
         Get-ChildItem -LiteralPath $extractDir -Filter '*.nuspec' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
-        $target = Join-Path (Join-Path (Get-MemLabsModuleInstallPath -Scope $Scope) $Name) $version
+        $moduleRoot = if ($DestinationRoot) { $DestinationRoot } else { Get-MemLabsModuleInstallPath -Scope $Scope }
+        $target = Join-Path (Join-Path $moduleRoot $Name) $version
         if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop }
         New-Item -ItemType Directory -Path $target -Force | Out-Null
         Get-ChildItem -LiteralPath $extractDir -Force | Copy-Item -Destination $target -Recurse -Force -ErrorAction Stop

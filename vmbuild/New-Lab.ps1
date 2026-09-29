@@ -1824,7 +1824,7 @@ finally {
                 $net = $created - [int]$ledger['disposeCalls']
                 $leakDisproportionate = ($net -ge 10) -and ($created -gt 0) -and (($net / $created) -ge 0.25)
             }
-            $parked = @($global:ps_orphanRunspaces).Count
+            $parked = $global:ps_orphanRunspaces.Count
             $actionable = $disposalFailing -or ($parked -gt 0) -or $leakDisproportionate
             $sev = if ($actionable) { @{ Warning = $true } } else { @{ LogOnly = $true } }
 
@@ -1854,7 +1854,7 @@ finally {
                             ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
                 }
                 catch { }
-                Write-Log "[JobLeak] cross-check: Get-PSSession=$liveSessions ps_cache=$(@($global:ps_cache.Keys).Count) jobs=[$jobSummary]" @sev
+                Write-Log "[JobLeak] cross-check: Get-PSSession=$liveSessions ps_cache=$($global:ps_cache.Keys.Count) jobs=[$jobSummary]" @sev
                 # created vs disposed separates the two remaining explanations:
                 #   created >> disposeCalls          -> some path drops sessions without
                 #                                       ever handing them to Remove-VmSession
