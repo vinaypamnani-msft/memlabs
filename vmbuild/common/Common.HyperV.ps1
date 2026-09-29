@@ -379,7 +379,8 @@ function Clear-StrayVhdMounts {
 function Invoke-HostMemoryReclaim {
     [CmdletBinding()]
     param(
-        [switch]$CurrentProcessOnly
+        [switch]$CurrentProcessOnly,
+        [switch]$ClearErrorHistory
     )
 
     $beforeMB = $null
@@ -412,6 +413,18 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
         $managedBeforeMB = [Math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 0)
     }
     catch {}
+
+    # $Error retains caught ErrorRecords, including their InvocationInfo, job,
+    # scriptblock, and remoting payload graphs. Preserve it during active work,
+    # but let end-of-run callers release history that has already been logged.
+    $clearedErrorRecords = 0
+    if ($ClearErrorHistory) {
+        try {
+            $clearedErrorRecords = $global:Error.Count
+            if ($clearedErrorRecords -gt 0) { $global:Error.Clear() }
+        }
+        catch { $clearedErrorRecords = 0 }
+    }
 
     # 1. Managed GC in the host process.
     try {
@@ -462,7 +475,8 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
     $freedMB = if (($null -ne $beforeMB) -and ($null -ne $afterMB)) { [Math]::Round($afterMB - $beforeMB, 0) } else { $null }
     try {
         if ($CurrentProcessOnly -and ($null -ne $beforeWorkingSetMB) -and ($null -ne $afterWorkingSetMB)) {
-            Write-Log "Invoke-HostMemoryReclaim: launcher pid $PID after cleanup - managed ${managedBeforeMB}MB -> ${managedAfterMB}MB, private ${beforePrivateMB}MB -> ${afterPrivateMB}MB, WS ${beforeWorkingSetMB}MB -> ${afterWorkingSetMB}MB" -LogOnly
+            $errorHistoryNote = if ($ClearErrorHistory) { ", errorsCleared=$clearedErrorRecords" } else { "" }
+            Write-Log "Invoke-HostMemoryReclaim: launcher pid $PID after cleanup - managed ${managedBeforeMB}MB -> ${managedAfterMB}MB, private ${beforePrivateMB}MB -> ${afterPrivateMB}MB, WS ${beforeWorkingSetMB}MB -> ${afterWorkingSetMB}MB$errorHistoryNote" -LogOnly
         }
         elseif ($null -ne $freedMB) {
             Write-Log "Invoke-HostMemoryReclaim: GC + trimmed $trimmed PowerShell working set(s) + flushed file cache; available memory changed by ${freedMB}MB (now $([Math]::Round($afterMB,0))MB)" -LogOnly

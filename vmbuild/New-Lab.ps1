@@ -54,6 +54,8 @@ param (
     [switch]$NoSnapshot,
     [Parameter(Mandatory = $false, HelpMessage = "Do not auto-remove Phase 1 VMs on failure (keep them around for forensics).")]
     [switch]$KeepFailedVMs,
+    [Parameter(Mandatory = $false, HelpMessage = "Release retained ErrorRecords when returning to a long-lived launcher.")]
+    [switch]$ClearErrorHistoryOnExit,
     [Parameter(Mandatory = $false, HelpMessage = "Disable mouse support in menus.")]
     [switch]$DisableMouse,
     [Parameter(Mandatory = $false, HelpMessage = "Open a secondary window showing verbose log output in real time.")]
@@ -1747,13 +1749,24 @@ finally {
     # Set quick edit back
     Set-QuickEdit
 
-    # Jobs and cached PSSessions can leave large, now-unreachable object graphs
-    # resident in this long-lived launcher process. Collect and trim only this
-    # process after cleanup, and log managed/private/working-set before/after so
-    # persistent private growth can be distinguished from reclaimable residency.
+    # Start-Test reuses this process for many domain-specific logs. Flush and
+    # discard inactive path entries so their StringBuilder capacity is not held
+    # for the lifetime of the launcher. Nonempty entries survive for retry.
+    try {
+        $prunedLogBuffers = Remove-StaleLogBuffers -KeepPath @($Common.LogPath)
+        if ($prunedLogBuffers -gt 0) {
+            Write-Log "Pruned $prunedLogBuffers inactive log buffer(s); retained the active log/JSONL pair." -LogOnly
+        }
+    }
+    catch { }
+
+    # Jobs, cached PSSessions, and caught ErrorRecords can leave large object graphs
+    # resident in a long-lived launcher process. Start-Test opts into releasing error
+    # history after failure details have been persisted; standalone New-Lab sessions
+    # preserve $Error for interactive inspection.
     # $null =: it returns the freed MB, which otherwise prints as a bare number
     # next to the exit message and reads like a status code.
-    $null = Invoke-HostMemoryReclaim -CurrentProcessOnly
+    $null = Invoke-HostMemoryReclaim -CurrentProcessOnly -ClearErrorHistory:$ClearErrorHistoryOnExit
 
     Write-Host
     if ($NewLabsuccess -ne $true) {

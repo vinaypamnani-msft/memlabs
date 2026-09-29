@@ -519,7 +519,7 @@ function Invoke-NewLab {
     $script:LastNewLabResumeCommand = $null
     $global:NewLabResumeCommand = $null
     $global:LASTEXITCODE = 0
-    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs | Out-Host
+    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit | Out-Host
     $code = [int]$LASTEXITCODE
     $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
 
@@ -527,7 +527,7 @@ function Invoke-NewLab {
     if ($code -eq 55) {
         $global:NewLabResumeCommand = $null
         $global:LASTEXITCODE = 0
-        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs | Out-Host
+        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit | Out-Host
         $code = [int]$LASTEXITCODE
         $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
     }
