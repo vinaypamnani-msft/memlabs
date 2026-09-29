@@ -2381,6 +2381,60 @@ function Test-SQLAOFunctionality {
             $replicaInstance = if ($replicaParts.Count -gt 1) { $replicaParts[1] } else { 'MSSQLSERVER' }
             return $replicaHost -ieq $env:COMPUTERNAME -and $replicaInstance -ieq $(if ($isDefaultInstance) { 'MSSQLSERVER' } else { $sqlInstName })
         }
+        function Wait-SqlAoReplicatedTestValue {
+            [CmdletBinding()]
+            param(
+                [Parameter(Mandatory)][string]$ServerInstance,
+                [Parameter(Mandatory)][string]$TestValue,
+                [ValidateRange(1, 60)][int]$MaxAttempts = 12,
+                [ValidateRange(0, 30)][int]$RetrySeconds = 5,
+                [scriptblock]$ReadOperation,
+                [scriptblock]$DelayOperation
+            )
+
+            if (-not $ReadOperation) {
+                $ReadOperation = {
+                    param($Target, $Query)
+                    @(Invoke-Sqlcmd -ServerInstance $Target -Query $Query -QueryTimeout 15 -TrustServerCertificate -ErrorAction Stop)
+                }
+            }
+            if (-not $DelayOperation) {
+                $DelayOperation = {
+                    param($Seconds)
+                    Start-Sleep -Seconds $Seconds
+                }
+            }
+
+            $escapedValue = $TestValue.Replace("'", "''")
+            $readQuery = "SELECT TOP 1 TestValue FROM [TESTDB].dbo.MemLabsValidation WHERE TestValue = '$escapedValue'"
+            $lastError = ''
+            for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+                try {
+                    $readResult = @(& $ReadOperation $ServerInstance $readQuery)
+                    if (@($readResult | Where-Object { $_.TestValue -eq $TestValue }).Count -gt 0) {
+                        return [pscustomobject]@{
+                            Success   = $true
+                            Attempts  = $attempt
+                            LastError = ''
+                        }
+                    }
+                    $lastError = 'query succeeded but the committed row was not visible yet'
+                }
+                catch {
+                    $lastError = $_.Exception.Message
+                }
+
+                if ($attempt -lt $MaxAttempts -and $RetrySeconds -gt 0) {
+                    $null = & $DelayOperation $RetrySeconds
+                }
+            }
+
+            return [pscustomobject]@{
+                Success   = $false
+                Attempts  = $MaxAttempts
+                LastError = $lastError
+            }
+        }
 
         # Live status — Write-Progress records emitted here are confined to this
         # -AsJob nested job; Invoke-VmCommand -PollProgress polls and re-emits the
@@ -4277,18 +4331,43 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
                         Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $writeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Wrote test value '$testId' to TESTDB on primary")
 
-                        # SynchronousCommit hardens the log on both replicas before commit
-                        # returns, but redo on the secondary may lag slightly.
-                        Start-Sleep -Seconds 5
-
-                        $readQuery = "SELECT TOP 1 TestValue FROM [TESTDB].dbo.MemLabsValidation WHERE TestValue = '$testId'"
-                        $readResult = Invoke-Sqlcmd -ServerInstance $secondaryConnStr -Query $readQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
-                        if ($readResult -and $readResult.TestValue -eq $testId) {
-                            $results.Details.Add("OK: Read test value '$testId' from secondary '$secondaryConnStr' — replication verified")
+                        # Synchronous commit hardens the log on both replicas before
+                        # commit returns, but secondary redo/read visibility can lag.
+                        # Poll through that bounded convergence window instead of
+                        # failing a healthy AG after one fixed five-second sleep.
+                        $replicationRead = Wait-SqlAoReplicatedTestValue -ServerInstance $secondaryConnStr -TestValue $testId
+                        if ($replicationRead.Success) {
+                            $results.Details.Add("OK: Read test value '$testId' from secondary '$secondaryConnStr' after $($replicationRead.Attempts) attempt(s) — replication verified")
                         }
                         else {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: Could not read test value '$testId' from secondary '$secondaryConnStr'")
+                            $results.Details.Add("FAIL: Test value '$testId' did not become readable on secondary '$secondaryConnStr' after $($replicationRead.Attempts) attempts: $($replicationRead.LastError)")
+                            $replicaDiagnosticQuery = @"
+SELECT ar.replica_server_name AS Replica,
+       drs.is_local AS IsLocal,
+       drs.synchronization_state_desc AS SyncState,
+       drs.synchronization_health_desc AS Health,
+       drs.database_state_desc AS DatabaseState,
+       drs.is_suspended AS IsSuspended,
+       drs.suspend_reason_desc AS SuspendReason,
+       drs.log_send_queue_size AS LogSendQueueKB,
+       drs.redo_queue_size AS RedoQueueKB
+FROM sys.dm_hadr_database_replica_states drs
+JOIN sys.availability_replicas ar ON drs.replica_id = ar.replica_id
+JOIN sys.availability_databases_cluster adc ON drs.group_database_id = adc.group_database_id
+WHERE adc.database_name = N'TESTDB'
+ORDER BY ar.replica_server_name
+"@
+                            try {
+                                $replicaDiagnostics = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $replicaDiagnosticQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                                foreach ($diag in $replicaDiagnostics) {
+                                    $suspendInfo = if ($diag.IsSuspended) { ", suspended=$($diag.SuspendReason)" } else { '' }
+                                    $results.Details.Add("INFO: TESTDB replica '$($diag.Replica)': sync=$($diag.SyncState), health=$($diag.Health), db=$($diag.DatabaseState), sendQueueKB=$($diag.LogSendQueueKB), redoQueueKB=$($diag.RedoQueueKB)$suspendInfo")
+                                }
+                            }
+                            catch {
+                                $results.Details.Add("WARN: Could not collect TESTDB replica diagnostics after replication timeout: $($_.Exception.Message)")
+                            }
                         }
                     }
                     catch {

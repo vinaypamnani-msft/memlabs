@@ -81,6 +81,7 @@ try {
     . (Import-TestFunction -Path (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Name 'Get-SqlAoVirtualIpAddresses')
     . (Import-TestFunction -Path (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Name 'Resolve-SqlAoNodeAddress')
     . (Import-TestFunction -Path (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Name 'Get-SqlAoConfigValue')
+    . (Import-TestFunction -Path (Join-Path $RootPath 'common\Common.Validation.Functional.ps1') -Name 'Wait-SqlAoReplicatedTestValue')
     function Get-ClusterParameter {
         param([Parameter(ValueFromPipeline)]$InputObject, [string]$Name)
         process { [pscustomobject]@{ Value = $InputObject.Parameters[$Name] } }
@@ -312,6 +313,45 @@ try {
 
     Assert-Validation ((Get-Command Test-SQLAOFunctionality).Parameters.ContainsKey('RecoveryRetry')) 'SQLAO validation declares the bounded recovery retry switch'
     function Start-Sleep {}
+    $script:ReplicationReadAttempts = 0
+    $script:ReplicationReadDelays = 0
+    $script:ReplicationReadServer = ''
+    $script:ReplicationReadQuery = ''
+    $replicatedValue = "ab'cd"
+    $eventualRead = {
+        param($ServerInstance, $Query)
+        $script:ReplicationReadAttempts++
+        $script:ReplicationReadServer = $ServerInstance
+        $script:ReplicationReadQuery = $Query
+        if ($script:ReplicationReadAttempts -ge 3) {
+            return [pscustomobject]@{ TestValue = $replicatedValue }
+        }
+        return @()
+    }
+    $recordDelay = {
+        param($Seconds)
+        $script:ReplicationReadDelays++
+    }
+    $eventualReplication = Wait-SqlAoReplicatedTestValue -ServerInstance 'FAB-PS1SQLAO2' -TestValue $replicatedValue `
+        -MaxAttempts 5 -RetrySeconds 5 -ReadOperation $eventualRead -DelayOperation $recordDelay
+    Assert-Validation ($eventualReplication.Success -and $eventualReplication.Attempts -eq 3) 'cross-node replication probe tolerates bounded secondary redo lag'
+    Assert-Validation ($script:ReplicationReadAttempts -eq 3 -and $script:ReplicationReadDelays -eq 2) 'cross-node replication probe retries only between failed reads'
+    Assert-Validation ($script:ReplicationReadServer -eq 'FAB-PS1SQLAO2') 'cross-node replication probe keeps the configured secondary target'
+    Assert-Validation ($script:ReplicationReadQuery -match "ab''cd") 'cross-node replication probe escapes the test value in its read query'
+
+    $script:ReplicationReadAttempts = 0
+    $script:ReplicationReadDelays = 0
+    $failedRead = {
+        param($ServerInstance, $Query)
+        $script:ReplicationReadAttempts++
+        throw 'injected secondary read failure'
+    }
+    $failedReplication = Wait-SqlAoReplicatedTestValue -ServerInstance 'FAB-PS1SQLAO2' -TestValue 'never-visible' `
+        -MaxAttempts 3 -RetrySeconds 5 -ReadOperation $failedRead -DelayOperation $recordDelay
+    Assert-Validation (-not $failedReplication.Success -and $failedReplication.Attempts -eq 3 -and
+        $failedReplication.LastError -eq 'injected secondary read failure') 'persistent secondary read failure remains a hard failure with its cause'
+    Assert-Validation ($script:ReplicationReadAttempts -eq 3 -and $script:ReplicationReadDelays -eq 2) 'persistent secondary read failure stays bounded'
+
     $script:RecoveryScenario = 'RecoverOnce'
     $script:RecoveryValidationCalls = 0
     $script:RecoveryRestartCalls = 0
@@ -521,6 +561,8 @@ try {
     Assert-Validation ($functionalSource -match '(?s)else \{\s+\$results\.Passed = \$false\s+\$mismatches\+\+.+?FAIL: DNS') 'failed exact DNS postcondition fails Phase 11'
     Assert-Validation (-not ($functionalSource -match '\$results\.Passed = \$true')) 'SQLAO recovery never resets the aggregate verdict to success'
     Assert-Validation ($functionalSource -match "FAIL: SQL connection via listener '.+did not succeed after bounded recovery") 'terminal listener timeout/error is a hard failure'
+    Assert-Validation ($functionalSource -match 'Wait-SqlAoReplicatedTestValue.+?-ServerInstance \$secondaryConnStr') 'cross-node replication validation uses bounded secondary-read convergence'
+    Assert-Validation ($functionalSource -match 'redo_queue_size AS RedoQueueKB' -and $functionalSource -match 'log_send_queue_size AS LogSendQueueKB') 'replication timeout reports send and redo queue diagnostics'
     Assert-Validation ($functionalSource -match 'cycling active AG IP resource.+inactive-subnet providers offline') 'listener recovery cycles only the active provider'
     Assert-Validation ($functionalSource.Contains("AG recovery is owned by '`$recoveryOwner'")) 'destructive AG recovery is serialized to one deterministic owner'
     Assert-Validation ($functionalSource -match '(?s)agHealthDeferred.+?Exact AG health query through' -and $functionalSource -match 'after listener recovery') 'initial listener failure defers exact AG verdict until listener recovery'
