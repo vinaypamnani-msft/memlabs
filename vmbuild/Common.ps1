@@ -4342,9 +4342,9 @@ function Clear-SqlAoBackupShare {
     switch ($out.Outcome) {
         'NotPresent' { Write-Log "No AG backup folder '$BackupLocalPath' on $FileServerVM yet$suffix." -LogOnly }
         'AlreadyEmpty' { Write-Log "No stale AG seeding backups in '$BackupLocalPath' on $FileServerVM$suffix." -LogOnly }
-        'Cleared' { Write-GreenCheck "Removed $(@($out.Removed).Count) stale AG seeding backup(s) from $FileServerVM`:$BackupLocalPath$suffix -- $(@($out.Removed) -join '; ')" -WriteLog }
+        'Cleared' { Write-GreenCheck "Removed $($out.Removed.Count) stale AG seeding backup(s) from $FileServerVM`:$BackupLocalPath$suffix -- $(@($out.Removed) -join '; ')" -WriteLog }
         'ScanFailed' { Write-OrangePoint "Could not read '$BackupLocalPath' on $FileServerVM$suffix`: $($out.Error). Not treating this as 'clean'; a leftover .trn fails the Phase 8 restore with SQL 3154." -WriteLog }
-        'PartialFailure' { Write-OrangePoint "Removed $(@($out.Removed).Count) stale AG seeding backup(s) from $FileServerVM but $(@($out.Failed).Count) could NOT be deleted$suffix`: $(@($out.Failed) -join '; '). Phase 8 may fail its restore with SQL 3154." -WriteLog }
+        'PartialFailure' { Write-OrangePoint "Removed $($out.Removed.Count) stale AG seeding backup(s) from $FileServerVM but $($out.Failed.Count) could NOT be deleted$suffix`: $(@($out.Failed) -join '; '). Phase 8 may fail its restore with SQL 3154." -WriteLog }
         default { Write-OrangePoint "Unexpected result clearing AG seeding backups on $FileServerVM$suffix`: $($out.Outcome)" -WriteLog }
     }
     "$($out.Outcome)"
@@ -4610,8 +4610,9 @@ function Write-DhcpLeaseFailureDiag {
             Get-DhcpServerv4Lease -ScopeId $scope -ErrorAction SilentlyContinue |
                 ForEach-Object { "$($_.IPAddress)|$($_.ClientId)|$($_.AddressState)|$($_.LeaseExpiryTime)" }
         }
-        Write-DhcpDiagLine "scope $ScopeId currently holds $(@($leases).Count) lease(s)."
-        foreach ($lease in @($leases)) { Write-Log "$Tag $VmName`:   lease $lease" -LogOnly }
+        $leases = @($leases | Where-Object { $null -ne $_ })
+        Write-DhcpDiagLine "scope $ScopeId currently holds $($leases.Count) lease(s)."
+        foreach ($lease in $leases) { Write-Log "$Tag $VmName`:   lease $lease" -LogOnly }
     }
     catch { }
 
@@ -7295,7 +7296,7 @@ function Wait-ForVm {
                         $channelBrokenCount++
                         # The reboot decision below is taken on this counter, so record each
                         # step of it. Bounded: the branch stops firing once it reaches 3.
-                        Write-Log "$VmName`: PSDirect channel-broken evidence $channelBrokenCount/3 (poll=$count elapsed=$([int]$stopWatch.Elapsed.TotalSeconds)s heartbeat=$hb timedOut=$($out.TimedOut) parkedRunspaces=$(@($global:ps_orphanRunspaces).Count))" -LogOnly
+                        Write-Log "$VmName`: PSDirect channel-broken evidence $channelBrokenCount/3 (poll=$count elapsed=$([int]$stopWatch.Elapsed.TotalSeconds)s heartbeat=$hb timedOut=$($out.TimedOut) parkedRunspaces=$($global:ps_orphanRunspaces.Count))" -LogOnly
                         if ($channelBrokenCount -ge 3 -and $stopWatch.Elapsed.TotalMinutes -ge 3) {
                             $psdirectRebootDone = $true
                             Write-Log "$VmName`: PSDirect channel broken after $channelBrokenCount consecutive failures despite healthy heartbeat ($hb). Rebooting VM to recover VMBus." -Warning
@@ -7790,7 +7791,7 @@ function Invoke-VmCommand {
                                     try { if ($cj.JobStateInfo.Reason) { $rt = $cj.JobStateInfo.Reason.GetType().FullName } } catch { }
                                     $counts = @()
                                     foreach ($s in @('Error', 'Warning', 'Verbose', 'Information', 'Output', 'Progress')) {
-                                        try { $counts += "$s=$(@($cj.$s).Count)" } catch { $counts += "$s=?" }
+                                        try { $counts += "$s=$(($cj.$s).Count)" } catch { $counts += "$s=?" }
                                     }
                                     $f += "child${ci}=[state=$($cj.State) reasonType=$rt $($counts -join ' ') hasData=$($cj.HasMoreData)]"
                                     if ($jobTimedOut) {
@@ -8745,7 +8746,7 @@ function Clear-OrphanRunspaces {
     }
     catch { }
     if ($reclaimed -gt 0) {
-        try { Write-Log "Reclaimed $reclaimed orphaned runspace(s); $(@($global:ps_orphanRunspaces).Count) still parked." -LogOnly } catch { }
+        try { Write-Log "Reclaimed $reclaimed orphaned runspace(s); $($global:ps_orphanRunspaces.Count) still parked." -LogOnly } catch { }
     }
     return $reclaimed
 }
@@ -9946,7 +9947,7 @@ function Install-Tools {
         # refresh only this VM's State, the one field acted on below.
         $allVMs = @(Get-List -Type VM | Where-Object { $_.vmName -in $VmName })
         $toolListPath = 'cached + per-VM state'
-        if ($allVMs.Count -ne @($VmName).Count) {
+        if ($allVMs.Count -ne $VmName.Count) {
             # Cache miss (e.g. a VM created earlier in this run): pay for the full refresh.
             $allVMs = @(Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -in $VmName })
             $toolListPath = 'cache miss -> full SmartUpdate'
@@ -9969,7 +9970,7 @@ function Install-Tools {
     }
     $swToolList.Stop()
     Write-Log ("[StepTiming] {0} ToolInject-GetList completed in {1} seconds ({2} VM(s) matched, {3}{4})" -f `
-            ($VmName -join ','), [Math]::Round($swToolList.Elapsed.TotalSeconds, 1), @($allVMs).Count, $toolListPath,
+            ($VmName -join ','), [Math]::Round($swToolList.Elapsed.TotalSeconds, 1), $allVMs.Count, $toolListPath,
         $(if ($staleState -gt 0) { ", $staleState stale state" } else { '' })) -LogOnly
 
     $success = $true

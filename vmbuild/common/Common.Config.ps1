@@ -342,7 +342,7 @@ function Resolve-ConfigVmReference {
     $normalized = $normalized.Trim("'")
     $normalized = $normalized.Trim('"')
 
-    if (-not $VmNames -or @($VmNames).Count -eq 0) {
+    if (-not $VmNames -or $VmNames.Count -eq 0) {
         return $normalized
     }
 
@@ -3233,7 +3233,7 @@ function Set-VmBgInfoConfig {
                     $refreshed++
                 }
             }
-            $bgiNote = ", $refreshed of $(@($BgiFiles).Count) .bgi template(s) refreshed"
+            $bgiNote = ", $refreshed of $($BgiFiles.Count) .bgi template(s) refreshed"
         }
         $note = "$readable/$total values readable in $($regPaths.Count) registry view(s)$bgiNote"
         if ($missing.Count) { $note += "; MISSING: $($missing -join ', ')" }
@@ -4032,7 +4032,8 @@ function Update-VMFromHyperV {
                     }
                 }
                 default {
-                    
+                    $parsedInteger = 0
+                    $isInteger = [int]::TryParse([string]$value, [ref]$parsedInteger)
                     switch ($value) {
                         "True" {
                             $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $true -Force
@@ -4046,8 +4047,8 @@ function Update-VMFromHyperV {
                             $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                             continue
                         }
-                        { $PSItem -as [int] -is [int] } {
-                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value ([int]$value) -Force
+                        { $isInteger } {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $parsedInteger -Force
                             continue
                         }
                         default {
