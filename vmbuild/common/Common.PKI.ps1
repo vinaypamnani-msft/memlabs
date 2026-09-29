@@ -756,7 +756,7 @@ function Install-SingleTierPKI {
                 try {
                     $srch = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://CN=Sites,$configCtx2", "(objectClass=nTDSDSA)")
                     $srch.PageSize = 100
-                    $dcCount = @($srch.FindAll()).Count
+                    $dcCount = ($srch.FindAll()).Count
                 } catch {}
                 _Log "[PKI-DIAG] Forest DC count (nTDSDSA): $dcCount  (1 => no inter-DC replication possible; a persistent write refusal is purely local readiness)"
                 try {
@@ -1097,7 +1097,7 @@ LoadDefaultTemplates=0
             _Log "Configuring CDP extensions..."
             # Remove default CDP entries and add HTTP-based
             $cdpConfig = Write-SingleTierCdp -WebURL $WebURL
-            _Log "Configured CRLPublicationURLs at '$($cdpConfig.Path)' with $(@($cdpConfig.Entries).Count) entries (registry readback passed)."
+            _Log "Configured CRLPublicationURLs at '$($cdpConfig.Path)' with $($cdpConfig.Entries.Count) entries (registry readback passed)."
 
             _Log "Configuring AIA extensions..."
             $httpAIA = "${WebURL}%1_%3%4.crt"
@@ -1967,7 +1967,7 @@ Empty=True
                 try {
                     $sr = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://CN=Sites,$configCtx2", "(objectClass=nTDSDSA)")
                     $sr.PageSize = 100
-                    $dcCount = @($sr.FindAll()).Count
+                    $dcCount = ($sr.FindAll()).Count
                 } catch {}
                 _Log "[PKI-DIAG] Forest DC count (nTDSDSA): $dcCount  (1 => no inter-DC replication possible; a persistent write refusal is purely local readiness)"
                 try {

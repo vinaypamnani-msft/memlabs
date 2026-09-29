@@ -332,10 +332,10 @@ if ($Upload.IsPresent) {
         try {
             $wsus = Get-WsusServer -ErrorAction Stop
             $sub = $wsus.GetSubscription()
-            $taxonomyCats = @($wsus.GetUpdateCategories()).Count
-            $taxonomyClas = @($wsus.GetUpdateClassifications()).Count
-            $subCats = @($sub.GetUpdateCategories()).Count
-            $subClas = @($sub.GetUpdateClassifications()).Count
+            $taxonomyCats = @($wsus.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count
+            $taxonomyClas = @($wsus.GetUpdateClassifications() | Where-Object { $null -ne $_ }).Count
+            $subCats = @($sub.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count
+            $subClas = @($sub.GetUpdateClassifications() | Where-Object { $null -ne $_ }).Count
             $status = $wsus.GetStatus()
             $hist = @($sub.GetSynchronizationHistory())
             [PSCustomObject]@{
@@ -452,10 +452,10 @@ if ($Upload.IsPresent) {
         try {
             $wsus = Get-WsusServer -ErrorAction Stop
             $sub = $wsus.GetSubscription()
-            $taxonomyCats = @($wsus.GetUpdateCategories()).Count
-            $taxonomyClas = @($wsus.GetUpdateClassifications()).Count
-            $subCats = @($sub.GetUpdateCategories()).Count
-            $subClas = @($sub.GetUpdateClassifications()).Count
+            $taxonomyCats = @($wsus.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count
+            $taxonomyClas = @($wsus.GetUpdateClassifications() | Where-Object { $null -ne $_ }).Count
+            $subCats = @($sub.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count
+            $subClas = @($sub.GetUpdateClassifications() | Where-Object { $null -ne $_ }).Count
             [PSCustomObject]@{ Ok = $true; TaxonomyCats = $taxonomyCats; TaxonomyClas = $taxonomyClas; SubscribedCats = $subCats; SubscribedClas = $subClas }
         }
         catch { [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message } }
@@ -606,8 +606,8 @@ while ((Get-Date) -lt $pollDeadline) {
             # export). $sub.GetUpdateCategories() returns only SUBSCRIBED
             # categories and is 0 here because the first sync had no products
             # subscribed yet -- it populates the taxonomy regardless.
-            $taxonomyCats = @($wsus.GetUpdateCategories()).Count
-            $taxonomyClas = @($wsus.GetUpdateClassifications()).Count
+            $taxonomyCats = @($wsus.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count
+            $taxonomyClas = @($wsus.GetUpdateClassifications() | Where-Object { $null -ne $_ }).Count
             $hist = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
             $lastResult = if ($hist.Count -gt 0) { $hist[0].Result.ToString() } else { '<no-history>' }
             [PSCustomObject]@{ Ok = $true; Status = $status; Phase = $phase; TaxonomyCats = $taxonomyCats; TaxonomyClas = $taxonomyClas; LastResult = $lastResult }

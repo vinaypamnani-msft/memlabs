@@ -240,7 +240,7 @@ function Remove-VirtualMachine {
                 $turnOffAnswered = $true
                 if ($stopJob.State -eq 'Failed') {
                     # Hyper-V's -AsJob returns a VMJob, which does not always populate ChildJobs.
-                    $reason = if (@($stopJob.ChildJobs).Count) { $stopJob.ChildJobs[0].JobStateInfo.Reason.Message } else { $stopJob.JobStateInfo.Reason.Message }
+                    $reason = if (@($stopJob.ChildJobs | Where-Object { $null -ne $_ }).Count) { $stopJob.ChildJobs[0].JobStateInfo.Reason.Message } else { $stopJob.JobStateInfo.Reason.Message }
                     Write-Log "TurnOff failed: $reason" -Warning
                 }
             }

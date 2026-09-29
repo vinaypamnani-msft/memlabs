@@ -433,7 +433,7 @@ function Invoke-ApplyChanges {
         try {
             Write-Host "  Downloading $($c.Name) to compute MD5 ..." -ForegroundColor DarkCyan
             Invoke-WebRequest -Uri $c.NewUrl -OutFile $tmp -UseBasicParsing -TimeoutSec 600
-            $newMd5 = (Get-FileHash -Path $tmp -Algorithm MD5).Hash.ToUpper()
+            $newMd5 = (Microsoft.PowerShell.Utility\Get-FileHash -Path $tmp -Algorithm MD5).Hash.ToUpper()
             if ($c.OldMd5) {
                 $c.Replacements += @{ Old = $c.OldMd5; New = $newMd5; Desc = 'md5' }
             }

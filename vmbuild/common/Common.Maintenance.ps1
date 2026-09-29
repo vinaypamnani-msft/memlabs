@@ -802,7 +802,7 @@ function Start-VMFixesBatched {
             if ($r.PSObject.Properties.Name -contains 'Message' -and $r.Message) {
                 Write-Log "$VMName`: [$fixDisplayName] $($r.Message)"
             }
-            if ($r.PSObject.Properties.Name -contains 'Errors' -and $r.Errors -and @($r.Errors).Count -gt 0) {
+            if ($r.PSObject.Properties.Name -contains 'Errors' -and $r.Errors -and $r.Errors.Count -gt 0) {
                 foreach ($e in @($r.Errors)) { Write-Log "$VMName`: [$fixDisplayName] ERROR: $e" -Warning }
             }
             if ($r.PSObject.Properties.Name -contains 'ExceptionInfo' -and $r.ExceptionInfo) {

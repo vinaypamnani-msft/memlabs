@@ -1606,16 +1606,16 @@ function Get-WsusTaxonomyCategoryCount {
         try {
             [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
             $ws = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
-            if ($ws) { return @($ws.GetUpdateCategories()).Count }
+            if ($ws) { return @($ws.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count }
         } catch {}
     }
     try {
         $w = Get-WsusServer -Name $ServerName -PortNumber $PortNumber -ErrorAction Stop
-        if ($w) { return @($w.GetUpdateCategories()).Count }
+        if ($w) { return @($w.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count }
     } catch {}
     try {
         $w = Get-WsusServer -Name $ServerName -PortNumber 8531 -UseSsl -ErrorAction Stop
-        if ($w) { return @($w.GetUpdateCategories()).Count }
+        if ($w) { return @($w.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count }
     } catch {}
     return -1
 }
@@ -1636,18 +1636,18 @@ function Get-WsusTaxonomyCategoryCountBounded {
                 try {
                     [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
                     $ws = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
-                    if ($ws) { return @($ws.GetUpdateCategories()).Count }
+                    if ($ws) { return @($ws.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count }
                 }
                 catch {}
             }
             try {
                 $ws = Get-WsusServer -Name $probeServerName -PortNumber $probePortNumber -ErrorAction Stop
-                if ($ws) { return @($ws.GetUpdateCategories()).Count }
+                if ($ws) { return @($ws.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count }
             }
             catch {}
             try {
                 $ws = Get-WsusServer -Name $probeServerName -PortNumber 8531 -UseSsl -ErrorAction Stop
-                if ($ws) { return @($ws.GetUpdateCategories()).Count }
+                if ($ws) { return @($ws.GetUpdateCategories() | Where-Object { $null -ne $_ }).Count }
             }
             catch {}
             return -1
@@ -1991,4 +1991,3 @@ function Wait-WsusBaselineImport {
         }
     }
 }
-

@@ -331,7 +331,7 @@ if (-not $SiteOnly) {
 
         $rep = New-Object System.Collections.Generic.List[string]
         $rep.Add("Computer : $($data.Computer)")
-        $rep.Add("Baselines: $(@($data.Baselines).Count)")
+        $rep.Add("Baselines: $($data.Baselines.Count)")
         $rep.Add("")
 
         $nonCompliantCount = 0
@@ -383,7 +383,7 @@ if (-not $SiteOnly) {
             $rep.Add("")
         }
 
-        if (@($data.CIStates).Count -gt 0) {
+        if ($data.CIStates.Count -gt 0) {
             $rep.Add("----- Per-CI compliance (SMS_DCMCIComplianceState) -----")
             foreach ($s in @($data.CIStates)) { $rep.Add("  $($s.DisplayName)  state=$($s.ComplianceState)  lastChange=$($s.LastChange)") }
             $rep.Add("")
@@ -404,7 +404,7 @@ if (-not $SiteOnly) {
         }
         $rep.Add("")
 
-        if (@($data.Logs).Count -gt 0) {
+        if ($data.Logs.Count -gt 0) {
             $logDest = Join-Path $vmDir 'ccmlogs'
             if (-not (Test-Path $logDest)) { New-Item -ItemType Directory -Path $logDest -Force | Out-Null }
             foreach ($lg in @($data.Logs)) { Set-Content -Path (Join-Path $logDest $lg.Name) -Value $lg.Text -Encoding UTF8 }
@@ -412,8 +412,8 @@ if (-not $SiteOnly) {
         }
 
         $rep | Set-Content -Path (Join-Path $vmDir 'baseline-report.txt') -Encoding UTF8
-        Write-Host " $(@($data.Baselines).Count) baseline(s): $discoveryFailCount discovery-fail, $errorCount error, $nonCompliantCount non-compliant" -ForegroundColor Green
-        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s): $discoveryFailCount discovery-fail, $errorCount error, $nonCompliantCount non-compliant")
+        Write-Host " $($data.Baselines.Count) baseline(s): $discoveryFailCount discovery-fail, $errorCount error, $nonCompliantCount non-compliant" -ForegroundColor Green
+        $summary.Add("  $vmName : $($data.Baselines.Count) baseline(s): $discoveryFailCount discovery-fail, $errorCount error, $nonCompliantCount non-compliant")
     }
     $summary.Add("")
 }
@@ -453,7 +453,7 @@ if (-not $ClientsOnly) {
 
         $rep = New-Object System.Collections.Generic.List[string]
         $rep.Add("Site server: $($data.Computer)")
-        $rep.Add("Baselines  : $(@($data.Baselines).Count)")
+        $rep.Add("Baselines  : $($data.Baselines.Count)")
         $rep.Add("")
         $empty = 0
         $unknown = 0
@@ -486,8 +486,8 @@ if (-not $ClientsOnly) {
             $rep.Add("")
         }
         $rep | Set-Content -Path (Join-Path $siteDir 'site-report.txt') -Encoding UTF8
-        Write-Host " $(@($data.Baselines).Count) baseline(s): $empty empty, $unknown unknown" -ForegroundColor Green
-        $summary.Add("  $vmName : $(@($data.Baselines).Count) baseline(s): $empty empty, $unknown unknown-linkage")
+        Write-Host " $($data.Baselines.Count) baseline(s): $empty empty, $unknown unknown" -ForegroundColor Green
+        $summary.Add("  $vmName : $($data.Baselines.Count) baseline(s): $empty empty, $unknown unknown-linkage")
     }
     $summary.Add("")
 }

@@ -449,7 +449,7 @@ $diagScript = {
         try {
             $sr = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://CN=Sites,$configNC", "(objectClass=nTDSDSA)")
             $sr.PageSize = 100
-            $dcCount = @($sr.FindAll()).Count
+            $dcCount = ($sr.FindAll()).Count
         }
         catch {}
         _R "Forest DC count (nTDSDSA objects): $dcCount   (1 => single-DC forest: no inter-DC replication possible, so a persistent write refusal is purely LOCAL readiness)"

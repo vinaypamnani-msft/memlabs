@@ -586,9 +586,9 @@ function Write-PowerShellJobLeakDiag {
             $selfAge = -1
             try { $selfAge = [Math]::Round(((Get-Date) - $self.StartTime).TotalMinutes) } catch { }
             $cacheCounts = @()
-            try { if ($global:ps_cache) { $cacheCounts += "ps_cache=$(@($global:ps_cache.Keys).Count)" } } catch { }
-            try { if ($global:vm_List) { $cacheCounts += "vm_List=$(@($global:vm_List).Count)" } } catch { }
-            try { if ($global:ps_inflight) { $cacheCounts += "ps_inflight=$(@($global:ps_inflight.Keys).Count)" } } catch { }
+            try { if ($global:ps_cache) { $cacheCounts += "ps_cache=$($global:ps_cache.Keys.Count)" } } catch { }
+            try { if ($global:vm_List) { $cacheCounts += "vm_List=$($global:vm_List.Count)" } } catch { }
+            try { if ($global:ps_inflight) { $cacheCounts += "ps_inflight=$($global:ps_inflight.Keys.Count)" } } catch { }
             Write-Log "[JobLeak] $Context`: this process age=${selfAge}m ws=$($result.SelfMB)MB private=$([Math]::Round($self.PrivateMemorySize64/1MB))MB clrHeap=${gcMB}MB handles=$($self.HandleCount) threads=$($self.Threads.Count) $($cacheCounts -join ' ')" -LogOnly
 
             # ps_cache is drained by the LATER session cleanup, so this is the only
@@ -645,7 +645,7 @@ function Write-PowerShellJobLeakDiag {
                 # Every swallowed catch in this codebase still appends to $Error, and
                 # an ErrorRecord can retain whatever object threw (job objects, big
                 # strings). PS7 caps the list, so a count at the cap means it is full.
-                try { Write-Log "[JobLeak] $Context`: `$Error holds $(@($global:Error).Count) retained ErrorRecord(s)." -LogOnly } catch { }
+                try { Write-Log "[JobLeak] $Context`: `$Error holds $($global:Error.Count) retained ErrorRecord(s)." -LogOnly } catch { }
             }
             catch { }
         }

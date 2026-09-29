@@ -292,9 +292,10 @@ function Select-Options {
         $i = 0
         
         write-log -verbose "Select-Options for '$MenuName': response = $response"
-        if (($response -as [int]) -is [int]) {
-            $response = $response -as [int]
-            $item = $itemMap[$response]
+        $responseIndex = 0
+        if ([int]::TryParse([string]$response, [ref]$responseIndex)) {
+            $response = $responseIndex
+            $item = $itemMap[$responseIndex]
             if ($null -ne $item) {
                 if ($isExisting) {
                     if ($null -eq $property."$($item + "-Original")") {
