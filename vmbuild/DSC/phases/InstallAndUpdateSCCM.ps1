@@ -2507,9 +2507,26 @@ else {
             param($PrimaryVM, $DeployCfg, $DomainFqdn)
             return Get-VmSqlConnectionTarget -SiteVm $PrimaryVM -DeployConfig $DeployCfg -DomainFullName $DomainFqdn
         }
+        function Test-DrsForceSendProbeDue {
+            param(
+                [datetime]$Now,
+                [int]$StuckMinutes,
+                [int]$ThresholdMinutes,
+                [int]$Attempts,
+                [int]$MaxAttempts,
+                [AllowNull()][object]$LastSend,
+                [int]$SendCooldownMinutes,
+                [AllowNull()][object]$LastProbe,
+                [int]$ProbeCooldownMinutes
+            )
+            if ($StuckMinutes -lt $ThresholdMinutes -or $Attempts -ge $MaxAttempts) { return $false }
+            if ($null -ne $LastSend -and ($Now - [datetime]$LastSend).TotalMinutes -lt $SendCooldownMinutes) { return $false }
+            if ($null -ne $LastProbe -and ($Now - [datetime]$LastProbe).TotalMinutes -lt $ProbeCooldownMinutes) { return $false }
+            return $true
+        }
         function Invoke-DrsForceSendOnPrimary {
             param($PrimaryVM, $PrimarySiteCode, $DeployCfg, $DomainFqdn)
-            $r = [pscustomobject]@{ DataSource = $null; Database = $null; Groups = 0; Sent = 0; Failed = 0; Error = $null; SelfStatus = $null; Skipped = $false }
+            $r = [pscustomobject]@{ DataSource = $null; Database = $null; Groups = 0; Sent = 0; Failed = 0; Error = $null; SelfStatus = $null; Skipped = $false; SkipReason = $null }
             try {
                 $ds = Get-PrimarySqlDataSourceForResync -PrimaryVM $PrimaryVM -DeployCfg $DeployCfg -DomainFqdn $DomainFqdn
                 $db = "CM_$PrimarySiteCode"
@@ -2535,6 +2552,7 @@ else {
                         # Not self-active yet (e.g. 120 ReplicationMaintenance / 115 ReplicationInitializing).
                         # Nothing to flush - skip the send so we don't fire prematurely.
                         $r.Skipped = $true
+                        $r.SkipReason = 'PrimaryNotSelfActive'
                         return $r
                     }
                     $listCmd = $conn.CreateCommand()
@@ -2545,6 +2563,11 @@ else {
                     while ($rdr.Read()) { $groups += [string]$rdr['ReplicationGroup'] }
                     $rdr.Close()
                     $r.Groups = $groups.Count
+                    if ($r.Groups -eq 0) {
+                        $r.Skipped = $true
+                        $r.SkipReason = 'NoGlobalGroups'
+                        return $r
+                    }
                     foreach ($grp in $groups) {
                         try {
                             $execCmd = $conn.CreateCommand()
@@ -2632,9 +2655,11 @@ else {
         $forceSendThresholdMin = 3      # link stuck at 100% init / not-active / not-failed this long -> force-send
         $forceSendMaxAttempts = 2       # cap force-send attempts per primary
         $forceSendCooldownMin = 5       # minimum gap between attempts
+        $forceSendProbeCooldownMin = 2  # minimum gap between self-active SQL probes
         $forceSendStuckSince = @{}      # when the non-failed stuck window started, per primary
         $forceSendCount = @{}           # attempts made, per primary
-        $forceSendLastAttempt = @{}     # timestamp of last attempt, per primary
+        $forceSendLastAttempt = @{}     # timestamp of last real force-send, per primary
+        $forceSendLastProbe = @{}       # timestamp of last primary self-active probe
 
         # Display labels for the four replication state columns - values match the authoritative
         # SMS_ReplicationLinkSummary-LinkStatus.resx enum above (do NOT diverge from it).
@@ -2741,6 +2766,14 @@ else {
                         }
                     }
 
+                    # The idle-stuck window must be continuous. Reset it on any
+                    # progress/failure or percentage regression, not only while the
+                    # summary happens to report 100%.
+                    if ($linkInFailedState -or $linkIsProgressing -or $replicationStatus.GlobalInitPercentage -lt 100) {
+                        $forceSendStuckSince[$PSVM.VmName] = $null
+                        $forceSendLastProbe[$PSVM.VmName] = $null
+                    }
+
                     if ($replicationStatus.GlobalInitPercentage -ge 100) {
                         # Init complete but link not yet active - show which states are pending
                         $pending = @()
@@ -2761,43 +2794,43 @@ else {
                             if (-not $forceSendStuckSince[$PSVM.VmName]) { $forceSendStuckSince[$PSVM.VmName] = Get-Date }
                             $stuckMin = [int]((Get-Date) - $forceSendStuckSince[$PSVM.VmName]).TotalMinutes
                             $attemptsSoFar = [int]$forceSendCount[$PSVM.VmName]
-                            $lastFs = $forceSendLastAttempt[$PSVM.VmName]
-                            $cooldownOk = (-not $lastFs) -or ([int]((Get-Date) - $lastFs).TotalMinutes -ge $forceSendCooldownMin)
-                            if ($stuckMin -ge $forceSendThresholdMin -and $attemptsSoFar -lt $forceSendMaxAttempts -and $cooldownOk) {
-                                $forceSendCount[$PSVM.VmName] = $attemptsSoFar + 1
-                                $forceSendLastAttempt[$PSVM.VmName] = Get-Date
-                                Write-DscStatus "DRS stale-status self-heal: link idle-stuck ${stuckMin}m at 100% init (not-active / not-failed / not-progressing) (Pending: $pendingStr). Force-sending the primary's global changes (spDRSSendChangesForGroup) to flush its status to the CAS [attempt $($attemptsSoFar + 1)/$forceSendMaxAttempts]." -MachineName $PSVM.VmName
+                            $now = Get-Date
+                            $probeDue = Test-DrsForceSendProbeDue -Now $now -StuckMinutes $stuckMin `
+                                -ThresholdMinutes $forceSendThresholdMin -Attempts $attemptsSoFar `
+                                -MaxAttempts $forceSendMaxAttempts -LastSend $forceSendLastAttempt[$PSVM.VmName] `
+                                -SendCooldownMinutes $forceSendCooldownMin -LastProbe $forceSendLastProbe[$PSVM.VmName] `
+                                -ProbeCooldownMinutes $forceSendProbeCooldownMin
+                            if ($probeDue) {
+                                $forceSendLastProbe[$PSVM.VmName] = $now
                                 try {
                                     $fsResult = Invoke-DrsForceSendOnPrimary -PrimaryVM $PSVM -PrimarySiteCode $PSSiteCode -DeployCfg $deployConfig -DomainFqdn $DomainFullName
                                     if ($fsResult.Error) {
-                                        Write-DscStatus "DRS force-send could NOT run on the primary's SQL ($($fsResult.DataSource) / $($fsResult.Database)): $($fsResult.Error). No change made; continuing the normal wait." -MachineName $PSVM.VmName
+                                        Write-DscStatus "DRS self-active probe could NOT run on the primary's SQL ($($fsResult.DataSource) / $($fsResult.Database)): $($fsResult.Error). No change made; next probe is eligible in $forceSendProbeCooldownMin minute(s)." -MachineName $PSVM.VmName
                                     }
                                     elseif ($fsResult.Skipped) {
-                                        # Primary has not yet flipped its own ServerData.SiteStatus to ReplicationActive(125)
-                                        # - there is nothing pending to flush, so the send would be a no-op (this is what
-                                        # happened on fabrikam PS2, which was still in ReplicationMaintenance when the gate
-                                        # first fired). Roll back this attempt so the real force-send window (once the primary
-                                        # self-activates) still has all $forceSendMaxAttempts available.
-                                        $forceSendCount[$PSVM.VmName] = $attemptsSoFar
-                                        $forceSendLastAttempt[$PSVM.VmName] = $lastFs
-                                        Write-DscStatus "DRS force-send skipped: primary $PSSiteCode is not self-active yet (its own ServerData.SiteStatus=$($fsResult.SelfStatus); ReplicationActive is 125). Nothing to flush - waiting for the primary to finish activating before force-sending." -MachineName $PSVM.VmName
+                                        if ($fsResult.SkipReason -eq 'NoGlobalGroups') {
+                                            Write-DscStatus "DRS force-send deferred: primary $PSSiteCode is self-active but returned no global replication groups. Nothing was sent and no attempt was consumed; next probe is eligible in $forceSendProbeCooldownMin minute(s)." -MachineName $PSVM.VmName
+                                        }
+                                        else {
+                                            # Primary has not yet flipped its own ServerData.SiteStatus to ReplicationActive(125)
+                                            # - there is nothing pending to flush, so the send would be a no-op (this is what
+                                            # happened on fabrikam PS2, which was still in ReplicationMaintenance when the gate
+                                            # first fired). The probe has its own short cooldown and does not consume a
+                                            # real force-send attempt.
+                                            Write-DscStatus "DRS force-send deferred: primary $PSSiteCode is not self-active yet (its own ServerData.SiteStatus=$($fsResult.SelfStatus); ReplicationActive is 125). Nothing was sent; next self-active probe is eligible in $forceSendProbeCooldownMin minute(s)." -MachineName $PSVM.VmName
+                                        }
                                     }
                                     else {
-                                        Write-DscStatus "DRS force-send done on $($fsResult.DataSource) / $($fsResult.Database) (primary self-active, SiteStatus=$($fsResult.SelfStatus)): $($fsResult.Sent)/$($fsResult.Groups) global groups sent ($($fsResult.Failed) failed). Watching for the CAS to see the primary active." -MachineName $PSVM.VmName
+                                        $forceSendCount[$PSVM.VmName] = $attemptsSoFar + 1
+                                        $forceSendLastAttempt[$PSVM.VmName] = $now
+                                        Write-DscStatus "DRS stale-status self-heal: link idle-stuck ${stuckMin}m at 100% init (Pending: $pendingStr). Force-send attempt $($attemptsSoFar + 1)/$forceSendMaxAttempts completed on $($fsResult.DataSource) / $($fsResult.Database) (primary self-active, SiteStatus=$($fsResult.SelfStatus)): $($fsResult.Sent)/$($fsResult.Groups) global groups sent ($($fsResult.Failed) failed). Watching for the CAS to see the primary active." -MachineName $PSVM.VmName
                                     }
                                 }
                                 catch {
-                                    Write-DscStatus "DRS force-send threw unexpectedly: $_. Continuing the normal wait (the sproc is idempotent, so no harm)." -MachineName $PSVM.VmName
+                                    Write-DscStatus "DRS self-active probe/force-send threw unexpectedly: $_. Continuing the normal wait; next probe is eligible in $forceSendProbeCooldownMin minute(s)." -MachineName $PSVM.VmName
                                 }
                             }
                         }
-                        else {
-                            # Either failed (reinit owns it) or actively progressing (Interim/Initializing - the link
-                            # is moving on its own). Reset the stuck timer so force-send only fires after the link has
-                            # been genuinely idle (NotStarted/Unknown) for the full threshold, with no progress in between.
-                            $forceSendStuckSince[$PSVM.VmName] = $null
-                        }
-
                         # Log SQL Broker diagnostics every 5 minutes when stuck at 100% init
                         if ($drsElapsedMin -gt 0 -and $drsElapsedMin % 5 -eq 0) {
                             try {
