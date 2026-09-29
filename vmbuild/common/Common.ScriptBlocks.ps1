@@ -39,7 +39,7 @@ $global:Phase10Job = {
         [object] $vm,
         [array] $Dummy,
         [boolean] $FreshDeployOnly,
-        [boolean] $Dummy2,
+        [boolean] $AllowInProgress,
         [string] $ScriptRoot
     ) 
     # Suppress CIM cmdlet progress in child process (see VM_Create comment).
@@ -96,9 +96,9 @@ $global:Phase10Job = {
         # before maintenance. Healthy VMs pass the probe instantly; Linux /
         # OSDClient / AADClient / StandaloneRootCA are skipped inside the helper.
         $null = Repair-VmPSDirectChannel -VmName $currentItem.vmName -VmDomainName $domainNameForLogging -Phase "$Phase"
-        $worked = Start-VMMaintenance -VMName $currentItem.vmName -FreshDeployOnly:$FreshDeployOnly
+        $worked = Start-VMMaintenance -VMName $currentItem.vmName -FreshDeployOnly:$FreshDeployOnly -AllowInProgress:$AllowInProgress
         if (-not $worked) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance reported failure. See the preceding per-fix result and transcript diagnostics." -OutputStream -Failure
             throw "Could not run VM Maintenance on $($currentItem.vmName)"
         }
         else {
@@ -2190,6 +2190,7 @@ function Save-CMSetupLogsFromVm {
             <VmName>-Phase<N>-<timestamp>-ConfigMgrSetup.head30000-tail5000.log (>64MB only)
             <VmName>-Phase<N>-<timestamp>-InstallCMLog.log            (always: full)
             <VmName>-Phase<N>-<timestamp>-DSC_Log.log                 (always: tail 4000)
+            <VmName>-Phase8-<timestamp>-ClientPackageTimeline.jsonl   (when package coverage runs)
             <VmName>-Phase<N>-<timestamp>-adksetup-*.log/.txt          (failure only)
             <VmName>-Phase8-<timestamp>-SMSProv.log, dmpdownloader.log, etc. (failure only)
             <VmName>-Phase8-<timestamp>-ConfigMgrUpdateDiagnostics.json
@@ -2216,6 +2217,10 @@ function Save-CMSetupLogsFromVm {
             DscLogExists   = $false
             DscLogBytes    = 0
             DscLogContent  = $null
+            ClientPackageTimelineExists = $false
+            ClientPackageTimelineBytes  = 0
+            ClientPackageTimelineContent = $null
+            ClientPackageTimelineTail   = $false
             AdkArtifacts   = @()
             CmArtifacts    = @()
             UpdateDiagnostics = $null
@@ -2258,6 +2263,23 @@ function Save-CMSetupLogsFromVm {
                 $out.DscLogExists  = $true
                 $out.DscLogBytes   = $fi.Length
                 $out.DscLogContent = (Get-Content -LiteralPath $fi.FullName -Tail 4000 -ErrorAction SilentlyContinue) -join "`r`n"
+            }
+        }
+        if ($Phase -eq 8 -and (Test-Path 'C:\staging\DSC\ClientPackageTimeline.jsonl')) {
+            $fi = Get-Item 'C:\staging\DSC\ClientPackageTimeline.jsonl' -ErrorAction SilentlyContinue
+            if ($fi) {
+                $out.ClientPackageTimelineExists = $true
+                $out.ClientPackageTimelineBytes = $fi.Length
+                if ($fi.Length -le 16MB) {
+                    $out.ClientPackageTimelineContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
+                }
+                else {
+                    $out.ClientPackageTimelineTail = $true
+                    $head = @(Get-Content -LiteralPath $fi.FullName -TotalCount 2000 -ErrorAction SilentlyContinue)
+                    $tail = @(Get-Content -LiteralPath $fi.FullName -Tail 2000 -ErrorAction SilentlyContinue)
+                    $marker = "{`"Truncated`":true,`"OriginalBytes`":$($fi.Length),`"Message`":`"Middle omitted; retained first and last 2000 records.`"}"
+                    $out.ClientPackageTimelineContent = (@($head) + @($marker) + @($tail)) -join "`r`n"
+                }
             }
         }
         if ($Mode -eq 'Failure' -and (Test-Path 'C:\staging\DSC\ADKSetupLogs' -PathType Container)) {
@@ -2504,6 +2526,7 @@ function Save-CMSetupLogsFromVm {
             SetupExists   = $false
             WrapperExists = $false
             DscLogExists  = $false
+            ClientPackageTimelineExists = $false
             AdkArtifacts  = @()
         }
         $baselineStatusData = [ordered]@{
@@ -2613,6 +2636,19 @@ function Save-CMSetupLogsFromVm {
         }
     }
 
+    if ($r.ClientPackageTimelineExists -and $r.ClientPackageTimelineContent) {
+        $dest = Join-Path $logDir "$base-ClientPackageTimeline.jsonl"
+        try {
+            Set-Content -LiteralPath $dest -Value $r.ClientPackageTimelineContent -Encoding UTF8 -ErrorAction Stop
+            $kb = [math]::Round($r.ClientPackageTimelineBytes / 1KB, 1)
+            $note = if ($r.ClientPackageTimelineTail) { "first and last 2000 records of ${kb}KB" } else { "full ${kb}KB" }
+            Write-Log "[Phase $Phase]: $VmName`: Pulled client-package timeline ($note) -> $dest" -OutputStream
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write client-package timeline: $_" -Warning
+        }
+    }
+
     $cmEvidence = $null
     if ($Mode -eq 'Failure' -and $Phase -eq 8) {
         $cmEvidenceResult = $null
@@ -2706,6 +2742,7 @@ function Save-CMSetupLogsFromVm {
                 SiteCode            = ''
                 Namespace           = ''
                 DirectCimClasses    = [ordered]@{}
+                DirectCimClassStats = [ordered]@{}
                 DirectCimErrors     = [ordered]@{}
                 CmdletModule        = $null
                 CmdletBroadQuery    = @()
@@ -2730,10 +2767,17 @@ function Save-CMSetupLogsFromVm {
                         'SMS_CM_UpdatePackages',
                         'SMS_CM_UpdatePackDownloadMonitoring',
                         'SMS_CM_UpdatePackTopLevelMonitoring',
-                        'SMS_CM_UpdatePackDetailedMonitoring'
+                        'SMS_CM_UpdatePackDetailedMonitoring',
+                        'SMS_DistributionPointGroup',
+                        'SMS_DPGroupMembers',
+                        'SMS_DPGroupPackages',
+                        'SMS_DPGroupCollections',
+                        'SMS_DistributionPointInfo'
                     )) {
                     try {
-                        $providerRows = @(Get-CimInstance -Namespace $probe.Namespace -ClassName $className -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 250)
+                        $boundedRows = @(Get-CimInstance -Namespace $probe.Namespace -ClassName $className -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 251)
+                        $truncated = $boundedRows.Count -gt 250
+                        $providerRows = @($boundedRows | Select-Object -First 250)
                         $serializedRows = @(
                             foreach ($providerRow in $providerRows) {
                                 $rowValues = [ordered]@{}
@@ -2742,6 +2786,11 @@ function Save-CMSetupLogsFromVm {
                             }
                         )
                         $probe.DirectCimClasses[$className] = $serializedRows
+                        $probe.DirectCimClassStats[$className] = [ordered]@{
+                            CapturedRows     = $serializedRows.Count
+                            Truncated        = $truncated
+                            MinimumTotalRows = if ($truncated) { 251 } else { $serializedRows.Count }
+                        }
                         if ($className -eq 'SMS_CM_UpdatePackages') {
                             $packageNames = @($providerRows | ForEach-Object { "$($_.Name)" } | Where-Object { $_ } | Select-Object -Unique)
                         }
@@ -4044,7 +4093,9 @@ $global:VM_Config = {
         # Only the phase-start call reaps. The retry/post-reboot calls below deliberately
         # omit it: after a reboot there is nothing left to reap, and a retry runs while the
         # premise ("nothing else is using them") is no longer established.
-        $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -ArgumentList @($hostRunStartUtc) -DisplayName "Stop Any Running DSC's"
+        # This probe is classified and recovered below. Suppress its low-level
+        # ERROR so a successful retry/reboot does not leave a false run error.
+        $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -ArgumentList @($hostRunStartUtc) -DisplayName "Stop Any Running DSC's" -SuppressLog
         $Format_StopDscFailure = {
             param($StopResult)
             try {
@@ -9157,6 +9208,7 @@ $global:VM_Config = {
                             [int] $MaxAttempts = 2
                         )
                         $useThreadJob = $null -ne (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+                        $lastError = $null
                         for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
                             $job = $null
                             try {
@@ -9169,17 +9221,29 @@ $global:VM_Config = {
                                     $jobErrors = $null
                                     $output = Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErrors
                                     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
-                                    $status = if ($jobErrors -and $jobErrors.Count -gt 0) { 'Error' } else { 'OK' }
-                                    return [pscustomobject]@{ Status = $status; Output = $output }
+                                    if ($jobErrors -and $jobErrors.Count -gt 0) {
+                                        $lastError = $jobErrors[0].ToString()
+                                        if ($attempt -lt $MaxAttempts) {
+                                            Start-Sleep -Seconds 2
+                                            continue
+                                        }
+                                        return [pscustomobject]@{ Status = 'Error'; Output = $output; Detail = $lastError; Attempts = $attempt }
+                                    }
+                                    return [pscustomobject]@{ Status = 'OK'; Output = $output; Detail = $null; Attempts = $attempt }
                                 }
                                 try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
                                 try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
                             }
                             catch {
+                                $lastError = $_.Exception.Message
                                 if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+                                if ($attempt -ge $MaxAttempts) {
+                                    return [pscustomobject]@{ Status = 'Error'; Output = $null; Detail = $lastError; Attempts = $attempt }
+                                }
+                                Start-Sleep -Seconds 2
                             }
                         }
-                        return [pscustomobject]@{ Status = 'TimedOut'; Output = $null }
+                        return [pscustomobject]@{ Status = 'TimedOut'; Output = $null; Detail = $lastError; Attempts = $MaxAttempts }
                     }
                     # Heartbeat / cluster NICs are the ONLY adapters that must never
                     # publish the host's name in DNS. Identify them POSITIVELY (an IP in
@@ -9260,11 +9324,18 @@ $global:VM_Config = {
                     # expensive DC query behind a cheap, bounded local resolve and (b) run every DC-side
                     # DNS call under the kill-and-retry watchdog above.
                     try {
-                        $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        $dnsServerAddress = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                             Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
+                        # Prefer the logon-server name for remote DNS cmdlets so
+                        # Kerberos can authenticate it. An IP target can force WinRM
+                        # into TrustedHosts/explicit-credential requirements.
+                        $logonServer = "$env:LOGONSERVER" -replace '^\\\\', ''
+                        $dnsServers = @(@($logonServer, $dnsServerAddress) | Where-Object { $_ } | Select-Object -Unique)
+                        $dnsServerCsv = $dnsServers -join ','
+                        $results += "DNS diagnostic targets: management hostname first [$($dnsServers -join ', ')]; direct DNS server [$dnsServerAddress]; logon server [$logonServer]"
                         $zone = ($hostname -split '\.', 2)[1]
                         $shortName = ($hostname -split '\.')[0]
-                        if ($dnsServer -and $zone) {
+                        if ($dnsServers.Count -gt 0 -and $zone) {
                             # Helper: is this IP a heartbeat/VIP record that must NOT live under the node name?
                             $isBadIp = {
                                 param($ip)
@@ -9275,51 +9346,93 @@ $global:VM_Config = {
                                 return $bad
                             }
 
-                            # Pre-check (cheap, bounded): resolve our own name locally and see if any
-                            # heartbeat/VIP IP is actually published under it. The expensive DC RPC only
-                            # runs when there's genuinely something to remove -- on a clean deploy this
-                            # short-circuits and we never touch the DC at all.
+                            # Pre-check (cheap, bounded): query the configured DNS server directly
+                            # so the answer cannot come from the node's resolver cache. The
+                            # expensive DNS-management RPC only runs when there is something
+                            # to remove or this direct query fails.
                             $badIps = @()
-                            $resolveWd = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($hostname) -ScriptBlock {
-                                param($fqdn)
-                                @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction SilentlyContinue |
+                            $dnsCheckSucceeded = $false
+                            $resolveServer = if ($dnsServerAddress) { $dnsServerAddress } else { $logonServer }
+                            $dnsCheckSource = "direct DNS response from $resolveServer"
+                            $resolveWd = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($hostname, $resolveServer) -ScriptBlock {
+                                param($fqdn, $server)
+                                @(Resolve-DnsName -Name $fqdn -Type A -Server $server -DnsOnly -QuickTimeout -ErrorAction Stop |
                                     Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress)
                             }
                             if ($resolveWd.Status -eq 'OK') {
+                                $dnsCheckSucceeded = $true
                                 foreach ($ip in @($resolveWd.Output)) { if (& $isBadIp $ip) { $badIps += $ip } }
                             }
                             else {
                                 # Local resolve itself timed out/failed -- fall back to the authoritative
                                 # DC query (still watchdog'd) so we don't miss a stale record just because
                                 # the local resolver was slow.
-                                $listWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $dnsServer) -ScriptBlock {
-                                    param($z, $n, $srv)
-                                    @(Get-DnsServerResourceRecord -ZoneName $z -Name $n -RRType A -ComputerName $srv -ErrorAction SilentlyContinue |
-                                        ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                                $listWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $dnsServerCsv) -ScriptBlock {
+                                    param($z, $n, $serverCsv)
+                                    $serverErrors = @()
+                                    foreach ($srv in @("$serverCsv".Split(',') | Where-Object { $_ })) {
+                                        try {
+                                            return @(Get-DnsServerResourceRecord -ZoneName $z -RRType A -ComputerName $srv -ErrorAction Stop |
+                                                Where-Object { $_.HostName -ieq $n } |
+                                                ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                                        }
+                                        catch { $serverErrors += "${srv}: $($_.Exception.Message)" }
+                                    }
+                                    throw "DNS query failed against every candidate server: $($serverErrors -join '; ')"
                                 }
                                 if ($listWd.Status -eq 'OK') {
+                                    $dnsCheckSucceeded = $true
+                                    $dnsCheckSource = 'authoritative DNS-management fallback'
                                     foreach ($ip in @($listWd.Output)) { if (& $isBadIp $ip) { $badIps += $ip } }
                                 }
                                 else {
-                                    $results += "DNS record cleanup skipped (DC DNS query did not respond: $($listWd.Status))"
+                                    $listDetail = if ($listWd.Detail) { ": $($listWd.Detail)" } else { '' }
+                                    $results += "DNS record cleanup skipped (DC DNS query did not respond: $($listWd.Status)$listDetail)"
                                 }
                             }
 
                             $badIps = @($badIps | Select-Object -Unique)
-                            if ($badIps.Count -eq 0) {
-                                $results += "No stale heartbeat/VIP DNS records to clean"
+                            if (-not $dnsCheckSucceeded) {
+                                # The failure detail was added above. Do not follow it
+                                # with a contradictory success-shaped "no records" line.
+                            }
+                            elseif ($badIps.Count -eq 0) {
+                                $results += "No stale heartbeat/VIP DNS records to clean ($dnsCheckSource)"
                             }
                             else {
                                 foreach ($ip in $badIps) {
-                                    $delWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $ip, $dnsServer) -ScriptBlock {
-                                        param($z, $n, $rip, $srv)
-                                        Remove-DnsServerResourceRecord -ZoneName $z -Name $n -RRType A -RecordData $rip -ComputerName $srv -Force -ErrorAction SilentlyContinue
+                                    $delWd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($zone, $shortName, $ip, $dnsServerCsv) -ScriptBlock {
+                                        param($z, $n, $rip, $serverCsv)
+                                        $serverErrors = @()
+                                        foreach ($srv in @("$serverCsv".Split(',') | Where-Object { $_ })) {
+                                            try {
+                                                # Query the whole zone so an already-absent node is
+                                                # an empty successful result, not DNS_ERROR_NAME_DOES_NOT_EXIST.
+                                                $records = @(Get-DnsServerResourceRecord -ZoneName $z -RRType A -ComputerName $srv -ErrorAction Stop |
+                                                        Where-Object { $_.HostName -ieq $n })
+                                                foreach ($record in @($records | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -eq $rip })) {
+                                                    Remove-DnsServerResourceRecord -ZoneName $z -InputObject $record -ComputerName $srv -Force -ErrorAction Stop
+                                                }
+                                                $remaining = @(Get-DnsServerResourceRecord -ZoneName $z -RRType A -ComputerName $srv -ErrorAction Stop |
+                                                        Where-Object {
+                                                            $_.HostName -ieq $n -and
+                                                            $_.RecordData.IPv4Address.IPAddressToString -eq $rip
+                                                        })
+                                                if ($remaining.Count -gt 0) { throw "DNS record $n.$z -> $rip still exists after removal" }
+                                                return $srv
+                                            }
+                                            catch { $serverErrors += "${srv}: $($_.Exception.Message)" }
+                                        }
+                                        throw "DNS cleanup failed against every candidate server: $($serverErrors -join '; ')"
                                     }
                                     if ($delWd.Status -eq 'OK') {
-                                        $results += "Removed stale DNS A record $ip"
+                                        $verifiedServer = $delWd.Output | Where-Object { $_ } | Select-Object -Last 1
+                                        $serverNote = if ($verifiedServer) { " (verified via $verifiedServer)" } else { '' }
+                                        $results += "Removed stale DNS A record $ip$serverNote"
                                     }
                                     else {
-                                        $results += "Stale DNS A record $ip removal did not complete ($($delWd.Status))"
+                                        $deleteDetail = if ($delWd.Detail) { ": $($delWd.Detail)" } else { '' }
+                                        $results += "Stale DNS A record $ip removal did not complete ($($delWd.Status)$deleteDetail)"
                                     }
                                 }
                             }
@@ -9358,6 +9471,9 @@ $global:VM_Config = {
                     -DisplayName "Scrub heartbeat DNS records"
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub failed: $($result.ScriptBlockOutput)" -Warning
+                }
+                elseif ("$($result.ScriptBlockOutput)" -match 'DNS record cleanup skipped|removal did not complete') {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub: $($result.ScriptBlockOutput)" -Warning
                 }
                 else {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub: $($result.ScriptBlockOutput)"

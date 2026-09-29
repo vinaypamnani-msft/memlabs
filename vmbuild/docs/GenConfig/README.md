@@ -182,6 +182,7 @@ rows. Header, health, quick-stat, and background-operation rows are display-only
 | `L` | Load saved config from file | Opens the JSON selector for `vmbuild/config`. | Edit, redeploy, or save a variant of an existing file. |
 | `X` | Load TEST config; develop branch only | Opens `vmbuild/config/tests`. | Run repository test scenarios, not normal authoring. |
 | `T` | Update Tools or Copy Optional Tools to VMs | Opens the running-VM tool deployment menu. | Refresh standard tools or inject optional tools without rebuilding. |
+| `A` | Apply Pending VM Maintenance | Reconciles DHCP/networking through `Confirm-MemLabsDhcpReadiness`, then calls the same interactive `Start-Maintenance` used everywhere else, with no `-DeployConfig` so it targets every currently deployed, MemLabs-managed Windows VM (not just this session's config). | Push pending fixes to the whole lab outside of a deployment run, e.g. after a hotfix bump, without needing to load or deploy any configuration. |
 | `V` | Show Virtual Machines | Displays current Hyper-V VM state and deployment metadata. | Inspect what is already deployed. |
 | `N` | Show Networks | Displays subnets, domains, site codes, and VMs. | Check subnet use before designing a topology. |
 | `P` | Show Passwords | Displays the current shared lab credential and domain account names. | Local troubleshooting only; do not capture or share the output. |
@@ -569,6 +570,55 @@ and creates/initializes a fixed 500 GB additional VHDX.
 Only running VMs are targetable. Both the tool and VM pickers use `A`, `N`, and
 `D` multi-select semantics.
 
+### Apply Pending VM Maintenance
+
+`Select-PendingVMMaintenance` in [genconfig.ps1](../../genconfig.ps1) backs the
+main-menu `A` option ("Apply Pending VM Maintenance"). It exists so an operator
+can push pending fixes to the whole lab without loading or deploying any
+configuration:
+
+1. Calls `Confirm-MemLabsDhcpReadiness` in
+   [Common.DhcpAppliance.ps1](../../common/Common.DhcpAppliance.ps1). On a
+   Windows Client host this reconciles the MemLabs dnsmasq DHCP appliance
+   (`Sync-MemLabsDhcpAppliance`); on Windows Server it confirms/starts the
+   native `DHCPServer` service. `New-Lab.ps1`'s own mandatory deployment-time
+   gate (see below) does **not** call this shared helper -- it performs the
+   equivalent appliance-reconcile-or-native-service-check logic inline, before
+   Phase 0, since by then it already has a resolved DeployConfig and its own
+   `-WhatIf`/exit-on-failure handling in place. The two checks are kept
+   behaviorally equivalent, not literally shared.
+2. If DHCP/networking is not ready, the action stops immediately with a
+   red-X message and does not start maintenance.
+3. Otherwise it calls `Start-Maintenance` in
+   [Common.Maintenance.ps1](../../common/Common.Maintenance.ps1) with no
+   `-DeployConfig`, so its target set is every VM the host currently tracks as
+   MemLabs-managed and not in progress (`Get-List -Type VM`), not merely the
+   VMs referenced by whatever configuration happens to be loaded.
+
+Within `Start-Maintenance`:
+
+- VMs are excluded up front when they have no Windows-side maintenance
+  pipeline: `OSDClient`/`AADClient` roles, a powered-off `StandaloneRootCA`,
+  `Proxy` role VMs, and Linux VMs (by `osFamily`/`operatingSystem`/`deployedOS`).
+- A VM already recorded (in its Hyper-V VM Notes `appliedFixes`) as current on
+  every relevant fix is skipped as up to date; a VM whose mutex is already held
+  by another operation is skipped as in-use.
+- If any VM needs maintenance, the operator is prompted (15-second default-`No`
+  timeout) to confirm running it, and again to confirm starting any stopped
+  target VMs for the duration of the run. Declining either prompt is fully
+  supported — this path is optional end to end and can be skipped at any step.
+- Remaining VMs run through the same per-VM fix pipeline (`Start-VMFixes` /
+  `Get-VMFixes`) used by fresh-deploy Phase 10 maintenance, respecting each
+  fix's own `AppliesToRoles`/`NotAppliesToRoles` and OS/Linux/offline-CA
+  applicability. An inapplicable fix on a given VM is a silent no-op, not a
+  failure.
+
+Use this action for routine lab upkeep (e.g., after a MemLabs hotfix bump)
+independent of any specific deployment, and see
+[Loading, saving, cloning, deleting, and deployment handoff](#loading-saving-cloning-deleting-and-deployment-handoff)
+for the separate, mandatory maintenance gate that runs automatically during
+`New-Lab.ps1` deployments.
+
 ### RDC settings
 
 `Select-RDCSettingsMenu` in
@@ -678,6 +728,51 @@ confuse that with:
 - `New-Lab` reloads the saved JSON, runs `Test-Configuration -Final`, creates the
   expanded deploy model, and starts the phase workflow. `-SkipValidation` exists
   for deliberate recovery but is explicitly discouraged.
+- Immediately before the phase workflow starts, and strictly after network
+  switches/DHCP scopes and DHCP appliance/native-DHCP reconciliation for the
+  deployment complete, `New-Lab.ps1` runs a **mandatory, non-interactive Phase 0
+  maintenance gate**: `Start-RequiredExistingVMMaintenance` in
+  [Common.Maintenance.ps1](../../common/Common.Maintenance.ps1). Targeting is
+  decided purely by whether the VM **already exists in live Hyper-V
+  inventory** (checked fail-closed against `Get-VM`, keyed by `vmName`) — not
+  by the `ExistingVM` marker or the `Hidden` flag on the `virtualMachines`
+  entry. Every entry whose `vmName` is already a live Hyper-V VM is a required
+  target, regardless of whether it is `Hidden` and regardless of whether it
+  carries an `ExistingVM` marker: a hidden dependency-only VM added by
+  `Add-ExistingVMToDeployConfig` never gets `ExistingVM` set at all, yet the
+  deployment depends on it being current exactly as much as any user-visible
+  target. An entry whose `vmName` has no live Hyper-V VM yet is a genuinely
+  new, not-yet-created VM — Phase 1 has to create it first, so it is never
+  targeted here and continues to receive fixes the normal way, through DSC and
+  Phase 10, once it exists.
+  - Each fix's own `AppliesToRoles`/`NotAppliesToRoles` and Windows/Linux/
+    offline-root-CA applicability rules still decide whether a given target
+    needs that fix's work; a target or fix that is not applicable is a
+    successful no-op, not a gate failure.
+  - This exists because a deployment that depends on an already-existing VM
+    cannot safely wait until Phase 10 to bring it current — later phases can
+    assume prerequisite state is already in place (for example, Phase 8/11 SQL
+    logic assumes the current ODBC driver is already installed).
+  - The live-inventory check is fail-closed: if `Get-VM` cannot enumerate the
+    host at all, the gate aborts the deployment rather than treating the
+    enumeration failure as "zero targets, so success."
+  - A required target found in use by another operation (its per-VM mutex is
+    held and the caller does not already own it) is a **hard failure** of this
+    gate, not a skip — unlike interactive `Start-Maintenance`, which is allowed
+    to defer to a concurrent operation on a VM it does not strictly require.
+  - If a prior interrupted run left a target's VM note marked `inProgress`,
+    the gate still applies maintenance because `New-Lab` already owns that
+    target's deployment mutex. This narrow override is not used by interactive
+    maintenance or normal Phase 10, so a genuinely concurrent deployment
+    remains protected.
+  - Unlike the interactive `A` "Apply Pending VM Maintenance" main-menu action
+    (which performs an equivalent DHCP-readiness check via
+    `Confirm-MemLabsDhcpReadiness`, but is fully optional and can be declined
+    at any prompt), this gate never prompts and cannot be skipped or declined.
+    **If required maintenance fails for any targeted VM — including an
+    inventory-enumeration failure or a target locked by another operation —
+    `New-Lab.ps1` logs the failure and aborts the deployment (`exit 1`) before
+    Phase 1 dispatch begins.**
 - In an add-to-existing run with no newly authored top-level site server,
   changed root `cmOptions` are copied onto hidden site-role deployment entries.
   A changed options block adds an existing Primary as a Phase 8 target; after a
@@ -1272,6 +1367,8 @@ These can be layered onto the preceding recipes:
 | [Common.Layout.ps1](../../common/Common.Layout.ps1) | Existing-VM status table shown by menu panels. | Main menu resource views. |
 | [Common.Config.ps1](../../common/Common.Config.ps1) | CM option resolution/persistence targeting, OSD PXE-path resolution/boundaries, deploy-model expansion, final summary. | UI flow; Persistence; Config model; Validation. |
 | [Common.Phases.ps1](../../common/Common.Phases.ps1) | Phase 1 relay-target address completion and successful-Phase-8 top-level CM-option note persistence. | Deployment handoff; Validation. |
+| [Common.Maintenance.ps1](../../common/Common.Maintenance.ps1) | Interactive `Start-Maintenance` (all-VM or `-DeployConfig`-scoped fix pipeline) and the mandatory, non-interactive `Start-RequiredExistingVMMaintenance` Phase 0 gate for every deploy-config VM already present in live Hyper-V inventory. | Tools/host (Apply Pending VM Maintenance); Deployment handoff. |
+| [Common.DhcpAppliance.ps1](../../common/Common.DhcpAppliance.ps1) | `Confirm-MemLabsDhcpReadiness` (DHCP-appliance/native-DHCP readiness check used by the `A` menu action; `New-Lab.ps1`'s Phase 0 gate performs the equivalent check inline, not through this helper) and DHCP backend detection. | Tools/host (Apply Pending VM Maintenance); Deployment handoff. |
 | [Common.Validation.ps1](../../common/Common.Validation.ps1) | Fast/full/final validation and severity semantics. | Validation and error handling. |
 | [New-Lab.ps1](../../New-Lab.ps1) | Integrated invocation, config reload, final validation, phase handoff. | Quick start; Deployment handoff. |
 | [VMBuild.cmd](../../VMBuild.cmd) | Stable launcher, update/maintenance, PowerShell selection. | Quick start. |
@@ -1310,5 +1407,12 @@ The menu-call audit covered all `Get-Menu2` calls in `genconfig.ps1`,
 - Some live management actions (host upgrade, VM deletion, disk attachment,
   tool injection, branch switch, start/stop/snapshot) modify the host and are not
   part of JSON authoring. Their confirmations are the final authority.
+- The Phase 0 existing-VM maintenance gate in `New-Lab.ps1` (see Deployment
+  handoff) has no skip/decline path by design: it targets every deploy-config
+  VM that already exists in live Hyper-V inventory (not just entries marked
+  `ExistingVM`), and a genuine required-fix failure, an in-use target, or a
+  Hyper-V enumeration failure all abort the deployment. Only the separate,
+  fully-optional `A` "Apply Pending VM Maintenance" main-menu action can be
+  declined at its prompts.
 - Mouse event support varies across conhost, Windows Terminal, and VS Code
   ConPTY. Keyboard operation is fully supported.

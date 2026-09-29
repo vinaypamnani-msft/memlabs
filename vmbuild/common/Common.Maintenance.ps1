@@ -210,6 +210,215 @@ function Start-Maintenance {
     }
 }
 
+function Start-RequiredExistingVMMaintenance {
+    <#
+    .SYNOPSIS
+        Phase 0 maintenance gate: mandatory, non-interactive maintenance for every
+        DeployConfig.virtualMachines entry that already exists in live Hyper-V
+        inventory, regardless of its Hidden flag or ExistingVM marker.
+    .DESCRIPTION
+        This IS Phase 0 maintenance: New-Lab.ps1 calls this immediately after Phase
+        0's existing-VM preparation (Start-Phase -Phase 0) and its own prior
+        DHCP/network reconciliation, and strictly before Phase 1 dispatch begins.
+        feature/wsus-prefix intentionally stopped running Start-Maintenance before
+        GenConfig (DHCP-appliance reconciliation needs a deployment config to exist
+        first). A VM that does NOT yet exist on the host cannot be maintained here
+        -- Phase 1 has to create it first -- so only genuinely new (not-yet-created)
+        VMs continue to receive fixes the normal way, through DSC and Phase 10,
+        exactly as before this function existed. Every VM that already exists is a
+        required target, whether or not it is Hidden and whether or not it carries
+        an ExistingVM marker: neither flag is a reliable signal that the deployment
+        depends on it (a hidden dependency-only VM added by Add-ExistingVMToDeployConfig
+        never gets ExistingVM set at all, yet the deployment is just as dependent on
+        it being current as it is on any user-visible target), so targeting is
+        decided purely by whether the VM already exists, checked against live
+        Hyper-V inventory obtained fail-closed (see OUTPUTS).
+
+        Not every applicable fix touches every targeted VM: each fix's own
+        AppliesToRoles/NotAppliesToRoles and Windows/Linux/offline-root-CA
+        applicability rules (already enforced inside Get-VMFixes/Start-VMMaintenance)
+        decide whether a given VM needs that fix's work at all. A VM or fix that is
+        simply not applicable is a successful no-op here, not a gate failure.
+
+        Targeting every already-existing VM (not just ones the deployment explicitly
+        edited) matters because later phases can assume any such VM is already
+        current -- e.g. Phase 8/11 SQL logic assumes the current ODBC driver is
+        already installed (see "Enforce current ODBC driver") -- and Phase 10 runs
+        far too late to catch a problem before hours of unrelated work have already
+        happened. This function runs the required (AppliesToExisting) fixes for
+        exactly those already-existing targets, as part of Phase 0, before Phase 1
+        dispatch. It never prompts and it cannot be declined -- unlike the
+        interactive GenConfig "Apply Pending VM Maintenance" menu action
+        (Select-PendingVMMaintenance), which remains fully interactive and covers
+        every managed VM, not just this deployment's targets.
+    .PARAMETER DeployConfig
+        The resolved deployment configuration. Every virtualMachines entry whose
+        vmName already exists in live Hyper-V inventory is a required target,
+        regardless of its Hidden flag or ExistingVM marker. An entry whose vmName
+        has no live Hyper-V VM yet is a not-yet-created VM and is never targeted.
+    .PARAMETER OwnedMutexVmNames
+        VM names whose per-VM mutex the caller already holds (New-Lab.ps1 creates
+        and acquires a mutex for every VM in DeployConfig.virtualMachines before any
+        phase dispatch). Required targets in this list skip the "is this VM in use
+        elsewhere" OpenExisting probe entirely -- probing our own held handle would
+        otherwise read as "in use elsewhere" and silently skip mandatory maintenance
+        on the very VMs the deployment is about to depend on. This ownership also
+        permits the gate to repair a stale inProgress note left by an interrupted
+        run; ordinary interactive maintenance and normal Phase 10 retain their
+        in-progress guard. A required target NOT in this list that IS found in use by
+        another operation is a hard failure of this mandatory gate (see OUTPUTS), not
+        a skip -- this gate has no decline/skip path, unlike the interactive
+        Start-Maintenance, which is allowed to defer to a concurrent operation.
+    .OUTPUTS
+        $true when there were no required targets (either DeployConfig has no VMs
+        yet created on the host, or every required target was already up to date or
+        had no applicable work), or every required target's maintenance succeeded.
+        $false when live Hyper-V inventory could not be enumerated at all (fail
+        closed -- an enumeration failure is never silently treated as "zero
+        targets, success"), when a required target is found in use by another
+        operation, when any required target's maintenance actually failed, when
+        Start-NormalJobs failed to dispatch a job for any required target (a
+        pending target with no job is invisible to Wait-Phase and must not be
+        silently read as success), or when Wait-Phase's own Success+Failed tally
+        does not account for every dispatched job / every required target -- in
+        every $false case the caller must abort the deployment rather than
+        continue. A VM/fix combination that a fix's own applicability rules
+        (AppliesToRoles/NotAppliesToRoles, Windows/Linux, offline-root-CA) exclude
+        is never treated as a failure.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $DeployConfig,
+        [string[]] $OwnedMutexVmNames = @()
+    )
+
+    # Fail closed: an enumeration failure must abort the deployment, never be
+    # silently read as "zero live VMs, so zero required targets, so success".
+    try {
+        $liveVMs = @(Get-VM -ErrorAction Stop)
+    }
+    catch {
+        Write-Log "[Phase 0] Maintenance gate: could not enumerate live Hyper-V VM inventory ($($_.Exception.Message)); required existing-VM maintenance cannot be verified. Aborting." -Failure
+        return $false
+    }
+    $liveVmNameSet = @{}
+    foreach ($liveVm in $liveVMs) { if ($liveVm.Name) { $liveVmNameSet[$liveVm.Name] = $true } }
+
+    $targets = @($DeployConfig.virtualMachines | Where-Object { $_.vmName -and $liveVmNameSet.ContainsKey($_.vmName) } | Sort-Object vmName)
+    if ($targets.Count -eq 0) {
+        Write-Log -Verbose "[Phase 0] Maintenance gate: no DeployConfig VM already exists in live Hyper-V inventory; nothing required. (Not-yet-created VMs get fixes through DSC/Phase 10 once Phase 1 creates them.)"
+        return $true
+    }
+
+    Write-Log "[Phase 0] Maintenance gate: deployment targets $($targets.Count) already-existing VM(s) [$($targets.vmName -join ', ')] (Hidden or not, ExistingVM-marked or not). Required maintenance cannot be skipped or declined; per-fix/per-role applicability still decides whether any given target needs work." -Activity
+
+    # Pre-filter: skip targets where every AppliesToExisting fix is already recorded.
+    # Mirrors Start-Maintenance's up-to-date shortcut so a fully-current VM does not
+    # pay for a job/thread + PSDirect round trip it does not need. Reuses the live
+    # inventory already fetched above instead of querying Hyper-V a second time.
+    $allFixDefs = Get-VMFixes -ReturnDummyList
+    $relevantFixes = @($allFixDefs | Where-Object { $_.AppliesToExisting -eq $true })
+    $vmNoteCache = @{}
+    foreach ($liveVm in $liveVMs) {
+        if ($liveVm.Notes -like "*lastUpdate*") {
+            try { $vmNoteCache[$liveVm.Name] = $liveVm.Notes | ConvertFrom-Json } catch {}
+        }
+    }
+
+    $vmsNeedingMaintenance = @($targets | Where-Object {
+            $note = $vmNoteCache[$_.vmName]
+            if ($note -and $note.appliedFixes) {
+                $missing = $false
+                foreach ($fix in $relevantFixes) {
+                    if (-not (Test-VMFixApplied -VMNote $note -FixName $fix.FixName -FixVersion $fix.FixVersion)) {
+                        $missing = $true
+                        break
+                    }
+                }
+                if (-not $missing) {
+                    Write-Log "[Phase 0] Maintenance gate: $($_.vmName): all required existing-VM fixes already recorded; nothing pending." -Verbose
+                    return $false
+                }
+            }
+            return $true
+        })
+
+    if ($vmsNeedingMaintenance.Count -eq 0) {
+        Write-Log "[Phase 0] Maintenance gate: nothing pending." -Success
+        return $true
+    }
+
+    # Mutex accounting: only probe "is this VM in use elsewhere" for targets the
+    # caller did NOT already report as owned. A target we already hold the mutex
+    # for is safe to proceed with unconditionally. This is a MANDATORY, no-decline
+    # gate: a required target that turns out to be locked by another operation is
+    # a hard failure of the gate, not a skip -- unlike the interactive
+    # Start-Maintenance path, which is allowed to defer to a concurrent operation.
+    $ownedSet = @{}
+    foreach ($ownedName in @($OwnedMutexVmNames)) { if ($ownedName) { $ownedSet[$ownedName] = $true } }
+    $inUseElsewhere = [System.Collections.Generic.List[string]]::new()
+    foreach ($vm in $vmsNeedingMaintenance) {
+        if ($ownedSet.ContainsKey($vm.vmName)) { continue }
+        $mutexName = $vm.vmName
+        try {
+            $probeMutex = [System.Threading.Mutex]::OpenExisting($mutexName)
+        }
+        catch {
+            continue
+        }
+        if ($probeMutex) {
+            try { [void]$probeMutex.ReleaseMutex() } catch {}
+            try { $probeMutex.Dispose() } catch {}
+        }
+        $inUseElsewhere.Add($vm.vmName)
+    }
+    if ($inUseElsewhere.Count -gt 0) {
+        Write-Log "[Phase 0] Maintenance gate: required target(s) already in use by another operation: $($inUseElsewhere -join ', '). Mandatory maintenance cannot be skipped, so the deployment cannot proceed safely. Aborting." -Failure
+        return $false
+    }
+
+    # Start-VMFixes (invoked per-VM inside Phase10Job -> Start-VMMaintenance) already
+    # starts a stopped target and waits for it to be connectable, so stopped targets
+    # here just need to reach the same per-VM job path as every other maintenance
+    # pass -- no separate prompt-free "start it" step is needed.
+    $expectedJobCount = $vmsNeedingMaintenance.Count
+    # The deployment owns every target mutex, so an inProgress note here is a
+    # stale marker from an interrupted run rather than concurrent work. Allow
+    # this mandatory Phase 0 path to repair that VM; interactive maintenance and
+    # normal Phase 10 retain the default in-progress guard.
+    $start = Start-NormalJobs -machines $vmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false -argument3 $true -PreferThreadJob
+
+    # Fail closed on dispatch: Start-NormalJobs.Failed counts VMs whose job never
+    # got created at all -- those VMs are absent from $start.Jobs, so Wait-Phase
+    # never sees them and cannot report them as failed. Silently proceeding to
+    # Wait-Phase here would let an undispatched required target's maintenance go
+    # completely unverified while the gate still returns success.
+    if ($start.Failed -gt 0) {
+        Write-Log "[Phase 0] Maintenance gate: failed to dispatch $($start.Failed) of $expectedJobCount required maintenance job(s); those target(s) were never verified. Deployment cannot proceed safely." -Failure
+        return $false
+    }
+
+    $result = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
+    $accountedFor = $result.Success + $result.Failed
+
+    Write-Log "[Phase 0] Maintenance gate finished. Dispatched: $($start.Jobs.Count) of $expectedJobCount; Success: $($result.Success); Failures: $($result.Failed)." -SubActivity
+    if ($result.Failed -gt 0) {
+        Write-Log "[Phase 0] Maintenance gate: required maintenance failed for $($result.Failed) existing VM deployment target(s). Deployment cannot proceed safely." -Failure
+        return $false
+    }
+    # Fail closed on accounting: every dispatched job -- and every required target,
+    # since dispatch failures were already rejected above -- must be reflected in
+    # Wait-Phase's own Success+Failed tally. A mismatch means some pending target
+    # was never actually verified one way or the other, which is not a safe basis
+    # for calling the gate a success.
+    if ($accountedFor -ne $start.Jobs.Count -or $accountedFor -ne $expectedJobCount) {
+        Write-Log "[Phase 0] Maintenance gate: Wait-Phase accounted for $accountedFor of $($start.Jobs.Count) dispatched job(s) ($expectedJobCount required target(s) total); at least one required target was never verified. Deployment cannot proceed safely." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Show-FailedDomains {
     [CmdletBinding()]
     param (
@@ -258,7 +467,9 @@ function Start-VMMaintenance {
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
         [object] $VMName,
         [Parameter(Mandatory = $false, HelpMessage = "Apply only fixes needed on fresh deploy")]
-        [switch] $FreshDeployOnly
+        [switch] $FreshDeployOnly,
+        [Parameter(Mandatory = $false, HelpMessage = "Allow maintenance when the caller owns the VM deployment mutex and the note has a stale in-progress marker")]
+        [switch] $AllowInProgress
     )
 
     Write-Log "Starting maintenance for VM: $VMName"
@@ -296,10 +507,12 @@ function Start-VMMaintenance {
     $global:MaintenanceActivity = $VMName
     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
 
-    # This should never happen, since parent filters these out. Leaving just-in-case.
-    if ($inProgress) {
+    if ($inProgress -and -not $AllowInProgress.IsPresent) {
         Write-Log "$vmName`: VM Deployment State is in-progress. Skipping." -Warning
         return $false
+    }
+    if ($inProgress) {
+        Write-Log "$vmName`: VM note is still marked in-progress from an interrupted run; proceeding through the mutex-owned mandatory Phase 0 maintenance gate." -Warning
     }
 
     if ($FreshDeployOnly.IsPresent) {

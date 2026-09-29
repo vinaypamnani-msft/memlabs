@@ -327,7 +327,11 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
             # assign via CIM -> WMI -> mountvol until S:\setup.exe resolves.
             Script AssignSqlIsoDriveLetter {
                 GetScript  = { @{ Result = '' } }
-                TestScript = { [bool](Test-Path 'S:\setup.exe' -ErrorAction SilentlyContinue) }
+                TestScript = {
+                    $mediaReady = [System.IO.File]::Exists('S:\setup.exe')
+                    if ($mediaReady) { Write-Verbose 'SQL ISO media confirmed at S:\setup.exe via System.IO.' }
+                    return $mediaReady
+                }
                 SetScript  = {
                     # NOTE: this logic is intentionally INLINE and self-contained. Do
                     # NOT refactor it to Import-Module TemplateHelpDSC +
@@ -355,7 +359,7 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                         $optical = @(Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)
                         # (a) Prefer a lettered optical volume with setup.exe at its root.
                         foreach ($vol in $optical) {
-                            if ($vol.DriveLetter -and (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe') -ErrorAction SilentlyContinue)) {
+                            if ($vol.DriveLetter -and [System.IO.File]::Exists("$($vol.DriveLetter)\setup.exe")) {
                                 return $vol
                             }
                         }
@@ -373,7 +377,7 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                             try {
                                 & $mountvol "${scratch}:" $vol.DeviceID 2>$null | Out-Null
                                 Start-Sleep -Seconds 1
-                                $isSql = [bool](Test-Path "${scratch}:\setup.exe" -ErrorAction SilentlyContinue)
+                                $isSql = [System.IO.File]::Exists("${scratch}:\setup.exe")
                             }
                             catch {}
                             # Release the scratch letter either way -- if it IS the SQL
@@ -400,7 +404,7 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                         throw "SQL ISO not found on any CD-ROM volume (expected setup.exe at the optical drive root) after waiting 2 min. The host should have mounted it before Phase 4."
                     }
                     if ($sqlVol.DriveLetter -eq 'S:') {
-                        Write-Verbose "SQL ISO already on S:."
+                        Write-Verbose "SQL ISO already on S: and setup.exe is visible via System.IO."
                         return
                     }
 
@@ -440,14 +444,20 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                     catch {}
 
                     # (3) Assign S: to the SQL disc, trying each method until S:\setup.exe resolves.
-                    # The mount manager publishes a new drive letter ASYNCHRONOUSLY, so probing
-                    # S:\setup.exe the instant Set-CimInstance returns races that publication and
-                    # reports a false failure -- observed on CS2-PS3SQL where all three methods
-                    # "failed" and the throw itself reported "Current optical letter: S:".
+                    # The mount manager publishes a new drive letter asynchronously. The
+                    # long-lived DSC host can also retain a stale FileSystem PSDrive list after
+                    # publication, so Test-Path can remain false even when Win32_Volume reports
+                    # S:. Use System.IO for every media probe and poll until native file access
+                    # sees setup.exe.
                     $confirmS = {
                         $limit = (Get-Date).AddSeconds(10)
                         do {
-                            if (Test-Path 'S:\setup.exe' -ErrorAction SilentlyContinue) { return $true }
+                            if ([System.IO.File]::Exists('S:\setup.exe')) {
+                                $providerSeesMedia = $false
+                                try { $providerSeesMedia = [bool](Test-Path 'S:\setup.exe' -ErrorAction SilentlyContinue) } catch {}
+                                Write-Verbose "SQL ISO S: confirmation succeeded: System.IO=True; Test-Path=$providerSeesMedia."
+                                return $true
+                            }
                             Start-Sleep -Milliseconds 500
                         } while ((Get-Date) -lt $limit)
                         return $false
@@ -487,7 +497,16 @@ if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "SQL setup to add the R
                                     Where-Object { $_.DeviceID -eq $sqlVol.DeviceID } | Select-Object -First 1).DriveLetter
                         }
                         catch {}
-                        throw "Failed to assign S: to SQL ISO volume ($($sqlVol.DeviceID)) after CIM/WMI/mountvol attempts. Current optical letter: $actualLetter."
+                        $nativeSeesMedia = [System.IO.File]::Exists('S:\setup.exe')
+                        $providerSeesMedia = $false
+                        try { $providerSeesMedia = [bool](Test-Path 'S:\setup.exe' -ErrorAction SilentlyContinue) } catch {}
+                        $psDriveRoot = '<none>'
+                        try {
+                            $psDrive = Get-PSDrive -Name S -PSProvider FileSystem -ErrorAction SilentlyContinue
+                            if ($psDrive) { $psDriveRoot = "$($psDrive.Root)" }
+                        }
+                        catch {}
+                        throw "Failed to assign S: to SQL ISO volume ($($sqlVol.DeviceID)) after CIM/WMI/mountvol attempts. Current optical letter: $actualLetter; System.IO.Exists=$nativeSeesMedia; Test-Path=$providerSeesMedia; PSDrive.S.Root='$psDriveRoot'."
                     }
                 }
                 DependsOn  = $nextDepend

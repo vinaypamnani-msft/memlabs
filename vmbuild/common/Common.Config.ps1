@@ -2128,7 +2128,7 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
-    # Add Primary to list, when adding Passive
+    # Add existing dependencies when adding a Passive
     $PassiveVMs = $config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and -not $_.Hidden }
     foreach ($PassiveVM in $PassiveVMs) {
         $ActiveNode = Get-SiteServerForSiteCode -deployConfig $config -siteCode $PassiveVM.siteCode -SmartUpdate:$false
@@ -2140,6 +2140,9 @@ function Add-ExistingVMsToDeployConfig {
                 }
                 Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
             }
+        }
+        if ($PassiveVM.remoteContentLibVM) {
+            Add-ExistingVMToDeployConfig -vmName $PassiveVM.remoteContentLibVM -configToModify $config -hidden:$true
         }
     }
 
@@ -2235,7 +2238,9 @@ function Add-ExistingVMsToDeployConfig {
     # still physically exist on the surviving node, AlwaysOnListenerName stays
     # set so $installToAO and CM Setup keep using the existing listener, and
     # every OtherNode-gated cluster-build step naturally no-ops while
-    # Get-SQLAOConfig still emits listener connection metadata.
+    # Get-SQLAOConfig still emits listener connection metadata. This runs in
+    # Test-Configuration's Add-Existing pass, before ConvertTo-DeployConfigEx,
+    # so the whole deploy (every phase + ScriptWorkflow) sees the healed config.
     Repair-SqlAoMissingPartners -Config $config -RefreshedVmInventory @($refreshedVmInventory) -InventoryRefreshVerified $inventoryRefreshVerified
 
     Add-Phase8DistributionPointMetadata -Config $config -ExistingVMs @($refreshedVmInventory) -InventoryRefreshVerified $inventoryRefreshVerified
@@ -5176,9 +5181,18 @@ function Update-VMFromHyperV {
 
 function Save-VMListDiskCache {
     if ($Common.InJob) { return }
-    if (-not $global:vm_List -or $global:vm_List.Count -eq 0) { return }
     try {
         $cachePath = Join-Path $Common.CachePath "vm-list-cache.clixml"
+        if (-not $global:vm_List -or $global:vm_List.Count -eq 0) {
+            # Reconciliation can legitimately remove every cached VM after a
+            # domain teardown. Leaving the old file in place resurrects those
+            # ghosts on every subsequent Get-List call in the same workflow.
+            if (Test-Path $cachePath) {
+                Remove-Item -LiteralPath $cachePath -Force -ErrorAction Stop
+                Write-Log "Save-VMListDiskCache: Removed disk cache because the live VM list is empty." -LogOnly
+            }
+            return
+        }
         @($global:vm_List) | Export-Clixml -Path $cachePath -Force -Depth 10
         Write-Log "Save-VMListDiskCache: Wrote $($global:vm_List.Count) VMs to disk cache." -LogOnly
     }
@@ -5454,7 +5468,10 @@ function Get-List {
             }
 
         }
-        $return = $global:vm_List
+        # PowerShell unwraps a one-item pipeline result to a scalar PSCustomObject.
+        # Get-List then merges deployConfig VMs with += below, which invokes the
+        # nonexistent PSCustomObject.op_Addition when exactly one VM is cached.
+        $return = @($global:vm_List)
 
         foreach ($vm in $return) {
             $vm | Add-Member -MemberType NoteProperty -Name "source" -Value "hyperv" -Force
@@ -5483,7 +5500,7 @@ function Get-List {
                     }
                 }
                 if ($found) {
-                    $return = $return | where-object { $_.vmName -ne $vm.vmName }
+                    $return = @($return | Where-Object { $_.vmName -ne $vm.vmName })
                 }
                 $newVM = $vm
                 $newVM | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
@@ -5502,7 +5519,7 @@ function Get-List {
         # the appliance reconciler discovers them directly from Hyper-V notes.
         $return = $return | Where-Object { $_.infrastructureType -ne 'MemLabsDhcpAppliance' }
 
-        $return = $return | Sort-Object -Property * #-Unique
+        $return = @($return | Sort-Object -Property *) #-Unique
 
         if ($Type -eq "VM") {
             return $return

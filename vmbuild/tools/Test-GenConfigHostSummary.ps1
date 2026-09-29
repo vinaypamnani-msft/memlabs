@@ -101,6 +101,180 @@ if ($syncCalls.Count -eq 1 -and $configLoadCalls.Count -gt 0 -and $validationCal
     Assert-True ($syncCalls[0].Extent.EndOffset -lt $phaseCalls[0].Extent.StartOffset) 'DHCP appliance reconciliation occurs before phase dispatch'
 }
 
+# Phase 0 maintenance gate: an explicit deployment targeting existing VMs must run
+# required (AppliesToExisting) maintenance automatically, as part of Phase 0 --
+# after Phase 0's own existing-VM preparation (and this deployment's earlier
+# DHCP/network reconciliation) and strictly before Phase 1 dispatch begins -- and
+# must abort the deployment (exit) if that maintenance fails. It is a distinct
+# function from the interactive Start-Maintenance so "no live maintenance before
+# GenConfig" and "menu-invoked maintenance stays interactive" both remain
+# literally true. New VMs are never targeted here; they continue to receive fixes
+# through DSC/Phase 10 once Phase 1 creates them.
+$requiredMaintenanceCalls = @($newLabAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Start-RequiredExistingVMMaintenance'
+        }, $true))
+Assert-Equal 1 $requiredMaintenanceCalls.Count 'New-Lab has one Phase 0 mandatory existing-VM maintenance gate'
+# Distinguish Phase 0's own Start-Phase call (literal "-Phase 0") from the main
+# Phase 1..N loop's call (variable "-Phase $i") -- both share the command name
+# Start-Phase, so $phaseCalls alone cannot tell them apart.
+$phase0DispatchCalls = @($phaseCalls | Where-Object { $_.Extent.Text -match '-Phase\s+0\b' })
+$phaseLoopDispatchCalls = @($phaseCalls | Where-Object { $_.Extent.Text -match '-Phase\s+\$i\b' })
+Assert-Equal 1 $phase0DispatchCalls.Count 'New-Lab has one literal Phase 0 Start-Phase call'
+Assert-True ($phaseLoopDispatchCalls.Count -ge 1) 'New-Lab has a Phase 1..N loop Start-Phase call'
+if ($requiredMaintenanceCalls.Count -eq 1 -and $syncCalls.Count -eq 1 -and $phase0DispatchCalls.Count -eq 1 -and $phaseLoopDispatchCalls.Count -ge 1) {
+    Assert-True ($requiredMaintenanceCalls[0].Extent.StartOffset -gt $syncCalls[0].Extent.EndOffset) 'Phase 0 maintenance gate runs after DHCP/network reconciliation'
+    Assert-True ($requiredMaintenanceCalls[0].Extent.StartOffset -gt $phase0DispatchCalls[0].Extent.EndOffset) 'Phase 0 maintenance gate runs after Phase 0 existing-VM preparation'
+    Assert-True ($requiredMaintenanceCalls[0].Extent.EndOffset -lt $phaseLoopDispatchCalls[0].Extent.StartOffset) 'Phase 0 maintenance gate runs before Phase 1 dispatch'
+    Assert-True ($requiredMaintenanceCalls[0].Extent.Text -match '(?i)-OwnedMutexVmNames') 'Phase 0 maintenance gate accounts for mutexes the deployment already owns'
+
+    # The gate must be clearly logged as belonging to Phase 0, not a generic/unlabeled step.
+    $gateLogWindowStart = $phase0DispatchCalls[0].Extent.EndOffset
+    $gateLogWindowEnd = $requiredMaintenanceCalls[0].Extent.StartOffset
+    $gateLogWindowText = $newLabAst.Extent.Text.Substring($gateLogWindowStart, $gateLogWindowEnd - $gateLogWindowStart)
+    Assert-True ($gateLogWindowText -match '(?i)\[Phase 0\].*maintenance') 'Phase 0 maintenance gate is logged with an explicit Phase 0 tag'
+
+    $gateOffsetEnd = $requiredMaintenanceCalls[0].Extent.EndOffset
+    $enclosingIf = $newLabAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Extent.StartOffset -ge $gateOffsetEnd -and
+            $node.Extent.StartOffset -lt ($gateOffsetEnd + 400)
+        }, $true)
+    Assert-True ($null -ne $enclosingIf) 'Phase 0 maintenance gate is immediately followed by a failure check'
+    if ($enclosingIf) {
+        $exitsInGate = @($enclosingIf.FindAll({ param($n) $n -is [Management.Automation.Language.ExitStatementAst] }, $true))
+        Assert-True ($exitsInGate.Count -ge 1) 'Phase 0 maintenance gate aborts the deployment when required maintenance fails'
+        Assert-True ($enclosingIf.Extent.Text -match '(?i)\[Phase 0\]') 'Phase 0 maintenance gate failure is logged with an explicit Phase 0 tag'
+    }
+}
+# Every maintenance-related call in New-Lab must occur at or after GenConfig returns.
+$preGenConfigMaintenanceCalls = @(($standaloneMaintenanceCalls + $requiredMaintenanceCalls) | Where-Object {
+        $genConfigCalls.Count -eq 0 -or $_.Extent.StartOffset -lt $genConfigCalls[0].Extent.EndOffset
+    })
+Assert-Equal 0 $preGenConfigMaintenanceCalls.Count 'no maintenance of any kind runs before GenConfig'
+
+$maintAst = Get-TestAst -Path (Join-Path $RootPath 'common\Common.Maintenance.ps1')
+$interactiveMaintenanceFn = @($maintAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Start-Maintenance'
+        }, $true))
+Assert-Equal 1 $interactiveMaintenanceFn.Count 'Common.Maintenance still defines the interactive Start-Maintenance entry point'
+if ($interactiveMaintenanceFn.Count -eq 1) {
+    Assert-True ($interactiveMaintenanceFn[0].Extent.Text -match '(?i)Read-YesOrNoWithTimeout') 'menu-invoked maintenance stays interactive (still prompts)'
+}
+
+$requiredMaintenanceFn = @($maintAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Start-RequiredExistingVMMaintenance'
+        }, $true))
+Assert-Equal 1 $requiredMaintenanceFn.Count 'Common.Maintenance defines the Phase 0 mandatory existing-VM maintenance function'
+if ($requiredMaintenanceFn.Count -eq 1) {
+    $requiredFnText = $requiredMaintenanceFn[0].Extent.Text
+    Assert-True ($requiredFnText -match '(?i)Get-VM\s+-ErrorAction\s+Stop') 'Phase 0 maintenance enumerates live Hyper-V inventory fail-closed (ErrorAction Stop)'
+    Assert-True ($requiredFnText -match '(?s)catch\s*\{[^}]*Get-VM.{0,10}$|catch\s*\{.{0,400}return\s+\$false') 'Phase 0 maintenance returns $false, not silent success, when live inventory cannot be enumerated'
+    Assert-True ($requiredFnText -match '(?i)\$liveVmNameSet\.ContainsKey\(\$_\.vmName\)') 'Phase 0 maintenance targets every DeployConfig VM that already exists in live Hyper-V inventory'
+    Assert-True ($requiredFnText -notmatch '(?i)\$_\.ExistingVM') 'Phase 0 maintenance no longer filters by the ExistingVM marker'
+    Assert-True ($requiredFnText -notmatch '(?i)-not\s+\$_\.hidden') 'Phase 0 maintenance no longer excludes hidden entries'
+    Assert-True ($requiredFnText -match '(?i)AppliesToRoles') 'Phase 0 maintenance documents per-fix role applicability (AppliesToRoles/NotAppliesToRoles)'
+    Assert-True ($requiredFnText -match '(?i)Windows/Linux') 'Phase 0 maintenance documents Windows/Linux applicability'
+    Assert-True ($requiredFnText -match '(?i)offline-root') 'Phase 0 maintenance documents offline-root-CA applicability'
+    Assert-True ($requiredFnText -match '(?i)not applicable.{0,40}(is a )?successful no-op|successful no-op.{0,60}not a (gate )?failure') 'Phase 0 maintenance documents that an inapplicable fix/VM is a successful no-op, not a gate failure'
+    Assert-True ($requiredFnText -match '(?i)AppliesToExisting') 'Phase 0 maintenance applies AppliesToExisting fixes'
+    Assert-True ($requiredFnText -notmatch '(?i)NeededOnFreshDeploy') 'Phase 0 maintenance does not use fresh-deploy-only fix semantics'
+    Assert-True ($requiredFnText -notmatch '(?i)Read-YesOrNoWithTimeout') 'Phase 0 maintenance never prompts and cannot be declined'
+    Assert-True ($requiredFnText -match '(?i)OwnedMutexVmNames') 'Phase 0 maintenance accounts for mutexes the deployment already owns'
+    Assert-True ($requiredFnText -match '(?i)result\.Failed\s+-gt\s+0') 'Phase 0 maintenance reports failure back to the caller'
+    Assert-True ($requiredFnText -match '\[Phase 0\]') 'Phase 0 maintenance function logs with an explicit Phase 0 tag'
+    Assert-True ($requiredFnText -match '(?i)Phase 0 maintenance') 'Phase 0 maintenance function documents itself as Phase 0 maintenance'
+    Assert-True ($requiredFnText -match "(?i)not.{0,10}yet exist.{0,160}Phase 1|Phase 1.{0,40}creates? (it|them)") 'Phase 0 maintenance documents that not-yet-created VMs continue through DSC/Phase 10 once Phase 1 creates them'
+    Assert-True ($requiredFnText -notmatch '(?i)dependency-only.{0,60}wait for Phase 10|dependency-only.{0,60}Phase 10.{0,60}already exist') 'Phase 0 maintenance does not claim already-existing dependency-only VMs wait for Phase 10'
+
+    # Mandatory-gate mutex semantics: a required target found in use by another
+    # operation must fail the gate outright, never be logged as "skipping" and
+    # then folded back into a $true success.
+    $inUseElsewhereMatch = [regex]::Match($requiredFnText, '(?s)\$inUseElsewhere\.Count\s+-gt\s+0\)\s*\{(.*?)\}')
+    Assert-True $inUseElsewhereMatch.Success 'Phase 0 maintenance has an explicit in-use-elsewhere failure branch'
+    if ($inUseElsewhereMatch.Success) {
+        Assert-True ($inUseElsewhereMatch.Groups[1].Value -match '-Failure') 'in-use-elsewhere required target is logged as a failure, not a warning/skip'
+        Assert-True ($inUseElsewhereMatch.Groups[1].Value -match 'return\s+\$false') 'in-use-elsewhere required target makes the mandatory gate return $false'
+    }
+    Assert-True ($requiredFnText -notmatch '(?i)skipping VM\(s\) already in use') 'Phase 0 maintenance no longer logs in-use-elsewhere targets as a skip'
+
+    # Dispatch/accounting fail-closed semantics: Start-NormalJobs.Failed counts
+    # VMs whose job never got created at all, so they never appear in .Jobs and
+    # Wait-Phase can never see or report them. The gate must reject that silent
+    # gap instead of only trusting Wait-Phase's own Failed counter.
+    Assert-True ($requiredFnText -match '(?i)\$start\.Failed\s+-gt\s+0') 'Phase 0 maintenance checks Start-NormalJobs dispatch failures before trusting Wait-Phase'
+    $dispatchFailBlockMatch = [regex]::Match($requiredFnText, '(?s)\$start\.Failed\s+-gt\s+0\)\s*\{(.*?)\}')
+    Assert-True $dispatchFailBlockMatch.Success 'Phase 0 maintenance has an explicit dispatch-failure branch'
+    if ($dispatchFailBlockMatch.Success) {
+        Assert-True ($dispatchFailBlockMatch.Groups[1].Value -match '-Failure') 'a dispatch failure is logged as a failure'
+        Assert-True ($dispatchFailBlockMatch.Groups[1].Value -match 'return\s+\$false') 'a dispatch failure makes the mandatory gate return $false'
+    }
+    Assert-True ($requiredFnText -match '(?i)\$start\.Failed') 'Phase 0 maintenance checks Start-NormalJobs.Failed at all (previously ignored)'
+    $waitPhaseCallSiteMatch = [regex]::Match($requiredFnText, '\$result\s*=\s*Wait-Phase\b')
+    $dispatchFailCheckIndex = $requiredFnText.IndexOf('$start.Failed -gt 0')
+    Assert-True ($dispatchFailCheckIndex -ge 0 -and $waitPhaseCallSiteMatch.Success -and $dispatchFailCheckIndex -lt $waitPhaseCallSiteMatch.Index) 'the dispatch-failure check runs before Wait-Phase is called, not after'
+    Assert-True ($requiredFnText -match '(?i)\$accountedFor\s*=\s*\$result\.Success\s*\+\s*\$result\.Failed') 'Phase 0 maintenance tallies Wait-Phase Success+Failed into an accounted-for total'
+    Assert-True ($requiredFnText -match '(?i)\$accountedFor\s+-ne\s+\$start\.Jobs\.Count') 'Phase 0 maintenance verifies the accounted-for total matches every dispatched job'
+    Assert-True ($requiredFnText -match '(?i)\$accountedFor\s+-ne\s+\$expectedJobCount') 'Phase 0 maintenance verifies the accounted-for total matches every required target'
+    $accountingBlockMatch = [regex]::Match($requiredFnText, '(?s)\$accountedFor\s+-ne\s+\$start\.Jobs\.Count.{0,120}\{(.*?)\}')
+    Assert-True $accountingBlockMatch.Success 'Phase 0 maintenance has an explicit accounting-mismatch failure branch'
+    if ($accountingBlockMatch.Success) {
+        Assert-True ($accountingBlockMatch.Groups[1].Value -match '-Failure') 'an accounting mismatch is logged as a failure'
+        Assert-True ($accountingBlockMatch.Groups[1].Value -match 'return\s+\$false') 'an accounting mismatch makes the mandatory gate return $false'
+    }
+}
+
+$dhcpApplianceAst = Get-TestAst -Path (Join-Path $RootPath 'common\Common.DhcpAppliance.ps1')
+$readinessFn = @($dhcpApplianceAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Confirm-MemLabsDhcpReadiness'
+        }, $true))
+Assert-Equal 1 $readinessFn.Count 'Common.DhcpAppliance defines the shared DHCP-readiness helper'
+if ($readinessFn.Count -eq 1) {
+    $readinessText = $readinessFn[0].Extent.Text
+    Assert-True ($readinessText -match '(?i)Test-MemLabsUsesDhcpAppliance') 'DHCP readiness distinguishes appliance mode from native DHCP'
+    Assert-True ($readinessText -match '(?i)Sync-MemLabsDhcpAppliance') 'DHCP readiness reconciles the appliance when in use'
+    Assert-True ($readinessText -match '(?i)DHCPServer') 'DHCP readiness ensures the native DHCP Server role otherwise'
+}
+# New-Lab.ps1 performs the equivalent DHCP-readiness logic inline (its own
+# pre-existing appliance-reconcile-or-native-service-check block) rather than
+# calling the shared helper -- only the GenConfig menu action calls it.
+$newLabReadinessCalls = @($newLabAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Confirm-MemLabsDhcpReadiness'
+        }, $true))
+Assert-Equal 0 $newLabReadinessCalls.Count 'New-Lab does not call Confirm-MemLabsDhcpReadiness (it has its own equivalent inline DHCP-readiness logic)'
+
+$genConfigMainAst = Get-TestAst -Path (Join-Path $RootPath 'genconfig.ps1')
+$pendingMaintenanceFn = @($genConfigMainAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Select-PendingVMMaintenance'
+        }, $true))
+Assert-Equal 1 $pendingMaintenanceFn.Count 'GenConfig defines the Apply Pending VM Maintenance menu action'
+if ($pendingMaintenanceFn.Count -eq 1) {
+    $dhcpReadinessCall = @($pendingMaintenanceFn[0].FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Confirm-MemLabsDhcpReadiness'
+            }, $true))
+    $interactiveMaintenanceCall = @($pendingMaintenanceFn[0].FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Start-Maintenance'
+            }, $true))
+    Assert-Equal 1 $dhcpReadinessCall.Count 'menu action reconciles DHCP/networking'
+    Assert-Equal 1 $interactiveMaintenanceCall.Count 'menu action starts interactive (opt-in) maintenance'
+    if ($dhcpReadinessCall.Count -eq 1 -and $interactiveMaintenanceCall.Count -eq 1) {
+        Assert-True ($dhcpReadinessCall[0].Extent.EndOffset -lt $interactiveMaintenanceCall[0].Extent.StartOffset) 'menu action reconciles networking before starting maintenance'
+    }
+}
+$genConfigMainText = Get-Content -LiteralPath (Join-Path $RootPath 'genconfig.ps1') -Raw
+Assert-True ($genConfigMainText -match '(?i)"A"\s*=\s*"Apply Pending VM Maintenance') 'main menu exposes the Apply Pending VM Maintenance option'
+Assert-True ($genConfigMainText -match '(?im)"a"\s*\{\s*Select-PendingVMMaintenance\s*\}') 'main menu routes "a" to the maintenance action'
+
 $storageAst = Get-TestAst -Path (Join-Path $RootPath 'common\Common.StorageToken.ps1')
 . (Import-TestFunction -Ast $storageAst -Name 'Get-MemlabsVmStorageRoot')
 $script:HostSettingsMode = 'Unset'

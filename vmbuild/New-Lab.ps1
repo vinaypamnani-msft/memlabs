@@ -1156,6 +1156,38 @@ try {
         $prepared = Resolve-PhaseResult -Raw (Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf) -Phase 0
     }
 
+    # Phase 0 maintenance gate (mandatory, non-interactive). feature/wsus-prefix
+    # intentionally stopped running Start-Maintenance before GenConfig (DHCP-appliance
+    # reconciliation needs a deployment config to exist first), and this deployment
+    # already reconciled DHCP/networking above, before Phase 0. A VM that does NOT yet
+    # exist on the host cannot be maintained here -- Phase 1 has to create it first --
+    # so only genuinely new (not-yet-created) VMs continue to receive fixes the normal
+    # way, through DSC and Phase 10, exactly as before. Every VM already deployed is a
+    # required target here, whether or not it is Hidden and whether or not it carries an
+    # ExistingVM marker: neither flag reliably means "not a real dependency" (a hidden
+    # dependency-only VM added by Add-ExistingVMToDeployConfig never gets ExistingVM set
+    # at all, yet the deployment depends on it being current too), so targeting is
+    # decided purely by whether the VM already exists in live Hyper-V inventory. Later
+    # phases can assume any such already-existing VM is already current (e.g. Phase 8/11
+    # SQL logic assumes the current ODBC driver is already installed), and Phase 10 runs
+    # far too late to catch a problem before hours of unrelated work have already
+    # happened. So, still as part of Phase 0 and strictly before Phase 1 dispatch below,
+    # enforce every pending AppliesToExisting fix on every already-existing VM this
+    # deploy config targets, and abort the deployment outright if any required fix
+    # actually fails, if a required target is found in use by another operation, or if
+    # live Hyper-V inventory cannot even be enumerated (fail closed). Each fix's own
+    # AppliesToRoles/NotAppliesToRoles and Windows/Linux/offline-root-CA applicability
+    # rules still decide whether a given target needs that fix's work at all; an
+    # inapplicable fix/VM is a successful no-op, not a gate failure. There is no
+    # decline/skip path here, unlike the interactive GenConfig "Apply Pending VM
+    # Maintenance" menu action.
+    Write-Log "[Phase 0] Running mandatory existing-VM maintenance gate." -Activity
+    $requiredExistingMaintenanceOk = Start-RequiredExistingVMMaintenance -DeployConfig $deployConfig -OwnedMutexVmNames @($deployConfig.virtualMachines.vmName)
+    if (-not $requiredExistingMaintenanceOk) {
+        Write-Log "[Phase 0] Required maintenance failed for one or more existing VM deployment targets. Aborting deployment." -Failure
+        exit 1
+    }
+
     # AADClient idempotency: if an AADClient VM exists from a prior interrupted
     # run but never reached oobeComplete, it is in an unrecoverable state
     # (partial DSC, half-sysprepped, etc.). Delete it now so Phase 1 can

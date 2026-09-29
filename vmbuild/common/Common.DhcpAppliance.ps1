@@ -54,6 +54,63 @@ function Test-MemLabsUsesDhcpAppliance {
     return [bool]($Common -and $Common.DhcpBackend -and $Common.DhcpBackend.BackendType -eq 'DnsmasqAppliance')
 }
 
+function Confirm-MemLabsDhcpReadiness {
+    <#
+    .SYNOPSIS
+        Ensures DHCP is ready to serve MemLabs-managed networks before maintenance
+        or deployment proceeds, regardless of backend.
+    .DESCRIPTION
+        Windows Client hosts have no native DHCP Server role and instead reconcile
+        the MemLabs dnsmasq appliance (Sync-MemLabsDhcpAppliance); Windows Server
+        hosts use the in-box DHCP Server role and just need the service running.
+        The GenConfig "Apply Pending VM Maintenance" menu action (Select-
+        PendingVMMaintenance) calls this function so its standalone readiness check
+        matches New-Lab.ps1's deployment-time behavior. New-Lab.ps1 itself does NOT
+        call this helper -- it performs the equivalent appliance-reconcile-or-
+        native-service-check logic inline, before Phase 0, because at that point it
+        already has a DeployConfig and its own -WhatIf/exit-on-failure handling in
+        place. Keep the two paths equivalent if either changes.
+    .PARAMETER DeployConfig
+        Optional. When omitted, DHCP appliance reconciliation is based solely on
+        currently deployed VM inventory (used by the standalone GenConfig menu
+        action, which has no in-progress deployment config).
+    .OUTPUTS
+        $true when DHCP (appliance or native) is confirmed ready; $false otherwise.
+    #>
+    [CmdletBinding()]
+    param(
+        [object] $DeployConfig,
+        [switch] $WhatIf
+    )
+
+    if (Test-MemLabsUsesDhcpAppliance) {
+        Write-Log "Reconciling DHCP appliance." -Activity
+        $dhcpReady = Sync-MemLabsDhcpAppliance -DeployConfig $DeployConfig -WhatIf:$WhatIf
+        if (-not $dhcpReady) {
+            Write-Log "DHCP appliance did not reach a validated ready state." -Failure
+            return $false
+        }
+        return $true
+    }
+
+    # Native (in-box) DHCP Server role: just make sure the service is running.
+    $service = Get-Service -Name 'DHCPServer' -ErrorAction SilentlyContinue
+    if (-not $service) {
+        Write-Log "DHCPServer service was not found on this host." -Failure
+        return $false
+    }
+    if ($service.Status -eq 'Stopped') {
+        Write-Log "DHCPServer service is stopped; starting it." -LogOnly
+        $service | Start-Service -ErrorAction SilentlyContinue
+        $service.Refresh()
+    }
+    if ($service.Status -ne 'Running') {
+        Write-Log "DHCPServer service could not be started." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Test-MemLabsVmStorageDriveAllowed {
     [CmdletBinding()]
     param(

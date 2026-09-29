@@ -297,4 +297,25 @@ elseif (Test-Path -LiteralPath $cachedMsi -PathType Leaf) {
     Write-Host 'INFO -- cached ODBC MSI uses an older source URL; the download-cache resolver will refresh it.'
 }
 
+# Routing: ODBC enforcement (AppliesToExisting=$true, NeededOnFreshDeploy=$true) must
+# reach an existing SQL/DomainMember VM through EVERY maintenance route memlabs has --
+# the interactive Start-Maintenance existing-VM branch, the mandatory pre-phase-dispatch
+# Start-RequiredExistingVMMaintenance gate, and Phase 10 -- and none of those routes may
+# special-case or exclude it by name. All three must select fixes generically by the
+# AppliesToExisting flag so a future compliance fix is picked up automatically too.
+if ($maintenanceText -notmatch '(?s)function Start-Maintenance\b.*?AppliesToExisting -eq \$true') {
+    throw 'Interactive Start-Maintenance no longer routes existing-VM fixes (including Fix-ODBC18) through the generic AppliesToExisting filter.'
+}
+if ($maintenanceText -notmatch '(?s)function Start-RequiredExistingVMMaintenance\b.*?AppliesToExisting -eq \$true') {
+    throw 'The mandatory existing-VM maintenance gate no longer routes fixes (including Fix-ODBC18) through the generic AppliesToExisting filter.'
+}
+if ($maintenanceText -match "(?s)function Start-RequiredExistingVMMaintenance\b.*?Fix-ODBC18") {
+    throw 'The mandatory existing-VM maintenance gate must not special-case Fix-ODBC18 by name -- it has to route generically via AppliesToExisting.'
+}
+$phaseText = Get-Content -LiteralPath (Join-Path $root 'common\Common.Phases.ps1') -Raw
+if ($phaseText -notmatch '(?s)elseif \(\$Phase -eq 10\).*?\$global:Phase10Job.*?\$currentItem, \(, @\(\)\), \$false') {
+    throw 'Phase 10 no longer dispatches every VM (fresh and existing) through the AppliesToExisting-equivalent FreshDeployOnly=$false path.'
+}
+
 Write-Host 'PASS -- ODBC 18 target is catalog-driven, payload-verified, and enforced by DSC plus maintenance.'
+Write-Host 'PASS -- ODBC (and every AppliesToExisting fix) is routed generically through interactive maintenance, the mandatory existing-VM gate, and Phase 10.'

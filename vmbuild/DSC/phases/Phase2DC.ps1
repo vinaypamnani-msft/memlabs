@@ -934,6 +934,8 @@
                 Ensure         = "Present"
                 DependsOn      = $waitOnDependency
                 IsGroup        = $true
+                RemoteCreds    = $groupCreds
+                RemoteServer   = $ThisVM.ThisParams.RootCADC
             }
             $waitOnDependency = "[DelegateControl]AddremoteIISGroup"
         }
@@ -963,6 +965,7 @@
                     CAName         = $ThisVM.ThisParams.RootCA
                     RemoteForestDC = $ThisVM.ThisParams.RootCADC
                     IssuingCAHint  = $ThisVM.ThisParams.IssuingCAHint
+                    RemoteCreds    = $groupCreds
                     DependsOn      = $waitOnDependency
                 }
                 $waitOnDependency = "[InstallRootCertificate]InstallRootCertificate"

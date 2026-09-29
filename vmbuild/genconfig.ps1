@@ -72,6 +72,29 @@ Function Select-PasswordMenu {
     $customOptions = [ordered]@{"*F" = "Show-Passwords" }
     $response = Get-Menu2 -MenuName "Show Passwords" -AdditionalOptions $customOptions -Prompt "Press Enter" -HideHelp:$true -test:$false               
 }
+
+# GenConfig main-menu action ("A"): opt-in maintenance for ALL currently deployed
+# Windows VMs (not just this session's config). Reconciles DHCP/networking first
+# (the appliance on Windows Client hosts, or the native DHCP Server role on
+# Windows Server hosts) via Confirm-MemLabsDhcpReadiness. New-Lab.ps1's mandatory
+# pre-Phase-1 gate performs the equivalent DHCP-readiness logic inline (it does
+# not call this helper -- see Confirm-MemLabsDhcpReadiness's own comments), so
+# this menu action's networking check is equivalent to, not shared with, that
+# gate. After networking is confirmed ready, this calls the existing interactive
+# Start-Maintenance (no -DeployConfig => every managed VM, prompts preserved: the
+# user still decides whether to run it and whether to start stopped VMs). Unlike
+# the mandatory deployment-time gate, this path is entirely optional and can be
+# skipped or declined at any prompt.
+Function Select-PendingVMMaintenance {
+    Write-Log "Apply Pending VM Maintenance: reconciling DHCP/networking before maintenance." -Activity
+    $dhcpReady = Confirm-MemLabsDhcpReadiness
+    if (-not $dhcpReady) {
+        Write-RedX "DHCP/networking is not ready. Maintenance was not started; resolve the issue above and try again."
+        return
+    }
+    Start-Maintenance
+}
+
 Function Select-ToolsMenu {
 
     while ($true) {
@@ -211,6 +234,7 @@ function Select-ConfigMenu {
                 }
             }
             "v" { Select-VMMenu }
+            "a" { Select-PendingVMMaintenance }
             "m" {
                 $Global:Common.MouseEnabled = -not $Global:Common.MouseEnabled
                 try {
@@ -389,6 +413,8 @@ function Build-ConfigMenuOptions {
     $customOptions += [ordered]@{"*BREAK2" = "Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
     $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
     $customOptions += [ordered]@{ "HT" = "Use this to refresh tools on a VM, or add new ones, like Azure Data Studio!" }
+    $customOptions += [ordered]@{"A" = "Apply Pending VM Maintenance%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HA" = "Reconciles DHCP/networking first, then applies any pending fixes to all currently deployed Windows VMs. Optional -- you decide whether to run it and whether to start stopped VMs." }
 
     $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "List Resources%$($Global:Common.Colors.GenConfigHeader)" }
     $customOptions += [ordered]@{"V" = "Show Virtual Machines%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }

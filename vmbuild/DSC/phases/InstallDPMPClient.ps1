@@ -472,7 +472,7 @@ $startClientPackagePrestage = {
             if ($distErr) {
                 # Not "confirmed broken", just not ready -- same call the coverage gate makes
                 # on every iteration when a DP has no targeting row, so let it own the retry.
-                Write-DscStatus "Client package pre-stage: $DistributionPointFqdn would not accept the $packageId distribution after $distTries attempt(s) in 30s ($($distErr.Exception.Message)). Continuing; the client-package coverage gate re-establishes a missing targeting row on every pass and Phase 11 re-checks." -Warning
+                Write-DscStatus "Client package pre-stage deferred: $DistributionPointFqdn did not accept the $packageId distribution during its first 30s after DP registration ($distTries attempt(s): $($distErr.Exception.Message)). This pre-stage probe is informational; the authoritative client-package coverage gate now re-establishes targeting and waits for Installed, and Phase 11 re-checks."
 
                 # 0 of 102 historical retries ever succeeded, and the one line above cannot
                 # say why. The three readings below decide it: SMS_DistributionPoint blind vs

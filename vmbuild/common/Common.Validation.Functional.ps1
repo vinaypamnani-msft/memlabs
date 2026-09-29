@@ -354,6 +354,11 @@ function Test-VmFunctionality {
         'Secondary' {
             Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Secondary site"
             $testsPassed = Test-SecondaryFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            if ($testsPassed) {
+                Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying implicit MP and DP roles"
+                $siteSystemRolesOk = Test-SiteSystemFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+                $testsPassed = $testsPassed -and $siteSystemRolesOk
+            }
         }
         'SiteSystem' {
             Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying site system roles"
@@ -2332,7 +2337,26 @@ function Test-SQLAOFunctionality {
     $scriptBlock = {
         param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $clusterIpCsv, $agIpCsv, $recoveryOwner, $expectedReplicaCsv, $listenerRegisterAllProvidersIP, $listenerHostRecordTTL)
 
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $dnsDiagnostics = [ordered]@{
+            SchemaVersion      = 1
+            CapturedAtUtc      = [DateTime]::UtcNow.ToString('o')
+            ComputerName       = $env:COMPUTERNAME
+            Domain             = ''
+            LogonServer        = ''
+            DataTargets        = @()
+            ManagementTargets  = @()
+            Adapters           = @()
+            DefaultRoutes      = @()
+            ManagementQueries  = [System.Collections.Generic.List[object]]::new()
+            DataQueries        = [System.Collections.Generic.List[object]]::new()
+            FailureEvidence    = [System.Collections.Generic.List[object]]::new()
+            Classification     = 'NotEvaluated'
+        }
+        $results = @{
+            Passed         = $true
+            Details        = [System.Collections.Generic.List[string]]::new()
+            DnsDiagnostics = $dnsDiagnostics
+        }
         $clusterIPs = @($clusterIpCsv -split ',' | Where-Object { $_ })
         $agIPs = @($agIpCsv -split ',' | Where-Object { $_ })
         $listenerRegisterAllProvidersIP = $listenerRegisterAllProvidersIP -eq 'True'
@@ -2384,6 +2408,8 @@ function Test-SQLAOFunctionality {
                 Select-Object -Unique
         )
         $dnsServer = if ($dnsCandidates.Count -gt 0) { $dnsCandidates[0] } else { $null }
+        $dnsDiagnostics.Domain = $domain
+        $dnsDiagnostics.DataTargets = @($dnsCandidates)
 
         # Watchdog: run a scriptblock under Start-ThreadJob (or Start-Job
         # fallback) with a per-attempt timeout and retry. A few SQLAO probes
@@ -2426,6 +2452,7 @@ function Test-SQLAOFunctionality {
                             AttemptLog = $attemptLog
                         }
                     }
+
                     $attemptLog.Add("attempt $attempt timed out after ${TimeoutSec}s")
                     try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
                     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
@@ -2545,6 +2572,265 @@ function Test-SQLAOFunctionality {
             }
         }
 
+        function Get-DnsWatchdogError {
+            param($WatchdogResult)
+
+            $record = if ($WatchdogResult.Errors -and $WatchdogResult.Errors.Count -gt 0) {
+                $WatchdogResult.Errors[0]
+            }
+            else { $null }
+            $exception = if ($record -and $record.Exception) { $record.Exception } else { $null }
+            return [ordered]@{
+                Status                = "$($WatchdogResult.Status)"
+                Attempts              = $WatchdogResult.Attempts
+                Message               = if ($exception) { $exception.Message } elseif ($record) { "$record" } else { "$($WatchdogResult.AttemptLog -join '; ')" }
+                ExceptionType         = if ($exception) { $exception.GetType().FullName } else { '' }
+                HResult               = if ($exception) { $exception.HResult } else { $null }
+                FullyQualifiedErrorId = if ($record) { "$($record.FullyQualifiedErrorId)" } else { '' }
+                Category              = if ($record) { "$($record.CategoryInfo.Category)" } else { '' }
+                TargetObject          = if ($record) { "$($record.TargetObject)" } else { '' }
+                AttemptLog            = @($WatchdogResult.AttemptLog)
+            }
+        }
+
+        function Add-DnsManagementFailureEvidence {
+            param([string]$Purpose)
+
+            if (@($dnsDiagnostics.FailureEvidence | Where-Object { $_.Purpose -ne 'Topology' }).Count -gt 0) { return }
+            $evidence = [ordered]@{
+                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                Purpose       = $Purpose
+                Ports         = @()
+                DnsCache      = @()
+                Nrpt          = @()
+                HostsEntries  = @()
+                Authentication = $null
+                CimSessions   = @()
+                Events        = @()
+                Errors        = @()
+            }
+
+            $portRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in @($dnsManagementTargets | Where-Object { $_ } | Select-Object -Unique)) {
+                foreach ($port in @(53, 88, 135, 445, 5985, 5986)) {
+                    $client = $null
+                    $connected = $false
+                    $errorText = ''
+                    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                    try {
+                        $client = [System.Net.Sockets.TcpClient]::new()
+                        $async = $client.BeginConnect($target, $port, $null, $null)
+                        if ($async.AsyncWaitHandle.WaitOne(2000, $false)) {
+                            $client.EndConnect($async)
+                            $connected = $client.Connected
+                        }
+                        else { $errorText = 'timeout after 2000ms' }
+                    }
+                    catch { $errorText = $_.Exception.Message }
+                    finally {
+                        $timer.Stop()
+                        if ($client) { try { $client.Close() } catch {} }
+                    }
+                    $portRows.Add([ordered]@{
+                            Target    = $target
+                            Port      = $port
+                            Connected = $connected
+                            ElapsedMs = $timer.ElapsedMilliseconds
+                            Error     = $errorText
+                        })
+                }
+            }
+            $evidence.Ports = $portRows.ToArray()
+
+            try {
+                $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                $klistOutput = @(& klist.exe 2>&1 | Select-Object -First 120)
+                $hostTarget = @($dnsManagementTargets | Where-Object {
+                        $parsedIp = $null
+                        -not [System.Net.IPAddress]::TryParse("$_", [ref]$parsedIp)
+                    } | Select-Object -First 1)
+                $spnOutput = @()
+                if ($hostTarget.Count -gt 0) {
+                    $spnProbe = Invoke-WithWatchdog -TimeoutSec 8 -MaxAttempts 1 -ArgumentList @("$($hostTarget[0])") -ScriptBlock {
+                        param($target)
+                        @(& setspn.exe -Q "HOST/$target" 2>&1 | Select-Object -First 80)
+                    }
+                    $spnOutput = @($spnProbe.Output)
+                }
+                $evidence.Authentication = [ordered]@{
+                    Identity = "$($identity.Name)"
+                    ImpersonationLevel = "$($identity.ImpersonationLevel)"
+                    AuthenticationType = "$($identity.AuthenticationType)"
+                    Klist = $klistOutput
+                    HostSpnQuery = $spnOutput
+                }
+            }
+            catch { $evidence.Errors += "Authentication context: $($_.Exception.Message)" }
+
+            $cimRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in @($dnsManagementTargets | Where-Object { $_ } | Select-Object -Unique)) {
+                $cimTimer = [System.Diagnostics.Stopwatch]::StartNew()
+                $cimProbe = Invoke-WithWatchdog -TimeoutSec 8 -MaxAttempts 1 -ArgumentList @("$target") -ScriptBlock {
+                    param($server)
+                    $session = $null
+                    try {
+                        $option = New-CimSessionOption -Protocol Wsman
+                        $session = New-CimSession -ComputerName $server -SessionOption $option -OperationTimeoutSec 5 -ErrorAction Stop
+                        $os = Get-CimInstance -CimSession $session -ClassName Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop
+                        [pscustomobject]@{ ComputerName = "$($os.CSName)"; Protocol = "$($session.Protocol)" }
+                    }
+                    finally {
+                        if ($session) { Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue }
+                    }
+                }
+                $cimTimer.Stop()
+                $cimRows.Add([ordered]@{
+                        Target    = $target
+                        Status    = "$($cimProbe.Status)"
+                        ElapsedMs = $cimTimer.ElapsedMilliseconds
+                        Output    = @($cimProbe.Output)
+                        Error     = Get-DnsWatchdogError $cimProbe
+                    })
+            }
+            $evidence.CimSessions = $cimRows.ToArray()
+
+            try {
+                $interestingNames = @(@($env:COMPUTERNAME, $clusterName, $listenerName) | Where-Object { $_ })
+                $evidence.DnsCache = @(Get-DnsClientCache -ErrorAction Stop |
+                    Where-Object {
+                        $entryName = "$($_.Entry)"
+                        @($interestingNames | Where-Object { $entryName -like "$_*" }).Count -gt 0
+                    } |
+                    Select-Object Entry, RecordName, RecordType, Data, TimeToLive, Status)
+            }
+            catch { $evidence.Errors += "DNS cache: $($_.Exception.Message)" }
+            try {
+                $evidence.Nrpt = @(Get-DnsClientNrptPolicy -Effective -ErrorAction Stop |
+                    Select-Object Namespace, NameServers, DirectAccessDnsServers, QueryPolicy)
+            }
+            catch { $evidence.Errors += "NRPT: $($_.Exception.Message)" }
+            try {
+                $hostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+                $evidence.HostsEntries = @(Get-Content -LiteralPath $hostsPath -ErrorAction Stop |
+                    Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' })
+            }
+            catch { $evidence.Errors += "Hosts file: $($_.Exception.Message)" }
+            foreach ($eventLog in @(
+                    'Microsoft-Windows-WMI-Activity/Operational',
+                    'Microsoft-Windows-WinRM/Operational',
+                    'Microsoft-Windows-DNS-Client/Operational'
+                )) {
+                try {
+                    $events = @(Get-WinEvent -FilterHashtable @{
+                            LogName   = $eventLog
+                            StartTime = (Get-Date).AddMinutes(-20)
+                        } -ErrorAction Stop |
+                        Where-Object { $_.Level -in @(2, 3) } |
+                        Select-Object -First 20 TimeCreated, Id, LevelDisplayName, ProviderName, Message)
+                    if ($events.Count -gt 0) {
+                        $evidence.Events += [ordered]@{ LogName = $eventLog; Records = $events }
+                    }
+                }
+                catch { $evidence.Errors += "Event log '$eventLog': $($_.Exception.Message)" }
+            }
+            $dnsDiagnostics.FailureEvidence.Add($evidence)
+        }
+
+        function Invoke-DnsManagementQuery {
+            param(
+                [Parameter(Mandatory)][string]$Purpose,
+                [Parameter(Mandatory)][string]$Zone,
+                [Parameter(Mandatory)][string]$Name,
+                [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Targets
+            )
+
+            $lastResult = $null
+            foreach ($target in @($Targets | Where-Object { $_ } | Select-Object -Unique)) {
+                $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$Zone' -Name '$Name' -RRType A -ComputerName '$target'")
+                $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                $watchdog = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($Zone, $Name, $target) -ScriptBlock {
+                    param($queryZone, $queryName, $server)
+                    $records = Get-DnsServerResourceRecord -ZoneName $queryZone -Name $queryName -RRType A -ComputerName $server -ErrorAction Stop
+                    @($records | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                }
+                $timer.Stop()
+                $errorDetail = Get-DnsWatchdogError $watchdog
+                $dnsDiagnostics.ManagementQueries.Add([ordered]@{
+                        CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                        Purpose       = $Purpose
+                        Target        = $target
+                        Zone          = $Zone
+                        Name          = $Name
+                        Status        = "$($watchdog.Status)"
+                        Attempts      = $watchdog.Attempts
+                        ElapsedMs     = $timer.ElapsedMilliseconds
+                        Addresses     = @($watchdog.Output | Where-Object { $_ })
+                        Error         = $errorDetail
+                    })
+                $lastResult = [pscustomobject]@{
+                    Status     = "$($watchdog.Status)"
+                    Output     = @($watchdog.Output | Where-Object { $_ })
+                    Errors     = @($watchdog.Errors)
+                    Attempts   = $watchdog.Attempts
+                    AttemptLog = @($watchdog.AttemptLog)
+                    Target     = $target
+                    Error      = $errorDetail
+                }
+                if ($watchdog.Status -eq 'OK') { return $lastResult }
+                Add-DnsManagementFailureEvidence -Purpose $Purpose
+                $results.Details.Add("  DNS management query against '$target' $("$($watchdog.Status)".ToLowerInvariant()): $($errorDetail.Message)")
+            }
+            return $lastResult
+        }
+
+        $logonServer = ("$env:LOGONSERVER" -replace '^\\\\', '').Trim()
+        $dnsManagementTargets = [System.Collections.Generic.List[string]]::new()
+        if ($logonServer) {
+            $logonFqdn = if ($logonServer.Contains('.')) { $logonServer } else { "$logonServer.$domain" }
+            $dnsManagementTargets.Add($logonFqdn)
+            if ($logonServer -ine $logonFqdn) { $dnsManagementTargets.Add($logonServer) }
+        }
+        foreach ($candidate in $dnsCandidates) {
+            if (-not $dnsManagementTargets.Contains("$candidate")) { $dnsManagementTargets.Add("$candidate") }
+        }
+        $dnsDiagnostics.LogonServer = $logonServer
+        $dnsDiagnostics.ManagementTargets = $dnsManagementTargets.ToArray()
+        try {
+            $adapterRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($iface in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop)) {
+                $dnsClient = Get-DnsClient -InterfaceIndex $iface.InterfaceIndex -ErrorAction SilentlyContinue
+                $dnsAddresses = Get-DnsClientServerAddress -InterfaceIndex $iface.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                $addresses = @(Get-NetIPAddress -InterfaceIndex $iface.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    ForEach-Object {
+                        [ordered]@{
+                            Address      = "$($_.IPAddress)"
+                            PrefixLength = $_.PrefixLength
+                            PrefixOrigin = "$($_.PrefixOrigin)"
+                            SkipAsSource = $_.SkipAsSource
+                        }
+                    })
+                $adapterRows.Add([ordered]@{
+                        InterfaceIndex                 = $iface.InterfaceIndex
+                        Alias                          = "$($iface.InterfaceAlias)"
+                        ConnectionState                = "$($iface.ConnectionState)"
+                        InterfaceMetric                = $iface.InterfaceMetric
+                        ConnectionSpecificSuffix       = "$($dnsClient.ConnectionSpecificSuffix)"
+                        RegisterThisConnectionsAddress = $dnsClient.RegisterThisConnectionsAddress
+                        DnsServers                     = @($dnsAddresses.ServerAddresses)
+                        Addresses                      = $addresses
+                    })
+            }
+            $dnsDiagnostics.Adapters = $adapterRows.ToArray()
+            $dnsDiagnostics.DefaultRoutes = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Select-Object InterfaceIndex, InterfaceAlias, NextHop, RouteMetric, State)
+        }
+        catch {
+            $dnsDiagnostics.FailureEvidence.Add([ordered]@{
+                    CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                    Purpose       = 'Topology'
+                    Errors        = @($_.Exception.Message)
+                })
+        }
         try {
             Import-Module SqlServer -ErrorAction SilentlyContinue
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
@@ -2655,49 +2941,64 @@ function Test-SQLAOFunctionality {
                     # killed). Run BOTH the zone-RPC probe and the port-53 fallback
                     # under Invoke-WithWatchdog (kill+retry on hang), exactly like
                     # the Step 5b listener-DNS probe.
-                    $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$clusterName' -RRType A -ComputerName '$dnsServer'")
-                    $cwd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $clusterName, $dnsServer) -ScriptBlock {
-                        param($zone, $name, $server)
-                        # Project to plain IP strings INSIDE the job. The watchdog runs this
-                        # under Start-Job when Start-ThreadJob is unavailable (the in-guest
-                        # WinPS 5.1 case), and Receive-Job then hands back DESERIALIZED CIM
-                        # records whose RecordData.IPv4Address has lost its IPAddress type --
-                        # .IPAddressToString returns $null, which surfaced as a spurious
-                        # "cluster IP not in DNS (found: )" FAIL even though DNS was correct.
-                        # Strings serialize losslessly, so do the extraction here.
-                        $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                        @($recs | ForEach-Object {
-                                '{0}|{1}' -f $_.RecordData.IPv4Address.IPAddressToString, [int]$_.TimeToLive.TotalSeconds
-                            })
-                    }
-                    if ($cwd.Status -eq 'OK') {
+                    $cwd = Invoke-DnsManagementQuery -Purpose 'ClusterName' -Zone $domain -Name $clusterName -Targets $dnsManagementTargets.ToArray()
+                    if ($cwd -and $cwd.Status -eq 'OK') {
                         $clusterDnsRpcOk = $true
-                        $clusterDnsEntries = @($cwd.Output | Where-Object { $_ })
-                        $clusterResolvedIPs = @($clusterDnsEntries | ForEach-Object { ($_ -split '\|', 2)[0] })
+                        $clusterResolvedIPs = @($cwd.Output | Where-Object { $_ })
+                        $attemptNote = if ($cwd.Attempts -gt 1) { ", attempt $($cwd.Attempts)" } else { '' }
+                        $clusterDnsSource = " (DNS management via '$($cwd.Target)'$attemptNote)"
+                        if ($cwd.Target) {
+                            $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$clusterName' -RRType A -ComputerName '$($cwd.Target)'")
+                            $cwdTtl = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $clusterName, $cwd.Target) -ScriptBlock {
+                                param($zone, $name, $server)
+                                $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                                @($recs | ForEach-Object {
+                                        '{0}|{1}' -f $_.RecordData.IPv4Address.IPAddressToString, [int]$_.TimeToLive.TotalSeconds
+                                    })
+                            }
+                            if ($cwdTtl.Status -eq 'OK') {
+                                $clusterDnsEntries = @($cwdTtl.Output | Where-Object { $_ })
+                            }
+                            else {
+                                $results.Details.Add("  DNS management TTL capture against '$($cwd.Target)' $("$($cwdTtl.Status)".ToLowerInvariant()): $((Get-DnsWatchdogError $cwdTtl).Message)")
+                            }
+                        }
                     }
                     else {
-                        if ($cwd.Status -eq 'Error') {
-                            $clusterDnsErr = if ($cwd.Errors -and $cwd.Errors[0].Exception) { $cwd.Errors[0].Exception.Message } else { ($cwd.Errors -join '; ') }
-                            $results.Details.Add("  RPC against '$dnsServer' errored: $clusterDnsErr -- falling back to direct DNS (port 53)")
-                        }
-                        else {
-                            $clusterDnsErr = "DnsServer RPC timed out after $($cwd.Attempts) attempt(s)"
-                            $results.Details.Add("  RPC against '$dnsServer' timed out -- falling back to direct DNS (port 53)")
-                        }
+                        $clusterDnsErr = if ($cwd) { "$($cwd.Error.Message)" } else { 'no DNS management target was available' }
+                        $results.Details.Add("  DNS management failed against all targets [$($dnsManagementTargets -join ', ')]: $clusterDnsErr -- falling back to direct DNS (port 53)")
                         $clusterFqdn = "$clusterName.$domain"
-                        $results.Details.Add("CMD: Resolve-DnsName -Name '$clusterFqdn' -Type A -Server '$dnsServer' -DnsOnly -NoHostsFile")
-                        $cwd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($clusterFqdn, $dnsServer) -ScriptBlock {
-                            param($n, $s)
-                            # Project to plain IP strings inside the job (Start-Job serialization-safe).
-                            $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
-                            @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object {
-                                    '{0}|{1}' -f $_.IPAddress, [int]$_.TTL
+                        foreach ($candidate in $dnsCandidates) {
+                            $results.Details.Add("CMD: Resolve-DnsName -Name '$clusterFqdn' -Type A -Server '$candidate' -DnsOnly -NoHostsFile")
+                            $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                            $cwd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($clusterFqdn, $candidate) -ScriptBlock {
+                                param($n, $s)
+                                $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                                @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object {
+                                        '{0}|{1}' -f $_.IPAddress, [int]$_.TTL
+                                    })
+                            }
+                            $timer.Stop()
+                            $clusterDirectAddresses = @($cwd2.Output | Where-Object { $_ } | ForEach-Object { ($_ -split '\|', 2)[0] })
+                            $dnsDiagnostics.DataQueries.Add([ordered]@{
+                                    CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                                    Purpose       = 'ClusterName'
+                                    Target        = $candidate
+                                    Name          = $clusterFqdn
+                                    Status        = "$($cwd2.Status)"
+                                    Attempts      = $cwd2.Attempts
+                                    ElapsedMs     = $timer.ElapsedMilliseconds
+                                    Addresses     = $clusterDirectAddresses
+                                    Error         = Get-DnsWatchdogError $cwd2
                                 })
-                        }
-                        if ($cwd2.Status -eq 'OK') {
-                            $clusterDnsEntries = @($cwd2.Output | Where-Object { $_ })
-                            $clusterResolvedIPs = @($clusterDnsEntries | ForEach-Object { ($_ -split '\|', 2)[0] })
-                            if ($clusterResolvedIPs.Count -gt 0) { $clusterDnsSource = ' (direct DNS, port 53)' }
+                            if ($cwd2.Status -eq 'OK') {
+                                $clusterDnsEntries = @($cwd2.Output | Where-Object { $_ })
+                                $clusterResolvedIPs = $clusterDirectAddresses
+                                if ($clusterResolvedIPs.Count -gt 0) {
+                                    $clusterDnsSource = " (direct DNS via '$candidate', port 53)"
+                                    break
+                                }
+                            }
                         }
                     }
 
@@ -2711,12 +3012,18 @@ function Test-SQLAOFunctionality {
                             $results.Passed = $false
                             $results.Details.Add("FAIL: Cluster DNS RRset is '$($actualClusterDns -join ',')', expected exactly active provider '$($expectedClusterDns -join ',')'")
                         }
-                        $wrongClusterTtls = @($clusterDnsEntries | Where-Object {
-                                [int](($_ -split '\|', 2)[1]) -ne $listenerHostRecordTTL
-                            })
-                        if ($wrongClusterTtls.Count -gt 0) {
+                        if ($clusterDnsEntries.Count -eq 0) {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: Cluster DNS TTL differs from expected $listenerHostRecordTTL second(s): $($wrongClusterTtls -join ', ')")
+                            $results.Details.Add("FAIL: Cluster DNS TTL could not be measured for '$clusterName'")
+                        }
+                        else {
+                            $wrongClusterTtls = @($clusterDnsEntries | Where-Object {
+                                    [int](($_ -split '\|', 2)[1]) -ne $listenerHostRecordTTL
+                                })
+                            if ($wrongClusterTtls.Count -gt 0) {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: Cluster DNS TTL differs from expected $listenerHostRecordTTL second(s): $($wrongClusterTtls -join ', ')")
+                            }
                         }
                     }
                     elseif ($clusterDnsRpcOk) {
@@ -3090,7 +3397,8 @@ function Test-SQLAOFunctionality {
                 $hostname = $env:COMPUTERNAME
                 $staleRecords = @()
                 $hostZoneRpcOk = $false
-                if ($dnsServer -and $domain) {
+                $hostZoneTarget = $null
+                if ($dnsManagementTargets.Count -gt 0 -and $domain) {
                     # Same cross-subnet caveat as the cluster-name probe above PLUS the
                     # same CIM-hang risk: Get-DnsServerResourceRecord is a CDXML/WMI
                     # cmdlet that opens an implicit CIM session to the DC, so it can both
@@ -3101,24 +3409,16 @@ function Test-SQLAOFunctionality {
                     # fall through to the informational skip instead of stalling the whole
                     # per-VM job. If we can't read the zone we simply can't audit stale
                     # heartbeat records remotely (informational), which is not a fault.
-                    $hwd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $hostname, $dnsServer) -ScriptBlock {
-                        param($zone, $name, $server)
-                        # Project to plain IP strings inside the job: deserialized CIM records
-                        # from the Start-Job fallback lose RecordData.IPv4Address, so the
-                        # subnet match below must run on strings, not record objects.
-                        $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                        @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                    }
-                    if ($hwd.Status -eq 'OK') {
+                    $hwd = Invoke-DnsManagementQuery -Purpose 'NodeStaleRecordAudit' -Zone $domain -Name $hostname -Targets $dnsManagementTargets.ToArray()
+                    if ($hwd -and $hwd.Status -eq 'OK') {
                         $hostZoneRpcOk = $true
+                        $hostZoneTarget = $hwd.Target
                         # $hwd.Output is now plain IP strings; $staleRecords holds IP strings.
                         $staleRecords = @($hwd.Output | Where-Object { $_ -and $_ -like "${clusterSubnet}*" })
                     }
                     else {
-                        $hwdErr = if ($hwd.Status -eq 'Error' -and $hwd.Errors -and $hwd.Errors[0].Exception) { $hwd.Errors[0].Exception.Message }
-                                  elseif ($hwd.Status -eq 'Error') { ($hwd.Errors -join '; ') }
-                                  else { "DnsServer CIM query timed out after $($hwd.Attempts) attempt(s)" }
-                        $results.Details.Add("INFO: Could not query DNS zone '$domain' on '$dnsServer' to audit stale heartbeat A records for '$hostname' ($hwdErr); skipping remote stale-record check (DNS-management CIM unavailable or unresponsive)")
+                        $hwdErr = if ($hwd) { "$($hwd.Error.Message)" } else { 'no DNS management target was available' }
+                        $results.Details.Add("INFO: Could not query DNS zone '$domain' via targets [$($dnsManagementTargets -join ', ')] to audit stale heartbeat A records for '$hostname' ($hwdErr); skipping remote stale-record check (DNS-management CIM unavailable or unresponsive)")
                     }
                 }
                 if ($staleRecords.Count -gt 0) {
@@ -3148,11 +3448,11 @@ function Test-SQLAOFunctionality {
                         }
                         # Remove stale A records from DNS server ($staleRecords = IP strings)
                         foreach ($ip in $staleRecords) {
-                            Remove-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
+                            Remove-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -RecordData $ip -ComputerName $hostZoneTarget -Force -ErrorAction SilentlyContinue
                             $results.Details.Add("REMEDIATE: Removed stale A record $hostname -> $ip")
                         }
                         # Recheck the DNS server directly (no LLMNR ambiguity)
-                        $recheckRecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
+                        $recheckRecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $hostZoneTarget -ErrorAction SilentlyContinue)
                         $staleRecords2 = @($recheckRecords | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
                         if ($staleRecords2.Count -gt 0) {
                             $staleIPs2 = @($staleRecords2 | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
@@ -3442,69 +3742,107 @@ WHERE drs.is_local = 1
                         Where-Object { $_.ResourceType -eq 'IP Address' -and $_.State -eq 'Online' } |
                         ForEach-Object { ($_ | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value } |
                         Where-Object { $_ -in $agIPs })
-                if (-not $dnsServer) {
-                    $dnsProbeFailureMsg = "no usable DNS server found on this VM (Get-DnsClientServerAddress returned no IPv4 entries outside loopback/APIPA)"
+                if ($dnsManagementTargets.Count -eq 0 -and $dnsCandidates.Count -eq 0) {
+                    $dnsProbeFailureMsg = "no usable DNS management or data-plane target was found on this VM"
                 }
                 else {
                     $resolvedIPs = @()
+                    $directResolvedIPs = @()
                     $listenerDnsEntries = @()
+                    $directDnsEntries = @()
                     $sourceNote = ''
+                    $directSourceNote = ''
                     $rpcStatus = 'Skipped'
-                    foreach ($candidate in $dnsCandidates) {
-                        $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$candidate'")
-                        $wd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $listenerName, $candidate) -ScriptBlock {
-                            param($zone, $name, $server)
-                            # Project to plain IP strings inside the job (Start-Job-safe);
-                            # deserialized CIM records lose RecordData.IPv4Address otherwise,
-                            # producing a spurious blank "'<listener>' resolves to" line.
-                            $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                            @($recs | ForEach-Object {
-                                    '{0}|{1}' -f $_.RecordData.IPv4Address.IPAddressToString, [int]$_.TimeToLive.TotalSeconds
-                                })
-                        }
+                    $wd = Invoke-DnsManagementQuery -Purpose 'Listener' -Zone $domain -Name $listenerName -Targets $dnsManagementTargets.ToArray()
+                    if ($wd) {
                         $rpcStatus = $wd.Status
                         if ($wd.Status -eq 'OK') {
-                            $listenerDnsEntries = @($wd.Output | Where-Object { $_ })
-                            $resolvedIPs = @($listenerDnsEntries | ForEach-Object { ($_ -split '\|', 2)[0] })
+                            $resolvedIPs = @($wd.Output | Where-Object { $_ })
                             $attemptNote = if ($wd.Attempts -gt 1) { ", attempt $($wd.Attempts)" } else { '' }
-                            if ($candidate -ne $dnsCandidates[0] -or $wd.Attempts -gt 1) {
-                                $sourceNote = " (via '$candidate'$attemptNote)"
-                            }
-                            break
-                        }
-                        elseif ($wd.Status -eq 'Error') {
-                            $results.Details.Add("  RPC against '$candidate' errored: $($wd.Errors[0].Exception.Message)")
-                        }
-                        else {
-                            $results.Details.Add("  RPC against '$candidate' timed out after $($wd.Attempts) attempts")
-                        }
-                    }
-
-                    if ($resolvedIPs.Count -eq 0 -and $rpcStatus -ne 'OK') {
-                        # RPC failed against every candidate -- try direct DNS port 53 next.
-                        $fqdn = "$listenerName.$domain"
-                        foreach ($candidate in $dnsCandidates) {
-                            $results.Details.Add("CMD: Resolve-DnsName -Name '$fqdn' -Type A -Server '$candidate' -DnsOnly -NoHostsFile")
-                            $wd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($fqdn, $candidate) -ScriptBlock {
-                                param($n, $s)
-                                # Project to plain IP strings inside the job (Start-Job-safe).
-                                $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
-                                @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object {
-                                        '{0}|{1}' -f $_.IPAddress, [int]$_.TTL
-                                    })
-                            }
-                            if ($wd2.Status -eq 'OK') {
-                                $listenerDnsEntries = @($wd2.Output | Where-Object { $_ })
-                                $resolvedIPs = @($listenerDnsEntries | ForEach-Object { ($_ -split '\|', 2)[0] })
-                                if ($resolvedIPs.Count -gt 0) {
-                                    $sourceNote = " (direct DNS via '$candidate')"
-                                    break
+                            $sourceNote = " (DNS management via '$($wd.Target)'$attemptNote)"
+                            if ($wd.Target) {
+                                $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$($wd.Target)'")
+                                $wdTtl = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $listenerName, $wd.Target) -ScriptBlock {
+                                    param($zone, $name, $server)
+                                    $recs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                                    @($recs | ForEach-Object {
+                                            '{0}|{1}' -f $_.RecordData.IPv4Address.IPAddressToString, [int]$_.TimeToLive.TotalSeconds
+                                        })
+                                }
+                                if ($wdTtl.Status -eq 'OK') {
+                                    $listenerDnsEntries = @($wdTtl.Output | Where-Object { $_ })
+                                }
+                                else {
+                                    $results.Details.Add("  DNS management TTL capture against '$($wd.Target)' $("$($wdTtl.Status)".ToLowerInvariant()): $((Get-DnsWatchdogError $wdTtl).Message)")
                                 }
                             }
                         }
                     }
 
-                    if ($resolvedIPs.Count -gt 0) {
+                    # Always exercise the DNS data plane independently. This distinguishes
+                    # an RPC/CIM authentication problem from bad authoritative DNS data even
+                    # when the hostname-based management query succeeds.
+                    $fqdn = "$listenerName.$domain"
+                    foreach ($candidate in $dnsCandidates) {
+                        $results.Details.Add("CMD: Resolve-DnsName -Name '$fqdn' -Type A -Server '$candidate' -DnsOnly -NoHostsFile")
+                        $timer = [System.Diagnostics.Stopwatch]::StartNew()
+                        $wd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($fqdn, $candidate) -ScriptBlock {
+                            param($n, $s)
+                            # Project to plain IP/TTL strings inside the job (Start-Job serialization-safe).
+                            $r = Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                            @($r | Where-Object { $_.Type -eq 'A' } | ForEach-Object {
+                                    '{0}|{1}' -f $_.IPAddress, [int]$_.TTL
+                                })
+                        }
+                        $timer.Stop()
+                        $listenerDirectAddresses = @($wd2.Output | Where-Object { $_ } | ForEach-Object { ($_ -split '\|', 2)[0] })
+                        $dnsDiagnostics.DataQueries.Add([ordered]@{
+                                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                                Purpose       = 'Listener'
+                                Target        = $candidate
+                                Name          = $fqdn
+                                Status        = "$($wd2.Status)"
+                                Attempts      = $wd2.Attempts
+                                ElapsedMs     = $timer.ElapsedMilliseconds
+                                Addresses     = $listenerDirectAddresses
+                                Error         = Get-DnsWatchdogError $wd2
+                            })
+                        if ($wd2.Status -eq 'OK') {
+                            $directDnsEntries = @($wd2.Output | Where-Object { $_ })
+                            $directResolvedIPs = $listenerDirectAddresses
+                            if ($directResolvedIPs.Count -gt 0) {
+                                $directSourceNote = " (direct DNS via '$candidate')"
+                                break
+                            }
+                        }
+                    }
+
+                    if ($listenerDnsEntries.Count -eq 0 -and $directDnsEntries.Count -gt 0 -and
+                        ($resolvedIPs.Count -eq 0 -or
+                            ((@($resolvedIPs | Sort-Object -Unique) -join ',') -eq (@($directResolvedIPs | Sort-Object -Unique) -join ',')))) {
+                        $listenerDnsEntries = @($directDnsEntries)
+                    }
+
+                    if ($rpcStatus -eq 'OK' -and $resolvedIPs.Count -gt 0 -and $directResolvedIPs.Count -gt 0) {
+                        $managementSet = @($resolvedIPs | Sort-Object -Unique)
+                        $dataSet = @($directResolvedIPs | Sort-Object -Unique)
+                        if (($managementSet -join ',') -ne ($dataSet -join ',')) {
+                            $results.Details.Add("INFO: DNS management and direct port-53 answers disagree for '$listenerName' (management=$($managementSet -join ','); data=$($dataSet -join ',')); targets may be different DCs with transient replication lag")
+                        }
+                    }
+                    elseif ($resolvedIPs.Count -eq 0 -and $directResolvedIPs.Count -gt 0) {
+                        $resolvedIPs = $directResolvedIPs
+                        $listenerDnsEntries = @($directDnsEntries)
+                        $sourceNote = if ($directSourceNote) { $directSourceNote } else { ' (direct DNS, port 53)' }
+                        if ($rpcStatus -eq 'OK') {
+                            $results.Details.Add("WARN: DNS management returned no '$listenerName' record while direct port-53 DNS returned $($directResolvedIPs -join ', ')")
+                        }
+                    }
+
+                    if ($resolvedIPs.Count -eq 0 -and $rpcStatus -ne 'OK' -and $directResolvedIPs.Count -eq 0) {
+                        $dnsProbeFailureMsg = "DNS zone probes (management + port 53) did not complete against management targets [$($dnsManagementTargets -join ', ')] and data targets [$($dnsCandidates -join ', ')]"
+                    }
+                    elseif ($resolvedIPs.Count -gt 0) {
                         $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$sourceNote")
                         $expectedListenerDns = if ($listenerRegisterAllProvidersIP) {
                             @($agIPs | Sort-Object)
@@ -3519,23 +3857,29 @@ WHERE drs.is_local = 1
                             $results.Passed = $false
                             $results.Details.Add("FAIL: Listener DNS RRset is '$($actualListenerDns -join ',')', expected exactly '$($expectedListenerDns -join ',')' for RegisterAllProvidersIP=$([uint32][bool]$listenerRegisterAllProvidersIP)")
                         }
-                        $wrongListenerTtls = @($listenerDnsEntries | Where-Object {
-                                [int](($_ -split '\|', 2)[1]) -ne $listenerHostRecordTTL
-                            })
-                        if ($wrongListenerTtls.Count -gt 0) {
+                        if ($listenerDnsEntries.Count -eq 0) {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: Listener DNS TTL differs from expected $listenerHostRecordTTL second(s): $($wrongListenerTtls -join ', ')")
+                            $results.Details.Add("FAIL: Listener DNS TTL could not be measured for '$listenerName'")
+                        }
+                        else {
+                            $wrongListenerTtls = @($listenerDnsEntries | Where-Object {
+                                    [int](($_ -split '\|', 2)[1]) -ne $listenerHostRecordTTL
+                                })
+                            if ($wrongListenerTtls.Count -gt 0) {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: Listener DNS TTL differs from expected $listenerHostRecordTTL second(s): $($wrongListenerTtls -join ', ')")
+                            }
                         }
                     }
                     elseif ($rpcStatus -eq 'OK') {
-                        # RPC succeeded but returned no records => listener has no A record in the zone.
-                        # This is a genuine fault, not a probe glitch -- emit FAIL immediately.
+                        # Both management and direct DNS completed without an A record.
                         $results.Passed = $false
                         $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
                     }
                     else {
-                        # All probes failed. Defer the WARN/INFO decision until after Step 6.
-                        $dnsProbeFailureMsg = "DNS zone probes (RPC + port 53) did not complete against any of $($dnsCandidates.Count) DNS server(s) [$($dnsCandidates -join ', ')]"
+                        if (-not $dnsProbeFailureMsg) {
+                            $dnsProbeFailureMsg = "DNS zone probes (management + port 53) did not return an A record"
+                        }
                     }
                 }
             }
@@ -3971,6 +4315,32 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
             $results.Details.Add("FAIL: SQLAO validation failed: $($_.Exception.Message)")
         }
 
+        $managementRows = @($dnsDiagnostics.ManagementQueries)
+        $dataRows = @($dnsDiagnostics.DataQueries)
+        $managementSuccess = @($managementRows | Where-Object { $_.Status -eq 'OK' }).Count -gt 0
+        $managementFailure = @($managementRows | Where-Object { $_.Status -ne 'OK' }).Count -gt 0
+        $dataSuccess = @($dataRows | Where-Object { $_.Status -eq 'OK' -and $_.Addresses.Count -gt 0 }).Count -gt 0
+        if (-not $managementFailure) {
+            $dnsDiagnostics.Classification = if ($managementSuccess -and $dataSuccess) {
+                'ManagementAndDataHealthy'
+            }
+            elseif ($managementSuccess) {
+                'ManagementHealthyDataPlaneUnmeasured'
+            }
+            else {
+                'NoManagementProbeRequired'
+            }
+        }
+        elseif ($managementSuccess) {
+            $dnsDiagnostics.Classification = 'TargetSpecificManagementFailure'
+        }
+        elseif ($dataSuccess -or $listenerSqlOk) {
+            $dnsDiagnostics.Classification = 'ManagementPlaneUnavailableDataPlaneHealthy'
+        }
+        else {
+            $dnsDiagnostics.Classification = 'DnsPathUnresolved'
+        }
+
         return $results
     }
 
@@ -3997,8 +4367,108 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
         -ArgumentList $validationArguments `
         -DisplayName "Phase11-SQLAO-Test" -SuppressLog -AsJob -TimeoutSeconds 600 -PollProgress
 
-    $recoveryTarget = if ($result -and $result.ScriptBlockOutput) { [string]$result.ScriptBlockOutput.RecoveryTarget } else { '' }
-    $recoveryService = if ($result -and $result.ScriptBlockOutput) { [string]$result.ScriptBlockOutput.RecoveryService } else { '' }
+    $sqlAoOutput = $null
+    try {
+        $sqlAoOutput = $result.ScriptBlockOutput
+        if ($sqlAoOutput -is [System.Collections.IEnumerable] -and
+            $sqlAoOutput -isnot [System.Collections.IDictionary] -and
+            $sqlAoOutput -isnot [string]) {
+            $sqlAoOutput = @($sqlAoOutput | Where-Object {
+                    $_ -is [System.Collections.IDictionary] -and $_.Contains('DnsDiagnostics')
+                }) | Select-Object -Last 1
+        }
+        if ($sqlAoOutput -is [System.Collections.IDictionary] -and $sqlAoOutput.Contains('DnsDiagnostics') -and
+            $sqlAoOutput.DnsDiagnostics -and $Common -and $Common.LogPath) {
+            $dnsDiagnosticObject = $sqlAoOutput.DnsDiagnostics
+            $managementFailures = @($dnsDiagnosticObject.ManagementQueries | Where-Object { $_.Status -ne 'OK' })
+            $managementSuccesses = @($dnsDiagnosticObject.ManagementQueries | Where-Object { $_.Status -eq 'OK' })
+            if ($managementFailures.Count -gt 0 -and $managementSuccesses.Count -eq 0) {
+                $dcControl = $null
+                $dcVm = @($DeployConfig.virtualMachines | Where-Object {
+                        -not $_.hidden -and "$($_.role)" -in @('DC', 'OtherDC') -and
+                        (-not $_.domain -or "$($_.domain)" -ieq "$domain")
+                    }) | Select-Object -First 1
+                if ($dcVm -and $dcVm.vmName) {
+                    $queryNames = @(@($VMName, $clusterName, $listenerName) | Where-Object { $_ } | Select-Object -Unique)
+                    try {
+                        $dcResult = Invoke-VmCommand -VmName "$($dcVm.vmName)" -VmDomainName $domain `
+                            -SuppressLog -AsJob -TimeoutSeconds 60 -SessionMaxRetries 1 `
+                            -ArgumentList $domain, ($queryNames -join ',') -ScriptBlock {
+                            param($zone, $namesCsv)
+                            $rows = [System.Collections.Generic.List[object]]::new()
+                            foreach ($name in @("$namesCsv".Split(',') | Where-Object { $_ })) {
+                                try {
+                                    $records = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ErrorAction Stop)
+                                    $rows.Add([ordered]@{
+                                            Name      = $name
+                                            Status    = 'OK'
+                                            Addresses = @($records | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                                        })
+                                }
+                                catch {
+                                    $rows.Add([ordered]@{
+                                            Name                  = $name
+                                            Status                = 'Error'
+                                            Message               = $_.Exception.Message
+                                            ExceptionType         = $_.Exception.GetType().FullName
+                                            HResult               = $_.Exception.HResult
+                                            FullyQualifiedErrorId = "$($_.FullyQualifiedErrorId)"
+                                        })
+                                }
+                            }
+                            [ordered]@{
+                                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                                ComputerName  = $env:COMPUTERNAME
+                                Zone          = $zone
+                                Records       = $rows.ToArray()
+                            }
+                        }
+                        if ($dcResult -and -not $dcResult.ScriptBlockFailed -and $dcResult.ScriptBlockOutput) {
+                            $dcControl = $dcResult.ScriptBlockOutput
+                        }
+                        else {
+                            $dcControl = [ordered]@{
+                                ComputerName = "$($dcVm.vmName)"
+                                Status       = 'HostInvocationFailed'
+                                TimedOut     = [bool]($dcResult -and $dcResult.TimedOut)
+                                Errors       = @($dcResult.ErrorDetails)
+                            }
+                        }
+                    }
+                    catch {
+                        $dcControl = [ordered]@{
+                            ComputerName = "$($dcVm.vmName)"
+                            Status       = 'HostInvocationFailed'
+                            Error        = $_.Exception.Message
+                        }
+                    }
+                }
+                else {
+                    $dcControl = [ordered]@{
+                        Status = 'Skipped'
+                        Reason = 'No DC VM for this domain was present in the deployment configuration.'
+                    }
+                }
+                if ($dnsDiagnosticObject -is [System.Collections.IDictionary]) {
+                    $dnsDiagnosticObject['DcLocalAuthoritativeControl'] = $dcControl
+                }
+                else {
+                    $dnsDiagnosticObject | Add-Member -MemberType NoteProperty -Name DcLocalAuthoritativeControl -Value $dcControl -Force
+                }
+            }
+            $dnsDiagDir = Split-Path $Common.LogPath -Parent
+            $dnsDiagPath = Join-Path $dnsDiagDir ("{0}-Phase11-{1}-SqlAoDnsMatrix.json" -f $VMName, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+            $sqlAoOutput.DnsDiagnostics | ConvertTo-Json -Depth 12 -ErrorAction Stop |
+                Set-Content -LiteralPath $dnsDiagPath -Encoding UTF8 -ErrorAction Stop
+            Write-Log "[Phase 11] $VMName [SQLAO]: Captured DNS transport diagnostics -> $dnsDiagPath" -LogOnly
+        }
+    }
+    catch {
+        Write-Log "[Phase 11] $VMName [SQLAO]: Could not persist DNS transport diagnostics: $($_.Exception.Message)" -LogOnly
+    }
+
+    $recoveryTarget = if ($sqlAoOutput) { [string]$sqlAoOutput.RecoveryTarget } elseif ($result -and $result.ScriptBlockOutput) { [string]$result.ScriptBlockOutput.RecoveryTarget } else { '' }
+    $recoveryService = if ($sqlAoOutput) { [string]$sqlAoOutput.RecoveryService } elseif ($result -and $result.ScriptBlockOutput) { [string]$result.ScriptBlockOutput.RecoveryService } else { '' }
     if (-not $RecoveryRetry -and $recoveryTarget -and $recoveryService) {
         Write-Log "[Phase $Phase] $VMName [SQLAO]: Restarting '$recoveryService' on '$recoveryTarget' through host PowerShell Direct, then retrying validation once." -Warning -LogOnly
         $restartResult = Invoke-VmCommand -VmName $recoveryTarget -VmDomainName $domain `
@@ -5662,9 +6132,11 @@ function Test-SiteSystemFunctionality {
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
     $allPassed = $true
+    $isSecondary = "$($CurrentItem.role)" -eq 'Secondary'
 
-    # Test MP if installed
-    if ($CurrentItem.installMP) {
+    # Secondary sites include MP and DP roles even when the config does not
+    # explicitly set installMP/installDP.
+    if ($CurrentItem.installMP -or $isSecondary) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Management Point"
         Write-Log "[Phase $Phase] $VMName [MP]: Testing Management Point" -LogOnly
 
@@ -5984,7 +6456,7 @@ function Test-SiteSystemFunctionality {
     # Test DP: local checks only. DP WMI registration (SMS_DistributionPointInfo)
     # is verified by the site server's own Phase 11 job in Test-CMSiteFunctionality,
     # avoiding cross-VM PSDirect calls that fail when the Primary is unresponsive.
-    if ($CurrentItem.installDP) {
+    if ($CurrentItem.installDP -or $isSecondary) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Distribution Point"
         Write-Log "[Phase $Phase] $VMName [DP]: Local content + PXE checks" -LogOnly
         # A remote relay target receives the same payload and PXE checks as a
@@ -5999,7 +6471,16 @@ function Test-SiteSystemFunctionality {
             Write-Log "[Phase $Phase] $VMName [DP]: selected by OSD PXE path(s) for $($osdClientNets -join ', ') -- PXE chain will be checked and failures are fatal" -LogOnly
         }
         else {
-            Write-Log "[Phase $Phase] $VMName [DP]: skipping all PXE checks -- this DP is not selected by deployConfig.osdPxePaths" -LogOnly
+            $osdNote = if ($isSecondary) {
+                'this is an implicit Secondary DP and MemLabs does not enable PXE on Secondary sites'
+            }
+            elseif (@($DeployConfig.osdPxePaths | Where-Object { $_.mode -in @('Direct', 'Relay') }).Count -gt 0) {
+                "this DP is not selected by deployConfig.osdPxePaths"
+            }
+            else {
+                'this lab has no OSDClient'
+            }
+            Write-Log "[Phase $Phase] $VMName [DP]: skipping all PXE checks -- $osdNote, so perfloading never distributed the boot image and nothing here can PXE boot" -LogOnly
         }
         $localDpScript = {
             param($dpServesOsdInner)
@@ -7736,8 +8217,10 @@ function Test-ForestTrustFunctionality {
         return $true
     }
 
+    $remoteCaConfig = if ($tp -and $tp.RootCA) { "$($tp.RootCA)" } else { '' }
+    $remoteIssuingHint = if ($tp -and $tp.IssuingCAHint) { "$($tp.IssuingCAHint)" } else { '' }
     $forestTrustScript = {
-        param($localDomain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios)
+        param($localDomain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios, $remoteCaConfig, $remoteIssuingHint)
 
         # Informational: Passed stays $true so the trust checks never fail the DC.
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
@@ -7748,7 +8231,125 @@ function Test-ForestTrustFunctionality {
         # MemLabs names CAs '<dns-first-label>-<vm>-CA' regardless of the NetBIOS name.
         $remoteDnsShort = ($remoteForest -split '\.')[0]
         if ([string]::IsNullOrWhiteSpace($remoteNetbios)) { $remoteNetbios = $remoteDnsShort }
+        $remoteCaCommonName = if ($remoteCaConfig) { ($remoteCaConfig -split '\\')[-1] } else { '' }
         $localDcFqdn = "$env:COMPUTERNAME.$localDomain"
+        $certificatesOf = {
+            param($rawCertificate)
+            $certificates = [System.Collections.Generic.List[System.Security.Cryptography.X509Certificates.X509Certificate2]]::new()
+            $blobs = [System.Collections.Generic.List[byte[]]]::new()
+            if ($rawCertificate -is [byte[]]) {
+                $blobs.Add([byte[]]$rawCertificate)
+            }
+            elseif ($rawCertificate -is [System.Array]) {
+                foreach ($item in $rawCertificate) {
+                    if ($item -is [byte[]]) { $blobs.Add([byte[]]$item) }
+                }
+            }
+            foreach ($blob in $blobs) {
+                try {
+                    $certificates.Add([System.Security.Cryptography.X509Certificates.X509Certificate2]::new([byte[]]$blob))
+                }
+                catch {}
+            }
+            return , $certificates.ToArray()
+        }
+        $containsExpectedCertificate = {
+            param($rawCertificate, [string[]]$expectedThumbprints)
+            if (-not $expectedThumbprints -or $expectedThumbprints.Count -eq 0) { return $null }
+            foreach ($cert in @(& $certificatesOf $rawCertificate)) {
+                if ($expectedThumbprints -contains "$($cert.Thumbprint)".ToUpperInvariant()) { return $true }
+            }
+            return $false
+        }
+        $publicationVerdict = {
+            param($label, $authoritativeState, $cacheState)
+            if ($authoritativeState -eq $true) {
+                if ($cacheState -eq $true) { return "OK: Remote CA present in authoritative AD $label and this DC's enterprise $label cache" }
+                $cacheNote = if ($cacheState -eq $false) { 'has not refreshed yet' } else { 'could not be measured' }
+                return "INFO: Remote CA is authoritatively published in AD $label; this DC's enterprise $label cache $cacheNote"
+            }
+            if ($authoritativeState -eq $false) {
+                if ($cacheState -eq $true) { return "WARN: Remote CA is absent from authoritative AD $label, but this DC still has a stale enterprise $label cache entry" }
+                if ($cacheState -eq $false) { return "WARN: Remote CA is absent from both authoritative AD $label and this DC's enterprise $label cache" }
+                return "WARN: Remote CA is absent from authoritative AD $label; this DC's enterprise $label cache could not be measured"
+            }
+            if ($cacheState -eq $true) { return "INFO: Remote CA is present in this DC's enterprise $label cache, but authoritative AD $label publication could not be measured" }
+            return "WARN: Remote CA $label trust could not be determined because authoritative AD publication could not be measured"
+        }
+
+        # Discover the actual remote issuing/root certificates from AD. RootCA is
+        # only a generation-time hint; exact thumbprints avoid same-CN stale certs
+        # and correctly distinguish a two-tier issuing CA from its root.
+        $remoteRootThumbprints = @()
+        $remoteIssuingThumbprints = @()
+        try {
+            $remoteCfg = "$(([ADSI]"LDAP://$remoteDcFqdn/RootDSE").configurationNamingContext)"
+            if ($remoteCfg -notmatch '^CN=Configuration,DC=') { throw "unusable remote configurationNamingContext '$remoteCfg'" }
+
+            $remoteRootsContainer = [ADSI]"LDAP://$remoteDcFqdn/CN=Certification Authorities,CN=Public Key Services,CN=Services,$remoteCfg"
+            $remoteRootCerts = [System.Collections.Generic.List[System.Security.Cryptography.X509Certificates.X509Certificate2]]::new()
+            foreach ($entry in @($remoteRootsContainer.Children | Where-Object { $null -ne $_ })) {
+                foreach ($cert in @(& $certificatesOf $entry.Properties['cACertificate'].Value)) { $remoteRootCerts.Add($cert) }
+            }
+
+            $remoteEnrollContainer = [ADSI]"LDAP://$remoteDcFqdn/CN=Enrollment Services,CN=Public Key Services,CN=Services,$remoteCfg"
+            $issuingEntries = @($remoteEnrollContainer.Children | Where-Object { $null -ne $_ })
+            $selectedIssuing = $null
+            foreach ($entry in $issuingEntries) {
+                $dns = "$($entry.Properties['dNSHostName'].Value)"
+                $cn = "$($entry.Properties['cn'].Value)"
+                $short = ($dns -split '\.')[0]
+                if (($remoteIssuingHint -and ($remoteIssuingHint -in @($dns, $short, $cn))) -or
+                    ($remoteCaCommonName -and $cn -eq $remoteCaCommonName)) {
+                    $selectedIssuing = $entry
+                    break
+                }
+            }
+            if (-not $selectedIssuing) { $selectedIssuing = $issuingEntries | Select-Object -First 1 }
+            $remoteIssuingCerts = @()
+            if ($selectedIssuing) { $remoteIssuingCerts = @(& $certificatesOf $selectedIssuing.Properties['cACertificate'].Value) }
+            $remoteIssuingThumbprints = @($remoteIssuingCerts | ForEach-Object { "$($_.Thumbprint)".ToUpperInvariant() } | Select-Object -Unique)
+
+            # Select the root that issued the chosen Enterprise issuing CA. A
+            # chain build verifies the signature/key relationship, avoiding a
+            # same-subject stale root after CA renewal.
+            $selectedRootCerts = @()
+            foreach ($issuingCert in $remoteIssuingCerts) {
+                if ($issuingCert.Subject -eq $issuingCert.Issuer) {
+                    $selectedRootCerts += $issuingCert
+                }
+                else {
+                    $chain = $null
+                    try {
+                        $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+                        $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+                        $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::AllowUnknownCertificateAuthority
+                        foreach ($candidateRoot in $remoteRootCerts) { [void]$chain.ChainPolicy.ExtraStore.Add($candidateRoot) }
+                        [void]$chain.Build($issuingCert)
+                        $remoteRootSet = @($remoteRootCerts | ForEach-Object { "$($_.Thumbprint)".ToUpperInvariant() })
+                        foreach ($element in @($chain.ChainElements)) {
+                            if ($remoteRootSet -contains "$($element.Certificate.Thumbprint)".ToUpperInvariant()) {
+                                $selectedRootCerts += $element.Certificate
+                            }
+                        }
+                    }
+                    finally {
+                        if ($chain) { $chain.Dispose() }
+                    }
+                }
+            }
+            if ($selectedRootCerts.Count -eq 0 -and $remoteRootCerts.Count -eq 1) {
+                $selectedRootCerts = @($remoteRootCerts[0])
+            }
+            $remoteRootThumbprints = @($selectedRootCerts | ForEach-Object { "$($_.Thumbprint)".ToUpperInvariant() } | Select-Object -Unique)
+            if ($remoteRootThumbprints.Count -eq 0 -or $remoteIssuingThumbprints.Count -eq 0) {
+                throw "could not resolve exact remote root/issuing certificate thumbprints (roots=$($remoteRootThumbprints.Count), issuing=$($remoteIssuingThumbprints.Count))"
+            }
+            $results.Details.Add("OK: Resolved exact remote PKI identity: root=$($remoteRootThumbprints -join ',') issuing=$($remoteIssuingThumbprints -join ',')")
+        }
+        catch {
+            $results.Details.Add("WARN: Could not resolve exact remote PKI certificate identity from '$remoteDcFqdn': $($_.Exception.Message)")
+        }
 
         # --- A1: Forest trust object ---
         $results.Details.Add("CMD: Get-ADTrust -Filter { Target -eq '$remoteForest' }")
@@ -7874,31 +8475,37 @@ function Test-ForestTrustFunctionality {
             $results.Details.Add("WARN: Could not enumerate local Administrators: $($_.Exception.Message)")
         }
 
-        # --- C1: Remote root CA trusted in the enterprise Root + NTAuth stores ---
+        # --- C1: Remote root CA cached in the enterprise Root + NTAuth stores ---
         # CA CN follows the '<dns-first-label>-<vm>-CA' naming convention, so match on the
         # DNS short name (NOT the NetBIOS name, which can differ in a disjoint namespace).
-        $results.Details.Add("CMD: certutil -store -enterprise Root / NTAuth (looking for '$remoteDnsShort-')")
+        $caNeedleLabel = if ($remoteCaCommonName) { $remoteCaCommonName } else { "$remoteDnsShort-*" }
+        $results.Details.Add("CMD: certutil -store -enterprise Root / NTAuth (matching exact remote root/issuing certificate thumbprints)")
+        $enterpriseRootCached = $null
+        $enterpriseNtauthCached = $null
         try {
             $rootStore = & certutil -store -enterprise Root 2>&1 | Out-String
+            $rootStoreExit = $LASTEXITCODE
             $ntauthStore = & certutil -store -enterprise NTAuth 2>&1 | Out-String
-            $needle = [regex]::Escape("$remoteDnsShort-")
-            if ($rootStore -match $needle) {
-                $results.Details.Add("OK: Remote CA '$remoteDnsShort-*' present in enterprise Root store")
+            $ntauthStoreExit = $LASTEXITCODE
+            if ($rootStoreExit -ne 0) {
+                $results.Details.Add("INFO: enterprise Root cache query exited $rootStoreExit; cache state is unknown")
+            }
+            elseif ($remoteRootThumbprints.Count -eq 0) {
+                $results.Details.Add("INFO: enterprise Root cache was readable, but exact remote root identity is unavailable; cache state is unknown")
             }
             else {
-                $extra = ''
-                # This is the same fact ccmsetup reports as "Unable to find any
-                # Certificate based on Certificate Issuers" -> CCM_E_NO_CLIENT_PKI_CERT.
-                if ($externalSiteCode -and $externalSiteCode -ne 'NONE') {
-                    $extra = " -- clients here are managed by remote site '$externalSiteCode' over HTTPS, so until this CA is trusted locally none of them can present a client cert (ccmsetup 0x87D00454)"
-                }
-                $results.Details.Add("WARN: Remote CA '$remoteDnsShort-*' NOT found in enterprise Root store (InstallRootCertificate dspublish RootCA may have failed)$extra")
+                $compactRootStore = ($rootStore -replace '\s+', '').ToUpperInvariant()
+                $enterpriseRootCached = @($remoteRootThumbprints | Where-Object { $compactRootStore.Contains($_) }).Count -gt 0
             }
-            if ($ntauthStore -match $needle) {
-                $results.Details.Add("OK: Remote CA present in enterprise NTAuth store")
+            if ($ntauthStoreExit -ne 0) {
+                $results.Details.Add("INFO: enterprise NTAuth cache query exited $ntauthStoreExit; cache state is unknown")
+            }
+            elseif ($remoteIssuingThumbprints.Count -eq 0) {
+                $results.Details.Add("INFO: enterprise NTAuth cache was readable, but exact remote issuing identity is unavailable; cache state is unknown")
             }
             else {
-                $results.Details.Add("WARN: Remote CA NOT found in enterprise NTAuth store (cross-forest client auth requires NTAuth)")
+                $compactNtauthStore = ($ntauthStore -replace '\s+', '').ToUpperInvariant()
+                $enterpriseNtauthCached = @($remoteIssuingThumbprints | Where-Object { $compactNtauthStore.Contains($_) }).Count -gt 0
             }
         }
         catch {
@@ -7907,16 +8514,30 @@ function Test-ForestTrustFunctionality {
 
         # --- C2: Remote CA published into the LOCAL forest Configuration NC,
         #         plus the synced certificate templates (RunPkiSync). ---
+        $rootPublishedInAd = $null
         try {
             $configNC = ([ADSI]"LDAP://RootDSE").configurationNamingContext.Value
             $caContainer = [ADSI]"LDAP://CN=Certification Authorities,CN=Public Key Services,CN=Services,$configNC"
             $names = @()
-            foreach ($c in $caContainer.Children) { $names += [string]$c.Properties['cn'].Value }
-            if (@($names | Where-Object { $_ -like "$remoteDnsShort-*" }).Count -gt 0) {
+            $localRootRaw = @()
+            foreach ($c in $caContainer.Children) {
+                $names += [string]$c.Properties['cn'].Value
+                $localRootRaw += , $c.Properties['cACertificate'].Value
+            }
+            if ($remoteRootThumbprints.Count -gt 0) {
+                $rootPublishedInAd = $false
+                foreach ($raw in $localRootRaw) {
+                    if (& $containsExpectedCertificate $raw $remoteRootThumbprints) { $rootPublishedInAd = $true; break }
+                }
+            }
+            if ($rootPublishedInAd -eq $true) {
                 $results.Details.Add("OK: Remote root CA published in local AD Certification Authorities [$($names -join ', ')]")
             }
-            else {
+            elseif ($rootPublishedInAd -eq $false) {
                 $results.Details.Add("WARN: Remote root CA not in local AD Certification Authorities [present: $($names -join ', ')] (InstallRootCertificate dspublish / RunPkiSync gap)")
+            }
+            else {
+                $results.Details.Add("INFO: Local AD Certification Authorities contains [$($names -join ', ')], but exact remote root identity was unavailable for comparison")
             }
 
             $tmplContainer = [ADSI]"LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$configNC"
@@ -7926,6 +8547,45 @@ function Test-ForestTrustFunctionality {
         catch {
             $results.Details.Add("WARN: Could not read local Configuration NC PKI containers: $($_.Exception.Message)")
         }
+
+        # NTAuthCertificates in AD is authoritative for every forest trust; the
+        # enterprise store checked above is only this machine's synced cache.
+        $ntAuthPublishedInAd = $null
+        try {
+            $ntAuth = [ADSI]"LDAP://CN=NTAuthCertificates,CN=Public Key Services,CN=Services,$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
+            $ntRaw = $ntAuth.Properties['cACertificate'].Value
+            $ntBlobs = [System.Collections.Generic.List[byte[]]]::new()
+            if ($ntRaw -is [byte[]]) {
+                $ntBlobs.Add([byte[]]$ntRaw)
+            }
+            elseif ($ntRaw -is [System.Array]) {
+                foreach ($item in $ntRaw) {
+                    if ($item -is [byte[]]) { $ntBlobs.Add([byte[]]$item) }
+                }
+            }
+            $ntAuthPublishedInAd = & $containsExpectedCertificate $ntRaw $remoteIssuingThumbprints
+            if ($ntAuthPublishedInAd -eq $true) {
+                $results.Details.Add("OK: this forest's AD NTAuthCertificates contains the remote '$caNeedleLabel' CA ($($ntBlobs.Count) total CA cert(s))")
+            }
+            elseif ($ntAuthPublishedInAd -eq $false -and $ntBlobs.Count -gt 0) {
+                $results.Details.Add("WARN: this forest's AD NTAuthCertificates has $($ntBlobs.Count) CA cert(s), but none match remote '$caNeedleLabel'")
+            }
+            elseif ($ntAuthPublishedInAd -eq $false) {
+                $results.Details.Add("WARN: this forest's AD NTAuthCertificates is EMPTY (certutil -dspublish NtauthCA never landed)")
+            }
+            else {
+                $results.Details.Add("INFO: this forest's AD NTAuthCertificates has $($ntBlobs.Count) CA cert(s), but exact remote issuing identity was unavailable for comparison")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: could not read this forest's NTAuthCertificates: $($_.Exception.Message)")
+        }
+
+        # AD publication is authoritative. certutil -enterprise reads this
+        # machine's policy-backed cache, which can lag immediately after
+        # dspublish even while clients already chain successfully.
+        $results.Details.Add((& $publicationVerdict 'RootCA' $rootPublishedInAd $enterpriseRootCached))
+        $results.Details.Add((& $publicationVerdict 'NTAuthCertificates' $ntAuthPublishedInAd $enterpriseNtauthCached))
 
         # --- C3: Can a computer in THIS domain actually autoenroll a ConfigMgr
         #         client cert from the remote CA? Read the template ACL in BOTH
@@ -7948,6 +8608,12 @@ function Test-ForestTrustFunctionality {
                 $results.Details.Add("CMD: read '$tplName' ACL in both forests for Enroll/AutoEnroll by $domainComputersSid ($localDomain\Domain Computers)")
                 $enrollGuid = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
                 $autoEnrollGuid = 'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+                $identitySidOf = {
+                    param($identityReference)
+                    $sidText = "$identityReference"
+                    try { $sidText = $identityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+                    return $sidText
+                }
                 $readTemplateAcl = {
                     param($server, $label)
                     $prefix = ''
@@ -7961,7 +8627,8 @@ function Test-ForestTrustFunctionality {
                     $granted = @()
                     foreach ($ace in @($tpl.ObjectSecurity.Access | Where-Object { $null -ne $_ })) {
                         if ("$($ace.AccessControlType)" -ne 'Allow') { continue }
-                        if ("$($ace.IdentityReference)" -ne $domainComputersSid) { continue }
+                        $aceSid = & $identitySidOf $ace.IdentityReference
+                        if ($aceSid -ne $domainComputersSid) { continue }
                         $ot = "$($ace.ObjectType)"
                         if ($ot -eq $enrollGuid) { $granted += 'Enroll' }
                         elseif ($ot -eq $autoEnrollGuid) { $granted += 'AutoEnroll' }
@@ -8006,23 +8673,6 @@ function Test-ForestTrustFunctionality {
                     $results.Details.Add("WARN: could not read this forest's Enrollment Services container: $($_.Exception.Message)")
                 }
 
-                # NTAuthCertificates in AD is the authoritative copy; the enterprise
-                # store checked above is only this machine's synced view of it.
-                try {
-                    $ntAuth = [ADSI]"LDAP://CN=NTAuthCertificates,CN=Public Key Services,CN=Services,$(([ADSI]'LDAP://RootDSE').configurationNamingContext)"
-                    # One published CA cert comes back as a single byte[]; piping that into
-                    # Where-Object unrolls it into individual bytes and counts 0, which read
-                    # as "EMPTY" on a forest whose publish had actually landed.
-                    $ntRaw = $ntAuth.Properties['cACertificate'].Value
-                    $ntCount = 0
-                    if ($ntRaw -is [byte[]]) { $ntCount = 1 }
-                    elseif ($ntRaw -is [System.Array]) { $ntCount = @($ntRaw | Where-Object { $_ -is [byte[]] }).Count }
-                    if ($ntCount -gt 0) { $results.Details.Add("OK: this forest's AD NTAuthCertificates holds $ntCount CA cert(s)") }
-                    else { $results.Details.Add("WARN: this forest's AD NTAuthCertificates is EMPTY (certutil -dspublish NtauthCA never landed)") }
-                }
-                catch {
-                    $results.Details.Add("WARN: could not read this forest's NTAuthCertificates: $($_.Exception.Message)")
-                }
             }
         }
 
@@ -8082,7 +8732,7 @@ function Test-ForestTrustFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $forestTrustScript -ArgumentList @($domain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios) `
+        -ScriptBlock $forestTrustScript -ArgumentList @($domain, $remoteForest, $remoteDcFqdn, $externalSiteCode, $remoteNetbios, $remoteCaConfig, $remoteIssuingHint) `
         -DisplayName "Phase11-ForestTrust-Test" -SuppressLog -AsJob -TimeoutSeconds 300
 
     $null = Format-TestResult -VMName $VMName -RoleLabel 'ForestTrust' -Result $result
@@ -10317,39 +10967,55 @@ function Test-DomainMemberFunctionality {
                 param($expSite)
                 $reg = @{ Details = [System.Collections.Generic.List[string]]::new() }
 
-                # Assigned site code (COM is authoritative; registry fallback).
                 $assigned = $null
-                try {
-                    $smsClient = New-Object -ComObject 'Microsoft.SMS.Client'
-                    $assigned = $smsClient.GetAssignedSite()
-                    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($smsClient)
+                $clientId = $null
+                $registrationAttempt = 0
+                $registrationAttempts = 13 # initial read + 12 x 10s = 2 minutes
+                do {
+                    $registrationAttempt++
+                    $assigned = $null
+                    $clientId = $null
+
+                    # Assigned site code (COM is authoritative; registry fallback).
+                    try {
+                        $smsClient = New-Object -ComObject 'Microsoft.SMS.Client'
+                        try { $assigned = $smsClient.GetAssignedSite() }
+                        finally { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($smsClient) }
+                    }
+                    catch {
+                        try { $assigned = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Mobile Client' -Name 'AssignedSiteCode' -ErrorAction Stop).AssignedSiteCode } catch {}
+                    }
+
+                    # A populated registration GUID means MP_ClientRegistration completed.
+                    try { $clientId = (Get-CimInstance -Namespace 'root\ccm' -ClassName CCM_Client -ErrorAction Stop).ClientId } catch {}
+                    if (-not $clientId) {
+                        try { $clientId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Client\Configuration\Client Properties' -Name 'SMSID' -ErrorAction Stop).SMSID } catch {}
+                    }
+
+                    if ("$assigned" -eq "$expSite" -and $clientId) { break }
+                    if ($registrationAttempt -lt $registrationAttempts) { Start-Sleep -Seconds 10 }
                 }
-                catch {
-                    try { $assigned = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Mobile Client' -Name 'AssignedSiteCode' -ErrorAction Stop).AssignedSiteCode } catch {}
-                }
+                while ($registrationAttempt -lt $registrationAttempts)
+
                 if ($assigned) {
                     if ("$assigned" -eq "$expSite") {
-                        $reg.Details.Add("OK: ConfigMgr client assigned to remote site '$assigned' (matches externalDomainJoinSiteCode)")
+                        $recoveryNote = if ($registrationAttempt -gt 1) { " after $([int](($registrationAttempt - 1) * 10))s of polling" } else { '' }
+                        $reg.Details.Add("OK: ConfigMgr client assigned to remote site '$assigned' (matches externalDomainJoinSiteCode)$recoveryNote")
                     }
                     else {
-                        $reg.Details.Add("WARN: ConfigMgr client assigned site '$assigned' != expected remote site '$expSite' (cross-forest site assignment may not have applied)")
+                        $reg.Details.Add("WARN: ConfigMgr client assigned site '$assigned' != expected remote site '$expSite' after $([int](($registrationAttempt - 1) * 10))s (cross-forest site assignment may not have applied)")
                     }
                 }
                 else {
                     $reg.Details.Add("WARN: Could not read the client's assigned site code (expected remote site '$expSite')")
                 }
 
-                # A populated registration GUID means MP_ClientRegistration completed.
-                $clientId = $null
-                try { $clientId = (Get-CimInstance -Namespace 'root\ccm' -ClassName CCM_Client -ErrorAction Stop).ClientId } catch {}
-                if (-not $clientId) {
-                    try { $clientId = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Client\Configuration\Client Properties' -Name 'SMSID' -ErrorAction Stop).SMSID } catch {}
-                }
                 if ($clientId) {
-                    $reg.Details.Add("OK: Client is registered (ClientId $clientId) -- MP registration with the remote site succeeded over the cross-forest trust/PKI")
+                    $recoveryNote = if ($registrationAttempt -gt 1) { " after $([int](($registrationAttempt - 1) * 10))s of polling" } else { '' }
+                    $reg.Details.Add("OK: Client is registered (ClientId $clientId) -- MP registration with the remote site succeeded over the cross-forest trust/PKI$recoveryNote")
                 }
                 else {
-                    $reg.Details.Add("WARN: Client has no registration GUID yet -- MP_ClientRegistration with the remote site's MP may not have completed (check the cross-forest PKI client cert + MP reachability)")
+                    $reg.Details.Add("WARN: Client has no registration GUID after $([int](($registrationAttempt - 1) * 10))s -- MP_ClientRegistration with the remote site's MP may not have completed (check the cross-forest PKI client cert + MP reachability)")
                 }
 
                 # The MP the client is actually talking to.
@@ -12550,6 +13216,33 @@ function Test-CMSiteWideFunctionality {
     # literal name "Configuration Manager current-branch" returns zero rows and
     # the deliberately conservative zero-row path can only report NOT measured.
     $effectiveCmVersion = Resolve-CmVersionAlias -Version ([string]$effectiveCmOptions.version)
+    if ([bool]$effectiveCmOptions.OfflineSCP) {
+        $offlineBaselineVersion = "$($CurrentItem.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+        if (-not $offlineBaselineVersion -and $CurrentItem.parentSiteCode) {
+            $parentSite = @($DeployConfig.virtualMachines | Where-Object {
+                    "$($_.siteCode)" -ieq "$($CurrentItem.parentSiteCode)" -and $_.thisParams.cmDownloadVersion.baselineVersion
+                }) | Select-Object -First 1
+            if ($parentSite) {
+                $offlineBaselineVersion = "$($parentSite.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+            }
+        }
+        if (-not $offlineBaselineVersion) {
+            try {
+                $catalogBaseline = Get-CMBaselineVersion -CMVersion $effectiveCmVersion | Select-Object -First 1
+                $offlineBaselineVersion = "$($catalogBaseline.baselineVersion)".Trim()
+            }
+            catch {
+                Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not derive the OfflineSCP baseline from the ConfigMgr catalog: $($_.Exception.Message)" -Warning
+            }
+        }
+        if ($offlineBaselineVersion -and $offlineBaselineVersion -notin @('current-branch', 'tech-preview')) {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP pins the effective ConfigMgr release to deployed baseline $offlineBaselineVersion (configured online target is $effectiveCmVersion)." -LogOnly
+            $effectiveCmVersion = $offlineBaselineVersion
+        }
+        else {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP is enabled but deployed baseline metadata is missing or symbolic ('$offlineBaselineVersion'); falling back to configured release $effectiveCmVersion for validation." -Warning
+        }
+    }
     $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
 
     # OfflineSUP deployments deliberately skip subscribing any products /
@@ -12658,6 +13351,43 @@ function Test-CMSiteWideFunctionality {
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
         param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner)
+
+        function Get-MemLabsDistributionPointGroupValidationState {
+            param(
+                [string]$Namespace,
+                [string]$SiteCode,
+                [string]$GroupName
+            )
+
+            $escapedGroupName = $GroupName.Replace("'", "''")
+            $groups = @(Get-WmiObject -Namespace $Namespace -Class SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" -ErrorAction Stop |
+                Where-Object { $null -ne $_ })
+            $memberNames = @(
+                foreach ($group in $groups) {
+                    Get-WmiObject -Namespace $Namespace -Class SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop |
+                        ForEach-Object {
+                            if ("$($_.DPNALPath)" -match '\\\\([^\\\"\]]+)') { $Matches[1] }
+                        }
+                }
+            ) | Where-Object { $_ } | Select-Object -Unique
+
+            [pscustomobject]@{
+                GroupCount      = $groups.Count
+                LocalGroupCount = @($groups | Where-Object { "$($_.SourceSite)" -eq $SiteCode }).Count
+                Identities      = @($groups | ForEach-Object { "GroupID=$($_.GroupID),SourceSite=$($_.SourceSite)" }) -join '; '
+                MemberNames     = @($memberNames)
+            }
+        }
+
+        function Get-MemLabsContentDistributionStateKind {
+            param([int]$State)
+
+            if ($State -eq 0) { return 'Installed' }
+            if ($State -in 1, 2, 7) { return 'Pending' }
+            return 'Problem'
+        }
+        $osdProgressActivity = "$env:COMPUTERNAME [OSD content validation]"
+
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
@@ -12683,6 +13413,48 @@ function Test-CMSiteWideFunctionality {
 
         $ns = "root\SMS\site_$sc"
 
+        function Invoke-CmWmiQueryWithRetry {
+            param(
+                [Parameter(Mandatory)][string]$Class,
+                [string]$Filter,
+                [Parameter(Mandatory)][string]$Label,
+                [int]$Attempts = 3,
+                [int]$RetrySeconds = 2
+            )
+
+            $lastError = $null
+            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+                try {
+                    $query = @{
+                        Namespace   = $ns
+                        Class       = $Class
+                        ErrorAction = 'Stop'
+                    }
+                    if ($Filter) { $query.Filter = $Filter }
+                    $items = @(Get-WmiObject @query)
+                    if ($attempt -gt 1) {
+                        $results.Details.Add("RECOVERED: $Label query succeeded on attempt $attempt/$Attempts after a transient provider failure")
+                    }
+                    return $items
+                }
+                catch {
+                    $lastError = $_
+                    if ($attempt -lt $Attempts) {
+                        $results.Details.Add("INFO: $Label query attempt $attempt/$Attempts failed: $($_.Exception.Message); retrying in ${RetrySeconds}s")
+                        Start-Sleep -Seconds $RetrySeconds
+                    }
+                }
+            }
+
+            $exception = $lastError.Exception
+            $exceptionType = if ($exception) { $exception.GetType().FullName } else { '<none>' }
+            $message = if ($exception) { $exception.Message } else { "$lastError" }
+            $hresult = if ($exception) { $exception.HResult } else { '<none>' }
+            $errorCode = if ($exception -and $exception.PSObject.Properties['ErrorCode']) { $exception.ErrorCode } else { '<none>' }
+            $fqid = if ($lastError.FullyQualifiedErrorId) { $lastError.FullyQualifiedErrorId } else { '<none>' }
+            throw "$Label query failed after $Attempts attempts: Type=$exceptionType; Message=$message; HResult=$hresult; ErrorCode=$errorCode; FQID=$fqid"
+        }
+
         # 1. Boundary groups -- runs on EVERY Primary/CAS (NOT gated on
         # top-level): each site's own boundary group is created LOCALLY by its
         # InstallBoundaryGroups.ps1 run, so it is present without waiting for
@@ -12693,7 +13465,7 @@ function Test-CMSiteWideFunctionality {
         # site assignment, so existence alone is not enough.
         $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_BoundaryGroup")
         try {
-            $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
+            $bgs = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup')
             if ($bgs.Count -ge 1) {
                 $results.Details.Add("OK: $($bgs.Count) boundary group(s) defined: $(($bgs | Select-Object -First 5 -ExpandProperty Name) -join ', ')")
             }
@@ -12773,7 +13545,13 @@ function Test-CMSiteWideFunctionality {
             }
         }
         catch {
-            $results.Details.Add("WARN: SMS_BoundaryGroup query failed: $($_.Exception.Message)")
+            if ($isPrimary) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Required Primary boundary groups could not be measured. $($_.Exception.Message)")
+            }
+            else {
+                $results.Details.Add("WARN: SMS_BoundaryGroup query failed: $($_.Exception.Message)")
+            }
         }
 
         # --- Hierarchy-owned checks (only on top-level sites) ---
@@ -12822,7 +13600,10 @@ function Test-CMSiteWideFunctionality {
             $results.Details.Add("WARN: SMS_Site mode query failed: $($_.Exception.Message)")
         }
 
-        # 3a. The site actually REACHED cmOptions.version. Nothing else in the build compares
+        # 3a. The site actually reached the effective expected release. For OfflineSCP this
+        # is the deployed baseline because InstallAndUpdateSCCM deliberately disables the
+        # in-console upgrade; otherwise it is cmOptions.version.
+        # Nothing else in the build compares
         # the running site against what was asked for: when the update workflow dies mid-script
         # Invoke-DotSource logs the throw as a WARNING without -Failure, so Phase 8 still reports
         # success -- WGB 2026-09-02 shipped the baseline twice while the config said 2503.
@@ -12847,10 +13628,10 @@ function Test-CMSiteWideFunctionality {
                 if ($updRows.Count -eq 0) {
                     # No update record exists to judge, so this was NOT measured -- never report
                     # the absence of evidence as a pass.
-                    $results.Details.Add("INFO: no in-console update named '$updName' exists, so whether cmOptions.version was applied was NOT measured (expected when the baseline media is already $cmVersionInner, or the SCP is offline/absent). Site build is $siteBuild.")
+                    $results.Details.Add("INFO: no in-console update named '$updName' exists, so whether expected release $cmVersionInner was applied was NOT measured (expected when the baseline media is already $cmVersionInner, or the SCP is offline/absent). Site build is $siteBuild.")
                 }
                 elseif ($installedRows.Count -gt 0) {
-                    $results.Details.Add("OK: site is at cmOptions.version $cmVersionInner -- '$updName' is INSTALL_SUCCESS, site build $siteBuild")
+                    $results.Details.Add("OK: site is at expected release $cmVersionInner -- '$updName' is INSTALL_SUCCESS, site build $siteBuild")
                 }
                 else {
                     # The row carries the build it delivers, so no version->build table is needed
@@ -12868,20 +13649,20 @@ function Test-CMSiteWideFunctionality {
                         $results.Details.Add("OK: site build $siteBuild is at or past $targetBuild, the build '$updName' delivers -- the un-installed row (State $states) is the same-version no-op the upgrade deliberately skips")
                     }
                     elseif ($targetBuild -le 0 -or $siteBuild -le 0) {
-                        $results.Details.Add("INFO: '$updName' is not installed (State $states) but the build comparison could NOT be made (site build '$siteBuild', update FullVersion '$fullVer') -- cmOptions.version was NOT verified")
+                        $results.Details.Add("INFO: '$updName' is not installed (State $states) but the build comparison could NOT be made (site build '$siteBuild', update FullVersion '$fullVer') -- expected release was NOT verified")
                     }
                     else {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: cmOptions.version is $cmVersionInner but this site is still on build $siteBuild -- '$updName' delivers build $targetBuild and is NOT installed (SMS_CM_UpdatePackages.State = $states; 196612 = INSTALL_SUCCESS). Phase 8 does not fail on this: a throw inside InstallAndUpdateSCCM.ps1 is logged by Invoke-DotSource as a WARNING only, so the build reports success with the site left on the baseline. Re-run Phase 8 (UpgradeSCCM.Status is left at 'Running', so the upgrade is retried) and read InstallCMLog.log on this server for why it stopped.")
+                        $results.Details.Add("FAIL: expected ConfigMgr release is $cmVersionInner but this site is still on build $siteBuild -- '$updName' delivers build $targetBuild and is NOT installed (SMS_CM_UpdatePackages.State = $states; 196612 = INSTALL_SUCCESS). Phase 8 does not fail on this: a throw inside InstallAndUpdateSCCM.ps1 is logged by Invoke-DotSource as a WARNING only, so the build reports success with the site left on the baseline. Re-run Phase 8 (UpgradeSCCM.Status is left at 'Running', so the upgrade is retried) and read InstallCMLog.log on this server for why it stopped.")
                     }
                 }
             }
             catch {
-                $results.Details.Add("INFO: SMS_CM_UpdatePackages query failed, so cmOptions.version ($cmVersionInner) was NOT verified: $($_.Exception.Message)")
+                $results.Details.Add("INFO: SMS_CM_UpdatePackages query failed, so expected release $cmVersionInner was NOT verified: $($_.Exception.Message)")
             }
         }
 
-        # 3b. The local admin console must match the requested release and the
+        # 3b. The local admin console must match the effective expected release and the
         # extension version published by this site. Site upgrade success does
         # not update an already-installed console by itself.
         if ($vmRole -in @('Primary', 'CAS') -and $cmVersionInner) {
@@ -12902,7 +13683,7 @@ function Test-CMSiteWideFunctionality {
                 }
                 elseif ($consoleRelease -ne "$cmVersionInner") {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: ConfigMgr admin console is release $consoleRelease ($adminConsoleVersion), but cmOptions.version is $cmVersionInner. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
+                    $results.Details.Add("FAIL: ConfigMgr admin console is release $consoleRelease ($adminConsoleVersion), but the effective expected release is $cmVersionInner. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
                 }
                 elseif (-not $requiredExtensionSiteVersion) {
                     $results.Passed = $false
@@ -13034,10 +13815,14 @@ function Test-CMSiteWideFunctionality {
 
         # 5. Client push install account configured (warn-only -- some labs disable client push)
         try {
-            $cpComp = Get-WmiObject -Namespace $ns -Class SMS_SCI_Component `
-                -Filter "ComponentName='SMS_DISCOVERY_DATA_MANAGER' AND SiteCode='$sc'" -ErrorAction Stop
+            $cpComp = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_SCI_Component' `
+                    -Filter "ComponentName='SMS_DISCOVERY_DATA_MANAGER' AND SiteCode='$sc'" `
+                    -Label 'Client push pipeline component') | Select-Object -First 1
             if ($cpComp) {
                 $results.Details.Add("OK: SMS_DISCOVERY_DATA_MANAGER component present (client push pipeline reachable)")
+            }
+            else {
+                $results.Details.Add("WARN: SMS_DISCOVERY_DATA_MANAGER component not found (client push pipeline could not be confirmed)")
             }
         }
         catch {
@@ -13114,14 +13899,16 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $results.Details.Add("FAIL: OSDClient subnet(s) have Missing or Invalid resolved PXE paths: $($uncoveredOsdSubnets -join ', '). Repair the direct DP or DHCPRelay topology before retrying OSD.")
                 }
                 try {
-                    $osdDpGroup = Get-WmiObject -Namespace $ns -Class SMS_DistributionPointGroup -Filter "Name='OSD DPS'" -ErrorAction Stop | Select-Object -First 1
-                    if (-not $osdDpGroup) {
+                    $osdGroupState = Get-MemLabsDistributionPointGroupValidationState -Namespace $ns -SiteCode $sc -GroupName 'OSD DPS'
+                    if ($osdGroupState.GroupCount -eq 0) {
                         $results.Passed = $false
                         $results.Details.Add("FAIL: OSDClient exists but distribution point group 'OSD DPS' was not found")
                     }
                     else {
-                        $expectedOsdDpNames = @(Get-WmiObject -Namespace $ns -Class SMS_DPGroupMembers -Filter "GroupID='$($osdDpGroup.GroupID)'" -ErrorAction Stop |
-                            ForEach-Object { & $dpNameOf $_.DPNALPath } | Where-Object { $_ } | Select-Object -Unique)
+                        if ($osdGroupState.GroupCount -gt 1) {
+                            $results.Details.Add("WARN: Found $($osdGroupState.GroupCount) distribution point groups named 'OSD DPS'; validating the union of exact GroupID memberships. Remove stale duplicates after the build. $($osdGroupState.Identities)")
+                        }
+                        $expectedOsdDpNames = @($osdGroupState.MemberNames)
                         # The group's own membership cannot testify that it is complete. Judge it
                         # against the DPs selected by direct or relayed PXE paths, and require
                         # coverage on those even when the join silently failed.
@@ -13296,6 +14083,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             # box the boot image sat InstallFailed for 12h, so it fails here.
                             if ($failed.Count -ge 1) {
                                 for ($dpTry = 1; $dpTry -le 3 -and $failed.Count -ge 1; $dpTry++) {
+                                    Write-Progress -Activity $osdProgressActivity -Status "Rechecking failed boot-image distribution for '$biName' (attempt $dpTry/3)"
                                     Start-Sleep -Seconds 30
                                     $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
                                         -Filter "PackageID='$($bi.PackageID)'" -ErrorAction SilentlyContinue)
@@ -13305,7 +14093,45 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                 }
                             }
 
+                            # States 1, 2 and 7 are nonterminal immediately after targeting or
+                            # RefreshPkgSource, but they cannot pass forever. Give required
+                            # OSD DPs a bounded five-minute convergence window, then let the
+                            # required-coverage verdict below fail any row still pending.
+                            $getRequiredPendingBootRows = {
+                                param([object[]]$Rows)
+                                @($Rows | Where-Object {
+                                        if ([int]$_.State -notin 1, 2, 7) { return $false }
+                                        $rowName = & $dpNameOf $_.ServerNALPath
+                                        $rowShort = ($rowName -split '\.')[0]
+                                        return @($expectedOsdDpNames | Where-Object {
+                                                $_ -ieq $rowName -or ($_ -split '\.')[0] -ieq $rowShort
+                                            }).Count -gt 0
+                                    })
+                            }
+                            $requiredPendingBootRows = @()
+                            $bootPendingWaitAttempts = 0
+                            if ($expectOsd -and $biName -notmatch 'arm64' -and $expectedOsdDpNames.Count -gt 0) {
+                                $requiredPendingBootRows = @(& $getRequiredPendingBootRows $allDp)
+                                for ($pendingTry = 1; $pendingTry -le 10 -and $requiredPendingBootRows.Count -gt 0; $pendingTry++) {
+                                    Write-Progress -Activity $osdProgressActivity -Status "Waiting for required boot-image content '$biName' (attempt $pendingTry/10)"
+                                    Start-Sleep -Seconds 30
+                                    $bootPendingWaitAttempts++
+                                    $allDp = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                                        -Filter "PackageID='$($bi.PackageID)'" -ErrorAction SilentlyContinue)
+                                    $installed = @($allDp | Where-Object { $_.State -eq 0 })
+                                    $inProgress = @($allDp | Where-Object { $_.State -in 1, 2, 7 })
+                                    $failed = @($allDp | Where-Object { $_.State -in 3, 6, 8 })
+                                    $requiredPendingBootRows = @(& $getRequiredPendingBootRows $allDp)
+                                }
+                                if ($bootPendingWaitAttempts -gt 0 -and $requiredPendingBootRows.Count -eq 0) {
+                                    $results.Details.Add("INFO: required boot-image DP state converged after $($bootPendingWaitAttempts * 30) second(s)")
+                                }
+                            }
+                            $bootPendingWaitTimedOut = $requiredPendingBootRows.Count -gt 0
+                            $bootPendingWaitSeconds = $bootPendingWaitAttempts * 30
+
                             $requiredOsdCoverageProblems = @()
+                            $requiredOsdCoveragePending = @()
                             if ($expectOsd -and $biName -notmatch 'arm64') {
                                 $bootSourceVersion = "$($bi.SourceVersion)"
                                 $bootStoredVersion = "$($bi.StoredPkgVersion)"
@@ -13325,11 +14151,24 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                         if ($requiredDpRow.Count -eq 0) {
                                             $requiredOsdCoverageProblems += "$expectedDpName (no status row)"
                                         }
-                                        elseif ([int]$requiredDpRow[0].State -ne 0) {
-                                            $requiredOsdCoverageProblems += "$expectedDpName (State=$($requiredDpRow[0].State), DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
-                                        }
-                                        elseif (-not "$($requiredDpRow[0].SourceVersion)" -or [int]$requiredDpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
-                                            $requiredOsdCoverageProblems += "$expectedDpName (Installed but stale: DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                        else {
+                                            $requiredState = [int]$requiredDpRow[0].State
+                                            $requiredStateKind = Get-MemLabsContentDistributionStateKind -State $requiredState
+                                            if ($requiredStateKind -eq 'Pending') {
+                                                $pendingDetail = "$expectedDpName (State=$requiredState, DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                                if ($bootPendingWaitTimedOut) {
+                                                    $requiredOsdCoverageProblems += "$pendingDetail still pending after ${bootPendingWaitSeconds}s"
+                                                }
+                                                else {
+                                                    $requiredOsdCoveragePending += $pendingDetail
+                                                }
+                                            }
+                                            elseif ($requiredStateKind -eq 'Problem') {
+                                                $requiredOsdCoverageProblems += "$expectedDpName (State=$requiredState, DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                            }
+                                            elseif (-not "$($requiredDpRow[0].SourceVersion)" -or [int]$requiredDpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
+                                                $requiredOsdCoverageProblems += "$expectedDpName (Installed but stale: DPVersion=$($requiredDpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                            }
                                         }
                                     }
                                 }
@@ -13453,6 +14292,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     elseif ($hierarchySc -ne $sc -and -not $bootStoredVersion) {
                                         $results.Details.Add("DIAG: Parent-owned boot-image metadata was NOT measured for '$biName' because StoredPkgVersion could not be read")
                                     }
+                                }
+                                elseif ($requiredOsdCoveragePending.Count -gt 0) {
+                                    $results.Details.Add("INFO: Boot image '$biName' ($($bi.PackageID)) is current-version but still in an in-flight state on required OSD DP(s): $($requiredOsdCoveragePending -join '; '). States 1, 2 and 7 are pending, not failures.")
                                 }
                                 else {
                                     $results.Details.Add("OK: Boot image '$biName' ($($bi.PackageID)) SourceVersion=$bootSourceVersion is Installed on every required OSD DP")
@@ -13595,7 +14437,231 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             # same OSD DP as the boot image. The boot image alone gets WinPE onto the machine;
             # the client then fails inside the task sequence looking for content that never
             # shipped. Only the boot image was ever checked.
-            foreach ($pkgClass in @(@{ Class = 'SMS_ImagePackage'; Label = 'OS image' }, @{ Class = 'SMS_OperatingSystemInstallPackage'; Label = 'OS upgrade package' })) {
+            $osdPackageClasses = @(
+                @{ Class = 'SMS_ImagePackage'; Label = 'OS image' }
+                @{ Class = 'SMS_OperatingSystemInstallPackage'; Label = 'OS upgrade package' }
+            )
+            $getOsdContentTargetRows = {
+                param([string]$PackageId, [string]$RequiredDp)
+
+                $requiredShort = ($RequiredDp -split '\.')[0]
+                @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageId'" -ErrorAction Stop |
+                    Where-Object {
+                        $targetDp = & $dpNameOf $_.ServerNALPath
+                        $targetDp -ieq $RequiredDp -or ($targetDp -split '\.')[0] -ieq $requiredShort
+                    })
+            }
+            $readPendingOsdContent = {
+                $pendingRows = [System.Collections.Generic.List[object]]::new()
+                foreach ($contentClass in $osdPackageClasses) {
+                    foreach ($contentPackage in @(Get-WmiObject -Namespace $ns -Class $contentClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)) {
+                        $statusRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($contentPackage.PackageID)'" -ErrorAction Stop)
+                        foreach ($requiredDp in $expectedOsdDpNames) {
+                            $requiredShort = ($requiredDp -split '\.')[0]
+                            $statusRow = @($statusRows | Where-Object {
+                                    $statusDp = & $dpNameOf $_.ServerNALPath
+                                    $statusDp -ieq $requiredDp -or ($statusDp -split '\.')[0] -ieq $requiredShort
+                                } | Select-Object -First 1)
+                            if ($statusRow.Count -eq 1 -and
+                                (Get-MemLabsContentDistributionStateKind -State ([int]$statusRow[0].State)) -eq 'Pending') {
+                                $stateNumber = [int]$statusRow[0].State
+                                $pendingRows.Add([pscustomobject]@{
+                                        PackageId = "$($contentPackage.PackageID)"
+                                        Name      = "$($contentPackage.Name)"
+                                        Label     = "$($contentClass.Label)"
+                                        DP        = "$requiredDp"
+                                        State     = $stateNumber
+                                        StateName = @{ 1 = 'InstallPending'; 2 = 'InstallRetrying'; 7 = 'ContentValidating' }[$stateNumber]
+                                    })
+                            }
+                            elseif ($statusRow.Count -eq 0 -and
+                                @(& $getOsdContentTargetRows "$($contentPackage.PackageID)" "$requiredDp").Count -gt 0) {
+                                $pendingRows.Add([pscustomobject]@{
+                                        PackageId = "$($contentPackage.PackageID)"
+                                        Name      = "$($contentPackage.Name)"
+                                        Label     = "$($contentClass.Label)"
+                                        DP        = "$requiredDp"
+                                        State     = -1
+                                        StateName = 'TargetedNoStatus'
+                                    })
+                            }
+                        }
+                    }
+                }
+                return $pendingRows.ToArray()
+            }
+            $osdContentWaitSeconds = 900
+            $osdContentWaitStarted = $false
+            $osdContentWaitTimedOut = $false
+            $osdContentWaitProbeFailed = $false
+            $osdContentWaitFailure = ''
+            $osdContentWaitElapsedSeconds = 0
+            $osdContentRearmed = @{}
+            $osdRetryingSince = @{}
+            $pendingOsdContent = @()
+            try { $pendingOsdContent = @(& $readPendingOsdContent) }
+            catch {
+                $osdContentWaitProbeFailed = $true
+                $osdContentWaitFailure = "pre-check failed: $($_.Exception.Message)"
+                $results.Details.Add("WARN: Could not perform the OSD content convergence pre-check: $($_.Exception.Message)")
+            }
+            if ($pendingOsdContent.Count -gt 0) {
+                $osdContentWaitStarted = $true
+                $pendingStart = Get-Date
+                $pendingDeadline = $pendingStart.AddSeconds($osdContentWaitSeconds)
+                $initialPendingSummary = @($pendingOsdContent | ForEach-Object {
+                        "$($_.PackageId) '$($_.Name)' on $($_.DP) is $($_.StateName) (State=$($_.State))"
+                    }) -join '; '
+                $results.Details.Add("INFO: Waiting up to ${osdContentWaitSeconds}s for required OSD content to finish distributing: $initialPendingSummary")
+                while ($pendingOsdContent.Count -gt 0 -and (Get-Date) -lt $pendingDeadline) {
+                    $now = Get-Date
+                    $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
+                    $remainingSeconds = [math]::Max(0, [int]($pendingDeadline - $now).TotalSeconds)
+                    Write-Progress -Activity $osdProgressActivity -Status "Waiting for $($pendingOsdContent.Count) required OSD content target(s); ${elapsedSeconds}s elapsed, ${remainingSeconds}s remaining"
+                    $currentRetryKeys = @{}
+                    foreach ($retrying in @($pendingOsdContent | Where-Object { $_.State -eq 2 })) {
+                        $retryKey = "$($retrying.PackageId)|$($retrying.DP)".ToUpperInvariant()
+                        $currentRetryKeys[$retryKey] = $true
+                        if (-not $osdRetryingSince.ContainsKey($retryKey)) {
+                            $osdRetryingSince[$retryKey] = $now
+                        }
+                        if ($osdContentRearmed.ContainsKey($retryKey) -or
+                            ($now - $osdRetryingSince[$retryKey]).TotalSeconds -lt 300) {
+                            continue
+                        }
+                        $osdContentRearmed[$retryKey] = $true
+                        try {
+                            $targetRows = @(& $getOsdContentTargetRows "$($retrying.PackageId)" "$($retrying.DP)")
+                            foreach ($targetRow in $targetRows) {
+                                $targetRow.RefreshNow = $true
+                                [void]$targetRow.Put()
+                            }
+                            if ($targetRows.Count -gt 0) {
+                                $results.Details.Add("DIAG: OSD content $($retrying.PackageId) remained InstallRetrying on $($retrying.DP) for 300s; validation re-armed its existing targeting row with RefreshNow once and continued waiting.")
+                            }
+                        }
+                        catch {
+                            $results.Details.Add("DIAG: Could not re-arm retrying OSD content $($retrying.PackageId) on $($retrying.DP): $($_.Exception.Message)")
+                        }
+                    }
+                    foreach ($knownRetryKey in @($osdRetryingSince.Keys)) {
+                        if (-not $currentRetryKeys.ContainsKey($knownRetryKey)) { $osdRetryingSince.Remove($knownRetryKey) }
+                    }
+                    if ($remainingSeconds -le 0) { break }
+                    Start-Sleep -Seconds ([math]::Min(30, $remainingSeconds))
+                    try { $pendingOsdContent = @(& $readPendingOsdContent) }
+                    catch {
+                        $osdContentWaitProbeFailed = $true
+                        $osdContentWaitElapsedSeconds = [int]((Get-Date) - $pendingStart).TotalSeconds
+                        $osdContentWaitFailure = "recheck failed after ${osdContentWaitElapsedSeconds}s: $($_.Exception.Message)"
+                        $results.Details.Add("WARN: OSD content convergence recheck failed after ${osdContentWaitElapsedSeconds}s: $($_.Exception.Message)")
+                        break
+                    }
+                }
+                $osdContentWaitElapsedSeconds = [int]((Get-Date) - $pendingStart).TotalSeconds
+                Write-Progress -Activity $osdProgressActivity -Completed
+                if (-not $osdContentWaitProbeFailed -and $pendingOsdContent.Count -eq 0) {
+                    $results.Details.Add("RECOVERED: Required OSD content left its pending/retrying state after ${osdContentWaitElapsedSeconds}s.")
+                }
+                elseif (-not $osdContentWaitProbeFailed -and (Get-Date) -ge $pendingDeadline) {
+                    $osdContentWaitTimedOut = $true
+                }
+            }
+
+            $getOsdContentFailureDiagnostic = {
+                param($Package, [string]$RequiredDp, [string]$StateDescription)
+
+                $parts = [System.Collections.Generic.List[string]]::new()
+                $parts.Add("package SourceVersion=$($Package.SourceVersion) StoredPkgVersion=$($Package.StoredPkgVersion) SourceSite=$($Package.SourceSite)")
+                try {
+                    $targetRows = @(& $getOsdContentTargetRows "$($Package.PackageID)" "$RequiredDp")
+                    if ($targetRows.Count -eq 0) {
+                        $parts.Add('targeting row=MISSING')
+                    }
+                    else {
+                        $target = $targetRows[0]
+                        $parts.Add("targeting row=present RefreshNow=$($target.RefreshNow) LastRefresh=$($target.LastRefreshTime) SourceVersion=$($target.SourceVersion) StoredPkgVersion=$($target.StoredPkgVersion)")
+                    }
+                }
+                catch { $parts.Add("targeting query failed: $($_.Exception.Message)") }
+                try {
+                    $detailRows = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionDPStatus -Filter "PackageID='$($Package.PackageID)'" -ErrorAction Stop |
+                        Where-Object {
+                            $detailDp = & $dpNameOf $_.ServerNALPath
+                            $detailDp -ieq $RequiredDp -or ($detailDp -split '\.')[0] -ieq ($RequiredDp -split '\.')[0]
+                        })
+                    if ($detailRows.Count -gt 0) {
+                        $detail = $detailRows[0]
+                        $detailParts = foreach ($propertyName in @('MessageID', 'MessageState', 'LastUpdateDate', 'Description', 'Status')) {
+                            if ($detail.PSObject.Properties.Name -contains $propertyName -and $null -ne $detail.$propertyName) {
+                                "$propertyName=$($detail.$propertyName)"
+                            }
+                        }
+                        if ($detailParts) { $parts.Add("provider detail: $($detailParts -join ' ')") }
+                    }
+                    else {
+                        $parts.Add('provider detail: no matching SMS_DistributionDPStatus row')
+                    }
+                }
+                catch { $parts.Add("provider detail query failed: $($_.Exception.Message)") }
+                try {
+                    $smsDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory'
+                    $distmgrLog = Join-Path $smsDir 'Logs\distmgr.log'
+                    $distmgrLines = @(Get-Content -LiteralPath $distmgrLog -Tail 5000 -ErrorAction Stop |
+                        Where-Object { $_ -match [regex]::Escape("$($Package.PackageID)") } |
+                        Select-Object -Last 8)
+                    if ($distmgrLines.Count -gt 0) {
+                        $parts.Add("distmgr tail: $(@($distmgrLines | ForEach-Object {
+                                    $match = [regex]::Match("$_", '<!\[LOG\[(.*?)\]LOG\]!>')
+                                    if ($match.Success) { $match.Groups[1].Value } else { "$_" }
+                                }) -join ' | ')")
+                    }
+                }
+                catch { $parts.Add("distmgr diagnostic failed: $($_.Exception.Message)") }
+                try {
+                    $dpHost = ($RequiredDp -split '\.')[0]
+                    $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 60000
+                    $dpDiagnostic = Invoke-Command -ComputerName $dpHost -SessionOption $sessionOption -ErrorAction Stop -ArgumentList "$($Package.PackageID)" -ScriptBlock {
+                        param($PackageId)
+                        $result = [ordered]@{ ContentRoot = ''; PkgLibFiles = @(); SmsDpProv = @(); Errors = @() }
+                        try {
+                            $result.ContentRoot = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath)"
+                            if ($result.ContentRoot) {
+                                $pkgLib = Join-Path $result.ContentRoot 'PkgLib'
+                                if (Test-Path -LiteralPath $pkgLib) {
+                                    $result.PkgLibFiles = @((Get-ChildItem -LiteralPath $pkgLib -Filter "$PackageId*.INI" -ErrorAction SilentlyContinue).Name)
+                                }
+                            }
+                        }
+                        catch { $result.Errors += "content library: $($_.Exception.Message)" }
+                        try {
+                            $dpLog = $null
+                            foreach ($drive in @('E:', 'D:', 'F:', 'C:')) {
+                                $candidate = "$drive\SMS_DP`$\sms\logs\smsdpprov.log"
+                                if (Test-Path -LiteralPath $candidate) { $dpLog = $candidate; break }
+                            }
+                            if ($dpLog) {
+                                $result.SmsDpProv = @(Get-Content -LiteralPath $dpLog -Tail 3000 -ErrorAction Stop |
+                                    Where-Object { $_ -match [regex]::Escape($PackageId) -or $_ -match 'error|failed|0x8' } |
+                                    Select-Object -Last 8)
+                            }
+                            else {
+                                $result.Errors += 'smsdpprov.log was not found on E:, D:, F:, or C:'
+                            }
+                        }
+                        catch { $result.Errors += "smsdpprov: $($_.Exception.Message)" }
+                        [pscustomobject]$result
+                    }
+                    $parts.Add("DP $RequiredDp state=$StateDescription ContentRoot='$($dpDiagnostic.ContentRoot)' PkgLib=[$(@($dpDiagnostic.PkgLibFiles) -join ',')] errors=[$(@($dpDiagnostic.Errors) -join '; ')]")
+                    if ($dpDiagnostic.SmsDpProv) {
+                        $parts.Add("DP smsdpprov tail: $(@($dpDiagnostic.SmsDpProv) -join ' | ')")
+                    }
+                }
+                catch { $parts.Add("DP diagnostic failed: $($_.Exception.Message)") }
+                return ($parts -join ' ; ')
+            }
+
+            foreach ($pkgClass in $osdPackageClasses) {
                 try {
                     $osPkgs = @(Get-WmiObject -Namespace $ns -Class $pkgClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)
                     if ($osPkgs.Count -eq 0) {
@@ -13611,11 +14677,11 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     # Same state vocabulary as the boot-image check above: 0=Installed,
                     # 1=InstallPending, 2=InstallRetrying, 3=InstallFailed, 4=RemovalPending,
                     # 5=RemovalRetrying, 6=RemovalFailed, 7=ContentValidating,
-                    # 8=ContentValidationFailed. Phase 11 runs minutes after these multi-GB WIMs
-                    # start distributing, so 1/2/7 are the NORMAL in-flight states and must not
-                    # fail the phase -- only a genuine failure or a missing targeting row does.
+                    # 8=ContentValidationFailed. InstallPending, InstallRetrying and
+                    # ContentValidating are nonterminal states. The shared convergence wait
+                    # above gives them time to advance; none may pass indefinitely.
                     $osPkgProblems = @()
-                    $osPkgPending = @()
+                    $osPkgProblemRows = [System.Collections.Generic.List[object]]::new()
                     foreach ($osPkg in $osPkgs) {
                         $rows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($osPkg.PackageID)'" -ErrorAction SilentlyContinue)
                         foreach ($wantDp in $expectedOsdDpNames) {
@@ -13625,30 +14691,74 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     $rowName -ieq $wantDp -or ($rowName -split '\.')[0] -ieq $wantShort
                                 } | Select-Object -First 1)
                             if ($row.Count -eq 0) {
-                                $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' not targeted to $wantDp"
+                                $targetRows = @()
+                                try { $targetRows = @(& $getOsdContentTargetRows "$($osPkg.PackageID)" "$wantDp") }
+                                catch { }
+                                if ($targetRows.Count -gt 0) {
+                                    $missingStatusDetail = "$($osPkg.PackageID) '$($osPkg.Name)' is targeted to $wantDp but has no summarizer row"
+                                    if ($osdContentWaitProbeFailed) {
+                                        $missingStatusDetail += " (convergence probe failed after ${osdContentWaitElapsedSeconds}s: $osdContentWaitFailure)"
+                                    }
+                                    elseif ($osdContentWaitTimedOut) {
+                                        $missingStatusDetail += " after ${osdContentWaitElapsedSeconds}s of convergence waiting"
+                                    }
+                                    else {
+                                        $missingStatusDetail += ' and no successful bounded wait covered this final state'
+                                    }
+                                    $osPkgProblems += $missingStatusDetail
+                                    $osPkgProblemRows.Add([pscustomobject]@{ Package = $osPkg; DP = $wantDp; State = 'TargetedNoStatus' })
+                                }
+                                else {
+                                    $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' not targeted to $wantDp"
+                                    $osPkgProblemRows.Add([pscustomobject]@{ Package = $osPkg; DP = $wantDp; State = 'NoTargetingRow' })
+                                }
                                 continue
                             }
                             $osState = [int]$row[0].State
-                            if ($osState -eq 0) { continue }
-                            if ($osState -in 1, 2, 7) { $osPkgPending += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is State=$osState" }
-                            else { $osPkgProblems += "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is State=$osState" }
+                            $osStateName = @{
+                                0 = 'Installed'; 1 = 'InstallPending'; 2 = 'InstallRetrying'; 3 = 'InstallFailed'
+                                4 = 'RemovalPending'; 5 = 'RemovalRetrying'; 6 = 'RemovalFailed'
+                                7 = 'ContentValidating'; 8 = 'ContentValidationFailed'
+                            }[$osState]
+                            if (-not $osStateName) { $osStateName = 'Unknown' }
+                            $osStateKind = Get-MemLabsContentDistributionStateKind -State $osState
+                            if ($osStateKind -eq 'Installed') { continue }
+                            $stateDetail = "$($osPkg.PackageID) '$($osPkg.Name)' on $wantDp is $osStateName (State=$osState)"
+                            if ($osStateKind -eq 'Pending') {
+                                if ($osdContentWaitProbeFailed) {
+                                    $stateDetail += " (convergence probe failed after ${osdContentWaitElapsedSeconds}s: $osdContentWaitFailure)"
+                                }
+                                elseif ($osdContentWaitTimedOut) {
+                                    $stateDetail += " after ${osdContentWaitElapsedSeconds}s of convergence waiting"
+                                }
+                                elseif (-not $osdContentWaitStarted) {
+                                    $stateDetail += ' but no successful bounded wait covered this final state'
+                                }
+                                else {
+                                    $stateDetail += ' after it had appeared to leave the bounded convergence set'
+                                }
+                            }
+                            $osPkgProblems += $stateDetail
+                            $osPkgProblemRows.Add([pscustomobject]@{ Package = $osPkg; DP = $wantDp; State = "$osStateName (State=$osState)" })
                         }
                     }
                     if ($osPkgProblems.Count -gt 0) {
                         $results.Passed = $false
                         $results.Details.Add("FAIL: $($pkgClass.Label) content cannot reach every required OSD DP: $($osPkgProblems -join '; '). PXE will boot into WinPE and the task sequence will then fail to find its content.")
-                    }
-                    elseif ($osPkgPending.Count -gt 0) {
-                        $results.Details.Add("INFO: $($pkgClass.Label) content is still distributing to the OSD DP(s): $($osPkgPending -join '; '). These are in-flight states, not failures; OSD cannot run until they reach Installed.")
+                        foreach ($problemRow in $osPkgProblemRows) {
+                            $results.Details.Add("DIAG: $(& $getOsdContentFailureDiagnostic $problemRow.Package $problemRow.DP $problemRow.State)")
+                        }
                     }
                     else {
                         $results.Details.Add("OK: all $($osPkgs.Count) $($pkgClass.Label)(s) are Installed on every required OSD DP ($($expectedOsdDpNames -join ', '))")
                     }
                 }
                 catch {
-                    $results.Details.Add("WARN: $($pkgClass.Class) query failed, so $($pkgClass.Label) distribution was NOT measured: $($_.Exception.Message)")
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: $($pkgClass.Class) query failed, so required $($pkgClass.Label) distribution was NOT measured: $($_.Exception.Message)")
                 }
             }
+            Write-Progress -Activity $osdProgressActivity -Completed
         }
 
         # 7c. The only check that puts a packet on the wire. Everything above is state:
@@ -14480,7 +15590,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 600
+        -AsJob -TimeoutSeconds 600 -PollProgress
 
     # Capture both sides when CM reports a long-running sync that native WSUS
     # cannot confirm. SUP-side evidence explains the native sync; site-server
