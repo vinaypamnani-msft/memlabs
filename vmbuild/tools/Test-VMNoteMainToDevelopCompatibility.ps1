@@ -21,6 +21,8 @@ $script:ExpectedFailures = 0
 $script:ProducerVm = $null
 $script:VmStore = @{}
 $script:Inventory = @()
+$script:LegacyNetbiosNames = @{}
+$script:RecoveredCmOptions = @{}
 $script:Common = [pscustomobject]@{ MemLabsVersion = '260829.0' }
 $global:vm_List = @()
 
@@ -185,8 +187,20 @@ function get-PrefixForDomain {
 }
 function Get-MemlabsVmStorageRoot { return 'E:\VirtualMachines' }
 function Get-CMLatestBaselineVersion { return '2509' }
+function Invoke-VmCommand {
+    param([string] $VmName, [string] $VmDomainName, [scriptblock] $ScriptBlock, [switch] $SuppressLog)
+    return [pscustomobject]@{ ScriptBlockOutput = $script:LegacyNetbiosNames[$VmDomainName] }
+}
+function Get-CmOptionsFromSiteServerBackup {
+    param([string] $VmName, [string] $DomainName)
+    return $script:RecoveredCmOptions[$DomainName]
+}
+function Set-VMNote {
+    param([string] $vmName, [object] $vmNote)
+}
 
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Get-VMNote)))
+. ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Get-DomainNetbiosName)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Test-VmPhase1Incomplete)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Update-VMFromHyperV)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.GenConfig.Existing.ps1' -Name New-UserConfig)))
@@ -303,6 +317,7 @@ Assert-Equal $false ([bool]$legacyState.Incomplete) 'older main note without pha
 Assert-True ($legacyState.Reason -like 'built by older build*') 'legacy safety decision reports its version basis' $legacyState.Reason
 
 $script:Inventory = @($nocmProjection)
+$script:LegacyNetbiosNames['nocm.com'] = 'nocm'
 $nocmExisting = New-UserConfig -Domain 'nocm.com' -Subnet '10.220.202.0'
 Assert-Equal 'nocm' $nocmExisting.vmOptions.domainNetBiosName 'ordinary DNS label reconstructs the expected NetBIOS name'
 Assert-Equal 'NOC-' $nocmExisting.vmOptions.prefix 'existing-domain config preserves prefix'
@@ -316,10 +331,9 @@ $disjointDeploy = New-DcDeployConfig -Domain 'sandwich.lab' -NetBios 'TACO' -Pre
 $disjointRaw = Invoke-MainNoteProducer -DeployConfig $disjointDeploy -VmName 'TAC-DC1'
 $disjointProjection = Convert-MainNoteToInventory -RawNote $disjointRaw
 $script:Inventory = @($disjointProjection)
+$script:LegacyNetbiosNames['sandwich.lab'] = 'TACO'
 $disjointExisting = New-UserConfig -Domain 'sandwich.lab' -Subnet '10.220.202.0'
-Assert-KnownFailure ($disjointExisting.vmOptions.domainNetBiosName -eq 'TACO') `
-    'legacy disjoint NetBIOS name survives reconstruction' `
-    "main note omitted TACO; develop reconstructed '$($disjointExisting.vmOptions.domainNetBiosName)' from the DNS label"
+Assert-Equal 'TACO' $disjointExisting.vmOptions.domainNetBiosName 'legacy disjoint NetBIOS name is recovered from the DC'
 
 $legacyPkiDeploy = New-DcDeployConfig -Domain 'legacypki.lab' -NetBios 'LEGACY' -Prefix 'LPK-'
 Add-PrimaryToDeployConfig -Config $legacyPkiDeploy
@@ -328,12 +342,13 @@ $legacyPrimaryRaw = Invoke-MainNoteProducer -DeployConfig $legacyPkiDeploy -VmNa
 $legacyDcProjection = Convert-MainNoteToInventory -RawNote $legacyDcRaw
 $legacyPrimaryProjection = Convert-MainNoteToInventory -RawNote $legacyPrimaryRaw
 $script:Inventory = @($legacyDcProjection, $legacyPrimaryProjection)
+$script:LegacyNetbiosNames['legacypki.lab'] = 'LEGACY'
+$script:RecoveredCmOptions['legacypki.lab'] = [pscustomobject]@{
+    Version = '2403'; Install = $true; PrePopulateObjects = $true; UsePKI = $true
+}
 $legacyPkiExisting = New-UserConfig -Domain 'legacypki.lab' -Subnet '10.220.202.0'
 Assert-Equal $true ([bool]$legacyPkiExisting.pkiOptions.EnablePKI) 'legacy CA metadata reconstructs pkiOptions'
-Assert-KnownFailure `
-    ([bool]$legacyPkiExisting.cmOptions.UsePKI -eq [bool]$legacyPkiExisting.pkiOptions.EnablePKI) `
-    'legacy ConfigMgr PKI reconstruction is internally consistent before deployment recovery' `
-    "pkiOptions.EnablePKI=$($legacyPkiExisting.pkiOptions.EnablePKI), cmOptions.UsePKI=$($legacyPkiExisting.cmOptions.UsePKI)"
+Assert-Equal $true ([bool]$legacyPkiExisting.cmOptions.UsePKI) 'legacy ConfigMgr PKI mode is recovered from the original guest config'
 
 Write-Host ''
 Write-Host "expected failures : $script:ExpectedFailures" -ForegroundColor Yellow
