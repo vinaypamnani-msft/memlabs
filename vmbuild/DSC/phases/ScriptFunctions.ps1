@@ -375,14 +375,15 @@ function Set-ScriptWorkflowStep {
         [string]$Step,
         [string]$Status,
         [switch]$StampStartTime,
-        [switch]$StampEndTime
+        [switch]$StampEndTime,
+        [switch]$ClearEndTime
     )
 
     $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $hasStatus = $PSBoundParameters.ContainsKey('Status')
 
-    return (Invoke-WithScriptWorkflowJsonMutex -ArgumentList $ConfigurationFile, $Step, $Status, $hasStatus, ([bool]$StampStartTime), ([bool]$StampEndTime), $now -ScriptBlock {
-            param($file, $step, $status, $hasStatus, $stampStart, $stampEnd, $now)
+    return (Invoke-WithScriptWorkflowJsonMutex -ArgumentList $ConfigurationFile, $Step, $Status, $hasStatus, ([bool]$StampStartTime), ([bool]$StampEndTime), ([bool]$ClearEndTime), $now -ScriptBlock {
+            param($file, $step, $status, $hasStatus, $stampStart, $stampEnd, $clearEnd, $now)
 
             $cfg = Get-Content -Path $file -Raw | ConvertFrom-Json
             if (-not $cfg.$step) {
@@ -391,9 +392,213 @@ function Set-ScriptWorkflowStep {
             if ($hasStatus) { $cfg.$step.Status = $status }
             if ($stampStart) { $cfg.$step.StartTime = $now }
             if ($stampEnd) { $cfg.$step.EndTime = $now }
+            elseif ($clearEnd) { $cfg.$step.EndTime = '' }
             $cfg | ConvertTo-Json | Out-File -FilePath $file -Force
             return $cfg
         })
+}
+
+function Reset-CMSiteProviderConnection {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SiteCode,
+        [Parameter(Mandatory)]
+        [string]$ProviderFqdn
+    )
+
+    try {
+        Set-Location "$($env:SystemDrive)\"
+        if (Get-PSDrive -Name $SiteCode -ErrorAction SilentlyContinue) {
+            Remove-PSDrive -Name $SiteCode -Force -ErrorAction Stop
+        }
+        $null = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderFqdn `
+            -Scope Global -ErrorAction Stop
+        Set-Location "$($SiteCode):\" -ErrorAction Stop
+        if ((Get-Location).Drive.Name -ne $SiteCode) {
+            throw "current drive is '$((Get-Location).Drive.Name)', not '$SiteCode'"
+        }
+        return [pscustomobject]@{ Succeeded = $true; Error = '' }
+    }
+    catch {
+        return [pscustomobject]@{ Succeeded = $false; Error = $_.Exception.Message }
+    }
+}
+
+function Get-SecondarySiteInstallMonitorSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SecondarySiteCode,
+        [Parameter(Mandatory)]
+        [string]$ProviderFqdn,
+        [Parameter(Mandatory)]
+        [string]$ProviderNamespacePath
+    )
+
+    try {
+        $siteStatus = Get-CMSite -SiteCode $SecondarySiteCode -ErrorAction Stop
+    }
+    catch {
+        throw "Get-CMSite failed for secondary site '$SecondarySiteCode': $($_.Exception.Message)"
+    }
+    if (-not $siteStatus) {
+        throw "Get-CMSite returned no row for secondary site '$SecondarySiteCode'"
+    }
+
+    $statusHistory = @()
+    if ([int]$siteStatus.Status -eq 2) {
+        try {
+            $statusHistory = @(Get-WmiObject -ComputerName $ProviderFqdn -Namespace $ProviderNamespacePath `
+                    -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$SecondarySiteCode'" -ErrorAction Stop |
+                    Sort-Object MessageTime)
+        }
+        catch {
+            throw "SMS_SecondarySiteStatus query failed for secondary site '$SecondarySiteCode': $($_.Exception.Message)"
+        }
+    }
+
+    return [pscustomobject]@{
+        SiteStatus    = $siteStatus
+        StatusHistory = @($statusHistory)
+    }
+}
+
+function Test-SecondarySiteReplicationActive {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$ReplicationStatus
+    )
+
+    return $null -ne $ReplicationStatus -and
+        [int]$ReplicationStatus.LinkStatus -eq 2 -and
+        [int]$ReplicationStatus.Site1ToSite2GlobalState -eq 2 -and
+        [int]$ReplicationStatus.Site2ToSite1GlobalState -eq 2
+}
+
+function Test-DrsLinkHealthyViaSql {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SqlDataSource,
+        [Parameter(Mandatory)]
+        [string]$DatabaseName,
+        [Parameter(Mandatory)]
+        [string]$ParentSiteCode,
+        [Parameter(Mandatory)]
+        [string]$ChildSiteCode
+    )
+
+    $result = [pscustomobject]@{
+        Healthy       = $false
+        ParentStatus  = $null
+        ChildStatus   = $null
+        NegativeSends = $null
+        Error         = $null
+    }
+    $connection = $null
+    try {
+        $connectionString = "Data Source=$SqlDataSource;Initial Catalog=$DatabaseName;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+        $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
+        $connection.Open()
+
+        $siteCommand = $connection.CreateCommand()
+        $siteCommand.CommandText = 'SELECT SiteCode, SiteStatus FROM ServerData WHERE SiteCode IN (@parent, @child)'
+        $siteCommand.CommandTimeout = 30
+        [void]$siteCommand.Parameters.AddWithValue('@parent', $ParentSiteCode)
+        [void]$siteCommand.Parameters.AddWithValue('@child', $ChildSiteCode)
+        $reader = $siteCommand.ExecuteReader()
+        try {
+            while ($reader.Read()) {
+                $siteCode = [string]$reader['SiteCode']
+                $siteStatus = [int]$reader['SiteStatus']
+                if ($siteCode -eq $ParentSiteCode) { $result.ParentStatus = $siteStatus }
+                elseif ($siteCode -eq $ChildSiteCode) { $result.ChildStatus = $siteStatus }
+            }
+        }
+        finally {
+            $reader.Close()
+        }
+
+        $sendCommand = $connection.CreateCommand()
+        $sendCommand.CommandText = 'SELECT COUNT(*) FROM DRS_MessageActivity_Send WHERE SiteCode = @child AND LastSendResult < 0'
+        $sendCommand.CommandTimeout = 30
+        [void]$sendCommand.Parameters.AddWithValue('@child', $ChildSiteCode)
+        $result.NegativeSends = [int]$sendCommand.ExecuteScalar()
+
+        $activeStatuses = @(125, 225)
+        $result.Healthy = $result.ParentStatus -in $activeStatuses -and
+            $result.ChildStatus -in $activeStatuses -and
+            $result.NegativeSends -eq 0
+    }
+    catch {
+        $result.Error = $_.Exception.Message
+    }
+    finally {
+        if ($connection) { $connection.Dispose() }
+    }
+
+    return $result
+}
+
+function Receive-SecondarySiteInstallJobResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.Job]$Job,
+        [int]$TimeoutSeconds = 6 * 60 * 60
+    )
+
+    if (-not (Wait-Job -Job $Job -Timeout $TimeoutSeconds)) {
+        Stop-Job -Job $Job -ErrorAction SilentlyContinue
+        return [pscustomobject]@{
+            Succeeded = $false
+            State     = "$($Job.State)"
+            Reason    = "job did not finish within $TimeoutSeconds seconds and was stopped"
+            Marker    = $null
+        }
+    }
+
+    $receiveErrors = @()
+    $jobOutput = @(Receive-Job -Job $Job -ErrorAction SilentlyContinue -ErrorVariable receiveErrors)
+    $resultMarker = @($jobOutput | Where-Object {
+            $_ -and $_.PSObject.Properties['MemLabsSecondaryInstallResult'] -and
+            $_.MemLabsSecondaryInstallResult -eq $true
+        } | Select-Object -Last 1)
+    $resultMarker = if ($resultMarker.Count -gt 0) { $resultMarker[0] } else { $null }
+
+    $succeeded = "$($Job.State)" -eq 'Completed' -and
+        $resultMarker -and $resultMarker.Succeeded -eq $true
+    $reasonParts = New-Object System.Collections.Generic.List[string]
+    if ("$($Job.State)" -ne 'Completed') {
+        $reasonParts.Add("job state is $($Job.State)")
+        $stateReason = $Job.JobStateInfo.Reason
+        if (-not $stateReason -and $Job.ChildJobs.Count -gt 0) {
+            $stateReason = $Job.ChildJobs[0].JobStateInfo.Reason
+        }
+        if ($stateReason) { $reasonParts.Add("$($stateReason.Message)") }
+    }
+    if (-not $resultMarker) {
+        $reasonParts.Add('the job did not return its completion marker')
+    }
+    elseif ($resultMarker.Succeeded -ne $true) {
+        $markerReason = "the secondary was not verified ready"
+        if ($resultMarker.LastStep) { $markerReason += " (last step $($resultMarker.LastStep))" }
+        if ($resultMarker.LastStatus) { $markerReason += ": $($resultMarker.LastStatus)" }
+        $reasonParts.Add($markerReason)
+    }
+    foreach ($receiveError in @($receiveErrors)) {
+        $message = "$($receiveError.Exception.Message)"
+        if ($message -and -not $reasonParts.Contains($message)) { $reasonParts.Add($message) }
+    }
+
+    return [pscustomobject]@{
+        Succeeded = [bool]$succeeded
+        State     = "$($Job.State)"
+        Reason    = ($reasonParts -join '; ')
+        Marker    = $resultMarker
+    }
 }
 
 # Launch InstallPassiveSiteServer.ps1 in a BACKGROUND JOB so the passive-site
