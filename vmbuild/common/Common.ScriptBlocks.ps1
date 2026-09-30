@@ -2233,13 +2233,34 @@ function Save-CMSetupLogsFromVm {
             BundlePath     = $null
             BundleBytes    = 0
             BundleError    = $null
+            BundleStatusPath = $null
         }
+        $bundleStatusPath = if ($BundleToken) { "C:\Windows\Temp\MemLabs-CMLogs-$BundleToken.status.json" } else { $null }
+        $writeBundleStage = {
+            param([string]$Stage, [string]$SourcePath, [long]$Bytes, [string]$ErrorText)
+            if (-not $bundleStatusPath) { return }
+            try {
+                $status = [ordered]@{
+                    CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                    ComputerName  = $env:COMPUTERNAME
+                    Stage         = $Stage
+                    SourcePath    = $SourcePath
+                    Bytes         = $Bytes
+                    Error         = $ErrorText
+                }
+                $status | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $bundleStatusPath -Encoding UTF8 -Force
+            }
+            catch { }
+        }
+        $out.BundleStatusPath = $bundleStatusPath
+        & $writeBundleStage 'Started' $null 0 $null
         if (-not $CollectCmEvidenceOnly) {
         if (Test-Path 'C:\ConfigMgrSetup.log') {
             $fi = Get-Item 'C:\ConfigMgrSetup.log' -ErrorAction SilentlyContinue
             if ($fi) {
                 $out.SetupExists = $true
                 $out.SetupBytes  = $fi.Length
+                & $writeBundleStage 'ReadConfigMgrSetup' $fi.FullName $fi.Length $null
                 if ($fi.Length -le 64MB) {
                     # Whole file on success too: the AI import sits ~4% in and index
                     # creation ~39% in, 17k lines apart, so no tail window covers both
@@ -2263,6 +2284,7 @@ function Save-CMSetupLogsFromVm {
             if ($fi) {
                 $out.WrapperExists  = $true
                 $out.WrapperBytes   = $fi.Length
+                & $writeBundleStage 'ReadInstallCMLog' $fi.FullName $fi.Length $null
                 $out.WrapperContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
             }
         }
@@ -2271,6 +2293,7 @@ function Save-CMSetupLogsFromVm {
             if ($fi) {
                 $out.DscLogExists  = $true
                 $out.DscLogBytes   = $fi.Length
+                & $writeBundleStage 'ReadDscLog' $fi.FullName $fi.Length $null
                 $out.DscLogContent = (Get-Content -LiteralPath $fi.FullName -Tail 4000 -ErrorAction SilentlyContinue) -join "`r`n"
             }
         }
@@ -2279,6 +2302,7 @@ function Save-CMSetupLogsFromVm {
             if ($fi) {
                 $out.ClientPackageTimelineExists = $true
                 $out.ClientPackageTimelineBytes = $fi.Length
+                & $writeBundleStage 'ReadClientPackageTimeline' $fi.FullName $fi.Length $null
                 if ($fi.Length -le 16MB) {
                     $out.ClientPackageTimelineContent = Get-Content -LiteralPath $fi.FullName -Raw -ErrorAction SilentlyContinue
                 }
@@ -2515,11 +2539,15 @@ function Save-CMSetupLogsFromVm {
                 Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'MemLabs-CMLogs-*' -ErrorAction SilentlyContinue |
                     Where-Object { $_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddHours(-1) } |
                     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                Get-ChildItem -LiteralPath 'C:\Windows\Temp' -File -Filter 'MemLabs-CMLogs-*.status.json' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddHours(-1) } |
+                    Remove-Item -Force -ErrorAction SilentlyContinue
 
                 if (Test-Path -LiteralPath $bundleRoot) {
                     Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction Stop
                 }
                 New-Item -ItemType Directory -Path $bundleRoot -Force -ErrorAction Stop | Out-Null
+                & $writeBundleStage 'StageFiles' $bundleRoot 0 $null
 
                 if ($out.SetupExists -and $null -ne $out.SetupContent) {
                     $out.SetupBundleName = if ($out.SetupTail) { 'ConfigMgrSetup.head30000-tail5000.log' } else { 'ConfigMgrSetup.log' }
@@ -2548,9 +2576,11 @@ function Save-CMSetupLogsFromVm {
                 $bundleFiles = @(Get-ChildItem -LiteralPath $bundleRoot -File -ErrorAction Stop)
                 if ($bundleFiles.Count -gt 0) {
                     $bundlePath = Join-Path $bundleRoot 'CMLogs.zip'
+                    & $writeBundleStage 'CompressArchive' $bundlePath (($bundleFiles | Measure-Object Length -Sum).Sum) $null
                     Compress-Archive -LiteralPath @($bundleFiles.FullName) -DestinationPath $bundlePath -CompressionLevel Optimal -Force -ErrorAction Stop
                     $out.BundlePath = $bundlePath
                     $out.BundleBytes = (Get-Item -LiteralPath $bundlePath -ErrorAction Stop).Length
+                    & $writeBundleStage 'Complete' $bundlePath $out.BundleBytes $null
 
                     # Only the small manifest crosses PSDirect. The bounded external
                     # copy worker retrieves the ZIP after this command returns.
@@ -2566,6 +2596,7 @@ function Save-CMSetupLogsFromVm {
             }
             catch {
                 $out.BundleError = $_.Exception.Message
+                & $writeBundleStage 'Failed' $bundleRoot 0 $out.BundleError
             }
             finally {
                 # A packaging error must never fall back to serializing the large
@@ -2604,6 +2635,21 @@ function Save-CMSetupLogsFromVm {
     if (-not $res -or $res.ScriptBlockFailed -or -not $res.ScriptBlockOutput) {
         if (-not $baselineCaptureError) {
             $baselineCaptureError = if ($res -and $res.TimedOut) { 'baseline log packaging timed out after 180 seconds' } else { 'baseline log packaging returned no usable response' }
+        }
+        if ($res -and $res.TimedOut) {
+            $guestStatusPath = "C:\Windows\Temp\MemLabs-CMLogs-$bundleToken.status.json"
+            $hostStatusPath = Join-Path $logDir "$base-PackagingStatus.json"
+            try {
+                if (Copy-ItemFromVmBounded -Path $guestStatusPath -Destination $hostStatusPath `
+                        -VMName $VmName -VMDomainName $DomainName -TimeoutSeconds 30) {
+                    $packagingStatus = Get-Content -LiteralPath $hostStatusPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $baselineCaptureError += " (lastStage=$($packagingStatus.Stage), source=$($packagingStatus.SourcePath), bytes=$($packagingStatus.Bytes))"
+                    Write-Log "[Phase $Phase]: $VmName`: Pulled packaging timeout status -> $hostStatusPath" -OutputStream
+                }
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: packaging timeout status could not be collected: $($_.Exception.Message)" -Warning -OutputStream
+            }
         }
     }
     else {
@@ -2672,7 +2718,7 @@ function Save-CMSetupLogsFromVm {
 
     if ($baselineCaptureError) {
         $continuation = if ($Mode -eq 'Failure') { 'continuing with independent failure diagnostics' } else { 'continuing; phase success is unchanged' }
-        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: $baselineCaptureError; $continuation" -Warning
+        Write-Log "[Phase $Phase]: $VmName`: CMLog capture: $baselineCaptureError; $continuation" -Warning -OutputStream
         $r = [pscustomobject]@{
             SetupExists   = $false
             WrapperExists = $false
