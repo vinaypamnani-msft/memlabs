@@ -28,6 +28,8 @@ param(
     [string]$DomainNetbios,
 
     [string]$AdminName = 'admin',
+    [string]$Domain = '',
+    [string]$DcVm = '',
 
     [Parameter(Mandatory)]
     [string]$AgName,
@@ -42,7 +44,11 @@ param(
     [ValidateRange(60, 900)]
     [int]$TimeoutSeconds = 300,
 
+    [ValidateRange(1, 24)]
+    [int]$HealthHours = 4,
+
     [switch]$NoFailback,
+    [switch]$SkipHealthSnapshots,
     [PSCredential]$Credential
 )
 
@@ -55,6 +61,14 @@ if (-not $Credential) {
 $logDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'logs'
 if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 $logPath = Join-Path $logDir ("sqlao-planned-failover-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$healthCollectorPath = Join-Path $PSScriptRoot 'Get-SqlaoDnsDiag.ps1'
+$healthCollectorInvoker = {
+    param([string]$Path, [hashtable]$Parameters)
+    & $Path @Parameters
+}
+$script:healthSnapshotEnvironment = $null
+$script:healthSnapshotArtifacts = [Collections.Generic.List[object]]::new()
+$script:healthSnapshotFailures = [Collections.Generic.List[string]]::new()
 
 function Write-TestLog {
     param([string]$Message)
@@ -103,6 +117,102 @@ function Invoke-NodeCommand {
     }
     finally {
         if ($job) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Resolve-HealthSnapshotEnvironment {
+    if ($SkipHealthSnapshots) { return $null }
+    $resolvedDomain = [string]$Domain
+    $resolvedDcVm = [string]$DcVm
+    if ([string]::IsNullOrWhiteSpace($resolvedDomain) -or [string]::IsNullOrWhiteSpace($resolvedDcVm)) {
+        $discovery = Invoke-NodeCommand -VmName $NodeVm[0] -ScriptBlock {
+            param($DomainHint)
+            $domainName = [string]$DomainHint
+            if ([string]::IsNullOrWhiteSpace($domainName)) {
+                $domainName = [string]$env:USERDNSDOMAIN
+            }
+            if ([string]::IsNullOrWhiteSpace($domainName)) {
+                $domainName = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName
+            }
+            $dcName = [string]$env:LOGONSERVER
+            if ($dcName) { $dcName = $dcName.TrimStart('\') }
+            if ([string]::IsNullOrWhiteSpace($dcName) -and $domainName) {
+                $nltest = @(& nltest "/dsgetdc:$domainName" 2>&1)
+                $dcLine = $nltest | Where-Object { $_ -match '^\s*DC:\s+\\\\([^\s.]+)' } | Select-Object -First 1
+                if ($dcLine -and $dcLine -match '^\s*DC:\s+\\\\([^\s.]+)') { $dcName = $Matches[1] }
+            }
+            [pscustomobject]@{ Domain = $domainName; DcVm = $dcName }
+        } -ArgumentList $resolvedDomain -Deadline (Get-Date).AddSeconds($TimeoutSeconds)
+        if ([string]::IsNullOrWhiteSpace($resolvedDomain)) { $resolvedDomain = [string]$discovery.Domain }
+        if ([string]::IsNullOrWhiteSpace($resolvedDcVm)) { $resolvedDcVm = [string]$discovery.DcVm }
+    }
+    if ([string]::IsNullOrWhiteSpace($resolvedDomain) -or [string]::IsNullOrWhiteSpace($resolvedDcVm)) {
+        throw 'Could not discover the DNS domain or DC VM for health snapshots. Supply -Domain and -DcVm explicitly.'
+    }
+    $dcState = Get-VM -Name $resolvedDcVm -ErrorAction Stop
+    if ($dcState.State -ne 'Running') {
+        throw "DC VM '$resolvedDcVm' is '$($dcState.State)'; health snapshots require it to be running."
+    }
+    return [pscustomobject]@{ Domain = $resolvedDomain; DcVm = $resolvedDcVm }
+}
+
+function Invoke-HealthSnapshot {
+    param([Parameter(Mandatory)][string]$Label)
+    if ($SkipHealthSnapshots) {
+        Write-TestLog "Health snapshot '$Label' skipped by request."
+        return $null
+    }
+    if (-not $script:healthSnapshotEnvironment) {
+        $script:healthSnapshotEnvironment = Resolve-HealthSnapshotEnvironment
+    }
+    if (-not (Test-Path -LiteralPath $healthCollectorPath)) {
+        throw "SQLAO health collector was not found at '$healthCollectorPath'."
+    }
+    $collectorParameters = @{
+        NodeVm = @($NodeVm)
+        DcVm = [string]$script:healthSnapshotEnvironment.DcVm
+        Domain = [string]$script:healthSnapshotEnvironment.Domain
+        DomainNetbios = $DomainNetbios
+        AdminName = $AdminName
+        AgName = $AgName
+        SqlInstanceName = $SqlInstanceName
+        ListenerPort = $ListenerPort
+        Hours = $HealthHours
+        SnapshotLabel = $Label
+        Credential = $Credential
+    }
+    $collectorOutput = @(& $healthCollectorInvoker $healthCollectorPath $collectorParameters)
+    $artifact = @($collectorOutput | Where-Object {
+            $_ -and $_.PSObject.Properties['ReportPath'] -and $_.PSObject.Properties['ArchivePath']
+        } | Select-Object -Last 1)
+    if ($artifact.Count -ne 1 -or
+        -not (Test-Path -LiteralPath $artifact[0].ReportPath) -or
+        -not (Test-Path -LiteralPath $artifact[0].ArchivePath)) {
+        throw "Health snapshot '$Label' did not produce a report and archive."
+    }
+    if (-not $artifact[0].PSObject.Properties['CollectionComplete'] -or
+        -not [bool]$artifact[0].CollectionComplete) {
+        $collectionErrors = @($artifact[0].CollectionErrors | Where-Object { $_ })
+        throw "Health snapshot '$Label' preserved incomplete artifacts report='$($artifact[0].ReportPath)' archive='$($artifact[0].ArchivePath)': $($collectionErrors -join ' | ')"
+    }
+    Write-TestLog "Health snapshot '$Label' captured: report='$($artifact[0].ReportPath)' archive='$($artifact[0].ArchivePath)'."
+    return $artifact[0]
+}
+
+function Save-HealthSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [switch]$Required
+    )
+    try {
+        $artifact = Invoke-HealthSnapshot -Label $Label
+        if ($artifact) { $script:healthSnapshotArtifacts.Add($artifact) }
+    }
+    catch {
+        $message = "Health snapshot '$Label' failed: $($_.Exception.Message)"
+        Write-TestLog $message
+        if ($Required) { throw }
+        $script:healthSnapshotFailures.Add($message)
     }
 }
 
@@ -471,6 +581,49 @@ function Wait-ForClusterPrimaryOwnership {
     throw "WSFC owner state did not converge to current SQL primary '$PrimaryNode' within $TimeoutSeconds seconds. Last group='$($lastState.GroupOwner)' groupState='$($lastState.GroupState)' resourceState='$($lastState.ResourceState)' possible=[$(@($lastState.PossibleOwners) -join ', ')]."
 }
 
+function Confirm-FailoverPreconditions {
+    param(
+        [Parameter(Mandatory)][string]$ExpectedPrimary,
+        [Parameter(Mandatory)][string]$ExpectedSecondary,
+        [Parameter(Mandatory)][string[]]$ExpectedDatabases,
+        [Parameter(Mandatory)][datetime]$Deadline
+    )
+    $states = Get-PairState -Deadline $Deadline
+    if (-not (Test-PrimaryReady -State $states[$ExpectedPrimary] -ExpectedDatabases $ExpectedDatabases)) {
+        throw "Expected primary '$ExpectedPrimary' is no longer healthy and online after the startup snapshot."
+    }
+    if (-not (Test-TargetReady -State $states[$ExpectedSecondary] -ExpectedDatabases $ExpectedDatabases)) {
+        throw "Target '$ExpectedSecondary' is no longer synchronized and failover-ready after the startup snapshot."
+    }
+    $clusterState = Invoke-NodeCommand -VmName $NodeVm[0] -ScriptBlock $clusterPreflightScript `
+        -ArgumentList $AgName, ($NodeVm -join ',') -Deadline $Deadline
+    if (-not (Test-ClusterPrimaryOwnership -ClusterState $clusterState -PrimaryNode $ExpectedPrimary)) {
+        throw "SQL/WSFC ownership changed after the startup snapshot. Expected primary='$ExpectedPrimary', group owner='$($clusterState.GroupOwner)', possible=[$(@($clusterState.PossibleOwners) -join ', ')]."
+    }
+    $expectedReplica = [string]$states[$ExpectedPrimary].Replica.ReplicaServer
+    $listenerState = Invoke-NodeCommand -VmName $ExpectedPrimary -ScriptBlock $listenerScript `
+        -ArgumentList $ListenerName, $ListenerPort, $Database, $AgName -Deadline $Deadline
+    if (-not (Test-ListenerState -State $listenerState -ExpectedReplica $expectedReplica)) {
+        throw "Listener state changed after the startup snapshot. Expected exact primary replica '$expectedReplica'."
+    }
+    return [pscustomobject]@{
+        States = $states
+        ClusterState = $clusterState
+        ListenerState = $listenerState
+    }
+}
+
+function Get-ExpectedFinalPrimary {
+    param(
+        [string]$OriginalPrimary,
+        [string]$TargetSecondary,
+        [bool]$FailoverConverged,
+        [bool]$NoFailbackRequested
+    )
+    if ($NoFailbackRequested -and $FailoverConverged) { return $TargetSecondary }
+    return $OriginalPrimary
+}
+
 foreach ($node in $NodeVm) {
     $vm = Get-VM -Name $node -ErrorAction Stop
     if ($vm.State -ne 'Running') { throw "VM '$node' is '$($vm.State)'; both replicas must be running." }
@@ -527,8 +680,13 @@ if (-not $PSCmdlet.ShouldProcess($operation, 'ALTER AVAILABILITY GROUP ... FAILO
 $firstFailoverAttempted = $false
 $testError = $null
 $finalPrimary = 'UNKNOWN'
+$failoverConverged = $false
 $postconditionFailures = [Collections.Generic.List[string]]::new()
 try {
+    Save-HealthSnapshot -Label 'startup' -Required
+    $null = Confirm-FailoverPreconditions -ExpectedPrimary $originalPrimary -ExpectedSecondary $targetSecondary `
+        -ExpectedDatabases $expectedDatabases -Deadline (Get-Date).AddSeconds($TimeoutSeconds)
+    Write-TestLog 'Failover preconditions revalidated after the startup health snapshot.'
     $failoverDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
     Write-TestLog "Failing over to '$targetSecondary'."
     $firstFailoverAttempted = $true
@@ -538,6 +696,9 @@ try {
         -ExpectedDatabases $expectedDatabases -Deadline $failoverDeadline
     $targetReplicaName = [string]$failedOverState[$targetSecondary].Replica.ReplicaServer
     $null = Wait-ForListener -ExpectedPrimary $targetSecondary -ExpectedReplica $targetReplicaName -Deadline $failoverDeadline
+    $null = Wait-ForClusterPrimaryOwnership -PrimaryNode $targetSecondary -Deadline (Get-Date).AddSeconds($TimeoutSeconds)
+    $failoverConverged = $true
+    Save-HealthSnapshot -Label 'after-failover'
     Write-TestLog "Failover succeeded. Listener and database '$Database' are served by '$targetSecondary'."
 
     if ($NoFailback) {
@@ -556,6 +717,8 @@ try {
             -ExpectedDatabases $expectedDatabases -Deadline $failbackDeadline
         $originalReplicaName = [string]$failedBackState[$originalPrimary].Replica.ReplicaServer
         $null = Wait-ForListener -ExpectedPrimary $originalPrimary -ExpectedReplica $originalReplicaName -Deadline $failbackDeadline
+        $null = Wait-ForClusterPrimaryOwnership -PrimaryNode $originalPrimary -Deadline (Get-Date).AddSeconds($TimeoutSeconds)
+        Save-HealthSnapshot -Label 'after-failback'
         $finalPrimary = $originalPrimary
         Write-TestLog "Failback succeeded. Listener and database '$Database' are again served by '$originalPrimary'."
     }
@@ -609,7 +772,11 @@ finally {
         $finalPrimary = "UNKNOWN ($($_.Exception.Message))"
     }
     Write-TestLog "Authoritative final primary after test: '$finalPrimary'."
-    $expectedFinalPrimary = if ($NoFailback) { $targetSecondary } else { $originalPrimary }
+    foreach ($snapshotFailure in $script:healthSnapshotFailures) {
+        $postconditionFailures.Add($snapshotFailure)
+    }
+    $expectedFinalPrimary = Get-ExpectedFinalPrimary -OriginalPrimary $originalPrimary -TargetSecondary $targetSecondary `
+        -FailoverConverged $failoverConverged -NoFailbackRequested ([bool]$NoFailback)
     if (-not (Test-FinalPrimaryPostcondition -FinalPrimary $finalPrimary -ExpectedPrimary $expectedFinalPrimary)) {
         $postconditionFailures.Add("Final primary postcondition failed: expected '$expectedFinalPrimary', observed '$finalPrimary'.")
     }

@@ -60,10 +60,12 @@ param(
     [string]$SqlInstanceName = 'MSSQLSERVER',
     [int]$ListenerPort = 1500,
     [int]$EndpointPort = 5022,
+    [string]$SnapshotLabel = '',
     [ValidateRange(1, 24)]
     [int]$Hours = 4,
     # Optional manual override if cluster auto-discovery on the nodes fails.
-    [string[]]$ExtraNames = @()
+    [string[]]$ExtraNames = @(),
+    [PSCredential]$Credential
 )
 
 $ErrorActionPreference = 'Continue'
@@ -71,7 +73,9 @@ $ErrorActionPreference = 'Continue'
 $logDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'logs'
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$outFile = Join-Path $logDir "sqlao-health-diag-$stamp.txt"
+$safeLabel = [string]$SnapshotLabel -replace '[^A-Za-z0-9_-]', '-'
+$labelSuffix = if ([string]::IsNullOrWhiteSpace($safeLabel)) { '' } else { "-$safeLabel" }
+$outFile = Join-Path $logDir "sqlao-health-diag$labelSuffix-$stamp.txt"
 
 function Add-Section {
     param([string]$Title, [object]$Body)
@@ -83,11 +87,15 @@ function Add-Section {
 }
 
 Add-Content -Path $outFile -Value "SQLAO post-deployment health diagnostic  ($stamp)"
+if ($safeLabel) { Add-Content -Path $outFile -Value "Snapshot=$safeLabel" }
 Add-Content -Path $outFile -Value "Nodes=$($NodeVm -join ', ')   DC=$DcVm   Domain=$Domain   AG='$AgName' Instance='$SqlInstanceName'"
 
 # One password for the lab. Entered locally; never via the model.
-$pw = (Get-Credential -UserName "$DomainNetbios\$AdminName" -Message "Enter the lab admin password for $DomainNetbios").Password
-$cred = New-Object System.Management.Automation.PSCredential ("$DomainNetbios\$AdminName", $pw)
+if (-not $Credential) {
+    $pw = (Get-Credential -UserName "$DomainNetbios\$AdminName" -Message "Enter the lab admin password for $DomainNetbios").Password
+    $Credential = New-Object System.Management.Automation.PSCredential ("$DomainNetbios\$AdminName", $pw)
+}
+$cred = $Credential
 
 # ---------------------------------------------------------------------------
 #  Node collection (runs in-guest on each SQLAO node -- PS5.1)
@@ -96,10 +104,12 @@ $cred = New-Object System.Management.Automation.PSCredential ("$DomainNetbios\$A
 # ---------------------------------------------------------------------------
 $nodeScript = {
     param($ExpectedAgName, $SqlInstanceName, $OtherNode, $ListenerPort, $EndpointPort, $Hours)
-    $out = [System.Collections.Generic.List[string]]::new()
-    $findings = [System.Collections.Generic.List[string]]::new()
+    $script:out = [System.Collections.Generic.List[string]]::new()
+    $script:findings = [System.Collections.Generic.List[string]]::new()
+    $script:acquisitionErrors = [System.Collections.Generic.List[string]]::new()
     function W { param($t) $script:out.Add([string]$t) }
     function F { param($t) $script:findings.Add([string]$t); W "FINDING: $t" }
+    function E { param($t) $script:acquisitionErrors.Add([string]$t); W "ERR $t" }
     function Test-TcpFast {
         param([string]$ComputerName, [int]$Port, [int]$TimeoutMs = 3000)
         $client = New-Object Net.Sockets.TcpClient
@@ -165,14 +175,14 @@ $nodeScript = {
         $discClusterName = [string]$cl.Name
         W ($cl | Format-List Name, Domain, * | Out-String)
     }
-    catch { W "ERR Get-Cluster: $($_.Exception.Message)" }
+    catch { E "Get-Cluster: $($_.Exception.Message)" }
 
     W "### Get-ClusterQuorum ###"
     try {
         $quorum = Get-ClusterQuorum -ErrorAction Stop
         W ($quorum | Format-List Cluster, QuorumType, QuorumResource | Out-String)
     }
-    catch { W "ERR Get-ClusterQuorum: $($_.Exception.Message)" }
+    catch { E "Get-ClusterQuorum: $($_.Exception.Message)" }
 
     W "### Get-ClusterNode ###"
     try {
@@ -180,13 +190,13 @@ $nodeScript = {
         foreach ($n in $nodes) { $discNodes.Add([string]$n.Name) }
         W ($nodes | Format-Table Name, State, DynamicWeight, NodeWeight -AutoSize | Out-String)
     }
-    catch { W "ERR Get-ClusterNode: $($_.Exception.Message)" }
+    catch { E "Get-ClusterNode: $($_.Exception.Message)" }
 
     W "### Get-ClusterNetwork (+ role: 1=Cluster-only, 3=Cluster+Client) ###"
     try {
         W (Get-ClusterNetwork -ErrorAction Stop | Format-Table Name, State, Role, Address, AddressMask -AutoSize | Out-String)
     }
-    catch { W "ERR Get-ClusterNetwork: $($_.Exception.Message)" }
+    catch { E "Get-ClusterNetwork: $($_.Exception.Message)" }
 
     W "### All cluster resources (State / Type / OwnerGroup) ###"
     $allRes = @()
@@ -201,10 +211,10 @@ $nodeScript = {
                     W ("    {0,-28} = {1}" -f $parameter.Name, $parameter.Value)
                 }
             }
-            catch { W "    ERR Get-ClusterParameter: $($_.Exception.Message)" }
+            catch { E "Get-ClusterParameter '$($resource.Name)': $($_.Exception.Message)" }
         }
     }
-    catch { W "ERR Get-ClusterResource: $($_.Exception.Message)" }
+    catch { E "Get-ClusterResource: $($_.Exception.Message)" }
 
     W "### Clustered role/resource owner policy ###"
     try {
@@ -261,7 +271,10 @@ $nodeScript = {
             }
         }
     }
-    catch { F "Could not enumerate AG preferred/possible owners: $($_.Exception.Message)" }
+    catch {
+        E "AG preferred/possible owner enumeration: $($_.Exception.Message)"
+        F "Could not enumerate AG preferred/possible owners: $($_.Exception.Message)"
+    }
 
     W "### Network Name resources -- FULL private properties (CNO + AG listeners) ###"
     W "    (key fields: Name, DnsName, RegisterAllProvidersIP, HostRecordTTL, PublishPTRRecords, StatusDNS)"
@@ -292,7 +305,7 @@ $nodeScript = {
         }
         if (-not $nnRes) { W "(no Network Name resources found)" }
     }
-    catch { W "ERR Network Name enumeration: $($_.Exception.Message)" }
+    catch { E "Network Name enumeration: $($_.Exception.Message)" }
 
     W "### IP Address resources -- FULL private properties (cluster IP + AG VIP) ###"
     try {
@@ -313,7 +326,7 @@ $nodeScript = {
         }
         if (-not $ipRes) { W "(no IP Address resources found)" }
     }
-    catch { W "ERR IP Address enumeration: $($_.Exception.Message)" }
+    catch { E "IP Address enumeration: $($_.Exception.Message)" }
 
     W "### SQL/cluster services and TCP reachability ###"
     foreach ($serviceName in @('ClusSvc', $(if ($SqlInstanceName -ieq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$SqlInstanceName" }))) {
@@ -322,7 +335,10 @@ $nodeScript = {
             W ("    {0,-24} {1}" -f $service.Name, $service.Status)
             if ($service.Status -ne 'Running') { F "Service '$serviceName' is '$($service.Status)'." }
         }
-        catch { F "Service '$serviceName' could not be queried: $($_.Exception.Message)" }
+        catch {
+            E "Service '$serviceName' query: $($_.Exception.Message)"
+            F "Service '$serviceName' could not be queried: $($_.Exception.Message)"
+        }
     }
     if ($OtherNode) {
         $endpointReachable = Test-TcpFast -ComputerName $OtherNode -Port $EndpointPort
@@ -354,7 +370,11 @@ $nodeScript = {
             elseif ($reachableAddresses.Count -eq 0) {
                 F "Listener TCP $Listener`:$Port is unreachable on every provider address [$($listenerAddresses -join ', ')] from '$env:COMPUTERNAME'."
             }
-        } catch { F "Listener '$Listener' DNS/TCP probe failed: $($_.Exception.Message)" }
+        }
+        catch {
+            E "Listener '$Listener' DNS/TCP probe: $($_.Exception.Message)"
+            F "Listener '$Listener' DNS/TCP probe failed: $($_.Exception.Message)"
+        }
     }
     foreach ($listener in $uniqueListeners) {
         & $listenerProbeScript -Listener $listener -Port $ListenerPort
@@ -384,6 +404,7 @@ $nodeScript = {
                 return , $table
             }
             catch {
+                E "SQL probe '$Label': $($_.Exception.Message)"
                 F "SQL probe '$Label' failed: $($_.Exception.Message)"
                 return $null
             }
@@ -541,7 +562,10 @@ WHERE configured.name = N'AlwaysOn_health'
             }
         }
     }
-    catch { F "SQL Always On query failed on '$sqlTarget': $($_.Exception.Message)" }
+    catch {
+        E "SQL Always On query on '$sqlTarget': $($_.Exception.Message)"
+        F "SQL Always On query failed on '$sqlTarget': $($_.Exception.Message)"
+    }
     finally { if ($connection) { $connection.Dispose() } }
 
     W "### FailoverClustering DNS-registration events (System log) ###"
@@ -567,7 +591,7 @@ WHERE configured.name = N'AlwaysOn_health'
             W ("[{0}] Id={1} {2}: {3}" -f $e.TimeCreated, $e.Id, $e.LevelDisplayName, (($e.Message -split "`r?`n")[0]))
         }
     }
-    catch { W "ERR cluster events: $($_.Exception.Message)" }
+    catch { E "cluster events: $($_.Exception.Message)" }
 
     W "### cluster.log (last $Hours hour(s)) grepped for AG/resource/DNS/failover ###"
     $clusterLogDir = Join-Path $env:TEMP ("sqlao-clusterlog-" + [guid]::NewGuid().ToString('N'))
@@ -585,7 +609,7 @@ WHERE configured.name = N'AlwaysOn_health'
         }
         else { W "(cluster.log not produced)" }
     }
-    catch { W "ERR Get-ClusterLog: $($_.Exception.Message)" }
+    catch { E "Get-ClusterLog: $($_.Exception.Message)" }
     finally {
         if (Test-Path -LiteralPath $clusterLogDir) {
             Remove-Item -LiteralPath $clusterLogDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -599,7 +623,7 @@ WHERE configured.name = N'AlwaysOn_health'
         W "--- Get-DnsClient RegisterThisConnectionsAddress ---"
         W (Get-DnsClient -ErrorAction SilentlyContinue | Format-Table InterfaceAlias, RegisterThisConnectionsAddress, ConnectionSpecificSuffix -AutoSize | Out-String)
     }
-    catch { W "ERR NIC state: $($_.Exception.Message)" }
+    catch { E "NIC state: $($_.Exception.Message)" }
 
     W "### Node resolver view of cluster + listener names ###"
     try {
@@ -612,10 +636,15 @@ WHERE configured.name = N'AlwaysOn_health'
             catch { W "    Resolve-DnsName $nm FAILED: $($_.Exception.Message)" }
         }
     }
-    catch { W "ERR resolver view: $($_.Exception.Message)" }
+    catch { E "resolver view: $($_.Exception.Message)" }
 
     W "### nltest /dsgetdc (which DC is this node bound to) ###"
-    try { W ((& nltest "/dsgetdc:$env:USERDNSDOMAIN" 2>&1 | Out-String)) } catch { W "ERR nltest: $($_.Exception.Message)" }
+    try {
+        $nltestOutput = @(& nltest "/dsgetdc:$env:USERDNSDOMAIN" 2>&1)
+        if ($LASTEXITCODE -ne 0) { E "nltest exited $LASTEXITCODE`: $($nltestOutput -join ' | ')" }
+        else { W ($nltestOutput | Out-String) }
+    }
+    catch { E "nltest: $($_.Exception.Message)" }
 
     W "### Computer object for the cluster (CNO) in AD -- enabled? ###"
     try {
@@ -631,16 +660,17 @@ WHERE configured.name = N'AlwaysOn_health'
             else { W "CNO '$discClusterName' NOT found in AD via cn search." }
         }
     }
-    catch { W "ERR CNO AD lookup: $($_.Exception.Message)" }
+    catch { E "CNO AD lookup: $($_.Exception.Message)" }
 
     return [pscustomobject]@{
-        Text        = ($out -join "`r`n")
-        Findings    = @($findings)
+        Text        = ($script:out -join "`r`n")
+        Findings    = @($script:findings)
         ClusterName = $discClusterName
         Listeners   = @($discListeners | Select-Object -Unique)
         ClusterIPs  = @($discClusterIPs | Select-Object -Unique)
         AgIPs       = @($discAgIPs | Select-Object -Unique)
         Nodes       = @($discNodes | Select-Object -Unique)
+        AcquisitionErrors = @($script:acquisitionErrors)
     }
 }
 
@@ -649,27 +679,29 @@ WHERE configured.name = N'AlwaysOn_health'
 # ---------------------------------------------------------------------------
 $dcScript = {
     param($Domain, $Names)
-    $out = [System.Collections.Generic.List[string]]::new()
+    $script:out = [System.Collections.Generic.List[string]]::new()
+    $script:acquisitionErrors = [System.Collections.Generic.List[string]]::new()
     function W { param($t) $script:out.Add([string]$t) }
+    function E { param($t) $script:acquisitionErrors.Add([string]$t); W "ERR $t" }
 
     Import-Module DnsServer -ErrorAction SilentlyContinue
 
     W "### DC time / uptime ###"
     try {
-        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
         W ("Now={0}  LastBoot={1}" -f (Get-Date), $os.LastBootUpTime)
     }
-    catch { W "ERR time: $($_.Exception.Message)" }
+    catch { E "time: $($_.Exception.Message)" }
 
     W "### Zone '$Domain' settings (DynamicUpdate mode) ###"
     try { W (Get-DnsServerZone -Name $Domain -ErrorAction Stop | Format-List ZoneName, ZoneType, DynamicUpdate, IsDsIntegrated, IsAutoCreated | Out-String) }
-    catch { W "ERR Get-DnsServerZone: $($_.Exception.Message)" }
+    catch { E "Get-DnsServerZone: $($_.Exception.Message)" }
 
     W "### Zone aging + server scavenging (a scavenge deletes dynamic CNO/listener records) ###"
-    try { W (Get-DnsServerZoneAging -Name $Domain -ErrorAction SilentlyContinue | Format-List * | Out-String) }
-    catch { W "ERR Get-DnsServerZoneAging: $($_.Exception.Message)" }
-    try { W (Get-DnsServerScavenging -ErrorAction SilentlyContinue | Format-List * | Out-String) }
-    catch { W "ERR Get-DnsServerScavenging: $($_.Exception.Message)" }
+    try { W (Get-DnsServerZoneAging -Name $Domain -ErrorAction Stop | Format-List * | Out-String) }
+    catch { E "Get-DnsServerZoneAging: $($_.Exception.Message)" }
+    try { W (Get-DnsServerScavenging -ErrorAction Stop | Format-List * | Out-String) }
+    catch { E "Get-DnsServerScavenging: $($_.Exception.Message)" }
 
     W "### Per-name A-records (RAW -- shows blank/empty RecordData; Timestamp 0=static, else dynamic) ###"
     foreach ($nm in ($Names | Where-Object { $_ } | Select-Object -Unique)) {
@@ -687,7 +719,7 @@ $dcScript = {
             # also dump the raw object for the first record so any odd shape is visible
             if ($recs) { W "    --- raw first record ---"; W (($recs[0] | Format-List * | Out-String)) }
         }
-        catch { W "    ERR Get-DnsServerResourceRecord '$short': $($_.Exception.Message)" }
+        catch { E "Get-DnsServerResourceRecord '$short': $($_.Exception.Message)" }
     }
 
     W "### ALL A-records in zone matching cluster/listener/node prefixes (catch duplicates / orphan blanks) ###"
@@ -710,7 +742,7 @@ $dcScript = {
         }
         if (-not $match) { W "(no matching A records)" }
     }
-    catch { W "ERR all-A scan: $($_.Exception.Message)" }
+    catch { E "all-A scan: $($_.Exception.Message)" }
 
     W "### DNS Server event log -- recent registration/update events (last 20) ###"
     try {
@@ -718,9 +750,12 @@ $dcScript = {
         foreach ($e in $ev) { W ("[{0}] Id={1} {2}: {3}" -f $e.TimeCreated, $e.Id, $e.LevelDisplayName, (($e.Message -split "`r?`n")[0])) }
         if (-not $ev) { W "(no DNS Server log events)" }
     }
-    catch { W "ERR DNS Server log: $($_.Exception.Message)" }
+    catch { E "DNS Server log: $($_.Exception.Message)" }
 
-    return ($out -join "`r`n")
+    return [pscustomobject]@{
+        Text = ($script:out -join "`r`n")
+        AcquisitionErrors = @($script:acquisitionErrors)
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -728,6 +763,7 @@ $dcScript = {
 # ---------------------------------------------------------------------------
 $collectedNames = New-Object System.Collections.Generic.List[string]
 $allFindings = New-Object System.Collections.Generic.List[string]
+$collectionErrors = New-Object System.Collections.Generic.List[string]
 foreach ($e in $ExtraNames) { if ($e) { $collectedNames.Add($e) } }
 
 foreach ($node in $NodeVm) {
@@ -738,6 +774,9 @@ foreach ($node in $NodeVm) {
             -ArgumentList $AgName, $SqlInstanceName, $otherNode, $ListenerPort, $EndpointPort, $Hours -ErrorAction Stop
         Add-Section -Title "SQLAO node: $node" -Body $res.Text
         foreach ($finding in @($res.Findings)) { if ($finding) { $allFindings.Add("$node`: $finding") } }
+        foreach ($collectionError in @($res.AcquisitionErrors)) {
+            if ($collectionError) { $collectionErrors.Add("$node`: $collectionError") }
+        }
         if ($res.ClusterName) { $collectedNames.Add($res.ClusterName) }
         foreach ($l in $res.Listeners) { if ($l) { $collectedNames.Add($l) } }
         foreach ($n in $res.Nodes) { if ($n) { $collectedNames.Add($n) } }
@@ -747,7 +786,9 @@ foreach ($node in $NodeVm) {
     }
     catch {
         Add-Section -Title "SQLAO node: $node -- COLLECTION FAILED" -Body $_.Exception.Message
-        $allFindings.Add("$node`: COLLECTION FAILED: $($_.Exception.Message)")
+        $collectionError = "$node`: COLLECTION FAILED: $($_.Exception.Message)"
+        $collectionErrors.Add($collectionError)
+        $allFindings.Add($collectionError)
     }
 }
 
@@ -758,23 +799,41 @@ Add-Content -Path $outFile -Value "`r`nNames queried on DC: $($namesForDc -join 
 
 Write-Host "Collecting from DC / DNS '$DcVm' ..." -ForegroundColor Cyan
 try {
-    $dcOut = Invoke-Command -VMName $DcVm -Credential $cred -ScriptBlock $dcScript -ArgumentList $Domain, $namesForDc -ErrorAction Stop
-    Add-Section -Title "DC / DNS: $DcVm ($Domain)" -Body $dcOut
+    $dcResult = Invoke-Command -VMName $DcVm -Credential $cred -ScriptBlock $dcScript -ArgumentList $Domain, $namesForDc -ErrorAction Stop
+    Add-Section -Title "DC / DNS: $DcVm ($Domain)" -Body $dcResult.Text
+    foreach ($collectionError in @($dcResult.AcquisitionErrors)) {
+        if ($collectionError) { $collectionErrors.Add("$DcVm`: $collectionError") }
+    }
 }
 catch {
     Add-Section -Title "DC / DNS: $DcVm -- COLLECTION FAILED" -Body $_.Exception.Message
-    $allFindings.Add("$DcVm`: DNS COLLECTION FAILED: $($_.Exception.Message)")
+    $collectionError = "$DcVm`: DNS COLLECTION FAILED: $($_.Exception.Message)"
+    $collectionErrors.Add($collectionError)
+    $allFindings.Add($collectionError)
 }
 
+foreach ($collectionError in $collectionErrors) {
+    if ($allFindings -notcontains $collectionError) {
+        $allFindings.Add("COLLECTION INCOMPLETE: $collectionError")
+    }
+}
 if ($allFindings.Count -eq 0) {
     $allFindings.Add('No collector-detected faults. Review the detailed cluster/SQL event sections for transient failures.')
 }
 Add-Section -Title 'FINDINGS SUMMARY' -Body ($allFindings -join "`r`n")
 
 $zipFile = [IO.Path]::ChangeExtension($outFile, '.zip')
-Compress-Archive -LiteralPath $outFile -DestinationPath $zipFile -Force
+Compress-Archive -LiteralPath $outFile -DestinationPath $zipFile -Force -ErrorAction Stop
 Write-Host ""
 Write-Host "Diagnostic written to:" -ForegroundColor Green
 Write-Host "  $outFile"
 Write-Host "Shareable archive:" -ForegroundColor Green
 Write-Host "  $zipFile"
+return [pscustomobject]@{
+    SnapshotLabel = $safeLabel
+    ReportPath = $outFile
+    ArchivePath = $zipFile
+    Findings = @($allFindings)
+    CollectionComplete = $collectionErrors.Count -eq 0
+    CollectionErrors = @($collectionErrors)
+}

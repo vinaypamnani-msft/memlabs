@@ -32,6 +32,17 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tok
 Assert-Diagnostic ($parseErrors.Count -eq 0) 'diagnostic script parses'
 
 $source = Get-Content -LiteralPath $scriptPath -Raw
+Assert-Diagnostic ($source -match '\[PSCredential\]\$Credential' -and
+    $source -match 'if \(-not \$Credential\)') 'collector accepts a reusable credential without reprompting'
+Assert-Diagnostic ($source -match '\$SnapshotLabel' -and
+    $source -match "\[\^A-Za-z0-9_-\]") 'collector emits sanitized labeled snapshot artifacts'
+Assert-Diagnostic ($source -match 'ReportPath\s*=\s*\$outFile' -and
+    $source -match 'ArchivePath\s*=\s*\$zipFile') 'collector returns report and archive paths to callers'
+Assert-Diagnostic ($source -match 'CollectionComplete\s*=\s*\$collectionErrors\.Count -eq 0' -and
+    $source -match 'CollectionErrors\s*=\s*@\(\$collectionErrors\)') 'collector distinguishes acquisition failures from health findings'
+Assert-Diagnostic ([regex]::Matches($source, 'AcquisitionErrors\s*=\s*@\(\$script:acquisitionErrors\)').Count -eq 2 -and
+    $source -match '\$res\.AcquisitionErrors' -and
+    $source -match '\$dcResult\.AcquisitionErrors') 'node and DC section acquisition errors flow into collector completeness'
 Assert-Diagnostic ($source -match '\$possible\s*=\s*\$resource\s*\|\s*Get-ClusterOwnerNode') 'collector records AG resource possible owners'
 Assert-Diagnostic ($source -match '\$preferred\s*=\s*\$group\s*\|\s*Get-ClusterOwnerNode') 'collector records clustered-role preferred owners'
 Assert-Diagnostic ($source -match '\$ownerOutcomeScript' -and
@@ -57,6 +68,38 @@ Assert-Diagnostic ($source -match 'No SQL availability group is configured' -and
 Assert-Diagnostic ($source -match 'Listener TCP.+?is unreachable') 'collector promotes failed listener TCP to a finding'
 Assert-Diagnostic ($source -match 'GetHostAddresses\(\$listener\)' -and $source -match 'foreach \(\$listenerAddress in \$listenerAddresses\)') 'collector probes every multi-subnet listener provider address'
 Assert-Diagnostic ($source.Contains('SQL probe ''$Label'' failed')) 'collector isolates SQL probe failures'
+
+$dcCollector = Get-AssignedScriptBlock -Ast $ast -VariableName 'dcScript'
+$script:failZoneQuery = $true
+function Import-Module { param($Name, $ErrorAction) }
+function Get-CimInstance { param($ClassName, $ErrorAction); [pscustomobject]@{ LastBootUpTime = Get-Date } }
+function Get-DnsServerZone {
+    param($Name, $ErrorAction)
+    if ($script:failZoneQuery) { throw 'injected zone query failure' }
+    [pscustomobject]@{ ZoneName = $Name; DynamicUpdate = 'Secure' }
+}
+function Get-DnsServerZoneAging { param($Name, $ErrorAction); [pscustomobject]@{ AgingEnabled = $false } }
+function Get-DnsServerScavenging { param($ErrorAction); [pscustomobject]@{ ScavengingState = $false } }
+function Get-DnsServerResourceRecord {
+    param($ZoneName, $Name, $RRType, $ComputerName, $ErrorAction)
+    @()
+}
+function Get-WinEvent { param($FilterHashtable, $MaxEvents, $ErrorAction); @() }
+try {
+    $dcIncomplete = & $dcCollector -Domain 'fabrikam.com' -Names @('LISTENER')
+    Assert-Diagnostic (@($dcIncomplete.AcquisitionErrors).Count -eq 1 -and
+        $dcIncomplete.AcquisitionErrors[0] -match 'injected zone query failure' -and
+        $dcIncomplete.Text -match 'ERR Get-DnsServerZone') 'real DC collector marks a required section query failure incomplete'
+
+    $script:failZoneQuery = $false
+    $dcComplete = & $dcCollector -Domain 'fabrikam.com' -Names @('LISTENER')
+    Assert-Diagnostic (@($dcComplete.AcquisitionErrors).Count -eq 0) 'real DC collector reports complete when required mocked sections succeed'
+}
+finally {
+    'Import-Module', 'Get-CimInstance', 'Get-DnsServerZone', 'Get-DnsServerZoneAging',
+    'Get-DnsServerScavenging', 'Get-DnsServerResourceRecord', 'Get-WinEvent' |
+        ForEach-Object { Remove-Item -LiteralPath "Function:\$_" -Force }
+}
 
 $ownerOutcome = Get-AssignedScriptBlock -Ast $ast -VariableName 'ownerOutcomeScript'
 $script:OwnerFindings = [Collections.Generic.List[string]]::new()
@@ -142,6 +185,7 @@ if ($probeFunction.Count -eq 1) {
     $probeScript = $probeFunction[0].Body.GetScriptBlock()
     $script:ProbeCalls = [Collections.Generic.List[string]]::new()
     $script:ProbeFindings = [Collections.Generic.List[string]]::new()
+    $script:ProbeAcquisitionErrors = [Collections.Generic.List[string]]::new()
     function Invoke-Q {
         param($Query)
         $script:ProbeCalls.Add([string]$Query)
@@ -154,9 +198,11 @@ if ($probeFunction.Count -eq 1) {
         return , $table
     }
     function F { param($t); $script:ProbeFindings.Add([string]$t) }
+    function E { param($t); $script:ProbeAcquisitionErrors.Add([string]$t) }
     $failedProbe = & $probeScript -Label 'middle' -Query 'FAIL'
     $laterProbe = & $probeScript -Label 'later' -Query 'PASS'
-    Assert-Diagnostic ($null -eq $failedProbe -and $script:ProbeFindings.Count -eq 1) 'failed SQL probe records a finding without throwing'
+    Assert-Diagnostic ($null -eq $failedProbe -and $script:ProbeFindings.Count -eq 1 -and
+        $script:ProbeAcquisitionErrors.Count -eq 1) 'failed SQL probe records health and acquisition evidence without throwing'
     Assert-Diagnostic ($laterProbe.Rows.Count -eq 1 -and ($script:ProbeCalls -join ',') -eq 'FAIL,PASS') 'later SQL probe still runs after an earlier failure'
 }
 

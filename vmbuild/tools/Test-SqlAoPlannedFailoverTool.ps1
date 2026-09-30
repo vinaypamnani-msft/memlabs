@@ -1,5 +1,6 @@
 #requires -Version 5.1
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Fixture locals are consumed by AST-extracted production scriptblocks.')]
 param([string]$RootPath)
 
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
@@ -42,6 +43,285 @@ Assert-FailoverTool ($source -match 'Invoke-Command.+?-AsJob' -and $source -matc
 Assert-FailoverTool ($source -match 'ThrowTerminatingError\(\$testError\)' -and $source -match 'SqlAoFinalPrimaryPostconditionFailed') 'final-primary mismatch terminates while preserving the captured error record'
 Assert-FailoverTool ($source -match 'Wait-ForClusterPrimaryOwnership -PrimaryNode \$finalPrimary' -and
     $source -match 'Final WSFC owner postcondition failed') 'final success requires settled WSFC ownership for the final SQL primary'
+Assert-FailoverTool ([regex]::Matches($source, "Save-HealthSnapshot -Label 'startup'").Count -eq 1 -and
+    [regex]::Matches($source, "Save-HealthSnapshot -Label 'after-failover'").Count -eq 1 -and
+    [regex]::Matches($source, "Save-HealthSnapshot -Label 'after-failback'").Count -eq 1) 'tool requests one labeled health snapshot at each transition stage'
+Assert-FailoverTool ($source.IndexOf("Save-HealthSnapshot -Label 'startup'") -lt
+    $source.IndexOf("Failing over to")) 'startup health snapshot precedes the first mutation'
+Assert-FailoverTool ($source.IndexOf("Save-HealthSnapshot -Label 'startup'") -lt
+    $source.IndexOf('Confirm-FailoverPreconditions -ExpectedPrimary') -and
+    $source.IndexOf('Confirm-FailoverPreconditions -ExpectedPrimary') -lt
+    $source.IndexOf('$firstFailoverAttempted = $true')) 'lightweight failover preconditions are refreshed after baseline collection and before mutation'
+Assert-FailoverTool ($source -match '(?s)Wait-ForClusterPrimaryOwnership -PrimaryNode \$targetSecondary.+?Save-HealthSnapshot -Label ''after-failover''' -and
+    $source -match '(?s)Wait-ForClusterPrimaryOwnership -PrimaryNode \$originalPrimary.+?Save-HealthSnapshot -Label ''after-failback''') 'post-transition snapshots wait for settled SQL and WSFC ownership'
+Assert-FailoverTool ($source -match '\[switch\]\$SkipHealthSnapshots' -and
+    $source -match 'Credential\s*=\s*\$Credential' -and
+    $source -match 'SnapshotLabel\s*=\s*\$Label') 'health snapshots are default-on, reusable-credential, labeled collector calls'
+Assert-FailoverTool ($source -match '\$env:USERDNSDOMAIN' -and
+    $source -match '\$env:LOGONSERVER' -and $source -match 'param\(\$DomainHint\)' -and
+    $source -match 'ArgumentList \$resolvedDomain' -and
+    $source -match 'Supply -Domain and -DcVm explicitly') 'snapshot environment supports partial overrides and discovery fallback'
+Assert-FailoverTool ($source -match 'CollectionComplete' -and
+    $source -match 'preserved incomplete artifacts') 'snapshot acquisition failure is distinct from evidence-only health findings'
+Assert-FailoverTool ($source -match 'Get-ExpectedFinalPrimary' -and
+    $source -match 'FailoverConverged') 'final-primary expectation depends on verified transition convergence'
+
+$healthSnapshotFunction = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-HealthSnapshot'
+        }, $true))
+Assert-FailoverTool ($healthSnapshotFunction.Count -eq 1) 'tool defines one health collector invocation helper'
+if ($healthSnapshotFunction.Count -eq 1) {
+    $invokeSnapshot = $healthSnapshotFunction[0].Body.GetScriptBlock()
+    $SkipHealthSnapshots = $false
+    $script:healthSnapshotEnvironment = [pscustomobject]@{ Domain = 'fabrikam.com'; DcVm = 'FAB-DC1' }
+    $script:snapshotTempRoot = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $script:snapshotTempRoot -Force
+    $healthCollectorPath = Join-Path $script:snapshotTempRoot 'mock-collector.ps1'
+    [IO.File]::WriteAllText($healthCollectorPath, '# collector boundary fixture')
+    $NodeVm = @('SQL1', 'SQL2')
+    $DomainNetbios = 'fabrikam'
+    $AdminName = 'admin'
+    $AgName = 'AG'
+    $SqlInstanceName = 'MSSQLSERVER'
+    $ListenerPort = 1500
+    $HealthHours = 4
+    $Credential = [PSCredential]::new('fabrikam\admin', [Security.SecureString]::new())
+    $script:snapshotInvocations = [Collections.Generic.List[object]]::new()
+    $healthCollectorInvoker = {
+        param($Path, $Parameters)
+        $script:snapshotInvocations.Add([pscustomobject]@{ Path = $Path; Parameters = $Parameters })
+        $reportPath = Join-Path $script:snapshotTempRoot "$($Parameters.SnapshotLabel).txt"
+        $archivePath = Join-Path $script:snapshotTempRoot "$($Parameters.SnapshotLabel).zip"
+        [IO.File]::WriteAllText($reportPath, "snapshot=$($Parameters.SnapshotLabel)")
+        Compress-Archive -LiteralPath $reportPath -DestinationPath $archivePath -Force -ErrorAction Stop
+        [pscustomobject]@{
+            SnapshotLabel = $Parameters.SnapshotLabel
+            ReportPath = $reportPath
+            ArchivePath = $archivePath
+            CollectionComplete = $true
+            CollectionErrors = @()
+            Findings = @('evidence-only finding')
+        }
+    }
+    function Write-TestLog { param([string]$Message) }
+    try {
+        $artifact = & $invokeSnapshot -Label startup
+        $invocation = $script:snapshotInvocations[0]
+        Assert-FailoverTool ($artifact.SnapshotLabel -eq 'startup' -and
+            @($artifact.Findings).Count -eq 1 -and
+            $invocation.Parameters.SnapshotLabel -eq 'startup' -and
+            $invocation.Parameters.DcVm -eq 'FAB-DC1' -and
+            $invocation.Parameters.Domain -eq 'fabrikam.com' -and
+            [object]::ReferenceEquals($invocation.Parameters.Credential, $Credential)) 'health helper reuses discovered environment and the existing credential'
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [IO.Compression.ZipFile]::OpenRead($artifact.ArchivePath)
+        try {
+            Assert-FailoverTool ($archive.Entries.Count -eq 1 -and
+                $archive.Entries[0].Name -eq 'startup.txt') 'health collector boundary produces a real labeled report ZIP'
+        }
+        finally {
+            $archive.Dispose()
+        }
+
+        $SkipHealthSnapshots = $true
+        $script:snapshotInvocations.Clear()
+        $skipped = & $invokeSnapshot -Label startup
+        Assert-FailoverTool ($null -eq $skipped -and $script:snapshotInvocations.Count -eq 0) 'SkipHealthSnapshots suppresses collector invocation'
+
+        $SkipHealthSnapshots = $false
+        $healthCollectorInvoker = {
+            param($Path, $Parameters)
+            $reportPath = Join-Path $script:snapshotTempRoot 'incomplete.txt'
+            $archivePath = Join-Path $script:snapshotTempRoot 'incomplete.zip'
+            [IO.File]::WriteAllText($reportPath, 'collection failed')
+            Compress-Archive -LiteralPath $reportPath -DestinationPath $archivePath -Force -ErrorAction Stop
+            [pscustomobject]@{
+                ReportPath = $reportPath
+                ArchivePath = $archivePath
+                CollectionComplete = $false
+                CollectionErrors = @('SQL1: COLLECTION FAILED')
+            }
+        }
+        $incompleteCollectionRejected = $false
+        try { $null = & $invokeSnapshot -Label startup } catch {
+            $incompleteCollectionRejected = $_.Exception.Message -match 'preserved incomplete artifacts' -and
+                $_.Exception.Message -match 'COLLECTION FAILED'
+        }
+        Assert-FailoverTool $incompleteCollectionRejected 'health helper preserves artifacts but rejects incomplete remote acquisition'
+
+        $healthCollectorInvoker = { param($Path, $Parameters); return $null }
+        $missingArtifactsRejected = $false
+        try { $null = & $invokeSnapshot -Label startup } catch {
+            $missingArtifactsRejected = $_.Exception.Message -match 'did not produce'
+        }
+        Assert-FailoverTool $missingArtifactsRejected 'health helper rejects a collector call without report and archive artifacts'
+    }
+    finally {
+        Remove-Item -LiteralPath Function:\Write-TestLog -Force
+        if (Test-Path -LiteralPath $script:snapshotTempRoot) {
+            Remove-Item -LiteralPath $script:snapshotTempRoot -Recurse -Force
+        }
+    }
+}
+
+$saveSnapshotFunction = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-HealthSnapshot'
+        }, $true))
+Assert-FailoverTool ($saveSnapshotFunction.Count -eq 1) 'tool defines one snapshot failure-policy helper'
+if ($saveSnapshotFunction.Count -eq 1) {
+    $saveSnapshot = $saveSnapshotFunction[0].Body.GetScriptBlock()
+    $script:healthSnapshotArtifacts = [Collections.Generic.List[object]]::new()
+    $script:healthSnapshotFailures = [Collections.Generic.List[string]]::new()
+    function Invoke-HealthSnapshot { param($Label); throw "injected $Label failure" }
+    function Write-TestLog { param([string]$Message) }
+    try {
+        $requiredThrows = $false
+        try { & $saveSnapshot -Label startup -Required } catch { $requiredThrows = $_.Exception.Message -match 'injected startup failure' }
+        Assert-FailoverTool $requiredThrows 'startup snapshot failure aborts before mutation'
+        & $saveSnapshot -Label after-failover
+        Assert-FailoverTool ($script:healthSnapshotFailures.Count -eq 1 -and
+            $script:healthSnapshotFailures[0] -match 'after-failover') 'post-transition snapshot failure is retained without blocking safe failback'
+    }
+    finally {
+        'Invoke-HealthSnapshot', 'Write-TestLog' | ForEach-Object { Remove-Item -LiteralPath "Function:\$_" -Force }
+    }
+}
+
+$resolveSnapshotEnvironmentFunction = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Resolve-HealthSnapshotEnvironment'
+        }, $true))
+Assert-FailoverTool ($resolveSnapshotEnvironmentFunction.Count -eq 1) 'tool defines one health snapshot environment resolver'
+if ($resolveSnapshotEnvironmentFunction.Count -eq 1) {
+    $resolveSnapshotEnvironment = $resolveSnapshotEnvironmentFunction[0].Body.GetScriptBlock()
+    $SkipHealthSnapshots = $false
+    $NodeVm = @('SQL1', 'SQL2')
+    $TimeoutSeconds = 60
+    $script:discoveryArgument = $null
+    $script:dcVmState = 'Running'
+    function Invoke-NodeCommand {
+        param($VmName, $ScriptBlock, $ArgumentList, $Deadline)
+        $script:discoveryArgument = $ArgumentList
+        [pscustomobject]@{
+            Domain = if ($ArgumentList) { [string]$ArgumentList } else { 'discovered.test' }
+            DcVm = 'DISCOVERED-DC'
+        }
+    }
+    function Get-VM {
+        param($Name, $ErrorAction)
+        [pscustomobject]@{ Name = $Name; State = $script:dcVmState }
+    }
+    try {
+        $Domain = 'fabrikam.com'
+        $DcVm = ''
+        $resolved = & $resolveSnapshotEnvironment
+        Assert-FailoverTool ($resolved.Domain -eq 'fabrikam.com' -and
+            $resolved.DcVm -eq 'DISCOVERED-DC' -and
+            [string]$script:discoveryArgument -eq 'fabrikam.com') 'explicit Domain is passed as the guest nltest discovery hint'
+
+        $Domain = ''
+        $DcVm = 'FAB-DC1'
+        $resolved = & $resolveSnapshotEnvironment
+        Assert-FailoverTool ($resolved.Domain -eq 'discovered.test' -and
+            $resolved.DcVm -eq 'FAB-DC1') 'explicit DC is preserved while the missing domain is discovered'
+
+        $Domain = 'fabrikam.com'
+        $DcVm = 'FAB-DC1'
+        $script:dcVmState = 'Off'
+        $stoppedDcRejected = $false
+        try { $null = & $resolveSnapshotEnvironment } catch {
+            $stoppedDcRejected = $_.Exception.Message -match "DC VM 'FAB-DC1' is 'Off'"
+        }
+        Assert-FailoverTool $stoppedDcRejected 'snapshot resolver rejects a stopped DC VM'
+    }
+    finally {
+        'Invoke-NodeCommand', 'Get-VM' | ForEach-Object { Remove-Item -LiteralPath "Function:\$_" -Force }
+    }
+}
+
+$confirmPreconditionsFunction = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Confirm-FailoverPreconditions'
+        }, $true))
+Assert-FailoverTool ($confirmPreconditionsFunction.Count -eq 1) 'tool defines one post-baseline precondition refresh'
+if ($confirmPreconditionsFunction.Count -eq 1) {
+    $confirmPreconditions = $confirmPreconditionsFunction[0].Body.GetScriptBlock()
+    $NodeVm = @('SQL1', 'SQL2')
+    $AgName = 'AG'
+    $ListenerName = 'LISTENER'
+    $ListenerPort = 1500
+    $Database = 'CM_DB'
+    $clusterPreflightScript = { 'cluster' }
+    $listenerScript = { 'listener' }
+    $script:primaryReady = $true
+    $script:targetReady = $true
+    $script:clusterReady = $true
+    $script:listenerReady = $true
+    function Get-PairState {
+        param($Deadline)
+        @{
+            SQL1 = [pscustomobject]@{ Replica = [pscustomobject]@{ ReplicaServer = 'SQL1' } }
+            SQL2 = [pscustomobject]@{ Replica = [pscustomobject]@{ ReplicaServer = 'SQL2' } }
+        }
+    }
+    function Test-PrimaryReady { param($State, $ExpectedDatabases); return $script:primaryReady }
+    function Test-TargetReady { param($State, $ExpectedDatabases); return $script:targetReady }
+    function Test-ClusterPrimaryOwnership { param($ClusterState, $PrimaryNode); return $script:clusterReady }
+    function Test-ListenerState { param($State, $ExpectedReplica); return $script:listenerReady }
+    function Invoke-NodeCommand {
+        param($VmName, $ScriptBlock, $ArgumentList, $Deadline)
+        if ([object]::ReferenceEquals($ScriptBlock, $script:clusterPreflightScript)) {
+            return [pscustomobject]@{ GroupOwner = 'SQL1'; PossibleOwners = @('SQL1') }
+        }
+        return [pscustomobject]@{ ReplicaServer = 'SQL1'; Role = 'PRIMARY'; DatabaseInAg = $true }
+    }
+    try {
+        $null = & $confirmPreconditions -ExpectedPrimary SQL1 -ExpectedSecondary SQL2 `
+            -ExpectedDatabases CM_DB -Deadline (Get-Date).AddSeconds(5)
+        Assert-FailoverTool $true 'post-baseline precondition refresh accepts unchanged healthy state'
+
+        $script:targetReady = $false
+        $staleTargetRejected = $false
+        try {
+            $null = & $confirmPreconditions -ExpectedPrimary SQL1 -ExpectedSecondary SQL2 `
+                -ExpectedDatabases CM_DB -Deadline (Get-Date).AddSeconds(5)
+        }
+        catch { $staleTargetRejected = $_.Exception.Message -match 'no longer synchronized' }
+        Assert-FailoverTool $staleTargetRejected 'post-baseline refresh rejects a target that became unsafe'
+
+        $script:targetReady = $true
+        $script:clusterReady = $false
+        $staleOwnerRejected = $false
+        try {
+            $null = & $confirmPreconditions -ExpectedPrimary SQL1 -ExpectedSecondary SQL2 `
+                -ExpectedDatabases CM_DB -Deadline (Get-Date).AddSeconds(5)
+        }
+        catch { $staleOwnerRejected = $_.Exception.Message -match 'ownership changed' }
+        Assert-FailoverTool $staleOwnerRejected 'post-baseline refresh rejects changed WSFC ownership'
+    }
+    finally {
+        'Get-PairState', 'Test-PrimaryReady', 'Test-TargetReady', 'Test-ClusterPrimaryOwnership',
+        'Test-ListenerState', 'Invoke-NodeCommand' |
+            ForEach-Object { Remove-Item -LiteralPath "Function:\$_" -Force }
+    }
+}
+
+$expectedFinalPrimaryFunction = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ExpectedFinalPrimary'
+        }, $true))
+Assert-FailoverTool ($expectedFinalPrimaryFunction.Count -eq 1) 'tool defines one convergence-aware final-primary selector'
+if ($expectedFinalPrimaryFunction.Count -eq 1) {
+    $getExpectedFinalPrimary = $expectedFinalPrimaryFunction[0].Body.GetScriptBlock()
+    Assert-FailoverTool ((& $getExpectedFinalPrimary -OriginalPrimary SQL1 -TargetSecondary SQL2 `
+                -FailoverConverged $false -NoFailbackRequested $true) -eq 'SQL1') 'NoFailback startup abort expects the unchanged original primary'
+    Assert-FailoverTool ((& $getExpectedFinalPrimary -OriginalPrimary SQL1 -TargetSecondary SQL2 `
+                -FailoverConverged $true -NoFailbackRequested $true) -eq 'SQL2') 'NoFailback converged failover expects the target primary'
+    Assert-FailoverTool ((& $getExpectedFinalPrimary -OriginalPrimary SQL1 -TargetSecondary SQL2 `
+                -FailoverConverged $true -NoFailbackRequested $false) -eq 'SQL1') 'normal run always expects failback to the original primary'
+}
 
 $clusterOwnershipFunction = @($ast.FindAll({
             param($node)
@@ -272,7 +552,7 @@ if ($invokeNodeFunction.Count -eq 1) {
     }
     function Invoke-Command {
         [CmdletBinding()]
-        param($VMName, $Credential, $ScriptBlock, $ArgumentList, [switch]$AsJob)
+        param($VMName, [PSCredential]$Credential, $ScriptBlock, $ArgumentList, [switch]$AsJob)
         if ($script:deadlineMockMode -eq 'LaunchDelay') { Microsoft.PowerShell.Utility\Start-Sleep -Seconds 3 }
         return $script:deadlineMockJob
     }
