@@ -80,6 +80,7 @@ $script:Messages.Clear()
 $null = Invoke-HostMemoryReclaim -CurrentProcessOnly -ClearErrorHistory
 Assert-True (-not (Test-MarkerPresent)) 'end-of-run reclaim releases retained ErrorRecords'
 Assert-True ([bool]($script:Messages -match 'errorsCleared=3')) 'cleanup log records the exact ErrorRecord count released'
+Assert-True ([bool]($script:Messages -match 'heap \d+MB -> \d+MB, committed \d+MB -> \d+MB, fragmented \d+MB -> \d+MB')) 'cleanup log records GC heap and fragmentation metrics'
 
 $newLabSource = [System.IO.File]::ReadAllText($newLabPath)
 $startTestSource = [System.IO.File]::ReadAllText($startTestPath)

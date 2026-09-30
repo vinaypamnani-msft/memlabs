@@ -406,11 +406,18 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
     $beforeWorkingSetMB = $null
     $beforePrivateMB = $null
     $managedBeforeMB = $null
+    $heapBeforeMB = $null
+    $committedBeforeMB = $null
+    $fragmentedBeforeMB = $null
     try {
         $beforeProcess = Get-Process -Id $PID -ErrorAction Stop
         $beforeWorkingSetMB = [Math]::Round($beforeProcess.WorkingSet64 / 1MB, 0)
         $beforePrivateMB = [Math]::Round($beforeProcess.PrivateMemorySize64 / 1MB, 0)
         $managedBeforeMB = [Math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 0)
+        $gcBefore = [System.GC]::GetGCMemoryInfo()
+        $heapBeforeMB = [Math]::Round($gcBefore.HeapSizeBytes / 1MB, 0)
+        $committedBeforeMB = [Math]::Round($gcBefore.TotalCommittedBytes / 1MB, 0)
+        $fragmentedBeforeMB = [Math]::Round($gcBefore.FragmentedBytes / 1MB, 0)
     }
     catch {}
 
@@ -464,11 +471,18 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
     $afterWorkingSetMB = $null
     $afterPrivateMB = $null
     $managedAfterMB = $null
+    $heapAfterMB = $null
+    $committedAfterMB = $null
+    $fragmentedAfterMB = $null
     try {
         $afterProcess = Get-Process -Id $PID -ErrorAction Stop
         $afterWorkingSetMB = [Math]::Round($afterProcess.WorkingSet64 / 1MB, 0)
         $afterPrivateMB = [Math]::Round($afterProcess.PrivateMemorySize64 / 1MB, 0)
         $managedAfterMB = [Math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 0)
+        $gcAfter = [System.GC]::GetGCMemoryInfo()
+        $heapAfterMB = [Math]::Round($gcAfter.HeapSizeBytes / 1MB, 0)
+        $committedAfterMB = [Math]::Round($gcAfter.TotalCommittedBytes / 1MB, 0)
+        $fragmentedAfterMB = [Math]::Round($gcAfter.FragmentedBytes / 1MB, 0)
     }
     catch {}
 
@@ -476,7 +490,10 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
     try {
         if ($CurrentProcessOnly -and ($null -ne $beforeWorkingSetMB) -and ($null -ne $afterWorkingSetMB)) {
             $errorHistoryNote = if ($ClearErrorHistory) { ", errorsCleared=$clearedErrorRecords" } else { "" }
-            Write-Log "Invoke-HostMemoryReclaim: launcher pid $PID after cleanup - managed ${managedBeforeMB}MB -> ${managedAfterMB}MB, private ${beforePrivateMB}MB -> ${afterPrivateMB}MB, WS ${beforeWorkingSetMB}MB -> ${afterWorkingSetMB}MB$errorHistoryNote" -LogOnly
+            Write-Log "Invoke-HostMemoryReclaim: launcher pid $PID after cleanup - managed ${managedBeforeMB}MB -> ${managedAfterMB}MB, private ${beforePrivateMB}MB -> ${afterPrivateMB}MB, WS ${beforeWorkingSetMB}MB -> ${afterWorkingSetMB}MB, heap ${heapBeforeMB}MB -> ${heapAfterMB}MB, committed ${committedBeforeMB}MB -> ${committedAfterMB}MB, fragmented ${fragmentedBeforeMB}MB -> ${fragmentedAfterMB}MB$errorHistoryNote" -LogOnly
+            if ($managedAfterMB -ge 1024 -or $afterPrivateMB -ge 2048) {
+                Write-Log "[MemoryGuard] Launcher remains above the safe post-cleanup threshold (managed=${managedAfterMB}MB private=${afterPrivateMB}MB heap=${heapAfterMB}MB fragmented=${fragmentedAfterMB}MB). Restart Start-Test before the next large configuration; capture a managed heap dump if growth repeats." -Warning
+            }
         }
         elseif ($null -ne $freedMB) {
             Write-Log "Invoke-HostMemoryReclaim: GC + trimmed $trimmed PowerShell working set(s) + flushed file cache; available memory changed by ${freedMB}MB (now $([Math]::Round($afterMB,0))MB)" -LogOnly

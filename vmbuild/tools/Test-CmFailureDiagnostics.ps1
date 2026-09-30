@@ -67,6 +67,9 @@ Assert-Equal $true ($collectorText -match 'HostSerializationFailed.+ConfigMgrPro
 Assert-Equal $true ($collectorText -match '-AsJob -TimeoutSeconds 180[\s\S]{0,200}-DisplayName "Package CM setup logs \(\$Mode\)"') 'baseline packaging has a 180-second hard timeout'
 Assert-Equal $true ($collectorText -match 'Copy-ItemFromVmBounded[\s\S]{0,300}-TimeoutSeconds 180') 'baseline ZIP uses the bounded external copy worker'
 Assert-Equal $true ($collectorText -match 'finally \{[\s\S]{0,500}\$out\.SetupContent = \$null[\s\S]{0,500}\$artifact\.Content = \$null') 'guest packaging failures return only a small manifest'
+Assert-Equal $true ($collectorText -match "'ReadConfigMgrSetup'|'ReadInstallCMLog'|'CompressArchive'") 'guest packaging writes durable stage checkpoints'
+Assert-Equal $true ($collectorText -match 'PackagingStatus\.json') 'host pulls packaging status after a timeout'
+Assert-Equal $true ($collectorText -match 'CMLog capture:[^\r\n]+-Warning -OutputStream') 'capture failures flow into phase warning stats'
 Assert-Equal $true ($commonText -match 'function Copy-ItemFromVmBounded') 'bounded guest-to-host copy helper exists'
 Assert-Equal $true ($commonText -match 'Copy-Item -FromSession') 'bounded copy helper uses PSDirect file transfer'
 Assert-Equal $true ($commonText -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)') 'bounded copy helper enforces its process timeout'
@@ -179,6 +182,17 @@ try {
                 Path = $Path; Destination = $Destination; VMName = $VMName
                 DomainName = $VMDomainName; TimeoutSeconds = $TimeoutSeconds
             })
+        if ($Path -like '*.status.json') {
+            [pscustomobject]@{
+                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                ComputerName = $VMName
+                Stage = 'CompressArchive'
+                SourcePath = 'C:\Windows\Temp\synthetic.zip'
+                Bytes = 4096
+                Error = $null
+            } | ConvertTo-Json | Set-Content -LiteralPath $Destination -Encoding UTF8
+            return $true
+        }
         if ($script:FailBundleCopy) { return $false }
         Copy-Item -LiteralPath $script:BundleTemplate -Destination $Destination -Force
         if ($script:CorruptBundleCopy) { Add-Content -LiteralPath $Destination -Value 'corrupt' -NoNewline }
@@ -308,7 +322,9 @@ try {
         Assert-Equal 'HostInvocationFailed' $baselineFailureJson.CaptureStatus 'baseline fallback records invocation failure'
         Assert-Equal $true $baselineFailureJson.TimedOut 'baseline fallback records timeout state'
         Assert-Equal 'synthetic baseline timeout' $baselineFailureJson.ErrorDetails[0] 'baseline fallback retains host error details'
+        Assert-Equal $true ("$($baselineFailureJson.Error)" -match 'lastStage=CompressArchive') 'baseline timeout records the last guest packaging stage'
     }
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath $failureWorkDir -Filter 'FAIL-PS1SITE-Phase8-*-PackagingStatus.json' -File).Count 'baseline timeout preserves guest packaging status'
     Assert-Equal 1 @(Get-ChildItem -LiteralPath $failureWorkDir -Filter 'FAIL-PS1SITE-Phase8-*-SMSProv.log' -File).Count 'baseline failure still preserves product logs'
 
     $diagnosticFailureWorkDir = Join-Path $workDir 'diagnostic-failure'
