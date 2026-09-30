@@ -194,7 +194,19 @@ try {
     Assert-Validation ($basicSqlParameterNames -notcontains 'RecoveryRetry') 'basic SQL validation does not own the SQLAO recovery retry switch'
     function Write-Log {}
     function Add-Phase11Output { param($Text, $Level) }
-    function Test-SQLFunctionality { return $true }
+    $script:FailureDiagnosticLabels = [Collections.Generic.List[string]]::new()
+    $script:DiagnosticCaptureSucceeds = $true
+    function Invoke-SqlAoFailureDiagnostics {
+        param($DeployConfig, $PrimaryAO, $SnapshotLabel, $Phase)
+        $script:FailureDiagnosticLabels.Add([string]$SnapshotLabel)
+        [pscustomobject]@{
+            Captured = $script:DiagnosticCaptureSucceeds
+            CollectionComplete = $script:DiagnosticCaptureSucceeds
+            Error = if ($script:DiagnosticCaptureSucceeds) { '' } else { 'injected diagnostic failure' }
+        }
+    }
+    $script:BasicSqlPass = $true
+    function Test-SQLFunctionality { return $script:BasicSqlPass }
     function Format-TestResult {
         param($VMName, $RoleLabel, $Result)
         return [bool]$Result.ScriptBlockOutput.Passed
@@ -204,6 +216,7 @@ try {
     $script:RecoveryScenario = 'None'
     $script:RecoveryValidationCalls = 0
     $script:RecoveryRestartCalls = 0
+    $script:Phase5Scenario = 'Passed'
     function Invoke-VmCommand {
         param(
             $VmName, $VmDomainName, $ScriptBlock, [object[]]$ArgumentList,
@@ -216,10 +229,11 @@ try {
                 $script:RecoveryValidationCalls++
                 $requestRecovery = $script:RecoveryScenario -eq 'AlwaysRequest' -or
                     ($script:RecoveryScenario -in 'RecoverOnce', 'RestartFailure' -and $script:RecoveryValidationCalls -eq 1)
+                $passed = if ($script:RecoveryScenario -eq 'NoRecovery') { $false } else { -not $requestRecovery }
                 return [pscustomobject]@{
                     ScriptBlockFailed = $false
                     ScriptBlockOutput = @{
-                        Passed = -not $requestRecovery
+                        Passed = $passed
                         Details = @()
                         RecoveryTarget = if ($requestRecovery) { 'FAB-PS1SQLAO2' } else { '' }
                         RecoveryService = if ($requestRecovery) { 'MSSQLSERVER' } else { '' }
@@ -234,7 +248,21 @@ try {
                 ScriptBlockOutput = if ($script:RecoveryScenario -eq 'RestartFailure') { 'injected restart failure' } else { [string]$ArgumentList[0] }
             }
         }
-        if ($DisplayName -eq 'Phase5-SQLAO-Validate') { $script:Phase5SqlAoArguments = $ArgumentList }
+        if ($DisplayName -eq 'Phase5-SQLAO-Validate') {
+            $script:Phase5SqlAoArguments = $ArgumentList
+            switch ($script:Phase5Scenario) {
+                'Failed' {
+                    return [pscustomobject]@{
+                        ScriptBlockFailed = $false
+                        ScriptBlockOutput = @{ Passed = $false; Details = @('FAIL: injected Phase 5 failure') }
+                    }
+                }
+                'NoResult' { return $null }
+                'Malformed' {
+                    return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = 'unexpected' }
+                }
+            }
+        }
         [pscustomobject]@{
             ScriptBlockFailed = $false
             ScriptBlockOutput = @{ Passed = $true; Details = @() }
@@ -291,6 +319,7 @@ try {
     $phase5MetadataPassed = Test-SQLAOPostPhase5 -DeployConfig $savedMetadataDeploy
     Assert-Validation $phase11MetadataPassed 'Phase 11 SQLAO fixture accepts saved nested metadata'
     Assert-Validation $phase5MetadataPassed 'post-Phase-5 SQLAO fixture accepts saved nested metadata'
+    Assert-Validation ($script:FailureDiagnosticLabels.Count -eq 0) 'healthy Phase 5 and Phase 11 do not collect failure diagnostics'
     Assert-Validation ($script:Phase11SqlAoArguments[10] -eq '192.168.3.201,172.16.4.201') 'Phase 11 sends every nested cluster IP through the scalar remoting contract'
     Assert-Validation ($script:Phase11SqlAoArguments[11] -eq '192.168.3.202,172.16.4.202') 'Phase 11 sends every nested listener IP through the scalar remoting contract'
     Assert-Validation ($script:Phase11SqlAoArguments[13] -eq 'FAB-PS1SQLAO1,FAB-PS1SQLAO2') 'Phase 11 owner validation receives the exact configured replica set'
@@ -310,6 +339,32 @@ try {
     Assert-Validation ($script:Phase5SqlAoArguments[17] -eq '300') 'post-Phase-5 guest receives listener DNS TTL policy'
     $savedMetadataOwner.sqlInstanceName = 'MSSQLSERVER'
     $savedMetadataDeploy.virtualMachines[1].sqlInstanceName = 'MSSQLSERVER'
+
+    foreach ($phase5Scenario in 'Failed', 'NoResult', 'Malformed') {
+        $script:Phase5Scenario = $phase5Scenario
+        $script:FailureDiagnosticLabels.Clear()
+        $phase5FailureResult = Test-SQLAOPostPhase5 -DeployConfig $savedMetadataDeploy
+        Assert-Validation (-not $phase5FailureResult -and $script:FailureDiagnosticLabels.Count -eq 1 -and
+            $script:FailureDiagnosticLabels[0] -eq 'phase5-terminal-failure-FAB-PS1SQLAO1') "Phase 5 $phase5Scenario terminal branch collects exactly one owner-scoped diagnostic"
+    }
+    $script:Phase5Scenario = 'Passed'
+
+    $script:DiagnosticCaptureSucceeds = $false
+    $script:Phase5Scenario = 'Failed'
+    $phase5FailureWithDiagFailure = Test-SQLAOPostPhase5 -DeployConfig $savedMetadataDeploy
+    Assert-Validation (-not $phase5FailureWithDiagFailure) 'diagnostic operational failure cannot change the original Phase 5 failure verdict'
+    $script:Phase5Scenario = 'Passed'
+    $script:DiagnosticCaptureSucceeds = $true
+
+    $script:BasicSqlPass = $false
+    $script:FailureDiagnosticLabels.Clear()
+    $basicOwnerFailure = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
+    Assert-Validation (-not $basicOwnerFailure -and
+        ($script:FailureDiagnosticLabels -join ',') -eq 'phase11-terminal-failure-FAB-PS1SQLAO1') 'basic SQL owner failure captures terminal diagnostics only'
+    $script:FailureDiagnosticLabels.Clear()
+    $basicSecondaryFailure = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO2' -CurrentItem $savedMetadataDeploy.virtualMachines[1] -DeployConfig $savedMetadataDeploy
+    Assert-Validation (-not $basicSecondaryFailure -and $script:FailureDiagnosticLabels.Count -eq 0) 'basic SQL secondary failure does not duplicate owner diagnostics'
+    $script:BasicSqlPass = $true
 
     Assert-Validation ((Get-Command Test-SQLAOFunctionality).Parameters.ContainsKey('RecoveryRetry')) 'SQLAO validation declares the bounded recovery retry switch'
     function Start-Sleep {}
@@ -355,25 +410,45 @@ try {
     $script:RecoveryScenario = 'RecoverOnce'
     $script:RecoveryValidationCalls = 0
     $script:RecoveryRestartCalls = 0
+    $script:FailureDiagnosticLabels.Clear()
+    $script:DiagnosticCaptureSucceeds = $false
     $recoverySucceeded = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
     Assert-Validation ($recoverySucceeded -and $script:RecoveryValidationCalls -eq 2 -and $script:RecoveryRestartCalls -eq 1) 'host recovery performs one restart and exactly one validation retry'
+    Assert-Validation (($script:FailureDiagnosticLabels -join ',') -eq 'phase11-before-recovery-FAB-PS1SQLAO1') 'successful Phase 11 recovery retains only the pre-recovery diagnostic'
+    Assert-Validation $recoverySucceeded 'diagnostic operational failure cannot change a successful Phase 11 recovery verdict'
+    $script:DiagnosticCaptureSucceeds = $true
+
+    $script:RecoveryScenario = 'NoRecovery'
+    $script:RecoveryValidationCalls = 0
+    $script:RecoveryRestartCalls = 0
+    $script:FailureDiagnosticLabels.Clear()
+    $noRecoveryResult = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
+    Assert-Validation (-not $noRecoveryResult -and $script:RecoveryValidationCalls -eq 1 -and
+        $script:RecoveryRestartCalls -eq 0 -and
+        ($script:FailureDiagnosticLabels -join ',') -eq 'phase11-before-recovery-FAB-PS1SQLAO1,phase11-terminal-failure-FAB-PS1SQLAO1') 'Phase 11 failure without a recovery plan captures before and terminal diagnostics'
 
     $script:RecoveryScenario = 'AlwaysRequest'
     $script:RecoveryValidationCalls = 0
     $script:RecoveryRestartCalls = 0
+    $script:FailureDiagnosticLabels.Clear()
     $boundedRetryResult = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
     Assert-Validation (-not $boundedRetryResult -and $script:RecoveryValidationCalls -eq 2 -and $script:RecoveryRestartCalls -eq 1) 'persistent recovery request is bounded to two validations and one restart'
+    Assert-Validation (($script:FailureDiagnosticLabels -join ',') -eq 'phase11-before-recovery-FAB-PS1SQLAO1,phase11-terminal-failure-FAB-PS1SQLAO1') 'persistent Phase 11 failure captures before-recovery and terminal diagnostics'
 
     $script:RecoveryValidationCalls = 0
     $script:RecoveryRestartCalls = 0
+    $script:FailureDiagnosticLabels.Clear()
     $directRetryResult = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy -RecoveryRetry
     Assert-Validation (-not $directRetryResult -and $script:RecoveryValidationCalls -eq 1 -and $script:RecoveryRestartCalls -eq 0) 'RecoveryRetry cannot recurse or restart a second time'
+    Assert-Validation (($script:FailureDiagnosticLabels -join ',') -eq 'phase11-terminal-failure-FAB-PS1SQLAO1') 'direct recovery retry failure captures only terminal diagnostics'
 
     $script:RecoveryScenario = 'RestartFailure'
     $script:RecoveryValidationCalls = 0
     $script:RecoveryRestartCalls = 0
+    $script:FailureDiagnosticLabels.Clear()
     $restartFailureResult = Test-SQLAOFunctionality -VMName 'FAB-PS1SQLAO1' -CurrentItem $savedMetadataOwner -DeployConfig $savedMetadataDeploy
     Assert-Validation (-not $restartFailureResult -and $script:RecoveryValidationCalls -eq 1 -and $script:RecoveryRestartCalls -eq 1) 'restart failure remains failed without recursive validation'
+    Assert-Validation (($script:FailureDiagnosticLabels -join ',') -eq 'phase11-before-recovery-FAB-PS1SQLAO1,phase11-terminal-failure-FAB-PS1SQLAO1') 'restart failure captures before-recovery and terminal diagnostics'
 
     $script:RecoveryScenario = 'None'
 

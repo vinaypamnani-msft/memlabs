@@ -44,6 +44,126 @@ function Add-Phase11Output {
     $script:Phase11OutputBuffer.Add(@{ Text = $Text; Level = $Level })
 }
 
+function Invoke-SqlAoFailureDiagnostics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$DeployConfig,
+        [Parameter(Mandatory)][object]$PrimaryAO,
+        [Parameter(Mandatory)][string]$SnapshotLabel,
+        [Parameter(Mandatory)][int]$Phase,
+        [ValidateRange(60, 600)][int]$TimeoutSeconds = 300
+    )
+
+    $diagnosticResult = [ordered]@{
+        Captured = $false
+        CollectionComplete = $false
+        ReportPath = ''
+        ArchivePath = ''
+        Error = ''
+    }
+    $job = $null
+    try {
+        if (-not $Common -or -not $Common.LocalAdmin) {
+            throw 'The deployment credential is unavailable.'
+        }
+        $collectorPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\Get-SqlaoDnsDiag.ps1'
+        if (-not (Test-Path -LiteralPath $collectorPath)) {
+            throw "SQLAO health collector was not found at '$collectorPath'."
+        }
+
+        $domain = [string]$DeployConfig.vmOptions.domainName
+        $domainNetbios = [string]$DeployConfig.vmOptions.domainNetBiosName
+        if ([string]::IsNullOrWhiteSpace($domainNetbios) -and $domain) {
+            $domainNetbios = ($domain -split '\.')[0]
+        }
+        $adminName = [string]$DeployConfig.vmOptions.adminName
+        $credential = [PSCredential]::new("$domainNetbios\$adminName", $Common.LocalAdmin.Password)
+        $dcVm = @($DeployConfig.virtualMachines | Where-Object {
+                "$($_.role)" -in @('DC', 'OtherDC', 'BDC') -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domain)
+            } | Sort-Object { [bool]$_.hidden }) | Select-Object -First 1
+        if (-not $dcVm -or -not $dcVm.vmName) {
+            throw "No running-domain DC VM was identified for '$domain'."
+        }
+
+        $otherNode = [string]$PrimaryAO.OtherNode
+        $nodeVms = @([string]$PrimaryAO.vmName, $otherNode | Where-Object { $_ } | Select-Object -Unique)
+        if ($nodeVms.Count -ne 2) {
+            throw "Expected two SQLAO node VMs, found [$($nodeVms -join ', ')]."
+        }
+        $agName = [string](Get-SqlAoConfigValue -Vm $PrimaryAO -Name 'AlwaysOnGroupName')
+        $listenerName = [string](Get-SqlAoConfigValue -Vm $PrimaryAO -Name 'AlwaysOnListenerName')
+        $clusterName = [string](Get-SqlAoConfigValue -Vm $PrimaryAO -Name 'ClusterName')
+        $extraNames = @($listenerName, $clusterName | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+        $listenerPort = Get-SqlAoConfigValue -Vm $PrimaryAO -Name 'SQLAOPort'
+        if (-not $listenerPort) { $listenerPort = 1500 }
+        $sqlInstanceName = if ($PrimaryAO.sqlInstanceName) { [string]$PrimaryAO.sqlInstanceName } else { 'MSSQLSERVER' }
+        $collectorParameters = @{
+            NodeVm = $nodeVms
+            DcVm = [string]$dcVm.vmName
+            Domain = $domain
+            DomainNetbios = $domainNetbios
+            AdminName = $adminName
+            AgName = $agName
+            SqlInstanceName = $sqlInstanceName
+            ListenerPort = [int]$listenerPort
+            SnapshotLabel = $SnapshotLabel
+            ExtraNames = $extraNames
+            Credential = $credential
+        }
+
+        $job = Start-Job -ScriptBlock {
+            param($Path, $Parameters)
+            & $Path @Parameters
+        } -ArgumentList $collectorPath, $collectorParameters
+        if (-not (Wait-Job -Job $job -Timeout $TimeoutSeconds)) {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            throw "SQLAO health collection exceeded ${TimeoutSeconds}s."
+        }
+        if ($job.State -ne 'Completed') {
+            $reason = $job.ChildJobs[0].JobStateInfo.Reason
+            throw "SQLAO health collection ended in state '$($job.State)': $($reason.Message)"
+        }
+        $jobOutput = @(Receive-Job -Job $job -ErrorAction Stop)
+        $artifact = @($jobOutput | Where-Object {
+                $_ -and $_.PSObject.Properties['ReportPath'] -and $_.PSObject.Properties['ArchivePath']
+            } | Select-Object -Last 1)
+        if ($artifact.Count -ne 1 -or
+            -not (Test-Path -LiteralPath $artifact[0].ReportPath) -or
+            -not (Test-Path -LiteralPath $artifact[0].ArchivePath)) {
+            throw 'SQLAO health collection did not produce a report and archive.'
+        }
+        $diagnosticResult.Captured = $true
+        $diagnosticResult.CollectionComplete = [bool]$artifact[0].CollectionComplete
+        $diagnosticResult.ReportPath = [string]$artifact[0].ReportPath
+        $diagnosticResult.ArchivePath = [string]$artifact[0].ArchivePath
+        if (-not $diagnosticResult.CollectionComplete) {
+            $diagnosticResult.Error = "Collection incomplete: $(@($artifact[0].CollectionErrors) -join ' | ')"
+        }
+    }
+    catch {
+        $diagnosticResult.Error = $_.Exception.Message
+    }
+    finally {
+        if ($job) {
+            $null = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $message = if ($diagnosticResult.Captured) {
+        "[Phase $Phase] SQLAO diagnostics '$SnapshotLabel': report='$($diagnosticResult.ReportPath)' archive='$($diagnosticResult.ArchivePath)' complete=$($diagnosticResult.CollectionComplete)"
+    }
+    else {
+        "[Phase $Phase] SQLAO diagnostics '$SnapshotLabel' failed: $($diagnosticResult.Error)"
+    }
+    Write-Log $message -Warning -LogOnly
+    if ($Phase -eq 11) {
+        Add-Phase11Output -Text $message -Level Warning
+    }
+    return [pscustomobject]$diagnosticResult
+}
+
 function Get-SqlAoVirtualIpAddresses {
     [CmdletBinding()]
     param([object[]]$Sources)
@@ -2237,9 +2357,19 @@ function Test-SQLAOFunctionality {
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
 
+    $primaryAO = $DeployConfig.virtualMachines | Where-Object {
+        $_.role -eq 'SQLAO' -and $_.OtherNode -and ($_.vmName -eq $VMName -or $_.OtherNode -eq $VMName)
+    } | Select-Object -First 1
+
     # First run basic SQL tests
     $sqlOk = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
-    if (-not $sqlOk) { return $false }
+    if (-not $sqlOk) {
+        if ($primaryAO -and $VMName -ieq $primaryAO.vmName) {
+            $null = Invoke-SqlAoFailureDiagnostics -DeployConfig $DeployConfig -PrimaryAO $primaryAO `
+                -SnapshotLabel "phase11-terminal-failure-$VMName" -Phase $Phase
+        }
+        return $false
+    }
 
     Write-Log "[Phase $Phase] $VMName [SQLAO]: Testing Availability Group health" -LogOnly
 
@@ -2254,9 +2384,6 @@ function Test-SQLAOFunctionality {
     # actually contains $VMName: the primary def whose own name is this VM, or
     # whose OtherNode points at this VM. Select-Object -First 1 is a belt-and-braces
     # guard so a malformed config can never reintroduce the array.
-    $primaryAO = $DeployConfig.virtualMachines | Where-Object {
-        $_.role -eq 'SQLAO' -and $_.OtherNode -and ($_.vmName -eq $VMName -or $_.OtherNode -eq $VMName)
-    } | Select-Object -First 1
     $listenerName = ''
     $agName = ''
     $otherNode = ''
@@ -4590,8 +4717,15 @@ ORDER BY ar.replica_server_name
         Write-Log "[Phase 11] $VMName [SQLAO]: Could not persist DNS transport diagnostics: $($_.Exception.Message)" -LogOnly
     }
 
+    $validationFailed = -not ($result -and
+        $sqlAoOutput -is [System.Collections.IDictionary] -and
+        $sqlAoOutput.Contains('Passed') -and $sqlAoOutput.Passed -eq $true)
     $recoveryTarget = if ($sqlAoOutput) { [string]$sqlAoOutput.RecoveryTarget } elseif ($result -and $result.ScriptBlockOutput) { [string]$result.ScriptBlockOutput.RecoveryTarget } else { '' }
     $recoveryService = if ($sqlAoOutput) { [string]$sqlAoOutput.RecoveryService } elseif ($result -and $result.ScriptBlockOutput) { [string]$result.ScriptBlockOutput.RecoveryService } else { '' }
+    if ($validationFailed -and -not $RecoveryRetry) {
+        $null = Invoke-SqlAoFailureDiagnostics -DeployConfig $DeployConfig -PrimaryAO $primaryAO `
+            -SnapshotLabel "phase11-before-recovery-$VMName" -Phase $Phase
+    }
     if (-not $RecoveryRetry -and $recoveryTarget -and $recoveryService) {
         Write-Log "[Phase $Phase] $VMName [SQLAO]: Restarting '$recoveryService' on '$recoveryTarget' through host PowerShell Direct, then retrying validation once." -Warning -LogOnly
         $restartResult = Invoke-VmCommand -VmName $recoveryTarget -VmDomainName $domain `
@@ -4616,6 +4750,10 @@ ORDER BY ar.replica_server_name
         Add-Phase11Output -Text "[Phase $Phase] $VMName [SQLAO]: FAIL: Host PowerShell Direct could not restart '$recoveryService' on '$recoveryTarget': $detail" -Level Failure
     }
 
+    if ($validationFailed) {
+        $null = Invoke-SqlAoFailureDiagnostics -DeployConfig $DeployConfig -PrimaryAO $primaryAO `
+            -SnapshotLabel "phase11-terminal-failure-$VMName" -Phase $Phase
+    }
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQLAO' -Result $result)
 }
 
@@ -17102,6 +17240,8 @@ function Test-SQLAOPostPhase5 {
         }
         if ($nodeAddressFailure) {
             $allPassed = $false
+            $null = Invoke-SqlAoFailureDiagnostics -DeployConfig $DeployConfig -PrimaryAO $primaryAO `
+                -SnapshotLabel "phase5-terminal-failure-$VMName" -Phase $Phase
             continue
         }
 
@@ -17668,14 +17808,18 @@ ORDER BY ar.replica_server_name, adb.database_name
                 }
                 Write-Log "[Phase $Phase] $VMName [SQLAO]: FAIL - $errMsg" -Failure
                 $allPassed = $false
+                $null = Invoke-SqlAoFailureDiagnostics -DeployConfig $DeployConfig -PrimaryAO $primaryAO `
+                    -SnapshotLabel "phase5-terminal-failure-$VMName" -Phase $Phase
                 continue
             }
         }
 
         $output = $result.ScriptBlockOutput
-        if (-not $output -or -not $output.ContainsKey('Passed')) {
+        if ($output -isnot [System.Collections.IDictionary] -or -not $output.Contains('Passed')) {
             Write-Log "[Phase $Phase] $VMName [SQLAO]: FAIL - Unexpected output from validation script" -Failure
             $allPassed = $false
+            $null = Invoke-SqlAoFailureDiagnostics -DeployConfig $DeployConfig -PrimaryAO $primaryAO `
+                -SnapshotLabel "phase5-terminal-failure-$VMName" -Phase $Phase
             continue
         }
 
@@ -17697,6 +17841,8 @@ ORDER BY ar.replica_server_name, adb.database_name
         else {
             Write-Log "[Phase $Phase] $VMName [SQLAO]: Post-Phase-5 SQLAO validation FAILED" -Failure
             $allPassed = $false
+            $null = Invoke-SqlAoFailureDiagnostics -DeployConfig $DeployConfig -PrimaryAO $primaryAO `
+                -SnapshotLabel "phase5-terminal-failure-$VMName" -Phase $Phase
         }
     }
 
