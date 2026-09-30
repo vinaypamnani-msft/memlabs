@@ -79,6 +79,9 @@ if ($classText -notmatch '\[version\]::TryParse') {
 if ($classText -notmatch 'Invoke-DownloadFile.+-BypassCache') {
     throw 'A stale cache-DVD ODBC payload does not retry from the network.'
 }
+if ($classText -notmatch 'SKIPPENDINGREBOOTCHECK=1') {
+    throw 'InstallODBCDriver still lets unrelated pending file renames trigger MSI error 25003.'
+}
 
 $genConfigText = Get-Content -LiteralPath $genConfigPath -Raw
 $genTokens = $null
@@ -180,12 +183,40 @@ for ($ancestor = $saveFunctions[0].Parent; $ancestor; $ancestor = $ancestor.Pare
         throw 'Save-OdbcInstaller is incorrectly nested inside Get-MsiVersion.'
     }
 }
+$failureDetailFunctions = @($fixAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-OdbcMsiFailureDetails'
+        }, $true))
+if ($failureDetailFunctions.Count -ne 1) { throw "Expected one Get-OdbcMsiFailureDetails definition; found $($failureDetailFunctions.Count)." }
+. ([scriptblock]::Create($failureDetailFunctions[0].Extent.Text))
+$syntheticMsiLog = Join-Path ([IO.Path]::GetTempPath()) "memlabs-odbc-failure-$([guid]::NewGuid().ToString('N')).log"
+try {
+    @(
+        'Action start 12:00:00: CA_ErrorPendingReboot.',
+        'A previous installation required a reboot of the machine for changes to take effect.',
+        'Action ended 12:00:00: CA_ErrorPendingReboot. Return value 3.',
+        'Installation success or error status: 1603.'
+    ) | Set-Content -LiteralPath $syntheticMsiLog -Encoding UTF8
+    $failureDetails = Get-OdbcMsiFailureDetails -LogPath $syntheticMsiLog
+    if ($failureDetails -notmatch 'Failure markers:' -or
+        $failureDetails -notmatch 'previous installation required a reboot' -or
+        $failureDetails -notmatch 'Return value 3') {
+        throw "ODBC MSI failure diagnostics omitted the actionable pending-reboot markers: $failureDetails"
+    }
+}
+finally {
+    Remove-Item -LiteralPath $syntheticMsiLog -Force -ErrorAction SilentlyContinue
+}
 foreach ($requiredPattern in @(
         "IACCEPTMSODBCSQLLICENSETERMS=YES",
         "ProductVersion",
         "InstalledVersion",
         "stale after direct retry",
         "Import-Module TemplateHelpDSC",
+        "SKIPPENDINGREBOOTCHECK=1",
+        "previous installation required a reboot",
+        "Return value 3",
         "ExitCode -ne 1618",
         "ExitCode -notin @\(0, 3010\)"
     )) {
@@ -288,7 +319,7 @@ if ($cacheMatchesTarget -and (Test-Path -LiteralPath $cachedMsi -PathType Leaf))
     $upgradeOutput = @(& $fix.ScriptBlock '18.6.2.1' $sourceUri)
     $upgradeResult = @($upgradeOutput | Where-Object { $_.PSObject.Properties.Name -contains 'Success' }) | Select-Object -Last 1
     if (-not $upgradeResult.Success -or $script:MsiStartCalls -ne 1 -or
-        ($script:MsiArguments -join ' ') -notmatch '/qn /norestart IACCEPTMSODBCSQLLICENSETERMS=YES' -or
+        ($script:MsiArguments -join ' ') -notmatch '/qn /norestart IACCEPTMSODBCSQLLICENSETERMS=YES SKIPPENDINGREBOOTCHECK=1' -or
         $upgradeResult.Message -notmatch "18\.4\.1\.1.+18\.6\.2\.1") {
         throw 'Fix-ODBC18 did not execute and verify the expected 18.4-to-18.6 upgrade path.'
     }

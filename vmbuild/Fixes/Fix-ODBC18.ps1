@@ -50,6 +50,26 @@ $Fix_ODBC18 = {
             }
         }
     }
+    function Get-OdbcMsiFailureDetails {
+        param([string]$LogPath)
+
+        if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) { return 'MSI log not found' }
+        $logLines = @(Get-Content -LiteralPath $LogPath -ErrorAction SilentlyContinue)
+        $allMarkers = @($logLines | Where-Object {
+                $_ -match '(?i)Return value 3|error 25003|previous installation required a reboot|CA_ErrorPendingReboot|installation success or error status:\s*1603'
+            })
+        $failureMarkers = @(
+            @($allMarkers | Select-Object -First 6)
+            @($allMarkers | Select-Object -Last 6)
+        ) | Select-Object -Unique
+        $tail = @($logLines | Select-Object -Last 20)
+        $parts = @()
+        if ($failureMarkers.Count -gt 0) { $parts += "Failure markers: $($failureMarkers -join ' | ')" }
+        $parts += "Log tail: $($tail -join ' | ')"
+        $details = $parts -join ' | '
+        if ($details.Length -gt 4000) { $details = $details.Substring(0, 4000) + ' [truncated]' }
+        return $details
+    }
     function Save-OdbcInstaller {
         param(
             [string]$Url,
@@ -138,6 +158,11 @@ $Fix_ODBC18 = {
         $arguments = @(
             '/i', "`"$installerPath`"", '/qn', '/norestart',
             'IACCEPTMSODBCSQLLICENSETERMS=YES',
+            # The ODBC MSI otherwise hard-fails with error 25003/1603 whenever
+            # PendingFileRenameOperations is non-empty. Phase 10 commonly runs
+            # after other maintenance has queued unrelated renames; MSI still
+            # handles real file-in-use failures, and we verify InstalledVersion.
+            'SKIPPENDINGREBOOTCHECK=1',
             '/l*v', "`"$logPath`""
         )
         $process = $null
@@ -147,11 +172,8 @@ $Fix_ODBC18 = {
             Start-Sleep -Seconds 30
         }
         if ($process.ExitCode -notin @(0, 3010)) {
-            $tail = if (Test-Path -LiteralPath $logPath) {
-                @(Get-Content -LiteralPath $logPath -Tail 20 -ErrorAction SilentlyContinue) -join ' | '
-            }
-            else { 'log not found' }
-            throw "ODBC MSI exited $($process.ExitCode). Log tail: $tail"
+            $details = Get-OdbcMsiFailureDetails -LogPath $logPath
+            throw "ODBC MSI exited $($process.ExitCode). $details"
         }
 
         $installedAfter = Get-InstalledOdbc18Version

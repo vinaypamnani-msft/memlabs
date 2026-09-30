@@ -1812,7 +1812,7 @@ class InstallODBCDriver {
         Install-MSIPackage `
             -MsiPath $_odbcpath `
             -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
-            -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES") `
+            -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1") `
             -LogPath "C:\temp\odbcinstallation.log" `
             -VerifyRegistryPath "HKLM:\Software\Microsoft\MSODBCSQL18" `
             -VerifyRegistryValueName "InstalledVersion"
