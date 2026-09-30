@@ -199,10 +199,11 @@ Assert-Equal $false ($phase5 -match "SqlWaitForAG 'SQLConfigureAG-WaitAG'") 'loc
 Assert-Equal $false ($phase5 -match 'WaitForAll AG \{') 'local membership gate has no remote listener WaitForAll predecessor'
 Assert-Equal $true ($phase5 -match '\[DateTime\]::UtcNow\.AddMinutes\(10\)') 'primary readiness gate uses an absolute ten-minute deadline'
 Assert-Equal $true ($phase5 -match 'while \(\[DateTime\]::UtcNow -lt \$deadline\)') 'primary readiness retries stop at the deadline'
-Assert-Equal $true ($phase5 -match 'Script EnsureAgPossibleOwners') 'Phase 5 converges AG resource possible owners after replica join'
-Assert-Equal $true ($phase5 -match 'Set-ClusterOwnerNode.+?-Resource.+?-Owners') 'Phase 5 assigns both nodes as AG resource possible owners'
-Assert-Equal $true ($phase5 -match 'Set-ClusterOwnerNode.+?-Group.+?-Owners') 'Phase 5 assigns both nodes as clustered-role preferred owners'
-Assert-Equal $true ($phase5 -match '(?s)Script EnsureAgPossibleOwners.+?DependsOn\s*=\s*''\[WaitForAll\]AddReplica''') 'owner convergence waits for the secondary replica'
+Assert-Equal $false ($phase5 -match 'ClusterSetOwnerNodes\s+ClusterSetOwnerNodes') 'Phase 5 does not apply universal possible-owner mutation'
+Assert-Equal $false ($phase5 -match 'EnsureAgPossibleOwners|Set-ClusterOwnerNode') 'Phase 5 leaves SQL-managed AG owner policy unchanged'
+Assert-Equal 2 ([regex]::Matches($phase5, 'Script EnsureAlwaysOnHealth').Count) 'Phase 5 converges AlwaysOn_health on both replicas'
+Assert-Equal 2 ([regex]::Matches($phase5, 'WITH \(STARTUP_STATE = ON\)').Count) 'Phase 5 enables AlwaysOn_health startup on both replicas'
+Assert-Equal 2 ([regex]::Matches($phase5, 'STATE = START').Count) 'Phase 5 starts AlwaysOn_health on both replicas'
 
 $install = Get-Content (Join-Path $RootPath 'vmbuild\DSC\phases\InstallAndUpdateSCCM.ps1') -Raw
 Assert-Equal $true ($install -match 'MultiSubnetFailover=True') 'listener-targeted probes enable SQL client multi-subnet failover'

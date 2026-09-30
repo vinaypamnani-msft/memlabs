@@ -602,7 +602,9 @@ try {
     Assert-Validation ($functionalSource -match 'if \(\$keep\) \{ \$null = \$seenExpected\.Add\(\$recordIp\) \}') 'wrong-TTL records are not marked as retained before replacement'
     Assert-Validation ([regex]::Matches($functionalSource, 'Get-ClusterOwnerNode -Resource').Count -ge 2) 'Phase 11 and post-Phase-5 validate AG resource possible owners'
     Assert-Validation ([regex]::Matches($functionalSource, 'Get-ClusterOwnerNode -Group').Count -ge 2) 'Phase 11 and post-Phase-5 validate group preferred owners'
-    Assert-Validation ([regex]::Matches($functionalSource, 'AG owner policy mismatch').Count -ge 2) 'owner-policy drift is an actionable failure in both validators'
+    Assert-Validation ([regex]::Matches($functionalSource, 'AG SQL-managed owner state is inconsistent').Count -ge 2) 'both validators fail inconsistent current-owner state'
+    Assert-Validation ([regex]::Matches($functionalSource, "current group owner '.+?' is absent from resource possible owners").Count -ge 2) 'both validators require only the current SQL-managed owner to be possible'
+    Assert-Validation (-not ($functionalSource -match 'expectedPossibleOwners|expectedPreferredOwners')) 'validators do not impose MemLabs owner sets on SQL-managed AG resources'
     $physicalAddressScript = Import-AssignedScriptBlock -Path $functionalPath -VariableName 'physicalAddressScript'
     $script:RegistrationAddresses = @(
         [pscustomobject]@{ IPAddress = '172.16.4.20'; InterfaceIndex = 7; SkipAsSource = $false },

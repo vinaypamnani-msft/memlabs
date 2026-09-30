@@ -384,20 +384,6 @@
 
         $nextDepend = "[WaitForAny]WaitForClusterJoin"
 
-        WriteStatus ClusterSetOwnerNodes {
-            DependsOn = $nextDepend
-            Status    = "Setting OwnerNodes $($thisVM.ClusterName) to $($thisVM.thisParams.SQLAO.ClusterNodes -Join ',')"
-        }
-
-        ClusterSetOwnerNodes ClusterSetOwnerNodes {
-            ClusterName          = $thisVM.ClusterName
-            #Nodes                = ($AllNodes.Where{ $_.Role -eq 'ClusterNode1' }.NodeName), ($AllNodes.Where{ $_.Role -eq 'ClusterNode2' }.NodeName)
-            Nodes                = $thisVM.thisParams.SQLAO.ClusterNodes
-            PsDscRunAsCredential = $Admincreds
-            DependsOn            = $nextDepend
-        }
-        $nextDepend = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
-
         $domainNetworkIndex = 0
         foreach ($domainNetwork in @($thisVM.thisParams.SQLAO.DomainNetworks)) {
             $domainNetworkIndex++
@@ -557,6 +543,88 @@
             #PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[SqlAlwaysOnService]EnableHADR'
+
+        $_alwaysOnHealthTarget = if ($thisVM.sqlInstanceName -and $thisVM.sqlInstanceName -ine 'MSSQLSERVER') {
+            "localhost\$($thisVM.sqlInstanceName)"
+        }
+        else {
+            'localhost'
+        }
+        Script EnsureAlwaysOnHealth {
+            GetScript = {
+                $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$using:_alwaysOnHealthTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                try {
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandTimeout = 15
+                    $command.CommandText = @'
+SELECT COUNT(*)
+FROM sys.server_event_sessions configured
+WHERE configured.name = N'AlwaysOn_health'
+  AND configured.startup_state = 1
+  AND EXISTS
+  (
+      SELECT 1
+      FROM sys.dm_xe_sessions running
+      WHERE running.name = configured.name
+  );
+'@
+                    return @{ Result = [int]$command.ExecuteScalar() }
+                }
+                finally {
+                    if ($connection) { $connection.Dispose() }
+                }
+            }
+            TestScript = {
+                $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$using:_alwaysOnHealthTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                try {
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandTimeout = 15
+                    $command.CommandText = @'
+SELECT COUNT(*)
+FROM sys.server_event_sessions configured
+WHERE configured.name = N'AlwaysOn_health'
+  AND configured.startup_state = 1
+  AND EXISTS
+  (
+      SELECT 1
+      FROM sys.dm_xe_sessions running
+      WHERE running.name = configured.name
+  );
+'@
+                    return [int]$command.ExecuteScalar() -eq 1
+                }
+                catch { return $false }
+                finally {
+                    if ($connection) { $connection.Dispose() }
+                }
+            }
+            SetScript = {
+                $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$using:_alwaysOnHealthTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                try {
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandTimeout = 30
+                    $command.CommandText = @'
+IF NOT EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'AlwaysOn_health')
+    THROW 51000, 'AlwaysOn_health extended-event session is not defined.', 1;
+
+ALTER EVENT SESSION [AlwaysOn_health] ON SERVER WITH (STARTUP_STATE = ON);
+
+IF NOT EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'AlwaysOn_health')
+    ALTER EVENT SESSION [AlwaysOn_health] ON SERVER STATE = START;
+'@
+                    $null = $command.ExecuteNonQuery()
+                }
+                finally {
+                    if ($connection) { $connection.Dispose() }
+                }
+            }
+            DependsOn = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[Script]EnsureAlwaysOnHealth'
 
         WriteStatus SQLAG {
             DependsOn = $nextDepend
@@ -924,55 +992,9 @@
             PsDscRunAsCredential = $Admincreds
         }
 
-        $_agOwnerResource = $thisVM.thisParams.SQLAO.AlwaysOnGroupName
-        $_agOwnerCluster = $thisVM.ClusterName
-        $_agOwnerNodes = @($thisVM.thisParams.SQLAO.ClusterNodes)
-        Script EnsureAgPossibleOwners {
-            GetScript = {
-                Import-Module FailoverClusters -ErrorAction Stop
-                $possible = Get-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Resource $using:_agOwnerResource -ErrorAction Stop
-                $preferred = Get-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Group $using:_agOwnerResource -ErrorAction Stop
-                return @{
-                    PossibleOwners = @($possible.OwnerNodes | ForEach-Object {
-                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
-                        }) -join ','
-                    PreferredOwners = @($preferred.OwnerNodes | ForEach-Object {
-                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
-                        }) -join ','
-                }
-            }
-            TestScript = {
-                try {
-                    Import-Module FailoverClusters -ErrorAction Stop
-                    $expectedPreferred = @($using:_agOwnerNodes | ForEach-Object { [string]$_ })
-                    $expectedPossible = @($expectedPreferred | Sort-Object)
-                    $possibleResult = Get-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Resource $using:_agOwnerResource -ErrorAction Stop
-                    $preferredResult = Get-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Group $using:_agOwnerResource -ErrorAction Stop
-                    $possible = @($possibleResult.OwnerNodes | ForEach-Object {
-                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
-                        } | Sort-Object)
-                    $preferred = @($preferredResult.OwnerNodes | ForEach-Object {
-                            if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
-                        })
-                    return $possible.Count -eq $expectedPossible.Count -and
-                        ($possible -join ',') -eq ($expectedPossible -join ',') -and
-                        $preferred.Count -eq $expectedPreferred.Count -and
-                        ($preferred -join ',') -eq ($expectedPreferred -join ',')
-                }
-                catch { return $false }
-            }
-            SetScript = {
-                Import-Module FailoverClusters -ErrorAction Stop
-                Set-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Resource $using:_agOwnerResource -Owners $using:_agOwnerNodes -ErrorAction Stop
-                Set-ClusterOwnerNode -Cluster $using:_agOwnerCluster -Group $using:_agOwnerResource -Owners $using:_agOwnerNodes -ErrorAction Stop
-            }
-            DependsOn = '[WaitForAll]AddReplica'
-            PsDscRunAsCredential = $Admincreds
-        }
-
         $dbName = "TESTDB"
 
-        $nextDepend = '[Script]EnsureAgPossibleOwners'
+        $nextDepend = '[WaitForAll]AddReplica'
         if ($dbName) {
 
             WriteStatus SetRecoveryModel {
@@ -1321,6 +1343,88 @@
         }
 
         $nextDepend = '[SqlAlwaysOnService]EnableHADR'
+
+        $_alwaysOnHealthTarget = if ($node1vm.sqlInstanceName -and $node1vm.sqlInstanceName -ine 'MSSQLSERVER') {
+            "localhost\$($node1vm.sqlInstanceName)"
+        }
+        else {
+            'localhost'
+        }
+        Script EnsureAlwaysOnHealth {
+            GetScript = {
+                $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$using:_alwaysOnHealthTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                try {
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandTimeout = 15
+                    $command.CommandText = @'
+SELECT COUNT(*)
+FROM sys.server_event_sessions configured
+WHERE configured.name = N'AlwaysOn_health'
+  AND configured.startup_state = 1
+  AND EXISTS
+  (
+      SELECT 1
+      FROM sys.dm_xe_sessions running
+      WHERE running.name = configured.name
+  );
+'@
+                    return @{ Result = [int]$command.ExecuteScalar() }
+                }
+                finally {
+                    if ($connection) { $connection.Dispose() }
+                }
+            }
+            TestScript = {
+                $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$using:_alwaysOnHealthTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                try {
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandTimeout = 15
+                    $command.CommandText = @'
+SELECT COUNT(*)
+FROM sys.server_event_sessions configured
+WHERE configured.name = N'AlwaysOn_health'
+  AND configured.startup_state = 1
+  AND EXISTS
+  (
+      SELECT 1
+      FROM sys.dm_xe_sessions running
+      WHERE running.name = configured.name
+  );
+'@
+                    return [int]$command.ExecuteScalar() -eq 1
+                }
+                catch { return $false }
+                finally {
+                    if ($connection) { $connection.Dispose() }
+                }
+            }
+            SetScript = {
+                $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$using:_alwaysOnHealthTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+                try {
+                    $connection.Open()
+                    $command = $connection.CreateCommand()
+                    $command.CommandTimeout = 30
+                    $command.CommandText = @'
+IF NOT EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'AlwaysOn_health')
+    THROW 51000, 'AlwaysOn_health extended-event session is not defined.', 1;
+
+ALTER EVENT SESSION [AlwaysOn_health] ON SERVER WITH (STARTUP_STATE = ON);
+
+IF NOT EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'AlwaysOn_health')
+    ALTER EVENT SESSION [AlwaysOn_health] ON SERVER STATE = START;
+'@
+                    $null = $command.ExecuteNonQuery()
+                }
+                finally {
+                    if ($connection) { $connection.Dispose() }
+                }
+            }
+            DependsOn = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[Script]EnsureAlwaysOnHealth'
 
         $_primaryAgTarget = $node1VM.thisParams.SQLAO.PrimaryReplicaServerName
         if ($node1vm.sqlInstanceName -and $node1vm.sqlInstanceName -ine 'MSSQLSERVER') {

@@ -2941,26 +2941,42 @@ function Test-SQLAOFunctionality {
                 $results.Details.Add("OK: Quorum type '$($quorum.QuorumType)', resource '$($quorum.QuorumResource)'")
 
                 try {
-                    $expectedPreferredOwners = @(@($recoveryOwner, $otherNode) | Where-Object { $_ })
-                    $expectedPossibleOwners = @($expectedPreferredOwners | Sort-Object)
+                    $expectedOwnerNodes = @(@($recoveryOwner, $otherNode) | Where-Object { $_ })
                     $agClusterResource = Get-ClusterResource -Name $agName -ErrorAction Stop
+                    $agClusterGroup = Get-ClusterGroup -Name $agName -ErrorAction Stop
                     $possibleInfo = Get-ClusterOwnerNode -Resource $agClusterResource.Name -ErrorAction Stop
                     $preferredInfo = Get-ClusterOwnerNode -Group $agName -ErrorAction Stop
                     $possibleOwners = @($possibleInfo.OwnerNodes | ForEach-Object {
                             if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
-                        } | Sort-Object)
+                        })
                     $preferredOwners = @($preferredInfo.OwnerNodes | ForEach-Object {
                             if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
                         })
-                    if ($possibleOwners.Count -ne $expectedPossibleOwners.Count -or
-                        ($possibleOwners -join ',') -ne ($expectedPossibleOwners -join ',') -or
-                        $preferredOwners.Count -ne $expectedPreferredOwners.Count -or
-                        ($preferredOwners -join ',') -ne ($expectedPreferredOwners -join ',')) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: AG owner policy mismatch: resource possible='$($possibleOwners -join ',')', group preferred='$($preferredOwners -join ',')', expected possible='$($expectedPossibleOwners -join ',')', expected preferred='$($expectedPreferredOwners -join ',')'")
+                    $groupOwner = if ($agClusterGroup.OwnerNode.PSObject.Properties['Name']) {
+                        [string]$agClusterGroup.OwnerNode.Name
                     }
                     else {
-                        $results.Details.Add("OK: AG resource possible owners and ordered group preferred owners are '$($expectedPreferredOwners -join ',')'")
+                        [string]$agClusterGroup.OwnerNode
+                    }
+                    $ownerFailures = @()
+                    if ([string]$agClusterGroup.State -ne 'Online') {
+                        $ownerFailures += "group state='$($agClusterGroup.State)'"
+                    }
+                    if ([string]$agClusterResource.State -ne 'Online') {
+                        $ownerFailures += "resource state='$($agClusterResource.State)'"
+                    }
+                    if ($groupOwner -notin $expectedOwnerNodes) {
+                        $ownerFailures += "group owner '$groupOwner' is not a configured replica node"
+                    }
+                    if ($possibleOwners -notcontains $groupOwner) {
+                        $ownerFailures += "current group owner '$groupOwner' is absent from resource possible owners"
+                    }
+                    if ($ownerFailures.Count -gt 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: AG SQL-managed owner state is inconsistent: $($ownerFailures -join '; '); possible='$($possibleOwners -join ',')', preferred='$($preferredOwners -join ',')', group owner='$groupOwner'")
+                    }
+                    else {
+                        $results.Details.Add("OK: AG SQL-managed owner state is consistent: group owner '$groupOwner' is online and possible; possible='$($possibleOwners -join ',')', preferred='$($preferredOwners -join ',')'")
                     }
                 }
                 catch {
@@ -17140,26 +17156,42 @@ function Test-SQLAOPostPhase5 {
                     $results.Details.Add("FAIL: Cluster not found or inaccessible: $($_.Exception.Message)")
                 }
                 try {
-                    $expectedPreferredOwners = @($expectedReplicas | ForEach-Object { (($_ -split '\\', 2)[0] -split '\.')[0] })
-                    $expectedPossibleOwners = @($expectedPreferredOwners | Sort-Object)
+                    $expectedOwnerNodes = @($expectedReplicas | ForEach-Object { (($_ -split '\\', 2)[0] -split '\.')[0] })
                     $agClusterResource = Get-ClusterResource -Name $agName -ErrorAction Stop
+                    $agClusterGroup = Get-ClusterGroup -Name $agName -ErrorAction Stop
                     $possibleInfo = Get-ClusterOwnerNode -Resource $agClusterResource.Name -ErrorAction Stop
                     $preferredInfo = Get-ClusterOwnerNode -Group $agName -ErrorAction Stop
                     $possibleOwners = @($possibleInfo.OwnerNodes | ForEach-Object {
                             if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
-                        } | Sort-Object)
+                        })
                     $preferredOwners = @($preferredInfo.OwnerNodes | ForEach-Object {
                             if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
                         })
-                    if ($possibleOwners.Count -ne $expectedPossibleOwners.Count -or
-                        ($possibleOwners -join ',') -ne ($expectedPossibleOwners -join ',') -or
-                        $preferredOwners.Count -ne $expectedPreferredOwners.Count -or
-                        ($preferredOwners -join ',') -ne ($expectedPreferredOwners -join ',')) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: AG owner policy mismatch: resource possible='$($possibleOwners -join ',')', group preferred='$($preferredOwners -join ',')', expected possible='$($expectedPossibleOwners -join ',')', expected preferred='$($expectedPreferredOwners -join ',')'")
+                    $groupOwner = if ($agClusterGroup.OwnerNode.PSObject.Properties['Name']) {
+                        [string]$agClusterGroup.OwnerNode.Name
                     }
                     else {
-                        $results.Details.Add("OK: AG resource possible owners and ordered group preferred owners are '$($expectedPreferredOwners -join ',')'")
+                        [string]$agClusterGroup.OwnerNode
+                    }
+                    $ownerFailures = @()
+                    if ([string]$agClusterGroup.State -ne 'Online') {
+                        $ownerFailures += "group state='$($agClusterGroup.State)'"
+                    }
+                    if ([string]$agClusterResource.State -ne 'Online') {
+                        $ownerFailures += "resource state='$($agClusterResource.State)'"
+                    }
+                    if ($groupOwner -notin $expectedOwnerNodes) {
+                        $ownerFailures += "group owner '$groupOwner' is not a configured replica node"
+                    }
+                    if ($possibleOwners -notcontains $groupOwner) {
+                        $ownerFailures += "current group owner '$groupOwner' is absent from resource possible owners"
+                    }
+                    if ($ownerFailures.Count -gt 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: AG SQL-managed owner state is inconsistent: $($ownerFailures -join '; '); possible='$($possibleOwners -join ',')', preferred='$($preferredOwners -join ',')', group owner='$groupOwner'")
+                    }
+                    else {
+                        $results.Details.Add("OK: AG SQL-managed owner state is consistent: group owner '$groupOwner' is online and possible; possible='$($possibleOwners -join ',')', preferred='$($preferredOwners -join ',')'")
                     }
                 }
                 catch {

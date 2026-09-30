@@ -34,6 +34,9 @@ Assert-Diagnostic ($parseErrors.Count -eq 0) 'diagnostic script parses'
 $source = Get-Content -LiteralPath $scriptPath -Raw
 Assert-Diagnostic ($source -match '\$possible\s*=\s*\$resource\s*\|\s*Get-ClusterOwnerNode') 'collector records AG resource possible owners'
 Assert-Diagnostic ($source -match '\$preferred\s*=\s*\$group\s*\|\s*Get-ClusterOwnerNode') 'collector records clustered-role preferred owners'
+Assert-Diagnostic ($source -match '\$ownerOutcomeScript' -and
+    -not ($source -match "cannot run on local node")) 'collector classifies SQL-managed owners by current primary and failover mode'
+Assert-Diagnostic ($source -match "ResourceType -eq 'SQL Server Availability Group'") 'collector captures only SQL AG cluster resources for owner classification'
 Assert-Diagnostic ($source -match 'Get-ClusterQuorum') 'collector records current quorum mode and witness'
 Assert-Diagnostic ($source -match '(?s)foreach \(\$resource in \$allRes\).+?Get-ClusterParameter') 'collector records private parameters for every cluster resource'
 Assert-Diagnostic ($source -match 'Get-ClusterLog -Node \$env:COMPUTERNAME') 'collector requests only the local node cluster log'
@@ -54,6 +57,69 @@ Assert-Diagnostic ($source -match 'No SQL availability group is configured' -and
 Assert-Diagnostic ($source -match 'Listener TCP.+?is unreachable') 'collector promotes failed listener TCP to a finding'
 Assert-Diagnostic ($source -match 'GetHostAddresses\(\$listener\)' -and $source -match 'foreach \(\$listenerAddress in \$listenerAddresses\)') 'collector probes every multi-subnet listener provider address'
 Assert-Diagnostic ($source.Contains('SQL probe ''$Label'' failed')) 'collector isolates SQL probe failures'
+
+$ownerOutcome = Get-AssignedScriptBlock -Ast $ast -VariableName 'ownerOutcomeScript'
+$script:OwnerFindings = [Collections.Generic.List[string]]::new()
+$script:OwnerMessages = [Collections.Generic.List[string]]::new()
+function W { param($t); $script:OwnerMessages.Add([string]$t) }
+function F { param($t); $script:OwnerFindings.Add([string]$t) }
+$manualReplicas = @(
+    [pscustomobject]@{ GroupName = 'AG'; replica_server_name = 'SQL1'; failover_mode_desc = 'MANUAL' },
+    [pscustomobject]@{ GroupName = 'AG'; replica_server_name = 'SQL2'; failover_mode_desc = 'MANUAL' }
+)
+$manualPolicy = [pscustomobject]@{
+    GroupName = 'AG'
+    GroupOwner = 'SQL1'
+    ResourceName = 'AG'
+    ResourceState = 'Online'
+    PossibleOwners = @('SQL1')
+}
+& $ownerOutcome -Policies @($manualPolicy) -ReplicaRows $manualReplicas
+Assert-Diagnostic ($script:OwnerFindings.Count -eq 0 -and
+    ($script:OwnerMessages -join ' ') -match 'MANUAL secondary') 'collector accepts SQL-managed singleton owner for MANUAL secondary'
+
+$script:OwnerFindings.Clear(); $script:OwnerMessages.Clear()
+$missingCurrent = $manualPolicy.PSObject.Copy()
+$missingCurrent.PossibleOwners = @('SQL2')
+& $ownerOutcome -Policies @($missingCurrent) -ReplicaRows $manualReplicas
+Assert-Diagnostic ($script:OwnerFindings.Count -eq 1 -and
+    $script:OwnerFindings[0] -match 'current group owner') 'collector rejects current primary missing from possible owners'
+
+$script:OwnerFindings.Clear(); $script:OwnerMessages.Clear()
+$automaticReplicas = @(
+    [pscustomobject]@{ GroupName = 'AG'; replica_server_name = 'SQL1'; failover_mode_desc = 'AUTOMATIC' },
+    [pscustomobject]@{ GroupName = 'AG'; replica_server_name = 'SQL2'; failover_mode_desc = 'AUTOMATIC' }
+)
+& $ownerOutcome -Policies @($manualPolicy) -ReplicaRows $automaticReplicas
+Assert-Diagnostic ($script:OwnerFindings.Count -eq 1 -and
+    $script:OwnerFindings[0] -match 'AUTOMATIC replica') 'collector reports missing automatic-failover owner'
+
+$script:OwnerFindings.Clear(); $script:OwnerMessages.Clear()
+$automaticPolicy = $manualPolicy.PSObject.Copy()
+$automaticPolicy.PossibleOwners = @('SQL1', 'SQL2')
+& $ownerOutcome -Policies @($automaticPolicy) -ReplicaRows $automaticReplicas
+Assert-Diagnostic ($script:OwnerFindings.Count -eq 0) 'collector accepts both automatic-failover owners'
+
+$script:OwnerFindings.Clear(); $script:OwnerMessages.Clear()
+$unrelatedPolicy = [pscustomobject]@{
+    GroupName = 'User Manager Group'
+    GroupOwner = 'SQL2'
+    ResourceName = 'User Manager Group'
+    ResourceState = 'Offline'
+    PossibleOwners = @()
+}
+& $ownerOutcome -Policies @($manualPolicy, $unrelatedPolicy) -ReplicaRows $manualReplicas
+Assert-Diagnostic ($script:OwnerFindings.Count -eq 0) 'collector ignores unrelated clustered-role policies'
+
+$script:OwnerFindings.Clear(); $script:OwnerMessages.Clear()
+& $ownerOutcome -Policies @() -ReplicaRows $manualReplicas
+Assert-Diagnostic ($script:OwnerFindings.Count -eq 1 -and
+    $script:OwnerFindings[0] -match 'no matching WSFC') 'collector fails when SQL AG has no matching WSFC AG resource'
+
+$script:OwnerFindings.Clear(); $script:OwnerMessages.Clear()
+& $ownerOutcome -Policies @($manualPolicy, $manualPolicy.PSObject.Copy()) -ReplicaRows $manualReplicas
+Assert-Diagnostic ($script:OwnerFindings.Count -eq 1 -and
+    $script:OwnerFindings[0] -match 'expected exactly one') 'collector rejects ambiguous SQL-to-WSFC AG correlation'
 
 foreach ($unsafePattern in @(
         'Set-ClusterOwnerNode',

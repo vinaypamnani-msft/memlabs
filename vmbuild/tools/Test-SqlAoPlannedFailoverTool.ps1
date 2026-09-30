@@ -22,7 +22,8 @@ $codeTokens = @($tokens | Where-Object { $_.Kind -ne [Management.Automation.Lang
 
 Assert-FailoverTool ($source -match 'SupportsShouldProcess' -and $source -match "ConfirmImpact = 'High'") 'tool requires high-impact ShouldProcess confirmation'
 Assert-FailoverTool ($source -match 'synchronization_state_desc' -and $source -match 'is_failover_ready') 'preflight measures synchronization and failover readiness'
-Assert-FailoverTool ($source -match 'Get-ClusterQuorum' -and $source -match 'OwnerPolicyValid') 'preflight requires quorum and exact owner policy'
+Assert-FailoverTool ($source -match 'Get-ClusterQuorum' -and $source -match 'Test-ClusterPrimaryOwnership') 'preflight requires quorum and SQL/WSFC current-primary consistency'
+Assert-FailoverTool (-not ($source -match 'OwnerPolicyValid|Run Phase 5 owner convergence')) 'preflight does not require MemLabs-managed owner sets'
 Assert-FailoverTool ($source -match 'SYNCHRONOUS_COMMIT' -and $source -match 'SYNCHRONIZED') 'tool requires synchronous synchronized target'
 Assert-FailoverTool ($source -match '(?s)availability_databases_cluster.+?LEFT JOIN sys\.dm_hadr_database_replica_states.+?LEFT JOIN sys\.dm_hadr_database_replica_cluster_states') 'database readiness preserves configured databases with missing runtime rows'
 Assert-FailoverTool ($source -match 'replica_server_name = @@SERVERNAME' -and -not ($source -match 'replica_server_name LIKE')) 'local replica lookup is exact for default and named instances'
@@ -39,6 +40,88 @@ Assert-FailoverTool ($source -match 'Get-Credential' -and -not ($source -match '
 Assert-FailoverTool ($source -match 'Authoritative final primary after test' -and $source -match 'Reconciliation: performing planned failback') 'error path records final primary and attempts only safe reconciliation'
 Assert-FailoverTool ($source -match 'Invoke-Command.+?-AsJob' -and $source -match 'remaining.*deadline') 'PowerShell Direct operations honor the remaining deadline'
 Assert-FailoverTool ($source -match 'ThrowTerminatingError\(\$testError\)' -and $source -match 'SqlAoFinalPrimaryPostconditionFailed') 'final-primary mismatch terminates while preserving the captured error record'
+Assert-FailoverTool ($source -match 'Wait-ForClusterPrimaryOwnership -PrimaryNode \$finalPrimary' -and
+    $source -match 'Final WSFC owner postcondition failed') 'final success requires settled WSFC ownership for the final SQL primary'
+
+$clusterOwnershipFunction = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-ClusterPrimaryOwnership'
+        }, $true))
+Assert-FailoverTool ($clusterOwnershipFunction.Count -eq 1) 'tool defines one current-primary cluster ownership predicate'
+if ($clusterOwnershipFunction.Count -eq 1) {
+    $testClusterOwnership = $clusterOwnershipFunction[0].Body.GetScriptBlock()
+    $manualSingleton = [pscustomobject]@{
+        NodesUp = $true
+        GroupState = 'Online'
+        ResourceState = 'Online'
+        GroupOwner = 'SQL1'
+        PossibleOwners = @('SQL1')
+    }
+    Assert-FailoverTool (& $testClusterOwnership -ClusterState $manualSingleton -PrimaryNode SQL1) 'preflight accepts SQL-managed singleton owner for MANUAL mode'
+    $automaticPair = $manualSingleton.PSObject.Copy()
+    $automaticPair.PossibleOwners = @('SQL1', 'SQL2')
+    Assert-FailoverTool (& $testClusterOwnership -ClusterState $automaticPair -PrimaryNode SQL1) 'preflight accepts multiple SQL-managed possible owners'
+    $missingPrimary = $manualSingleton.PSObject.Copy()
+    $missingPrimary.PossibleOwners = @('SQL2')
+    Assert-FailoverTool (-not (& $testClusterOwnership -ClusterState $missingPrimary -PrimaryNode SQL1)) 'preflight rejects current primary missing from possible owners'
+    $wrongGroupOwner = $manualSingleton.PSObject.Copy()
+    $wrongGroupOwner.GroupOwner = 'SQL2'
+    Assert-FailoverTool (-not (& $testClusterOwnership -ClusterState $wrongGroupOwner -PrimaryNode SQL1)) 'preflight rejects WSFC owner differing from SQL primary'
+    $offlineResource = $manualSingleton.PSObject.Copy()
+    $offlineResource.ResourceState = 'Offline'
+    Assert-FailoverTool (-not (& $testClusterOwnership -ClusterState $offlineResource -PrimaryNode SQL1)) 'preflight rejects an offline AG resource'
+}
+
+$clusterWaitFunction = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Wait-ForClusterPrimaryOwnership'
+        }, $true))
+Assert-FailoverTool ($clusterWaitFunction.Count -eq 1) 'tool defines one bounded final WSFC ownership wait'
+if ($clusterOwnershipFunction.Count -eq 1 -and $clusterWaitFunction.Count -eq 1) {
+    . ([scriptblock]::Create($clusterOwnershipFunction[0].Extent.Text))
+    . ([scriptblock]::Create($clusterWaitFunction[0].Extent.Text))
+    $NodeVm = @('SQL1', 'SQL2')
+    $AgName = 'AG'
+    $clusterPreflightScript = { 1 }
+    $TimeoutSeconds = 60
+    $script:clusterStateQueue = [Collections.Generic.Queue[object]]::new()
+    function Invoke-NodeCommand {
+        param($VmName, $ScriptBlock, $ArgumentList, $Deadline)
+        return $script:clusterStateQueue.Dequeue()
+    }
+    function Write-TestLog { param([string]$Message) }
+    function Start-Sleep { param([int]$Seconds) }
+    try {
+        $pendingOwner = [pscustomobject]@{
+            NodesUp = $true
+            GroupState = 'Online'
+            ResourceState = 'Online'
+            GroupOwner = 'SQL2'
+            PossibleOwners = @('SQL1')
+            PreferredOwners = @('SQL1')
+        }
+        $settledOwner = $pendingOwner.PSObject.Copy()
+        $settledOwner.PossibleOwners = @('SQL2')
+        $settledOwner.PreferredOwners = @('SQL2')
+        $script:clusterStateQueue.Enqueue($pendingOwner)
+        $script:clusterStateQueue.Enqueue($settledOwner)
+        $settled = Wait-ForClusterPrimaryOwnership -PrimaryNode SQL2 -Deadline (Get-Date).AddSeconds(5)
+        Assert-FailoverTool ($settled.GroupOwner -eq 'SQL2' -and
+            ($settled.PossibleOwners -join ',') -eq 'SQL2') 'final owner wait polls through SQL owner-list settling to reversed singleton'
+
+        $script:clusterStateQueue.Clear()
+        $script:clusterStateQueue.Enqueue($pendingOwner)
+        $missingFinalOwnerRejected = $false
+        try { $null = Wait-ForClusterPrimaryOwnership -PrimaryNode SQL2 -Deadline (Get-Date) } catch {
+            $missingFinalOwnerRejected = $_.Exception.Message -match 'did not converge'
+        }
+        Assert-FailoverTool $missingFinalOwnerRejected 'final owner wait rejects expected SQL primary absent from possible owners'
+    }
+    finally {
+        'Invoke-NodeCommand', 'Write-TestLog', 'Start-Sleep' |
+            ForEach-Object { Remove-Item -LiteralPath "Function:\$_" -Force }
+    }
+}
 
 $nameSetFunction = @($ast.FindAll({
             param($node)

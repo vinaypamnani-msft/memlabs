@@ -263,18 +263,22 @@ $clusterPreflightScript = {
     $preferred = @($preferredInfo.OwnerNodes | ForEach-Object {
             if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
         })
+    $groupOwner = if ($group.OwnerNode.PSObject.Properties['Name']) {
+        [string]$group.OwnerNode.Name
+    }
+    else {
+        [string]$group.OwnerNode
+    }
     [pscustomobject]@{
         NodesUp = $downNodes.Count -eq 0 -and $nodes.Count -eq $expectedNodes.Count
         DownNodes = @($downNodes.Name)
         QuorumType = [string]$quorum.QuorumType
         QuorumResource = [string]$quorum.QuorumResource
         GroupState = [string]$group.State
+        GroupOwner = $groupOwner
+        ResourceState = [string]$resource.State
         PossibleOwners = @($possible)
         PreferredOwners = @($preferred)
-        OwnerPolicyValid = $possible.Count -eq $expectedNodes.Count -and
-            ($possible -join ',') -eq (($expectedNodes | Sort-Object) -join ',') -and
-            $preferred.Count -eq $expectedNodes.Count -and
-            ($preferred -join ',') -eq ($expectedNodes -join ',')
     }
 }
 
@@ -432,6 +436,41 @@ function Test-FinalPrimaryPostcondition {
     return [string]::Equals($FinalPrimary, $ExpectedPrimary, [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-ClusterPrimaryOwnership {
+    param([object]$ClusterState, [string]$PrimaryNode)
+    return $ClusterState -and
+        $ClusterState.NodesUp -and
+        $ClusterState.GroupState -eq 'Online' -and
+        $ClusterState.ResourceState -eq 'Online' -and
+        [string]::Equals([string]$ClusterState.GroupOwner, $PrimaryNode, [StringComparison]::OrdinalIgnoreCase) -and
+        @($ClusterState.PossibleOwners) -contains $PrimaryNode
+}
+
+function Wait-ForClusterPrimaryOwnership {
+    param(
+        [Parameter(Mandatory)][string]$PrimaryNode,
+        [Parameter(Mandatory)][datetime]$Deadline
+    )
+    $lastState = $null
+    do {
+        try {
+            $lastState = Invoke-NodeCommand -VmName $NodeVm[0] -ScriptBlock $clusterPreflightScript `
+                -ArgumentList $AgName, ($NodeVm -join ',') -Deadline $Deadline
+            if (Test-ClusterPrimaryOwnership -ClusterState $lastState -PrimaryNode $PrimaryNode) {
+                return $lastState
+            }
+            Write-TestLog "WSFC owner state pending for '$PrimaryNode': group='$($lastState.GroupOwner)' groupState='$($lastState.GroupState)' resourceState='$($lastState.ResourceState)' possible=[$(@($lastState.PossibleOwners) -join ', ')]."
+        }
+        catch {
+            Write-TestLog "WSFC owner state pending for '$PrimaryNode': $($_.Exception.Message)"
+        }
+        $remaining = ($Deadline - (Get-Date)).TotalSeconds
+        if ($remaining -le 0) { break }
+        Start-Sleep -Seconds ([Math]::Min(2, [Math]::Max(1, [int]$remaining)))
+    } while ((Get-Date) -lt $Deadline)
+    throw "WSFC owner state did not converge to current SQL primary '$PrimaryNode' within $TimeoutSeconds seconds. Last group='$($lastState.GroupOwner)' groupState='$($lastState.GroupState)' resourceState='$($lastState.ResourceState)' possible=[$(@($lastState.PossibleOwners) -join ', ')]."
+}
+
 foreach ($node in $NodeVm) {
     $vm = Get-VM -Name $node -ErrorAction Stop
     if ($vm.State -ne 'Running') { throw "VM '$node' is '$($vm.State)'; both replicas must be running." }
@@ -446,10 +485,9 @@ if (-not $clusterPreflight.NodesUp) {
 if ($clusterPreflight.GroupState -ne 'Online') {
     throw "Clustered role '$AgName' is '$($clusterPreflight.GroupState)', expected Online before planned failover."
 }
-if (-not $clusterPreflight.OwnerPolicyValid) {
-    throw "AG owner policy is invalid. Possible=[$(@($clusterPreflight.PossibleOwners) -join ', ')], Preferred=[$(@($clusterPreflight.PreferredOwners) -join ', ')], Expected=[$($NodeVm -join ', ')]. Run Phase 5 owner convergence first."
+if ($clusterPreflight.ResourceState -ne 'Online') {
+    throw "AG resource '$AgName' is '$($clusterPreflight.ResourceState)', expected Online before planned failover."
 }
-Write-TestLog "Cluster preflight passed. Quorum='$($clusterPreflight.QuorumType)' resource='$($clusterPreflight.QuorumResource)'."
 
 $initialStates = Get-PairState -Deadline $preflightDeadline
 $primaryNodes = @($NodeVm | Where-Object { $initialStates[$_].Replica.Role -eq 'PRIMARY' })
@@ -459,6 +497,11 @@ if ($primaryNodes.Count -ne 1 -or $secondaryNodes.Count -ne 1) {
 }
 $originalPrimary = $primaryNodes[0]
 $targetSecondary = $secondaryNodes[0]
+if (-not (Test-ClusterPrimaryOwnership -ClusterState $clusterPreflight -PrimaryNode $originalPrimary)) {
+    throw "SQL/WSFC primary ownership is inconsistent. SQL primary='$originalPrimary', group owner='$($clusterPreflight.GroupOwner)', resource state='$($clusterPreflight.ResourceState)', possible=[$(@($clusterPreflight.PossibleOwners) -join ', ')]."
+}
+Write-TestLog "Cluster preflight passed. Quorum='$($clusterPreflight.QuorumType)' resource='$($clusterPreflight.QuorumResource)'; SQL-managed owners possible=[$(@($clusterPreflight.PossibleOwners) -join ', ')] preferred=[$(@($clusterPreflight.PreferredOwners) -join ', ')]."
+
 $expectedDatabases = @($initialStates[$originalPrimary].Databases | ForEach-Object { [string]$_.Name } | Sort-Object)
 if ($expectedDatabases.Count -eq 0 -or $Database -notin $expectedDatabases) {
     throw "Configured AG database set is [$($expectedDatabases -join ',')]; required listener test database '$Database' is not a member."
@@ -484,6 +527,7 @@ if (-not $PSCmdlet.ShouldProcess($operation, 'ALTER AVAILABILITY GROUP ... FAILO
 $firstFailoverAttempted = $false
 $testError = $null
 $finalPrimary = 'UNKNOWN'
+$postconditionFailures = [Collections.Generic.List[string]]::new()
 try {
     $failoverDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
     Write-TestLog "Failing over to '$targetSecondary'."
@@ -567,7 +611,20 @@ finally {
     Write-TestLog "Authoritative final primary after test: '$finalPrimary'."
     $expectedFinalPrimary = if ($NoFailback) { $targetSecondary } else { $originalPrimary }
     if (-not (Test-FinalPrimaryPostcondition -FinalPrimary $finalPrimary -ExpectedPrimary $expectedFinalPrimary)) {
-        $finalStateFailure = "Final primary postcondition failed: expected '$expectedFinalPrimary', observed '$finalPrimary'."
+        $postconditionFailures.Add("Final primary postcondition failed: expected '$expectedFinalPrimary', observed '$finalPrimary'.")
+    }
+    else {
+        try {
+            $finalOwnerDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            $finalClusterState = Wait-ForClusterPrimaryOwnership -PrimaryNode $finalPrimary -Deadline $finalOwnerDeadline
+            Write-TestLog "Authoritative final WSFC owner state: group='$($finalClusterState.GroupOwner)' possible=[$(@($finalClusterState.PossibleOwners) -join ', ')] preferred=[$(@($finalClusterState.PreferredOwners) -join ', ')]."
+        }
+        catch {
+            $postconditionFailures.Add("Final WSFC owner postcondition failed for SQL primary '$finalPrimary': $($_.Exception.Message)")
+        }
+    }
+    if ($postconditionFailures.Count -gt 0) {
+        $finalStateFailure = $postconditionFailures -join ' '
         Write-TestLog $finalStateFailure
         if ($testError) {
             $originalErrorMessage = if ($testError.ErrorDetails -and $testError.ErrorDetails.Message) {

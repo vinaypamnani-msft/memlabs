@@ -118,6 +118,44 @@ $nodeScript = {
     $discClusterIPs = New-Object System.Collections.Generic.List[string]
     $discAgIPs = New-Object System.Collections.Generic.List[string]
     $discNodes = New-Object System.Collections.Generic.List[string]
+    $agOwnerPolicies = New-Object System.Collections.Generic.List[object]
+    $ownerOutcomeScript = {
+        param($Policies, $ReplicaRows)
+        $sqlGroupNames = @($ReplicaRows | ForEach-Object { [string]$_.GroupName } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Sort-Object -Unique)
+        foreach ($sqlGroupName in $sqlGroupNames) {
+            $matchingPolicies = @($Policies | Where-Object { $_.GroupName -eq $sqlGroupName })
+            if ($matchingPolicies.Count -eq 0) {
+                F "CRITICAL: SQL availability group '$sqlGroupName' has no matching WSFC SQL Server Availability Group resource."
+                continue
+            }
+            if ($matchingPolicies.Count -ne 1) {
+                F "CRITICAL: SQL availability group '$sqlGroupName' has $($matchingPolicies.Count) matching WSFC SQL Server Availability Group resources; expected exactly one."
+                continue
+            }
+            $policy = $matchingPolicies[0]
+            if ($policy.ResourceState -ne 'Online') {
+                F "CRITICAL: AG resource '$($policy.ResourceName)' is '$($policy.ResourceState)'."
+            }
+            if ([string]::IsNullOrWhiteSpace($policy.GroupOwner) -or
+                $policy.PossibleOwners -notcontains $policy.GroupOwner) {
+                F "CRITICAL: AG resource '$($policy.ResourceName)' cannot run on current group owner '$($policy.GroupOwner)'; possible owners are [$($policy.PossibleOwners -join ', ')]."
+            }
+            foreach ($replica in @($ReplicaRows | Where-Object { $_.GroupName -eq $sqlGroupName })) {
+                $replicaNode = ((([string]$replica.replica_server_name -split '\\', 2)[0] -split '\.')[0])
+                if ($replica.failover_mode_desc -eq 'AUTOMATIC' -and
+                    $policy.PossibleOwners -notcontains $replicaNode) {
+                    F "AUTOMATIC replica '$($replica.replica_server_name)' is absent from AG resource '$($policy.ResourceName)' possible owners [$($policy.PossibleOwners -join ', ')]."
+                }
+                elseif ($replica.failover_mode_desc -eq 'MANUAL' -and
+                    $replicaNode -ne $policy.GroupOwner -and
+                    $policy.PossibleOwners -notcontains $replicaNode) {
+                    W "INFO: MANUAL secondary '$($replica.replica_server_name)' is intentionally absent from SQL-managed possible owners."
+                }
+            }
+        }
+    }
 
     Import-Module FailoverClusters -ErrorAction SilentlyContinue
 
@@ -183,6 +221,12 @@ $nodeScript = {
         }
         foreach ($group in $candidateGroups) {
             W "----- Group '$($group.Name)' State=$($group.State) Owner=$($group.OwnerNode) -----"
+            $groupOwnerName = if ($group.OwnerNode.PSObject.Properties['Name']) {
+                [string]$group.OwnerNode.Name
+            }
+            else {
+                [string]$group.OwnerNode
+            }
             $preferred = $group | Get-ClusterOwnerNode -ErrorAction Stop
             $preferredNames = @($preferred.OwnerNodes | ForEach-Object {
                     if ($_.PSObject.Properties['Name']) { [string]$_.Name } else { [string]$_ }
@@ -200,8 +244,16 @@ $nodeScript = {
                     if ($dependency.DependencyExpression) { W "        Dependency=$($dependency.DependencyExpression)" }
                 }
                 catch {}
-                if ($resource.Name -ieq $group.Name -and $possibleNames -notcontains $env:COMPUTERNAME) {
-                    F "CRITICAL: AG resource '$($resource.Name)' cannot run on local node '$env:COMPUTERNAME'; possible owners are [$($possibleNames -join ', ')]."
+                if ($resource.Name -ieq $group.Name -and
+                    [string]$resource.ResourceType -eq 'SQL Server Availability Group') {
+                    $agOwnerPolicies.Add([pscustomobject]@{
+                            GroupName = [string]$group.Name
+                            GroupOwner = $groupOwnerName
+                            ResourceName = [string]$resource.Name
+                            ResourceState = [string]$resource.State
+                            PossibleOwners = @($possibleNames)
+                            PreferredOwners = @($preferredNames)
+                        })
                 }
             }
             if ($group.State -ne 'Online') {
@@ -374,6 +426,7 @@ ORDER BY ag.name, ar.replica_server_name
                     F "INFO: Replica '$($row.replica_server_name)' is configured for MANUAL failover; powering off the primary will not automatically promote the secondary."
                 }
             }
+            & $ownerOutcomeScript -Policies $agOwnerPolicies -ReplicaRows $replicaConfig.Rows
         }
 
         $replicaState = Invoke-SqlProbe -Label 'replica runtime state' -Query @"
