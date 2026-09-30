@@ -42,6 +42,17 @@ function Write-Step {
     Write-Host "[Optimize-Defender] $Text"
 }
 
+function Disable-DefenderScheduledTasks {
+    try {
+        $defenderTasks = @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Disabled' })
+        foreach ($task in $defenderTasks) {
+            Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null
+        }
+        if ($defenderTasks.Count -gt 0) { $applied.Add("$($defenderTasks.Count) Defender scheduled task(s) disabled") }
+    }
+    catch { $failures.Add("Defender scheduled tasks: $($_.Exception.Message)") }
+}
+
 if (-not (Get-Command -Name Get-MpComputerStatus -ErrorAction SilentlyContinue)) {
     Write-Step 'Defender cmdlets are not present on this OS. Nothing to do.'
     return [pscustomobject]@{ Success = $true; Message = 'Defender not present; skipped.'; Errors = @() }
@@ -88,6 +99,25 @@ if ($status -and ($status.PSObject.Properties.Name -contains 'IsTamperProtected'
     $tamperProtected = [bool]$status.IsTamperProtected
 }
 Write-Step "TamperProtection=$tamperProtected RealTimeProtection=$($status.RealTimeProtectionEnabled) AMRunningMode=$($status.AMRunningMode)"
+
+# Defender cmdlets remain installed when the engine is stopped, but every
+# preference call then fails with 0x800106ba. There is no active engine to tune;
+# disable its scheduled tasks so they cannot reintroduce the idle-time workload.
+if ("$($status.AMRunningMode)".Trim() -eq 'Not running') {
+    Disable-DefenderScheduledTasks
+    $success = ($failures.Count -eq 0)
+    $message = 'Microsoft Defender Antivirus is not running; preference tuning is not applicable.'
+    if ($applied.Count -gt 0) { $message += " Applied $($applied.Count) setting(s)." }
+    if ($failures.Count -gt 0) { $message += " Failed: $($failures -join '; ')." }
+    Write-Step $message
+    return [pscustomobject]@{
+        Success = $success
+        Message = $message
+        Errors  = @($failures)
+        Applied = @($applied)
+        Blocked = @()
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Path exclusions
@@ -305,14 +335,7 @@ foreach ($name in $protectedSettings.Keys) {
 # cleanup, verification). These are Task Scheduler objects, not MpPreference,
 # so Tamper Protection does not cover them.
 # ---------------------------------------------------------------------------
-try {
-    $defenderTasks = @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Disabled' })
-    foreach ($task in $defenderTasks) {
-        Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction SilentlyContinue | Out-Null
-    }
-    if ($defenderTasks.Count -gt 0) { $applied.Add("$($defenderTasks.Count) Defender scheduled task(s) disabled") }
-}
-catch { $failures.Add("Defender scheduled tasks: $($_.Exception.Message)") }
+Disable-DefenderScheduledTasks
 
 # ---------------------------------------------------------------------------
 $success = ($failures.Count -eq 0)
