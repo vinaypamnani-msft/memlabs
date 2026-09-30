@@ -12,6 +12,19 @@ function Assert-Diagnostic {
     else { Write-Host "FAIL  $What"; $failures.Add($What) }
 }
 
+function Get-AssignedScriptBlock {
+    param([Management.Automation.Language.Ast]$Ast, [string]$VariableName)
+    $assignment = @($Ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -eq $VariableName -and
+                $node.Right.Extent.Text.TrimStart().StartsWith('{')
+            }, $true))
+    if ($assignment.Count -ne 1) { throw "Expected one '$VariableName' scriptblock, found $($assignment.Count)" }
+    return [scriptblock]::Create($assignment[0].Right.Extent.Text).InvokeReturnAsIs()
+}
+
 $scriptPath = Join-Path $RootPath 'tools\Get-SqlaoDnsDiag.ps1'
 $tokens = $null
 $parseErrors = $null
@@ -28,7 +41,9 @@ Assert-Diagnostic ($source -match '(?s)finally\s*\{.+?Remove-Item -LiteralPath \
 Assert-Diagnostic ($source -match 'sys\.dm_hadr_availability_replica_states') 'collector queries replica runtime state'
 Assert-Diagnostic ($source -match 'sys\.dm_hadr_database_replica_cluster_states') 'collector queries database failover readiness'
 Assert-Diagnostic ($source -match 'sys\.database_mirroring_endpoints') 'collector queries HADR endpoint state'
-Assert-Diagnostic ($source -match 'AlwaysOn_health') 'collector records the AlwaysOn_health event target'
+Assert-Diagnostic ($source -match 'sys\.server_event_sessions' -and $source -match 'sys\.dm_xe_sessions') 'collector distinguishes configured and running AlwaysOn_health state'
+Assert-Diagnostic ($source -match 'configured\.name = running\.name' -and
+    $source -match 'running\.address = target\.event_session_address') 'AlwaysOn_health query uses configured-to-running-to-target joins'
 Assert-Diagnostic ($source -match 'ErrorLogFileName' -and $source -match 'last_connect_error_number') 'collector captures SQL error and last-connect evidence'
 Assert-Diagnostic ($source -match 'Test-TcpFast' -and $source -match '\$EndpointPort' -and $source -match '\$ListenerPort') 'collector probes endpoint and listener TCP paths'
 Assert-Diagnostic ($source -match 'FINDINGS SUMMARY' -and $source -match 'Compress-Archive') 'collector emits a summary and shareable archive'
@@ -37,6 +52,7 @@ Assert-Diagnostic ($source -match 'No SQL availability group is configured' -and
     $source -match 'No availability replicas are configured' -and
     $source -match 'No availability-group listener Network Name was discovered') 'collector reports missing AG, replicas, and listener'
 Assert-Diagnostic ($source -match 'Listener TCP.+?is unreachable') 'collector promotes failed listener TCP to a finding'
+Assert-Diagnostic ($source -match 'GetHostAddresses\(\$listener\)' -and $source -match 'foreach \(\$listenerAddress in \$listenerAddresses\)') 'collector probes every multi-subnet listener provider address'
 Assert-Diagnostic ($source.Contains('SQL probe ''$Label'' failed')) 'collector isolates SQL probe failures'
 
 foreach ($unsafePattern in @(
@@ -77,6 +93,57 @@ if ($probeFunction.Count -eq 1) {
     Assert-Diagnostic ($null -eq $failedProbe -and $script:ProbeFindings.Count -eq 1) 'failed SQL probe records a finding without throwing'
     Assert-Diagnostic ($laterProbe.Rows.Count -eq 1 -and ($script:ProbeCalls -join ',') -eq 'FAIL,PASS') 'later SQL probe still runs after an earlier failure'
 }
+
+$listenerProbe = Get-AssignedScriptBlock -Ast $ast -VariableName 'listenerProbeScript'
+$script:TcpResults = @{}
+$script:TcpCalls = [Collections.Generic.List[string]]::new()
+$script:ProbeFindings = [Collections.Generic.List[string]]::new()
+function Test-TcpFast {
+    param($ComputerName, $Port)
+    $script:TcpCalls.Add([string]$ComputerName)
+    return [bool]$script:TcpResults[[string]$ComputerName]
+}
+function W {}
+function F { param($t); $script:ProbeFindings.Add([string]$t) }
+
+$script:TcpResults = @{ '10.0.1.202' = $false; '10.0.2.202' = $true }
+$script:TcpCalls.Clear(); $script:ProbeFindings.Clear()
+& $listenerProbe -Listener 'LISTENER' -Port 1500 -ResolvedAddresses @('10.0.1.202', '10.0.2.202')
+Assert-Diagnostic (($script:TcpCalls -join ',') -eq '10.0.1.202,10.0.2.202' -and $script:ProbeFindings.Count -eq 0) 'listener probe accepts a reachable second provider after the first fails'
+
+$script:TcpResults = @{ '10.0.1.202' = $false; '10.0.2.202' = $false }
+$script:TcpCalls.Clear(); $script:ProbeFindings.Clear()
+& $listenerProbe -Listener 'LISTENER' -Port 1500 -ResolvedAddresses @('10.0.1.202', '10.0.2.202')
+Assert-Diagnostic ($script:TcpCalls.Count -eq 2 -and $script:ProbeFindings.Count -eq 1 -and
+    $script:ProbeFindings[0] -match 'every provider') 'listener probe fails only after every provider is unreachable'
+
+$script:TcpCalls.Clear(); $script:ProbeFindings.Clear()
+& $listenerProbe -Listener 'LISTENER' -Port 1500 -ResolvedAddresses @()
+Assert-Diagnostic ($script:TcpCalls.Count -eq 0 -and $script:ProbeFindings.Count -eq 1 -and
+    $script:ProbeFindings[0] -match 'no IPv4') 'listener probe reports zero IPv4 providers distinctly'
+
+$xeOutcome = Get-AssignedScriptBlock -Ast $ast -VariableName 'xeOutcomeScript'
+$script:ProbeFindings.Clear()
+& $xeOutcome -Rows @() -SqlTarget 'localhost'
+Assert-Diagnostic ($script:ProbeFindings.Count -eq 1 -and $script:ProbeFindings[0] -match 'not defined') 'XE classifier distinguishes absent session'
+$script:ProbeFindings.Clear()
+& $xeOutcome -Rows @([pscustomobject]@{ SessionState = 'STOPPED'; target_name = $null }) -SqlTarget 'localhost'
+Assert-Diagnostic ($script:ProbeFindings.Count -eq 1 -and $script:ProbeFindings[0] -match 'stopped') 'XE classifier distinguishes stopped session'
+$script:ProbeFindings.Clear()
+& $xeOutcome -Rows @([pscustomobject]@{ SessionState = 'STARTED'; target_name = $null }) -SqlTarget 'localhost'
+Assert-Diagnostic ($script:ProbeFindings.Count -eq 1 -and $script:ProbeFindings[0] -match 'without an active target') 'XE classifier distinguishes missing target'
+$xeDataTable = [Data.DataTable]::new()
+$null = $xeDataTable.Columns.Add('SessionState', [string])
+$null = $xeDataTable.Columns.Add('target_name', [string])
+$xeDataRow = $xeDataTable.NewRow()
+$xeDataRow.SessionState = 'STARTED'
+$xeDataTable.Rows.Add($xeDataRow)
+$script:ProbeFindings.Clear()
+& $xeOutcome -Rows $xeDataTable.Rows -SqlTarget 'localhost'
+Assert-Diagnostic ($script:ProbeFindings.Count -eq 1 -and $script:ProbeFindings[0] -match 'without an active target') 'XE classifier treats DataTable DBNull target as missing'
+$script:ProbeFindings.Clear()
+& $xeOutcome -Rows @([pscustomobject]@{ SessionState = 'STARTED'; target_name = 'event_file' }) -SqlTarget 'localhost'
+Assert-Diagnostic ($script:ProbeFindings.Count -eq 0) 'XE classifier accepts started session with target'
 
 if ($failures.Count -gt 0) {
     throw "$($failures.Count) SQLAO health diagnostic assertion(s) failed: $($failures -join '; ')"

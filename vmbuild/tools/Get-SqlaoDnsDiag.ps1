@@ -279,10 +279,33 @@ $nodeScript = {
     }
     $uniqueListeners = @($discListeners | Where-Object { $_ } | Select-Object -Unique)
     if ($uniqueListeners.Count -eq 0) { F "No availability-group listener Network Name was discovered." }
+    $listenerProbeScript = {
+        param($Listener, $Port, [string[]]$ResolvedAddresses)
+        try {
+            $listenerAddresses = if ($PSBoundParameters.ContainsKey('ResolvedAddresses')) {
+                @($ResolvedAddresses | Where-Object { $_ } | Select-Object -Unique)
+            }
+            else {
+                @([Net.Dns]::GetHostAddresses($Listener) |
+                    Where-Object { $_.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork } |
+                    ForEach-Object { $_.IPAddressToString } | Select-Object -Unique)
+            }
+            $reachableAddresses = [System.Collections.Generic.List[string]]::new()
+            foreach ($listenerAddress in $listenerAddresses) {
+                $reachable = Test-TcpFast -ComputerName $listenerAddress -Port $Port
+                W "    TCP $Listener [$listenerAddress]:$Port reachable=$reachable"
+                if ($reachable) { $reachableAddresses.Add($listenerAddress) }
+            }
+            if ($listenerAddresses.Count -eq 0) {
+                F "Listener '$Listener' resolved to no IPv4 addresses."
+            }
+            elseif ($reachableAddresses.Count -eq 0) {
+                F "Listener TCP $Listener`:$Port is unreachable on every provider address [$($listenerAddresses -join ', ')] from '$env:COMPUTERNAME'."
+            }
+        } catch { F "Listener '$Listener' DNS/TCP probe failed: $($_.Exception.Message)" }
+    }
     foreach ($listener in $uniqueListeners) {
-        $listenerReachable = Test-TcpFast -ComputerName $listener -Port $ListenerPort
-        W "    TCP $listener`:$ListenerPort reachable=$listenerReachable"
-        if (-not $listenerReachable) { F "Listener TCP $listener`:$ListenerPort is unreachable from '$env:COMPUTERNAME'." }
+        & $listenerProbeScript -Listener $listener -Port $ListenerPort
     }
 
     W "### SQL Always On state (local SQL instance) ###"
@@ -426,15 +449,32 @@ LEFT JOIN sys.tcp_endpoints t ON e.endpoint_id = t.endpoint_id
         }
 
         $xeTargets = Invoke-SqlProbe -Label 'AlwaysOn_health extended events' -Query @"
-SELECT s.name AS SessionName, t.target_name, CAST(t.target_data AS nvarchar(max)) AS TargetData
-FROM sys.dm_xe_sessions s
-LEFT JOIN sys.dm_xe_session_targets t ON s.address = t.event_session_address
-WHERE s.name = N'AlwaysOn_health'
+SELECT configured.name AS SessionName,
+       CASE WHEN running.address IS NULL THEN N'STOPPED' ELSE N'STARTED' END AS SessionState,
+       target.target_name,
+       CAST(target.target_data AS nvarchar(max)) AS TargetData
+FROM sys.server_event_sessions configured
+LEFT JOIN sys.dm_xe_sessions running ON configured.name = running.name
+LEFT JOIN sys.dm_xe_session_targets target ON running.address = target.event_session_address
+WHERE configured.name = N'AlwaysOn_health'
 "@
         W "--- AlwaysOn_health extended-event target ---"
         if ($xeTargets) {
             W ($xeTargets | Format-List * | Out-String)
-            if ($xeTargets.Rows.Count -eq 0) { F "AlwaysOn_health extended-event session/target is absent on '$sqlTarget'." }
+            $xeOutcomeScript = {
+                param($Rows, $SqlTarget)
+                if ($Rows.Count -eq 0) {
+                    F "AlwaysOn_health extended-event session is not defined on '$SqlTarget'."
+                }
+                elseif ($Rows[0].SessionState -ne 'STARTED') {
+                    F "AlwaysOn_health extended-event session is defined but stopped on '$SqlTarget'."
+                }
+                elseif ([Convert]::IsDBNull($Rows[0].target_name) -or
+                    [string]::IsNullOrWhiteSpace([string]$Rows[0].target_name)) {
+                    F "AlwaysOn_health is running without an active target on '$SqlTarget'."
+                }
+            }
+            & $xeOutcomeScript -Rows $xeTargets.Rows -SqlTarget $sqlTarget
         }
 
         $errorLogInfo = Invoke-SqlProbe -Label 'SQL ERRORLOG path' -Query "SELECT CAST(SERVERPROPERTY('ErrorLogFileName') AS nvarchar(4000)) AS ErrorLogFileName"
