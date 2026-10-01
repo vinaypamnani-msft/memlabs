@@ -181,6 +181,11 @@ finally {
 }
 
 . (Import-TestFunction -Path $runnerPath -Name Invoke-Git)
+. (Import-TestFunction -Path $runnerPath -Name Test-CrossRevisionStateProgress)
+. (Import-TestFunction -Path $runnerPath -Name Get-ActiveCrossRevisionCheckpoint)
+. (Import-TestFunction -Path $runnerPath -Name Test-GitCommitAncestor)
+. (Import-TestFunction -Path $runnerPath -Name Assert-CrossRevisionCheckpointCanAdvance)
+. (Import-TestFunction -Path $runnerPath -Name Move-CrossRevisionCheckpoint)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-PinnedWorktree)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeRuntime)
 . (Import-TestFunction -Path $runnerPath -Name Get-OrderedCrossRevisionPlan)
@@ -202,6 +207,114 @@ finally {
 . (Import-TestFunction -Path $runnerPath -Name Test-StepInProgress)
 . (Import-TestFunction -Path $runnerPath -Name Start-Step)
 . (Import-TestFunction -Path $runnerPath -Name Complete-Step)
+
+$global:RepositoryRoot = $repoRoot
+$checkpointTestRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-checkpoints-$PID"
+$checkpointMain = '1111111111111111111111111111111111111111'
+$requestedDevelop = '2222222222222222222222222222222222222222'
+$activeDevelop = '3333333333333333333333333333333333333333'
+$secondActiveDevelop = '4444444444444444444444444444444444444444'
+try {
+    $null = New-Item -ItemType Directory -Path $checkpointTestRoot -Force
+    $emptyFailedPath = Join-Path $checkpointTestRoot 'state-11111111-to-22222222.json'
+    [IO.File]::WriteAllText($emptyFailedPath, ([ordered]@{
+                MainRevision = $checkpointMain
+                DevelopRevision = $requestedDevelop
+                Status = 'Failed'
+                CurrentStep = $null
+                CompletedSteps = @()
+                Baselines = @{}
+            } | ConvertTo-Json -Depth 6))
+    Assert-Equal $null (Get-ActiveCrossRevisionCheckpoint -Root $checkpointTestRoot -MainCommit $checkpointMain) `
+        'empty failed checkpoint does not claim an existing baseline'
+
+    $activePath = Join-Path $checkpointTestRoot 'state-11111111-to-33333333.json'
+    [IO.File]::WriteAllText($activePath, ([ordered]@{
+                MainRevision = $checkpointMain
+                DevelopRevision = $activeDevelop
+                Status = 'Failed'
+                CurrentStep = 'nocm|develop|1|NOCM-B-AddWin11.json'
+                CompletedSteps = @('nocm|main|A')
+                Baselines = @{ nocm = @(@{ Name = 'NOC-DC1' }) }
+            } | ConvertTo-Json -Depth 6))
+
+    $checkpoint = Get-ActiveCrossRevisionCheckpoint -Root $checkpointTestRoot -MainCommit $checkpointMain
+    Assert-Equal $activeDevelop $checkpoint.DevelopRevision 'active checkpoint keeps its original develop revision'
+    Assert-Equal $activePath $checkpoint.Path 'empty failed state for newer develop is not adopted'
+
+    $secondActivePath = Join-Path $checkpointTestRoot 'state-11111111-to-44444444.json'
+    [IO.File]::WriteAllText($secondActivePath, ([ordered]@{
+                MainRevision = $checkpointMain
+                DevelopRevision = $secondActiveDevelop
+                Status = 'Running'
+                CurrentStep = $null
+                CompletedSteps = @('cstest1|main|A')
+                Baselines = @{ cstest1 = @(@{ Name = 'CS1-DC1' }) }
+            } | ConvertTo-Json -Depth 6))
+    Assert-ThrowsLike -Action {
+        Get-ActiveCrossRevisionCheckpoint -Root $checkpointTestRoot -MainCommit $checkpointMain
+    } -Pattern '*Multiple active checkpoints*' -What 'multiple active revision pairs fail closed'
+
+    Remove-Item -LiteralPath $secondActivePath -Force
+    $activeState = Get-Content -LiteralPath $activePath -Raw | ConvertFrom-Json -AsHashtable
+    $migratedPath = Move-CrossRevisionCheckpoint -ActivePath $activePath -State $activeState `
+        -Root $checkpointTestRoot -MainCommit $checkpointMain -NewDevelopCommit $requestedDevelop
+    Assert-Equal $emptyFailedPath $migratedPath 'rolling checkpoint replaces the empty failed state for requested develop'
+    $migratedState = Get-Content -LiteralPath $migratedPath -Raw | ConvertFrom-Json -AsHashtable
+    Assert-Equal $requestedDevelop $migratedState.DevelopRevision 'rolling checkpoint records requested develop'
+    Assert-Equal 'nocm|develop|1|NOCM-B-AddWin11.json' $migratedState.CurrentStep 'rolling checkpoint preserves the failed follow-on step'
+    Assert-Equal 'NOC-DC1' $migratedState.Baselines.nocm[0].Name 'rolling checkpoint preserves exact-main VM identity'
+    Assert-Equal 'RollingDevelop' $migratedState.QualificationMode 'rolling checkpoint is not labeled as a pinned qualification'
+    Assert-Equal 2 @($migratedState.DevelopRevisionHistory).Count 'rolling checkpoint records both develop revisions'
+    Assert-Equal $false (Test-Path -LiteralPath $activePath) 'superseded active state no longer competes for resume'
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath $checkpointTestRoot -Filter '*.superseded-by-*' -File).Count `
+        'superseded checkpoint is retained outside active-state discovery'
+    $migratedCheckpoint = Get-ActiveCrossRevisionCheckpoint -Root $checkpointTestRoot -MainCommit $checkpointMain
+    Assert-Equal $requestedDevelop $migratedCheckpoint.DevelopRevision 'active checkpoint discovery follows the migrated state'
+}
+finally {
+    Remove-Item -LiteralPath $checkpointTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$rollingOldDevelop = (& git -C $repoRoot rev-parse 30389976).Trim()
+$rollingNewDevelop = (& git -C $repoRoot rev-parse HEAD).Trim()
+$rollingState = [ordered]@{
+    MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
+    DevelopRevision = $rollingOldDevelop
+    Status = 'Failed'
+    CurrentStep = 'nocm|develop|1|NOCM-B-AddWin11.json'
+    CompletedSteps = @('nocm|main|A')
+    Baselines = @{ nocm = @(@{ Name = 'NOC-DC1' }) }
+    DomainIdentities = @{ nocm = @{ Domain = 'nocm.com'; Sid = $script:MockDomainSid } }
+}
+$rollingPlan = @([pscustomobject]@{
+        Family = 'NOCM'
+        FollowOns = @([pscustomobject]@{ Name = 'NOCM-B-AddWin11.json' })
+    })
+try {
+    Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
+    Write-TestResult -Passed $true -What 'fast-forward develop can retry a failed follow-on over the saved main baseline'
+}
+catch {
+    Write-TestResult -Passed $false -What 'fast-forward develop can retry a failed follow-on over the saved main baseline' -Detail $_.Exception.Message
+}
+$rollingState.CurrentStep = 'nocm|main|A'
+Assert-ThrowsLike -Action {
+    Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
+} -Pattern '*Cannot advance develop while exact-main baseline*' -What 'rolling develop cannot adopt an interrupted main baseline'
+$rollingState.CurrentStep = 'nocm|cleanup|nocm.com'
+Assert-ThrowsLike -Action {
+    Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
+} -Pattern '*Cannot advance develop while cleanup*' -What 'rolling develop cannot switch revisions during cleanup'
+$rollingState.CurrentStep = 'nocm|develop|1|Renamed-Fixture.json'
+Assert-ThrowsLike -Action {
+    Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
+} -Pattern '*in-progress fixture*not present*' -What 'rolling develop requires the failed fixture to remain in the new plan'
+$rollingState.CurrentStep = 'nocm|develop|1|NOCM-B-AddWin11.json'
+$rollingState.DevelopRevision = $rollingNewDevelop
+Assert-ThrowsLike -Action {
+    Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingOldDevelop
+} -Pattern '*not an ancestor*Rolling resume only supports fast-forward*' -What 'rolling develop rejects backward or divergent revision changes'
 
 $resumePlan = @(
     [pscustomobject]@{ Family = 'CSTest1' }

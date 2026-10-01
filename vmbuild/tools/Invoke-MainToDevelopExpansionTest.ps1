@@ -14,11 +14,12 @@
 
     The runner uses separate Git worktrees and never pulls during the cycle. State
     is written after every completed stage. Follow-on stages resume without replaying
-    the main baseline. An interruption while exact-main A itself is running fails
-    closed because no pre-mutation VM/domain identity exists to prove what survived;
-    remove that family lab and reset its state before retrying. Use -PlanOnly to
-    inspect the revision and fixture matrix without creating worktrees, writing
-    state, or touching Hyper-V.
+    the main baseline. If the harness branch advances, one active checkpoint for the
+    same main revision keeps its original develop pin and takes precedence over HEAD.
+    An interruption while exact-main A itself is running fails closed because no
+    pre-mutation VM/domain identity exists to prove what survived; remove that family
+    lab and reset its state before retrying. Use -PlanOnly to inspect the revision and
+    fixture matrix without creating worktrees, writing state, or touching Hyper-V.
 
 .EXAMPLE
     .\Invoke-MainToDevelopExpansionTest.ps1 -All -PlanOnly
@@ -88,6 +89,196 @@ function Resolve-GitRevision {
         throw "Could not resolve '$Revision' to one commit."
     }
     return $resolved[0]
+}
+
+function Get-ActiveCrossRevisionCheckpoint {
+    param(
+        [string] $Root,
+        [string] $MainCommit
+    )
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $null }
+
+    $shortMain = $MainCommit.Substring(0, 8)
+    $active = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $Root -Filter "state-$shortMain-to-*.json" -File -ErrorAction Stop)) {
+        try {
+            $state = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            throw "Could not read checkpoint '$($file.FullName)': $($_.Exception.Message)"
+        }
+        if ([string]$state.MainRevision -ne $MainCommit) { continue }
+
+        $hasProgress = Test-CrossRevisionStateProgress -State $state
+        $isActive = [string]$state.Status -eq 'Running' -or
+            ([string]$state.Status -eq 'Failed' -and $hasProgress)
+        if (-not $isActive) { continue }
+        if ([string]$state.DevelopRevision -notmatch '^[0-9a-f]{40}$') {
+            throw "Active checkpoint '$($file.FullName)' has an invalid develop revision."
+        }
+
+        $active += [pscustomobject]@{
+            Path            = $file.FullName
+            DevelopRevision = [string]$state.DevelopRevision
+            CurrentStep     = [string]$state.CurrentStep
+            Status          = [string]$state.Status
+        }
+    }
+
+    if ($active.Count -gt 1) {
+        throw "Multiple active checkpoints exist for main $MainCommit`: $($active.Path -join ', '). Resolve them before starting another cycle."
+    }
+    if ($active.Count -eq 1) { return $active[0] }
+    return $null
+}
+
+function Test-CrossRevisionStateProgress {
+    param([object] $State)
+
+    $completedCount = @($State.CompletedSteps | Where-Object { $_ }).Count
+    $baselineCount = if ($State.Baselines -is [Collections.IDictionary]) {
+        $State.Baselines.Count
+    }
+    elseif ($State.Baselines) {
+        @($State.Baselines.PSObject.Properties).Count
+    }
+    else {
+        0
+    }
+    return -not [string]::IsNullOrWhiteSpace([string]$State.CurrentStep) -or
+        $completedCount -gt 0 -or $baselineCount -gt 0
+}
+
+function Test-GitCommitAncestor {
+    param([string] $Ancestor, [string] $Descendant)
+
+    & git -C $RepositoryRoot merge-base --is-ancestor $Ancestor $Descendant
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) { return $true }
+    if ($exitCode -eq 1) { return $false }
+    throw "git merge-base --is-ancestor $Ancestor $Descendant failed with exit code $exitCode."
+}
+
+function Assert-CrossRevisionCheckpointCanAdvance {
+    param(
+        [Collections.IDictionary] $State,
+        [object[]] $Plan,
+        [string] $NewDevelopCommit
+    )
+
+    $oldDevelopCommit = [string]$State.DevelopRevision
+    if (-not (Test-GitCommitAncestor -Ancestor $oldDevelopCommit -Descendant $NewDevelopCommit)) {
+        throw "Active checkpoint develop $oldDevelopCommit is not an ancestor of requested develop $NewDevelopCommit. Rolling resume only supports fast-forward develop changes."
+    }
+
+    $currentStep = [string]$State.CurrentStep
+    if ([string]::IsNullOrWhiteSpace($currentStep)) { return }
+    $parts = @($currentStep -split '\|')
+    if ($parts.Count -lt 3) { throw "Active checkpoint has an invalid current step: '$currentStep'." }
+
+    $familyKey = $parts[0].ToLowerInvariant()
+    $stageType = $parts[1].ToLowerInvariant()
+    if ($stageType -eq 'main') {
+        throw "Cannot advance develop while exact-main baseline step '$currentStep' is in progress. Remove that family lab and reset its state."
+    }
+    if ($stageType -eq 'cleanup') {
+        throw "Cannot advance develop while cleanup step '$currentStep' is in progress. Finish cleanup with the pinned revision first."
+    }
+    if ($stageType -ne 'develop' -or $parts.Count -lt 4) {
+        throw "Active checkpoint step '$currentStep' is not a recognized develop stage."
+    }
+    if (@($State.CompletedSteps) -notcontains "$familyKey|main|A") {
+        throw "Cannot advance develop because '$familyKey' has no completed exact-main baseline checkpoint."
+    }
+    if (-not $State.Baselines.Contains($familyKey) -or @($State.Baselines[$familyKey]).Count -eq 0) {
+        throw "Cannot advance develop because '$familyKey' has no saved baseline VM identity."
+    }
+    if (-not $State.DomainIdentities.Contains($familyKey) -or -not $State.DomainIdentities[$familyKey]) {
+        throw "Cannot advance develop because '$familyKey' has no saved baseline domain identity."
+    }
+
+    $familyPlan = @($Plan | Where-Object { $_.Family -ieq $familyKey })
+    if ($familyPlan.Count -ne 1) {
+        throw "The active family '$familyKey' is not present exactly once in requested develop $NewDevelopCommit."
+    }
+    $fixtureName = $parts[3]
+    if (@($familyPlan[0].FollowOns | Where-Object { $_.Name -eq $fixtureName }).Count -ne 1) {
+        throw "The in-progress fixture '$fixtureName' is not present in requested develop $NewDevelopCommit."
+    }
+}
+
+function Move-CrossRevisionCheckpoint {
+    param(
+        [string] $ActivePath,
+        [Collections.IDictionary] $State,
+        [string] $Root,
+        [string] $MainCommit,
+        [string] $NewDevelopCommit
+    )
+
+    $shortMain = $MainCommit.Substring(0, 8)
+    $shortDevelop = $NewDevelopCommit.Substring(0, 8)
+    $targetPath = Join-Path $Root "state-$shortMain-to-$shortDevelop.json"
+    if ([IO.Path]::GetFullPath($ActivePath) -ieq [IO.Path]::GetFullPath($targetPath)) { return $targetPath }
+
+    $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+    if (Test-Path -LiteralPath $targetPath) {
+        $targetState = Get-Content -LiteralPath $targetPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
+        if ([string]$targetState.Status -eq 'Running' -or (Test-CrossRevisionStateProgress -State $targetState)) {
+            throw "Requested develop checkpoint '$targetPath' already contains progress and cannot be replaced."
+        }
+        Move-Item -LiteralPath $targetPath -Destination "$targetPath.abandoned-$timestamp" -Force
+    }
+
+    $oldDevelopCommit = [string]$State.DevelopRevision
+    $history = [Collections.Generic.List[object]]::new()
+    if ($State.Contains('DevelopRevisionHistory')) {
+        foreach ($entry in @($State.DevelopRevisionHistory)) { $history.Add($entry) }
+        if ($history.Count -gt 0) {
+            $currentHistory = $history[$history.Count - 1]
+            if ($currentHistory -is [Collections.IDictionary]) {
+                $currentHistory['SupersededUtc'] = [DateTime]::UtcNow.ToString('o')
+                $currentHistory['LastError'] = $State.LastError
+            }
+            else {
+                $currentHistory | Add-Member -NotePropertyName SupersededUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+                $currentHistory | Add-Member -NotePropertyName LastError -NotePropertyValue $State.LastError -Force
+            }
+        }
+    }
+    else {
+        $history.Add([ordered]@{
+                Revision    = $oldDevelopCommit
+                BeganUtc    = $State.StartedUtc
+                SupersededUtc = [DateTime]::UtcNow.ToString('o')
+                LastError   = $State.LastError
+            })
+    }
+    $history.Add([ordered]@{
+        Revision      = $NewDevelopCommit
+        BeganUtc      = [DateTime]::UtcNow.ToString('o')
+        SupersededUtc = $null
+        LastError     = $null
+    })
+
+    $State.SchemaVersion = 2
+    $State.DevelopRevision = $NewDevelopCommit
+    $State.DevelopRevisionHistory = @($history.ToArray())
+    $State.QualificationMode = 'RollingDevelop'
+    $State.LastUpdateUtc = [DateTime]::UtcNow.ToString('o')
+
+    $tempPath = "$targetPath.$PID.tmp"
+    try {
+        $json = $State | ConvertTo-Json -Depth 12
+        [IO.File]::WriteAllText($tempPath, $json, (New-Object Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tempPath -Destination $targetPath -Force
+        Move-Item -LiteralPath $ActivePath -Destination "$ActivePath.superseded-by-$shortDevelop-$timestamp" -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    }
+    return $targetPath
 }
 
 function Get-GitText {
@@ -638,15 +829,39 @@ try {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git.exe was not found.' }
 
     $mainCommit = Resolve-GitRevision -Revision $MainRevision
-    $developCommit = Resolve-GitRevision -Revision $DevelopRevision
+    $requestedDevelopCommit = Resolve-GitRevision -Revision $DevelopRevision
+    $developCommit = $requestedDevelopCommit
+    $checkpointToAdvance = $null
+    $checkpointState = $null
+    if (-not $PlanOnly.IsPresent) {
+        $activeCheckpoint = Get-ActiveCrossRevisionCheckpoint -Root $StateRoot -MainCommit $mainCommit
+        if ($activeCheckpoint) {
+            $checkpointDevelopCommit = Resolve-GitRevision -Revision $activeCheckpoint.DevelopRevision
+            $step = if ($activeCheckpoint.CurrentStep) { $activeCheckpoint.CurrentStep } else { '<between steps>' }
+            if ($checkpointDevelopCommit -eq $requestedDevelopCommit) {
+                Write-Host "RESUME: active checkpoint '$($activeCheckpoint.Path)' continues develop $developCommit at $step." -ForegroundColor Yellow
+            }
+            else {
+                $checkpointToAdvance = $activeCheckpoint
+                $checkpointState = Get-Content -LiteralPath $activeCheckpoint.Path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
+                Write-Host "ROLLING RESUME: preserving the exact-main baseline while advancing develop $checkpointDevelopCommit -> $requestedDevelopCommit at $step." -ForegroundColor Yellow
+            }
+        }
+    }
     if ($mainCommit -eq $developCommit) { throw 'Main and develop resolved to the same commit.' }
     $plan = @(Get-CrossRevisionPlan -MainCommit $mainCommit -DevelopCommit $developCommit -TestPrefix $Test)
     if ($plan.Count -eq 0) {
         $selection = if ($Test) { " matching '$Test'" } else { '' }
         throw "No main-A/develop-follow-on test families were found$selection."
     }
+    if ($checkpointToAdvance) {
+        Assert-CrossRevisionCheckpointCanAdvance -State $checkpointState -Plan $plan -NewDevelopCommit $developCommit
+    }
 
     Write-CrossRevisionPlan -Plan $plan -MainCommit $mainCommit -DevelopCommit $developCommit
+    if ($checkpointToAdvance) {
+        Write-Host 'Qualification mode: rolling develop revisions (diagnostic burn-in; run one fresh pinned cycle for final release qualification).' -ForegroundColor Yellow
+    }
     if ($PlanOnly.IsPresent) { exit 0 }
 
     $trackedChanges = @(Invoke-Git -Arguments @('status', '--porcelain', '--untracked-files=no'))
@@ -680,6 +895,11 @@ try {
     }
 
     $null = New-Item -ItemType Directory -Path $StateRoot -Force
+    if ($checkpointToAdvance) {
+        $migratedStatePath = Move-CrossRevisionCheckpoint -ActivePath $checkpointToAdvance.Path -State $checkpointState `
+            -Root $StateRoot -MainCommit $mainCommit -NewDevelopCommit $developCommit
+        Write-Host "ROLLING RESUME: checkpoint advanced to '$migratedStatePath'." -ForegroundColor Yellow
+    }
     $shortMain = $mainCommit.Substring(0, 8)
     $shortDevelop = $developCommit.Substring(0, 8)
     $worktreeRoot = Join-Path $StateRoot 'worktrees'
@@ -711,9 +931,16 @@ try {
     }
     else {
         $script:State = [ordered]@{
-            SchemaVersion   = 1
+            SchemaVersion   = 2
             MainRevision    = $mainCommit
             DevelopRevision = $developCommit
+            DevelopRevisionHistory = @([ordered]@{
+                    Revision      = $developCommit
+                    BeganUtc      = [DateTime]::UtcNow.ToString('o')
+                    SupersededUtc = $null
+                    LastError     = $null
+                })
+            QualificationMode = 'Pinned'
             StartedUtc      = [DateTime]::UtcNow.ToString('o')
             LastUpdateUtc   = $null
             Status          = 'Ready'
@@ -737,6 +964,17 @@ try {
     if (-not $script:State.Contains('DevelopIdentities')) {
         $script:State.DevelopIdentities = @{}
         $script:State.DevelopDomainIdentities = @{}
+        Save-State
+    }
+    if (-not $script:State.Contains('DevelopRevisionHistory')) {
+        $script:State.DevelopRevisionHistory = @([ordered]@{
+                Revision      = $developCommit
+                BeganUtc      = $script:State.StartedUtc
+                SupersededUtc = $null
+                LastError     = $null
+            })
+        $script:State.QualificationMode = 'Pinned'
+        $script:State.SchemaVersion = 2
         Save-State
     }
 
@@ -886,6 +1124,9 @@ try {
     $script:State.LastError = $null
     Save-State
     Write-Host "`nPASS: all selected main-to-develop expansion cycles completed." -ForegroundColor Green
+    if ($script:State.QualificationMode -eq 'RollingDevelop') {
+        Write-Host 'NOTE: This burn-in spans multiple develop revisions. Run a fresh pinned cycle before final release qualification.' -ForegroundColor Yellow
+    }
     Write-Host "State: $script:StatePath" -ForegroundColor DarkGray
     exit 0
 }
