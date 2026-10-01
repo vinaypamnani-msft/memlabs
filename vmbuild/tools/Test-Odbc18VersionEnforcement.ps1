@@ -11,8 +11,9 @@ $modulePath = Join-Path $root 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1'
 $genConfigPath = Join-Path $root 'common\Common.GenConfig.ps1'
 $downloadCachePath = Join-Path $root 'common\Common.DownloadCache.ps1'
 $fixPath = Join-Path $root 'Fixes\Fix-ODBC18.ps1'
+$phase3Path = Join-Path $root 'DSC\phases\Phase3.ps1'
 
-foreach ($path in @($modulePath, $genConfigPath, $downloadCachePath, $fixPath)) {
+foreach ($path in @($modulePath, $genConfigPath, $downloadCachePath, $fixPath, $phase3Path)) {
     $tokens = $null
     $errors = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
@@ -137,6 +138,25 @@ if ($fix.ArgumentList[1] -notmatch 'linkid=2358430' -or
     -not $fix.NeededOnFreshDeploy -or -not $fix.AppliesToExisting) {
     throw 'Fix-ODBC18 is not available to both new and existing VMs with the ODBC and VC++ prerequisite URLs.'
 }
+$expectedCmRoles = @('CAS', 'DPMP', 'PassiveSite', 'Primary', 'Secondary', 'SiteSystem', 'WSUS')
+if ((@($fix.AppliesToRoles | Sort-Object) -join ',') -ne ($expectedCmRoles -join ',') -or
+    @($fix.NotAppliesToRoles).Count -ne 0) {
+    throw "Fix-ODBC18 must apply only to ConfigMgr server and WSUS roles by default; actual roles: $(@($fix.AppliesToRoles) -join ', ')."
+}
+$script:vmNote = [pscustomobject]@{ role = 'DomainMember'; sqlVersion = 'SQL Server 2022' }
+$script:fixesToPerform = @()
+. $fixPath
+$sqlHostFix = @($script:fixesToPerform | Where-Object { $_.FixName -eq 'Fix-ODBC18' }) | Select-Object -Last 1
+if ($sqlHostFix.AppliesToRoles -notcontains 'DomainMember') {
+    throw 'Fix-ODBC18 does not dynamically include a VM that hosts SQL.'
+}
+$script:vmNote = [pscustomobject]@{ role = 'InternetClient' }
+$script:fixesToPerform = @()
+. $fixPath
+$internetClientFix = @($script:fixesToPerform | Where-Object { $_.FixName -eq 'Fix-ODBC18' }) | Select-Object -Last 1
+if ($internetClientFix.AppliesToRoles -contains 'InternetClient') {
+    throw 'Fix-ODBC18 still applies to an InternetClient that does not host SQL.'
+}
 if (-not $fix.DoNotSeedFromWatermark) {
     throw 'Fix-ODBC18 can be incorrectly stamped by legacy watermark migration without running.'
 }
@@ -173,6 +193,10 @@ if (-not $alreadyCurrent.Success -or $script:MsiStartCalls -ne 0 -or
 }
 
 $fixText = Get-Content -LiteralPath $fixPath -Raw
+$phase3Text = Get-Content -LiteralPath $phase3Path -Raw
+if ($phase3Text -notmatch '(?s)\$cmServerRoles\s*=\s*@\(''CAS'',\s*''Primary'',\s*''Secondary'',\s*''SiteSystem'',\s*''PassiveSite'',\s*''DPMP''\).*?\$odbcRequired\s*=\s*\$ThisVM\.role\s+-in\s+\$cmServerRoles\s+-or\s+\$ThisVM\.role\s+-eq\s+''WSUS''\s+-or\s+-not\s+\[string\]::IsNullOrWhiteSpace\("\$\(\$ThisVM\.sqlVersion\)"\).*?if\s*\(\$odbcRequired\)\s*\{.*?InstallODBCDriver\s+ODBCDriverInstall') {
+    throw 'Phase 3 does not gate ODBC installation to ConfigMgr servers, WSUS servers, or SQL hosts.'
+}
 $fixTokens = $null
 $fixErrors = $null
 $fixAst = [System.Management.Automation.Language.Parser]::ParseFile($fixPath, [ref]$fixTokens, [ref]$fixErrors)

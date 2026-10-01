@@ -294,20 +294,28 @@
             Ensure    = "Present"
         }
 
-        WriteStatus ODBCDriverInstall {
-            DependsOn = "[InstallSQLClient]SQLClientInstall"
-            Status    = "Downloading and installing ODBC driver"
-        }
+        $nextDepend = "[InstallSQLClient]SQLClientInstall"
+        $cmServerRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'DPMP')
+        $odbcRequired = $ThisVM.role -in $cmServerRoles -or
+            $ThisVM.role -eq 'WSUS' -or
+            -not [string]::IsNullOrWhiteSpace("$($ThisVM.sqlVersion)")
+        if ($odbcRequired) {
+            WriteStatus ODBCDriverInstall {
+                DependsOn = $nextDepend
+                Status    = "Downloading and installing ODBC driver"
+            }
 
-        InstallODBCDriver ODBCDriverInstall {
-            DependsOn = "[WriteStatus]ODBCDriverInstall"
-            URL       = $deployConfig.URLS.ODBC
-            ODBCPath  = "C:\temp\msodbcsql.msi"
-            Ensure    = "Present"
+            InstallODBCDriver ODBCDriverInstall {
+                DependsOn = "[WriteStatus]ODBCDriverInstall"
+                URL       = $deployConfig.URLS.ODBC
+                ODBCPath  = "C:\temp\msodbcsql.msi"
+                Ensure    = "Present"
+            }
+            $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
         }
 
         WriteStatus OleDbDriverInstall {
-            DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
+            DependsOn = $nextDepend
             Status    = "Downloading and installing OleDB driver"
         }
 

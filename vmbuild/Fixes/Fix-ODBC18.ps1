@@ -286,13 +286,20 @@ $Fix_ODBC18 = {
     }
 }
 
+$odbcApplicableRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'DPMP', 'WSUS')
+if ($vmNote -and $vmNote.sqlVersion -and $vmNote.role -notin $odbcApplicableRoles) {
+    # Fix descriptors are built separately for each VM, so adding the current
+    # role here targets this SQL host without broadening every VM of that role.
+    $odbcApplicableRoles += "$($vmNote.role)"
+}
+
 $fixesToPerform += [pscustomobject]@{
     FixName             = 'Fix-ODBC18'
     FixVersion          = $odbcTargetVersion
     NeededOnFreshDeploy = $true
     AppliesToExisting   = $true
-    AppliesToRoles      = @()
-    NotAppliesToRoles   = @('OSDClient', 'AADClient', 'StandaloneRootCA', 'Proxy', 'LinuxServer', 'LinuxClient')
+    AppliesToRoles      = @($odbcApplicableRoles)
+    NotAppliesToRoles   = @()
     DoNotSeedFromWatermark = $true
     DependentVMs        = @()
     ScriptBlock         = $Fix_ODBC18
