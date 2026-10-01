@@ -1458,13 +1458,13 @@ Write-DscStatus "$Tag Starting perfloading"
                 # Enable PXE. Prefer the NonWDS PXE responder (no separate WDS role);
                 # fall back to plain EnablePxe if this build lacks -EnableNonWdsPxe.
                 try {
-                    Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableNonWdsPxe $true -ErrorAction Stop
-                    Write-DscStatus "$Tag Enabled PXE (NonWDS) on OSD DP '$($d.Short)'"
+                    Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableUnknownComputerSupport $true -EnableNonWdsPxe $true -ErrorAction Stop
+                    Write-DscStatus "$Tag Enabled PXE (NonWDS) with unknown-computer support on OSD DP '$($d.Short)'"
                 }
                 catch {
                     try {
-                        Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -ErrorAction Stop
-                        Write-DscStatus "$Tag Enabled PXE on OSD DP '$($d.Short)'"
+                        Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableUnknownComputerSupport $true -ErrorAction Stop
+                        Write-DscStatus "$Tag Enabled PXE with unknown-computer support on OSD DP '$($d.Short)'"
                     }
                     catch { Write-DscStatus "$Tag WARNING: Failed to enable PXE on OSD DP '$($d.Short)': $($_.Exception.Message)" }
                 }

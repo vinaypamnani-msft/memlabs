@@ -45,6 +45,21 @@ if (-not $perfloadingText.Contains("OSD content is not distributed by the ambigu
 if ($perfloadingText -notmatch 'Could not resolve OSD DP group[\s\S]{0,300}-Warning') {
     throw 'OSD DP-group resolver failures are not warning-only.'
 }
+$pxeCommands = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Set-CMDistributionPoint' -and
+            $node.Extent.Text -match '-EnablePxe\s+\$true' -and
+            $node.Extent.Text -match '\$d\.Fqdn'
+        }, $true))
+if ($pxeCommands.Count -ne 2) {
+    throw "Expected NonWDS and fallback PXE reconciliation commands; found $($pxeCommands.Count)."
+}
+foreach ($pxeCommand in $pxeCommands) {
+    if ($pxeCommand.Extent.Text -notmatch '-EnableUnknownComputerSupport\s+\$true') {
+        throw "OSD PXE reconciliation at line $($pxeCommand.Extent.StartLineNumber) does not enable unknown-computer support."
+    }
+}
 
 $taskSequenceGuards = @($ast.FindAll({
             param($node)
