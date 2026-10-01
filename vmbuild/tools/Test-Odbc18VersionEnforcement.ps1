@@ -118,7 +118,10 @@ $script:Common = [pscustomobject]@{
         UrlsMeta = [pscustomobject]@{
             ODBC = [pscustomobject]@{ version = '18.6.2.1'; fwlink = 2358430 }
         }
-        Urls = @([pscustomobject]@{ ODBC = 'https://go.microsoft.com/fwlink/?linkid=2358430' })
+        Urls = @([pscustomobject]@{
+                ODBC = 'https://go.microsoft.com/fwlink/?linkid=2358430'
+                VCredist = 'https://example.invalid/catalog-vc_redist.x64.exe'
+            })
     }
 }
 $script:fixesToPerform = @()
@@ -130,8 +133,9 @@ if ($fix.FixVersion -ne '18.6.2.1' -or $fix.ArgumentList[0] -ne '18.6.2.1') {
     throw 'Fix-ODBC18 version is not driven by the catalog target.'
 }
 if ($fix.ArgumentList[1] -notmatch 'linkid=2358430' -or
+    $fix.ArgumentList[2] -ne 'https://example.invalid/catalog-vc_redist.x64.exe' -or
     -not $fix.NeededOnFreshDeploy -or -not $fix.AppliesToExisting) {
-    throw 'Fix-ODBC18 is not available to both new and existing VMs with the catalog URL.'
+    throw 'Fix-ODBC18 is not available to both new and existing VMs with the ODBC and VC++ prerequisite URLs.'
 }
 if (-not $fix.DoNotSeedFromWatermark) {
     throw 'Fix-ODBC18 can be incorrectly stamped by legacy watermark migration without running.'
@@ -208,12 +212,79 @@ try {
 finally {
     Remove-Item -LiteralPath $syntheticMsiLog -Force -ErrorAction SilentlyContinue
 }
+$vcInstallFunctions = @($fixAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Install-OdbcVcRuntimePrerequisite'
+        }, $true))
+if ($vcInstallFunctions.Count -ne 1) { throw "Expected one Install-OdbcVcRuntimePrerequisite definition; found $($vcInstallFunctions.Count)." }
+$vcInstallProbe = & {
+    $script:VcStateReads = 0
+    $script:VcStartCalls = 0
+    $script:VcArguments = @()
+    function Get-OdbcVcRuntimeState {
+        $script:VcStateReads++
+        if ($script:VcStateReads -eq 1) {
+            return [pscustomobject]@{ Ready = $false; Major = 0; Minor = 0; Build = 0; FilesReady = $false; RegistryPath = 'test' }
+        }
+        return [pscustomobject]@{ Ready = $true; Major = 14; Minor = 44; Build = 35211; FilesReady = $true; RegistryPath = 'test' }
+    }
+    function Save-OdbcInstaller {
+        param($Url, $Path, [switch]$BypassCache, $Label)
+        [void]$Url
+        [void]$Path
+        [void]$BypassCache
+        [void]$Label
+    }
+    function Get-Item {
+        param($LiteralPath, $ErrorAction)
+        [void]$LiteralPath
+        [void]$ErrorAction
+        [pscustomobject]@{ Length = 25MB }
+    }
+    function Start-Process {
+        param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow, $ErrorAction)
+        [void]$FilePath
+        [void]$Wait
+        [void]$PassThru
+        [void]$NoNewWindow
+        [void]$ErrorAction
+        $script:VcStartCalls++
+        $script:VcArguments = @($ArgumentList)
+        [pscustomobject]@{ ExitCode = 0 }
+    }
+    function Remove-Item {
+        param($LiteralPath, [switch]$Force, $ErrorAction)
+        [void]$LiteralPath
+        [void]$Force
+        [void]$ErrorAction
+    }
+    . ([scriptblock]::Create($vcInstallFunctions[0].Extent.Text))
+    $result = Install-OdbcVcRuntimePrerequisite -Url 'https://example.invalid/vc_redist.x64.exe'
+    [pscustomobject]@{
+        Result     = $result
+        StateReads = $script:VcStateReads
+        StartCalls = $script:VcStartCalls
+        Arguments  = @($script:VcArguments)
+    }
+}
+if (-not $vcInstallProbe.Result.Installed -or
+    $vcInstallProbe.StateReads -ne 2 -or
+    $vcInstallProbe.StartCalls -ne 1 -or
+    ($vcInstallProbe.Arguments -join ' ') -notmatch '/install /quiet /norestart /log') {
+    throw 'Fix-ODBC18 did not install and verify the missing VC++ x64 runtime prerequisite.'
+}
 foreach ($requiredPattern in @(
         "IACCEPTMSODBCSQLLICENSETERMS=YES",
         "ProductVersion",
         "InstalledVersion",
         "stale after direct retry",
         "Import-Module TemplateHelpDSC",
+        "Get-OdbcVcRuntimeState",
+        "Install-OdbcVcRuntimePrerequisite",
+        "vc_redist\.x64\.exe",
+        "20MB",
+        "33135",
         "SKIPPENDINGREBOOTCHECK=1",
         "previous installation required a reboot",
         "Return value 3",
@@ -279,6 +350,12 @@ if ((Get-MemlabsCacheUrlForKey -Key ODBC) -notmatch 'linkid=9999999') {
 $cachedMsi = Join-Path $root 'azureFiles\cache\ODBC.dat'
 $cachedMsiSource = "$cachedMsi.src"
 $cacheMatchesTarget = $false
+$hostVcRuntime = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64' -ErrorAction SilentlyContinue
+$hostVcReady = (($hostVcRuntime.Major -gt 14) -or
+    ($hostVcRuntime.Major -eq 14 -and $hostVcRuntime.Minor -gt 34) -or
+    ($hostVcRuntime.Major -eq 14 -and $hostVcRuntime.Minor -eq 34 -and $hostVcRuntime.Bld -ge 33135)) -and
+    (Test-Path -LiteralPath "$env:windir\System32\vcruntime140.dll" -PathType Leaf) -and
+    (Test-Path -LiteralPath "$env:windir\System32\msvcp140.dll" -PathType Leaf)
 if (Test-Path -LiteralPath $cachedMsiSource -PathType Leaf) {
     try {
         $cacheMatchesTarget = (Get-Content -LiteralPath $cachedMsiSource -Raw | ConvertFrom-Json).url -match 'linkid=2358430'
@@ -287,7 +364,7 @@ if (Test-Path -LiteralPath $cachedMsiSource -PathType Leaf) {
         Write-Warning "Could not read ODBC cache source metadata '$cachedMsiSource': $($_.Exception.Message)"
     }
 }
-if ($cacheMatchesTarget -and (Test-Path -LiteralPath $cachedMsi -PathType Leaf)) {
+if ($cacheMatchesTarget -and (Test-Path -LiteralPath $cachedMsi -PathType Leaf) -and $hostVcReady) {
     $cachedVersion = [version](Get-MsiProductVersion -Path $cachedMsi)
     if ($cachedVersion -lt [version]'18.6.2.1') {
         throw "Host ODBC cache is stale: $cachedVersion."
@@ -316,13 +393,16 @@ if ($cacheMatchesTarget -and (Test-Path -LiteralPath $cachedMsi -PathType Leaf))
         [pscustomobject]@{ ExitCode = 0 }
     }
     $sourceUri = ([uri]::new((Resolve-Path -LiteralPath $cachedMsi).Path)).AbsoluteUri
-    $upgradeOutput = @(& $fix.ScriptBlock '18.6.2.1' $sourceUri)
+    $upgradeOutput = @(& $fix.ScriptBlock '18.6.2.1' $sourceUri $fix.ArgumentList[2])
     $upgradeResult = @($upgradeOutput | Where-Object { $_.PSObject.Properties.Name -contains 'Success' }) | Select-Object -Last 1
     if (-not $upgradeResult.Success -or $script:MsiStartCalls -ne 1 -or
         ($script:MsiArguments -join ' ') -notmatch '/qn /norestart IACCEPTMSODBCSQLLICENSETERMS=YES SKIPPENDINGREBOOTCHECK=1' -or
         $upgradeResult.Message -notmatch "18\.4\.1\.1.+18\.6\.2\.1") {
         throw 'Fix-ODBC18 did not execute and verify the expected 18.4-to-18.6 upgrade path.'
     }
+}
+elseif ($cacheMatchesTarget -and (Test-Path -LiteralPath $cachedMsi -PathType Leaf)) {
+    Write-Host 'INFO -- skipping the real cached-MSI upgrade probe because this test host lacks the VC++ runtime; the mocked missing-runtime path was validated above.'
 }
 elseif (Test-Path -LiteralPath $cachedMsi -PathType Leaf) {
     Write-Host 'INFO -- cached ODBC MSI uses an older source URL; the download-cache resolver will refresh it.'

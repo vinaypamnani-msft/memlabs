@@ -16,9 +16,13 @@ if (-not ([version]::TryParse($odbcTargetVersion, [ref]$parsedOdbcTarget) -and
     $parsedOdbcFwlink = 2358430
 }
 $odbcDownloadUrl = "https://go.microsoft.com/fwlink/?linkid=$parsedOdbcFwlink"
+$vcRedistDownloadUrl = "$($Common.AzureFileList.Urls.VCredist)".Trim()
+if ([string]::IsNullOrWhiteSpace($vcRedistDownloadUrl)) {
+    $vcRedistDownloadUrl = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
+}
 
 $Fix_ODBC18 = {
-    param([string]$TargetVersion, [string]$DownloadUrl)
+    param([string]$TargetVersion, [string]$DownloadUrl, [string]$VcRedistUrl)
 
     function Get-InstalledOdbc18Version {
         $value = [string](Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18' -Name 'InstalledVersion' -ErrorAction SilentlyContinue)
@@ -50,13 +54,34 @@ $Fix_ODBC18 = {
             }
         }
     }
+    function Get-OdbcVcRuntimeState {
+        $regPath = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64'
+        $runtime = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+        $major = [int]$runtime.Major
+        $minor = [int]$runtime.Minor
+        $build = [int]$runtime.Bld
+        $filesReady = (Test-Path -LiteralPath "$env:windir\System32\vcruntime140.dll" -PathType Leaf) -and
+            (Test-Path -LiteralPath "$env:windir\System32\msvcp140.dll" -PathType Leaf)
+        $versionReady = $major -gt 14 -or
+            ($major -eq 14 -and $minor -gt 34) -or
+            ($major -eq 14 -and $minor -eq 34 -and $build -ge 33135)
+        return [pscustomobject]@{
+            Ready        = [bool]($versionReady -and $filesReady)
+            Major        = $major
+            Minor        = $minor
+            Build        = $build
+            Version      = "$($runtime.Version)"
+            FilesReady   = [bool]$filesReady
+            RegistryPath = $regPath
+        }
+    }
     function Get-OdbcMsiFailureDetails {
         param([string]$LogPath)
 
         if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) { return 'MSI log not found' }
         $logLines = @(Get-Content -LiteralPath $LogPath -ErrorAction SilentlyContinue)
         $allMarkers = @($logLines | Where-Object {
-                $_ -match '(?i)Return value 3|error 25003|previous installation required a reboot|CA_ErrorPendingReboot|installation success or error status:\s*1603'
+                $_ -match '(?i)Return value 3|error 25003|previous installation required a reboot|CA_ErrorPendingReboot|IsPendingRebootKey|error 1723|error 2896|returned actual error code|installation success or error status:\s*1603'
             })
         $failureMarkers = @(
             @($allMarkers | Select-Object -First 6)
@@ -74,7 +99,8 @@ $Fix_ODBC18 = {
         param(
             [string]$Url,
             [string]$Path,
-            [switch]$BypassCache
+            [switch]$BypassCache,
+            [string]$Label = 'ODBC MSI'
         )
 
         $cacheFailure = $null
@@ -116,7 +142,70 @@ $Fix_ODBC18 = {
         $failureDetails = @()
         if ($cacheFailure) { $failureDetails += "cache path: $cacheFailure" }
         $failureDetails += $downloadErrors
-        throw "ODBC MSI download failed: $($failureDetails -join '; ')"
+        throw "$Label download failed: $($failureDetails -join '; ')"
+    }
+    function Install-OdbcVcRuntimePrerequisite {
+        param([string]$Url)
+
+        $state = Get-OdbcVcRuntimeState
+        if ($state.Ready) {
+            return [pscustomobject]@{
+                Installed = $false
+                ExitCode  = 0
+                Message   = "VC++ x64 runtime is already ready ($($state.Major).$($state.Minor).$($state.Build); filesReady=$($state.FilesReady))"
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($Url)) {
+            throw 'VC++ x64 runtime is missing or stale and its download URL is empty'
+        }
+
+        $vcPath = Join-Path ([IO.Path]::GetTempPath()) 'memlabs-vc_redist.x64.exe'
+        $vcLogPath = Join-Path ([IO.Path]::GetTempPath()) 'memlabs-vc_redist.x64.log'
+        try {
+            $null = Save-OdbcInstaller -Url $Url -Path $vcPath -Label 'VC++ x64 runtime'
+            $vcFile = Get-Item -LiteralPath $vcPath -ErrorAction Stop
+            if ($vcFile.Length -lt 20MB) {
+                $null = Save-OdbcInstaller -Url $Url -Path $vcPath -BypassCache -Label 'VC++ x64 runtime'
+                $vcFile = Get-Item -LiteralPath $vcPath -ErrorAction Stop
+                if ($vcFile.Length -lt 20MB) {
+                    throw "VC++ x64 runtime payload is only $($vcFile.Length) bytes after direct retry (need at least 20MB)"
+                }
+            }
+
+            $vcArguments = @('/install', '/quiet', '/norestart', '/log', "`"$vcLogPath`"")
+            $vcProcess = $null
+            for ($vcAttempt = 1; $vcAttempt -le 3; $vcAttempt++) {
+                $vcProcess = Start-Process -FilePath $vcPath -ArgumentList $vcArguments -Wait -PassThru -NoNewWindow -ErrorAction Stop
+                if ($vcProcess.ExitCode -ne 1618 -or $vcAttempt -ge 3) { break }
+                Start-Sleep -Seconds 30
+            }
+            if ($vcProcess.ExitCode -notin @(0, 1638, 3010)) {
+                $vcTail = if (Test-Path -LiteralPath $vcLogPath -PathType Leaf) {
+                    @(Get-Content -LiteralPath $vcLogPath -Tail 30 -ErrorAction SilentlyContinue) -join ' | '
+                }
+                else { 'VC++ runtime log not found' }
+                throw "VC++ x64 runtime installer exited $($vcProcess.ExitCode). Log tail: $vcTail"
+            }
+
+            $deadline = (Get-Date).AddSeconds(120)
+            do {
+                $state = Get-OdbcVcRuntimeState
+                if ($state.Ready) { break }
+                Start-Sleep -Seconds 2
+            } while ((Get-Date) -lt $deadline)
+            if (-not $state.Ready) {
+                throw "VC++ x64 runtime installer exited $($vcProcess.ExitCode), but $($state.RegistryPath) is $($state.Major).$($state.Minor).$($state.Build) and filesReady=$($state.FilesReady) after 120 seconds"
+            }
+
+            return [pscustomobject]@{
+                Installed = $true
+                ExitCode  = [int]$vcProcess.ExitCode
+                Message   = "VC++ x64 runtime converged to $($state.Major).$($state.Minor).$($state.Build) before ODBC installation"
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $vcPath -Force -ErrorAction SilentlyContinue
+        }
     }
 
     [version]$required = $null
@@ -139,6 +228,7 @@ $Fix_ODBC18 = {
     $installerPath = Join-Path ([IO.Path]::GetTempPath()) "memlabs-msodbcsql-$TargetVersion.msi"
     $logPath = Join-Path ([IO.Path]::GetTempPath()) "memlabs-msodbcsql-$TargetVersion.log"
     try {
+        $vcResult = Install-OdbcVcRuntimePrerequisite -Url $VcRedistUrl
         $null = Save-OdbcInstaller -Url $DownloadUrl -Path $installerPath
 
         $payloadVersionText = Get-MsiVersion -Path $installerPath
@@ -182,8 +272,11 @@ $Fix_ODBC18 = {
         }
         return [pscustomobject]@{
             Success = $true
-            Message = "Microsoft ODBC Driver 18 upgraded from '$installedBefore' to $installedAfter using payload $payloadVersion$(if ($process.ExitCode -eq 3010) { '; reboot required' })"
-            Errors  = $(if ($process.ExitCode -eq 3010) { @('ODBC MSI requested a reboot (exit 3010); restart the VM before relying on already-loaded ODBC DLLs.') } else { @() })
+            Message = "$($vcResult.Message); Microsoft ODBC Driver 18 upgraded from '$installedBefore' to $installedAfter using payload $payloadVersion$(if ($process.ExitCode -eq 3010) { '; reboot required' })"
+            Errors  = @(
+                if ($vcResult.ExitCode -eq 3010) { 'VC++ runtime installer requested a reboot (exit 3010)' }
+                if ($process.ExitCode -eq 3010) { 'ODBC MSI requested a reboot (exit 3010); restart the VM before relying on already-loaded ODBC DLLs.' }
+            )
         }
     }
     finally {
@@ -203,5 +296,5 @@ $fixesToPerform += [pscustomobject]@{
     DoNotSeedFromWatermark = $true
     DependentVMs        = @()
     ScriptBlock         = $Fix_ODBC18
-    ArgumentList        = @($odbcTargetVersion, $odbcDownloadUrl)
+    ArgumentList        = @($odbcTargetVersion, $odbcDownloadUrl, $vcRedistDownloadUrl)
 }
