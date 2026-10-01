@@ -157,6 +157,127 @@ function Get-DomainHyperVVM {
     }
 }
 
+function Stop-VirtualMachinesForRemoval {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object[]] $VMRecords,
+        [Parameter(Mandatory = $true)]
+        [hashtable] $CapturedLinuxIPs,
+        [Parameter()]
+        [int] $TimeoutSeconds = 30,
+        [Parameter()]
+        [switch] $WhatIf
+    )
+
+    # Do not power off VMs that Remove-VirtualMachine would refuse to delete.
+    $records = @($VMRecords | Where-Object { $_ -and $_.vmName -and $_.vmBuild -ne $false })
+    if ($records.Count -eq 0) { return }
+
+    $targetNames = @($records | Select-Object -ExpandProperty vmName -Unique)
+    $targetNameSet = @{}
+    foreach ($name in $targetNames) {
+        $targetNameSet["$name"] = $true
+    }
+
+    try {
+        # Enumerate Hyper-V once instead of resolving every VM separately.
+        $hyperVVMs = @(Get-VM -ErrorAction Stop | Where-Object { $targetNameSet.ContainsKey("$($_.Name)") })
+    }
+    catch {
+        Write-Log "Could not enumerate VMs for the bulk power-off phase: $($_.Exception.Message). Per-VM removal will retry." -Warning
+        return
+    }
+
+    $vmByName = @{}
+    foreach ($vm in $hyperVVMs) {
+        $vmByName["$($vm.Name)"] = $vm
+    }
+
+    # Linux adapter IPs disappear when the guest powers off. Preserve them for
+    # the later known_hosts cleanup performed by Remove-VirtualMachine.
+    foreach ($record in $records) {
+        $isLinuxVm = $record.role -in @('Proxy', 'LinuxServer', 'LinuxClient') -or $record.osFamily -eq 'Linux'
+        if (-not $isLinuxVm) { continue }
+
+        $vm = $vmByName["$($record.vmName)"]
+        if (-not $vm) { continue }
+
+        try {
+            $liveIPs = @($vm | Get-VMNetworkAdapter -ErrorAction Stop |
+                ForEach-Object { $_.IPAddresses } |
+                Where-Object { $_ -and $_ -notmatch ':' -and $_ -notmatch '^169\.254\.' } |
+                Select-Object -Unique)
+            if ($liveIPs.Count -gt 0) {
+                $CapturedLinuxIPs["$($record.vmName)"] = $liveIPs
+            }
+        }
+        catch {
+            Write-Log "VM '$($record.vmName)': Could not capture Linux IPs before bulk power-off: $($_.Exception.Message)" -Warning
+        }
+    }
+
+    $vmsToStop = @($hyperVVMs | Where-Object { $_.State -ne 'Off' })
+    if ($vmsToStop.Count -eq 0) {
+        Write-Log "All $($hyperVVMs.Count) targeted VM(s) are already off." -SubActivity
+        return
+    }
+
+    Write-Log "Forcing power off for $($vmsToStop.Count) VM(s) in parallel before deletion to release host memory." -Activity
+
+    if ($WhatIf) {
+        foreach ($vm in $vmsToStop) {
+            $vm | Stop-VM -TurnOff -Force -WhatIf -WarningAction SilentlyContinue
+        }
+        return
+    }
+
+    $stopRequests = [System.Collections.Generic.List[object]]::new()
+    foreach ($vm in $vmsToStop) {
+        try {
+            # Submit every request before waiting so responsive VMs turn off together.
+            $jobs = @(Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob -ErrorAction Stop)
+            foreach ($job in $jobs) {
+                if ($job) {
+                    $stopRequests.Add([pscustomobject]@{ VMName = $vm.Name; Job = $job })
+                }
+            }
+        }
+        catch {
+            Write-Log "VM '$($vm.Name)': Could not submit bulk TurnOff request: $($_.Exception.Message). Per-VM removal will retry." -Warning
+        }
+    }
+
+    if ($stopRequests.Count -eq 0) { return }
+
+    $stopJobs = @($stopRequests | ForEach-Object { $_.Job })
+    try {
+        $null = Wait-Job -Job $stopJobs -Timeout $TimeoutSeconds
+    }
+    catch {
+        Write-Log "Bulk VM power-off wait failed: $($_.Exception.Message). Per-VM removal will verify each VM." -Warning
+    }
+
+    foreach ($request in $stopRequests) {
+        $job = $request.Job
+        $jobState = [string]$job.State
+        if ($jobState -eq 'Running') {
+            Write-Log "VM '$($request.VMName)': Bulk TurnOff did not return within $TimeoutSeconds seconds; per-VM removal will escalate." -Warning
+            Stop-Job $job -ErrorAction SilentlyContinue
+        }
+        elseif ($jobState -eq 'Failed') {
+            $reason = if (@($job.ChildJobs | Where-Object { $null -ne $_ }).Count) {
+                $job.ChildJobs[0].JobStateInfo.Reason.Message
+            }
+            else {
+                $job.JobStateInfo.Reason.Message
+            }
+            Write-Log "VM '$($request.VMName)': Bulk TurnOff failed: $reason. Per-VM removal will retry." -Warning
+        }
+        Remove-CompletedHyperVJob -Job $job -Context "VM '$($request.VMName)': bulk TurnOff"
+    }
+}
+
 function Remove-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -173,6 +294,9 @@ function Remove-VirtualMachine {
         # otherwise re-enumerate the entire host VM inventory.
         [Parameter()]
         [object] $VmRecord,
+        # Linux IPs captured before a caller's bulk power-off phase.
+        [Parameter()]
+        [string[]] $CapturedLinuxIPs,
         # When true, the caller is tearing down the entire domain (or
         # removing the DC). Skip expensive per-client proxy
         # unconfiguration since all VMs are going away anyway.
@@ -352,13 +476,16 @@ function Remove-VirtualMachine {
     }
 
     # -- Linux: capture IPs before stopping (KVP dies with the VM) --
-    $linuxIPs = @()
+    $linuxIPs = @($CapturedLinuxIPs |
+        Where-Object { $_ -and $_ -notmatch ':' -and $_ -notmatch '^169\.254\.' } |
+        Select-Object -Unique)
     $isLinuxVm = $vmFromList -and ($vmFromList.role -in @('Proxy', 'LinuxServer', 'LinuxClient') -or $vmFromList.osFamily -eq 'Linux')
     if ($isLinuxVm) {
         # Live adapter IPs (available only while the VM is running)
-        $linuxIPs = @($adapters | ForEach-Object { $_.IPAddresses } |
+        $liveLinuxIPs = @($adapters | ForEach-Object { $_.IPAddresses } |
             Where-Object { $_ -and $_ -notmatch ':' -and $_ -notmatch '^169\.254\.' } |
             Select-Object -Unique)
+        $linuxIPs = @($linuxIPs + $liveLinuxIPs | Select-Object -Unique)
 
         # Fallback: LastKnownIP from VM notes (works even if VM is already off)
         try {
@@ -945,6 +1072,11 @@ function Remove-Domain {
         Remove-ForestTrust -DomainName $DomainName
     }
 
+    $capturedLinuxIPs = @{}
+    if ($vmsToDelete) {
+        $null = Stop-VirtualMachinesForRemoval -VMRecords $vmsToDelete -CapturedLinuxIPs $capturedLinuxIPs -WhatIf:$WhatIf
+    }
+
     # When removing the full domain ($all) or the DC, every VM is going
     # away -- skip the expensive per-client proxy unconfiguration inside
     # Remove-VirtualMachine.
@@ -972,9 +1104,11 @@ function Remove-Domain {
             $currentItem = $using:currentItem
             $Phase = $using:Phase
             $vm = $currentItem
+            $capturedLinuxIPs = $using:capturedLinuxIPs
+            $preCapturedLinuxIPs = @($capturedLinuxIPs[$vm.VmName])
             # Pass the already-resolved VM record so the worker doesn't
             # re-enumerate every VM on the host (~1s/worker saved).
-            $null = Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm -RemovingDomain:$using:removingDomain
+            $null = Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm -CapturedLinuxIPs $preCapturedLinuxIPs -RemovingDomain:$using:removingDomain
             Write-Log "[Phase $Phase]: $($vm.vmName): Remove VM Successful" -OutputStream -Success
         }
         catch {
@@ -1009,12 +1143,13 @@ function Remove-Domain {
             $refreshedRecords = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate)
             foreach ($survivor in $survivors) {
                 $vmRecord = $refreshedRecords | Where-Object { $_.vmID -eq $survivor.vmID } | Select-Object -First 1
+                $preCapturedLinuxIPs = @($capturedLinuxIPs[$survivor.Name])
                 try {
                     if ($vmRecord) {
-                        $null = Remove-VirtualMachine -VmName $survivor.Name -VmRecord $vmRecord -RemovingDomain
+                        $null = Remove-VirtualMachine -VmName $survivor.Name -VmRecord $vmRecord -CapturedLinuxIPs $preCapturedLinuxIPs -RemovingDomain
                     }
                     else {
-                        $null = Remove-VirtualMachine -VmName $survivor.Name -RemovingDomain
+                        $null = Remove-VirtualMachine -VmName $survivor.Name -CapturedLinuxIPs $preCapturedLinuxIPs -RemovingDomain
                     }
                 }
                 catch {
@@ -1110,8 +1245,11 @@ function Remove-All {
 
     if ($vmsToDelete) {
         Write-Log "Removing ALL virtual machines" -Activity
+        $capturedLinuxIPs = @{}
+        $null = Stop-VirtualMachinesForRemoval -VMRecords $vmsToDelete -CapturedLinuxIPs $capturedLinuxIPs -WhatIf:$WhatIf
         foreach ($vm in $vmsToDelete) {
-            Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf -RemovingDomain
+            $preCapturedLinuxIPs = @($capturedLinuxIPs[$vm.VmName])
+            Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm -CapturedLinuxIPs $preCapturedLinuxIPs -WhatIf:$WhatIf -RemovingDomain
         }
     }
 
