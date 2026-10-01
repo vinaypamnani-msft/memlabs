@@ -8,6 +8,9 @@ param([string] $RootPath)
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $repoRoot = Split-Path -Parent $RootPath
 $runnerPath = Join-Path $PSScriptRoot 'Invoke-MainToDevelopExpansionTest.ps1'
+$childLauncherPath = Join-Path $PSScriptRoot 'Invoke-PinnedChildScript.ps1'
+$newLabPath = Join-Path $RootPath 'New-Lab.ps1'
+$phasesPath = Join-Path $RootPath 'common\Common.Phases.ps1'
 $script:Failures = 0
 $script:MockVms = @{}
 $script:MockDisks = @{}
@@ -107,6 +110,75 @@ Assert-Equal 0 $singleExit 'single-family plan exits successfully'
 Assert-True ($singleText -like '*1 family/families, 7 follow-on fixture(s), 14 develop deployment pass(es).*') 'single-family plan selects NOCM only'
 Assert-True ($singleText -notlike '*CSTest1-A-CSPS.json*') 'single-family plan excludes unrelated families'
 Assert-Equal $false (Test-Path -LiteralPath $stateRoot) 'single-family plan remains non-mutating'
+
+$newLabText = [IO.File]::ReadAllText($newLabPath)
+$phasesText = [IO.File]::ReadAllText($phasesPath)
+Assert-True ($newLabText -notmatch '\$global:StartPhase\s*=') 'New-Lab does not reassign its validated StartPhase parameter in global scope'
+Assert-True ($newLabText -match '\$global:MemLabsStartPhase\s*=\s*\[int\]\$StartPhase') 'New-Lab publishes the phase mode under a non-parameter global name'
+Assert-True ($phasesText -match '\$global:MemLabsStartPhase') 'phase preparation consumes the non-parameter start-phase flag'
+Assert-True ($newLabText -match 'AdditionalInfo\s+\(\$deployConfig\s+\|\s+ConvertTo-Json\s+-Depth\s+12\)') 'New-Lab crash details serialize the complete deployment config'
+
+$scopeTestRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-child-scope-$PID"
+$legacyScriptPath = Join-Path $scopeTestRoot 'Legacy-New-Lab.ps1'
+$parameterPath = Join-Path $scopeTestRoot 'parameters.clixml'
+$resultPath = Join-Path $scopeTestRoot 'result.txt'
+$exitScriptPath = Join-Path $scopeTestRoot 'Exit-Code.ps1'
+$continueScriptPath = Join-Path $scopeTestRoot 'Continue-Error.ps1'
+try {
+    $null = New-Item -ItemType Directory -Path $scopeTestRoot -Force
+    [IO.File]::WriteAllText($legacyScriptPath, @'
+[CmdletBinding()]
+param(
+    [ValidateRange(2, 11)]
+    [int] $StartPhase,
+    [Parameter(Mandatory = $true)]
+    [string] $ResultPath
+)
+$ErrorActionPreference = 'Stop'
+$global:StartPhase = $StartPhase
+[IO.File]::WriteAllText($ResultPath, "$StartPhase|$global:StartPhase")
+'@)
+
+    $directOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $legacyScriptPath -ResultPath $resultPath 2>&1 |
+            ForEach-Object { "$_" })
+    $directExit = $LASTEXITCODE
+    Assert-True ($directExit -ne 0 -and ($directOutput -join "`n") -like '*not a valid value for the StartPhase variable*') `
+        'legacy direct-file invocation reproduces the omitted StartPhase validation failure'
+
+    [ordered]@{ ResultPath = $resultPath } | Export-Clixml -LiteralPath $parameterPath
+    & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
+        -ScriptPath $legacyScriptPath -ParameterPath $parameterPath
+    Assert-Equal 0 $LASTEXITCODE 'child launcher isolates the legacy validated parameter from global scope'
+    Assert-Equal '0|0' (Get-Content -LiteralPath $resultPath -Raw) 'child launcher preserves omitted StartPhase semantics'
+
+    [ordered]@{ StartPhase = 5; ResultPath = $resultPath } | Export-Clixml -LiteralPath $parameterPath
+    & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
+        -ScriptPath $legacyScriptPath -ParameterPath $parameterPath
+    Assert-Equal 0 $LASTEXITCODE 'child launcher accepts an explicit valid StartPhase'
+    Assert-Equal '5|5' (Get-Content -LiteralPath $resultPath -Raw) 'child launcher forwards named parameters without coercion'
+
+    [IO.File]::WriteAllText($exitScriptPath, '[CmdletBinding()] param([int] $Code) exit $Code')
+    [ordered]@{ Code = 55 } | Export-Clixml -LiteralPath $parameterPath
+    & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
+        -ScriptPath $exitScriptPath -ParameterPath $parameterPath
+    Assert-Equal 55 $LASTEXITCODE 'child launcher preserves restart exit codes'
+
+    [IO.File]::WriteAllText($continueScriptPath, @'
+[CmdletBinding()]
+param([Parameter(Mandatory = $true)][string] $ResultPath)
+Get-Item -LiteralPath (Join-Path $env:TEMP 'memlabs-intentionally-missing') -ErrorAction Continue
+[IO.File]::WriteAllText($ResultPath, 'continued')
+'@)
+    [ordered]@{ ResultPath = $resultPath } | Export-Clixml -LiteralPath $parameterPath
+    $continueOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
+            -ScriptPath $continueScriptPath -ParameterPath $parameterPath 2>&1)
+    Assert-Equal 0 $LASTEXITCODE 'child launcher preserves the default non-terminating error behavior'
+    Assert-Equal 'continued' (Get-Content -LiteralPath $resultPath -Raw) 'child launcher does not abort after a non-terminating child error'
+    Assert-True (($continueOutput -join "`n") -like '*memlabs-intentionally-missing*') 'child launcher still reports non-terminating child errors'
+}
+finally {
+    Remove-Item -LiteralPath $scopeTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 . (Import-TestFunction -Path $runnerPath -Name Invoke-Git)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-PinnedWorktree)

@@ -1133,7 +1133,10 @@ try {
     # Define phases
     $start = 1
     $maxPhase = 11
-    $global:StartPhase = $StartPhase
+    # A script launched with pwsh -File can place its validated parameter in global
+    # scope. Mirroring an omitted [int] value (0) back to the same name then reruns
+    # ValidateRange(2, 11) and fails before Phase 1.
+    $global:MemLabsStartPhase = [int]$StartPhase
 
     # Pre-build the host download-cache ISO ONCE, before any phase fans out to
     # per-VM jobs. Building it here (single host process) instead of lazily inside
@@ -1451,7 +1454,7 @@ try {
 
 }
 catch {
-    Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json)
+    Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json -Depth 12)
     $NewLabsuccess = $false
 }
 finally {

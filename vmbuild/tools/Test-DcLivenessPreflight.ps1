@@ -345,7 +345,7 @@ function Test-VmResponsive { param($VmName, $TimeoutSeconds) return $false }
 function Restart-UnresponsiveVm { param($VmName, $WaitTimeSeconds) return $false }
 
 $global:Common = [pscustomobject]@{ VerboseEnabled = $false }
-$global:StartPhase = $false
+$global:MemLabsStartPhase = 0
 $global:preparePhasePercent = 0
 $preflightConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ domainNetBiosName = 'PT1'; domainName = 'pstest1.com' }

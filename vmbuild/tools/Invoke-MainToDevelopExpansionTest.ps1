@@ -61,6 +61,7 @@ if (-not $RepositoryRoot) {
 }
 $RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 $pwshPath = Join-Path $PSHOME 'pwsh.exe'
+$script:ChildLauncherPath = Join-Path $PSScriptRoot 'Invoke-PinnedChildScript.ps1'
 $script:MutationMutex = $null
 $script:MutationMutexHeld = $false
 $script:MainBaselineFailureCleanupPossible = $false
@@ -559,24 +560,31 @@ function Invoke-ChildScript {
     param(
         [string] $WorktreePath,
         [string] $ScriptName,
-        [string[]] $Arguments,
+        [Collections.IDictionary] $Parameters,
         [string] $Label
     )
 
     $vmbuildPath = Join-Path $WorktreePath 'vmbuild'
     $scriptPath = Join-Path $vmbuildPath $ScriptName
+    if (-not (Test-Path -LiteralPath $script:ChildLauncherPath -PathType Leaf)) {
+        throw "Pinned child-script launcher not found: $script:ChildLauncherPath"
+    }
     $safeLabel = $Label -replace '[^A-Za-z0-9_.-]', '_'
     $logPath = Join-Path $StateRoot "$safeLabel.log"
+    $parameterPath = Join-Path $StateRoot ('.child-parameters-{0}-{1}.clixml' -f $PID, [guid]::NewGuid().ToString('N'))
     Write-Host "===== $Label =====" -ForegroundColor Magenta
     Push-Location $vmbuildPath
     try {
+        $Parameters | Export-Clixml -LiteralPath $parameterPath -Depth 4 -ErrorAction Stop
         $global:LASTEXITCODE = 0
-        & $pwshPath -NoLogo -NoProfile -NonInteractive -File $scriptPath @Arguments 2>&1 |
+        & $pwshPath -NoLogo -NoProfile -NonInteractive -File $script:ChildLauncherPath `
+            -ScriptPath $scriptPath -ParameterPath $parameterPath 2>&1 |
             Tee-Object -FilePath $logPath -Append |
             Out-Host
         return [int]$LASTEXITCODE
     }
     finally {
+        Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
         Pop-Location
     }
 }
@@ -589,12 +597,16 @@ function Invoke-NewLabFixture {
         [switch] $KeepFailedVms
     )
 
-    $arguments = @('-Configuration', $FixturePath, '-NoSnapshot', '-NoWindowResize')
-    if ($KeepFailedVms.IsPresent) { $arguments += '-KeepFailedVMs' }
-    $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' -Arguments $arguments -Label $Label
+    $parameters = [ordered]@{
+        Configuration  = $FixturePath
+        NoSnapshot     = $true
+        NoWindowResize = $true
+    }
+    if ($KeepFailedVms.IsPresent) { $parameters.KeepFailedVMs = $true }
+    $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' -Parameters $parameters -Label $Label
     if ($exitCode -eq 55) {
         Write-Host "$Label requested one restart after rebuilding DSC.zip; rerunning." -ForegroundColor Yellow
-        $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' -Arguments $arguments -Label "$Label-restart"
+        $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' -Parameters $parameters -Label "$Label-restart"
     }
     return $exitCode
 }
@@ -857,7 +869,7 @@ try {
             if (Test-StepComplete -Step $cleanupStep) { continue }
             Start-Step -Step $cleanupStep
             $exitCode = Invoke-ChildScript -WorktreePath $developWorktree -ScriptName 'Remove-Lab.ps1' `
-                -Arguments @('-DomainName', $domain) -Label "$family-cleanup-$domain"
+                -Parameters ([ordered]@{ DomainName = $domain }) -Label "$family-cleanup-$domain"
             if ($exitCode -ne 0) { throw "Cleanup of $domain failed with exit code $exitCode." }
             $remaining = @(Get-DomainVms -Domains @($domain))
             $remaining += @(Get-ExistingNamedVms -VmNames @($familyPlan.VmNamesByDomain[$domain.ToLowerInvariant()]))
