@@ -186,8 +186,13 @@ finally {
 . (Import-TestFunction -Path $runnerPath -Name Test-GitCommitAncestor)
 . (Import-TestFunction -Path $runnerPath -Name Assert-CrossRevisionCheckpointCanAdvance)
 . (Import-TestFunction -Path $runnerPath -Name Move-CrossRevisionCheckpoint)
+. (Import-TestFunction -Path $runnerPath -Name ConvertTo-CrossRevisionNormalizedPath)
+. (Import-TestFunction -Path $runnerPath -Name Assert-CrossRevisionPathLayout)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-PinnedWorktree)
+. (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeLogPath)
+. (Import-TestFunction -Path $runnerPath -Name Initialize-ExistingCrossRevisionLogPaths)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeRuntime)
+. (Import-TestFunction -Path $runnerPath -Name Invoke-ChildScript)
 . (Import-TestFunction -Path $runnerPath -Name Get-OrderedCrossRevisionPlan)
 . (Import-TestFunction -Path $runnerPath -Name Get-FullVmName)
 . (Import-TestFunction -Path $runnerPath -Name Get-ExpectedVmNames)
@@ -209,6 +214,81 @@ finally {
 . (Import-TestFunction -Path $runnerPath -Name Complete-Step)
 
 $global:RepositoryRoot = $repoRoot
+try {
+    Assert-CrossRevisionPathLayout -Repository $repoRoot -Root (Join-Path $env:ProgramData 'MemLabs\CrossRevision')
+    Write-TestResult -Passed $true -What 'default state root is outside the source log tree'
+}
+catch {
+    Write-TestResult -Passed $false -What 'default state root is outside the source log tree' -Detail $_.Exception.Message
+}
+Assert-ThrowsLike -Action {
+    Assert-CrossRevisionPathLayout -Repository $repoRoot -Root (Join-Path $repoRoot 'vmbuild\logs')
+} -Pattern '*cannot be inside the source repository*' -What 'state root cannot be inside the source repository'
+Assert-ThrowsLike -Action {
+    Assert-CrossRevisionPathLayout -Repository $repoRoot -Root ("\\?\" + (Join-Path $repoRoot 'vmbuild\logs\CrossRevision\state'))
+} -Pattern '*cannot be inside the source repository*' -What 'extended paths cannot bypass source-repository containment'
+
+$pathAliasRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-state-alias-$PID"
+$pathAliasTarget = Join-Path $pathAliasRoot 'target'
+$pathAlias = Join-Path $pathAliasRoot 'alias'
+try {
+    $null = New-Item -ItemType Directory -Path $pathAliasTarget -Force
+    $null = New-Item -ItemType Junction -Path $pathAlias -Target $pathAliasTarget
+    Assert-ThrowsLike -Action {
+        Assert-CrossRevisionPathLayout -Repository $repoRoot -Root (Join-Path $pathAlias 'state')
+    } -Pattern '*cannot traverse reparse point*' -What 'state root cannot traverse a junction alias'
+}
+finally {
+    if (Test-Path -LiteralPath $pathAlias) { Remove-Item -LiteralPath $pathAlias -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $pathAliasRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$transcriptTestRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-transcripts-$PID"
+$transcriptSource = Join-Path $transcriptTestRoot 'source'
+$transcriptWorktree = Join-Path $transcriptTestRoot 'worktree'
+$transcriptState = Join-Path $transcriptTestRoot 'state'
+$transcriptMarker = Join-Path $transcriptTestRoot 'child-ran.txt'
+$transcriptPriorRepositoryRoot = $global:RepositoryRoot
+$transcriptPriorStateRoot = $StateRoot
+$transcriptPriorLauncherPath = $script:ChildLauncherPath
+try {
+    $null = New-Item -ItemType Directory -Path (Join-Path $transcriptSource 'vmbuild\logs') -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $transcriptWorktree 'vmbuild') -Force
+    $childScript = Join-Path $transcriptWorktree 'vmbuild\Child.ps1'
+    [IO.File]::WriteAllText($childScript, @'
+[CmdletBinding()]
+param([Parameter(Mandatory = $true)][string] $MarkerPath)
+[IO.File]::WriteAllText($MarkerPath, 'ran')
+Write-Output 'TRANSCRIPT:runner-output'
+'@)
+    $global:RepositoryRoot = $transcriptSource
+    $StateRoot = $transcriptState
+    $script:ChildLauncherPath = $childLauncherPath
+
+    $childExit = Invoke-ChildScript -WorktreePath $transcriptWorktree -ScriptName 'Child.ps1' `
+        -Parameters ([ordered]@{ MarkerPath = $transcriptMarker }) -Label 'runner-output'
+    $sharedTranscript = Join-Path $transcriptSource 'vmbuild\logs\CrossRevision\Runner\runner-output.log'
+    Assert-Equal 0 $childExit 'runner transcript preserves successful child exit code'
+    Assert-Equal 'ran' (Get-Content -LiteralPath $transcriptMarker -Raw) 'child runs after the normal log path is writable'
+    Assert-True ((Get-Content -LiteralPath $sharedTranscript -Raw) -like '*TRANSCRIPT:runner-output*') `
+        'runner transcript is written under the normal log directory'
+
+    Remove-Item -LiteralPath $transcriptMarker -Force
+    $blockedSharedPath = Join-Path $transcriptSource 'vmbuild\logs\CrossRevision\Runner\blocked-transcript.log'
+    $null = New-Item -ItemType Directory -Path $blockedSharedPath -Force
+    Assert-ThrowsLike -Action {
+        Invoke-ChildScript -WorktreePath $transcriptWorktree -ScriptName 'Child.ps1' `
+            -Parameters ([ordered]@{ MarkerPath = $transcriptMarker }) -Label 'blocked-transcript'
+    } -Pattern '*Access to the path*is denied*' -What 'unwritable shared transcript prevents a successful child invocation'
+    Assert-Equal $false (Test-Path -LiteralPath $transcriptMarker) 'child is not run when shared transcript preflight fails'
+}
+finally {
+    $global:RepositoryRoot = $transcriptPriorRepositoryRoot
+    $StateRoot = $transcriptPriorStateRoot
+    $script:ChildLauncherPath = $transcriptPriorLauncherPath
+    Remove-Item -LiteralPath $transcriptTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $checkpointTestRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-checkpoints-$PID"
 $checkpointMain = '1111111111111111111111111111111111111111'
 $requestedDevelop = '2222222222222222222222222222222222222222'
@@ -333,12 +413,24 @@ $sourceRepoRoot = $repoRoot
 $gitTestRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-git-$PID"
 $gitTestRepo = Join-Path $gitTestRoot 'repo'
 $gitTestWorktree = Join-Path $gitTestRoot 'develop-worktree'
+$priorStateRoot = $StateRoot
+$priorRequireCleanSource = $RequireCleanSource
 try {
     $null = New-Item -ItemType Directory -Path $gitTestRepo -Force
     & git -C $gitTestRepo init -q
     if ($LASTEXITCODE -ne 0) { throw 'Could not initialize temporary Git repository.' }
+    foreach ($directory in @(
+            (Join-Path $gitTestRepo 'vmbuild\config'),
+            (Join-Path $gitTestRepo 'vmbuild\azureFiles'),
+            (Join-Path $gitTestRepo 'vmbuild\cache'),
+            (Join-Path $gitTestRepo 'vmbuild\logs')
+        )) {
+        $null = New-Item -ItemType Directory -Path $directory -Force
+    }
+    [IO.File]::WriteAllText((Join-Path $gitTestRepo '.gitignore'), "/vmbuild/azureFiles`n/vmbuild/cache`n/vmbuild/logs`n")
+    [IO.File]::WriteAllText((Join-Path $gitTestRepo 'vmbuild\config\placeholder.txt'), 'fixture')
     [IO.File]::WriteAllText((Join-Path $gitTestRepo 'fixture.txt'), 'fixture')
-    & git -C $gitTestRepo add fixture.txt
+    & git -C $gitTestRepo add .gitignore fixture.txt vmbuild/config/placeholder.txt
     & git -C $gitTestRepo -c user.name=MemLabsTest -c user.email=memlabs-test@example.invalid commit -q -m fixture
     if ($LASTEXITCODE -ne 0) { throw 'Could not create temporary Git commit.' }
     $gitTestCommit = (& git -C $gitTestRepo rev-parse HEAD).Trim()
@@ -347,8 +439,20 @@ try {
     $gitTestBranch = (& git -C $gitTestWorktree branch --show-current).Trim()
     Assert-Equal 'memlabs-cross-develop-test' $gitTestBranch 'pinned develop worktree retains a develop-named branch'
     Assert-True ($gitTestBranch -notmatch 'main') 'develop worktree branch selects develop media mode'
+
+    $StateRoot = Join-Path $gitTestRoot 'state'
+    $RequireCleanSource = $true
+    $strictLogRoot = Join-Path $gitTestWorktree 'vmbuild\logs\crashlogs'
+    $null = New-Item -ItemType Directory -Path $strictLogRoot -Force
+    [IO.File]::WriteAllText((Join-Path $strictLogRoot 'failure.txt'), 'strict-clean recovery')
+    Initialize-WorktreeRuntime -WorktreePath $gitTestWorktree
+    Initialize-PinnedWorktree -Path $gitTestWorktree -Commit $gitTestCommit -BranchName 'memlabs-cross-develop-test'
+    Assert-Equal 0 @(& git -C $gitTestWorktree status --porcelain --untracked-files=all).Count `
+        'external log backup keeps a strict-clean pinned worktree clean on resume'
 }
 finally {
+    $StateRoot = $priorStateRoot
+    $RequireCleanSource = $priorRequireCleanSource
     if (Test-Path -LiteralPath $gitTestWorktree) {
         & git -C $gitTestRepo worktree remove --force $gitTestWorktree 2>$null
     }
@@ -360,11 +464,13 @@ $runtimeTestRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-r
 $runtimeSource = Join-Path $runtimeTestRoot 'source'
 $runtimeWorktree = Join-Path $runtimeTestRoot 'worktree'
 $wrongAssets = Join-Path $runtimeTestRoot 'wrong-assets'
+$runtimePriorStateRoot = $StateRoot
 try {
     foreach ($directory in @(
             (Join-Path $runtimeSource 'vmbuild\azureFiles'),
             (Join-Path $runtimeSource 'vmbuild\cache'),
             (Join-Path $runtimeSource 'vmbuild\config'),
+            (Join-Path $runtimeSource 'vmbuild\logs'),
             (Join-Path $runtimeWorktree 'vmbuild\cache'),
             (Join-Path $runtimeWorktree 'vmbuild\config'),
             $wrongAssets
@@ -373,11 +479,44 @@ try {
     }
     [IO.File]::WriteAllText((Join-Path $runtimeWorktree 'vmbuild\cache\git-branch-context.json'), '{"CurrentBranch":"main"}')
     $global:RepositoryRoot = $runtimeSource
+    $StateRoot = Join-Path $runtimeTestRoot 'state'
     Initialize-WorktreeRuntime -WorktreePath $runtimeWorktree
     $runtimeLink = Get-Item -LiteralPath (Join-Path $runtimeWorktree 'vmbuild\azureFiles') -Force
     Assert-Equal ([IO.Path]::GetFullPath((Join-Path $runtimeSource 'vmbuild\azureFiles')).TrimEnd('\')) `
         ([IO.Path]::GetFullPath([string]$runtimeLink.Target).TrimEnd('\')) 'runtime worktree media link targets the source media directory'
+    $runtimeLogLink = Get-Item -LiteralPath (Join-Path $runtimeWorktree 'vmbuild\logs') -Force
+    $runtimeSharedLogs = Join-Path $runtimeSource 'vmbuild\logs\CrossRevision\worktree'
+    Assert-Equal ([IO.Path]::GetFullPath($runtimeSharedLogs).TrimEnd('\')) `
+        ([IO.Path]::GetFullPath([string]$runtimeLogLink.Target).TrimEnd('\')) 'runtime worktree log link targets its folder under normal logs'
     Assert-Equal $false (Test-Path -LiteralPath (Join-Path $runtimeWorktree 'vmbuild\cache\git-branch-context.json')) 'runtime initialization clears stale branch context'
+
+    Remove-Item -LiteralPath $runtimeLogLink.FullName -Force
+    $legacyLogRoot = Join-Path $runtimeWorktree 'vmbuild\logs'
+    $legacyLogNested = Join-Path $legacyLogRoot 'crashlogs'
+    $null = New-Item -ItemType Directory -Path $legacyLogNested -Force
+    [IO.File]::WriteAllText((Join-Path $legacyLogRoot 'VMBuild.test.log'), 'main log')
+    [IO.File]::WriteAllText((Join-Path $legacyLogNested 'failure.txt'), 'crash log')
+    Initialize-WorktreeRuntime -WorktreePath $runtimeWorktree
+    $runtimeLogLink = Get-Item -LiteralPath $legacyLogRoot -Force
+    Assert-Equal 'Junction' $runtimeLogLink.LinkType 'existing worktree log directory is replaced by a junction'
+    $recoveredLogs = @(Get-ChildItem -LiteralPath $runtimeSharedLogs -Recurse -File)
+    Assert-Equal 2 $recoveredLogs.Count 'existing worktree logs are copied into the normal log tree before linking'
+    Assert-True (@($recoveredLogs | Where-Object { $_.Name -eq 'VMBuild.test.log' }).Count -eq 1) 'recovered main log keeps its filename'
+    Assert-True (@($recoveredLogs | Where-Object { $_.Name -eq 'failure.txt' }).Count -eq 1) 'recovered nested crash log keeps its filename'
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath (Join-Path $StateRoot 'worktree-log-backups') -Directory).Count `
+        'original worktree logs remain in an external recovery backup'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath (Join-Path $runtimeWorktree 'vmbuild') -Directory -Filter 'logs.recovered-*').Count `
+        'worktree contains no untracked recovery backup'
+
+    $oldWorktree = Join-Path $StateRoot 'worktrees\develop-old'
+    $oldLogs = Join-Path $oldWorktree 'vmbuild\logs'
+    $null = New-Item -ItemType Directory -Path $oldLogs -Force
+    [IO.File]::WriteAllText((Join-Path $oldLogs 'VMBuild.old.log'), 'old worktree failure')
+    Initialize-ExistingCrossRevisionLogPaths -WorktreeRoot (Join-Path $StateRoot 'worktrees')
+    $oldLogLink = Get-Item -LiteralPath $oldLogs -Force
+    Assert-Equal 'Junction' $oldLogLink.LinkType 'existing superseded worktree log directory is swept and linked'
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath (Join-Path $runtimeSource 'vmbuild\logs\CrossRevision\develop-old') `
+            -Recurse -File -Filter 'VMBuild.old.log').Count 'superseded worktree failure log is recovered before revision migration'
 
     Remove-Item -LiteralPath $runtimeLink.FullName -Force
     $null = New-Item -ItemType Junction -Path $runtimeLink.FullName -Target $wrongAssets
@@ -387,9 +526,38 @@ try {
 }
 finally {
     $global:RepositoryRoot = $sourceRepoRoot
+    $StateRoot = $runtimePriorStateRoot
     $runtimeAssets = Join-Path $runtimeWorktree 'vmbuild\azureFiles'
     if (Test-Path -LiteralPath $runtimeAssets) { Remove-Item -LiteralPath $runtimeAssets -Force -ErrorAction SilentlyContinue }
+    $runtimeLogs = Join-Path $runtimeWorktree 'vmbuild\logs'
+    if (Test-Path -LiteralPath $runtimeLogs) { Remove-Item -LiteralPath $runtimeLogs -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $runtimeTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$recoverCliRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-recover-cli-$PID"
+$recoverCliSource = Join-Path $recoverCliRoot 'source'
+$recoverCliState = Join-Path $recoverCliRoot 'state'
+$recoverCliWorktree = Join-Path $recoverCliState 'worktrees\develop-recover'
+$recoverCliLogs = Join-Path $recoverCliWorktree 'vmbuild\logs'
+try {
+    $null = New-Item -ItemType Directory -Path (Join-Path $recoverCliSource 'vmbuild\logs') -Force
+    $null = New-Item -ItemType Directory -Path $recoverCliLogs -Force
+    [IO.File]::WriteAllText((Join-Path $recoverCliLogs 'VMBuild.recover.log'), 'recover-only')
+    $recoverOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $runnerPath `
+            -RecoverLogsOnly -RepositoryRoot $recoverCliSource -StateRoot $recoverCliState 2>&1 |
+            ForEach-Object { "$_" })
+    Assert-Equal 0 $LASTEXITCODE 'recover-logs-only mode exits successfully without a test selection'
+    Assert-True (($recoverOutput -join "`n") -like '*PASS: cross-revision logs now write under*') `
+        'recover-logs-only mode reports the normal log destination'
+    Assert-Equal 'Junction' (Get-Item -LiteralPath $recoverCliLogs -Force).LinkType `
+        'recover-logs-only mode links an existing pinned worktree'
+    Assert-Equal 'recover-only' (Get-Content -LiteralPath (Join-Path $recoverCliSource `
+                'vmbuild\logs\CrossRevision\develop-recover\VMBuild.recover.log') -Raw) `
+        'recover-logs-only mode moves stranded evidence under normal logs'
+}
+finally {
+    if (Test-Path -LiteralPath $recoverCliLogs) { Remove-Item -LiteralPath $recoverCliLogs -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $recoverCliRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $resumeConfig = [pscustomobject]@{

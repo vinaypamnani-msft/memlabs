@@ -13,7 +13,10 @@
     patch that historical behavior.
 
     The runner uses separate Git worktrees and never pulls during the cycle. State
-    is written after every completed stage. Follow-on stages resume without replaying
+    is written after every completed stage. Each worktree's vmbuild\logs directory
+    is linked to the source checkout's normal log directory so existing log-sync
+    automation captures mixed-test failures.
+    Follow-on stages resume without replaying
     the main baseline. If the harness branch advances, one active checkpoint for the
     same main revision keeps its original develop pin and takes precedence over HEAD.
     An interruption while exact-main A itself is running fails closed because no
@@ -32,6 +35,12 @@
 
     Resets checkpoint metadata only. Existing matching VMs still block a new baseline
     and must be deliberately removed first.
+
+.EXAMPLE
+    .\Invoke-MainToDevelopExpansionTest.ps1 -RecoverLogsOnly
+
+    Moves logs from existing pinned worktrees into vmbuild\logs\CrossRevision,
+    replaces each worktree log directory with a junction, and exits.
 #>
 [CmdletBinding(DefaultParameterSetName = 'All')]
 param(
@@ -40,6 +49,9 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Test')]
     [string] $Test,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'RecoverLogs')]
+    [switch] $RecoverLogsOnly,
 
     [string] $RepositoryRoot,
 
@@ -609,6 +621,141 @@ function Assert-DevelopStageComplete {
     }
 }
 
+function ConvertTo-CrossRevisionNormalizedPath {
+    param([string] $Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        $fullPath = "\\$($fullPath.Substring(8))"
+    }
+    elseif ($fullPath.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        $fullPath = $fullPath.Substring(4)
+    }
+    return $fullPath.TrimEnd('\')
+}
+
+function Assert-CrossRevisionPathLayout {
+    param(
+        [string] $Repository,
+        [string] $Root
+    )
+
+    $repositoryPath = ConvertTo-CrossRevisionNormalizedPath -Path $Repository
+    $statePath = ConvertTo-CrossRevisionNormalizedPath -Path $Root
+    if ($statePath -ieq $repositoryPath -or
+        $statePath.StartsWith("$repositoryPath\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "StateRoot '$statePath' cannot be inside the source repository '$repositoryPath'."
+    }
+
+    $existingPath = $statePath
+    while (-not (Test-Path -LiteralPath $existingPath)) {
+        $parent = Split-Path -Parent $existingPath
+        if (-not $parent -or $parent -eq $existingPath) { break }
+        $existingPath = $parent
+    }
+    while ($existingPath -and (Test-Path -LiteralPath $existingPath)) {
+        $item = Get-Item -LiteralPath $existingPath -Force -ErrorAction Stop
+        if ($item.LinkType -in @('Junction', 'SymbolicLink')) {
+            throw "StateRoot '$statePath' cannot traverse reparse point '$($item.FullName)'."
+        }
+        $parent = Split-Path -Parent $existingPath
+        if (-not $parent -or $parent -eq $existingPath) { break }
+        $existingPath = $parent
+    }
+}
+
+function Initialize-WorktreeLogPath {
+    param([string] $WorktreePath)
+
+    $worktreeName = Split-Path -Leaf $WorktreePath
+    $sourceLogs = Join-Path $RepositoryRoot "vmbuild\logs\CrossRevision\$worktreeName"
+    $targetLogs = Join-Path $WorktreePath 'vmbuild\logs'
+    $backupRoot = Join-Path $StateRoot 'worktree-log-backups'
+    $null = New-Item -ItemType Directory -Path $sourceLogs -Force -ErrorAction Stop
+    $null = New-Item -ItemType Directory -Path $backupRoot -Force -ErrorAction Stop
+
+    if (-not (Test-Path -LiteralPath $targetLogs)) {
+        $null = New-Item -ItemType Junction -Path $targetLogs -Target $sourceLogs -ErrorAction Stop
+        return
+    }
+
+    $logItem = Get-Item -LiteralPath $targetLogs -Force -ErrorAction Stop
+    if ($logItem.LinkType -in @('Junction', 'SymbolicLink')) {
+        $targets = @($logItem.Target | Where-Object { $null -ne $_ })
+        if ($targets.Count -ne 1) {
+            throw "Pinned worktree log path '$targetLogs' is not a single junction/symbolic link."
+        }
+        $actualTarget = [string]$targets[0]
+        if (-not [IO.Path]::IsPathRooted($actualTarget)) {
+            $actualTarget = Join-Path $logItem.Parent.FullName $actualTarget
+        }
+        $actualTarget = [IO.Path]::GetFullPath($actualTarget).TrimEnd('\')
+        $expectedTarget = [IO.Path]::GetFullPath($sourceLogs).TrimEnd('\')
+        if ($actualTarget -ine $expectedTarget) {
+            throw "Pinned worktree log link '$targetLogs' targets '$actualTarget', expected '$expectedTarget'. Remove the stale worktree before retrying."
+        }
+        return
+    }
+    if (-not $logItem.PSIsContainer) {
+        throw "Pinned worktree log path '$targetLogs' is not a directory or supported link."
+    }
+
+    $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+    $backupPath = Join-Path $backupRoot "$worktreeName-$timestamp"
+    $entries = @(Get-ChildItem -LiteralPath $targetLogs -Force -ErrorAction Stop)
+    if ($entries.Count -gt 0) {
+        foreach ($entry in $entries) {
+            Copy-Item -LiteralPath $entry.FullName -Destination $sourceLogs -Recurse -Force -ErrorAction Stop
+        }
+        foreach ($sourceFile in @(Get-ChildItem -LiteralPath $targetLogs -Recurse -File -Force)) {
+            $relativePath = $sourceFile.FullName.Substring($targetLogs.Length).TrimStart('\')
+            $recoveredFile = Join-Path $sourceLogs $relativePath
+            if (-not (Test-Path -LiteralPath $recoveredFile -PathType Leaf) -or
+                (Get-Item -LiteralPath $recoveredFile -Force).Length -ne $sourceFile.Length) {
+                throw "Could not verify recovered mixed-test log '$relativePath' in '$sourceLogs'."
+            }
+        }
+    }
+
+    Move-Item -LiteralPath $targetLogs -Destination $backupPath -ErrorAction Stop
+    try {
+        $null = New-Item -ItemType Junction -Path $targetLogs -Target $sourceLogs -ErrorAction Stop
+    }
+    catch {
+        $junctionError = $_
+        $rollbackError = $null
+        if (Test-Path -LiteralPath $targetLogs) {
+            $rollbackError = "the failed junction operation left '$targetLogs' occupied"
+        }
+        elseif (Test-Path -LiteralPath $backupPath) {
+            try {
+                Move-Item -LiteralPath $backupPath -Destination $targetLogs -ErrorAction Stop
+            }
+            catch {
+                $rollbackError = $_.Exception.Message
+            }
+        }
+        if ($rollbackError) {
+            throw "Could not create mixed-test log junction '$targetLogs': $($junctionError.Exception.Message) Rollback also failed ($rollbackError). Original logs remain at '$backupPath'."
+        }
+        throw $junctionError
+    }
+    if ($entries.Count -gt 0) {
+        Write-Host "Moved existing mixed-test logs into '$sourceLogs'; backup retained at '$backupPath'." -ForegroundColor Yellow
+    }
+}
+
+function Initialize-ExistingCrossRevisionLogPaths {
+    param([string] $WorktreeRoot)
+
+    if (-not (Test-Path -LiteralPath $WorktreeRoot -PathType Container)) { return }
+    foreach ($worktree in @(Get-ChildItem -LiteralPath $WorktreeRoot -Directory -Force -ErrorAction Stop)) {
+        if (Test-Path -LiteralPath (Join-Path $worktree.FullName 'vmbuild') -PathType Container) {
+            Initialize-WorktreeLogPath -WorktreePath $worktree.FullName
+        }
+    }
+}
+
 function Initialize-PinnedWorktree {
     param(
         [string] $Path,
@@ -690,6 +837,8 @@ function Initialize-WorktreeRuntime {
         $null = New-Item -ItemType Junction -Path $targetAssets -Target $sourceAssets -ErrorAction Stop
     }
 
+    Initialize-WorktreeLogPath -WorktreePath $WorktreePath
+
     $targetCache = Join-Path $targetVmbuild 'cache'
     $null = New-Item -ItemType Directory -Path $targetCache -Force
     $branchCache = Join-Path $targetCache 'git-branch-context.json'
@@ -761,7 +910,18 @@ function Invoke-ChildScript {
         throw "Pinned child-script launcher not found: $script:ChildLauncherPath"
     }
     $safeLabel = $Label -replace '[^A-Za-z0-9_.-]', '_'
-    $logPath = Join-Path $StateRoot "$safeLabel.log"
+    $sharedLogRoot = Join-Path $RepositoryRoot 'vmbuild\logs\CrossRevision\Runner'
+    $null = New-Item -ItemType Directory -Path $StateRoot -Force -ErrorAction Stop
+    $null = New-Item -ItemType Directory -Path $sharedLogRoot -Force -ErrorAction Stop
+    $logPath = Join-Path $sharedLogRoot "$safeLabel.log"
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($logPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $null = $stream.Seek(0, [IO.SeekOrigin]::End)
+    }
+    finally {
+        if ($stream) { $stream.Dispose() }
+    }
     $parameterPath = Join-Path $StateRoot ('.child-parameters-{0}-{1}.clixml' -f $PID, [guid]::NewGuid().ToString('N'))
     Write-Host "===== $Label =====" -ForegroundColor Magenta
     Push-Location $vmbuildPath
@@ -770,9 +930,13 @@ function Invoke-ChildScript {
         $global:LASTEXITCODE = 0
         & $pwshPath -NoLogo -NoProfile -NonInteractive -File $script:ChildLauncherPath `
             -ScriptPath $scriptPath -ParameterPath $parameterPath 2>&1 |
-            Tee-Object -FilePath $logPath -Append |
+            Tee-Object -FilePath $logPath -Append -ErrorAction Stop |
             Out-Host
-        return [int]$LASTEXITCODE
+        $childExitCode = [int]$LASTEXITCODE
+        if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+            throw "Mixed-test transcript verification failed for '$logPath'."
+        }
+        return $childExitCode
     }
     finally {
         Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
@@ -827,6 +991,20 @@ try {
         throw "Repository root not found: $RepositoryRoot"
     }
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git.exe was not found.' }
+    Assert-CrossRevisionPathLayout -Repository $RepositoryRoot -Root $StateRoot
+
+    if ($RecoverLogsOnly.IsPresent) {
+        $script:MutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+        try { $script:MutationMutexHeld = $script:MutationMutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $script:MutationMutexHeld = $true }
+        if (-not $script:MutationMutexHeld) {
+            throw 'Another MemLabs test cycle owns the host mutation lock; recover logs after it stops.'
+        }
+        $null = New-Item -ItemType Directory -Path $StateRoot -Force -ErrorAction Stop
+        Initialize-ExistingCrossRevisionLogPaths -WorktreeRoot (Join-Path $StateRoot 'worktrees')
+        Write-Host "PASS: cross-revision logs now write under '$(Join-Path $RepositoryRoot 'vmbuild\logs\CrossRevision')'." -ForegroundColor Green
+        exit 0
+    }
 
     $mainCommit = Resolve-GitRevision -Revision $MainRevision
     $requestedDevelopCommit = Resolve-GitRevision -Revision $DevelopRevision
@@ -894,7 +1072,9 @@ try {
         throw "Another MemLabs test/deployment process is active (PID(s): $($otherRunners.ProcessId -join ', ')). Do not share Hyper-V infrastructure between test cycles."
     }
 
-    $null = New-Item -ItemType Directory -Path $StateRoot -Force
+    $null = New-Item -ItemType Directory -Path $StateRoot -Force -ErrorAction Stop
+    $worktreeRoot = Join-Path $StateRoot 'worktrees'
+    Initialize-ExistingCrossRevisionLogPaths -WorktreeRoot $worktreeRoot
     if ($checkpointToAdvance) {
         $migratedStatePath = Move-CrossRevisionCheckpoint -ActivePath $checkpointToAdvance.Path -State $checkpointState `
             -Root $StateRoot -MainCommit $mainCommit -NewDevelopCommit $developCommit
@@ -902,7 +1082,6 @@ try {
     }
     $shortMain = $mainCommit.Substring(0, 8)
     $shortDevelop = $developCommit.Substring(0, 8)
-    $worktreeRoot = Join-Path $StateRoot 'worktrees'
     $mainWorktree = Join-Path $worktreeRoot "main-$shortMain"
     $developWorktree = Join-Path $worktreeRoot "develop-$shortDevelop"
     $mainBranch = "memlabs-cross-main-$shortMain"
