@@ -124,6 +124,7 @@ $parameterPath = Join-Path $scopeTestRoot 'parameters.clixml'
 $resultPath = Join-Path $scopeTestRoot 'result.txt'
 $exitScriptPath = Join-Path $scopeTestRoot 'Exit-Code.ps1'
 $continueScriptPath = Join-Path $scopeTestRoot 'Continue-Error.ps1'
+$launcherPidPath = Join-Path $scopeTestRoot 'launcher.pid'
 try {
     $null = New-Item -ItemType Directory -Path $scopeTestRoot -Force
     [IO.File]::WriteAllText($legacyScriptPath, @'
@@ -147,9 +148,12 @@ $global:StartPhase = $StartPhase
 
     [ordered]@{ ResultPath = $resultPath } | Export-Clixml -LiteralPath $parameterPath
     & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
-        -ScriptPath $legacyScriptPath -ParameterPath $parameterPath
+        -ScriptPath $legacyScriptPath -ParameterPath $parameterPath -PidPath $launcherPidPath
     Assert-Equal 0 $LASTEXITCODE 'child launcher isolates the legacy validated parameter from global scope'
     Assert-Equal '0|0' (Get-Content -LiteralPath $resultPath -Raw) 'child launcher preserves omitted StartPhase semantics'
+    $launcherIdentity = Get-Content -LiteralPath $launcherPidPath -Raw | ConvertFrom-Json
+    Assert-True ([int]$launcherIdentity.ProcessId -gt 0 -and $launcherIdentity.StartTimeUtc) `
+        'child launcher publishes its process identity for cancellation cleanup'
 
     [ordered]@{ StartPhase = 5; ResultPath = $resultPath } | Export-Clixml -LiteralPath $parameterPath
     & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
@@ -192,7 +196,10 @@ finally {
 . (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeLogPath)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-ExistingCrossRevisionLogPaths)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeRuntime)
-. (Import-TestFunction -Path $runnerPath -Name Invoke-ChildScript)
+$stopLauncherFunction = Import-TestFunction -Path $runnerPath -Name Stop-CrossRevisionLauncher
+$invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildScript
+. $stopLauncherFunction
+. $invokeChildFunction
 . (Import-TestFunction -Path $runnerPath -Name Get-OrderedCrossRevisionPlan)
 . (Import-TestFunction -Path $runnerPath -Name Get-FullVmName)
 . (Import-TestFunction -Path $runnerPath -Name Get-ExpectedVmNames)
@@ -212,6 +219,99 @@ finally {
 . (Import-TestFunction -Path $runnerPath -Name Test-StepInProgress)
 . (Import-TestFunction -Path $runnerPath -Name Start-Step)
 . (Import-TestFunction -Path $runnerPath -Name Complete-Step)
+
+$cancelRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-cancel-$PID"
+$cancelSource = Join-Path $cancelRoot 'source'
+$cancelState = Join-Path $cancelRoot 'state'
+$cancelWorktree = Join-Path $cancelRoot 'worktree'
+$cancelMarker = Join-Path $cancelRoot 'started.txt'
+$cancelPids = Join-Path $cancelRoot 'pids.txt'
+$cancelCheckpoint = Join-Path $cancelRoot 'checkpoint.txt'
+$cancelLocationResult = Join-Path $cancelRoot 'location.txt'
+$cancelPs = $null
+try {
+    $null = New-Item -ItemType Directory -Path (Join-Path $cancelSource 'vmbuild\logs') -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $cancelWorktree 'vmbuild') -Force
+    $cancelChild = Join-Path $cancelWorktree 'vmbuild\CancelChild.ps1'
+    [IO.File]::WriteAllText($cancelChild, @'
+param([string] $MarkerPath, [string] $PidPath)
+$descendant = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120') -PassThru
+[IO.File]::WriteAllText($PidPath, "$PID|$($descendant.Id)")
+[IO.File]::WriteAllText($MarkerPath, 'started')
+Start-Sleep -Seconds 120
+'@)
+    [IO.File]::WriteAllText($cancelCheckpoint, 'preserve-me')
+
+    $cancelScript = {
+        param(
+            [string] $StopFunctionText,
+            [string] $InvokeFunctionText,
+            [string] $Repository,
+            [string] $State,
+            [string] $Worktree,
+            [string] $Launcher,
+            [string] $Pwsh,
+            [string] $Marker,
+            [string] $Pids,
+            [string] $LocationResult
+        )
+        . ([scriptblock]::Create($StopFunctionText))
+        . ([scriptblock]::Create($InvokeFunctionText))
+        $global:RepositoryRoot = $Repository
+        $StateRoot = $State
+        $script:ChildLauncherPath = $Launcher
+        $pwshPath = $Pwsh
+        $initialLocation = (Get-Location).Path
+        try {
+            Invoke-ChildScript -WorktreePath $Worktree -ScriptName 'CancelChild.ps1' `
+                -Parameters ([ordered]@{ MarkerPath = $Marker; PidPath = $Pids }) -Label 'cancel-test'
+        }
+        finally {
+            [IO.File]::WriteAllText($LocationResult, "$(Get-Location)")
+            if ((Get-Location).Path -ne $initialLocation) { throw 'Invoke-ChildScript did not restore the caller location.' }
+        }
+    }
+    $cancelPs = [powershell]::Create()
+    $null = $cancelPs.AddScript($cancelScript).
+        AddArgument($stopLauncherFunction.ToString()).
+        AddArgument($invokeChildFunction.ToString()).
+        AddArgument($cancelSource).
+        AddArgument($cancelState).
+        AddArgument($cancelWorktree).
+        AddArgument($childLauncherPath).
+        AddArgument($pwshPath).
+        AddArgument($cancelMarker).
+        AddArgument($cancelPids).
+        AddArgument($cancelLocationResult)
+    $cancelAsync = $cancelPs.BeginInvoke()
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    while (-not (Test-Path -LiteralPath $cancelMarker -PathType Leaf) -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    $publishedPids = if (Test-Path -LiteralPath $cancelPids) {
+        @((Get-Content -LiteralPath $cancelPids -Raw).Trim() -split '\|' | ForEach-Object { [int]$_ })
+    }
+    else {
+        @()
+    }
+    Assert-Equal 2 $publishedPids.Count 'cancellation fixture publishes launcher and descendant IDs'
+    $cancelPs.Stop()
+    try { $null = $cancelPs.EndInvoke($cancelAsync) } catch [Management.Automation.PipelineStoppedException] { }
+    Start-Sleep -Seconds 1
+    Assert-Equal $null (Get-Process -Id $publishedPids[0] -ErrorAction SilentlyContinue) 'cancellation cleanup stops the launcher process'
+    Assert-Equal $null (Get-Process -Id $publishedPids[1] -ErrorAction SilentlyContinue) 'launcher Job Object stops descendant workers'
+    Assert-Equal 'preserve-me' (Get-Content -LiteralPath $cancelCheckpoint -Raw) 'cancellation preserves checkpoint state'
+    Assert-True (Test-Path -LiteralPath $cancelLocationResult -PathType Leaf) 'cancellation executes location-restoration finally blocks'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $cancelState -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '.child-*' }).Count 'cancellation removes temporary launcher artifacts'
+}
+finally {
+    if ($cancelPs) { $cancelPs.Dispose() }
+    foreach ($processId in @($publishedPids)) {
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $cancelRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $global:RepositoryRoot = $repoRoot
 try {
@@ -272,6 +372,21 @@ Write-Output 'TRANSCRIPT:runner-output'
     Assert-Equal 'ran' (Get-Content -LiteralPath $transcriptMarker -Raw) 'child runs after the normal log path is writable'
     Assert-True ((Get-Content -LiteralPath $sharedTranscript -Raw) -like '*TRANSCRIPT:runner-output*') `
         'runner transcript is written under the normal log directory'
+
+    $nativeExitScript = Join-Path $transcriptWorktree 'vmbuild\NativeExit.ps1'
+    [IO.File]::WriteAllText($nativeExitScript, '[CmdletBinding()] param([int] $Code) exit $Code')
+    $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $true
+        foreach ($expectedExit in @(55, 23)) {
+            $actualExit = Invoke-ChildScript -WorktreePath $transcriptWorktree -ScriptName 'NativeExit.ps1' `
+                -Parameters ([ordered]@{ Code = $expectedExit }) -Label "native-exit-$expectedExit"
+            Assert-Equal $expectedExit $actualExit "native error promotion does not reclassify exit $expectedExit as cancellation"
+        }
+    }
+    finally {
+        $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+    }
 
     Remove-Item -LiteralPath $transcriptMarker -Force
     $blockedSharedPath = Join-Path $transcriptSource 'vmbuild\logs\CrossRevision\Runner\blocked-transcript.log'

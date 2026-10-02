@@ -896,6 +896,50 @@ function Complete-Step {
     Save-State
 }
 
+function Stop-CrossRevisionLauncher {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $IdentityPath,
+        [Parameter(Mandatory = $true)]
+        [string] $InvocationToken
+    )
+
+    $identity = Get-Content -LiteralPath $IdentityPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ("$($identity.InvocationToken)" -ne $InvocationToken) {
+        throw "Cancellation identity token mismatch for '$IdentityPath'; refusing to terminate PID $($identity.ProcessId)."
+    }
+    $processId = [int]$identity.ProcessId
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if (-not $process) { return }
+    try {
+        # Force one stable OS process handle now. All verification, termination,
+        # and waiting below stays bound to this handle even if the numeric PID is
+        # recycled after the launcher exits.
+        $null = $process.Handle
+        $expectedStart = [DateTime]::Parse("$($identity.StartTimeUtc)").ToUniversalTime()
+        if ($process.StartTime.ToUniversalTime() -ne $expectedStart) {
+            throw "PID $processId start time changed; refusing to terminate a reused process ID."
+        }
+
+        $cim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$processId" -ErrorAction Stop
+        if (-not $cim) {
+            if ($process.HasExited) { return }
+            throw "Could not verify the command line for active cross-revision launcher PID $processId."
+        }
+        if ("$($cim.CommandLine)" -notlike "*$InvocationToken*") {
+            throw "PID $processId no longer belongs to cross-revision invocation $InvocationToken; refusing to terminate it."
+        }
+
+        $process.Kill()
+        if (-not $process.WaitForExit(15000)) {
+            throw "Cross-revision launcher PID $processId did not exit within 15 seconds after cancellation."
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-ChildScript {
     param(
         [string] $WorktreePath,
@@ -923,23 +967,39 @@ function Invoke-ChildScript {
         if ($stream) { $stream.Dispose() }
     }
     $parameterPath = Join-Path $StateRoot ('.child-parameters-{0}-{1}.clixml' -f $PID, [guid]::NewGuid().ToString('N'))
+    $pidPath = Join-Path $StateRoot ('.child-pid-{0}-{1}.txt' -f $PID, [guid]::NewGuid().ToString('N'))
+    $invocationToken = [guid]::NewGuid().ToString('N')
+    $childInvocationCompleted = $false
     Write-Host "===== $Label =====" -ForegroundColor Magenta
     Push-Location $vmbuildPath
     try {
         $Parameters | Export-Clixml -LiteralPath $parameterPath -Depth 4 -ErrorAction Stop
         $global:LASTEXITCODE = 0
-        & $pwshPath -NoLogo -NoProfile -NonInteractive -File $script:ChildLauncherPath `
-            -ScriptPath $scriptPath -ParameterPath $parameterPath 2>&1 |
-            Tee-Object -FilePath $logPath -Append -ErrorAction Stop |
-            Out-Host
-        $childExitCode = [int]$LASTEXITCODE
+        $hadNativePreference = $null -ne (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue)
+        if ($hadNativePreference) { $oldNativePreference = $PSNativeCommandUseErrorActionPreference }
+        try {
+            if ($hadNativePreference) { $PSNativeCommandUseErrorActionPreference = $false }
+            & $pwshPath -NoLogo -NoProfile -NonInteractive -File $script:ChildLauncherPath `
+                -ScriptPath $scriptPath -ParameterPath $parameterPath -PidPath $pidPath -InvocationToken $invocationToken 2>&1 |
+                Tee-Object -FilePath $logPath -Append -ErrorAction Stop |
+                Out-Host
+            $childExitCode = [int]$LASTEXITCODE
+            $childInvocationCompleted = $true
+        }
+        finally {
+            if ($hadNativePreference) { $PSNativeCommandUseErrorActionPreference = $oldNativePreference }
+        }
         if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
             throw "Mixed-test transcript verification failed for '$logPath'."
         }
         return $childExitCode
     }
     finally {
+        if (-not $childInvocationCompleted -and (Test-Path -LiteralPath $pidPath -PathType Leaf)) {
+            Stop-CrossRevisionLauncher -IdentityPath $pidPath -InvocationToken $invocationToken
+        }
         Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
         Pop-Location
     }
 }
