@@ -833,19 +833,19 @@ $Install_Secondary = {
             $secondaryMp = Wait-CMRoleRegistered -RoleName 'Secondary MP' -ServerFQDN $secondaryFQDN `
                 -TimeoutSeconds 900 -PollSeconds 15 `
                 -Probe {
-                    Get-CMManagementPoint -SiteSystemServerName $secondaryFQDN -ErrorAction Stop
-                }
-            $secondaryMpIis = $null
-            if ($secondaryMp) {
-                $secondaryMpIis = Wait-CMRoleRegistered -RoleName 'Secondary MP IIS' -ServerFQDN $secondaryFQDN `
-                    -TimeoutSeconds 900 -PollSeconds 15 `
-                    -Probe {
-                        Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
-                            Import-Module WebAdministration -ErrorAction Stop
-                            Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
-                        } -ErrorAction Stop
+                    Get-CMManagementPoint -SiteCode $secondarySiteCode -ErrorAction Stop | Where-Object {
+                        $networkPath = "$($_.NetworkOSPath)" -replace '^\\\\', ''
+                        $networkPath -ieq $secondaryFQDN -or $networkPath -ieq $SecondaryName
                     }
-            }
+                }
+            $secondaryMpIis = Wait-CMRoleRegistered -RoleName 'Secondary MP IIS' -ServerFQDN $secondaryFQDN `
+                -TimeoutSeconds 900 -PollSeconds 15 `
+                -Probe {
+                    Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
+                        Import-Module WebAdministration -ErrorAction Stop
+                        Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
+                    } -ErrorAction Stop
+                }
             if ($secondaryDp -and $secondaryMp -and $secondaryMpIis -and $secondaryHttpsReady) {
                 Write-DscStatus "Secondary DP and MP on $secondaryFQDN are provider-visible, and the SMS_MP IIS application is ready." -MachineName $SecondaryName
                 $secondaryInstallSucceeded = $true
