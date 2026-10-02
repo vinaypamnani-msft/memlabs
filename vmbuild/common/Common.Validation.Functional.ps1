@@ -5727,6 +5727,96 @@ function Test-SiteSystemFunctionality {
             $dpServesOsd = ("$dpServesOsdInner" -eq 'True')
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+            function Test-DpSignatureConfigPendingContent {
+                [CmdletBinding()]
+                param(
+                    [Parameter(Mandatory)][string]$ConfigPath,
+                    [Parameter(Mandatory)][string]$Description,
+                    [Parameter(Mandatory)][string]$FileName,
+                    [Parameter(Mandatory)][string]$LineNumber,
+                    [Parameter(Mandatory)][string]$PhysicalPath,
+                    [Parameter(Mandatory)][bool]$SignatureSharePresent,
+                    [Parameter(Mandatory)][ValidateSet('Missing', 'Empty', 'Populated', 'Unknown')][string]$PackageState,
+                    [Parameter(Mandatory)][bool]$DpRegistryPresent,
+                    [Parameter(Mandatory)][bool]$DpSharePresent,
+                    [Parameter(Mandatory)][bool]$ProviderRan,
+                    [Parameter(Mandatory)][bool]$ProviderFailed,
+                    [Parameter(Mandatory)][string[]]$LocalNames
+                )
+
+                if ($ConfigPath -notmatch '^Default Web Site/(?:NOCERT_|CCMTOKENAUTH_)?SMS_DP_SMSSIG\$$' -or
+                    $Description -ine 'Cannot read configuration file' -or
+                    $LineNumber -ne '0' -or
+                    $SignatureSharePresent -or
+                    $PackageState -notin @('Missing', 'Empty') -or
+                    -not $DpRegistryPresent -or
+                    -not $DpSharePresent -or
+                    -not $ProviderRan -or
+                    $ProviderFailed) {
+                    return $false
+                }
+
+                $normalizedFile = $FileName -replace '^\\\\\?\\UNC\\', '\\'
+                if ($normalizedFile -notmatch '^\\\\([^\\]+)\\SMSSIG\$\\web\.config$') {
+                    return $false
+                }
+                $fileServer = $Matches[1].TrimEnd('.')
+
+                $normalizedPhysicalPath = $PhysicalPath -replace '/', '\'
+                if ($normalizedPhysicalPath -notmatch '^\\\\([^\\]+)\\SMSSIG\$$') {
+                    return $false
+                }
+                $pathServer = $Matches[1].TrimEnd('.')
+
+                $selfNames = @($LocalNames | Where-Object { $_ } | ForEach-Object { "$_".TrimEnd('.') })
+                return $fileServer -iin $selfNames -and $pathServer -iin $selfNames
+            }
+
+            function Get-DpProviderProvisioningEvidence {
+                [CmdletBinding()]
+                param(
+                    [AllowEmptyCollection()][string[]]$Lines
+                )
+
+                $allLines = @($Lines | Where-Object { $null -ne $_ })
+                if ($allLines.Count -eq 0) {
+                    return [pscustomobject]@{ Ran = $false; Failed = $false }
+                }
+
+                $sessionStart = -1
+                for ($i = 0; $i -lt $allLines.Count; $i++) {
+                    if ($allLines[$i] -match 'CSMSDPInstProv::CreateVirtualDirectory creating virtual directory SMS_DP_SMSPKG\$') {
+                        $sessionStart = $i
+                    }
+                }
+                $sessionLines = if ($sessionStart -ge 0) {
+                    @($allLines[$sessionStart..($allLines.Count - 1)])
+                }
+                else {
+                    $allLines
+                }
+
+                $ran = @($sessionLines | Where-Object {
+                        $_ -match 'Successfully created the virtual directory SMS_DP_SMSSIG\$'
+                    }).Count -gt 0
+                $failed = @($sessionLines | Where-Object {
+                        $_ -match 'Failed to create the content library|CreateContentLibrary.*fail|fatal error'
+                    }).Count -gt 0
+                return [pscustomobject]@{ Ran = $ran; Failed = $failed }
+            }
+
+            function Get-DpProviderLogPath {
+                [CmdletBinding()]
+                param(
+                    [AllowEmptyString()][string]$DpSharePath
+                )
+
+                if ([string]::IsNullOrWhiteSpace($DpSharePath)) {
+                    return $null
+                }
+                return "$($DpSharePath.TrimEnd('\'))\sms\logs\smsdpprov.log"
+            }
+
             $results.Details.Add("CMD: Get-SmbShare -Name 'SMS_DP`$'")
             $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
             if ($share) {
@@ -5884,6 +5974,78 @@ function Test-SiteSystemFunctionality {
                     $badDesc = ''
                     if ($appcmdText -match '(?m)^\s*Description:\s*(\S.*?)\s*$') { $badDesc = $Matches[1] }
                     if (-not $badDesc) { $badDesc = (($appcmdText -replace '\s+', ' ').Trim()) }
+
+                    if ($cfgPath -match '(?:NOCERT_|CCMTOKENAUTH_)?SMS_DP_SMSSIG\$$' -and
+                        $badDesc -ieq 'Cannot read configuration file' -and
+                        $badLine -eq '0') {
+                        $appName = $cfgPath -replace '^Default Web Site/', ''
+                        $signatureApp = Get-WebApplication -Site 'Default Web Site' -Name $appName -ErrorAction SilentlyContinue
+                        $signatureShare = Get-SmbShare -Name 'SMSSIG$' -ErrorAction SilentlyContinue
+                        $dpShare = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
+                        $dpRegistryPresent = Test-Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP'
+                        $packageState = 'Unknown'
+                        if ($dpRegistryPresent) {
+                            try {
+                                $dpProperties = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -ErrorAction Stop
+                                $contentLibraryPath = "$($dpProperties.ContentLibraryPath)"
+                                if ($contentLibraryPath -and $contentLibraryPath -notmatch '^\\\\') {
+                                    $pkgLibPath = Join-Path $contentLibraryPath 'PkgLib'
+                                    if (-not (Test-Path -LiteralPath $pkgLibPath)) {
+                                        $packageState = 'Missing'
+                                    }
+                                    else {
+                                        $packageCount = @(Get-ChildItem -LiteralPath $pkgLibPath -Filter '*.INI' -File -ErrorAction Stop).Count
+                                        $packageState = if ($packageCount -eq 0) { 'Empty' } else { 'Populated' }
+                                    }
+                                }
+                            }
+                            catch {
+                                $packageState = 'Unknown'
+                            }
+                        }
+
+                        $providerLog = Get-DpProviderLogPath -DpSharePath "$($dpShare.Path)"
+                        if ($providerLog -and -not (Test-Path -LiteralPath $providerLog)) {
+                            $providerLog = $null
+                        }
+                        $providerRan = $false
+                        $providerFailed = $false
+                        if ($providerLog) {
+                            try {
+                                $providerLines = @(Get-Content -LiteralPath $providerLog -ErrorAction Stop)
+                                $providerEvidence = Get-DpProviderProvisioningEvidence -Lines $providerLines
+                                $providerRan = [bool]$providerEvidence.Ran
+                                $providerFailed = [bool]$providerEvidence.Failed
+                            }
+                            catch {
+                                $providerFailed = $true
+                            }
+                        }
+
+                        $computerSystem = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+                        $localNames = @($env:COMPUTERNAME)
+                        if ($computerSystem.Domain) {
+                            $localNames += "$env:COMPUTERNAME.$($computerSystem.Domain)"
+                        }
+                        $pendingSignatureParams = @{
+                            ConfigPath           = $cfgPath
+                            Description          = $badDesc
+                            FileName             = $badFile
+                            LineNumber           = "$badLine"
+                            PhysicalPath         = "$($signatureApp.PhysicalPath)"
+                            SignatureSharePresent = [bool]$signatureShare
+                            PackageState         = $packageState
+                            DpRegistryPresent    = [bool]$dpRegistryPresent
+                            DpSharePresent       = [bool]$dpShare
+                            ProviderRan          = [bool]$providerRan
+                            ProviderFailed       = [bool]$providerFailed
+                            LocalNames           = $localNames
+                        }
+                        if (Test-DpSignatureConfigPendingContent @pendingSignatureParams) {
+                            $results.Details.Add("WARN: IIS signature application '$cfgPath' still references '$($signatureApp.PhysicalPath)' while ConfigMgr has not imported any packages or published the local 'SMSSIG`$' share. This is a pre-content DP provisioning state; ConfigMgr reconciles the path when signature content is published.")
+                            continue
+                        }
+                    }
 
                     $where = ''
                     if ($badFile) {
@@ -8872,9 +9034,24 @@ $Phase11DpContentLogCollector = {
     # site/app pool looks identical to "content never arrived" from the site's side.
     try {
         Import-Module WebAdministration -ErrorAction Stop
-        foreach ($vd in @('SMS_DP_SMSPKG$', 'SMS_DP_SMSSIG$', 'NOCERT_SMS_DP_SMSPKG$')) {
+        $signatureShare = Get-SmbShare -Name 'SMSSIG$' -ErrorAction SilentlyContinue
+        if ($signatureShare) {
+            $lines += "SMSSIG$ share = '$($signatureShare.Path)'"
+            $lines += "SMSSIG$ local path exists = $(Test-Path -LiteralPath $signatureShare.Path)"
+            $signatureAccess = @(Get-SmbShareAccess -Name 'SMSSIG$' -ErrorAction SilentlyContinue |
+                    ForEach-Object { "$($_.AccountName):$($_.AccessControlType):$($_.AccessRight)" })
+            $lines += "SMSSIG$ share access = $($signatureAccess -join ', ')"
+        }
+        else {
+            $lines += 'SMSSIG$ share = MISSING'
+        }
+        foreach ($vd in @('SMS_DP_SMSPKG$', 'SMS_DP_SMSSIG$', 'NOCERT_SMS_DP_SMSPKG$', 'NOCERT_SMS_DP_SMSSIG$')) {
             $exists = Test-Path "IIS:\Sites\Default Web Site\$vd"
             $lines += "IIS vdir '$vd': $(if ($exists) { 'present' } else { 'MISSING' })"
+            if ($exists) {
+                $app = Get-WebApplication -Site 'Default Web Site' -Name $vd -ErrorAction SilentlyContinue
+                $lines += "IIS vdir '$vd' physical path = '$($app.PhysicalPath)'"
+            }
         }
         $site = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
         if ($site) { $lines += "IIS 'Default Web Site' state = $($site.State)" }
