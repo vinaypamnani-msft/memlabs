@@ -49,6 +49,7 @@ function Import-TestFunction {
 
 . (Import-TestFunction -Path $functionsPath -Name 'Get-SecondarySiteInstallMonitorSnapshot')
 . (Import-TestFunction -Path $functionsPath -Name 'Test-SecondarySiteReplicationActive')
+. (Import-TestFunction -Path $functionsPath -Name 'Test-MPHttpsBinding')
 . (Import-TestFunction -Path $functionsPath -Name 'Receive-SecondarySiteInstallJobResult')
 
 $script:SiteReadFailure = $null
@@ -117,6 +118,15 @@ Assert-True (Test-SecondarySiteReplicationActive -ReplicationStatus $activeRepli
 Assert-True (-not (Test-SecondarySiteReplicationActive -ReplicationStatus $incompleteReplication)) 'one incomplete DRS direction is not ready'
 Assert-True (-not (Test-SecondarySiteReplicationActive -ReplicationStatus $null)) 'missing DRS status is not ready'
 
+$script:HttpsProbeResult = $true
+function Invoke-Command { param($ComputerName, $ScriptBlock, $ErrorAction) return $script:HttpsProbeResult }
+function Write-DscStatus { param($Status) }
+Assert-True (Test-MPHttpsBinding -MPFQDN 'secondary.example.test') 'healthy Secondary HTTPS binding is accepted'
+$script:HttpsProbeResult = $false
+Assert-True (-not (Test-MPHttpsBinding -MPFQDN 'secondary.example.test')) 'missing or stale Secondary HTTPS binding fails readiness'
+Remove-Item Function:\Invoke-Command -ErrorAction SilentlyContinue
+Remove-Item Function:\Write-DscStatus -ErrorAction SilentlyContinue
+
 $jobs = New-Object System.Collections.Generic.List[System.Management.Automation.Job]
 try {
     $goodJob = Start-Job -Name 'SecondaryResilience-Good' -ScriptBlock {
@@ -162,8 +172,14 @@ Assert-True ($installerText -match 'Reset-CMSiteProviderConnection\s+-SiteCode\s
 Assert-True ($installerText -match '\$recoveryObservedInProgress') 'recovery must enter an in-progress state before Active is accepted'
 Assert-True ($installerText -match 'if\s*\(-not \$installed\s+-and\s+-not \$recoveryRequested\)') 'recovery does not fall through into a duplicate New-CMSecondarySite request'
 Assert-True ($installerText -match 'Test-DrsLinkHealthyViaSql\s+-SqlDataSource') 'lagging DRS summary has a SQL ground-truth fallback'
-Assert-True ($installerText -match 'if\s*\(\$drsActive\)[\s\S]{0,1200}Wait-CMRoleRegistered\s+-RoleName\s+''Secondary DP''') 'child success requires Active DRS and a provider-visible Secondary DP'
+Assert-True ($installerText -match 'if\s*\(\$drsActive\)[\s\S]{0,4000}Wait-CMRoleRegistered\s+-RoleName\s+''Secondary DP''') 'child success requires Active DRS and a provider-visible Secondary DP'
 Assert-True ($installerText -match 'SMS_DistributionPointInfo') 'Secondary DP readiness uses the authoritative provider class'
+Assert-True ($installerText -match 'if\s*\(\$usePKI\)[\s\S]{0,1800}Confirm-MPHttpsBinding\s+-MPFQDN\s+\$secondaryFQDN') 'PKI resume always ensures the Secondary MP HTTPS binding'
+Assert-True ($installerText -match 'Test-MPHttpsBinding\s+-MPFQDN\s+\$secondaryFQDN') 'PKI Secondary success verifies binding health after repair'
+Assert-True ($installerText -match 'Restart-Service\s+-Name\s+SMS_SITE_COMPONENT_MANAGER[\s\S]{0,400}retry implicit HTTPS MP provisioning') 'PKI resume forces the Secondary MP installer out of backoff'
+Assert-True ($installerText -match 'Wait-CMRoleRegistered\s+-RoleName\s+''Secondary MP''[\s\S]{0,300}Get-CMManagementPoint\s+-SiteSystemServerName\s+\$secondaryFQDN') 'child success requires a provider-visible Secondary MP'
+Assert-True ($installerText -match 'Wait-CMRoleRegistered\s+-RoleName\s+''Secondary MP IIS''[\s\S]{0,500}Get-WebApplication\s+-Site\s+''Default Web Site''\s+-Name\s+''SMS_MP''') 'child success requires the Secondary SMS_MP IIS application'
+Assert-True ($installerText -match 'if\s*\(\$secondaryDp\s+-and\s+\$secondaryMp\s+-and\s+\$secondaryMpIis\s+-and\s+\$secondaryHttpsReady\)') 'secondary completion requires DP, MP, MP IIS, and HTTPS readiness together'
 Assert-True ($installerText -match 'Receive-SecondarySiteInstallJobResult\s+-Job\s+\$secondaryJob') 'parent drains and validates each exact child job'
 Assert-True ($installerText -match 'if\s*\(\$secondaryJobsSucceeded\)[\s\S]{0,500}InstallSecondary''\s+-Status\s+''Completed''') 'InstallSecondary completion is gated on validated child results'
 

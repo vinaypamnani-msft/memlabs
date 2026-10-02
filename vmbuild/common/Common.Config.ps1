@@ -111,6 +111,126 @@ function Get-ConfigCmOptions {
     return $null
 }
 
+function Sync-ExistingHierarchyOptionsToDeployConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $ExistingVMs
+    )
+
+    if (-not $Config.virtualMachines -or -not $Config.vmOptions.domainName) { return }
+    $siteRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+    $existingTopSites = @($ExistingVMs | Where-Object {
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.siteCode
+        })
+    if ($existingTopSites.Count -eq 0) { return }
+
+    $allSites = @($ExistingVMs) + @($Config.virtualMachines)
+    $hierarchies = @()
+    $configVmOwners = @{}
+    foreach ($topSite in $existingTopSites) {
+        $siteCodes = @{}
+        $siteCodes["$($topSite.siteCode)".ToLowerInvariant()] = $true
+        $added = $true
+        while ($added) {
+            $added = $false
+            foreach ($site in $allSites) {
+                if (-not $site.siteCode -or -not $site.parentSiteCode) { continue }
+                $parentKey = "$($site.parentSiteCode)".ToLowerInvariant()
+                $siteKey = "$($site.siteCode)".ToLowerInvariant()
+                if ($siteCodes.ContainsKey($parentKey) -and -not $siteCodes.ContainsKey($siteKey)) {
+                    $siteCodes[$siteKey] = $true
+                    $added = $true
+                }
+            }
+        }
+
+        $matchingConfigVms = @($Config.virtualMachines | Where-Object {
+                $_.role -in $siteRoles -and $_.siteCode -and
+                $siteCodes.ContainsKey("$($_.siteCode)".ToLowerInvariant())
+            })
+        if ($matchingConfigVms.Count -eq 0) { continue }
+
+        foreach ($siteVm in $matchingConfigVms) {
+            $vmKey = if ($siteVm.vmName) { "$($siteVm.vmName)".ToLowerInvariant() } else { "$($siteVm.role)|$($siteVm.siteCode)".ToLowerInvariant() }
+            if ($configVmOwners.ContainsKey($vmKey)) {
+                throw "ConfigMgr hierarchy ownership is ambiguous for '$($siteVm.vmName)' (site '$($siteVm.siteCode)'): both '$($configVmOwners[$vmKey])' and '$($topSite.siteCode)' claim it."
+            }
+            $configVmOwners[$vmKey] = "$($topSite.siteCode)"
+        }
+        $hierarchies += [pscustomobject]@{
+            TopSite           = $topSite
+            MatchingConfigVms = $matchingConfigVms
+            CmOptions         = $null
+        }
+    }
+
+    foreach ($hierarchy in $hierarchies) {
+        $topSite = $hierarchy.TopSite
+        $authoritativeCm = $topSite.cmOptions
+        $recoveredFromBackup = $false
+        if (-not $authoritativeCm) {
+            $authoritativeCm = Get-CmOptionsFromSiteServerBackup -VmName $topSite.vmName -DomainName $Config.vmOptions.domainName
+            $recoveredFromBackup = $true
+        }
+        if (-not $authoritativeCm) {
+            throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($Config.vmOptions.domainName)': site server '$($topSite.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
+        }
+        if ($recoveredFromBackup) {
+            Write-Log "Recovered authoritative ConfigMgr options (UsePKI=$($authoritativeCm.UsePKI)) from '$($topSite.vmName)' deployConfig backup and stamped its VM note." -Verbose
+            try { Set-VMNote -vmName $topSite.vmName -vmNote ([PSCustomObject]@{ cmOptions = $authoritativeCm }) } catch {}
+        }
+        $hierarchy.CmOptions = $authoritativeCm
+    }
+
+    foreach ($hierarchy in $hierarchies) {
+        foreach ($siteVm in $hierarchy.MatchingConfigVms) {
+            $clone = $hierarchy.CmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            $siteVm | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
+        }
+    }
+
+    $configSiteVms = @($Config.virtualMachines | Where-Object { $_.role -in $siteRoles -and $_.siteCode })
+    if ($hierarchies.Count -eq 1 -and $configVmOwners.Count -eq $configSiteVms.Count) {
+        $authoritativeCm = $hierarchies[0].CmOptions
+        $rootClone = $authoritativeCm | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+        $Config | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $rootClone -Force
+
+        if ([bool]$authoritativeCm.UsePKI) {
+            $existingPki = $ExistingVMs | Where-Object {
+                $_.role -eq 'DC' -and $_.pkiOptions -and $_.pkiOptions.EnablePKI
+            } | Select-Object -First 1 -ExpandProperty pkiOptions
+            if ($existingPki) {
+                $pkiClone = $existingPki | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            }
+            elseif ($Config.pkiOptions) {
+                $pkiClone = $Config.pkiOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            }
+            else {
+                $pkiClone = [pscustomobject]@{
+                    EnablePKI      = $true
+                    IssuingCAVM    = ''
+                    UseOfflineRoot = $false
+                    OfflineRootCAVM = ''
+                }
+            }
+            $pkiClone.EnablePKI = $true
+            if (-not $pkiClone.IssuingCAVM) {
+                $issuingCa = @($ExistingVMs) + @($Config.virtualMachines) | Where-Object {
+                    $_.role -eq 'DC' -and $_.InstallCA
+                } | Select-Object -First 1
+                if ($issuingCa) { $pkiClone.IssuingCAVM = $issuingCa.vmName }
+            }
+            $Config | Add-Member -MemberType NoteProperty -Name 'pkiOptions' -Value $pkiClone -Force
+        }
+    }
+
+    return $hierarchies
+}
+
 # Resolves a symbolic ConfigMgr media choice to the concrete version used by
 # deployment and validation. Explicit numeric targets pass through unchanged.
 function Resolve-CmVersionAlias {
@@ -1014,52 +1134,16 @@ function New-DeployConfig {
     )
     try {
 
-        # --- Legacy-lab PKI recovery (must run BEFORE trusting the config's cmOptions) ---
-        # A lab first built on the legacy branch never persisted cmOptions to its VM notes.
-        # When such a lab is later re-deployed with a regenerated config, that config can
-        # carry a cmOptions block whose UsePKI is $false even though the site was actually
-        # built as PKI (HTTPS) -- legacy defaulted DC.InstallCA=$true even for eHTTP labs,
-        # so PKI cannot be inferred from per-VM flags. The stale $false makes the guest run
-        # EnableEHTTP.ps1, the MP web cert is never bound, and the HTTPS MP install fails
-        # with MSI 25055 (SMS_MP never created -> Phase 11 functional validation fails).
-        # The site server keeps a timestamped backup of every deployConfig it was given;
-        # the OLDEST is the original build config and carries the authoritative UsePKI.
-        # So: when the existing top-level site server's VM NOTE has no cmOptions at all
-        # (the legacy signal), recover cmOptions from that backup, stamp the note (so future
-        # runs read it directly), and adopt it here -- overriding the possibly-stale config
-        # block and dropping any per-VM clones so Set-VmCmOptionsResolved re-derives them.
-        # Host-context only (needs PSDirect). A genuine modern eHTTP lab persists cmOptions
-        # to its note, so this is skipped for it.
+        # Existing ConfigMgr hierarchy settings are authoritative for add-to-existing.
+        # Static follow-on fixtures can carry newer/default cmOptions, but child sites
+        # cannot independently change their hierarchy's version or HTTPS mode.
         if ($Common -and -not $Common.InJob -and $configObject.vmOptions.domainName) {
             try {
-                $existingDomainVMs = Get-List -Type VM -DomainName $configObject.vmOptions.domainName
-                $topSiteServer = $existingDomainVMs | Where-Object { $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode } | Select-Object -First 1
-                if ($topSiteServer -and -not $topSiteServer.cmOptions) {
-                    $backupCm = Get-CmOptionsFromSiteServerBackup -VmName $topSiteServer.vmName -DomainName $configObject.vmOptions.domainName
-                    if (-not $backupCm) {
-                        throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($configObject.vmOptions.domainName)': site server '$($topSiteServer.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
-                    }
-                    Write-Log "New-DeployConfig: '$($topSiteServer.vmName)' VM note had no cmOptions (legacy build); recovered cmOptions (UsePKI=$($backupCm.UsePKI)) from its oldest deployConfig backup. Stamping note and adopting for this deploy (prevents eHTTP/MP 25055)." -Verbose
-                    try { Set-VMNote -vmName $topSiteServer.vmName -vmNote ([PSCustomObject]@{ cmOptions = $backupCm }) } catch {}
-                    # Adopt for THIS deploy, overriding the stale block the regenerated
-                    # config carries. Move-CmOptionsToTopLevelSiteServer may already have
-                    # copied that stale (UsePKI=$false) block onto the in-config top site
-                    # server VM, and Resolve-VmCmOptions walks VM->VM (it does NOT read root),
-                    # so we must overwrite it THERE for the corrected value to propagate to
-                    # this hierarchy's child site systems. Also mirror onto root for the guest
-                    # fallback read ($deployConfig.cmOptions). We deliberately touch ONLY this
-                    # recovered top site server (not every site VM) so a second hierarchy in
-                    # the same config keeps its own cmOptions.
-                    $topInConfig = $configObject.virtualMachines | Where-Object { $_.vmName -eq $topSiteServer.vmName } | Select-Object -First 1
-                    if ($topInConfig) {
-                        $topClone = $backupCm | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
-                        $topInConfig | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $topClone -Force
-                    }
-                    $configObject | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $backupCm -Force
-                }
+                $existingDomainVMs = @(Get-List -Type VM -DomainName $configObject.vmOptions.domainName)
+                $null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $configObject -ExistingVMs $existingDomainVMs
             }
             catch {
-                throw "New-DeployConfig: legacy ConfigMgr option recovery failed closed. $($_.Exception.Message)"
+                throw "New-DeployConfig: existing ConfigMgr option recovery failed closed. $($_.Exception.Message)"
             }
         }
 

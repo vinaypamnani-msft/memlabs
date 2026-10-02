@@ -3998,11 +3998,14 @@ function New-VmNote {
             $vmNote | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value $($DeployConfig.pkiOptions) -Force
         }
 
-        # Store cmOptions on the top-level site server (CAS or standalone Primary) so new
-        # deployments to this domain can detect features like EnableBLM from the VM note.
-        if ($null -ne $DeployConfig.cmOptions -and $ThisVm.role -in @('CAS', 'Primary') -and -not $ThisVm.parentSiteCode) {
-            Write-Log "Writing out cmOptions on top-level site server (EnableBLM: $($DeployConfig.cmOptions.EnableBLM))"
-            $vmNote | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $($DeployConfig.cmOptions) -Force
+        # Persist each top-level site's own hierarchy options. Root cmOptions is only
+        # a legacy single-hierarchy mirror and can belong to a different hierarchy.
+        if ($ThisVm.role -in @('CAS', 'Primary') -and -not $ThisVm.parentSiteCode) {
+            $siteCmOptions = if ($ThisVm.cmOptions) { $ThisVm.cmOptions } else { $DeployConfig.cmOptions }
+            if ($null -ne $siteCmOptions) {
+                Write-Log "Writing out cmOptions on top-level site server (EnableBLM: $($siteCmOptions.EnableBLM))"
+                $vmNote | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $siteCmOptions -Force
+            }
         }
 
         Set-VMNote -vmName $vmName -vmNote $vmNote -force:$Force

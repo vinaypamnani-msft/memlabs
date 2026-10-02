@@ -1464,6 +1464,44 @@ function Confirm-MPHttpsBinding {
     }
 }
 
+function Test-MPHttpsBinding {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$MPFQDN
+    )
+
+    $probe = {
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            $binding = Get-WebBinding -Name 'Default Web Site' -Port 443 -Protocol 'https' -ErrorAction SilentlyContinue
+            if (-not $binding) { return $false }
+
+            $sslText = @(netsh http show sslcert ipport=0.0.0.0:443 2>&1) -join "`n"
+            $match = [regex]::Match($sslText, '(?im)Certificate Hash\s*:\s*([0-9a-f ]+)')
+            if (-not $match.Success) { return $false }
+            $thumbprint = ($match.Groups[1].Value -replace '\s+', '').ToUpperInvariant()
+            $now = Get-Date
+            $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object {
+                $_.Thumbprint -eq $thumbprint -and $_.NotBefore -lt $now -and $_.NotAfter -gt $now -and
+                ($_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.1')
+            } | Select-Object -First 1
+            return [bool]$cert
+        }
+        catch {
+            return $false
+        }
+    }
+
+    try {
+        $result = @(Invoke-Command -ComputerName $MPFQDN -ScriptBlock $probe -ErrorAction Stop)
+        return $result.Count -gt 0 -and [bool]$result[-1]
+    }
+    catch {
+        Write-DscStatus "WARNING: Could not verify IIS 443 SSL binding health on $MPFQDN`: $($_.Exception.Message)."
+        return $false
+    }
+}
+
 function Install-MP {
     param (
         [string]

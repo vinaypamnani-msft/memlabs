@@ -800,18 +800,63 @@ $Install_Secondary = {
 
         if ($drsActive) {
             Write-DscStatus "Secondary site replication link is 'Active'." -MachineName $SecondaryName
+            $secondaryHttpsReady = -not $usePKI
+            if ($usePKI) {
+                $existingMpApp = $null
+                try {
+                    $existingMpApp = Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
+                        Import-Module WebAdministration -ErrorAction Stop
+                        Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
+                    } -ErrorAction Stop
+                }
+                catch { }
+                $mpBindingRepaired = Confirm-MPHttpsBinding -MPFQDN $secondaryFQDN
+                $secondaryHttpsReady = Test-MPHttpsBinding -MPFQDN $secondaryFQDN
+                if (-not $existingMpApp -or $mpBindingRepaired) {
+                    try {
+                        Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
+                            Restart-Service -Name SMS_SITE_COMPONENT_MANAGER -Force -ErrorAction Stop
+                        } -ErrorAction Stop
+                        Write-DscStatus "Restarted SMS_SITE_COMPONENT_MANAGER on $secondaryFQDN to retry implicit HTTPS MP provisioning." -MachineName $SecondaryName
+                    }
+                    catch {
+                        Write-DscStatus "Could not restart SMS_SITE_COMPONENT_MANAGER on $secondaryFQDN`: $($_.Exception.Message). The bounded MP readiness wait continues." -Warning -MachineName $SecondaryName
+                    }
+                }
+            }
             $secondaryDp = Wait-CMRoleRegistered -RoleName 'Secondary DP' -ServerFQDN $secondaryFQDN `
                 -TimeoutSeconds 900 -PollSeconds 15 `
                 -Probe {
                     Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointInfo `
                         -Filter "ServerName='$secondaryFQDN'" -ErrorAction Stop
                 }
-            if ($secondaryDp) {
-                Write-DscStatus "Secondary DP on $secondaryFQDN is provider-visible; downstream boundary-group and content reconciliation can start." -MachineName $SecondaryName
+            $secondaryMp = Wait-CMRoleRegistered -RoleName 'Secondary MP' -ServerFQDN $secondaryFQDN `
+                -TimeoutSeconds 900 -PollSeconds 15 `
+                -Probe {
+                    Get-CMManagementPoint -SiteSystemServerName $secondaryFQDN -ErrorAction Stop
+                }
+            $secondaryMpIis = $null
+            if ($secondaryMp) {
+                $secondaryMpIis = Wait-CMRoleRegistered -RoleName 'Secondary MP IIS' -ServerFQDN $secondaryFQDN `
+                    -TimeoutSeconds 900 -PollSeconds 15 `
+                    -Probe {
+                        Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
+                            Import-Module WebAdministration -ErrorAction Stop
+                            Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
+                        } -ErrorAction Stop
+                    }
+            }
+            if ($secondaryDp -and $secondaryMp -and $secondaryMpIis -and $secondaryHttpsReady) {
+                Write-DscStatus "Secondary DP and MP on $secondaryFQDN are provider-visible, and the SMS_MP IIS application is ready." -MachineName $SecondaryName
                 $secondaryInstallSucceeded = $true
             }
             else {
-                Write-DscStatus "Secondary site '$secondarySiteCode' is Active, but its implicit Distribution Point role was not provider-visible after 15 minutes. Downstream content targeting would be unsafe." -Failure -MachineName $SecondaryName
+                $missingRoles = @()
+                if (-not $secondaryDp) { $missingRoles += 'DP provider role' }
+                if (-not $secondaryMp) { $missingRoles += 'MP provider role' }
+                elseif (-not $secondaryMpIis) { $missingRoles += 'SMS_MP IIS application' }
+                if (-not $secondaryHttpsReady) { $missingRoles += 'healthy IIS HTTPS binding' }
+                Write-DscStatus "Secondary site '$secondarySiteCode' is Active, but implicit role readiness failed after bounded waits: $($missingRoles -join ', ')." -Failure -MachineName $SecondaryName
             }
         }
     }
