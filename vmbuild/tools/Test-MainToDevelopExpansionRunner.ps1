@@ -8,6 +8,7 @@ param([string] $RootPath)
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $repoRoot = Split-Path -Parent $RootPath
 $runnerPath = Join-Path $PSScriptRoot 'Invoke-MainToDevelopExpansionTest.ps1'
+$startTestPath = Join-Path $RootPath 'Start-Test.ps1'
 $childLauncherPath = Join-Path $PSScriptRoot 'Invoke-PinnedChildScript.ps1'
 $newLabPath = Join-Path $RootPath 'New-Lab.ps1'
 $phasesPath = Join-Path $RootPath 'common\Common.Phases.ps1'
@@ -113,10 +114,34 @@ Assert-Equal $false (Test-Path -LiteralPath $stateRoot) 'single-family plan rema
 
 $newLabText = [IO.File]::ReadAllText($newLabPath)
 $phasesText = [IO.File]::ReadAllText($phasesPath)
+$runnerText = [IO.File]::ReadAllText($runnerPath)
+$startTestText = [IO.File]::ReadAllText($startTestPath)
 Assert-True ($newLabText -notmatch '\$global:StartPhase\s*=') 'New-Lab does not reassign its validated StartPhase parameter in global scope'
 Assert-True ($newLabText -match '\$global:MemLabsStartPhase\s*=\s*\[int\]\$StartPhase') 'New-Lab publishes the phase mode under a non-parameter global name'
 Assert-True ($phasesText -match '\$global:MemLabsStartPhase') 'phase preparation consumes the non-parameter start-phase flag'
 Assert-True ($newLabText -match 'AdditionalInfo\s+\(\$deployConfig\s+\|\s+ConvertTo-Json\s+-Depth\s+12\)') 'New-Lab crash details serialize the complete deployment config'
+Assert-True ($runnerText -match '\[switch\]\s*\$PauseAtFamilyBoundary' -and
+    $runnerText -match '(?s)FAMILY BOUNDARY:.+?exit 56') 'runner checkpoints and returns only at a completed family boundary'
+Assert-True ($startTestText -match "Invoke-MixedRevisionGitRefresh -Context 'between mixed-revision families'" -and
+    $startTestText -match '\$exitCode -ne 56' -and
+    $startTestText -match 'Restarting mixed-revision runner at develop') 'Start-Test pulls and relaunches the runner between families'
+$mixedCycleText = (Import-TestFunction -Path $startTestPath -Name 'Invoke-MainToDevelopExpansionCycle').ToString()
+$allSelectorIndex = $mixedCycleText.IndexOf("`$arguments += '-All'")
+$testSelectorIndex = $mixedCycleText.IndexOf("`$arguments += @('-Test', `$TestPrefix)")
+$boundarySwitchIndex = $mixedCycleText.IndexOf("`$arguments += '-PauseAtFamilyBoundary'")
+Assert-True ($allSelectorIndex -ge 0 -and $testSelectorIndex -ge 0 -and
+    $boundarySwitchIndex -gt $allSelectorIndex -and $boundarySwitchIndex -gt $testSelectorIndex) `
+    'all and multi-family prefix selections both enable family-boundary refresh'
+Assert-True ($startTestText -match '\$forwardResetState\s*=\s*\$ResetState\.IsPresent' -and
+    $startTestText -match 'if \(\$forwardResetState\) \{ \$arguments \+= ''-ResetState'' \}' -and
+    $startTestText -match '\$forwardResetState\s*=\s*\$false') 'cross-revision reset is forwarded only to the first runner process'
+Assert-True ($startTestText -match "Invoke-MixedRevisionGitRefresh -Context 'before mixed-revision cycle'") 'live mixed cycle refreshes develop before pinning its first family'
+Assert-True ($startTestText -match 'Mixed-revision plan-only mode uses the current committed HEAD without pulling') 'plan-only mixed cycle remains non-mutating'
+$branchGuardIndex = $startTestText.IndexOf("A live main-to-develop cycle must run from the develop branch")
+$mixedPullIndex = $startTestText.IndexOf("Invoke-MixedRevisionGitRefresh -Context 'before mixed-revision cycle'")
+Assert-True ($branchGuardIndex -ge 0 -and $mixedPullIndex -gt $branchGuardIndex) 'mixed-mode branch validation runs before git pull'
+Assert-True ($startTestText -match "(?s)function Invoke-MixedRevisionGitRefresh.+?Global\\MemLabsTestMutationLock.+?Invoke-TestGitPull.+?rev-parse HEAD.+?ReleaseMutex") `
+    'mixed-mode pull and revision pin are serialized by the host mutation lock'
 
 $scopeTestRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-child-scope-$PID"
 $legacyScriptPath = Join-Path $scopeTestRoot 'Legacy-New-Lab.ps1'
@@ -190,6 +215,9 @@ finally {
 . (Import-TestFunction -Path $runnerPath -Name Test-GitCommitAncestor)
 . (Import-TestFunction -Path $runnerPath -Name Assert-CrossRevisionCheckpointCanAdvance)
 . (Import-TestFunction -Path $runnerPath -Name Move-CrossRevisionCheckpoint)
+. (Import-TestFunction -Path $runnerPath -Name Write-CrossRevisionStateFile)
+. (Import-TestFunction -Path $runnerPath -Name Reset-CrossRevisionFamilyState)
+. (Import-TestFunction -Path $runnerPath -Name Resolve-CrossRevisionResetFamily)
 . (Import-TestFunction -Path $runnerPath -Name ConvertTo-CrossRevisionNormalizedPath)
 . (Import-TestFunction -Path $runnerPath -Name Assert-CrossRevisionPathLayout)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-PinnedWorktree)
@@ -497,6 +525,84 @@ $rollingState.CurrentStep = 'nocm|main|A'
 Assert-ThrowsLike -Action {
     Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
 } -Pattern '*Cannot advance develop while exact-main baseline*' -What 'rolling develop cannot adopt an interrupted main baseline'
+
+$familyResetState = [ordered]@{
+    MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
+    DevelopRevision = $rollingOldDevelop
+    Status = 'Failed'
+    CurrentStep = 'cstest2|main|A'
+    LastError = 'interrupted'
+    CompletedSteps = @('cstest1|complete', 'cstest2|main|A')
+    Baselines = @{ cstest1 = @(@{ Name = 'CT1-DC1' }); cstest2 = @(@{ Name = 'CT2-DC1' }) }
+    DomainIdentities = @{ cstest1 = @{ Sid = 'sid1' }; cstest2 = @{ Sid = 'sid2' } }
+    DevelopIdentities = @{
+        'cstest1|fixture.json' = @(@{ Name = 'CT1-X' })
+        'cstest2|fixture.json' = @(@{ Name = 'CT2-X' })
+    }
+    DevelopDomainIdentities = @{
+        'cstest1|fixture.json' = @{ Sid = 'sid1' }
+        'cstest2|fixture.json' = @{ Sid = 'sid2' }
+    }
+}
+Reset-CrossRevisionFamilyState -State $familyResetState -Family 'CSTest2'
+Assert-Equal $null $familyResetState.CurrentStep 'family reset clears the interrupted CSTest2 main baseline step'
+Assert-Equal 'cstest1|complete' ($familyResetState.CompletedSteps -join ',') 'family reset preserves completed CSTest1 progress'
+Assert-Equal $false $familyResetState.Baselines.Contains('cstest2') 'family reset removes only the interrupted baseline identity'
+Assert-Equal $true $familyResetState.Baselines.Contains('cstest1') 'family reset preserves another family baseline identity'
+Assert-Equal $false $familyResetState.DevelopIdentities.Contains('cstest2|fixture.json') 'family reset removes interrupted family develop identities'
+Assert-Equal $true $familyResetState.DevelopIdentities.Contains('cstest1|fixture.json') 'family reset preserves other family develop identities'
+Assert-Equal 'CSTest2' (Resolve-CrossRevisionResetFamily `
+        -Plan @([pscustomobject]@{ Family = 'CSTest1' }, [pscustomobject]@{ Family = 'CSTest2' }) `
+        -TestPrefix 'CSTest2') 'family reset resolves an exact selected family'
+Assert-ThrowsLike -Action {
+    Resolve-CrossRevisionResetFamily `
+        -Plan @([pscustomobject]@{ Family = 'CSTest1' }, [pscustomobject]@{ Family = 'CSTest2' }) `
+        -TestPrefix 'CSTest'
+} -Pattern '*must resolve to exactly one family*matched 2*' -What 'family reset rejects an ambiguous test prefix'
+$familyResetPath = Join-Path ([IO.Path]::GetTempPath()) "memlabs-family-reset-$PID.json"
+try {
+    Write-CrossRevisionStateFile -Path $familyResetPath -State $familyResetState
+    $familyResetReadback = Get-Content -LiteralPath $familyResetPath -Raw | ConvertFrom-Json -AsHashtable
+    Assert-Equal $null $familyResetReadback.CurrentStep 'family reset persists a restartable checkpoint'
+    Assert-Equal 'cstest1|complete' ($familyResetReadback.CompletedSteps -join ',') 'family reset persistence keeps other family progress'
+}
+finally {
+    Remove-Item -LiteralPath $familyResetPath -Force -ErrorAction SilentlyContinue
+}
+try {
+    Assert-CrossRevisionCheckpointCanAdvance -State $familyResetState `
+        -Plan @([pscustomobject]@{ Family = 'CSTest2'; FollowOns = @() }) `
+        -NewDevelopCommit $rollingNewDevelop
+    Write-TestResult -Passed $true -What 'family reset permits a fast-forward develop advance after lab removal'
+}
+
+catch {
+    Write-TestResult -Passed $false -What 'family reset permits a fast-forward develop advance after lab removal' -Detail $_.Exception.Message
+}
+
+$runnerTokens = $null
+$runnerErrors = $null
+$runnerAst = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$runnerTokens, [ref]$runnerErrors)
+foreach ($helperName in @('Write-CrossRevisionStateFile', 'Reset-CrossRevisionFamilyState', 'Resolve-CrossRevisionResetFamily')) {
+    $definition = @($runnerAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $helperName
+            }, $true))
+    $nested = $false
+    if ($definition.Count -eq 1) {
+        $parent = $definition[0].Parent
+        while ($parent) {
+            if ($parent -is [Management.Automation.Language.FunctionDefinitionAst]) { $nested = $true; break }
+            $parent = $parent.Parent
+        }
+    }
+    Assert-True ($definition.Count -eq 1 -and -not $nested) "$helperName is callable from runner script scope"
+}
+$mainLockIndex = $runnerText.LastIndexOf('$script:MutationMutex = [Threading.Mutex]::new')
+$familyResetCallIndex = $runnerText.IndexOf('Reset-CrossRevisionFamilyState -State $checkpointState')
+$allResetMoveIndex = $runnerText.IndexOf('Move-Item -LiteralPath $activeCheckpoint.Path')
+Assert-True ($mainLockIndex -ge 0 -and $familyResetCallIndex -gt $mainLockIndex -and $allResetMoveIndex -gt $mainLockIndex) `
+    'mutation lock is acquired before checkpoint reset writes or archives'
 $rollingState.CurrentStep = 'nocm|cleanup|nocm.com'
 Assert-ThrowsLike -Action {
     Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop

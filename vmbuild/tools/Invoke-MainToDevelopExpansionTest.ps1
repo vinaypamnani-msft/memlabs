@@ -65,6 +65,8 @@ param(
 
     [switch] $ResetState,
 
+    [switch] $PauseAtFamilyBoundary,
+
     [switch] $RequireCleanSource
 )
 
@@ -218,6 +220,70 @@ function Assert-CrossRevisionCheckpointCanAdvance {
     if (@($familyPlan[0].FollowOns | Where-Object { $_.Name -eq $fixtureName }).Count -ne 1) {
         throw "The in-progress fixture '$fixtureName' is not present in requested develop $NewDevelopCommit."
     }
+}
+
+function Write-CrossRevisionStateFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$State
+    )
+
+    $State.LastUpdateUtc = [DateTime]::UtcNow.ToString('o')
+    $tempPath = "$Path.$PID.tmp"
+    try {
+        $json = $State | ConvertTo-Json -Depth 12
+        [IO.File]::WriteAllText($tempPath, $json, (New-Object Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tempPath -Destination $Path -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Reset-CrossRevisionFamilyState {
+    param(
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$State,
+        [Parameter(Mandatory = $true)][string]$Family
+    )
+
+    $familyKey = $Family.ToLowerInvariant()
+    $State.CompletedSteps = @($State.CompletedSteps | Where-Object {
+            "$_".ToLowerInvariant() -notlike "$familyKey|*"
+        })
+    if ("$($State.CurrentStep)".ToLowerInvariant() -like "$familyKey|*") {
+        $State.CurrentStep = $null
+    }
+
+    foreach ($propertyName in @('Baselines', 'DomainIdentities')) {
+        $map = $State[$propertyName]
+        if ($map -is [Collections.IDictionary] -and $map.Contains($familyKey)) {
+            $map.Remove($familyKey)
+        }
+    }
+    foreach ($propertyName in @('DevelopIdentities', 'DevelopDomainIdentities')) {
+        $map = $State[$propertyName]
+        if ($map -isnot [Collections.IDictionary]) { continue }
+        foreach ($key in @($map.Keys)) {
+            if ("$key".ToLowerInvariant() -like "$familyKey|*") { $map.Remove($key) }
+        }
+    }
+    $State.Status = 'Failed'
+    $State.LastError = $null
+}
+
+function Resolve-CrossRevisionResetFamily {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Plan,
+        [Parameter(Mandatory = $true)][string]$TestPrefix
+    )
+
+    $matches = @($Plan | Where-Object { $_.Family -like "$TestPrefix*" })
+    if ($matches.Count -ne 1) {
+        $names = @($matches | ForEach-Object { $_.Family })
+        $detail = if ($names.Count -gt 0) { $names -join ', ' } else { '<none>' }
+        throw "-ResetState with -Test '$TestPrefix' must resolve to exactly one family; matched $($matches.Count): $detail."
+    }
+    return [string]$matches[0].Family
 }
 
 function Move-CrossRevisionCheckpoint {
@@ -1069,10 +1135,48 @@ try {
     $mainCommit = Resolve-GitRevision -Revision $MainRevision
     $requestedDevelopCommit = Resolve-GitRevision -Revision $DevelopRevision
     $developCommit = $requestedDevelopCommit
+    if ($mainCommit -eq $developCommit) { throw 'Main and develop resolved to the same commit.' }
+    $plan = @(Get-CrossRevisionPlan -MainCommit $mainCommit -DevelopCommit $developCommit -TestPrefix $Test)
+    if ($plan.Count -eq 0) {
+        $selection = if ($Test) { " matching '$Test'" } else { '' }
+        throw "No main-A/develop-follow-on test families were found$selection."
+    }
+    $resetFamily = $null
+    if ($ResetState.IsPresent -and $Test) {
+        $resetFamily = Resolve-CrossRevisionResetFamily -Plan $plan -TestPrefix $Test
+    }
+
+    if (-not $PlanOnly.IsPresent) {
+        $script:MutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+        try { $script:MutationMutexHeld = $script:MutationMutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $script:MutationMutexHeld = $true }
+        if (-not $script:MutationMutexHeld) {
+            throw 'Another MemLabs test cycle owns the host mutation lock.'
+        }
+    }
+
     $checkpointToAdvance = $null
     $checkpointState = $null
+    $familyResetHandled = $false
     if (-not $PlanOnly.IsPresent) {
         $activeCheckpoint = Get-ActiveCrossRevisionCheckpoint -Root $StateRoot -MainCommit $mainCommit
+        if ($activeCheckpoint) {
+            $checkpointState = Get-Content -LiteralPath $activeCheckpoint.Path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
+            if ($ResetState.IsPresent -and $resetFamily) {
+                Reset-CrossRevisionFamilyState -State $checkpointState -Family $resetFamily
+                Write-CrossRevisionStateFile -Path $activeCheckpoint.Path -State $checkpointState
+                $activeCheckpoint.CurrentStep = [string]$checkpointState.CurrentStep
+                $familyResetHandled = $true
+                Write-Host "RESET: cleared checkpoint state for family '$resetFamily' after its lab was deliberately removed; preserving other family progress." -ForegroundColor Yellow
+            }
+            elseif ($ResetState.IsPresent) {
+                $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+                Move-Item -LiteralPath $activeCheckpoint.Path -Destination "$($activeCheckpoint.Path).reset-$timestamp" -Force
+                Write-Host "RESET: archived active checkpoint '$($activeCheckpoint.Path)'." -ForegroundColor Yellow
+                $activeCheckpoint = $null
+                $checkpointState = $null
+            }
+        }
         if ($activeCheckpoint) {
             $checkpointDevelopCommit = Resolve-GitRevision -Revision $activeCheckpoint.DevelopRevision
             $step = if ($activeCheckpoint.CurrentStep) { $activeCheckpoint.CurrentStep } else { '<between steps>' }
@@ -1081,16 +1185,9 @@ try {
             }
             else {
                 $checkpointToAdvance = $activeCheckpoint
-                $checkpointState = Get-Content -LiteralPath $activeCheckpoint.Path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
                 Write-Host "ROLLING RESUME: preserving the exact-main baseline while advancing develop $checkpointDevelopCommit -> $requestedDevelopCommit at $step." -ForegroundColor Yellow
             }
         }
-    }
-    if ($mainCommit -eq $developCommit) { throw 'Main and develop resolved to the same commit.' }
-    $plan = @(Get-CrossRevisionPlan -MainCommit $mainCommit -DevelopCommit $developCommit -TestPrefix $Test)
-    if ($plan.Count -eq 0) {
-        $selection = if ($Test) { " matching '$Test'" } else { '' }
-        throw "No main-A/develop-follow-on test families were found$selection."
     }
     if ($checkpointToAdvance) {
         Assert-CrossRevisionCheckpointCanAdvance -State $checkpointState -Plan $plan -NewDevelopCommit $developCommit
@@ -1105,13 +1202,6 @@ try {
     $trackedChanges = @(Invoke-Git -Arguments @('status', '--porcelain', '--untracked-files=no'))
     if ($trackedChanges.Count -gt 0) {
         throw "The source worktree has tracked changes. Commit or remove them before running a pinned live cycle: $($trackedChanges -join '; ')"
-    }
-
-    $script:MutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
-    try { $script:MutationMutexHeld = $script:MutationMutex.WaitOne(0) }
-    catch [Threading.AbandonedMutexException] { $script:MutationMutexHeld = $true }
-    if (-not $script:MutationMutexHeld) {
-        throw 'Another MemLabs test cycle owns the host mutation lock.'
     }
 
     if (-not (Get-Command Get-VM -ErrorAction SilentlyContinue)) {
@@ -1162,7 +1252,7 @@ try {
     }
 
     $script:StatePath = Join-Path $StateRoot "state-$shortMain-to-$shortDevelop.json"
-    if ($ResetState.IsPresent -and (Test-Path -LiteralPath $script:StatePath)) {
+    if ($ResetState.IsPresent -and -not $familyResetHandled -and (Test-Path -LiteralPath $script:StatePath)) {
         Remove-Item -LiteralPath $script:StatePath -Force
     }
     if (Test-Path -LiteralPath $script:StatePath) {
@@ -1356,6 +1446,20 @@ try {
         }
         Complete-Step -Step $completeKey
         Write-Host "PASS: $family main-to-develop expansion cycle completed." -ForegroundColor Green
+
+        if ($PauseAtFamilyBoundary.IsPresent) {
+            $remainingFamilies = @($plan | Where-Object {
+                    -not (Test-StepComplete -Step "$($_.Family.ToLowerInvariant())|complete")
+                })
+            if ($remainingFamilies.Count -gt 0) {
+                $script:State.Status = 'Running'
+                $script:State.CurrentStep = $null
+                $script:State.LastError = $null
+                Save-State
+                Write-Host "FAMILY BOUNDARY: $family completed; returning to Start-Test so develop can refresh before $($remainingFamilies[0].Family)." -ForegroundColor Yellow
+                exit 56
+            }
+        }
     }
 
     $script:State.Status = 'Passed'

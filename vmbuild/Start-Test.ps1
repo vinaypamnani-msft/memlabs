@@ -509,6 +509,33 @@ function Invoke-TestGitPull {
     }
 }
 
+function Invoke-MixedRevisionGitRefresh {
+    param([string]$Context)
+
+    $mutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+    $held = $false
+    try {
+        try { $held = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $held = $true }
+        if (-not $held) {
+            throw 'Another MemLabs test cycle owns the host mutation lock; refusing to update the shared checkout.'
+        }
+
+        Invoke-TestGitPull -Context $Context
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        $revisionOutput = @(& git -C $repoRoot rev-parse HEAD 2>$null)
+        $revision = if ($revisionOutput.Count -eq 1) { $revisionOutput[0].Trim() } else { '' }
+        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+            throw "Could not pin develop after git pull ($Context)."
+        }
+        return $revision
+    }
+    finally {
+        if ($held) { try { $mutex.ReleaseMutex() } catch {} }
+        $mutex.Dispose()
+    }
+}
+
 function Invoke-VMNoteCompatibilityPreflight {
     param([string] $PinnedMainRevision)
 
@@ -561,20 +588,41 @@ function Invoke-MainToDevelopExpansionCycle {
         return 2
     }
 
-    $arguments = @(
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $runnerPath,
-        '-RepositoryRoot', (Split-Path -Parent $PSScriptRoot),
-        '-MainRevision', $PinnedMainRevision,
-        '-DevelopRevision', $PinnedDevelopRevision
-    )
-    if ($RunAll.IsPresent) { $arguments += '-All' } else { $arguments += @('-Test', $TestPrefix) }
-    if ($PlanOnly.IsPresent) { $arguments += '-PlanOnly' }
-    if ($ResetState.IsPresent) { $arguments += '-ResetState' }
-    if ($RequireCleanSource.IsPresent) { $arguments += '-RequireCleanSource' }
+    $currentDevelopRevision = $PinnedDevelopRevision
+    $forwardResetState = $ResetState.IsPresent
+    do {
+        $arguments = @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $runnerPath,
+            '-RepositoryRoot', (Split-Path -Parent $PSScriptRoot),
+            '-MainRevision', $PinnedMainRevision,
+            '-DevelopRevision', $currentDevelopRevision
+        )
+        if ($RunAll.IsPresent) {
+            $arguments += '-All'
+        }
+        else {
+            $arguments += @('-Test', $TestPrefix)
+        }
+        $arguments += '-PauseAtFamilyBoundary'
+        if ($PlanOnly.IsPresent) { $arguments += '-PlanOnly' }
+        if ($forwardResetState) { $arguments += '-ResetState' }
+        if ($RequireCleanSource.IsPresent) { $arguments += '-RequireCleanSource' }
 
-    $global:LASTEXITCODE = 0
-    & (Join-Path $PSHOME 'pwsh.exe') @arguments | Out-Host
-    return [int]$LASTEXITCODE
+        $global:LASTEXITCODE = 0
+        & (Join-Path $PSHOME 'pwsh.exe') @arguments | Out-Host
+        $exitCode = [int]$LASTEXITCODE
+        $forwardResetState = $false
+        if ($exitCode -ne 56) { return $exitCode }
+
+        try {
+            $currentDevelopRevision = Invoke-MixedRevisionGitRefresh -Context 'between mixed-revision families'
+        }
+        catch {
+            Write-Host "Could not refresh develop at the family boundary: $($_.Exception.Message)" -ForegroundColor Red
+            return 2
+        }
+        Write-Host "Restarting mixed-revision runner at develop $currentDevelopRevision." -ForegroundColor Yellow
+    } while ($true)
 }
 
 function Invoke-NewLab {
@@ -800,11 +848,39 @@ if (-not $MainToDevelopExpansion.IsPresent -and -not $VMNoteCompatibilityOnly.Is
     }
 }
 
-if ($MainToDevelopExpansion.IsPresent) {
-    Write-Host 'Mixed-revision mode will use the current committed HEAD without pulling.' -ForegroundColor DarkGray
+if (-not $MainToDevelopExpansion.IsPresent) {
+    Invoke-TestGitPull -Context 'before VM-note compatibility preflight'
 }
 else {
-    Invoke-TestGitPull -Context 'before VM-note compatibility preflight'
+    if ($cmVersion -or $dynamicMemory.IsPresent -or $DoNotInstallCM.IsPresent -or $serverVersion -or
+        $EnableBLM.IsPresent -or $EnableProxy.IsPresent -or $TwoTierPKI.IsPresent -or $Office.IsPresent -or $TheWorks.IsPresent) {
+        Write-Host 'Feature and platform overrides are not supported in a pinned main-to-develop cycle; use the committed fixtures unchanged.' -ForegroundColor Red
+        exit 2
+    }
+
+    $startTestRepoRoot = Split-Path -Parent $PSScriptRoot
+    $branchOutput = @(& git -C $startTestRepoRoot branch --show-current 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $branchOutput.Count -gt 1) {
+        Write-Host 'Could not determine the current Git branch.' -ForegroundColor Red
+        exit 2
+    }
+    $currentBranch = if ($branchOutput.Count -eq 1) { $branchOutput[0].Trim() } else { '' }
+    if (-not $CrossRevisionPlanOnly.IsPresent -and $currentBranch -ne 'develop') {
+        Write-Host "A live main-to-develop cycle must run from the develop branch; current branch is '$currentBranch'." -ForegroundColor Red
+        exit 2
+    }
+    if (-not $CrossRevisionPlanOnly.IsPresent) {
+        try {
+            $developRevision = Invoke-MixedRevisionGitRefresh -Context 'before mixed-revision cycle'
+        }
+        catch {
+            Write-Host "Could not refresh develop before the mixed-revision cycle: $($_.Exception.Message)" -ForegroundColor Red
+            exit 2
+        }
+    }
+    else {
+        Write-Host 'Mixed-revision plan-only mode uses the current committed HEAD without pulling.' -ForegroundColor DarkGray
+    }
 }
 if ($SkipVMNoteCompatibility.IsPresent) {
     Write-Host 'WARNING: main-to-develop VM-note compatibility preflight skipped by request.' -ForegroundColor Yellow
@@ -824,28 +900,13 @@ if (($CrossRevisionPlanOnly.IsPresent -or $ResetCrossRevisionState.IsPresent) -a
 }
 
 if ($MainToDevelopExpansion.IsPresent) {
-    if ($cmVersion -or $dynamicMemory.IsPresent -or $DoNotInstallCM.IsPresent -or $serverVersion -or
-        $EnableBLM.IsPresent -or $EnableProxy.IsPresent -or $TwoTierPKI.IsPresent -or $Office.IsPresent -or $TheWorks.IsPresent) {
-        Write-Host 'Feature and platform overrides are not supported in a pinned main-to-develop cycle; use the committed fixtures unchanged.' -ForegroundColor Red
-        exit 2
-    }
-
-    $startTestRepoRoot = Split-Path -Parent $PSScriptRoot
-    $branchOutput = @(& git -C $startTestRepoRoot branch --show-current 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $branchOutput.Count -gt 1) {
-        Write-Host 'Could not determine the current Git branch.' -ForegroundColor Red
-        exit 2
-    }
-    $currentBranch = if ($branchOutput.Count -eq 1) { $branchOutput[0].Trim() } else { '' }
-    if (-not $CrossRevisionPlanOnly.IsPresent -and $currentBranch -ne 'develop') {
-        Write-Host "A live main-to-develop cycle must run from the develop branch; current branch is '$currentBranch'." -ForegroundColor Red
-        exit 2
-    }
-    $developOutput = @(& git -C $startTestRepoRoot rev-parse HEAD 2>$null)
-    $developRevision = if ($developOutput.Count -eq 1) { $developOutput[0].Trim() } else { '' }
-    if ($LASTEXITCODE -ne 0 -or $developRevision -notmatch '^[0-9a-f]{40}$') {
-        Write-Host 'Could not pin the current develop commit.' -ForegroundColor Red
-        exit 2
+    if ($CrossRevisionPlanOnly.IsPresent) {
+        $developOutput = @(& git -C $startTestRepoRoot rev-parse HEAD 2>$null)
+        $developRevision = if ($developOutput.Count -eq 1) { $developOutput[0].Trim() } else { '' }
+        if ($LASTEXITCODE -ne 0 -or $developRevision -notmatch '^[0-9a-f]{40}$') {
+            Write-Host 'Could not pin the current develop commit.' -ForegroundColor Red
+            exit 2
+        }
     }
     $crossRevisionExit = Invoke-MainToDevelopExpansionCycle `
         -PinnedMainRevision $MainRevision `
