@@ -1505,7 +1505,7 @@ function Add-ExistingVMsToDeployConfig {
     $newBLMVMs = @($config.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
     $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
     $newPushVMs = @($config.virtualMachines | Where-Object {
-            $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
+            $_.role -in $pushableRoles -and -not $_.hidden -and (Test-PushClientRequested -VM $_)
         })
     $newOsdVMs = @($config.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
     $phase8PrimaryNames = @()
@@ -2108,6 +2108,31 @@ function Get-EligiblePushSites {
     return $sites
 }
 
+function Test-PushClientRequested {
+    <#
+    .SYNOPSIS
+    Returns true only when a VM explicitly requests ConfigMgr client push.
+    .DESCRIPTION
+    pushClient is either Boolean true, a non-empty target site-code string, or
+    Boolean false. Missing, null, empty, and non-Boolean/non-string values are
+    opt-out so exact-main VM notes cannot become push targets by omission.
+    #>
+    param (
+        [Parameter(Mandatory = $false)] [object] $VM
+    )
+
+    if ($null -eq $VM -or -not ($VM.PSObject.Properties.Name -contains 'pushClient')) {
+        return $false
+    }
+    if ($VM.pushClient -is [bool]) {
+        return [bool]$VM.pushClient
+    }
+    if ($VM.pushClient -is [string]) {
+        return -not [string]::IsNullOrWhiteSpace($VM.pushClient)
+    }
+    return $false
+}
+
 function Resolve-PushClientSite {
     <#
     .SYNOPSIS
@@ -2116,6 +2141,7 @@ function Resolve-PushClientSite {
     Returns the site code string, or $false when the VM should not get a client.
 
     Resolution:
+      - pushClient missing/null/empty   -> $false (opt-out).
       - pushClient -eq $false           -> $false (explicit opt-out).
       - pushClient is a valid site code -> that site code (kept as-is).
       - pushClient -eq $true / invalid  -> auto-resolve: the site whose own
@@ -2132,10 +2158,7 @@ function Resolve-PushClientSite {
         [Parameter(Mandatory = $false)] [object] $EligibleSites
     )
 
-    if ($null -eq $VM) { return $false }
-
-    # Explicit opt-out (boolean $false).
-    if (($VM.pushClient -is [bool]) -and ($VM.pushClient -eq $false)) { return $false }
+    if (-not (Test-PushClientRequested -VM $VM)) { return $false }
 
     $eligible = @($EligibleSites)
     if (-not $eligible -or $eligible.Count -eq 0) {
@@ -2233,7 +2256,7 @@ function Resolve-PushClientWithLock {
         [Parameter(Mandatory = $false)] [object] $EligibleSites,
         [Parameter(Mandatory = $false)] [string] $DefaultNet
     )
-    if (($VM.pushClient -is [bool]) -and ($VM.pushClient -eq $false)) { return $false }
+    if (-not (Test-PushClientRequested -VM $VM)) { return $false }
     $eligible = @($EligibleSites)
     if (-not $eligible -or $eligible.Count -eq 0) { return $VM.pushClient }
     $codes = @($eligible | ForEach-Object { $_.SiteCode })
@@ -2259,8 +2282,7 @@ function Update-PushClientTargets {
     )
     foreach ($vm in @($Targets)) {
         if (-not $vm) { continue }
-        if (-not ($vm.PSObject.Properties.Name -contains 'pushClient')) { continue }
-        if (($vm.pushClient -is [bool]) -and ($vm.pushClient -eq $false)) { continue }
+        if (-not (Test-PushClientRequested -VM $vm)) { continue }
         $new = Resolve-PushClientWithLock -VM $vm -Config $Config -Domain $Domain -EligibleSites $Eligible -DefaultNet $DefaultNet
         if ($null -ne $new -and $vm.pushClient -ne $new) {
             $vm.pushClient = $new
@@ -2931,7 +2953,7 @@ function Get-LabWsusUrl {
 
     # --- Step 1: Will this VM get a ConfigMgr client? (mirrors Common.GenConfig.ps1 ~L1396)
     $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-    $getsClient = $CurrentItem.role -in $pushableRoles -and $CurrentItem.pushClient -ne $false
+    $getsClient = $CurrentItem.role -in $pushableRoles -and (Test-PushClientRequested -VM $CurrentItem)
 
     if ($getsClient) {
         # Find the Primary that would push to this VM (same network or child Secondary's network)
@@ -4110,6 +4132,13 @@ function Update-VMFromHyperV {
                         }
                     }
                 }
+                { $_ -in @('pushClient', 'siteCode', 'parentSiteCode') } {
+                    # Site identifiers can be all digits (including leading
+                    # zeroes). Preserve their JSON Boolean/string type rather
+                    # than letting generic integer coercion change "001" into
+                    # Int32 1 and break site lookup or explicit push selection.
+                    $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                }
                 default {
                     $parsedInteger = 0
                     $isInteger = [int]::TryParse([string]$value, [ref]$parsedInteger)
@@ -4147,6 +4176,14 @@ function Update-VMFromHyperV {
 
     if ($vmObject.Role -eq "DPMP") {
         $vmObject.Role = "SiteSystem"
+    }
+
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $hasPushClient = $vmObject.PSObject.Properties.Name -contains 'pushClient'
+    if ($vmObject.Role -in $pushableRoles -and
+        (-not $hasPushClient -or $null -eq $vmObject.pushClient -or
+            (($vmObject.pushClient -is [string]) -and [string]::IsNullOrWhiteSpace($vmObject.pushClient)))) {
+        $vmObject | Add-Member -MemberType NoteProperty -Name 'pushClient' -Value $false -Force
     }
 
     if (-not $vmObject.DynamicMinRam) {

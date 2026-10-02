@@ -267,7 +267,7 @@ if (Test-Path $cm_svc_file) {
     # agent DURING the deploy, force a discovery pass and then explicitly
     # Install-CMClient each external-domain DomainMember, mirroring PushClients.ps1.
     $externalClients = @($deployConfig.virtualMachines | Where-Object {
-            $_.Role -eq "DomainMember" -and ($_.pushClient -ne $false) -and
+            $_.Role -eq "DomainMember" -and (Test-PushClientRequested -VM $_) -and
             ($_.ThisParams.vmNetwork -in $networks)
         } | Select-Object -ExpandProperty vmName | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
 

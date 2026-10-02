@@ -2,6 +2,21 @@
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 
+function Test-PushClientRequested {
+    param([object]$VM)
+
+    if ($null -eq $VM -or -not ($VM.PSObject.Properties.Name -contains 'pushClient')) {
+        return $false
+    }
+    if ($VM.pushClient -is [bool]) {
+        return [bool]$VM.pushClient
+    }
+    if ($VM.pushClient -is [string]) {
+        return -not [string]::IsNullOrWhiteSpace($VM.pushClient)
+    }
+    return $false
+}
+
 
 function Test-TcpPortFast {
     # Hard-timeout TCP probe using TcpClient + WaitHandle. Never use Test-NetConnection:

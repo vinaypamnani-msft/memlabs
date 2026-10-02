@@ -700,7 +700,7 @@ $ensureClientPkgCoverage = {
         $secSite = "$($dpVm.siteCode)"
         $secNet = "$($dpVm.network)"
         $assigned = @($deployConfig.virtualMachines | Where-Object {
-                ($_.pushClient -ne $false) -and (
+                (Test-PushClientRequested -VM $_) -and (
                     ("$($_.pushClient)" -eq $secSite) -or
                     (($_.pushClient -eq $true) -and $secNet -and ("$($_.network)" -eq $secNet))
                 )

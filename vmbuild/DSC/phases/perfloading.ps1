@@ -3383,7 +3383,7 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # and we don't pull thousands of irrelevant updates into the lab catalog.
         $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
         $clientVMs = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -in $pushableRoles -and ($_.pushClient -ne $false)
+                $_.role -in $pushableRoles -and (Test-PushClientRequested -VM $_)
             })
 
         $products = ($clientVMs.operatingSystem | Select-Object -Unique) + ($clientVMs.sqlversion | Select-Object -Unique)

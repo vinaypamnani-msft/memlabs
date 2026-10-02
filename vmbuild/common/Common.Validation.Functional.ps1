@@ -4477,7 +4477,7 @@ function Test-CMSiteFunctionality {
             $isActive = ($linkActive.ContainsKey($csc) -and $linkActive[$csc] -eq $true)
             if ($isActive) { continue }
             $assigned = @($DeployConfig.virtualMachines | Where-Object {
-                    ($_.pushClient -ne $false) -and (
+                    (Test-PushClientRequested -VM $_) -and (
                         ("$($_.pushClient)" -eq $csc) -or
                         (($_.pushClient -eq $true) -and $csNet -and ("$($_.network)" -eq $csNet))
                     )
@@ -9422,7 +9422,7 @@ function Test-DomainMemberFunctionality {
     # explicitly false) must not make us expect/warn about a missing client.
     $hasLocalCmSite = @($DeployConfig.virtualMachines | Where-Object { $_.role -in @('CAS', 'Primary', 'Secondary') }).Count -gt 0
     $cmManagesDomain = ($hasLocalCmSite -or $isExternallyManaged)
-    $pushExpected = $cmManagesDomain -and ($CurrentItem.pushClient -ne $false)
+    $pushExpected = $cmManagesDomain -and (Test-PushClientRequested -VM $CurrentItem)
 
     Write-Log "[Phase $Phase] $VMName [DomainMember]: Testing domain join and CCM client (if present)" -LogOnly
 

@@ -5068,10 +5068,11 @@ function Get-Phase8ConfigurationData {
     # any child site; other add workflows retain the existing single-Primary behavior.
     if ($NumberOfNodesAdded -eq 0) {
         $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
-        # Per-VM pushClient opt-in (null/absent treated as $true for back-compat)
+        # Per-VM pushClient opt-in. Missing/null values are opt-out; legacy
+        # config defaults are normalized before phase selection.
         $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
         $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
+                $_.role -in $pushableRoles -and -not $_.hidden -and (Test-PushClientRequested -VM $_)
             })
         $newOsdVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
         if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0 -or $newOsdVMs.Count -gt 0) {

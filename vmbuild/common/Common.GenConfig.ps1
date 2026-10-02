@@ -1221,7 +1221,7 @@ function ConvertTo-DeployConfigEx {
                 $pushInventory = @(get-list2 -DeployConfig $deployConfig)
                 $eligiblePushSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName -Inventory $pushInventory)
                 $ClientNames = $pushInventory | Where-Object {
-                    $_.role -in $pushableRoles -and ($_.pushClient -ne $false)
+                    $_.role -in $pushableRoles -and (Test-PushClientRequested -VM $_)
                 }
                 # Site codes this Primary is responsible for pushing: its own
                 # site + any child Secondary (a Secondary has no client-push
@@ -1289,7 +1289,7 @@ function ConvertTo-DeployConfigEx {
             # client on a standalone subnet gets no boundary and never assigns.
             $bgPushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
             $bgEligibleSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName -Inventory $siteInventory)
-            foreach ($vm in $siteInventory | Where-Object { $_.role -in $bgPushableRoles -and ($_.pushClient -ne $false) }) {
+            foreach ($vm in $siteInventory | Where-Object { $_.role -in $bgPushableRoles -and (Test-PushClientRequested -VM $_) }) {
                 $targetSite = Resolve-PushClientSite -VM $vm -Config $deployConfig -Domain $DomainName -EligibleSites $bgEligibleSites
                 if (-not $targetSite) { continue }
                 $vmSubnet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
