@@ -4001,6 +4001,30 @@ function Test-CMSiteFunctionality {
             $results.Details.Add("OK: WMI SMS_Site query returned site '$sc' (attempt $($siteQuery.Attempt))")
         }
         else {
+            try {
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                $smsAdmins = @(Get-LocalGroupMember -Group 'SMS Admins' -ErrorAction Stop |
+                        Select-Object -ExpandProperty Name)
+                $results.Details.Add("DIAG: provider query identity='$identity'; local SMS Admins members=[$($smsAdmins -join ', ')]")
+            }
+            catch {
+                $results.Details.Add("DIAG: could not read local SMS Admins membership: $($_.Exception.Message)")
+            }
+            try {
+                $providerLocations = @(Get-WmiObject -Namespace 'root\SMS' -Class SMS_ProviderLocation -ErrorAction Stop)
+                if ($providerLocations.Count -gt 0) {
+                    $providerSummary = @($providerLocations | ForEach-Object {
+                            "Site=$($_.SiteCode), Machine=$($_.Machine), Namespace=$($_.NamespacePath), Local=$($_.ProviderForLocalSite)"
+                        })
+                    $results.Details.Add("DIAG: SMS_ProviderLocation rows: $($providerSummary -join '; ')")
+                }
+                else {
+                    $results.Details.Add('DIAG: SMS_ProviderLocation returned no rows')
+                }
+            }
+            catch {
+                $results.Details.Add("DIAG: SMS_ProviderLocation query failed: $($_.Exception.Message)")
+            }
             $results.Passed = $false
             $results.Details.Add("FAIL: WMI SMS_Site query failed after $maxRetries attempts")
             return $results
@@ -7109,7 +7133,8 @@ function Test-PKICertificatesOnVM {
                 [Parameter(Mandatory)][string]$CertificatePath,
                 [int]$Attempts = 4,
                 [int]$RetrySeconds = 15,
-                [scriptblock]$Verifier
+                [scriptblock]$Verifier,
+                [scriptblock]$BeforeRetry
             )
 
             if (-not $Verifier) {
@@ -7122,8 +7147,27 @@ function Test-PKICertificatesOnVM {
                     }
                 }
             }
+            if (-not $BeforeRetry) {
+                $BeforeRetry = {
+                    param($Path)
+                    try {
+                        $nativeOutput = @(& certutil.exe -urlcache CRL delete 2>&1)
+                        [pscustomobject]@{
+                            ExitCode = $LASTEXITCODE
+                            Output   = $nativeOutput
+                        }
+                    }
+                    catch {
+                        [pscustomobject]@{
+                            ExitCode = -1
+                            Output   = @($_.Exception.Message)
+                        }
+                    }
+                }
+            }
 
             $last = $null
+            $retryDiagnostics = [System.Collections.Generic.List[string]]::new()
             for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
                 $check = & $Verifier $CertificatePath
                 $output = @($check.Output | ForEach-Object { "$_" })
@@ -7134,10 +7178,25 @@ function Test-PKICertificatesOnVM {
                     ExitCode = [int]$check.ExitCode
                     Output  = $output
                     Attempts = $attempt
+                    RetryDiagnostics = @($retryDiagnostics)
                 }
                 if ($passed) { return $last }
-                if ($attempt -lt $Attempts) { Start-Sleep -Seconds $RetrySeconds }
+                if ($attempt -lt $Attempts) {
+                    try {
+                        $cacheReset = & $BeforeRetry $CertificatePath
+                        if (-not $cacheReset -or [int]$cacheReset.ExitCode -ne 0) {
+                            $cacheExit = if ($cacheReset) { [int]$cacheReset.ExitCode } else { -1 }
+                            $cacheText = if ($cacheReset) { @($cacheReset.Output) -join ' ' } else { 'no result' }
+                            $retryDiagnostics.Add("CRL cache clear before attempt $($attempt + 1) failed (exit $cacheExit): $cacheText")
+                        }
+                    }
+                    catch {
+                        $retryDiagnostics.Add("CRL cache clear before attempt $($attempt + 1) threw: $($_.Exception.Message)")
+                    }
+                    Start-Sleep -Seconds $RetrySeconds
+                }
             }
+            if ($last) { $last.RetryDiagnostics = @($retryDiagnostics) }
             return $last
         }
 
@@ -7395,6 +7454,9 @@ function Test-PKICertificatesOnVM {
                 $verifyOutput = @($verifyResult.Output)
                 $verifyExit = $verifyResult.ExitCode
                 $verifyText = $verifyOutput -join "`n"
+                foreach ($retryDiagnostic in @($verifyResult.RetryDiagnostics)) {
+                    $results.Details.Add("WARN: $retryDiagnostic")
+                }
 
                 if ($verifyResult.Passed) {
                     $results.Details.Add("OK: Certificate chain + CRL verification passed (attempt $($verifyResult.Attempts)/4)")
@@ -9443,7 +9505,8 @@ function Test-DomainMemberFunctionality {
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
 
-    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $usePKI = [bool]$effectiveCmOptions.UsePKI
 
     # Cross-forest client management: a domain whose DC has
     # externalDomainJoinSiteCode is NOT managed by a local Primary -- its clients
@@ -10861,7 +10924,8 @@ function Test-InternetClientFunctionality {
 
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
-    $usePKI = [bool]($DeployConfig.cmOptions.UsePKI)
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $usePKI = [bool]$effectiveCmOptions.UsePKI
 
     Write-Log "[Phase $Phase] $VMName [InternetClient]: Testing internet client VM (UsePKI=$usePKI)" -LogOnly
 
@@ -11246,7 +11310,7 @@ function Test-PullDPConfiguration {
                 $smsProvider = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
                 $null = New-PSDrive -Name $sc -PSProvider CMSite -Root $smsProvider -ErrorAction SilentlyContinue
                 Push-Location "${sc}:\"
-                $cmDp = Get-CMDistributionPoint -SiteSystemServerName $dpFqdn -ErrorAction SilentlyContinue
+                $cmDp = Get-CMDistributionPoint -SiteSystemServerName $dpFqdn -SiteCode $sc -ErrorAction SilentlyContinue
                 Pop-Location
                 if ($cmDp) {
                     $results.Details.Add("OK: Get-CMDistributionPoint returned the DP via CM module")
@@ -12359,7 +12423,8 @@ function Test-CMSiteWideFunctionality {
     $domain = $DeployConfig.vmOptions.domainName
     $siteCode = $CurrentItem.siteCode
     $hierarchySiteCode = if ($CurrentItem.parentSiteCode) { "$($CurrentItem.parentSiteCode)" } else { "$siteCode" }
-    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $usePKI = [bool]$effectiveCmOptions.UsePKI
     $role = $CurrentItem.role
 
     # Build expected apps list by mirroring perfloading.ps1 EXACTLY:

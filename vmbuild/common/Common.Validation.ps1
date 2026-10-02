@@ -2592,7 +2592,7 @@ function Test-Configuration {
         }
 
 
-        if ($global:SkipValidation) {
+        if ($global:MemLabsSkipValidation) {
             $return.Message = $null
             $return.Valid = $true
             $return.Problems = 0

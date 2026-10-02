@@ -229,7 +229,7 @@ $global:Phase11Job = {
                 # Re-enable Windows Update services disabled in Phase 1.
                 # Services need to be startable for WSUS/ConfigMgr-initiated updates.
                 foreach ($svc in @('UsoSvc', 'wuauserv')) {
-                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    $s = Get-Service -Name $svc -ErrorAction Ignore
                     if ($s -and $s.StartType -eq 'Disabled') {
                         Set-Service $svc -StartupType Manual -ErrorAction SilentlyContinue
                     }
@@ -250,20 +250,20 @@ $global:Phase11Job = {
                 $auPath = "$wuPath\AU"
 
                 # Check our ownership marker
-                $marker = Get-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -ErrorAction SilentlyContinue
+                $marker = Get-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -ErrorAction Ignore
                 if (-not $marker -or $marker.WsusSetByMemLabs -ne 1) {
                     return "Skipped: not set by MemLabs"
                 }
 
                 $isReal = 0
-                $realMarker = Get-ItemProperty -Path $mlPath -Name "WsusIsReal" -ErrorAction SilentlyContinue
+                $realMarker = Get-ItemProperty -Path $mlPath -Name "WsusIsReal" -ErrorAction Ignore
                 if ($realMarker) { $isReal = $realMarker.WsusIsReal }
 
                 # Always remove blocking keys (deploy is done)
-                Remove-ItemProperty -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations" -Force -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $wuPath -Name "DisableWindowsUpdateAccess" -Force -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Force -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $auPath -Name "AUOptions" -Force -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations" -Force -ErrorAction Ignore
+                Remove-ItemProperty -Path $wuPath -Name "DisableWindowsUpdateAccess" -Force -ErrorAction Ignore
+                Remove-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Force -ErrorAction Ignore
+                Remove-ItemProperty -Path $auPath -Name "AUOptions" -Force -ErrorAction Ignore
 
                 if ($isReal -eq 1 -or $UseFakeWSUS -eq 1) {
                     # Real WSUS or user-chosen fake WSUS: keep WUServer/WUStatusServer/UseWUServer
@@ -271,17 +271,17 @@ $global:Phase11Job = {
                 }
                 else {
                     # Fake localhost that we set as fallback — remove everything
-                    Remove-ItemProperty -Path $wuPath -Name "WUServer" -Force -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $wuPath -Name "WUStatusServer" -Force -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $auPath -Name "UseWUServer" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $wuPath -Name "WUServer" -Force -ErrorAction Ignore
+                    Remove-ItemProperty -Path $wuPath -Name "WUStatusServer" -Force -ErrorAction Ignore
+                    Remove-ItemProperty -Path $auPath -Name "UseWUServer" -Force -ErrorAction Ignore
                     $action = "Removed all WU policy (no WSUS)"
                 }
 
                 # Clean up MemLabs markers
-                Remove-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -Force -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $mlPath -Name "WsusIsReal" -Force -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -Force -ErrorAction Ignore
+                Remove-ItemProperty -Path $mlPath -Name "WsusIsReal" -Force -ErrorAction Ignore
                 # Remove MemLabs key if empty
-                $remaining = Get-ItemProperty -Path $mlPath -ErrorAction SilentlyContinue
+                $remaining = Get-ItemProperty -Path $mlPath -ErrorAction Ignore
                 if ($remaining) {
                     $props = $remaining.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }
                     if (-not $props) { Remove-Item -Path $mlPath -Force -ErrorAction SilentlyContinue }
@@ -1059,7 +1059,7 @@ $global:VM_Create = {
                     if ($Dev.InstanceId -ne $null) {
                         Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
                         $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
-                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ErrorAction SilentlyContinue }
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ErrorAction Ignore }
                     }
                 }
             }
@@ -1304,7 +1304,7 @@ $global:VM_Create = {
             # Phase 2 sets the full policy (WSUS server + blocking keys per config).
             try {
                 foreach ($svc in @('wuauserv', 'UsoSvc')) {
-                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    $s = Get-Service -Name $svc -ErrorAction Ignore
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1328,7 +1328,7 @@ $global:VM_Create = {
             try {
                 Invoke-WithCimRetry {
                 foreach ($svc in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService')) {
-                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    $s = Get-Service -Name $svc -ErrorAction Ignore
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1345,7 +1345,7 @@ $global:VM_Create = {
             try {
                 Invoke-WithCimRetry {
                 foreach ($svc in @('DiagTrack', 'dmwappushservice')) {
-                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    $s = Get-Service -Name $svc -ErrorAction Ignore
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1478,7 +1478,7 @@ $global:VM_Create = {
                 New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Force -ErrorAction SilentlyContinue | Out-Null
                 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'EnableDynamicContentInWSB' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
                 # SysMain (Superfetch) — counterproductive on dynamic-memory VMs
-                $s = Get-Service -Name 'SysMain' -ErrorAction SilentlyContinue
+                $s = Get-Service -Name 'SysMain' -ErrorAction Ignore
                 if ($s) {
                     Stop-Service 'SysMain' -Force -ErrorAction SilentlyContinue
                     Set-Service  'SysMain' -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1684,9 +1684,9 @@ $global:VM_Create = {
             $arbSb = {
                 $key = 'HKLM:\SOFTWARE\Microsoft\WBEM\CIMOM'
                 if (-not (Test-Path -LiteralPath $key)) { return 'CIMOM key not present -- not set' }
-                $prior = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction SilentlyContinue).ArbThrottlingEnabled
+                $prior = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction Ignore).ArbThrottlingEnabled
                 New-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-                $now = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction SilentlyContinue).ArbThrottlingEnabled
+                $now = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction Ignore).ArbThrottlingEnabled
                 $priorText = 'unset'
                 if ($null -ne $prior) { $priorText = "$prior" }
                 return ("ArbThrottlingEnabled was {0}, now {1} (applies at next Winmgmt start)" -f $priorText, $now)
@@ -2021,7 +2021,8 @@ $global:VM_Create = {
             }
         }
         
-        if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.role -eq 'Primary' -and $createVM) {
+        $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+        if ($currentCmOptions.PrePopulateObjects -and $currentItem.role -eq 'Primary' -and $createVM) {
             Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying OSD ISOs to Primary" -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary site server — copying OSD content for perfloading"
 
@@ -3284,7 +3285,7 @@ function Save-CMSetupSqlFailureEvidence {
             $instProps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction Stop
             $instName = ($instProps.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | Select-Object -First 1).Name
             $instId = [string]$instProps.$instName
-            $params = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\Parameters" -ErrorAction SilentlyContinue
+            $params = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\Parameters" -ErrorAction Ignore
             if ($params) {
                 foreach ($p in $params.PSObject.Properties) {
                     if ($p.Name -like 'SQLArg*' -and ([string]$p.Value).StartsWith('-e')) {
@@ -3660,10 +3661,10 @@ function Save-CMClientPackagePrestageLogsFromVm {
 $Set_WSManRetryWindow = {
     $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Client'
     if (-not (Test-Path -LiteralPath $key)) { return 'WSMAN Client key not present -- not set' }
-    $prior = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
+    $prior = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction Ignore).max_retry_timeout_ms
     if ($prior -eq 2000) { return 'max_retry_timeout_ms already 2000' }
     New-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -Value 2000 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-    $now = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
+    $now = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction Ignore).max_retry_timeout_ms
     $priorText = 'unset (default 180000)'
     if ($null -ne $prior) { $priorText = "$prior" }
     return ("max_retry_timeout_ms was {0}, now {1}; server window is this +15000 (applies at next WinRM start)" -f $priorText, $now)
@@ -3872,12 +3873,12 @@ $global:VM_Config = {
                         if (Test-Path -LiteralPath $pendingKey.Path) { $servicingPending += $pendingKey.Name }
                     }
                     if (Test-Path -LiteralPath 'C:\Windows\WinSxS\pending.xml') { $servicingPending += 'WinSxS pending.xml' }
-                    $updateExeVolatile = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Updates' -Name 'UpdateExeVolatile' -ErrorAction SilentlyContinue
+                    $updateExeVolatile = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Updates' -Name 'UpdateExeVolatile' -ErrorAction Ignore
                     if ($null -ne $updateExeVolatile -and [int]$updateExeVolatile -ne 0) { $servicingPending += "UpdateExeVolatile=$updateExeVolatile" }
 
                     $acted = @()
                     foreach ($svc in @('wuauserv', 'UsoSvc')) {
-                        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                        $s = Get-Service -Name $svc -ErrorAction Ignore
                         if ($s) {
                             if ($s.Status -eq 'Running') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
                             if ($s.StartType -ne 'Disabled') { Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue }
@@ -4677,8 +4678,9 @@ $global:VM_Config = {
             $toolInjectSw = [System.Diagnostics.Stopwatch]::StartNew()
             $toolInjectRecovered = $false
             $SkipAutoDeploy = $false
-            if ($deployConfig.cmOptions.PrePopulateObjects) {
-                if ($deployConfig.cmOptions.Install) {
+            $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+            if ($currentCmOptions.PrePopulateObjects) {
+                if ($currentCmOptions.Install) {
                     $SkipAutoDeploy = $true
                 }
             }
@@ -7879,7 +7881,11 @@ $global:VM_Config = {
                         if (-not $certPulseDone -and $currentStatusTrimmed -match 'MEMLABS-PULSE-CERTS') {
                             $certPulseDone = $true
                             $pkiOn = $false
-                            try { $pkiOn = [bool]$deployConfig.cmOptions.UsePKI } catch { $pkiOn = $false }
+                            try {
+                                $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+                                $pkiOn = [bool]$currentCmOptions.UsePKI
+                            }
+                            catch { $pkiOn = $false }
                             if ($pkiOn) {
                                 # Resolve this site server's push-client list.
                                 $pulseTargets = @()
@@ -8843,9 +8849,9 @@ $global:VM_Config = {
                             else {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO auto-remediate: replica '$stuckVmName' has been Op=UNKNOWN/Rec=UNKNOWN/Sync=NOT_HEALTHY for $($stuck.SpanMinutes) min ($($stuck.Count) consecutive AGWaitForSynchronizationHealth poll(s) in ConfigMgrSetup.log). Restarting SQL on '$stuckVmName' to clear the stuck recovery thread." -Warning -OutputStream
                                 $bounceResult = Invoke-VmCommand -VmName $stuckVmName -VmDomainName $domainName -DisplayName "SQLAO auto-remediate: bounce SQL on $stuckVmName" -ScriptBlock {
-                                    $svc = Get-Service -Name 'MSSQLSERVER' -ErrorAction SilentlyContinue
+                                    $svc = Get-Service -Name 'MSSQLSERVER' -ErrorAction Ignore
                                     if (-not $svc) {
-                                        $svc = Get-Service -Name 'MSSQL$*' -ErrorAction SilentlyContinue | Select-Object -First 1
+                                        $svc = Get-Service -Name 'MSSQL$*' -ErrorAction Ignore | Select-Object -First 1
                                     }
                                     if (-not $svc) { return [pscustomobject]@{ Ok = $false; Error = 'No MSSQLSERVER service found' } }
                                     $svcName = $svc.Name
@@ -9010,11 +9016,11 @@ $global:VM_Config = {
             $check_ExternalWsus = {
                 $markerPath = "HKLM:\SOFTWARE\MemLabs"
                 $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
-                $marker = Get-ItemProperty -Path $markerPath -Name "WsusSetByMemLabs" -ErrorAction SilentlyContinue
+                $marker = Get-ItemProperty -Path $markerPath -Name "WsusSetByMemLabs" -ErrorAction Ignore
                 if ($marker -and $marker.WsusSetByMemLabs -eq 1) {
                     return "OwnedByMemLabs"
                 }
-                $existing = Get-ItemProperty -Path $wuPath -Name "WUServer" -ErrorAction SilentlyContinue
+                $existing = Get-ItemProperty -Path $wuPath -Name "WUServer" -ErrorAction Ignore
                 if ($existing -and $existing.WUServer) {
                     return "External"
                 }

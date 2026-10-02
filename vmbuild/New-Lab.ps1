@@ -65,7 +65,7 @@ param (
 
 )
 
-$global:NoSnapshot = $NoSnapshot
+$global:MemLabsNoSnapshot = [bool]$NoSnapshot.IsPresent
 $global:NewLabResumeCommand = $null
 
 function Write-NewLabResumeCommand {
@@ -466,10 +466,7 @@ try {
         Write-Host ("`r`n" * 6)
     }
 
-    $global:SkipValidation = $false
-    if ($SkipValidation.IsPresent) {
-        $global:SkipValidation = $true
-    }
+    $global:MemLabsSkipValidation = [bool]$SkipValidation.IsPresent
 
     $principal = new-object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
     if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {
@@ -1275,7 +1272,7 @@ try {
                 }
                 if ($i -eq 11) {
                     # Phase 11 passed: merge the Phase 8 auto-snapshot if it exists
-                    if (-not $global:NoSnapshot) {
+                    if (-not $global:MemLabsNoSnapshot) {
                         Merge-Phase8AutoSnapshot -DeployConfig $deployConfig
                     }
                     else {

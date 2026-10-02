@@ -300,11 +300,12 @@ function Resolve-ConfigCmVersionAliases {
 # Resolves the cmOptions block that should apply to a given VM, by walking up
 # its hierarchy to the top-level site server (CAS or standalone Primary) that
 # owns the canonical block. Returns $null when the VM has no hierarchy
-# affiliation (e.g. DC/DomainMember not bound to a site).
+# affiliation (e.g. a DC, or a DomainMember without an explicit push site).
 #
 # Walks: $vm -> parentSiteCode -> ... -> top. For Passive/SiteSystem VMs which
-# only have a SiteCode (no parentSiteCode), finds the owning CAS/Primary in the
-# same SiteCode and resumes the walk from there. Cycle-guarded.
+# only have a SiteCode (no parentSiteCode), and clients that carry a resolved
+# pushClient site code, finds the owning CAS/Primary/Secondary and resumes the
+# walk from there. Cycle-guarded.
 function Resolve-VmCmOptions {
     [CmdletBinding()]
     param (
@@ -327,9 +328,18 @@ function Resolve-VmCmOptions {
             continue
         }
 
-        if ($current.SiteCode) {
+        $affiliatedSiteCode = "$($current.SiteCode)".Trim()
+        if (-not $affiliatedSiteCode -and
+            ($current.PSObject.Properties.Name -contains 'pushClient') -and
+            $current.pushClient -is [string]) {
+            $affiliatedSiteCode = "$($current.pushClient)".Trim()
+        }
+
+        if ($affiliatedSiteCode) {
             $owner = $Config.virtualMachines | Where-Object {
-                $_.SiteCode -eq $current.SiteCode -and $_.Role -in 'CAS', 'Primary' -and $_.vmName -ne $current.vmName
+                "$($_.SiteCode)" -eq $affiliatedSiteCode -and
+                $_.Role -in 'CAS', 'Primary', 'Secondary' -and
+                $_.vmName -ne $current.vmName
             } | Select-Object -First 1
             if (-not $owner) { return $null }
             $current = $owner
@@ -341,20 +351,18 @@ function Resolve-VmCmOptions {
     return $null
 }
 
-# Stamps a resolved cmOptions block onto every site-role VM (CAS/Primary/
-# Secondary/PassiveSite/SiteSystem) in the config that doesn't already carry
-# one, so DSC phases can read $ThisVM.cmOptions directly without per-hierarchy
-# guesswork. Deep-clones via JSON round-trip so later mutations don't bleed
-# across VMs.
+# Stamps a resolved cmOptions block onto every hierarchy-affiliated VM in the
+# config that doesn't already carry one. Affiliation can come from siteCode,
+# parentSiteCode, or an explicit pushClient site code, so clients and WSUS roles
+# consume the same version/PKI/install settings as their owning hierarchy.
+# Deep-clones via JSON round-trip so later mutations don't bleed across VMs.
 function Set-VmCmOptionsResolved {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)] [object] $Config
     )
     if (-not $Config -or -not $Config.virtualMachines) { return }
-    $siteRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
     foreach ($vm in $Config.virtualMachines) {
-        if ($vm.Role -notin $siteRoles) { continue }
         if ($null -ne $vm.cmOptions) { continue }
         $resolved = Resolve-VmCmOptions -Config $Config -vm $vm
         if (-not $resolved) { continue }
@@ -2947,7 +2955,8 @@ function Get-LabWsusUrl {
     $allVMs = $DeployConfig.virtualMachines
 
     # Determine protocol/port from PKI setting
-    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $usePKI = [bool]$effectiveCmOptions.UsePKI
     $protocol = if ($usePKI) { "https" } else { "http" }
     $port = if ($usePKI) { 8531 } else { 8530 }
 

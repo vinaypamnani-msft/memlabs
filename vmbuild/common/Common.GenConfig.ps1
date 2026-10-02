@@ -1162,7 +1162,8 @@ function ConvertTo-DeployConfigEx {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
                     }
                 }
-                $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                $effectiveCmOptions = if ($thisVM.cmOptions) { $thisVM.cmOptions } else { $deployConfig.cmOptions }
+                $url = Get-CMBaselineVersion -CMVersion $effectiveCmOptions.version
                 $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
             }
             "Primary" {
@@ -1203,7 +1204,8 @@ function ConvertTo-DeployConfigEx {
                     }
                 }
                 else {
-                    $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                    $effectiveCmOptions = if ($thisVM.cmOptions) { $thisVM.cmOptions } else { $deployConfig.cmOptions }
+                    $url = Get-CMBaselineVersion -CMVersion $effectiveCmOptions.version
                     $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
                 }
 

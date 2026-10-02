@@ -412,7 +412,7 @@ if ($adminAddFailures.Count -gt 0) {
 # Add-CMServiceConnectionPoint -Mode Online -SiteCode CAS -SiteSystemServerName SCCM-FileServer.contosomd.com
 # New-CMSiteSystemServer -SiteCode CAS -SiteSystemServerName SCCM-CAS2.contosomd.com
 
-if ((Get-CMDistributionPoint -SiteSystemServerName $localSiteServer).count -eq 1) {
+if ((Get-CMDistributionPoint -SiteSystemServerName $localSiteServer -SiteCode $SiteCode).count -eq 1) {
     Write-DscStatus "Removing DP Role from $localSiteServer before moving Content Library."
     Remove-CMDistributionPoint -SiteSystemServerName $localSiteServer -Force *>&1 | Write-StatusLogEntry
 }

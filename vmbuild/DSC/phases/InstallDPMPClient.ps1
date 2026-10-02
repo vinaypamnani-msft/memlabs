@@ -669,7 +669,7 @@ if ($allInstalled) {
     foreach ($MP in $MPs) {
         if ([string]::IsNullOrWhiteSpace($MP.ServerName)) { continue }
         $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
-        if (-not (Get-CMManagementPoint -SiteSystemServerName $MPFQDN)) {
+        if (-not (Get-CMManagementPoint -SiteSystemServerName $MPFQDN -SiteCode $MP.ServerSiteCode)) {
             $allInstalled = $false
             break
         }

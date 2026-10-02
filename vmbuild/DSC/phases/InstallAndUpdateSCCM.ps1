@@ -1410,6 +1410,34 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
+function Ensure-CmProviderLocalAdminMembership {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AccountName,
+        [int]$Attempts = 6,
+        [int]$RetrySeconds = 5
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            $group = Get-LocalGroup -Name 'SMS Admins' -ErrorAction Stop
+            $members = @(Get-LocalGroupMember -Group $group.Name -ErrorAction Stop)
+            if (@($members | Where-Object { $_.Name -ieq $AccountName }).Count -gt 0) {
+                Write-DscStatus "'$AccountName' is present in local group 'SMS Admins' (attempt $attempt/$Attempts)."
+                return $true
+            }
+
+            Write-DscStatus "Adding '$AccountName' to local group 'SMS Admins' (attempt $attempt/$Attempts)."
+            Add-LocalGroupMember -Group $group.Name -Member $AccountName -ErrorAction Stop
+        }
+        catch {
+            Write-DscStatus "Could not ensure '$AccountName' in local group 'SMS Admins' (attempt $attempt/$Attempts): $($_.Exception.Message)"
+        }
+        if ($attempt -lt $Attempts) { Start-Sleep -Seconds $RetrySeconds }
+    }
+    return $false
+}
+
 # Add vmbuildadmin as Full Admin
 
 $userName = "vmbuildadmin"
@@ -1432,6 +1460,10 @@ if (-not $exists) {
 
 if (-not $exists) {
     Write-DscStatus "Failed to add 'vmbuildadmin' account as Full Administrator in ConfigMgr"
+}
+if (-not (Ensure-CmProviderLocalAdminMembership -AccountName $domainUserName)) {
+    Write-DscStatus "Failed to add '$domainUserName' to local group 'SMS Admins'. Phase 11 provider queries would run with no local provider authorization." -Failure
+    return $false
 }
 
 # Check if we should update

@@ -4429,12 +4429,12 @@ function Wait-Phase {
 # guaranteeing the checkpoint is ISO-free and the media can then be locked in and
 # left untouched for the whole phase. Gating is unchanged from the old inline
 # block: only snapshot when a CAS/Primary in the Phase 8 set has never finished
-# Phase 8 (the risky first CM install), honoring $global:NoSnapshot and an
+# Phase 8 (the risky first CM install), honoring $global:MemLabsNoSnapshot and an
 # existing snapshot of the same name.
 function Invoke-Phase8PreInstallSnapshot {
     param([object]$deployConfig)
 
-    if ($global:NoSnapshot) { return }
+    if ($global:MemLabsNoSnapshot) { return }
     $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
     if (-not $cd) { return }
 
@@ -4961,12 +4961,17 @@ function Get-Phase8ConfigurationData {
         }
     }
 
-    if ($deployConfig.cmOptions.Install -ne $false) {
+    $cmPhase8Vms = @($deployConfig.virtualMachines | Where-Object {
+            if ($_.role -notin @('Primary', 'CAS', 'PassiveSite', 'Secondary', 'SiteSystem', 'WSUS') -or $_.osdMetadataOnly) {
+                return $false
+            }
+            $effectiveCmOptions = if ($_.cmOptions) { $_.cmOptions } else { $deployConfig.cmOptions }
+            return $effectiveCmOptions -and $effectiveCmOptions.Install -ne $false
+        })
+    if ($cmPhase8Vms.Count -gt 0) {
 
         $fsVMsAdded = @()
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object {
-                $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "SiteSystem", "WSUS") -and -not $_.osdMetadataOnly
-            }) {
+        foreach ($vm in $cmPhase8Vms) {
 
             $global:preparePhasePercent++
 
@@ -5053,49 +5058,75 @@ function Get-Phase8ConfigurationData {
             }
         }
 
-        $all = @{
-            NodeName                    = "*"
-            PSDscAllowDomainUser        = $true
-            PSDscAllowPlainTextPassword = $true
-        }
-        $cd.AllNodes += $all
-
     }
 
     # Even when cmOptions.Install is false (existing CM), include hidden Primary nodes
     # when new VMs need BLM membership, client push, or OSD content/PXE reconciliation.
-    # OSD add-deltas inject every existing Primary because the target DP can belong to
-    # any child site; other add workflows retain the existing single-Primary behavior.
-    if ($NumberOfNodesAdded -eq 0) {
-        $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
-        # Per-VM pushClient opt-in. Missing/null values are opt-out; legacy
-        # config defaults are normalized before phase selection.
-        $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-        $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -in $pushableRoles -and -not $_.hidden -and (Test-PushClientRequested -VM $_)
-            })
-        $newOsdVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
-        if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0 -or $newOsdVMs.Count -gt 0) {
-            $hiddenPrimaries = @($deployConfig.virtualMachines | Where-Object {
+    # This merge is independent of normal Install=true nodes: a new hierarchy
+    # must not suppress maintenance work for an existing sibling hierarchy.
+    $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
+            $_.role -in $pushableRoles -and -not $_.hidden -and (Test-PushClientRequested -VM $_)
+        })
+    $newOsdVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
+    if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0 -or $newOsdVMs.Count -gt 0) {
+        $hiddenPrimaries = @($deployConfig.virtualMachines | Where-Object {
                 $_.role -eq "Primary" -and $_.hidden -and
                 (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
             })
-            if ($newOsdVMs.Count -eq 0) {
-                $hiddenPrimaries = @($hiddenPrimaries | Select-Object -First 1)
+        $requiredHiddenPrimaries = @()
+        if ($newOsdVMs.Count -gt 0) {
+            # An OSD target DP can belong to any child site, so every existing
+            # Primary remains authoritative for its own content/PXE state.
+            $requiredHiddenPrimaries = $hiddenPrimaries
+        }
+        else {
+            $targetSiteCodes = @(($newPushVMs + $newBLMVMs) | ForEach-Object {
+                    if ($_.pushClient -is [string] -and -not [string]::IsNullOrWhiteSpace($_.pushClient)) {
+                        "$($_.pushClient)".Trim()
+                    }
+                } | Where-Object { $_ } | Select-Object -Unique)
+            $needsLegacyPrimaryFallback = $targetSiteCodes.Count -eq 0
+            foreach ($targetSiteCode in $targetSiteCodes) {
+                $ownerSiteCode = $targetSiteCode
+                $secondary = $deployConfig.virtualMachines | Where-Object {
+                    $_.role -eq 'Secondary' -and "$($_.siteCode)" -eq $targetSiteCode
+                } | Select-Object -First 1
+                if ($secondary -and $secondary.parentSiteCode) {
+                    $ownerSiteCode = "$($secondary.parentSiteCode)"
+                }
+                $ownerPrimary = $deployConfig.virtualMachines | Where-Object {
+                    $_.role -eq 'Primary' -and "$($_.siteCode)" -eq $ownerSiteCode
+                } | Select-Object -First 1
+                if (-not $ownerPrimary) {
+                    $needsLegacyPrimaryFallback = $true
+                    continue
+                }
+                if ($ownerPrimary.hidden) {
+                    $requiredHiddenPrimaries += @($hiddenPrimaries | Where-Object {
+                            $_.vmName -eq $ownerPrimary.vmName
+                        })
+                }
             }
-            foreach ($hiddenPrimary in $hiddenPrimaries) {
-                if ($cd.AllNodes.NodeName -contains $hiddenPrimary.vmName) { continue }
-                $cd.AllNodes += @{ NodeName = $hiddenPrimary.vmName; Role = $hiddenPrimary.Role }
-                $NumberOfNodesAdded++
+            if ($needsLegacyPrimaryFallback) {
+                # Preserve the legacy single-hierarchy fallback for BLM work or
+                # old configs whose client target cannot be resolved to a site.
+                $requiredHiddenPrimaries = @($hiddenPrimaries | Select-Object -First 1)
             }
-            if ($NumberOfNodesAdded -gt 0) {
-                $cd.AllNodes += @{ NodeName = "*"; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
-            }
+        }
+        foreach ($hiddenPrimary in @($requiredHiddenPrimaries | Sort-Object vmName -Unique)) {
+            if ($cd.AllNodes.NodeName -contains $hiddenPrimary.vmName) { continue }
+            $cd.AllNodes += @{ NodeName = $hiddenPrimary.vmName; Role = $hiddenPrimary.Role }
+            $NumberOfNodesAdded++
         }
     }
 
     if ($NumberOfNodesAdded -eq 0) {
         return
+    }
+    if ($cd.AllNodes.NodeName -notcontains '*') {
+        $cd.AllNodes += @{ NodeName = "*"; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
     }
     return $cd
 }

@@ -1542,15 +1542,15 @@ function Install-MP {
     do {
 
         $i++
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $MPFQDN"
             New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
             $SystemServer = Wait-CMRoleRegistered -RoleName 'Site System' -ServerFQDN $MPFQDN -TimeoutSeconds 15 -PollSeconds 3 `
-                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN }
+                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode }
         }
 
-        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN
+        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode
         if (-not $mpinstalled) {
             Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
             if ($UsePKI) {
@@ -1560,7 +1560,7 @@ function Install-MP {
                 Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http *>&1 | Write-StatusLogEntry
             }
             $mpinstalled = Wait-CMRoleRegistered -RoleName 'MP' -ServerFQDN $MPFQDN -TimeoutSeconds 60 `
-                -Probe { Get-CMManagementPoint -SiteSystemServerName $MPFQDN }
+                -Probe { Get-CMManagementPoint -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode }
         }
         else {
             Write-DscStatus "MP Role detected on $MPFQDN"
@@ -1597,7 +1597,7 @@ function Install-SUP {
     do {
 
         $i++
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN SiteCode: $ServerSiteCode"
             try {
@@ -1606,7 +1606,7 @@ function Install-SUP {
                 if ($_.Exception.Message -notmatch 'already exists') { Write-DscStatus "WARNING: New-CMSiteSystemServer failed: $($_.Exception.Message)" }
             }
             $SystemServer = Wait-CMRoleRegistered -RoleName 'Site System' -ServerFQDN $ServerFQDN -TimeoutSeconds 15 -PollSeconds 3 `
-                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN }
+                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode }
         }
 
         $installed = Get-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN
@@ -1703,12 +1703,12 @@ function Install-SRP {
     do {
 
         $i++
-        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
+        $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
             New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode  *>&1 | Write-StatusLogEntry
             $SystemServer = Wait-CMRoleRegistered -RoleName 'Site System' -ServerFQDN $ServerFQDN -TimeoutSeconds 15 -PollSeconds 3 `
-                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN }
+                -Probe { Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode }
         }
 
         $installed = Get-CMReportingServicePoint -SiteSystemServerName $ServerFQDN
