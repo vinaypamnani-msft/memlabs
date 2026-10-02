@@ -7589,6 +7589,8 @@ function Invoke-VmCommand {
         [switch]$PollProgress,
         [Parameter(Mandatory = $false, HelpMessage = "Skip domain credential fallback via VMNote. Use during OOBE polling when VM is not yet domain-joined.")]
         [switch]$SkipDomainFallback,
+        [Parameter(Mandatory = $false, HelpMessage = "Require a domain guest principal and reject local SAM sessions.")]
+        [switch]$RequireDomainIdentity,
         [Parameter(Mandatory = $false, HelpMessage = "Max retries for Get-VmSession (default 3). Reduce for tight polling loops.")]
         [int]$SessionMaxRetries = 3,
         [Parameter(Mandatory = $false, HelpMessage = 'With -AsJob, treat non-terminating errors the remote scriptblock wrote (Write-Error) as a failure. The synchronous path gets this free via -ErrorVariable, but under -AsJob those errors land on the CHILD job and $Err2 stays empty, so a scriptblock that reports failure with Write-Error + return completes as "Succeeded". Set this when converting a sync caller to -AsJob for a timeout, so its existing failure/retry handling keeps working.')]
@@ -7661,7 +7663,7 @@ function Invoke-VmCommand {
         # that make the phase look broken. -ShowVMSessionError still overrides this.
         $quietSession = $SuppressLog.IsPresent -and -not $ShowVMSessionError.IsPresent
         if ($VmDomainAccount) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag -Quiet:$quietSession
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -RequireDomainIdentity:$RequireDomainIdentity -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
         # Get-VmSession already refuses to cycle credentials WITHIN a pass once the
@@ -7671,7 +7673,7 @@ function Invoke-VmCommand {
         # local-admin ladder, then another 95s on a domain-admin one, while Hyper-V
         # reported the guest 'Operating normally' -- only a reboot cleared it.
         if (-not $ps -and -not $sessionDiag.ChannelBroken) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag -Quiet:$quietSession
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -RequireDomainIdentity:$RequireDomainIdentity -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
         if (-not $ps -and -not $sessionDiag.ChannelBroken -and $VmDomainName -eq "WORKGROUP" -and -not $SkipDomainFallback) {
@@ -7681,7 +7683,7 @@ function Invoke-VmCommand {
             if (-not $adminName) {
                 $adminName = "admin"
             }
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -Diagnostics $sessionDiag -Quiet:$quietSession
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -RequireDomainIdentity:$RequireDomainIdentity -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
         $failed = ($null -eq $ps)
@@ -8748,6 +8750,8 @@ function Set-VmSessionCacheStamp {
     param(
         [object] $Session,
         [string] $VmName,
+        [string] $CredentialUserName,
+        [string] $GuestIdentity,
         [switch] $Hit
     )
     if (-not $Session) { return }
@@ -8761,9 +8765,198 @@ function Set-VmSessionCacheStamp {
             $Session | Add-Member -MemberType NoteProperty -Name '_CacheHits' -Value 0 -Force
             $Session | Add-Member -MemberType NoteProperty -Name '_CachedVm' -Value $VmName -Force
         }
+        if ($CredentialUserName) {
+            $Session | Add-Member -MemberType NoteProperty -Name '_CredentialUserName' -Value $CredentialUserName -Force
+        }
+        if ($GuestIdentity) {
+            $Session | Add-Member -MemberType NoteProperty -Name '_GuestIdentity' -Value $GuestIdentity -Force
+        }
         $Session | Add-Member -MemberType NoteProperty -Name '_LastUsed' -Value $now -Force
     }
     catch { }
+}
+
+function Get-VmSessionCredentialUserName {
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $false)][string]$VmDomainName,
+        [Parameter(Mandatory = $true)][string]$AccountName
+    )
+
+    if ($AccountName -match '[@\\]') { return $AccountName }
+    if ([string]::IsNullOrWhiteSpace($VmDomainName) -or
+        $VmDomainName -eq 'WORKGROUP' -or
+        $VmDomainName -ieq $VmName) {
+        return "$VmName\$AccountName"
+    }
+    return "$AccountName@$VmDomainName"
+}
+
+function Get-VmSessionGuestIdentity {
+    param(
+        [Parameter(Mandatory = $true)][object]$Session,
+        [int]$TimeoutSeconds = 15,
+        [string]$VmName,
+        [scriptblock]$ProbeOperation
+    )
+
+    if ($Session.PSObject.Properties.Name -contains '_GuestIdentity' -and
+        -not [string]::IsNullOrWhiteSpace("$($Session._GuestIdentity)")) {
+        $cachedComputerName = "$($Session._GuestComputerName)"
+        $cachedIsLocal = if ($Session.PSObject.Properties.Name -contains '_GuestIdentityIsLocal') {
+            [bool]$Session._GuestIdentityIsLocal
+        }
+        else {
+            "$($Session._GuestIdentity)" -match '^([^\\]+)\\' -and
+                $cachedComputerName -and $Matches[1] -ieq $cachedComputerName
+        }
+        return [pscustomobject]@{
+            Succeeded    = $true
+            Identity     = "$($Session._GuestIdentity)"
+            ComputerName = $cachedComputerName
+            IsLocal      = [bool]$cachedIsLocal
+            TimedOut     = $false
+            ChannelBroken = $false
+            Error        = $null
+            Abandoned    = $false
+        }
+    }
+    if (-not $ProbeOperation) {
+        $ProbeOperation = {
+            param($targetSession)
+            Invoke-Command -Session $targetSession -ScriptBlock {
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                $authority = if ($identity -match '^([^\\]+)\\') { $Matches[1] } else { '' }
+                [pscustomobject]@{
+                    Identity     = $identity
+                    ComputerName = $env:COMPUTERNAME
+                    IsLocal      = [bool]($authority -and $authority -ieq $env:COMPUTERNAME)
+                }
+            } -ErrorAction Stop
+        }
+    }
+
+    $rs = $null
+    $psi = $null
+    $async = $null
+    $parked = $false
+    try {
+        $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $rs.Open()
+        $psi = [System.Management.Automation.PowerShell]::Create()
+        $psi.Runspace = $rs
+        $null = $psi.AddScript($ProbeOperation.ToString()).AddArgument($Session)
+        $async = $psi.BeginInvoke()
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
+            try { $psi.BeginStop($null, $null) } catch {}
+            $Session | Add-Member -MemberType NoteProperty -Name '_IdentityProbeAbandoned' -Value $true -Force
+            Add-OrphanRunspace -Runspace $rs -PowerShell $psi -Session $Session `
+                -Reason 'identity probe timeout' -VmName $VmName
+            $parked = $true
+            return [pscustomobject]@{
+                Succeeded    = $false
+                Identity     = $null
+                ComputerName = $null
+                IsLocal      = $false
+                TimedOut     = $true
+                ChannelBroken = $true
+                Error        = "Identity probe timed out after ${TimeoutSeconds}s"
+                Abandoned    = $true
+            }
+        }
+
+        $identityOutput = @($psi.EndInvoke($async))
+        $record = $identityOutput | Select-Object -Last 1
+        $probeErrors = @($psi.Streams.Error | ForEach-Object { "$_" })
+        if ($probeErrors.Count -gt 0 -or -not $record -or
+            [string]::IsNullOrWhiteSpace("$($record.Identity)")) {
+            $errorText = if ($probeErrors.Count -gt 0) { $probeErrors -join '; ' } else { 'Identity probe returned no identity' }
+            try { $psi.BeginStop($null, $null) } catch {}
+            $Session | Add-Member -MemberType NoteProperty -Name '_IdentityProbeAbandoned' -Value $true -Force
+            Add-OrphanRunspace -Runspace $rs -PowerShell $psi -Session $Session `
+                -Reason 'identity probe failed' -VmName $VmName
+            $parked = $true
+            return [pscustomobject]@{
+                Succeeded    = $false
+                Identity     = $null
+                ComputerName = $null
+                IsLocal      = $false
+                TimedOut     = $false
+                ChannelBroken = $true
+                Error        = $errorText
+                Abandoned    = $true
+            }
+        }
+
+        $identity = "$($record.Identity)".Trim()
+        $computerName = "$($record.ComputerName)".Trim()
+        $isLocal = [bool]$record.IsLocal
+        $Session | Add-Member -MemberType NoteProperty -Name '_GuestIdentity' -Value $identity -Force
+        $Session | Add-Member -MemberType NoteProperty -Name '_GuestComputerName' -Value $computerName -Force
+        $Session | Add-Member -MemberType NoteProperty -Name '_GuestIdentityIsLocal' -Value $isLocal -Force
+        return [pscustomobject]@{
+            Succeeded    = $true
+            Identity     = $identity
+            ComputerName = $computerName
+            IsLocal      = $isLocal
+            TimedOut     = $false
+            ChannelBroken = $false
+            Error        = $null
+            Abandoned    = $false
+        }
+    }
+    catch {
+        if ($psi) { try { $psi.BeginStop($null, $null) } catch {} }
+        if ($Session) {
+            $Session | Add-Member -MemberType NoteProperty -Name '_IdentityProbeAbandoned' -Value $true -Force
+        }
+        if ($rs -or $psi -or $Session) {
+            Add-OrphanRunspace -Runspace $rs -PowerShell $psi -Session $Session `
+                -Reason 'identity probe threw' -VmName $VmName
+            $parked = $true
+        }
+        return [pscustomobject]@{
+            Succeeded    = $false
+            Identity     = $null
+            ComputerName = $null
+            IsLocal      = $false
+            TimedOut     = $false
+            ChannelBroken = $true
+            Error        = $_.Exception.Message
+            Abandoned    = [bool]$parked
+        }
+    }
+    finally {
+        if (-not $parked) {
+            if ($psi) { try { $psi.Dispose() } catch {} }
+            if ($rs) {
+                try { $rs.Close() } catch {}
+                try { $rs.Dispose() } catch {}
+            }
+        }
+    }
+}
+
+function Test-VmSessionIdentityCompatible {
+    param(
+        [Parameter(Mandatory = $true)][object]$Session,
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [bool]$RequireDomainIdentity = $false,
+        [hashtable]$Diagnostics,
+        [scriptblock]$ProbeOperation
+    )
+
+    if (-not $RequireDomainIdentity) { return $true }
+    $probe = Get-VmSessionGuestIdentity -Session $Session -VmName $VmName -ProbeOperation $ProbeOperation
+    if (-not $probe.Succeeded) {
+        if ($Diagnostics) {
+            $Diagnostics.ChannelBroken = [bool]$probe.ChannelBroken
+            $Diagnostics.FailureReasons = @($Diagnostics.FailureReasons) + @('identity-probe-failed')
+            $Diagnostics.LastError = "$($probe.Error)"
+        }
+        return $false
+    }
+    return -not $probe.IsLocal
 }
 
 # One-line census of $global:ps_cache for the phase-boundary and end-of-run
@@ -9459,6 +9652,8 @@ function Get-VmSession {
         [int]$MaxRetries = 3,
         [Parameter(Mandatory = $false, HelpMessage = "Only try local/primary credentials. Skip domain-lookup fallback.")]
         [switch]$LocalOnly,
+        [Parameter(Mandatory = $false, HelpMessage = "Require the guest command identity to be a domain principal; never reuse or fall back to a local SAM account.")]
+        [switch]$RequireDomainIdentity,
         [Parameter(Mandatory = $false, HelpMessage = "Suppress the final 'Could not create session' type=3 failure log. Use for best-effort liveness probes (e.g. Copy-ItemSafe heartbeat) where a miss during OOBE is expected and not an error.")]
         [switch]$Quiet,
         [Parameter(Mandatory = $false, HelpMessage = "Hashtable populated with channel diagnostics: ChannelBroken, FailureReasons, LastError, VmState, Heartbeat, and ConnectMilliseconds.")]
@@ -9469,9 +9664,17 @@ function Get-VmSession {
     $VmName = $VmName.Split(".")[0]
 
     $ps = $null
+    [bool]$sawChannelBroken = $false
 
-    # Cache key
-    $cacheKey = $VmName + "-" + $VmDomainName
+    $requestedDomainName = $VmDomainName
+    $requireDomain = $RequireDomainIdentity.IsPresent -or [bool]$global:MemLabsRequireDomainIdentity
+    $isDomainRequest = -not [string]::IsNullOrWhiteSpace($requestedDomainName) -and
+        $requestedDomainName -ne 'WORKGROUP' -and
+        $requestedDomainName -ine $VmName
+    if ($requireDomain -and -not $isDomainRequest) {
+        Write-Log "$VmName`: A domain identity is required, but the requested domain is '$requestedDomainName'." -Failure
+        return $null
+    }
 
     # Set domain name to VmName when workgroup
     if ($VmDomainName -eq "WORKGROUP") {
@@ -9479,21 +9682,17 @@ function Get-VmSession {
     }
 
     # Get PS Session
-    if ($VmDomainAccount) {
-        $username = "$VmDomainName\$VmDomainAccount"
-        $cacheKey = $cacheKey + "-" + $VmDomainAccount
-    }
-    else {
-        $username = "$VmDomainName\$($Common.LocalAdmin.UserName)"
-        $cacheKey = $cacheKey + "-" + $Common.LocalAdmin.UserName
-    }
+    $requestedAccount = if ($VmDomainAccount) { $VmDomainAccount } else { $Common.LocalAdmin.UserName }
+    $username = Get-VmSessionCredentialUserName -VmName $VmName -VmDomainName $requestedDomainName -AccountName $requestedAccount
+    $cacheKey = "$VmName-$requestedDomainName-$requestedAccount"
 
     Write-Log "$VmName`: Get-VmSession started with cachekey $cacheKey" -Verbose
 
     # ── Fast path: exact cache key match ──────────────────────────────────
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
-        if ($ps.Availability -eq "Available") {
+        if ($ps.Availability -eq "Available" -and
+            (Test-VmSessionIdentityCompatible -Session $ps -VmName $VmName -RequireDomainIdentity:$requireDomain -Diagnostics $Diagnostics)) {
             Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             Set-VmSessionCacheStamp -Session $ps -VmName $VmName -Hit
             return $ps
@@ -9501,7 +9700,10 @@ function Get-VmSession {
         else {
             $global:ps_cache.Remove($cacheKey)
             $global:ps_lastGoodCred.Remove($VmName)
-            Remove-VmSession $ps
+            if (-not ($ps.PSObject.Properties.Name -contains '_IdentityProbeAbandoned' -and $ps._IdentityProbeAbandoned)) {
+                Remove-VmSession $ps
+            }
+            if ($Diagnostics -and $Diagnostics.ChannelBroken) { $sawChannelBroken = $true }
         }
     }
 
@@ -9512,15 +9714,22 @@ function Get-VmSession {
     foreach ($existingKey in @($global:ps_cache.Keys)) {
         if ($existingKey -like "$VmName-*") {
             $existingPs = $global:ps_cache[$existingKey]
-            if ($existingPs.Availability -eq "Available") {
+            if ($existingPs.Availability -eq "Available" -and
+                (Test-VmSessionIdentityCompatible -Session $existingPs -VmName $VmName -RequireDomainIdentity:$requireDomain -Diagnostics $Diagnostics)) {
                 Write-Log "$VmName`: Reusing existing session from key '$existingKey' (caller asked for '$cacheKey')." -Verbose
                 Set-VmSessionCacheStamp -Session $existingPs -VmName $VmName -Hit
                 return $existingPs
             }
-            else {
+            elseif ($existingPs.Availability -ne "Available") {
                 $global:ps_cache.Remove($existingKey)
                 $global:ps_lastGoodCred.Remove($VmName)
                 Remove-VmSession $existingPs
+            }
+            elseif ($existingPs.PSObject.Properties.Name -contains '_IdentityProbeAbandoned' -and
+                $existingPs._IdentityProbeAbandoned) {
+                $global:ps_cache.Remove($existingKey)
+                $global:ps_lastGoodCred.Remove($VmName)
+                $sawChannelBroken = $true
             }
         }
     }
@@ -9548,7 +9757,7 @@ function Get-VmSession {
     # Local fallback: VMNAME\localadmin (only if different from primary)
     $localUser = "$VmName\$($Common.LocalAdmin.UserName)"
     $localCacheKey = "$VmName-WORKGROUP-$($Common.LocalAdmin.UserName)"
-    if ($localUser -ne $username) {
+    if (-not $requireDomain -and $localUser -ne $username) {
         $credEntries.Add(@{ Tag = 'local'; Username = $localUser; CacheKey = $localCacheKey })
     }
 
@@ -9559,7 +9768,7 @@ function Get-VmSession {
     if (-not $LocalOnly -and -not $Common.InJob) {
         $vmRecord = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
         if ($vmRecord -and $vmRecord.Domain) {
-            $domainLookupUser = "$($vmRecord.Domain)\$($Common.LocalAdmin.UserName)"
+            $domainLookupUser = Get-VmSessionCredentialUserName -VmName $VmName -VmDomainName $vmRecord.Domain -AccountName $Common.LocalAdmin.UserName
             $domainLookupCacheKey = "$VmName-$($vmRecord.Domain)-$($Common.LocalAdmin.UserName)"
             if ($domainLookupUser -ne $username -and $domainLookupUser -ne $localUser) {
                 $credEntries.Add(@{ Tag = 'domain-lookup'; Username = $domainLookupUser; CacheKey = $domainLookupCacheKey })
@@ -9568,8 +9777,8 @@ function Get-VmSession {
     }
 
     # Administrator fallback: DOMAIN\Administrator (after DC promotion)
-    if (-not $LocalOnly -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
-        $adminUser = "$VmDomainName\Administrator"
+    if (-not $requireDomain -and -not $LocalOnly -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
+        $adminUser = Get-VmSessionCredentialUserName -VmName $VmName -VmDomainName $requestedDomainName -AccountName 'Administrator'
         $adminCacheKey = "$VmName-$VmDomainName-Administrator"
         if ($adminUser -ne $username) {
             $credEntries.Add(@{ Tag = 'administrator'; Username = $adminUser; CacheKey = $adminCacheKey })
@@ -9597,7 +9806,6 @@ function Get-VmSession {
     }
 
     $failCount = 0
-    [bool]$sawChannelBroken = $false
     # Split the cost of a session CREATE (never a cache hit -- those return above) so the
     # log says whether the ~8s is the PSDirect handshake or vmms contention on the two
     # Get-VM calls. Only one of those is fixable; hiding it behind other work is the other.
@@ -9675,6 +9883,32 @@ function Get-VmSession {
             $swConnectTotalMs += $swConnect.Elapsed.TotalMilliseconds
             $ps = $connectResult.Session
             if ($ps -and $ps.Availability -eq "Available") {
+                $identityProbe = if ($requireDomain) {
+                    Get-VmSessionGuestIdentity -Session $ps -VmName $VmName
+                }
+                else {
+                    [pscustomobject]@{
+                        Succeeded = $true; Identity = $null; IsLocal = $false
+                        ChannelBroken = $false; Error = $null
+                    }
+                }
+                $guestIdentity = if ($identityProbe.Identity) { "$($identityProbe.Identity)" } else { '<not-probed>' }
+                if ($requireDomain -and (-not $identityProbe.Succeeded -or $identityProbe.IsLocal)) {
+                    if ($identityProbe.ChannelBroken) {
+                        $sawChannelBroken = $true
+                        $null = $failReasons.Add('identity-probe-channel-broken')
+                        $lastConnectError = "$($identityProbe.Error)"
+                    }
+                    else {
+                        $null = $failReasons.Add("local-identity:$guestIdentity")
+                        $lastConnectError = "Requested domain identity but guest authenticated as '$guestIdentity'"
+                    }
+                    Write-Log "$VmName`: Rejecting session created with '$($entry.Username)' because the guest identity is '$guestIdentity'." -Warning -LogOnly
+                    if (-not $identityProbe.Abandoned) { Remove-VmSession $ps }
+                    $ps = $null
+                    if ($identityProbe.ChannelBroken) { break }
+                    continue
+                }
                 $cacheKey = $entry.CacheKey
                 # This slot may already hold a session: two callers can race a create for the
                 # same VM (parallel phase workers, or a worker and the launcher). The bare
@@ -9683,7 +9917,9 @@ function Get-VmSession {
                 # life of the VM. Measured: 142 orphaned hosts / 14.8 GB across a 17-VM lab.
                 $existingSession = $global:ps_cache[$cacheKey]
                 if ($existingSession -and -not [object]::ReferenceEquals($existingSession, $ps)) {
-                    if ("$($existingSession.State)" -eq 'Opened' -and "$($existingSession.Availability)" -eq 'Available') {
+                    if ("$($existingSession.State)" -eq 'Opened' -and
+                        "$($existingSession.Availability)" -eq 'Available' -and
+                        (Test-VmSessionIdentityCompatible -Session $existingSession -VmName $VmName -RequireDomainIdentity:$requireDomain -Diagnostics $Diagnostics)) {
                         # We lost. Dispose OURS -- nothing has a reference to it yet, so this is
                         # the one session here that is unambiguously safe to tear down inline.
                         try { (Get-VmSessionStats)['cacheRaceLost']++ } catch { }
@@ -9694,17 +9930,21 @@ function Get-VmSession {
                     # and disposing something with a live pipeline is the documented cause of the
                     # disposed-PSJob phase crash.
                     try { (Get-VmSessionStats)['cacheEvicted']++ } catch { }
-                    Add-OrphanRunspace -Runspace $existingSession._OwnerRunspace -Session $existingSession -Reason 'cache slot overwritten' -VmName $VmName
+                    if (-not ($existingSession.PSObject.Properties.Name -contains '_IdentityProbeAbandoned' -and
+                            $existingSession._IdentityProbeAbandoned)) {
+                        Add-OrphanRunspace -Runspace $existingSession._OwnerRunspace -Session $existingSession -Reason 'cache slot overwritten' -VmName $VmName
+                    }
                 }
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
-                Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
-                Write-Log ("[StepTiming] {0} SessionCreate completed in {1} seconds (vmLookup={2}ms stateCheck={3}ms hbWait={4}ms connect={5}ms attempts={6} tag={7} hb={8} failed=[{9}])" -f `
+                Write-Log "$VmName`: Created session using $($entry.Username) as $guestIdentity. CacheKey [$cacheKey]" -Success -Verbose
+                Write-Log ("[StepTiming] {0} SessionCreate completed in {1} seconds (vmLookup={2}ms stateCheck={3}ms hbWait={4}ms connect={5}ms attempts={6} tag={7} identity={8} hb={9} failed=[{10}])" -f `
                         $VmName, [Math]::Round(($swVmLookup.Elapsed.TotalMilliseconds + $swStateCheckTotalMs + $swHeartbeatWaitMs + $swConnectTotalMs) / 1000, 1),
                     [int]$swVmLookup.Elapsed.TotalMilliseconds, [int]$swStateCheckTotalMs, [int]$swHeartbeatWaitMs, [int]$swConnectTotalMs,
-                    $connectAttempts, $entry.Tag, $heartbeatAtConnect,
+                    $connectAttempts, $entry.Tag, $guestIdentity, $heartbeatAtConnect,
                     ($failReasons -join ',')) -LogOnly
                 $global:ps_cache[$cacheKey] = $ps
-                Set-VmSessionCacheStamp -Session $ps -VmName $VmName
+                $guestIdentityStamp = if ($identityProbe.Identity) { "$($identityProbe.Identity)" } else { $null }
+                Set-VmSessionCacheStamp -Session $ps -VmName $VmName -CredentialUserName $entry.Username -GuestIdentity $guestIdentityStamp
                 Set-VmSessionPipelineEvent -Session $ps -Kind 'created'
                 return $ps
             }
@@ -9770,7 +10010,7 @@ function Get-VmSession {
     }
     # Populate diagnostics for the caller so it knows WHY we failed
     if ($Diagnostics) {
-        $Diagnostics.ChannelBroken = $sawChannelBroken
+        $Diagnostics.ChannelBroken = $sawChannelBroken -or [bool]$Diagnostics.ChannelBroken
         $Diagnostics.FailureReasons = @($failReasons)
         $Diagnostics.LastError = $lastConnectError
         $Diagnostics.VmState = "$vmState"

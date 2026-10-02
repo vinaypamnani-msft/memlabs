@@ -57,6 +57,10 @@ $global:Phase10Job = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM (role '$($currentItem.role)'); Windows maintenance not applicable. Skipping." -OutputStream -Success
             return
         }
+        $global:MemLabsRequireDomainIdentity = [bool](
+            $domainNameForLogging -and
+            $currentItem.role -notin @('WorkgroupMember', 'InternetClient', 'StandaloneRootCA')
+        )
         # Pre-flight: a VM can be Running with a healthy heartbeat yet have a
         # wedged PSDirect/VMBus channel, which would make Start-VMMaintenance
         # fail with "returned no data". Recover it (reboot once to clear VMBus)
@@ -146,6 +150,10 @@ $global:Phase11Job = {
         try { Flush-LogBuffer -All } catch { }
         $domainNameForLogging = $deployConfig.vmOptions.domainName
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+        $global:MemLabsRequireDomainIdentity = [bool](
+            -not (Test-VmIsLinux -Vm $currentItem) -and
+            $currentItem.role -notin @('WorkgroupMember', 'InternetClient', 'StandaloneRootCA')
+        )
         Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] JobBootstrap completed in $([Math]::Round(([DateTime]::UtcNow - $sbBootStart).TotalSeconds,1)) seconds" -LogOnly
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting functional validation for role '$($currentItem.role)'" -LogOnly
