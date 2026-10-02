@@ -3952,31 +3952,55 @@ function Test-CMSiteFunctionality {
 
         if (-not $results.Passed) { return $results }
 
+        function Invoke-CmSiteIdentityQueryWithRetry {
+            param(
+                [Parameter(Mandatory)][string]$Namespace,
+                [Parameter(Mandatory)][string]$SiteCode,
+                [int]$Attempts = 6,
+                [int]$RetrySeconds = 30
+            )
+
+            $details = [System.Collections.Generic.List[string]]::new()
+            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+                $site = $null
+                try {
+                    $site = Get-WmiObject -Namespace $Namespace -Class SMS_Site -ErrorAction Stop
+                    if (-not $site) {
+                        $details.Add("  Attempt $attempt/${Attempts}: SMS_Site returned null")
+                    }
+                }
+                catch {
+                    $details.Add("  Attempt $attempt/${Attempts} failed: $($_.Exception.Message)")
+                }
+
+                if ($site) {
+                    return [pscustomobject]@{
+                        Site     = $site
+                        Attempt  = $attempt
+                        Details  = @($details)
+                    }
+                }
+                if ($attempt -lt $Attempts) { Start-Sleep -Seconds $RetrySeconds }
+            }
+
+            return [pscustomobject]@{
+                Site     = $null
+                Attempt  = $Attempts
+                Details  = @($details)
+            }
+        }
+
         # WMI site query with retry (CM components still initializing after fresh build)
         $maxRetries = 6
         $retryDelay = 30
-        $siteOk = $false
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_Site (max ${maxRetries} attempts, ${retryDelay}s apart)")
-        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
-            try {
-                $site = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_Site -ErrorAction Stop
-                if ($site) {
-                    $results.Details.Add("OK: WMI SMS_Site query returned site '$sc' (attempt $attempt)")
-                    $siteOk = $true
-                    break
-                }
-                else {
-                    $results.Details.Add("  Attempt $attempt/${maxRetries}: SMS_Site returned null")
-                }
-            }
-            catch {
-                $results.Details.Add("  Attempt $attempt/${maxRetries} failed: $($_.Exception.Message)")
-                if ($attempt -lt $maxRetries) {
-                    Start-Sleep -Seconds $retryDelay
-                }
-            }
+        $siteQuery = Invoke-CmSiteIdentityQueryWithRetry -Namespace "root\SMS\site_$sc" `
+            -SiteCode $sc -Attempts $maxRetries -RetrySeconds $retryDelay
+        foreach ($detail in @($siteQuery.Details)) { $results.Details.Add($detail) }
+        if ($siteQuery.Site) {
+            $results.Details.Add("OK: WMI SMS_Site query returned site '$sc' (attempt $($siteQuery.Attempt))")
         }
-        if (-not $siteOk) {
+        else {
             $results.Passed = $false
             $results.Details.Add("FAIL: WMI SMS_Site query failed after $maxRetries attempts")
             return $results
@@ -7080,6 +7104,43 @@ function Test-PKICertificatesOnVM {
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        function Invoke-CertutilRevocationCheckWithRetry {
+            param(
+                [Parameter(Mandatory)][string]$CertificatePath,
+                [int]$Attempts = 4,
+                [int]$RetrySeconds = 15,
+                [scriptblock]$Verifier
+            )
+
+            if (-not $Verifier) {
+                $Verifier = {
+                    param($Path)
+                    $nativeOutput = @(& certutil.exe -verify -urlfetch $Path 2>&1)
+                    [pscustomobject]@{
+                        ExitCode = $LASTEXITCODE
+                        Output   = $nativeOutput
+                    }
+                }
+            }
+
+            $last = $null
+            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+                $check = & $Verifier $CertificatePath
+                $output = @($check.Output | ForEach-Object { "$_" })
+                $text = $output -join "`n"
+                $passed = [int]$check.ExitCode -eq 0 -and $text -match 'revocation check passed'
+                $last = [pscustomobject]@{
+                    Passed  = [bool]$passed
+                    ExitCode = [int]$check.ExitCode
+                    Output  = $output
+                    Attempts = $attempt
+                }
+                if ($passed) { return $last }
+                if ($attempt -lt $Attempts) { Start-Sleep -Seconds $RetrySeconds }
+            }
+            return $last
+        }
+
         # ---- Check 1: Duplicate certificate detection ----
         $friendlyNames = @(
             'ConfigMgr WebServer Certificate'
@@ -7327,25 +7388,26 @@ function Test-PKICertificatesOnVM {
 
             # Export cert to temp file for certutil -verify
             $tmpCer = "$env:TEMP\phase11_crl_check.cer"
+            $verifyOutput = @()
             try {
                 Export-Certificate -Cert $webCert -FilePath $tmpCer -Force -ErrorAction Stop | Out-Null
-                $verifyOutput = & certutil.exe -verify -urlfetch $tmpCer 2>&1
-                $verifyExit = $LASTEXITCODE
+                $verifyResult = Invoke-CertutilRevocationCheckWithRetry -CertificatePath $tmpCer
+                $verifyOutput = @($verifyResult.Output)
+                $verifyExit = $verifyResult.ExitCode
                 $verifyText = $verifyOutput -join "`n"
-                Remove-Item $tmpCer -Force -ErrorAction SilentlyContinue
 
-                if ($verifyExit -eq 0 -and $verifyText -match 'revocation check passed') {
-                    $results.Details.Add("OK: Certificate chain + CRL verification passed")
+                if ($verifyResult.Passed) {
+                    $results.Details.Add("OK: Certificate chain + CRL verification passed (attempt $($verifyResult.Attempts)/4)")
                 }
                 else {
                     # certutil still exits 0 when the chain builds but every CDP fetch failed, so
                     # the 'revocation check passed' line is the only proof revocation actually worked.
                     $results.Passed = $false
                     $why = if ($verifyExit -eq 0) {
-                        "certutil exited 0 but never reported a passing revocation check -- no CRL could be retrieved"
+                        "certutil exited 0 but never reported a passing revocation check after $($verifyResult.Attempts) attempts -- no CRL could be retrieved"
                     }
                     else {
-                        "certutil -verify -urlfetch failed (exit $verifyExit)"
+                        "certutil -verify -urlfetch failed after $($verifyResult.Attempts) attempts (exit $verifyExit)"
                     }
                     $results.Details.Add("FAIL: Revocation checking is broken for '$($webCert.Subject)': $why. The site is configured to check the CRL for site systems, so an unreachable CDP breaks HTTPS MP/DP traffic and PXE.")
                     if ($cdpUrls.Count -eq 0) {
@@ -7360,6 +7422,9 @@ function Test-PKICertificatesOnVM {
             }
             catch {
                 $results.Details.Add("WARN: CRL verification skipped: $($_.Exception.Message)")
+            }
+            finally {
+                Remove-Item $tmpCer -Force -ErrorAction SilentlyContinue
             }
 
             # ---- Check 4: Delta CRL expiry ----
