@@ -1949,11 +1949,18 @@ function Get-EligiblePushSites {
     #>
     param (
         [Parameter(Mandatory = $false)] [object] $Config,
-        [Parameter(Mandatory = $false)] [string] $Domain
+        [Parameter(Mandatory = $false)] [string] $Domain,
+        [Parameter(Mandatory = $false)] [object] $Inventory
     )
 
     $sites = @()
     $seen = @{}
+    $inventorySites = @()
+    if ($PSBoundParameters.ContainsKey('Inventory')) {
+        $inventorySites = @($Inventory | Where-Object {
+                $_.Role -in 'Primary', 'Secondary' -and $_.SiteCode
+            })
+    }
 
     $lookupDomain = $Domain
     if (-not $lookupDomain -and $Config -and $Config.vmOptions) { $lookupDomain = $Config.vmOptions.domainName }
@@ -1970,7 +1977,16 @@ function Get-EligiblePushSites {
             # An existing site server carries no 'network' in the config; using
             # $defaultNet here would put it on the subnet being deployed now and
             # make it tie with (and lose to) the new Primary on every subnet match.
-            if (-not $net) { $net = Get-VMDeployedNetwork -VmName $vm.vmName -Domain $lookupDomain }
+            if (-not $net -and $PSBoundParameters.ContainsKey('Inventory')) {
+                $inventoryMatch = @($inventorySites | Where-Object {
+                        ($vm.vmName -and $_.vmName -ieq $vm.vmName) -or
+                        $_.SiteCode -ieq $vm.SiteCode
+                    }) | Select-Object -First 1
+                if ($inventoryMatch) { $net = $inventoryMatch.Network }
+            }
+            if (-not $net -and -not $PSBoundParameters.ContainsKey('Inventory')) {
+                $net = Get-VMDeployedNetwork -VmName $vm.vmName -Domain $lookupDomain
+            }
             if (-not $net) { $net = $defaultNet }
             $sites += [PSCustomObject]@{ SiteCode = $vm.siteCode; Network = $net; Role = $vm.role }
             $seen[$key] = $true
@@ -1978,19 +1994,31 @@ function Get-EligiblePushSites {
     }
 
     # Existing domain sites (for add-to-existing where the Primary is hidden).
-    if ($Domain) {
+    # Callers that already resolved Get-List2 should pass that exact snapshot so
+    # site discovery and client selection cannot observe different inventories.
+    if ($PSBoundParameters.ContainsKey('Inventory')) {
+        $existingSites = $inventorySites
+    }
+    elseif ($Domain) {
         try {
-            foreach ($e in @(Get-ExistingSiteServer -DomainName $Domain | Where-Object { $_.Role -in 'Primary', 'Secondary' })) {
-                if (-not $e.SiteCode) { continue }
-                $key = $e.SiteCode.ToLowerInvariant()
-                if ($seen.ContainsKey($key)) { continue }
-                $sites += [PSCustomObject]@{ SiteCode = $e.SiteCode; Network = $e.Network; Role = $e.Role }
-                $seen[$key] = $true
-            }
+            $existingSites = @(Get-ExistingSiteServer -DomainName $Domain | Where-Object {
+                    $_.Role -in 'Primary', 'Secondary'
+                })
         }
         catch {
             Write-Log "Get-EligiblePushSites: failed to enumerate existing site servers for '$Domain': $($_.Exception.Message)" -LogOnly -Warning
+            $existingSites = @()
         }
+    }
+    else {
+        $existingSites = @()
+    }
+    foreach ($e in $existingSites) {
+        if (-not $e.SiteCode) { continue }
+        $key = $e.SiteCode.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $sites += [PSCustomObject]@{ SiteCode = $e.SiteCode; Network = $e.Network; Role = $e.Role }
+        $seen[$key] = $true
     }
 
     return $sites
