@@ -46,7 +46,7 @@ $validationText = Get-Content -LiteralPath $validationPath -Raw
 $phaseJobsText = Get-Content -LiteralPath $phaseJobsPath -Raw
 
 Assert-ConsoleUpgrade ($fixText -match 'NeededOnFreshDeploy\s*=\s*\$true' -and $fixText -match 'AppliesToExisting\s*=\s*\$true') 'console fix is reachable from Phase 10 and fresh-deploy maintenance'
-Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"260927\.1"') 'console fix version forces deployment of the repaired runner'
+Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"261002\.1"') 'console fix version forces deployment of the hierarchy-release repair'
 Assert-ConsoleUpgrade ($fixText -match 'returned no result' -and $fixText -match "Properties\['Success'\]") 'maintenance wrapper requires an explicit result'
 Assert-ConsoleUpgrade ($fixText -match 'ToBase64String.+ReadAllBytes' -and
     $fixText -match 'WriteAllBytes\(\$script.+FromBase64String') 'maintenance carries the current console script into Phase 10-only reruns'
@@ -58,6 +58,7 @@ Assert-ConsoleUpgrade ($upgradeText -match 'Get-ConsoleVersionState' -and $upgra
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Invoke-ConsoleUpgrade')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Get-ConsoleVersionState')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Resolve-ExpectedConsoleRelease')))
+. ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $validationPath -Name 'Resolve-EffectiveHierarchyCmRelease')))
 $numericVM = [pscustomobject]@{}
 $symbolicVM = [pscustomobject]@{ thisParams = [pscustomobject]@{ cmDownloadVersion = [pscustomobject]@{ baselineVersion = '2603' } } }
 $offlineVM = [pscustomobject]@{ thisParams = [pscustomobject]@{ cmDownloadVersion = [pscustomobject]@{ baselineVersion = '2509' } } }
@@ -71,6 +72,7 @@ $offlineHierarchy = [pscustomobject]@{
     virtualMachines = @(
         [pscustomobject]@{
             siteCode  = 'CAS'
+            cmOptions = [pscustomobject]@{ Version = '2603'; OfflineSCP = $true }
             thisParams = [pscustomobject]@{
                 cmDownloadVersion = [pscustomobject]@{ baselineVersion = '2509' }
             }
@@ -78,6 +80,67 @@ $offlineHierarchy = [pscustomobject]@{
     )
 }
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2603'; OfflineSCP = $true }) -VM $childOfflineVM -DeployConfig $offlineHierarchy) -eq '2509') 'OfflineSCP child Primary inherits deployed baseline metadata from its CAS'
+$mainEraParent = [pscustomobject]@{
+    siteCode  = 'CS1'
+    cmOptions = [pscustomobject]@{ Version = '2309'; OfflineSCP = $false }
+    thisParams = [pscustomobject]@{
+        cmDownloadVersion = [pscustomobject]@{
+            baselineVersion = '2303'
+            versions = @('2303', '2309')
+        }
+    }
+}
+$developChild = [pscustomobject]@{
+    siteCode = 'PS2'
+    parentSiteCode = 'CS1'
+    cmOptions = [pscustomobject]@{ Version = '2509'; OfflineSCP = $false }
+    thisParams = [pscustomobject]@{
+        cmDownloadVersion = [pscustomobject]@{
+            baselineVersion = '2303'
+            versions = @('2303', '2309')
+        }
+    }
+}
+$mixedHierarchy = [pscustomobject]@{
+    cmOptions = $developChild.cmOptions
+    virtualMachines = @($developChild, $mainEraParent)
+}
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions $developChild.cmOptions -VM $developChild -DeployConfig $mixedHierarchy) -eq '2309') `
+    'child Primary console inherits the existing parent hierarchy release'
+function Resolve-CmVersionAlias { param([string]$Version) return $Version }
+function Get-CMBaselineVersion { param([string]$CMVersion) [pscustomobject]@{ baselineVersion = '2303' } }
+$validationRelease = Resolve-EffectiveHierarchyCmRelease -CurrentItem $developChild -DeployConfig $mixedHierarchy
+Assert-ConsoleUpgrade ($validationRelease.Version -eq '2309' -and $validationRelease.InheritedFromParent) `
+    'Phase 11 uses the same parent hierarchy release as console maintenance'
+$mainEraParent.cmOptions.OfflineSCP = $true
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions $developChild.cmOptions -VM $developChild -DeployConfig $mixedHierarchy) -eq '2303') `
+    'child Primary inherits an offline parent hierarchy baseline'
+$offlineValidationRelease = Resolve-EffectiveHierarchyCmRelease -CurrentItem $developChild -DeployConfig $mixedHierarchy
+Assert-ConsoleUpgrade ($offlineValidationRelease.Version -eq '2303' -and $offlineValidationRelease.OfflineSCP) `
+    'Phase 11 inherits the offline parent hierarchy baseline'
+$mainEraParent.cmOptions.OfflineSCP = $false
+function Get-CMBaselineVersion { throw 'synthetic baseline catalog failure' }
+$offlineWithoutMetadata = [pscustomobject]@{
+    cmOptions = [pscustomobject]@{ Version = '2603'; OfflineSCP = $true }
+    thisParams = [pscustomobject]@{ cmDownloadVersion = [pscustomobject]@{} }
+}
+$offlineWithoutMetadataConfig = [pscustomobject]@{
+    cmOptions = $offlineWithoutMetadata.cmOptions
+    virtualMachines = @($offlineWithoutMetadata)
+}
+$offlineFallback = Resolve-EffectiveHierarchyCmRelease -CurrentItem $offlineWithoutMetadata -DeployConfig $offlineWithoutMetadataConfig
+Assert-ConsoleUpgrade ($offlineFallback.Version -eq '2603' -and
+    $offlineFallback.BaselineResolutionError -eq 'synthetic baseline catalog failure') `
+    'Phase 11 preserves actionable OfflineSCP baseline catalog errors while falling back'
+$missingParentFailed = $false
+try {
+    $null = Resolve-ExpectedConsoleRelease -CmOptions $developChild.cmOptions -VM $developChild `
+        -DeployConfig ([pscustomobject]@{ virtualMachines = @($developChild) })
+}
+catch { $missingParentFailed = $_.Exception.Message -match 'expected exactly one parent site' }
+Assert-ConsoleUpgrade $missingParentFailed 'missing parent hierarchy metadata fails explicitly'
+Remove-Item Function:\Resolve-CmVersionAlias -ErrorAction SilentlyContinue
+Remove-Item Function:\Get-CMBaselineVersion -ErrorAction SilentlyContinue
 $unresolvedFailed = $false
 try { $null = Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = 'tech-preview' }) -VM $numericVM }
 catch { $unresolvedFailed = $_.Exception.Message -match 'could not resolve symbolic' }
@@ -95,7 +158,10 @@ Assert-ConsoleUpgrade ($upgradeText -match 'Stop-Process -Id \$ownedProcess\.Id'
 Assert-ConsoleUpgrade ($upgradeText -match 'Console upgrade did not converge' -and $upgradeText -match 'throw "Upgrade-Console: CM install directory' -and $upgradeText -match 'site-maintained console source.+is incomplete') 'missing prerequisites and retry exhaustion are terminating failures'
 Assert-ConsoleUpgrade ($validationText -match 'ConfigMgr admin console is release' -and $validationText -match 'ConfigMgr admin console extension is' -and $validationText -match '\$results\.Passed = \$false') 'Phase 11 fails stale console release and extension versions'
 Assert-ConsoleUpgrade ($validationText -match 'OfflineSCP pins the effective ConfigMgr release to deployed baseline' -and
-    $validationText -match 'Get-CMBaselineVersion -CMVersion \$effectiveCmVersion') 'Phase 11 derives missing OfflineSCP metadata from the baseline catalog'
+    $validationText -match 'Get-CMBaselineVersion -CMVersion \$configuredVersion') 'Phase 11 derives missing OfflineSCP metadata from the baseline catalog'
+Assert-ConsoleUpgrade ($validationText -match 'Child site inherits ConfigMgr release.+from parent site') 'Phase 11 reports inherited parent hierarchy release'
+Assert-ConsoleUpgrade ($validationText -match 'BaselineResolutionError' -and
+    $validationText -match 'Could not derive the OfflineSCP baseline from the ConfigMgr catalog') 'Phase 11 reports baseline catalog resolution failures'
 Assert-ConsoleUpgrade ($phaseJobsText -match 'Start-VMMaintenance reported failure.+preceding per-fix result') 'Phase 10 reports explicit maintenance failure instead of claiming no data'
 
 $fixesToPerform = @()

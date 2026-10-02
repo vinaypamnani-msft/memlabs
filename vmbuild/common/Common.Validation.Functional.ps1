@@ -12042,6 +12042,57 @@ function Test-BitLockerProtection {
     return (Format-TestResult -VMName $VMName -RoleLabel 'BitLocker' -Result $result)
 }
 
+function Resolve-EffectiveHierarchyCmRelease {
+    param(
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $releaseItem = $CurrentItem
+    $releaseOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $inheritedFromParent = $false
+    if ($CurrentItem.parentSiteCode) {
+        $parentSites = @($DeployConfig.virtualMachines | Where-Object {
+                "$($_.siteCode)" -ieq "$($CurrentItem.parentSiteCode)"
+            })
+        if ($parentSites.Count -ne 1) {
+            throw "Expected exactly one parent site '$($CurrentItem.parentSiteCode)' in deployConfig, found $($parentSites.Count)"
+        }
+        $releaseItem = $parentSites[0]
+        $releaseOptions = if ($releaseItem.cmOptions) { $releaseItem.cmOptions } else { $DeployConfig.cmOptions }
+        $inheritedFromParent = $true
+    }
+
+    $configuredVersion = Resolve-CmVersionAlias -Version ([string]$releaseOptions.version)
+    $effectiveVersion = $configuredVersion
+    $baselineVersion = "$($releaseItem.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+    $baselineResolutionError = ''
+    if ([bool]$releaseOptions.OfflineSCP) {
+        if (-not $baselineVersion) {
+            try {
+                $catalogBaseline = Get-CMBaselineVersion -CMVersion $configuredVersion | Select-Object -First 1
+                $baselineVersion = "$($catalogBaseline.baselineVersion)".Trim()
+            }
+            catch {
+                $baselineResolutionError = $_.Exception.Message
+            }
+        }
+        if ($baselineVersion -and $baselineVersion -notin @('current-branch', 'tech-preview')) {
+            $effectiveVersion = $baselineVersion
+        }
+    }
+
+    [pscustomobject]@{
+        Version             = $effectiveVersion
+        ConfiguredVersion   = $configuredVersion
+        BaselineVersion     = $baselineVersion
+        OfflineSCP          = [bool]$releaseOptions.OfflineSCP
+        InheritedFromParent = $inheritedFromParent
+        ParentSiteCode      = if ($inheritedFromParent) { [string]$CurrentItem.parentSiteCode } else { '' }
+        BaselineResolutionError = $baselineResolutionError
+    }
+}
+
 function Test-CMSiteWideFunctionality {
     <#
     .SYNOPSIS
@@ -12087,36 +12138,21 @@ function Test-CMSiteWideFunctionality {
     # and another with false.
     $expectedAppNames = @()
     $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
-    # Resolve this independently of Get-UserConfiguration. If a symbolic alias
-    # ever survives config loading again, querying SMS_CM_UpdatePackages for the
-    # literal name "Configuration Manager current-branch" returns zero rows and
-    # the deliberately conservative zero-row path can only report NOT measured.
-    $effectiveCmVersion = Resolve-CmVersionAlias -Version ([string]$effectiveCmOptions.version)
-    if ([bool]$effectiveCmOptions.OfflineSCP) {
-        $offlineBaselineVersion = "$($CurrentItem.thisParams.cmDownloadVersion.baselineVersion)".Trim()
-        if (-not $offlineBaselineVersion -and $CurrentItem.parentSiteCode) {
-            $parentSite = @($DeployConfig.virtualMachines | Where-Object {
-                    "$($_.siteCode)" -ieq "$($CurrentItem.parentSiteCode)" -and $_.thisParams.cmDownloadVersion.baselineVersion
-                }) | Select-Object -First 1
-            if ($parentSite) {
-                $offlineBaselineVersion = "$($parentSite.thisParams.cmDownloadVersion.baselineVersion)".Trim()
-            }
+    $releaseResolution = Resolve-EffectiveHierarchyCmRelease -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    $effectiveCmVersion = $releaseResolution.Version
+    if ($releaseResolution.InheritedFromParent) {
+        Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Child site inherits ConfigMgr release $effectiveCmVersion from parent site $($releaseResolution.ParentSiteCode); local configured target is $($effectiveCmOptions.version)." -LogOnly
+    }
+    if ($releaseResolution.OfflineSCP) {
+        if ($releaseResolution.BaselineResolutionError) {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not derive the OfflineSCP baseline from the ConfigMgr catalog: $($releaseResolution.BaselineResolutionError)" -Warning
         }
-        if (-not $offlineBaselineVersion) {
-            try {
-                $catalogBaseline = Get-CMBaselineVersion -CMVersion $effectiveCmVersion | Select-Object -First 1
-                $offlineBaselineVersion = "$($catalogBaseline.baselineVersion)".Trim()
-            }
-            catch {
-                Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not derive the OfflineSCP baseline from the ConfigMgr catalog: $($_.Exception.Message)" -Warning
-            }
-        }
-        if ($offlineBaselineVersion -and $offlineBaselineVersion -notin @('current-branch', 'tech-preview')) {
-            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP pins the effective ConfigMgr release to deployed baseline $offlineBaselineVersion (configured online target is $effectiveCmVersion)." -LogOnly
-            $effectiveCmVersion = $offlineBaselineVersion
+        if ($releaseResolution.BaselineVersion -and
+            $releaseResolution.BaselineVersion -notin @('current-branch', 'tech-preview')) {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP pins the effective ConfigMgr release to deployed baseline $($releaseResolution.BaselineVersion) (configured online target is $($releaseResolution.ConfiguredVersion))." -LogOnly
         }
         else {
-            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP is enabled but deployed baseline metadata is missing or symbolic ('$offlineBaselineVersion'); falling back to configured release $effectiveCmVersion for validation." -Warning
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP is enabled but deployed baseline metadata is missing or symbolic ('$($releaseResolution.BaselineVersion)'); falling back to configured release $effectiveCmVersion for validation." -Warning
         }
     }
     $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
