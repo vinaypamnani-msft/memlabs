@@ -6826,8 +6826,10 @@ $global:VM_Config = {
                 $probeVmIds = @{}
                 $probeCred = $null
                 if ($Common.LocalAdmin) {
+                    $probeUserName = Get-VmSessionCredentialUserName -VmName $currentItem.vmName `
+                        -VmDomainName $deployConfig.vmOptions.domainName -AccountName $Common.LocalAdmin.UserName
                     $probeCred = New-Object System.Management.Automation.PSCredential (
-                        "$($deployConfig.vmOptions.domainName)\$($Common.LocalAdmin.UserName)", $Common.LocalAdmin.Password)
+                        $probeUserName, $Common.LocalAdmin.Password)
                     foreach ($node in $nodeList) {
                         try {
                             $probeVm = Get-VM2 -Name $node -Fallback
@@ -6872,20 +6874,27 @@ $global:VM_Config = {
                         param(
                             [guid]$VmId,
                             [pscredential]$VmCredential,
-                            [string]$ExpectedGuid
+                            [string]$ExpectedGuid,
+                            [string]$ExpectedDomain,
+                            [string]$ExpectedUser
                         )
 
                         $session = $null
                         try {
                             $session = New-PSSession -VMId $VmId -Credential $VmCredential -ErrorAction Stop
                             $ready = Invoke-Command -Session $session -ScriptBlock {
-                                param($targetGuid)
+                                param($targetGuid, $targetDomain, $targetUser)
+                                $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                                $actualUser = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { $env:USERNAME }
+                                if ($env:USERDNSDOMAIN -ine $targetDomain -or $actualUser -ine $targetUser) {
+                                    throw "Identity mismatch: expected $targetUser@$targetDomain, actual $identity (USERDNSDOMAIN=$env:USERDNSDOMAIN)"
+                                }
                                 $f = "C:\staging\DSC\RunGuid.txt"
                                 if (-not (Test-Path $f)) { return $false }
                                 $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
                                 if ($content) { $content = $content.Trim() }
                                 return ([string]$content -eq [string]$targetGuid)
-                            } -ArgumentList $ExpectedGuid -ErrorAction Stop
+                            } -ArgumentList $ExpectedGuid, $ExpectedDomain, $ExpectedUser -ErrorAction Stop
                             [pscustomobject]@{
                                 Ready = [bool]$ready
                                 Error = $null
@@ -6912,13 +6921,16 @@ $global:VM_Config = {
                         }
 
                         if ($useThreadProbe -and $probeVmIds.ContainsKey($node)) {
-                            $readyProbeJobs[$node] = Start-ThreadJob -ScriptBlock $threadProbeBlock -ArgumentList $probeVmIds[$node], $probeCred, $phaseRunGuid -ThrottleLimit $readyProbeThrottle -ErrorAction Stop
+                            $readyProbeJobs[$node] = Start-ThreadJob -ScriptBlock $threadProbeBlock `
+                                -ArgumentList $probeVmIds[$node], $probeCred, $phaseRunGuid, $deployConfig.vmOptions.domainName, $Common.LocalAdmin.UserName `
+                                -ThrottleLimit $readyProbeThrottle -ErrorAction Stop
                             continue
                         }
 
                         # Fallback when ThreadJob is unavailable: keep the original serial probe path.
                         $nodeProbeSw = [System.Diagnostics.Stopwatch]::StartNew()
-                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock {
+                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName `
+                            -RequireDomainIdentity -CommandReturnsBool -ScriptBlock {
                             param($expectedGuid)
                             $f = "C:\staging\DSC\RunGuid.txt"
                             if (-not (Test-Path $f)) { return $false }
@@ -7006,7 +7018,8 @@ $global:VM_Config = {
                                 # A ThreadJob error means we cannot trust the raw session result; use the
                                 # same serial probe path as today for just that node so a false 'not ready'
                                 # doesn't wait on a healthy VM and then reboot it.
-                                $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock {
+                                $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName `
+                                    -RequireDomainIdentity -CommandReturnsBool -ScriptBlock {
                                     param($expectedGuid)
                                     $f = "C:\staging\DSC\RunGuid.txt"
                                     if (-not (Test-Path $f)) { return $false }

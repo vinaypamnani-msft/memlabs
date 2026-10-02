@@ -8801,7 +8801,9 @@ function Get-VmSessionGuestIdentity {
     )
 
     if ($Session.PSObject.Properties.Name -contains '_GuestIdentity' -and
-        -not [string]::IsNullOrWhiteSpace("$($Session._GuestIdentity)")) {
+        -not [string]::IsNullOrWhiteSpace("$($Session._GuestIdentity)") -and
+        $Session.PSObject.Properties.Name -contains '_GuestUserDnsDomain' -and
+        $Session.PSObject.Properties.Name -contains '_GuestUserName') {
         $cachedComputerName = "$($Session._GuestComputerName)"
         $cachedIsLocal = if ($Session.PSObject.Properties.Name -contains '_GuestIdentityIsLocal') {
             [bool]$Session._GuestIdentityIsLocal
@@ -8815,6 +8817,9 @@ function Get-VmSessionGuestIdentity {
             Identity     = "$($Session._GuestIdentity)"
             ComputerName = $cachedComputerName
             IsLocal      = [bool]$cachedIsLocal
+            UserDomain   = "$($Session._GuestUserDomain)"
+            UserDnsDomain = "$($Session._GuestUserDnsDomain)"
+            UserName     = "$($Session._GuestUserName)"
             TimedOut     = $false
             ChannelBroken = $false
             Error        = $null
@@ -8831,6 +8836,9 @@ function Get-VmSessionGuestIdentity {
                     Identity     = $identity
                     ComputerName = $env:COMPUTERNAME
                     IsLocal      = [bool]($authority -and $authority -ieq $env:COMPUTERNAME)
+                    UserDomain   = $env:USERDOMAIN
+                    UserDnsDomain = $env:USERDNSDOMAIN
+                    UserName     = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { $env:USERNAME }
                 }
             } -ErrorAction Stop
         }
@@ -8858,6 +8866,9 @@ function Get-VmSessionGuestIdentity {
                 Identity     = $null
                 ComputerName = $null
                 IsLocal      = $false
+                UserDomain   = $null
+                UserDnsDomain = $null
+                UserName     = $null
                 TimedOut     = $true
                 ChannelBroken = $true
                 Error        = "Identity probe timed out after ${TimeoutSeconds}s"
@@ -8881,6 +8892,9 @@ function Get-VmSessionGuestIdentity {
                 Identity     = $null
                 ComputerName = $null
                 IsLocal      = $false
+                UserDomain   = $null
+                UserDnsDomain = $null
+                UserName     = $null
                 TimedOut     = $false
                 ChannelBroken = $true
                 Error        = $errorText
@@ -8891,14 +8905,23 @@ function Get-VmSessionGuestIdentity {
         $identity = "$($record.Identity)".Trim()
         $computerName = "$($record.ComputerName)".Trim()
         $isLocal = [bool]$record.IsLocal
+        $userDomain = "$($record.UserDomain)".Trim()
+        $userDnsDomain = "$($record.UserDnsDomain)".Trim()
+        $userName = "$($record.UserName)".Trim()
         $Session | Add-Member -MemberType NoteProperty -Name '_GuestIdentity' -Value $identity -Force
         $Session | Add-Member -MemberType NoteProperty -Name '_GuestComputerName' -Value $computerName -Force
         $Session | Add-Member -MemberType NoteProperty -Name '_GuestIdentityIsLocal' -Value $isLocal -Force
+        $Session | Add-Member -MemberType NoteProperty -Name '_GuestUserDomain' -Value $userDomain -Force
+        $Session | Add-Member -MemberType NoteProperty -Name '_GuestUserDnsDomain' -Value $userDnsDomain -Force
+        $Session | Add-Member -MemberType NoteProperty -Name '_GuestUserName' -Value $userName -Force
         return [pscustomobject]@{
             Succeeded    = $true
             Identity     = $identity
             ComputerName = $computerName
             IsLocal      = $isLocal
+            UserDomain   = $userDomain
+            UserDnsDomain = $userDnsDomain
+            UserName     = $userName
             TimedOut     = $false
             ChannelBroken = $false
             Error        = $null
@@ -8920,6 +8943,9 @@ function Get-VmSessionGuestIdentity {
             Identity     = $null
             ComputerName = $null
             IsLocal      = $false
+            UserDomain   = $null
+            UserDnsDomain = $null
+            UserName     = $null
             TimedOut     = $false
             ChannelBroken = $true
             Error        = $_.Exception.Message
@@ -8937,26 +8963,74 @@ function Get-VmSessionGuestIdentity {
     }
 }
 
+function Test-VmSessionIdentityProbeCompatible {
+    param(
+        [Parameter(Mandatory = $true)][object]$Probe,
+        [string]$ExpectedDomainName,
+        [string]$ExpectedAccountName,
+        [hashtable]$Diagnostics
+    )
+
+    if (-not $Probe.Succeeded) {
+        if ($Diagnostics) {
+            $Diagnostics.ChannelBroken = [bool]$Probe.ChannelBroken
+            $Diagnostics.FailureReasons = @($Diagnostics.FailureReasons) + @('identity-probe-failed')
+            $Diagnostics.LastError = "$($Probe.Error)"
+        }
+        return $false
+    }
+    $compatible = -not $Probe.IsLocal
+    $mismatch = $null
+    if ($compatible -and -not [string]::IsNullOrWhiteSpace($ExpectedDomainName)) {
+        if ([string]::IsNullOrWhiteSpace("$($Probe.UserDnsDomain)") -or
+            "$($Probe.UserDnsDomain)" -ine $ExpectedDomainName) {
+            $compatible = $false
+            $mismatch = "guest DNS domain '$($Probe.UserDnsDomain)' does not match '$ExpectedDomainName'"
+        }
+    }
+    if ($compatible -and -not [string]::IsNullOrWhiteSpace($ExpectedAccountName)) {
+        $expectedUser = $ExpectedAccountName
+        if ($expectedUser -match '\\([^\\]+)$') { $expectedUser = $Matches[1] }
+        elseif ($expectedUser -match '^([^@]+)@') { $expectedUser = $Matches[1] }
+        if ([string]::IsNullOrWhiteSpace("$($Probe.UserName)") -or
+            "$($Probe.UserName)" -ine $expectedUser) {
+            $compatible = $false
+            $mismatch = "guest user '$($Probe.UserName)' does not match '$expectedUser'"
+        }
+    }
+    if (-not $compatible -and $Diagnostics) {
+        $reason = if ($Probe.IsLocal) { 'identity-local' } else { 'identity-domain-account-mismatch' }
+        $Diagnostics.FailureReasons = @($Diagnostics.FailureReasons) + @($reason)
+        $Diagnostics.LastError = if ($mismatch) { $mismatch } else { "guest identity '$($Probe.Identity)' is local" }
+    }
+    return $compatible
+}
+
 function Test-VmSessionIdentityCompatible {
     param(
         [Parameter(Mandatory = $true)][object]$Session,
         [Parameter(Mandatory = $true)][string]$VmName,
         [bool]$RequireDomainIdentity = $false,
+        [string]$ExpectedDomainName,
+        [string]$ExpectedAccountName,
         [hashtable]$Diagnostics,
         [scriptblock]$ProbeOperation
     )
 
-    if (-not $RequireDomainIdentity) { return $true }
-    $probe = Get-VmSessionGuestIdentity -Session $Session -VmName $VmName -ProbeOperation $ProbeOperation
-    if (-not $probe.Succeeded) {
+    if ($Session.PSObject.Properties.Name -contains '_IdentityProbeAbandoned' -and
+        $Session._IdentityProbeAbandoned) {
         if ($Diagnostics) {
-            $Diagnostics.ChannelBroken = [bool]$probe.ChannelBroken
-            $Diagnostics.FailureReasons = @($Diagnostics.FailureReasons) + @('identity-probe-failed')
-            $Diagnostics.LastError = "$($probe.Error)"
+            $Diagnostics.ChannelBroken = $true
+            $Diagnostics.FailureReasons = @($Diagnostics.FailureReasons) + @('identity-probe-abandoned')
+            $Diagnostics.LastError = 'Identity probe previously abandoned this session'
         }
         return $false
     }
-    return -not $probe.IsLocal
+    if (-not $RequireDomainIdentity) { return $true }
+    $probe = Get-VmSessionGuestIdentity -Session $Session -VmName $VmName -ProbeOperation $ProbeOperation
+    return (Test-VmSessionIdentityProbeCompatible -Probe $probe `
+            -ExpectedDomainName $ExpectedDomainName -ExpectedAccountName $ExpectedAccountName `
+            -Diagnostics $Diagnostics)
 }
 
 # One-line census of $global:ps_cache for the phase-boundary and end-of-run
@@ -9692,7 +9766,8 @@ function Get-VmSession {
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available" -and
-            (Test-VmSessionIdentityCompatible -Session $ps -VmName $VmName -RequireDomainIdentity:$requireDomain -Diagnostics $Diagnostics)) {
+            (Test-VmSessionIdentityCompatible -Session $ps -VmName $VmName -RequireDomainIdentity:$requireDomain `
+                -ExpectedDomainName $requestedDomainName -ExpectedAccountName $requestedAccount -Diagnostics $Diagnostics)) {
             Write-Log "$VmName`: Returning session for $userName from cache using key $cacheKey." -Verbose
             Set-VmSessionCacheStamp -Session $ps -VmName $VmName -Hit
             return $ps
@@ -9715,7 +9790,8 @@ function Get-VmSession {
         if ($existingKey -like "$VmName-*") {
             $existingPs = $global:ps_cache[$existingKey]
             if ($existingPs.Availability -eq "Available" -and
-                (Test-VmSessionIdentityCompatible -Session $existingPs -VmName $VmName -RequireDomainIdentity:$requireDomain -Diagnostics $Diagnostics)) {
+                (Test-VmSessionIdentityCompatible -Session $existingPs -VmName $VmName -RequireDomainIdentity:$requireDomain `
+                    -ExpectedDomainName $requestedDomainName -ExpectedAccountName $requestedAccount -Diagnostics $Diagnostics)) {
                 Write-Log "$VmName`: Reusing existing session from key '$existingKey' (caller asked for '$cacheKey')." -Verbose
                 Set-VmSessionCacheStamp -Session $existingPs -VmName $VmName -Hit
                 return $existingPs
@@ -9893,15 +9969,24 @@ function Get-VmSession {
                     }
                 }
                 $guestIdentity = if ($identityProbe.Identity) { "$($identityProbe.Identity)" } else { '<not-probed>' }
-                if ($requireDomain -and (-not $identityProbe.Succeeded -or $identityProbe.IsLocal)) {
+                $identityCompatible = -not $requireDomain -or
+                    (Test-VmSessionIdentityProbeCompatible -Probe $identityProbe `
+                        -ExpectedDomainName $requestedDomainName -ExpectedAccountName $requestedAccount -Diagnostics $Diagnostics)
+                if (-not $identityCompatible) {
                     if ($identityProbe.ChannelBroken) {
                         $sawChannelBroken = $true
                         $null = $failReasons.Add('identity-probe-channel-broken')
                         $lastConnectError = "$($identityProbe.Error)"
                     }
                     else {
-                        $null = $failReasons.Add("local-identity:$guestIdentity")
-                        $lastConnectError = "Requested domain identity but guest authenticated as '$guestIdentity'"
+                        $identityReason = if ($identityProbe.IsLocal) { 'local-identity' } else { 'domain-identity-mismatch' }
+                        $null = $failReasons.Add("${identityReason}:$guestIdentity")
+                        $lastConnectError = if ($Diagnostics -and $Diagnostics.LastError) {
+                            "$($Diagnostics.LastError)"
+                        }
+                        else {
+                            "Requested '$requestedAccount@$requestedDomainName' but guest authenticated as '$guestIdentity'"
+                        }
                     }
                     Write-Log "$VmName`: Rejecting session created with '$($entry.Username)' because the guest identity is '$guestIdentity'." -Warning -LogOnly
                     if (-not $identityProbe.Abandoned) { Remove-VmSession $ps }
@@ -9919,7 +10004,8 @@ function Get-VmSession {
                 if ($existingSession -and -not [object]::ReferenceEquals($existingSession, $ps)) {
                     if ("$($existingSession.State)" -eq 'Opened' -and
                         "$($existingSession.Availability)" -eq 'Available' -and
-                        (Test-VmSessionIdentityCompatible -Session $existingSession -VmName $VmName -RequireDomainIdentity:$requireDomain -Diagnostics $Diagnostics)) {
+                        (Test-VmSessionIdentityCompatible -Session $existingSession -VmName $VmName -RequireDomainIdentity:$requireDomain `
+                            -ExpectedDomainName $requestedDomainName -ExpectedAccountName $requestedAccount -Diagnostics $Diagnostics)) {
                         # We lost. Dispose OURS -- nothing has a reference to it yet, so this is
                         # the one session here that is unambiguously safe to tear down inline.
                         try { (Get-VmSessionStats)['cacheRaceLost']++ } catch { }
