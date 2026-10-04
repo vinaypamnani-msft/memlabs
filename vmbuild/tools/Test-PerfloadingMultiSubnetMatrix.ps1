@@ -39,6 +39,7 @@ function Write-Log {
 . (Import-TestFunction -Path $configPath -Name 'Add-Phase8DistributionPointMetadata')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsManagedDistributionPointNames')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsOsdTargetingPlan')
+. (Import-TestFunction -Path $validationPath -Name 'Get-Phase11ProjectedVmNetwork')
 . (Import-TestFunction -Path $validationPath -Name 'Get-Phase11OsdTargetingExpectation')
 
 $config = [pscustomobject]@{

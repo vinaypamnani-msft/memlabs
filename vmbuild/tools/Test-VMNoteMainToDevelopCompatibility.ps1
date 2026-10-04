@@ -463,6 +463,7 @@ $twoHierarchyConfig = [pscustomobject]@{
         [pscustomobject]@{
             vmName = 'MUL-CAS'; role = 'CAS'; siteCode = 'CAS'
             cmOptions = [pscustomobject]@{ Version = '2403'; UsePKI = $true }
+            osdMetadataOnly = $true; osdValidate = $true; phase11Validate = $true
         }
         [pscustomobject]@{
             vmName = 'MUL-PRI'; role = 'Primary'; siteCode = 'PRI'
@@ -474,6 +475,10 @@ $casNote = (Invoke-CurrentNoteProducer -DeployConfig $twoHierarchyConfig -VmName
 $primaryNote = (Invoke-CurrentNoteProducer -DeployConfig $twoHierarchyConfig -VmName 'MUL-PRI') | ConvertFrom-Json
 Assert-Equal '2403' $casNote.cmOptions.Version 'CAS note persists its own hierarchy options'
 Assert-Equal $true ([bool]$casNote.cmOptions.UsePKI) 'CAS note persists its own PKI mode'
+foreach ($runtimeProperty in @('osdMetadataOnly', 'osdValidate', 'phase11Validate')) {
+    Assert-Equal $false ($null -ne $casNote.PSObject.Properties[$runtimeProperty]) `
+        "current note excludes per-run routing property '$runtimeProperty'"
+}
 Assert-Equal '2509' $primaryNote.cmOptions.Version 'standalone Primary note persists its own hierarchy options'
 Assert-Equal $false ([bool]$primaryNote.cmOptions.UsePKI) 'standalone Primary note does not inherit root PKI mode'
 

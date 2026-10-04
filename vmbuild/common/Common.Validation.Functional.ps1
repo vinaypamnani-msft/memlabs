@@ -20,6 +20,27 @@
 # read and emitted by Phase11Job after Test-VmFunctionality returns.
 $script:Phase11OutputBuffer = $null
 
+function Get-Phase11ProjectedVmNetwork {
+    param(
+        [object] $DeployConfig,
+        [object] $Vm
+    )
+
+    if ($Vm -and $Vm.network) { return "$($Vm.network)" }
+    if ($Vm -and $Vm.thisParams -and $Vm.thisParams.vmNetwork) { return "$($Vm.thisParams.vmNetwork)" }
+    $vmName = "$($Vm.vmName)"
+    if ($vmName) {
+        $record = $DeployConfig.phase8ManagedDistributionPointScopes | ForEach-Object {
+            @($_.DistributionPoints)
+        } | Where-Object {
+            $_.VmName -ieq $vmName -or $_.Fqdn -ieq $vmName -or
+            $_.Fqdn -like "$vmName.*"
+        } | Select-Object -First 1
+        if ($record -and $record.Network) { return "$($record.Network)" }
+    }
+    return "$($DeployConfig.vmOptions.network)"
+}
+
 function Get-Phase11OsdTargetingExpectation {
     param(
         [object] $DeployConfig,
@@ -54,24 +75,9 @@ function Get-Phase11OsdTargetingExpectation {
             $candidateVm = $_
             $fqdn = "$($candidateVm.vmName)"
             if ($fqdn -notmatch '\.') { $fqdn = "$fqdn.$Domain" }
-            $scopeRecord = $scopeRecords | Where-Object {
-                $_.Fqdn -ieq $fqdn -or $_.VmName -ieq "$($candidateVm.vmName)"
-            } | Select-Object -First 1
-            $network = if ($candidateVm.network) {
-                "$($candidateVm.network)"
-            }
-            elseif ($candidateVm.thisParams -and $candidateVm.thisParams.vmNetwork) {
-                "$($candidateVm.thisParams.vmNetwork)"
-            }
-            elseif ($scopeRecord -and $scopeRecord.Network) {
-                "$($scopeRecord.Network)"
-            }
-            else {
-                $defaultNetwork
-            }
             [pscustomobject]@{
                 Name = $fqdn
-                Network = $network
+                Network = Get-Phase11ProjectedVmNetwork -DeployConfig $DeployConfig -Vm $candidateVm
                 SiteCode = "$($candidateVm.siteCode)"
                 Role = "$($candidateVm.role)"
             }
@@ -5820,13 +5826,11 @@ function Test-SiteSystemFunctionality {
         # every other DP "PXE enabled, no payload" is the state memlabs deliberately built, and
         # measuring it is guaranteed-fire noise, not a health signal. Skip the PXE checks there
         # entirely; only this log line records that they were skipped.
-        $osdDefaultNet = "$($DeployConfig.vmOptions.network)"
         $netOfVm = {
             param($v)
-            if ($v.network) { return "$($v.network)" }
-            if ($v.thisParams -and $v.thisParams.vmNetwork) { return "$($v.thisParams.vmNetwork)" }
-            return $osdDefaultNet
+            return Get-Phase11ProjectedVmNetwork -DeployConfig $DeployConfig -Vm $v
         }
+        $localDpNetwork = & $netOfVm $CurrentItem
         $phase8Scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
             "$($_.PrimarySiteCode)" -eq "$($CurrentItem.siteCode)"
         } | Select-Object -First 1
@@ -5841,16 +5845,16 @@ function Test-SiteSystemFunctionality {
         $osdClientNets = @($osdClientNets | Where-Object { $_ } | Select-Object -Unique)
         # MemLabs does not configure PXE on the implicit Secondary DP. Only
         # explicit SiteSystem DPs go through Add-CMDistributionPoint -EnablePxe.
-        $dpServesOsd = [bool](-not $isSecondary -and $osdClientNets.Count -gt 0 -and $osdClientNets -contains (& $netOfVm $CurrentItem))
+        $dpServesOsd = [bool](-not $isSecondary -and $osdClientNets.Count -gt 0 -and $osdClientNets -contains $localDpNetwork)
         if ($dpServesOsd) {
-            Write-Log "[Phase $Phase] $VMName [DP]: OSDClient subnet(s) $($osdClientNets -join ', ') include this DP's $(& $netOfVm $CurrentItem) -- PXE chain will be checked and failures are fatal" -LogOnly
+            Write-Log "[Phase $Phase] $VMName [DP]: OSDClient subnet(s) $($osdClientNets -join ', ') include this DP's $localDpNetwork -- PXE chain will be checked and failures are fatal" -LogOnly
         }
         else {
             $osdNote = if ($isSecondary) {
                 'this is an implicit Secondary DP and MemLabs does not enable PXE on Secondary sites'
             }
             elseif ($osdClientNets.Count) {
-                "OSDClient subnet(s) $($osdClientNets -join ', ') do not include this DP's $(& $netOfVm $CurrentItem)"
+                "OSDClient subnet(s) $($osdClientNets -join ', ') do not include this DP's $localDpNetwork"
             }
             else {
                 'this lab has no OSDClient'

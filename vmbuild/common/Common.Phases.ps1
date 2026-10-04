@@ -1,5 +1,16 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 
+function Test-MemLabsIncludeHiddenVmForPhase {
+    param(
+        [object] $Vm,
+        [int] $Phase
+    )
+
+    if (-not $Vm.hidden) { return $true }
+    if ($Phase -notin @(1, 10, 11)) { return $true }
+    return $Phase -eq 11 -and ($Vm.osdValidate -eq $true -or $Vm.phase11Validate -eq $true)
+}
+
 function Get-CriticalVMs {
     [CmdletBinding()]
     param (
@@ -2989,15 +3000,10 @@ DROP TABLE #memlabs_idxprobe;
             continue
         }
 
-        # Don't touch hidden VM's in Phase 1, 10, or 11 -- except a VM pulled in ONLY so OSD
-        # could be configured (the DP that serves PXE, the Primary that owns the boot image
-        # and the task-sequence deployments). Those arrive hidden, so the run that INTRODUCES
-        # an OSDClient used to validate none of the chain it just built. Phase 11 is read-only;
-        # 1 and 10 would rebuild them, so they stay excluded there.
-        if ($currentItem.hidden -and $Phase -in @(1, 10, 11)) {
-            if (-not ($Phase -eq 11 -and $currentItem.osdValidate)) {
-                continue
-            }
+        # Don't touch hidden VMs in Phase 1 or 10. Phase 11 is read-only, so include
+        # explicitly requested upgrade/OSD validation targets without rebuilding them.
+        if (-not (Test-MemLabsIncludeHiddenVmForPhase -Vm $currentItem -Phase $Phase)) {
+            continue
             Write-Log "[Phase $Phase] $($currentItem.vmName): hidden, but pulled in for OSD -- validating it so the PXE chain this run configured is actually checked" -LogOnly
         }
 

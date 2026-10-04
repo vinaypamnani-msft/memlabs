@@ -1354,6 +1354,67 @@ function Add-RemoteSQLVMToDeployConfig {
     }
 }
 
+function Get-ExistingConfigMgrRoleUpgradePlan {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $ExistingVMs
+    )
+
+    $domainName = "$($Config.vmOptions.domainName)"
+    $allSiteVms = @($ExistingVMs) + @($Config.virtualMachines)
+    $roleTriggers = @($Config.virtualMachines | Where-Object {
+            $_.siteCode -and
+            (-not $_.hidden -or $_.phase11Validate) -and
+            ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or
+             $_.installMP -eq $true -or $_.installSUP -eq $true -or $_.installRP -eq $true)
+        })
+    $ownerSiteNames = @()
+    $existingRoleVmNames = @()
+    foreach ($trigger in $roleTriggers) {
+        $ownerSiteCode = "$($trigger.siteCode)"
+        $secondaryRows = @($allSiteVms | Where-Object {
+                $_.role -eq 'Secondary' -and "$($_.siteCode)" -eq $ownerSiteCode
+            } | Sort-Object vmName -Unique)
+        if ($secondaryRows.Count -gt 1) {
+            throw "Cannot scope ConfigMgr role upgrade for '$($trigger.vmName)': site '$ownerSiteCode' has $($secondaryRows.Count) Secondary owners."
+        }
+        if ($secondaryRows.Count -eq 1 -and $secondaryRows[0].parentSiteCode) {
+            $ownerSiteCode = "$($secondaryRows[0].parentSiteCode)"
+        }
+
+        $ownerRows = @($allSiteVms | Where-Object {
+                $_.role -in @('CAS', 'Primary') -and "$($_.siteCode)" -eq $ownerSiteCode
+            } | Sort-Object vmName -Unique)
+        if ($ownerRows.Count -ne 1) {
+            throw "Cannot scope ConfigMgr role upgrade for '$($trigger.vmName)': expected one CAS/Primary owner for site '$ownerSiteCode', found $($ownerRows.Count)."
+        }
+        $ownerSiteNames += "$($ownerRows[0].vmName)"
+
+        $managedSiteCodes = @($ownerSiteCode)
+        if ($ownerRows[0].role -eq 'Primary') {
+            $managedSiteCodes += @($allSiteVms | Where-Object {
+                    $_.role -eq 'Secondary' -and "$($_.parentSiteCode)" -eq $ownerSiteCode
+                } | ForEach-Object { "$($_.siteCode)" })
+        }
+        $managedSiteCodes = @($managedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
+        $existingRoleVmNames += @($ExistingVMs | Where-Object {
+                ($_.domain -eq $domainName -or -not $_.domain) -and
+                "$($_.siteCode)" -in $managedSiteCodes -and
+                ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or
+                 $_.installMP -eq $true -or $_.installSUP -eq $true -or $_.installRP -eq $true)
+            } | ForEach-Object { "$($_.vmName)" })
+    }
+
+    [pscustomobject]@{
+        OwnerSiteVmNames      = @($ownerSiteNames | Where-Object { $_ } | Select-Object -Unique)
+        ExistingRoleVmNames   = @($existingRoleVmNames | Where-Object { $_ } | Select-Object -Unique)
+    }
+}
+
 function Add-Phase8DistributionPointMetadata {
     [CmdletBinding()]
     param (
@@ -1617,6 +1678,10 @@ function Add-ExistingVMsToDeployConfig {
 
     foreach ($primaryName in @($phase8PrimaryNames | Where-Object { $_ } | Select-Object -Unique)) {
         Add-ExistingVMToDeployConfig -vmName $primaryName -configToModify $config
+        $phase8Primary = $config.virtualMachines | Where-Object { $_.vmName -ieq $primaryName } | Select-Object -First 1
+        if ($phase8Primary -and $phase8Primary.hidden) {
+            $phase8Primary | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+        }
     }
 
     if ($newOsdVMs.Count -gt 0) {
@@ -1839,6 +1904,61 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+    # A develop role addition to a main-era hierarchy is also a repair pass for
+    # every existing explicit MP/DP/SUP/RP in that owner site. Main did not have
+    # the current content, boundary, certificate, MSI, and Phase 11 safeguards.
+    # Pull those role hosts into the deploy snapshot, run the idempotent phases,
+    # and validate both the changed host and its authoritative site server.
+    $roleUpgradePlan = Get-ExistingConfigMgrRoleUpgradePlan -Config $config -ExistingVMs @($refreshedVmInventory)
+    foreach ($roleVmName in @($roleUpgradePlan.ExistingRoleVmNames)) {
+        Add-ExistingVMToDeployConfig -vmName $roleVmName -configToModify $config
+    }
+    foreach ($validationVmName in @(
+            @($roleUpgradePlan.OwnerSiteVmNames) + @($roleUpgradePlan.ExistingRoleVmNames) |
+                Where-Object { $_ } | Select-Object -Unique
+        )) {
+        $validationVm = $config.virtualMachines | Where-Object { $_.vmName -ieq $validationVmName } | Select-Object -First 1
+        if ($validationVm -and $validationVm.hidden) {
+            $validationVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+        }
+    }
+    foreach ($roleVmName in @($roleUpgradePlan.ExistingRoleVmNames)) {
+        $roleVm = $config.virtualMachines | Where-Object { $_.vmName -ieq $roleVmName } | Select-Object -First 1
+        if (-not $roleVm) { continue }
+        if ($roleVm.remoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.remoteSQLVM -configToModify $config
+        }
+        if ($roleVm.replicaSqlServerVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.replicaSqlServerVM -configToModify $config
+        }
+        if ($roleVm.wsusDataBaseServer -and $roleVm.wsusDataBaseServer -ne 'WID') {
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.wsusDataBaseServer -configToModify $config
+        }
+        if ($roleVm.pullDPSourceDP) {
+            Add-ExistingVMToDeployConfig -vmName $roleVm.pullDPSourceDP -configToModify $config
+        }
+        if ($roleVm.PatchMyPCFileServer) {
+            Add-ExistingVMToDeployConfig -vmName $roleVm.PatchMyPCFileServer -configToModify $config
+        }
+        if ($roleVm.remoteContentLibVM) {
+            Add-ExistingVMToDeployConfig -vmName $roleVm.remoteContentLibVM -configToModify $config
+        }
+    }
+    $repairedProxyClients = @($config.virtualMachines | Where-Object {
+            $_.phase11Validate -and $_.useProxy -eq $true
+        })
+    if ($repairedProxyClients.Count -gt 0 -and
+        -not ($config.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1)) {
+        $existingProxy = Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role 'Proxy'
+        if ($existingProxy) {
+            $proxyName = if ($existingProxy -is [array]) { $existingProxy[0] } else { $existingProxy }
+            Add-ExistingVMToDeployConfig -vmName $proxyName -configToModify $config
+        }
+    }
+    if (@($roleUpgradePlan.OwnerSiteVmNames).Count -gt 0 -or @($roleUpgradePlan.ExistingRoleVmNames).Count -gt 0) {
+        $null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $config -ExistingVMs @($refreshedVmInventory)
+    }
+
     # Heal a SQLAO node whose partner (OtherNode) no longer exists. If the
     # second AG node was removed (e.g. via the remove script / Remove-Lab),
     # the surviving node's note still carries a dangling OtherNode pointing at
@@ -1921,6 +2041,9 @@ function Add-ModifiedExistingVMToDeployConfig {
         "DscShortcutsCreated",
         "lastPhaseComplete",
         "appliedFixes",
+        "osdMetadataOnly",
+        "osdValidate",
+        "phase11Validate",
         "state",
         "vmBuild",
         "DiskUsedGB",
@@ -1944,6 +2067,7 @@ function Add-ModifiedExistingVMToDeployConfig {
         }
         $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
     }
+    $newVMObject | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
@@ -2015,7 +2139,10 @@ function Add-ExistingVMToDeployConfig {
         "memLabsDeployVersion",
         "memLabsVersion",
         "adminName",
-        "lastUpdate"
+        "lastUpdate",
+        "osdMetadataOnly",
+        "osdValidate",
+        "phase11Validate"
     )
     foreach ($prop in $vmNote.PSObject.Properties) {
         if ($prop.Name -in $propsToExclude) {

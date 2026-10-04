@@ -227,6 +227,7 @@ Assert-True ($config.virtualMachines.Count -eq $mainRoles.Count) `
     "Expected one upgraded entry per exact-main role; found $($config.virtualMachines.Count)."
 foreach ($vm in $config.virtualMachines) {
     Assert-True ($vm.hidden -eq $true) "Existing VM '$($vm.vmName)' was not kept hidden."
+    Assert-True ($vm.phase11Validate -eq $true) "Modified existing VM '$($vm.vmName)' was not scheduled for Phase 11 validation."
     Assert-True ($vm.legacyCustomProperty -eq "preserve-$($vm.role)") `
         "Unknown exact-main property was dropped from upgraded VM '$($vm.vmName)'."
     foreach ($noise in $runtimeNoise.Keys) {
