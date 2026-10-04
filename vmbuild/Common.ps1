@@ -1717,7 +1717,9 @@ function Copy-ItemSafe {
         [Parameter(Mandatory = $false)]
         [switch] $WhatIf,
         [Parameter(Mandatory = $false)]
-        [switch]$Force
+        [switch]$Force,
+        [Parameter(Mandatory = $false)]
+        [switch]$RequireDomainIdentity
     )
     #$PSScriptRoot = $using:PSScriptRoot
     $location = $PSScriptRoot
@@ -1752,7 +1754,8 @@ function Copy-ItemSafe {
                 $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
             }
 
-            $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
+            $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName `
+                -RequireDomainIdentity:$using:RequireDomainIdentity
 
             if ($ps) {
                 Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) WhatIf:$($using:WhatIF)" -LogOnly
@@ -1770,7 +1773,7 @@ function Copy-ItemSafe {
         return $true
     }
 
-    write-log "[Copy-ItemSafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force" -LogOnly
+    write-log "[Copy-ItemSafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container Force:$Force RequireDomainIdentity:$RequireDomainIdentity" -LogOnly
 
     # Scale timeouts based on concurrent VM load. More VMs = more PSDirect
     # contention = slower copies. Avoid adding heartbeat probe load too often.
@@ -8792,6 +8795,53 @@ function Get-VmSessionCredentialUserName {
     return "$AccountName@$VmDomainName"
 }
 
+function Get-VmSessionCredentialUserNames {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $false)][string]$VmDomainName,
+        [Parameter(Mandatory = $true)][string]$AccountName,
+        [Parameter(Mandatory = $false)][string]$DomainNetBiosName
+    )
+
+    $users = [System.Collections.Generic.List[string]]::new()
+    $primary = Get-VmSessionCredentialUserName -VmName $VmName -VmDomainName $VmDomainName -AccountName $AccountName
+    $users.Add($primary)
+
+    $isDomainRequest = -not [string]::IsNullOrWhiteSpace($VmDomainName) -and
+        $VmDomainName -ne 'WORKGROUP' -and $VmDomainName -ine $VmName
+    if (-not $isDomainRequest -or $AccountName -match '\\') {
+        return $users.ToArray()
+    }
+
+    $accountLeaf = $AccountName
+    if ($AccountName -match '^([^@]+)@(.+)$') {
+        if ($Matches[2] -ine $VmDomainName) { return $users.ToArray() }
+        $accountLeaf = $Matches[1]
+    }
+
+    if ([string]::IsNullOrWhiteSpace($DomainNetBiosName)) {
+        try {
+            $note = Get-VMNote -VMName $VmName
+            if ($note -and $note.domain -ieq $VmDomainName -and $note.domainNetBiosName) {
+                $DomainNetBiosName = "$($note.domainNetBiosName)"
+            }
+        }
+        catch { }
+    }
+    $DomainNetBiosName = "$DomainNetBiosName".Trim()
+    if (-not $DomainNetBiosName -or $DomainNetBiosName.Length -gt 15 -or
+        $DomainNetBiosName -match '[\\/:*?"<>|]') {
+        return $users.ToArray()
+    }
+
+    $netBiosUser = "$DomainNetBiosName\$accountLeaf"
+    if ($netBiosUser -ine $primary) {
+        $users.Add($netBiosUser)
+    }
+    return $users.ToArray()
+}
+
 function Get-VmSessionGuestIdentity {
     param(
         [Parameter(Mandatory = $true)][object]$Session,
@@ -9757,7 +9807,9 @@ function Get-VmSession {
 
     # Get PS Session
     $requestedAccount = if ($VmDomainAccount) { $VmDomainAccount } else { $Common.LocalAdmin.UserName }
-    $username = Get-VmSessionCredentialUserName -VmName $VmName -VmDomainName $requestedDomainName -AccountName $requestedAccount
+    $credentialUserNames = @(Get-VmSessionCredentialUserNames -VmName $VmName `
+            -VmDomainName $requestedDomainName -AccountName $requestedAccount)
+    $username = $credentialUserNames[0]
     $cacheKey = "$VmName-$requestedDomainName-$requestedAccount"
 
     Write-Log "$VmName`: Get-VmSession started with cachekey $cacheKey" -Verbose
@@ -9829,6 +9881,18 @@ function Get-VmSession {
 
     # Primary: what the caller asked for
     $credEntries.Add(@{ Tag = 'primary'; Username = $username; CacheKey = $cacheKey })
+
+    # Windows Server 2019 PowerShell Direct can reject a UPN with "The credential
+    # is invalid" while accepting the equivalent explicit NetBIOS-domain principal.
+    # This remains a DOMAIN credential, not a local fallback, and every successful
+    # connection is still validated against the guest's DNS domain and username.
+    for ($i = 1; $i -lt $credentialUserNames.Count; $i++) {
+        $credEntries.Add(@{
+                Tag      = 'domain-netbios'
+                Username = $credentialUserNames[$i]
+                CacheKey = $cacheKey
+            })
+    }
 
     # Local fallback: VMNAME\localadmin (only if different from primary)
     $localUser = "$VmName\$($Common.LocalAdmin.UserName)"

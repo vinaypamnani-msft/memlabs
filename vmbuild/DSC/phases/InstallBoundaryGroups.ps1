@@ -680,9 +680,11 @@ $ensureClientPkgCoverage = {
     # actually DEPENDS on that secondary's DP. So: if any push client is assigned to
     # the secondary (its resolved pushClient site code == the secondary's site code,
     # or a legacy pushClient=$true client sits on the secondary's own subnet), WAIT
-    # for it as before; if NONE are, SKIP it (the parent-Primary DPs still cover every
-    # boundary, and the content will arrive on its own via normal inter-site
-    # replication -- Phase 11 re-checks). Non-secondary DPs are always waited on.
+    # for it as before; if NONE are, give it only a short optional grace (the
+    # parent-Primary DPs still cover every boundary, and the content will arrive
+    # through normal inter-site replication). Phase 11 verifies the Secondary's
+    # DP/MP plumbing but does not prove this optional package arrived; subsequent
+    # Phase 8 passes measure it again. Non-secondary DPs are always waited on.
     $vmByHost = @{}
     foreach ($v in @($deployConfig.virtualMachines)) { if ($v.vmName) { $vmByHost["$($v.vmName)".ToUpper()] = $v } }
     # Grace is charged only AFTER every DP something depends on is Installed, because until

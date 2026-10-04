@@ -2066,12 +2066,11 @@ Write-DscStatus "$Tag Starting perfloading"
     }
 
 
-    # Phase 1 copies the Win10/Win11 OSD ISOs to <CM install drive>\OSD for EVERY
-    # Primary when PrePopulateObjects is set (which gated entry to perfloading), so
-    # by here a Primary SHOULD have the media. A miss is a real gap, not an expected
-    # child-primary case -- capture exactly what's present so the next run shows
-    # WHICH file went missing and whether the whole folder was emptied
-    # (wacky ZZ-GYRO 2026-08-17 skipped all task sequences on this signal).
+    # Phase 1 seeds the Win10/Win11 OSD ISOs on every new Primary, and the Phase 8
+    # host preflight repairs inherited Primaries created by revisions that copied
+    # media only to the hierarchy's top-level site. By here a Primary MUST have the
+    # media. A miss means the host repair was skipped or failed -- capture exactly
+    # what's present so the next run shows which file is still missing.
     $win11OsdPath = Join-Path $folderPath "Windows 11 24h2"
     $win10OsdPath = Join-Path $folderPath "Windows 10 22h2"
     $hasOsdMedia = (Test-Path "$win11OsdPath\sources\install.wim") -and (Test-Path "$win10OsdPath\sources\install.wim")
@@ -2081,7 +2080,7 @@ Write-DscStatus "$Tag Starting perfloading"
         $w10 = Test-Path "$win10OsdPath\sources\install.wim"
         $cfgDrive = if ($CMInstallDir) { (Split-Path -Path $CMInstallDir -Qualifier) } else { '<unset>' }
         $freeGB = try { [math]::Round((Get-PSDrive -Name ($DriveLetter.TrimEnd(':')) -ErrorAction Stop).Free / 1GB, 1) } catch { '?' }
-        Write-DscStatus "$Tag WARNING: OSD media missing under '$folderPath' -- skipping OS packages and task sequences. win11 install.wim=$w11; win10 install.wim=$w10; OSD drive '$DriveLetter' free=${freeGB}GB; config CMInstallDir drive '$cfgDrive'. Phase 1 copies OSD to the CMInstallDir drive only when the VM is (re)created, so a rerun will NOT restore it -- rebuild the site server or re-copy the ISOs." -Warning
+        Write-DscStatus "$Tag WARNING: OSD media missing under '$folderPath' -- skipping OS packages and task sequences. win11 install.wim=$w11; win10 install.wim=$w10; OSD drive '$DriveLetter' free=${freeGB}GB; config CMInstallDir drive '$cfgDrive'. The Phase 8 host preflight should repair this payload before perfloading; verify the host OS ISOs are available and rerun from Phase 8." -Warning
         # Enumerate the OSD tree so a partial/misplaced copy or an emptied folder is visible.
         try {
             if (Test-Path $folderPath) {

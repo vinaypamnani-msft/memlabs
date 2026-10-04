@@ -13596,7 +13596,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 else {
                     # TS creation in Phase 8 (perfloading) is gated on OSD media under
                     # <CM install drive>\OSD -- probe it here so the message names the cause:
-                    # media absent -> Phase 1 copy gap; media present -> TS creation
+                    # media absent -> Phase 8 host repair gap; media present -> TS creation
                     # itself failed (e.g. a transient SQL deadlock or an unresolved boot image).
                     $osdHint = 'OSD media state unknown'
                     try {
@@ -13605,7 +13605,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         $w11 = Test-Path "$osdFolder\Windows 11 24h2\sources\install.wim"
                         $w10 = Test-Path "$osdFolder\Windows 10 22h2\sources\install.wim"
                         if ($w11 -and $w10) { $osdHint = "OSD media IS present under '$osdFolder' -- TS creation itself failed in Phase 8 (check the perfloading task-sequence and boot-image lines, e.g. a transient SQL deadlock or 'no boot image resolved')" }
-                        else { $osdHint = "OSD media MISSING under '$osdFolder' (win11 install.wim=$w11; win10 install.wim=$w10) -- Phase 8 skipped TS creation; see the Phase 8 '[perfloading] OSD media missing' + 'OSD DIAG' lines for why the Phase 1 copy is gone" }
+                        else { $osdHint = "OSD media MISSING under '$osdFolder' (win11 install.wim=$w11; win10 install.wim=$w10) -- Phase 8 skipped TS creation; the host preflight should have repaired inherited media before perfloading, so verify the host OS ISOs and repair diagnostics" }
                     }
                     catch {}
                     $tsMessage = "$($tsPresentNames.Count) of $($expectedTsNames.Count) MEMLABS task sequences exist at site ${sc}; missing: $($missingTsNames -join ', '). $osdHint."

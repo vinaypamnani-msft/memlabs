@@ -24,6 +24,7 @@ function Import-FunctionDefinition {
 }
 
 . (Import-FunctionDefinition -Name 'Get-VmSessionCredentialUserName')
+. (Import-FunctionDefinition -Name 'Get-VmSessionCredentialUserNames')
 . (Import-FunctionDefinition -Name 'Get-VmSessionGuestIdentity')
 . (Import-FunctionDefinition -Name 'Test-VmSessionIdentityProbeCompatible')
 . (Import-FunctionDefinition -Name 'Test-VmSessionIdentityCompatible')
@@ -36,6 +37,50 @@ if ((Get-VmSessionCredentialUserName -VmName 'CT1-PS2SITE' -VmDomainName 'WORKGR
 }
 if ((Get-VmSessionCredentialUserName -VmName 'CT1-PS2SITE' -VmDomainName 'cstest1.com' -AccountName 'admin@cstest1.com') -ne 'admin@cstest1.com') {
     throw 'An explicit UPN was not preserved.'
+}
+function Get-VMNote {
+    param([string]$VMName)
+    [pscustomobject]@{
+        domain = 'cstest1.com'
+        domainNetBiosName = 'CSTEST1'
+    }
+}
+$domainCredentialNames = @(Get-VmSessionCredentialUserNames -VmName 'CT1-PS2SITE' `
+        -VmDomainName 'cstest1.com' -AccountName 'vmbuildadmin')
+if (($domainCredentialNames -join '|') -ne 'vmbuildadmin@cstest1.com|CSTEST1\vmbuildadmin') {
+    throw "Domain credential forms are incomplete or misordered: $($domainCredentialNames -join ', ')."
+}
+$disjointCredentialNames = @(Get-VmSessionCredentialUserNames -VmName 'LAB-SRV' `
+        -VmDomainName 'ad.example.test' -DomainNetBiosName 'CORP' -AccountName 'admin@ad.example.test')
+if (($disjointCredentialNames -join '|') -ne 'admin@ad.example.test|CORP\admin') {
+    throw "Disjoint DNS/NetBIOS credential forms are incorrect: $($disjointCredentialNames -join ', ')."
+}
+$workgroupCredentialNames = @(Get-VmSessionCredentialUserNames -VmName 'LAB-SRV' `
+        -VmDomainName 'WORKGROUP' -AccountName 'vmbuildadmin')
+if ($workgroupCredentialNames.Count -ne 1 -or $workgroupCredentialNames[0] -ne 'LAB-SRV\vmbuildadmin') {
+    throw 'Workgroup credential candidates included a domain fallback.'
+}
+if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue) {
+    $transportPassword = ConvertTo-SecureString 'test-only' -AsPlainText -Force
+    $transportSet = [pscustomobject]@{
+        Credentials = @($domainCredentialNames | ForEach-Object {
+                [pscredential]::new($_, $transportPassword)
+            })
+    }
+    $transportJob = Start-ThreadJob -ScriptBlock {
+        param($CredentialSet)
+        @($CredentialSet.Credentials | ForEach-Object { $_.UserName })
+    } -ArgumentList $transportSet
+    try {
+        $null = Wait-Job -Job $transportJob -Timeout 15
+        $transportedNames = @(Receive-Job -Job $transportJob -ErrorAction Stop)
+        if (($transportedNames -join '|') -ne ($domainCredentialNames -join '|')) {
+            throw "ThreadJob credential-set transport changed the candidate order: $($transportedNames -join ', ')."
+        }
+    }
+    finally {
+        Remove-Job -Job $transportJob -Force -ErrorAction SilentlyContinue
+    }
 }
 
 $localSession = [pscustomobject]@{
@@ -187,9 +232,10 @@ if (-not $creationBlock -or
 if (@([regex]::Matches($jobsText, '\$global:MemLabsRequireDomainIdentity\s*=\s*\[bool\]')).Count -ne 2) {
     throw 'Phase 10 and Phase 11 do not both require domain identity for domain-joined Windows roles.'
 }
-if ($jobsText -notmatch '(?s)Get-VmSessionCredentialUserName.+?-VmDomainName \$deployConfig\.vmOptions\.domainName' -or
+if ($jobsText -notmatch '(?s)Get-VmSessionCredentialUserNames.+?-VmDomainName \$deployConfig\.vmOptions\.domainName.+?-DomainNetBiosName \$deployConfig\.vmOptions\.domainNetBiosName' -or
+    $jobsText -notmatch '(?s)foreach \(\$vmCredential in @\(\$VmCredentialSet\.Credentials\)\).+?New-PSSession -VMId \$VmId -Credential \$vmCredential' -or
     -not $jobsText.Contains('Identity mismatch: expected $targetUser@$targetDomain')) {
-    throw 'The direct parallel node-readiness probe bypasses UPN or guest identity validation.'
+    throw 'The direct parallel node-readiness probe bypasses domain credential fallbacks or guest identity validation.'
 }
 $serialReadinessCalls = @([regex]::Matches(
         $jobsText,
@@ -228,4 +274,4 @@ if ($directConstructors.Count -ne 2) {
     throw "Unexpected production PowerShell Direct constructors found: $($directConstructors -join ', ')"
 }
 
-Write-Host 'PASS -- PSDirect uses UPN credentials and rejects local identities for domain-required work.'
+Write-Host 'PASS -- PSDirect uses UPN/NetBIOS domain credentials and rejects local identities for domain-required work.'

@@ -2031,76 +2031,13 @@ $global:VM_Create = {
         
         $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
         if ($currentCmOptions.PrePopulateObjects -and $currentItem.role -eq 'Primary' -and $createVM) {
-            Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying OSD ISOs to Primary" -force
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary site server — copying OSD content for perfloading"
-
-                if ($currentItem.cmInstallDir) {
-                    $driveLetter = (Split-Path -Path $currentItem.cmInstallDir -Qualifier)
-                }
-
-                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying baselines.zip" -force
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM."
-                $sourceLocation = Join-Path $Common.AzureFilesPath "support\baselines.zip"
-                Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $sourceLocation -Destination "C:\tools" -Recurse -Container -Force
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished copying baselines.zip to the VM."
-
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying OS ISO files to the VM."
-
-                $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
-
-                $isoFiles = @($azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet })
-                $isoIndex = 0
-                $isoTotal = $isoFiles.Count
-
-                foreach ($isoFile in $isoFiles) {
-                    $isoIndex++
-
-                    # OS ISO Path
-                    $Iso = $isoFile.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
-                    Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Mounting $($isoFile.id) ($isoIndex/$isoTotal)" -force
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying $iso files to the VM."
-                    $IsoPath = Join-Path $Common.AzureFilesPath $Iso
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $IsoPath to the VM."
-                    # Idempotent, per-drive, multi-drive-safe mount (gets its own drive
-                    # if a cache/other disc is already mounted). The guest copy below
-                    # picks THIS OS disc by content (sources\install.wim), never "the
-                    # CD-ROM", so a co-mounted disc can't be copied by mistake.
-                    if (-not (Mount-IsoOnVm -VmName $currentItem.vmName -IsoPath $IsoPath -Context "OS ($($isoFile.id))" -Phase $Phase)) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to mount OS ISO $IsoPath after retries" -Failure -OutputStream
-                        return
-                    }
-                    $dirname = (join-path $driveLetter "OSD" $isoFile.id)
-
-                    $CopyIsoFiles = {
-                        param ($dirname)
-                        New-Item -Path $dirname -ItemType Directory -Force | Out-Null
-                        $cd = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
-                            Test-Path ("$($_.DriveLetter):\sources\install.wim")
-                        } | Select-Object -First 1
-                        if (-not $cd) { throw "OS media DVD not visible (no CD-ROM with sources\install.wim)" }
-                        Copy-Item -Path "$($cd.DriveLetter):\*" -Destination $dirname -Recurse -Force -Confirm:$false
-                    }
-
-                    # Copy files from DVD
-                    Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying $($isoFile.id) ISO to VM ($isoIndex/$isoTotal)" -force
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying ISO WIM files to $dirname"
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock $CopyIsoFiles -ArgumentList $dirname
-                    if ($result.ScriptBlockFailed) {
-                        $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | ForEach-Object { "$($_.DriveLetter): $($_.FileSystemLabel)" } }
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): CD-ROM volumes: $($result2.ScriptBlockOutput)"
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy ISO WIM files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                        return
-                    }
-
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test WIM Files" -ScriptBlock { param ($dirname) get-item "$dirname\sources\install.wim" } -ArgumentList $dirname 
-                    if ($result.ScriptBlockFailed) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy WIM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                        return
-                    }
-
-                    Dismount-IsoFromVm -VmName $currentItem.vmName -IsoPath $IsoPath -Context "OS ($($isoFile.id))" -Phase $Phase
-                }
-                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed -force
+            $payloadReady = Repair-PrimaryPrepopulationPayload -VirtualMachine $currentItem `
+                -VmDomainName $domainName -AzureFileList $azureFileList `
+                -AzureFilesPath $Common.AzureFilesPath -Phase $Phase
+            if (-not $payloadReady) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary prepopulation payload repair failed. See preceding diagnostics." -Failure -OutputStream
+                return
+            }
         }
 
         if ($createVM) {
@@ -3829,6 +3766,17 @@ $global:VM_Config = {
                 return
             }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM responded after last-resort reboot." -Success -OutputStream
+        }
+
+        $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+        if ($Phase -eq 8 -and $currentItem.role -eq 'Primary' -and $currentCmOptions.PrePopulateObjects) {
+            $payloadReady = Repair-PrimaryPrepopulationPayload -VirtualMachine $currentItem `
+                -VmDomainName $domainName -AzureFileList $Common.AzureFileList `
+                -AzureFilesPath $Common.AzureFilesPath -Phase $Phase -RequireDomainIdentity
+            if (-not $payloadReady) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary prepopulation payload repair failed. See preceding diagnostics." -Failure -OutputStream
+                return
+            }
         }
 
         Write-Progress2 $Activity -Status "Establishing a session with the VM" -percentcomplete 2 -force
@@ -6824,12 +6772,18 @@ $global:VM_Config = {
                 # what shipped -- 35/35 probes came back unknown and every one paid the serial
                 # fallback, so the fan-out cost more than it saved.
                 $probeVmIds = @{}
-                $probeCred = $null
+                $probeCredentialSet = $null
                 if ($Common.LocalAdmin) {
-                    $probeUserName = Get-VmSessionCredentialUserName -VmName $currentItem.vmName `
-                        -VmDomainName $deployConfig.vmOptions.domainName -AccountName $Common.LocalAdmin.UserName
-                    $probeCred = New-Object System.Management.Automation.PSCredential (
-                        $probeUserName, $Common.LocalAdmin.Password)
+                    $probeUserNames = @(Get-VmSessionCredentialUserNames -VmName $currentItem.vmName `
+                            -VmDomainName $deployConfig.vmOptions.domainName `
+                            -DomainNetBiosName $deployConfig.vmOptions.domainNetBiosName `
+                            -AccountName $Common.LocalAdmin.UserName)
+                    $probeCredentialSet = [pscustomobject]@{
+                        Credentials = @($probeUserNames | ForEach-Object {
+                                New-Object System.Management.Automation.PSCredential (
+                                    $_, $Common.LocalAdmin.Password)
+                            })
+                    }
                     foreach ($node in $nodeList) {
                         try {
                             $probeVm = Get-VM2 -Name $node -Fallback
@@ -6838,7 +6792,11 @@ $global:VM_Config = {
                         catch { }
                     }
                 }
-                Write-Log "[Phase $Phase]: NodeReadyProbe fan-out armed for $($probeVmIds.Count)/$($nodeList.Count) node(s), cred=$($null -ne $probeCred)" -LogOnly
+                $probeCredentialNames = if ($probeCredentialSet) {
+                    @($probeCredentialSet.Credentials | ForEach-Object { $_.UserName }) -join ', '
+                }
+                else { '<none>' }
+                Write-Log "[Phase $Phase]: NodeReadyProbe fan-out armed for $($probeVmIds.Count)/$($nodeList.Count) node(s), credentials=[$probeCredentialNames]" -LogOnly
 
                 # Budget is wall-clock, not attempts: an attempt costs one round trip PER NODE, so an
                 # attempt-capped loop silently shortened the real timeout as node count grew.
@@ -6873,45 +6831,49 @@ $global:VM_Config = {
                     $threadProbeBlock = {
                         param(
                             [guid]$VmId,
-                            [pscredential]$VmCredential,
+                            [object]$VmCredentialSet,
                             [string]$ExpectedGuid,
                             [string]$ExpectedDomain,
                             [string]$ExpectedUser
                         )
 
-                        $session = $null
-                        try {
-                            $session = New-PSSession -VMId $VmId -Credential $VmCredential -ErrorAction Stop
-                            $ready = Invoke-Command -Session $session -ScriptBlock {
-                                param($targetGuid, $targetDomain, $targetUser)
-                                $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-                                $actualUser = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { $env:USERNAME }
-                                if ($env:USERDNSDOMAIN -ine $targetDomain -or $actualUser -ine $targetUser) {
-                                    throw "Identity mismatch: expected $targetUser@$targetDomain, actual $identity (USERDNSDOMAIN=$env:USERDNSDOMAIN)"
+                        $credentialErrors = [System.Collections.Generic.List[string]]::new()
+                        foreach ($vmCredential in @($VmCredentialSet.Credentials)) {
+                            $session = $null
+                            try {
+                                $session = New-PSSession -VMId $VmId -Credential $vmCredential -ErrorAction Stop
+                                $ready = Invoke-Command -Session $session -ScriptBlock {
+                                    param($targetGuid, $targetDomain, $targetUser)
+                                    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                                    $actualUser = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { $env:USERNAME }
+                                    if ($env:USERDNSDOMAIN -ine $targetDomain -or $actualUser -ine $targetUser) {
+                                        throw "Identity mismatch: expected $targetUser@$targetDomain, actual $identity (USERDNSDOMAIN=$env:USERDNSDOMAIN)"
+                                    }
+                                    $f = "C:\staging\DSC\RunGuid.txt"
+                                    if (-not (Test-Path $f)) { return $false }
+                                    $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
+                                    if ($content) { $content = $content.Trim() }
+                                    return ([string]$content -eq [string]$targetGuid)
+                                } -ArgumentList $ExpectedGuid, $ExpectedDomain, $ExpectedUser -ErrorAction Stop
+                                return [pscustomobject]@{
+                                    Ready = [bool]$ready
+                                    Error = $null
+                                    Source = 'ThreadJob'
+                                    Unknown = $false
                                 }
-                                $f = "C:\staging\DSC\RunGuid.txt"
-                                if (-not (Test-Path $f)) { return $false }
-                                $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
-                                if ($content) { $content = $content.Trim() }
-                                return ([string]$content -eq [string]$targetGuid)
-                            } -ArgumentList $ExpectedGuid, $ExpectedDomain, $ExpectedUser -ErrorAction Stop
-                            [pscustomobject]@{
-                                Ready = [bool]$ready
-                                Error = $null
-                                Source = 'ThreadJob'
-                                Unknown = $false
+                            }
+                            catch {
+                                $credentialErrors.Add("$($vmCredential.UserName): $($_.Exception.Message)")
+                            }
+                            finally {
+                                if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
                             }
                         }
-                        catch {
-                            [pscustomobject]@{
-                                Ready = $false
-                                Error = $_.Exception.Message
-                                Source = 'ThreadJob'
-                                Unknown = $true
-                            }
-                        }
-                        finally {
-                            if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+                        return [pscustomobject]@{
+                            Ready = $false
+                            Error = $credentialErrors -join '; '
+                            Source = 'ThreadJob'
+                            Unknown = $true
                         }
                     }
 
@@ -6922,7 +6884,7 @@ $global:VM_Config = {
 
                         if ($useThreadProbe -and $probeVmIds.ContainsKey($node)) {
                             $readyProbeJobs[$node] = Start-ThreadJob -ScriptBlock $threadProbeBlock `
-                                -ArgumentList $probeVmIds[$node], $probeCred, $phaseRunGuid, $deployConfig.vmOptions.domainName, $Common.LocalAdmin.UserName `
+                                -ArgumentList $probeVmIds[$node], $probeCredentialSet, $phaseRunGuid, $deployConfig.vmOptions.domainName, $Common.LocalAdmin.UserName `
                                 -ThrottleLimit $readyProbeThrottle -ErrorAction Stop
                             continue
                         }

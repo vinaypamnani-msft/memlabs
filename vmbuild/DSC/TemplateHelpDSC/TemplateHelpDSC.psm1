@@ -421,7 +421,9 @@ function Install-MSIPackage {
         [string] $LogPath,
         [string] $VerifyRegistryPath,
         [string] $VerifyRegistryValueName,
-        [int[]]  $SuccessExitCodes = @(0, 3010)  # 3010 = success, reboot required
+        [int[]]  $SuccessExitCodes = @(0, 3010),  # 3010 = success, reboot required
+        [ValidateRange(1, 60)][int] $InstallBusyMaxAttempts = 10,
+        [ValidateRange(1, 300)][int] $InstallBusyRetrySeconds = 30
     )
 
     if (-not (Test-Path -Path $MsiPath)) {
@@ -442,8 +444,15 @@ function Install-MSIPackage {
     Write-Status "Installing $DisplayName from $MsiPath ..."
     Write-Verbose ("Commandline: msiexec.exe $($msiArgs -join ' ')")
 
-    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
-    $exit = $proc.ExitCode
+    $installAttempt = 0
+    do {
+        $installAttempt++
+        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
+        $exit = $proc.ExitCode
+        if ($exit -ne 1618 -or $installAttempt -ge $InstallBusyMaxAttempts) { break }
+        Write-Status "Windows Installer is busy installing another package (exit 1618). Retrying $DisplayName in $InstallBusyRetrySeconds seconds (attempt $installAttempt of $InstallBusyMaxAttempts)."
+        Start-Sleep -Seconds $InstallBusyRetrySeconds
+    } while ($true)
 
     if ($SuccessExitCodes -notcontains $exit) {
         # MSI 1603 ("fatal error during installation") never tells you the
