@@ -50,6 +50,9 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Test')]
     [string] $Test,
 
+    [Parameter(Mandatory = $true, ParameterSetName = 'Tests')]
+    [string] $TestsCsv,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'RecoverLogs')]
     [switch] $RecoverLogsOnly,
 
@@ -407,14 +410,25 @@ function Get-CrossRevisionPlan {
     param(
         [string] $MainCommit,
         [string] $DevelopCommit,
-        [string] $TestPrefix
+        [string[]] $TestPrefixes,
+        [switch] $ExactTestNames
     )
 
     $mainFixtures = @(Get-FixtureRecords -Revision $MainCommit)
     $developFixtures = @(Get-FixtureRecords -Revision $DevelopCommit)
     $families = @($mainFixtures | Where-Object { $_.Stage -eq 'A' } | Select-Object -ExpandProperty Family -Unique | Sort-Object)
-    if ($TestPrefix) {
-        $families = @($families | Where-Object { $_.StartsWith($TestPrefix, [StringComparison]::OrdinalIgnoreCase) })
+    if ($TestPrefixes.Count -gt 0) {
+        if ($ExactTestNames.IsPresent) {
+            $families = @($families | Where-Object { $_ -in $TestPrefixes })
+        }
+        else {
+            $families = @($families | Where-Object {
+                    $familyName = $_
+                    @($TestPrefixes | Where-Object {
+                            $familyName.StartsWith($_, [StringComparison]::OrdinalIgnoreCase)
+                        }).Count -gt 0
+                })
+        }
     }
 
     $plan = @()
@@ -1277,10 +1291,26 @@ try {
     $requestedDevelopCommit = Resolve-GitRevision -Revision $DevelopRevision
     $developCommit = $requestedDevelopCommit
     if ($mainCommit -eq $developCommit) { throw 'Main and develop resolved to the same commit.' }
-    $plan = @(Get-CrossRevisionPlan -MainCommit $mainCommit -DevelopCommit $developCommit -TestPrefix $Test)
+    $testPrefixes = if ($PSCmdlet.ParameterSetName -eq 'Test') {
+        @($Test)
+    }
+    elseif ($PSCmdlet.ParameterSetName -eq 'Tests') {
+        @($TestsCsv -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    else {
+        @()
+    }
+    $plan = @(Get-CrossRevisionPlan -MainCommit $mainCommit -DevelopCommit $developCommit `
+            -TestPrefixes $testPrefixes -ExactTestNames:($PSCmdlet.ParameterSetName -eq 'Tests'))
     if ($plan.Count -eq 0) {
         $selection = if ($Test) { " matching '$Test'" } else { '' }
         throw "No main-A/develop-follow-on test families were found$selection."
+    }
+    if ($PSCmdlet.ParameterSetName -eq 'Tests') {
+        $missingFamilies = @($testPrefixes | Where-Object { $_ -notin $plan.Family })
+        if ($missingFamilies.Count -gt 0) {
+            throw "Selected cross-revision family/families have no pinned main-A/develop-follow-on plan: $($missingFamilies -join ', ')."
+        }
     }
     $resetFamily = $null
     if ($ResetState.IsPresent -and $Test) {

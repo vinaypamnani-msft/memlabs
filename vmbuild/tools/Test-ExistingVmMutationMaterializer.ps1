@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $materializerPath = Join-Path $RootPath 'tools\New-ExistingVmMutationConfig.ps1'
 $runnerPath = Join-Path $RootPath 'tools\Invoke-MainToDevelopExpansionTest.ps1'
-$manifestPath = Join-Path $RootPath 'config\tests\CSTest3-D-MutateExistingSiteSystem.json'
+$manifestPath = Join-Path $RootPath 'config\tests\mutations\CSTest3-D-MutateExistingSiteSystem.json'
 $baselinePath = Join-Path $RootPath 'config\tests\CSTest3-A-CSPS-CSHA.json'
 
 function Import-TestFunction {

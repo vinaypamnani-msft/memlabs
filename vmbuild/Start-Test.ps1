@@ -3,9 +3,19 @@
     Runs MemLabs deployment test fixtures.
 
 .EXAMPLE
+    .\Start-Test.ps1 -All
+
+    Runs the curated Core suite. Use -Suite Full for every ordinary test family.
+
+.EXAMPLE
+    .\Start-Test.ps1 -Suite Upgrade -CrossRevisionPlanOnly
+
+    Prints the curated exact-main to develop upgrade matrix without touching Hyper-V.
+
+.EXAMPLE
     .\Start-Test.ps1 -All -MainToDevelopExpansion -CrossRevisionPlanOnly
 
-    Prints the pinned main-to-develop expansion matrix without touching Hyper-V.
+    Prints the Core suite's pinned main-to-develop expansion matrix without touching Hyper-V.
 
 .EXAMPLE
     .\Start-Test.ps1 -Test NOCM -MainToDevelopExpansion
@@ -59,8 +69,13 @@ param (
     [Parameter(Mandatory = $true, HelpMessage = "Prefix of tests to perform", ParameterSetName = 'ALL')]
     [switch]$All,
 
+    [Parameter(Mandatory = $true, HelpMessage = "Curated test suite", ParameterSetName = 'Suite')]
+    [ValidateSet('Core', 'Upgrade', 'Specialized', 'Stress', 'Full')]
+    [string]$Suite,
+
     [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'Suite')]
     [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
             # Fast path: read CM versions from cache file instead of loading Common.ps1
@@ -84,14 +99,17 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'Suite')]
     [switch]$dynamicMemory,
 
     [Parameter(Mandatory = $false, HelpMessage = "Override Install CM", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Override Install CM", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Install CM", ParameterSetName = 'Suite')]
     [switch]$DoNotInstallCM,
 
     [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'Suite')]
     [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
             # Not -InJob: the completer needs Get-SupportedOperatingSystemsForRole, which
@@ -114,22 +132,27 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable BitLocker Management (BLM) on the site + a BitLocker client", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Enable BitLocker Management (BLM) on the site + a BitLocker client", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Enable BitLocker Management (BLM) on the site + a BitLocker client", ParameterSetName = 'Suite')]
     [switch]$EnableBLM,
 
     [Parameter(Mandatory = $false, HelpMessage = "Add a Proxy server and route Windows clients through it", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Add a Proxy server and route Windows clients through it", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Add a Proxy server and route Windows clients through it", ParameterSetName = 'Suite')]
     [switch]$EnableProxy,
 
     [Parameter(Mandatory = $false, HelpMessage = "Two-tier PKI: issuing CA on the DC + offline standalone root CA", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Two-tier PKI: issuing CA on the DC + offline standalone root CA", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Two-tier PKI: issuing CA on the DC + offline standalone root CA", ParameterSetName = 'Suite')]
     [switch]$TwoTierPKI,
 
     [Parameter(Mandatory = $false, HelpMessage = "Deploy Microsoft 365 Apps (Office) to Windows clients", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Deploy Microsoft 365 Apps (Office) to Windows clients", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy Microsoft 365 Apps (Office) to Windows clients", ParameterSetName = 'Suite')]
     [switch]$Office,
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'Suite')]
     [switch]$TheWorks,
 
     [Parameter(Mandatory = $true, HelpMessage = "Run only the main-to-develop VM-note compatibility tests", ParameterSetName = 'VMNoteCompatibility')]
@@ -137,26 +160,42 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'Suite')]
     [switch]$SkipVMNoteCompatibility,
 
     [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'Suite')]
     [switch]$MainToDevelopExpansion,
 
     [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'Suite')]
     [switch]$CrossRevisionPlanOnly,
 
     [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'Suite')]
     [switch]$ResetCrossRevisionState,
 
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'Suite')]
     [switch]$RequireCleanSource,
 
     [string]$MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
 )
+
+. (Join-Path $PSScriptRoot 'tools\Common.TestSuites.ps1')
+$resolvedTestSuite = $null
+if ($Suite) {
+    $resolvedTestSuite = Resolve-MemLabsTestSuite -VmbuildRoot $PSScriptRoot -Name $Suite
+}
+elseif ($All.IsPresent) {
+    $resolvedTestSuite = Resolve-MemLabsTestSuite -VmbuildRoot $PSScriptRoot -Name 'Core'
+}
+$runCrossRevision = $MainToDevelopExpansion.IsPresent -or
+    ($resolvedTestSuite -and $resolvedTestSuite.Mode -eq 'CrossRevision')
 
 
 # ============================================================
@@ -576,6 +615,7 @@ function Invoke-MainToDevelopExpansionCycle {
         [string] $PinnedMainRevision,
         [string] $PinnedDevelopRevision,
         [string] $TestPrefix,
+        [string[]] $TestPrefixes,
         [switch] $RunAll,
         [switch] $PlanOnly,
         [switch] $ResetState,
@@ -599,6 +639,12 @@ function Invoke-MainToDevelopExpansionCycle {
         )
         if ($RunAll.IsPresent) {
             $arguments += '-All'
+        }
+        elseif ($TestPrefixes.Count -gt 1) {
+            $arguments += @('-TestsCsv', ($TestPrefixes -join ','))
+        }
+        elseif ($TestPrefixes.Count -eq 1) {
+            $arguments += @('-Test', $TestPrefixes[0])
         }
         else {
             $arguments += @('-Test', $TestPrefix)
@@ -832,7 +878,7 @@ function Run-Test {
 
 $script:TestMutationMutex = $null
 $script:TestMutationMutexHeld = $false
-if (-not $MainToDevelopExpansion.IsPresent -and -not $VMNoteCompatibilityOnly.IsPresent) {
+if (-not $runCrossRevision -and -not $VMNoteCompatibilityOnly.IsPresent) {
     try {
         $script:TestMutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
         try { $script:TestMutationMutexHeld = $script:TestMutationMutex.WaitOne(0) }
@@ -848,7 +894,7 @@ if (-not $MainToDevelopExpansion.IsPresent -and -not $VMNoteCompatibilityOnly.Is
     }
 }
 
-if (-not $MainToDevelopExpansion.IsPresent) {
+if (-not $runCrossRevision) {
     Invoke-TestGitPull -Context 'before VM-note compatibility preflight'
 }
 else {
@@ -894,12 +940,12 @@ if ($VMNoteCompatibilityOnly.IsPresent) {
     exit 0
 }
 
-if (($CrossRevisionPlanOnly.IsPresent -or $ResetCrossRevisionState.IsPresent) -and -not $MainToDevelopExpansion.IsPresent) {
-    Write-Host '-CrossRevisionPlanOnly and -ResetCrossRevisionState require -MainToDevelopExpansion.' -ForegroundColor Red
+if (($CrossRevisionPlanOnly.IsPresent -or $ResetCrossRevisionState.IsPresent) -and -not $runCrossRevision) {
+    Write-Host '-CrossRevisionPlanOnly and -ResetCrossRevisionState require -MainToDevelopExpansion or -Suite Upgrade.' -ForegroundColor Red
     exit 2
 }
 
-if ($MainToDevelopExpansion.IsPresent) {
+if ($runCrossRevision) {
     if ($CrossRevisionPlanOnly.IsPresent) {
         $developOutput = @(& git -C $startTestRepoRoot rev-parse HEAD 2>$null)
         $developRevision = if ($developOutput.Count -eq 1) { $developOutput[0].Trim() } else { '' }
@@ -908,11 +954,20 @@ if ($MainToDevelopExpansion.IsPresent) {
             exit 2
         }
     }
+    $crossRevisionFamilies = if ($resolvedTestSuite -and -not $resolvedTestSuite.IncludeAll) {
+        @($resolvedTestSuite.Families)
+    }
+    else {
+        @()
+    }
+    $crossRevisionRunAll = ($resolvedTestSuite -and $resolvedTestSuite.IncludeAll) -or
+        (-not $resolvedTestSuite -and $All.IsPresent)
     $crossRevisionExit = Invoke-MainToDevelopExpansionCycle `
         -PinnedMainRevision $MainRevision `
         -PinnedDevelopRevision $developRevision `
         -TestPrefix $Test `
-        -RunAll:$All `
+        -TestPrefixes $crossRevisionFamilies `
+        -RunAll:$crossRevisionRunAll `
         -PlanOnly:$CrossRevisionPlanOnly `
         -ResetState:$ResetCrossRevisionState `
         -RequireCleanSource:$RequireCleanSource
@@ -942,21 +997,9 @@ try {
         }
     }
 
-    if ($all) {
-        $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name }
-        $Tests = @()
-        foreach ($name in $ConfigPaths.Name) {
-     
-            $Testname = ($name -split "-")[0]
-            if ($Testname.contains("json")) {
-                continue
-            }
-            if ($Testname.Contains("storageconfig")) {
-                continue
-            }
-            $Tests += $Testname
-        }                        
-        $Tests = $Tests | Select-Object -Unique
+    if ($all -or $Suite) {
+        $Tests = @($resolvedTestSuite.Families)
+        Write-Host "Running '$($resolvedTestSuite.Name)' suite: $($Tests -join ', ')" -ForegroundColor Cyan
 
         foreach ($Test in $Tests) {
             if (Get-Content "c:\temp\CompletedTests.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -eq $Test }) {

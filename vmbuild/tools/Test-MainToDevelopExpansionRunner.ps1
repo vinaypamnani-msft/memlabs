@@ -131,10 +131,20 @@ $allOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $runnerPath 
         -RepositoryRoot $repoRoot -All -PlanOnly -StateRoot $stateRoot 2>&1 | ForEach-Object { "$_" })
 $allExit = $LASTEXITCODE
 $allText = $allOutput -join [Environment]::NewLine
-$mutationFixtureGitPath = 'vmbuild/config/tests/CSTest3-D-MutateExistingSiteSystem.json'
-$null = & git -C $repoRoot cat-file -e "HEAD`:$mutationFixtureGitPath" 2>$null
-$mutationFixtureInHead = $LASTEXITCODE -eq 0
-$expectedFollowOns = if ($mutationFixtureInHead) { 38 } else { 37 }
+$mutationFixtureGitPath = 'vmbuild/config/tests/mutations/CSTest3-D-MutateExistingSiteSystem.json'
+$legacyMutationFixtureGitPath = 'vmbuild/config/tests/CSTest3-D-MutateExistingSiteSystem.json'
+$proxyLinuxFixtureGitPath = 'vmbuild/config/tests/CSTest5-C-AddProxyLinux.json'
+$pullDpFixtureGitPath = 'vmbuild/config/tests/PSTest2-F-AddPullDP.json'
+function Test-FixtureInHead {
+    param([string] $GitPath)
+    $null = & git -C $repoRoot cat-file -e "HEAD`:$GitPath" 2>$null
+    return $LASTEXITCODE -eq 0
+}
+$mutationFixtureInHead = (Test-FixtureInHead $mutationFixtureGitPath) -or
+    (Test-FixtureInHead $legacyMutationFixtureGitPath)
+$proxyLinuxFixtureInHead = Test-FixtureInHead $proxyLinuxFixtureGitPath
+$pullDpFixtureInHead = Test-FixtureInHead $pullDpFixtureGitPath
+$expectedFollowOns = 37 + [int]$mutationFixtureInHead + [int]$proxyLinuxFixtureInHead + [int]$pullDpFixtureInHead
 $expectedPasses = 2 * $expectedFollowOns
 Assert-Equal 0 $allExit 'all-family plan exits successfully'
 Assert-True ($allText -like "*10 family/families, $expectedFollowOns follow-on fixture(s), $expectedPasses develop deployment pass(es).*") 'all-family plan has the expected revision matrix'
@@ -144,6 +154,18 @@ if ($mutationFixtureInHead) {
 }
 else {
     Assert-True (Test-Path -LiteralPath (Join-Path $repoRoot $mutationFixtureGitPath)) 'uncommitted mutation fixture exists for the pending publication'
+}
+if ($proxyLinuxFixtureInHead) {
+    Assert-True ($allText.Contains('CSTest5-C-AddProxyLinux.json')) 'all-family plan includes the Proxy/Linux upgrade fixture'
+}
+else {
+    Assert-True (Test-Path -LiteralPath (Join-Path $repoRoot $proxyLinuxFixtureGitPath)) 'uncommitted Proxy/Linux fixture exists for the pending publication'
+}
+if ($pullDpFixtureInHead) {
+    Assert-True ($allText.Contains('PSTest2-F-AddPullDP.json')) 'all-family plan includes the pull-DP upgrade fixture'
+}
+else {
+    Assert-True (Test-Path -LiteralPath (Join-Path $repoRoot $pullDpFixtureGitPath)) 'uncommitted pull-DP fixture exists for the pending publication'
 }
 Assert-Equal $false (Test-Path -LiteralPath $stateRoot) 'plan-only mode creates no state or worktree directory'
 

@@ -1,0 +1,37 @@
+{
+  "cmOptions": {
+    "version": "current-branch",
+    "install": true,
+    "pushClientToDomainMembers": true
+  },
+  "vmOptions": {
+    "prefix": "PT2-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "pstest2.com",
+    "adminName": "admin",
+    "network": "192.168.120.0",
+    "timeZone": "Central Standard Time",
+    "domainNetBiosName": "pstest2",
+    "locale": "en-US"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "PULLDP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "siteCode": "PRI",
+      "installDP": true,
+      "installMP": false,
+      "installSUP": false,
+      "installRP": false,
+      "enablePullDP": true,
+      "pullDPSourceDP": "DPMP1",
+      "additionalDisks": {
+        "E": "250GB"
+      }
+    }
+  ]
+}
