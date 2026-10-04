@@ -1826,9 +1826,9 @@ function Add-ModifiedExistingVMToDeployConfig {
     $vmName = $vm.vmName
 
     Write-Log -verbose "Adding Modified $($vmName) to Deploy config"
-    if ($configToModify.virtualMachines.vmName -contains $vmName) {
-        Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
-        return
+    $matchingConfigVms = @($configToModify.virtualMachines | Where-Object { $_.vmName -ieq $vmName })
+    if ($matchingConfigVms.Count -gt 1) {
+        throw "Cannot merge modified existing VM '$vmName': deployConfig contains $($matchingConfigVms.Count) matching entries."
     }
     $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
     if (-not $existingVM) {
@@ -1852,10 +1852,23 @@ function Add-ModifiedExistingVMToDeployConfig {
         "success",
         "deployedOS",
         "domain",
+        "domainNetBiosName",
         "network",
         "prefix",
         "domaindefaults"
         "pkiOptions",
+        "ExistingVM",
+        "AssignedIP",
+        "ReservationCreated",
+        "ToolsFingerprint",
+        "DscShortcutsCreated",
+        "lastPhaseComplete",
+        "appliedFixes",
+        "state",
+        "vmBuild",
+        "DiskUsedGB",
+        "memoryGB",
+        "memoryStartupGB",
         "memLabsDeployVersion",
         "memLabsVersion",
         "adminName",
@@ -1877,6 +1890,19 @@ function Add-ModifiedExistingVMToDeployConfig {
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
+    }
+    if ($matchingConfigVms.Count -eq 1) {
+        $target = $matchingConfigVms[0]
+        # Generated phase data belongs to the pre-edit shape. Retaining it after a
+        # role/property mutation can route the old role through later phases.
+        foreach ($generatedProperty in @('thisParams', 'SQLAO')) {
+            $target.PSObject.Properties.Remove($generatedProperty)
+        }
+        foreach ($prop in $newVMObject.PSObject.Properties) {
+            $target | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+        }
+        Write-Log "Merged modified existing VM '$vmName' into its existing deployConfig entry." -LogOnly
+        return
     }
     if ($null -eq $configToModify.virtualMachines) {
         $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
