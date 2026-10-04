@@ -3985,7 +3985,7 @@ function New-VmNote {
         foreach ($prop in $ThisVM.PSObject.Properties) {
             if ($prop.Name -in @(
                     'thisParams', 'SQLAO', 'network',
-                    'osdMetadataOnly', 'osdValidate', 'phase11Validate'
+                    'ExistingVM', 'osdMetadataOnly', 'osdValidate', 'phase11Validate'
                 )) {
                 continue
             }

@@ -377,6 +377,13 @@ function Get-GitJson {
     }
 }
 
+function Test-ExistingVmMutationFixture {
+    param([object] $Config)
+
+    return $Config.PSObject.Properties['existingVmMutationVersion'] -and
+        [int]$Config.existingVmMutationVersion -eq 1
+}
+
 function Get-FixtureRecords {
     param([string] $Revision)
 
@@ -426,6 +433,8 @@ function Get-CrossRevisionPlan {
         $vmNamesByDomain[$baselineDomain.ToLowerInvariant()] = @($expectedVmNames)
         foreach ($followOn in $followOns) {
             $followOnConfig = Get-GitJson -Revision $DevelopCommit -Path $followOn.Path
+            $followOn | Add-Member -NotePropertyName IsExistingVmMutation `
+                -NotePropertyValue (Test-ExistingVmMutationFixture -Config $followOnConfig) -Force
             $followOnDomain = [string]$followOnConfig.vmOptions.domainName
             $followOnVmNames = @(Get-ExpectedVmNames -Config $followOnConfig)
             $domains += $followOnDomain
@@ -459,7 +468,8 @@ function Write-CrossRevisionPlan {
     foreach ($item in $Plan) {
         Write-Host ("{0}: {1}" -f $item.Family, $item.Baseline.Name) -ForegroundColor Cyan
         foreach ($followOn in $item.FollowOns) {
-            Write-Host ("  {0}: {1}" -f $followOn.Stage, $followOn.Name)
+            $kind = if ($followOn.IsExistingVmMutation) { ' [existing-VM mutation]' } else { '' }
+            Write-Host ("  {0}: {1}{2}" -f $followOn.Stage, $followOn.Name, $kind)
         }
         Write-Host ("  domains: {0}" -f ($item.Domains -join ', ')) -ForegroundColor DarkGray
     }
@@ -468,7 +478,7 @@ function Write-CrossRevisionPlan {
             $Plan.Count,
             (@($Plan | ForEach-Object { $_.FollowOns.Count }) | Measure-Object -Sum).Sum,
             (2 * (@($Plan | ForEach-Object { $_.FollowOns.Count }) | Measure-Object -Sum).Sum))
-    Write-Host 'Coverage boundary: B+ fixture files test deployment over main-era VMs, but do not invoke the interactive existing-domain GenConfig path.' -ForegroundColor Yellow
+    Write-Host 'Mutation fixtures materialize through the pinned develop existing-domain GenConfig model; menu keystroke handling itself remains outside this runner.' -ForegroundColor Yellow
     Write-Host 'The VM-note preflight remains the gate for legacy NetBIOS and PKI reconstruction.' -ForegroundColor Yellow
 }
 
@@ -1187,6 +1197,42 @@ function Invoke-NewLabFixture {
     return $exitCode
 }
 
+function Get-ExistingVmMutationOutputPath {
+    param(
+        [string] $Family,
+        [string] $FixtureName,
+        [string] $MainCommit,
+        [string] $DevelopCommit
+    )
+
+    $pairName = "$($MainCommit.Substring(0, 8))-to-$($DevelopCommit.Substring(0, 8))"
+    $safeFamily = $Family -replace '[^A-Za-z0-9_.-]', '_'
+    $safeFixture = ([IO.Path]::GetFileNameWithoutExtension($FixtureName)) -replace '[^A-Za-z0-9_.-]', '_'
+    $outputDirectory = Join-Path $StateRoot "generated-mutations\$pairName\$safeFamily"
+    $null = New-Item -ItemType Directory -Path $outputDirectory -Force -ErrorAction Stop
+    return Join-Path $outputDirectory "$safeFixture.json"
+}
+
+function Invoke-ExistingVmMutationMaterializer {
+    param(
+        [string] $WorktreePath,
+        [string] $ManifestPath,
+        [string] $OutputPath,
+        [string] $Label
+    )
+
+    $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath `
+        -ScriptName 'tools\New-ExistingVmMutationConfig.ps1' `
+        -Parameters ([ordered]@{ ManifestPath = $ManifestPath; OutputPath = $OutputPath }) `
+        -Label $Label
+    if ($exitCode -ne 0) {
+        throw "Existing-VM mutation materialization failed with exit code $exitCode."
+    }
+    if (-not (Test-Path -LiteralPath $OutputPath -PathType Leaf)) {
+        throw "Existing-VM mutation materializer did not create '$OutputPath'."
+    }
+}
+
 function Assert-DomainsAbsent {
     param([string[]] $Domains, [string[]] $VmNames)
 
@@ -1452,7 +1498,19 @@ try {
             foreach ($followOn in $familyPlan.FollowOns) {
                 $step = "$familyKey|develop|$pass|$($followOn.Name)"
                 $identityKey = "$familyKey|$($followOn.Name.ToLowerInvariant())"
-                $followOnConfig = Get-GitJson -Revision $developCommit -Path $followOn.Path
+                $followOnDefinition = Get-GitJson -Revision $developCommit -Path $followOn.Path
+                $isExistingVmMutation = Test-ExistingVmMutationFixture -Config $followOnDefinition
+                $fixturePath = Join-Path $developWorktree ($followOn.Path -replace '/', '\')
+                if ($isExistingVmMutation) {
+                    $fixturePath = Get-ExistingVmMutationOutputPath -Family $family -FixtureName $followOn.Name `
+                        -MainCommit $mainCommit -DevelopCommit $developCommit
+                }
+                $followOnConfig = if ($isExistingVmMutation -and (Test-Path -LiteralPath $fixturePath -PathType Leaf)) {
+                    Get-Content -LiteralPath $fixturePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                }
+                else {
+                    $followOnDefinition
+                }
                 $followOnVmNames = @(Get-ExpectedVmNames -Config $followOnConfig)
                 $followOnHasDc = @($followOnConfig.virtualMachines | Where-Object { $_.role -eq 'DC' }).Count -gt 0
                 if (Test-StepComplete -Step $step) {
@@ -1493,7 +1551,17 @@ try {
                     }
                 }
                 Start-Step -Step $step
-                $fixturePath = Join-Path $developWorktree ($followOn.Path -replace '/', '\')
+                if ($isExistingVmMutation) {
+                    if (-not (Test-Path -LiteralPath $fixturePath -PathType Leaf)) {
+                        $manifestPath = Join-Path $developWorktree ($followOn.Path -replace '/', '\')
+                        Invoke-ExistingVmMutationMaterializer -WorktreePath $developWorktree `
+                            -ManifestPath $manifestPath -OutputPath $fixturePath `
+                            -Label "$family-materialize-$($followOn.Stage)"
+                    }
+                    $followOnConfig = Get-Content -LiteralPath $fixturePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $followOnVmNames = @(Get-ExpectedVmNames -Config $followOnConfig)
+                    $followOnHasDc = @($followOnConfig.virtualMachines | Where-Object { $_.role -eq 'DC' }).Count -gt 0
+                }
                 $exitCode = Invoke-NewLabFixture -WorktreePath $developWorktree -FixturePath $fixturePath -Label "$family-develop-pass$pass-$($followOn.Stage)" -KeepFailedVms
                 if ($exitCode -ne 0) { throw "$($followOn.Name) failed on develop pass $pass with exit code $exitCode." }
                 Assert-BaselineIdentity -Identity $baselineIdentity

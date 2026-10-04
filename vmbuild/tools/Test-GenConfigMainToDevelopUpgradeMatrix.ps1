@@ -169,7 +169,6 @@ function Add-ValidationMessage {
 $script:ValidationFailures = [System.Collections.Generic.List[string]]::new()
 
 $runtimeNoise = @{
-    ExistingVM = $true
     AssignedIP = '10.0.0.20'
     LastKnownIP = '10.0.0.20'
     ReservationCreated = $true
@@ -227,6 +226,7 @@ Assert-True ($config.virtualMachines.Count -eq $mainRoles.Count) `
     "Expected one upgraded entry per exact-main role; found $($config.virtualMachines.Count)."
 foreach ($vm in $config.virtualMachines) {
     Assert-True ($vm.hidden -eq $true) "Existing VM '$($vm.vmName)' was not kept hidden."
+    Assert-True ($vm.ExistingVM -eq $true) "Existing VM '$($vm.vmName)' lost its per-run mutation marker."
     Assert-True ($vm.phase11Validate -eq $true) "Modified existing VM '$($vm.vmName)' was not scheduled for Phase 11 validation."
     Assert-True ($vm.legacyCustomProperty -eq "preserve-$($vm.role)") `
         "Unknown exact-main property was dropped from upgraded VM '$($vm.vmName)'."
@@ -256,6 +256,7 @@ $mergeConfig = [pscustomobject]@{ virtualMachines = @($existingEntry) }
 Add-ModifiedExistingVMToDeployConfig -vm $siteSystem -configToModify $mergeConfig -hidden $true
 Assert-True ($mergeConfig.virtualMachines.Count -eq 1) 'Modified hidden dependency was duplicated instead of merged.'
 Assert-True ($mergeConfig.virtualMachines[0].InstallDP -eq $true) 'Adding DP to an existing main-era SiteSystem was discarded.'
+Assert-True ($mergeConfig.virtualMachines[0].ExistingVM -eq $true) 'Modified hidden dependency lost its per-run mutation marker.'
 Assert-True ($null -eq $mergeConfig.virtualMachines[0].PSObject.Properties['InstallDP-Original']) 'Edit bookkeeping leaked into deploy config.'
 Assert-True ($null -eq $mergeConfig.virtualMachines[0].PSObject.Properties['thisParams']) 'Stale thisParams survived the existing-VM mutation.'
 Assert-True ($null -eq $mergeConfig.virtualMachines[0].PSObject.Properties['SQLAO']) 'Stale SQLAO data survived the existing-VM mutation.'

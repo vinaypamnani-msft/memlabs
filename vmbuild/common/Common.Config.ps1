@@ -2068,6 +2068,7 @@ function Add-ModifiedExistingVMToDeployConfig {
         $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
     }
     $newVMObject | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+    $newVMObject | Add-Member -MemberType NoteProperty -Name 'ExistingVM' -Value $true -Force
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
@@ -2140,6 +2141,7 @@ function Add-ExistingVMToDeployConfig {
         "memLabsVersion",
         "adminName",
         "lastUpdate",
+        "ExistingVM",
         "osdMetadataOnly",
         "osdValidate",
         "phase11Validate"

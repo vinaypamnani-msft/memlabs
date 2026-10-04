@@ -256,6 +256,8 @@ Add-ModifiedExistingVMToDeployConfig -Vm $modifiedDp -ConfigToModify $mergeConfi
 $mergedDp = $mergeConfig.virtualMachines[0]
 Assert-Equal $true ([bool]$mergedDp.phase11Validate) `
     'Modified main-era role host was not scheduled for Phase 11 validation.'
+Assert-Equal $true ([bool]$mergedDp.ExistingVM) `
+    'Modified main-era role host lost its per-run existing-VM mutation marker.'
 Assert-True ($null -eq $mergedDp.PSObject.Properties['osdValidate']) `
     'Stale OSD validation metadata leaked from a VM note into the upgraded config.'
 Assert-True ($null -eq $mergedDp.PSObject.Properties['osdMetadataOnly']) `
