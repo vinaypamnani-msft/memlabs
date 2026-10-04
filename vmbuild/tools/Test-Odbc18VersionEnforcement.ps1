@@ -177,9 +177,13 @@ if ($futureFix.FixVersion -ne '18.7.1.2' -or $futureFix.ArgumentList[1] -notmatc
 }
 
 $script:MsiStartCalls = 0
-function Get-ItemPropertyValue {
-    param($Path, $Name, $ErrorAction)
-    '18.6.2.1'
+function Test-Path {
+    param($LiteralPath, $Path, $PathType)
+    return $true
+}
+function Get-ItemProperty {
+    param($LiteralPath, $Path, $ErrorAction)
+    [pscustomobject]@{ InstalledVersion = '18.6.2.1' }
 }
 function Start-Process {
     $script:MsiStartCalls++

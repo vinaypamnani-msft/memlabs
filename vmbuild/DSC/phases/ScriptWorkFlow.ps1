@@ -134,7 +134,15 @@ if ($DownloadOnly) {
         # registry value is the same local "CM installed" signal that
         # InstallAndUpdateSCCM's ground-truth check uses.
         $regSiteCode = $null
-        try { $regSiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue } catch { }
+        $identificationPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
+        if (Test-Path -LiteralPath $identificationPath) {
+            try {
+                $identification = Get-ItemProperty -LiteralPath $identificationPath -ErrorAction Stop
+                $siteCodeProperty = $identification.PSObject.Properties['Site Code']
+                if ($siteCodeProperty) { $regSiteCode = $siteCodeProperty.Value }
+            }
+            catch { }
+        }
         if ($regSiteCode) {
             Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: ConfigMgr already installed on this site server (Site Code '$regSiteCode'); skipping pre-req pre-warm."
             return
@@ -1629,5 +1637,4 @@ if ($ScriptWorkflowRunId) {
         Write-DscStatus "ScriptWorkflow.ps1 WARNING: failed to stamp completion RunId: $($_.Exception.Message)"
     }
 }
-
 

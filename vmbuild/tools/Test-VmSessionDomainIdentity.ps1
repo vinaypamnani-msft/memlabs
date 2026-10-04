@@ -200,6 +200,7 @@ Remove-Item -LiteralPath $reprobeMarker -Force -ErrorAction SilentlyContinue
 
 $commonText = Get-Content -LiteralPath $commonPath -Raw
 $jobsText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Raw
+$runnerText = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MainToDevelopExpansionTest.ps1') -Raw
 if ($commonText -notmatch 'if \(-not \$requireDomain -and \$localUser -ne \$username\)') {
     throw 'Get-VmSession still offers local fallback during domain-required work.'
 }
@@ -237,6 +238,10 @@ if ($jobsText -notmatch '(?s)Get-VmSessionCredentialUserNames.+?-VmDomainName \$
     -not $jobsText.Contains('Identity mismatch: expected $targetUser@$targetDomain')) {
     throw 'The direct parallel node-readiness probe bypasses domain credential fallbacks or guest identity validation.'
 }
+if ($runnerText -notmatch '(?s)New-DomainCredentials.+?Invoke-CrossRevisionDomainProbe' -or
+    $runnerText -notmatch 'Identity mismatch: expected \$ExpectedUser@\$ExpectedDomain') {
+    throw 'The mixed-revision runner bypasses domain credential fallbacks or exact guest identity validation.'
+}
 $serialReadinessCalls = @([regex]::Matches(
         $jobsText,
         '(?s)Invoke-VmCommand\s+-VmName\s+\$node\s+-VmDomainName\s+\$deployConfig\.vmOptions\.domainName.+?-DisplayName\s+"DSC: Check Nodes Ready(?: \(fallback\))?"'
@@ -249,7 +254,8 @@ if ($serialReadinessCalls.Count -ne 2 -or
 $productionFiles = @(
     (Join-Path $RootPath 'Common.ps1'),
     (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1'),
-    (Join-Path $RootPath 'common\Common.Phases.ps1')
+    (Join-Path $RootPath 'common\Common.Phases.ps1'),
+    (Join-Path $RootPath 'tools\Invoke-MainToDevelopExpansionTest.ps1')
 )
 $directConstructors = [System.Collections.Generic.List[string]]::new()
 foreach ($path in $productionFiles) {

@@ -25,7 +25,16 @@ $Fix_ODBC18 = {
     param([string]$TargetVersion, [string]$DownloadUrl, [string]$VcRedistUrl)
 
     function Get-InstalledOdbc18Version {
-        $value = [string](Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18' -Name 'InstalledVersion' -ErrorAction SilentlyContinue)
+        $value = ''
+        $regPath = 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18'
+        if (Test-Path -LiteralPath $regPath) {
+            try {
+                $state = Get-ItemProperty -LiteralPath $regPath -ErrorAction Stop
+                $versionProperty = $state.PSObject.Properties['InstalledVersion']
+                if ($versionProperty) { $value = [string]$versionProperty.Value }
+            }
+            catch { }
+        }
         [version]$parsed = $null
         if ($value -and [version]::TryParse($value.Trim(), [ref]$parsed)) { return $parsed }
         return $null
@@ -56,7 +65,9 @@ $Fix_ODBC18 = {
     }
     function Get-OdbcVcRuntimeState {
         $regPath = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64'
-        $runtime = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+        $runtime = if (Test-Path -LiteralPath $regPath) {
+            try { Get-ItemProperty -LiteralPath $regPath -ErrorAction Stop } catch { $null }
+        }
         $major = [int]$runtime.Major
         $minor = [int]$runtime.Minor
         $build = [int]$runtime.Bld

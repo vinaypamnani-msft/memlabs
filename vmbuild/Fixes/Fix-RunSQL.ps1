@@ -15,7 +15,7 @@ $Fix_RunSQL = {
     if (-not (Test-Path $regPath)) {
         return [pscustomobject]@{ Success = $true; Message = 'No SQL instances installed - skipping' }
     }
-    $instances = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue).PSObject.Properties |
+    $instances = (Get-ItemProperty -LiteralPath $regPath -ErrorAction Stop).PSObject.Properties |
         Where-Object { $_.MemberType -eq 'NoteProperty' -and $_.Name -notin 'PSPath','PSParentPath','PSChildName','PSDrive','PSProvider' } |
         Select-Object -ExpandProperty Name
     if (-not $instances) {

@@ -362,11 +362,15 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
 if ($Configuration.InstallSCCM.Status -eq 'Completed') {
 
     $regPresent = $false
-    try {
-        $regSiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue
-        if ($regSiteCode) { $regPresent = $true }
+    $identificationPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
+    if (Test-Path -LiteralPath $identificationPath) {
+        try {
+            $identification = Get-ItemProperty -LiteralPath $identificationPath -ErrorAction Stop
+            $siteCodeProperty = $identification.PSObject.Properties['Site Code']
+            if ($siteCodeProperty -and $siteCodeProperty.Value) { $regPresent = $true }
+        }
+        catch { }
     }
-    catch { }
 
     # If registry says CM is installed, try WMI first. The SMS Provider uses
     # CM's own SQL connection (with proper SPNs/auth) so it works reliably
@@ -759,7 +763,16 @@ CurrentBranch=1
                     $dcName = $allDCs[0]
                 }
                 else {
-                    $dcName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
+                    $gpHistoryPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History'
+                    $dcName = $null
+                    if (Test-Path -LiteralPath $gpHistoryPath) {
+                        try {
+                            $gpHistory = Get-ItemProperty -LiteralPath $gpHistoryPath -ErrorAction Stop
+                            $dcNameProperty = $gpHistory.PSObject.Properties['DCName']
+                            if ($dcNameProperty) { $dcName = $dcNameProperty.Value }
+                        }
+                        catch { }
+                    }
                     if ($dcName) { $dcName = $dcName.TrimStart('\\') }
                     if (-not $dcName) { $dcName = (nltest /dsgetdc:$DomainFullName 2>$null | Select-String 'DC: \\\\(.+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) }
                     $allDCs = @($dcName)
@@ -1986,7 +1999,13 @@ if ($UpdateRequired) {
             if ($elapsedMin -ge $monitorDeadlineMin) {
                 $diag = ""
                 try {
-                    $cmInstallDir = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction SilentlyContinue).'Installation Directory'
+                    $cmSetupPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Setup'
+                    $cmInstallDir = $null
+                    if (Test-Path -LiteralPath $cmSetupPath) {
+                        $cmSetup = Get-ItemProperty -LiteralPath $cmSetupPath -ErrorAction Stop
+                        $installDirProperty = $cmSetup.PSObject.Properties['Installation Directory']
+                        if ($installDirProperty) { $cmInstallDir = $installDirProperty.Value }
+                    }
                     if ($cmInstallDir) {
                         # cmupdate.log is the decisive one -- tail it deeper. The 2303->2309
                         # in-console update hangs mid-install in a KNOWN product bug
@@ -2012,7 +2031,10 @@ if ($UpdateRequired) {
                 # INSTALL_IN_PROGRESS on this hop (fixed in later builds; the RTM 2309
                 # in-console update still hits it).
                 try {
-                    $oleProps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Ole' -ErrorAction SilentlyContinue
+                    $olePath = 'HKLM:\SOFTWARE\Microsoft\Ole'
+                    $oleProps = if (Test-Path -LiteralPath $olePath) {
+                        Get-ItemProperty -LiteralPath $olePath -ErrorAction Stop
+                    }
                     $haveAccess = $oleProps -and $null -ne $oleProps.MachineAccessRestriction
                     $haveLaunch = $oleProps -and $null -ne $oleProps.MachineLaunchRestriction
                     if (-not $haveAccess -or -not $haveLaunch) {

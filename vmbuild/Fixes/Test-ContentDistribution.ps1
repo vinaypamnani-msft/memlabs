@@ -251,7 +251,16 @@ if ($anyStuck -and -not $SkipLogCollection -and (Get-Command Invoke-VmCommand -E
     $logBlock = {
         param($pkgCsv)
         $pkgs = @($pkgCsv -split ',' | Where-Object { $_ })
-        $ccm = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\CCM\Logging\@GLOBAL' -ErrorAction SilentlyContinue).LogDirectory
+        $ccmPath = 'HKLM:\SOFTWARE\Microsoft\CCM\Logging\@GLOBAL'
+        $ccm = $null
+        if (Test-Path -LiteralPath $ccmPath) {
+            try {
+                $ccmState = Get-ItemProperty -LiteralPath $ccmPath -ErrorAction Stop
+                $logDirectoryProperty = $ccmState.PSObject.Properties['LogDirectory']
+                if ($logDirectoryProperty) { $ccm = $logDirectoryProperty.Value }
+            }
+            catch { }
+        }
         if (-not $ccm) { $ccm = "$env:WINDIR\CCM\Logs" }
         $out = New-Object System.Collections.Generic.List[string]
         $out.Add("CCM log dir: $ccm")

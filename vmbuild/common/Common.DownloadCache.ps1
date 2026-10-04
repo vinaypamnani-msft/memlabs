@@ -890,7 +890,10 @@ function Confirm-IsoVisibleInGuest {
             $pend = @()
             if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $pend += 'CBS' }
             if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $pend += 'WU' }
-            $pfro = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+            $sessionManagerPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+            $sessionManager = Get-ItemProperty -LiteralPath $sessionManagerPath -ErrorAction Stop
+            $pfroProperty = $sessionManager.PSObject.Properties['PendingFileRenameOperations']
+            $pfro = if ($pfroProperty) { $pfroProperty.Value } else { $null }
             if ($pfro) { $pend += 'PendingFileRename' }
             $r.PendingReboot = if ($pend.Count -gt 0) { $pend -join '+' } else { 'no' }
         }

@@ -31,6 +31,8 @@ function Assert-True {
 
 $modulePath = Join-Path $RootPath 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1'
 $phase8Path = Join-Path $RootPath 'DSC\phases\Phase8.ps1'
+$odbcFixPath = Join-Path $RootPath 'Fixes\Fix-ODBC18.ps1'
+$maintenancePath = Join-Path $RootPath 'Invoke-Maintenance.ps1'
 . (Import-TestFunction -Path $modulePath -Name 'Install-MSIPackage')
 
 $script:ExitCodes = [System.Collections.Queue]::new()
@@ -93,10 +95,33 @@ try {
         'MSI retry budget should not sleep after its final attempt.'
 
     $phase8Source = Get-Content -LiteralPath $phase8Path -Raw
+    $reportBuilderResources = @([regex]::Matches(
+            $phase8Source,
+            '(?s)InstallReportBuilder\s+InstallReportBuilder\s*\{[^}]+DependsOn\s*=\s*\$nextDepend[^}]+\}'
+        ))
+    $reportBuilderChainUpdates = @([regex]::Matches(
+            $phase8Source,
+            '\$nextDepend\s*=\s*"\[InstallReportBuilder\]InstallReportBuilder"'
+        ))
+    Assert-True ($reportBuilderResources.Count -eq 3) `
+        'Every Phase 8 Report Builder resource must depend on the current prerequisite chain.'
+    Assert-True ($reportBuilderChainUpdates.Count -eq 3) `
+        'Every Phase 8 Report Builder resource must become the next dependency.'
     Assert-True ($phase8Source -match '(?s)InstallReportBuilder\s+InstallReportBuilder\s*\{.+?\$nextDepend\s*=\s*"\[InstallReportBuilder\]InstallReportBuilder".+?WriteStatus\s+WaitActive\s*\{.+?DependsOn\s*=\s*\$nextDepend') `
         'Passive-site WaitActive must depend on the Report Builder resource chain.'
     Assert-True ($phase8Source -notmatch '(?s)WriteStatus\s+WaitActive\s*\{[^}]+DependsOn\s*=\s*''\[InstallADK\]ADKInstall''') `
         'Passive-site completion must not bypass Report Builder through a direct ADK dependency.'
+
+    $odbcFixSource = Get-Content -LiteralPath $odbcFixPath -Raw
+    Assert-True ($odbcFixSource -match '(?s)for \(\$msiAttempt = 1; \$msiAttempt -le 3; \$msiAttempt\+\+\).+?\$process\.ExitCode -ne 1618.+?Start-Sleep -Seconds 30') `
+        'The maintenance ODBC MSI installer must retry Windows Installer busy errors.'
+    $maintenanceSource = Get-Content -LiteralPath $maintenancePath -Raw
+    $maintenanceMsiStarts = @([regex]::Matches(
+            $maintenanceSource,
+            '(?im)Start-Process\s+-FilePath\s+''msiexec\.exe''[^\r\n]+'
+        ))
+    Assert-True ($maintenanceMsiStarts.Count -eq 1 -and $maintenanceMsiStarts[0].Value -match "@\('/x'") `
+        'The only direct maintenance msiexec call must remain the bounded uninstall path, not an installer bypass.'
 }
 finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
