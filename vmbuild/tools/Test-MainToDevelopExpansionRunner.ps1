@@ -17,6 +17,10 @@ $script:MockVms = @{}
 $script:MockDisks = @{}
 $script:MockDomainSid = 'S-1-5-21-100-200-300'
 $script:LastCredentialUser = $null
+$script:CredentialAttempts = [System.Collections.Generic.List[string]]::new()
+$script:RejectedCredentialUsers = @()
+$script:MockIdentityDnsDomain = 'nocm.com'
+$script:MockIdentityUser = $null
 $script:MockGetVmFailure = $false
 $script:MockDomainHealth = [pscustomobject]@{
     PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; DnsAddresses = @('10.220.201.20')
@@ -81,8 +85,37 @@ function Get-VMHardDiskDrive {
 function Invoke-Command {
     param([string] $VMName, [pscredential] $Credential, [scriptblock] $ScriptBlock, [object[]] $ArgumentList, [object] $ErrorAction)
     $script:LastCredentialUser = $Credential.UserName
-    if ("$ScriptBlock" -like '*Test-ComputerSecureChannel*') { return $script:MockDomainHealth }
-    return $script:MockDomainSid
+    $script:CredentialAttempts.Add($Credential.UserName)
+    if ($script:RejectedCredentialUsers -contains $Credential.UserName) {
+        throw 'The credential is invalid.'
+    }
+    $identityUser = if ($Credential.UserName -match '\\([^\\]+)$') {
+        $Matches[1]
+    }
+    elseif ($Credential.UserName -match '^([^@]+)@') {
+        $Matches[1]
+    }
+    else {
+        'admin2'
+    }
+    if ($script:MockIdentityUser) { $identityUser = $script:MockIdentityUser }
+    if ("$ScriptBlock" -like '*Test-ComputerSecureChannel*') {
+        return [pscustomobject]@{
+            PartOfDomain = $script:MockDomainHealth.PartOfDomain
+            Domain = $script:MockDomainHealth.Domain
+            SecureChannel = $script:MockDomainHealth.SecureChannel
+            DnsAddresses = @($script:MockDomainHealth.DnsAddresses)
+            _MemLabsIdentity = "NOCM\$identityUser"
+            _MemLabsUserDnsDomain = $script:MockIdentityDnsDomain
+            _MemLabsUserName = $identityUser
+        }
+    }
+    return [pscustomobject]@{
+        DomainSid = $script:MockDomainSid
+        _MemLabsIdentity = "NOCM\$identityUser"
+        _MemLabsUserDnsDomain = $script:MockIdentityDnsDomain
+        _MemLabsUserName = $identityUser
+    }
 }
 
 if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
@@ -236,7 +269,10 @@ $invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildS
 . (Import-TestFunction -Path $runnerPath -Name Get-VmIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-BaselineIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DevelopStageComplete)
+. (Import-TestFunction -Path $runnerPath -Name Resolve-CrossRevisionDomainNetBiosName)
+. (Import-TestFunction -Path $runnerPath -Name New-DomainCredentials)
 . (Import-TestFunction -Path $runnerPath -Name New-DomainCredential)
+. (Import-TestFunction -Path $runnerPath -Name Invoke-CrossRevisionDomainProbe)
 . (Import-TestFunction -Path $runnerPath -Name Get-DomainIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainJoinedVmHealth)
@@ -856,11 +892,12 @@ $script:MockGetVmFailure = $false
 $credentialPath = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-credential-$PID.txt"
 [IO.File]::WriteAllText($credentialPath, 'not-a-real-password')
 $domainConfig = [pscustomobject]@{
-    vmOptions       = [pscustomobject]@{ prefix = 'NOC-'; domainName = 'nocm.com'; adminName = 'admin2' }
+    vmOptions       = [pscustomobject]@{ prefix = 'NOC-'; domainName = 'nocm.com'; domainNetBiosName = 'NOCM'; adminName = 'admin2' }
     virtualMachines = @([pscustomobject]@{ vmName = 'DC1'; role = 'DC' })
 }
 $domainIdentity = Get-DomainIdentity -Config $domainConfig -AdminCachePath $credentialPath
 Assert-Equal 'S-1-5-21-100-200-300' $domainIdentity.Sid 'baseline identity captures the AD domain SID'
+Assert-Equal 'NOCM' $domainIdentity.DomainNetBiosName 'baseline identity captures the authoritative NetBIOS domain name'
 Assert-Equal 'admin2@nocm.com' $script:LastCredentialUser 'domain SID probe uses the DNS-domain UPN'
 try {
     Assert-DomainIdentity -Identity $domainIdentity -AdminCachePath $credentialPath
@@ -875,7 +912,7 @@ Assert-ThrowsLike -Action {
 } -Pattern '*was replaced*' -What 'AD domain SID replacement fails the cycle'
 
 $stageConfig = [pscustomobject]@{
-    vmOptions       = [pscustomobject]@{ prefix = 'NOC-'; domainName = 'nocm.com'; adminName = 'admin2' }
+    vmOptions       = [pscustomobject]@{ prefix = 'NOC-'; domainName = 'nocm.com'; domainNetBiosName = 'NOCM'; adminName = 'admin2' }
     virtualMachines = @([pscustomobject]@{ vmName = 'W11CLIENT1'; role = 'DomainMember' })
 }
 $script:MockVms['NOC-W11CLIENT1'] = [pscustomobject]@{
@@ -905,6 +942,23 @@ try {
 catch {
     Write-TestResult -Passed $false -What 'domain member independently passes join, secure-channel, and DNS checks' -Detail $_.Exception.Message
 }
+$script:CredentialAttempts.Clear()
+$script:RejectedCredentialUsers = @('admin2@nocm.com')
+try {
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Write-TestResult -Passed $true -What 'Server 2019-style UPN rejection falls back to the exact NetBIOS domain principal'
+}
+catch {
+    Write-TestResult -Passed $false -What 'Server 2019-style UPN rejection falls back to the exact NetBIOS domain principal' -Detail $_.Exception.Message
+}
+Assert-Equal 'admin2@nocm.com|NOCM\admin2' ($script:CredentialAttempts -join '|') 'domain probe tries UPN then NetBIOS in order'
+Assert-Equal 'NOCM\admin2' $script:LastCredentialUser 'successful fallback uses the NetBIOS domain principal'
+$script:RejectedCredentialUsers = @()
+$script:MockIdentityDnsDomain = 'fabrikam.com'
+Assert-ThrowsLike -Action {
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+} -Pattern '*Identity mismatch*' -What 'runner rejects a credential that authenticates into the wrong DNS domain'
+$script:MockIdentityDnsDomain = 'nocm.com'
 $script:MockDomainHealth = [pscustomobject]@{
     PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $false; DnsAddresses = @('10.220.201.20')
 }

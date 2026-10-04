@@ -559,10 +559,41 @@ function Assert-BaselineIdentity {
     }
 }
 
-function New-DomainCredential {
+function Resolve-CrossRevisionDomainNetBiosName {
+    param(
+        [string] $Domain,
+        [string] $DomainNetBiosName,
+        [string] $VmName
+    )
+
+    $candidate = "$DomainNetBiosName".Trim()
+    if (-not $candidate -and $VmName) {
+        try {
+            $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+            $note = if ($vm -and $vm.Notes) { $vm.Notes | ConvertFrom-Json -ErrorAction Stop } else { $null }
+            if ($note -and $note.domain -ieq $Domain -and $note.domainNetBiosName) {
+                $candidate = "$($note.domainNetBiosName)".Trim()
+            }
+        }
+        catch { }
+    }
+    if (-not $candidate) { return $null }
+    if ($candidate.Length -gt 15 -or $candidate -match '[\\/:*?"<>|]') {
+        throw "Invalid NetBIOS domain name '$candidate' for '$Domain'."
+    }
+    return $candidate
+}
+
+function New-DomainCredentials {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '',
         Justification = 'MemLabs already stores this deployment credential as plaintext in its local ignored cache; this process-local PSCredential is required for PowerShell Direct.')]
-    param([string] $Domain, [string] $AdminName, [string] $AdminCachePath)
+    param(
+        [string] $Domain,
+        [string] $AdminName,
+        [string] $AdminCachePath,
+        [string] $DomainNetBiosName,
+        [string] $VmName
+    )
 
     if (-not (Test-Path -LiteralPath $AdminCachePath -PathType Leaf)) {
         throw "Cached VM credential not found: $AdminCachePath"
@@ -570,7 +601,55 @@ function New-DomainCredential {
     $password = (Get-Content -LiteralPath $AdminCachePath -Raw -ErrorAction Stop).Trim()
     if ([string]::IsNullOrWhiteSpace($password)) { throw "Cached VM credential is empty: $AdminCachePath" }
     $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-    return New-Object Management.Automation.PSCredential("$AdminName@$Domain", $securePassword)
+    $credentials = [System.Collections.Generic.List[Management.Automation.PSCredential]]::new()
+    $credentials.Add([Management.Automation.PSCredential]::new("$AdminName@$Domain", $securePassword))
+    $netBiosName = Resolve-CrossRevisionDomainNetBiosName -Domain $Domain `
+        -DomainNetBiosName $DomainNetBiosName -VmName $VmName
+    if ($netBiosName) {
+        $credentials.Add([Management.Automation.PSCredential]::new("$netBiosName\$AdminName", $securePassword))
+    }
+    return $credentials.ToArray()
+}
+
+function New-DomainCredential {
+    param([string] $Domain, [string] $AdminName, [string] $AdminCachePath)
+
+    return @(New-DomainCredentials -Domain $Domain -AdminName $AdminName -AdminCachePath $AdminCachePath)[0]
+}
+
+function Invoke-CrossRevisionDomainProbe {
+    param(
+        [string] $VmName,
+        [Management.Automation.PSCredential[]] $Credentials,
+        [string] $ExpectedDomain,
+        [string] $ExpectedUser,
+        [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList
+    )
+
+    $errors = [System.Collections.Generic.List[string]]::new()
+    foreach ($credential in @($Credentials)) {
+        try {
+            $values = @(Invoke-Command -VMName $VmName -Credential $credential `
+                    -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop)
+            if ($values.Count -ne 1) {
+                throw "Probe returned $($values.Count) value(s); expected exactly one."
+            }
+            $value = $values[0]
+            $identity = "$($value._MemLabsIdentity)"
+            $userDnsDomain = "$($value._MemLabsUserDnsDomain)"
+            $userName = "$($value._MemLabsUserName)"
+            if (-not $identity -or $userDnsDomain -ine $ExpectedDomain -or $userName -ine $ExpectedUser) {
+                throw "Identity mismatch: expected $ExpectedUser@$ExpectedDomain, actual $identity (USERDNSDOMAIN=$userDnsDomain)."
+            }
+            return $value
+        }
+        catch {
+            $message = ($_.Exception.Message -replace '\s+', ' ').Trim()
+            $errors.Add("$($credential.UserName): $message")
+        }
+    }
+    throw "PowerShell Direct domain probe failed for '$VmName' using [$(@($Credentials.UserName) -join ', ')]: $($errors -join '; ')"
 }
 
 function Get-DomainIdentity {
@@ -582,18 +661,29 @@ function Get-DomainIdentity {
     $domain = [string]$Config.vmOptions.domainName
     $adminName = [string]$Config.vmOptions.adminName
     $dcVmName = Get-FullVmName -Prefix ([string]$Config.vmOptions.prefix) -VmName ([string]$dc[0].vmName)
-    $credential = New-DomainCredential -Domain $domain -AdminName $adminName -AdminCachePath $AdminCachePath
-    $domainSidValues = @(Invoke-Command -VMName $dcVmName -Credential $credential -ScriptBlock {
-            (Get-ADDomain -ErrorAction Stop).DomainSID.Value
-        } -ErrorAction Stop)
-    if ($domainSidValues.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$domainSidValues[0])) {
-        throw "The domain SID probe returned $($domainSidValues.Count) value(s) from '$dcVmName'; expected exactly one."
+    $domainNetBiosName = Resolve-CrossRevisionDomainNetBiosName -Domain $domain `
+        -DomainNetBiosName ([string]$Config.vmOptions.domainNetBiosName) -VmName $dcVmName
+    $credentials = @(New-DomainCredentials -Domain $domain -AdminName $adminName -AdminCachePath $AdminCachePath `
+            -DomainNetBiosName $domainNetBiosName -VmName $dcVmName)
+    $domainProbe = Invoke-CrossRevisionDomainProbe -VmName $dcVmName -Credentials $credentials `
+        -ExpectedDomain $domain -ExpectedUser $adminName -ScriptBlock {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        [pscustomobject]@{
+            DomainSid                 = (Get-ADDomain -ErrorAction Stop).DomainSID.Value
+            _MemLabsIdentity          = $identity
+            _MemLabsUserDnsDomain     = "$env:USERDNSDOMAIN"
+            _MemLabsUserName          = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { "$env:USERNAME" }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$domainProbe.DomainSid)) {
+        throw "The domain SID probe returned an empty SID from '$dcVmName'."
     }
     return [ordered]@{
-        Domain    = $domain
-        AdminName = $adminName
-        DcVmName  = $dcVmName
-        Sid       = "$($domainSidValues[0])"
+        Domain            = $domain
+        DomainNetBiosName = $domainNetBiosName
+        AdminName         = $adminName
+        DcVmName          = $dcVmName
+        Sid               = "$($domainProbe.DomainSid)"
     }
 }
 
@@ -602,34 +692,34 @@ function Assert-DomainJoinedVmHealth {
 
     $domainJoinedRoles = @('DomainMember', 'FileServer', 'PassiveSite', 'Primary', 'Secondary', 'SiteSystem', 'SQLAO', 'WSUS')
     $domain = [string]$Config.vmOptions.domainName
+    $domainNetBiosName = [string]$Config.vmOptions.domainNetBiosName
     $adminName = [string]$Config.vmOptions.adminName
     $prefix = [string]$Config.vmOptions.prefix
-    $credential = $null
 
     foreach ($vmConfig in @($Config.virtualMachines | Where-Object { $_.role -in $domainJoinedRoles })) {
-        if (-not $credential) {
-            $credential = New-DomainCredential -Domain $domain -AdminName $adminName -AdminCachePath $AdminCachePath
-        }
         $vmName = Get-FullVmName -Prefix $prefix -VmName ([string]$vmConfig.vmName)
-        $healthValues = @(Invoke-Command -VMName $vmName -Credential $credential -ScriptBlock {
-                param($ExpectedDomain)
-                $computerSystem = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
-                $secureChannel = Test-ComputerSecureChannel -ErrorAction Stop
-                $fqdn = "$env:COMPUTERNAME.$ExpectedDomain"
-                $dnsAddresses = @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop |
-                        Where-Object { $_.IPAddress } |
-                        Select-Object -ExpandProperty IPAddress -Unique)
-                [pscustomobject]@{
-                    PartOfDomain  = [bool]$computerSystem.PartOfDomain
-                    Domain        = [string]$computerSystem.Domain
-                    SecureChannel = [bool]$secureChannel
-                    DnsAddresses  = @($dnsAddresses)
-                }
-            } -ArgumentList $domain -ErrorAction Stop)
-        if ($healthValues.Count -ne 1) {
-            throw "$FixtureName domain health probe returned $($healthValues.Count) value(s) from '$vmName'; expected exactly one."
-        }
-        $health = $healthValues[0]
+        $credentials = @(New-DomainCredentials -Domain $domain -AdminName $adminName -AdminCachePath $AdminCachePath `
+                -DomainNetBiosName $domainNetBiosName -VmName $vmName)
+        $health = Invoke-CrossRevisionDomainProbe -VmName $vmName -Credentials $credentials `
+            -ExpectedDomain $domain -ExpectedUser $adminName -ScriptBlock {
+            param($ExpectedDomain)
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $computerSystem = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+            $secureChannel = Test-ComputerSecureChannel -ErrorAction Stop
+            $fqdn = "$env:COMPUTERNAME.$ExpectedDomain"
+            $dnsAddresses = @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop |
+                    Where-Object { $_.IPAddress } |
+                    Select-Object -ExpandProperty IPAddress -Unique)
+            [pscustomobject]@{
+                PartOfDomain              = [bool]$computerSystem.PartOfDomain
+                Domain                    = [string]$computerSystem.Domain
+                SecureChannel             = [bool]$secureChannel
+                DnsAddresses              = @($dnsAddresses)
+                _MemLabsIdentity          = $identity
+                _MemLabsUserDnsDomain     = "$env:USERDNSDOMAIN"
+                _MemLabsUserName          = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { "$env:USERNAME" }
+            }
+        } -ArgumentList $domain
         if (-not $health.PartOfDomain -or $health.Domain -ine $domain) {
             throw "$FixtureName left '$vmName' outside '$domain' (PartOfDomain=$($health.PartOfDomain), Domain=$($health.Domain))."
         }
@@ -646,7 +736,12 @@ function Assert-DomainIdentity {
     param([object] $Identity, [string] $AdminCachePath)
 
     $config = [pscustomobject]@{
-        vmOptions       = [pscustomobject]@{ domainName = $Identity.Domain; adminName = $Identity.AdminName; prefix = '' }
+        vmOptions       = [pscustomobject]@{
+            domainName = $Identity.Domain
+            domainNetBiosName = $Identity.DomainNetBiosName
+            adminName = $Identity.AdminName
+            prefix = ''
+        }
         virtualMachines = @([pscustomobject]@{ role = 'DC'; vmName = $Identity.DcVmName })
     }
     $vm = Get-VM -Name $Identity.DcVmName -ErrorAction SilentlyContinue
