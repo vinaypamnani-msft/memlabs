@@ -77,12 +77,14 @@ if (-not $RepositoryRoot) {
     $vmbuildRoot = Split-Path -Parent $PSScriptRoot
     $RepositoryRoot = Split-Path -Parent $vmbuildRoot
 }
+. (Join-Path $PSScriptRoot 'Common.TestHistory.ps1')
 $RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 $pwshPath = Join-Path $PSHOME 'pwsh.exe'
 $script:ChildLauncherPath = Join-Path $PSScriptRoot 'Invoke-PinnedChildScript.ps1'
 $script:MutationMutex = $null
 $script:MutationMutexHeld = $false
 $script:MainBaselineFailureCleanupPossible = $false
+$script:HistoryRun = $null
 
 function Invoke-Git {
     param(
@@ -1491,6 +1493,26 @@ try {
             continue
         }
 
+        $familyMetadata = Get-MemLabsFamilyMetadata -VmbuildRoot (Split-Path -Parent $PSScriptRoot) `
+            -Family $family -IncludeMutations
+        $script:HistoryRun = [pscustomobject]@{
+            RunId = [guid]::NewGuid().ToString('N')
+            Family = $family
+            CandidateKey = "CrossRevision|$family"
+            StartedUtc = [DateTime]::UtcNow
+            Completed = $false
+            Metadata = $familyMetadata
+        }
+        Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{
+                EventType = 'RunStarted'; RunId = $script:HistoryRun.RunId
+                CandidateKey = $script:HistoryRun.CandidateKey; Mode = 'CrossRevision'
+                Family = $family; Suite = 'Upgrade'
+                StartedUtc = $script:HistoryRun.StartedUtc.ToString('o')
+                Commit = $developCommit; MainRevision = $mainCommit
+                Domains = @($familyMetadata.Domains); CoverageTags = @($familyMetadata.CoverageTags)
+                RequiredMemoryGB = $familyMetadata.EstimatedRequiredGB
+            })
+
         Write-Host "`n######## $family ########" -ForegroundColor Cyan
         $baselineStep = "$familyKey|main|A"
         if (-not (Test-StepComplete -Step $baselineStep)) {
@@ -1638,6 +1660,20 @@ try {
             Complete-Step -Step $cleanupStep
         }
         Complete-Step -Step $completeKey
+        $familyCompletedUtc = [DateTime]::UtcNow
+        Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{
+                EventType = 'RunCompleted'; RunId = $script:HistoryRun.RunId
+                CandidateKey = $script:HistoryRun.CandidateKey; Mode = 'CrossRevision'
+                Family = $family; Suite = 'Upgrade'
+                StartedUtc = $script:HistoryRun.StartedUtc.ToString('o')
+                CompletedUtc = $familyCompletedUtc.ToString('o')
+                DurationSeconds = [Math]::Round(($familyCompletedUtc - $script:HistoryRun.StartedUtc).TotalSeconds, 1)
+                Commit = $developCommit; MainRevision = $mainCommit; Success = $true; ExitCode = 0
+                Error = ''; Domains = @($script:HistoryRun.Metadata.Domains)
+                CoverageTags = @($script:HistoryRun.Metadata.CoverageTags); NeedsRerun = $false
+            })
+        $script:HistoryRun.Completed = $true
+        $script:HistoryRun = $null
         Write-Host "PASS: $family main-to-develop expansion cycle completed." -ForegroundColor Green
 
         if ($PauseAtFamilyBoundary.IsPresent) {
@@ -1667,12 +1703,36 @@ try {
     exit 0
 }
 catch {
+    $runError = $_
+    $runInterrupted = $runError.Exception -is [Management.Automation.PipelineStoppedException] -or
+        $runError.FullyQualifiedErrorId -like '*PipelineStopped*'
+    if ($script:HistoryRun -and -not $script:HistoryRun.Completed) {
+        $failedUtc = [DateTime]::UtcNow
+        try {
+            Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{
+                    EventType = 'RunCompleted'; RunId = $script:HistoryRun.RunId
+                    CandidateKey = $script:HistoryRun.CandidateKey; Mode = 'CrossRevision'
+                    Family = $script:HistoryRun.Family; Suite = 'Upgrade'
+                    StartedUtc = $script:HistoryRun.StartedUtc.ToString('o')
+                    CompletedUtc = $failedUtc.ToString('o')
+                    DurationSeconds = [Math]::Round(($failedUtc - $script:HistoryRun.StartedUtc).TotalSeconds, 1)
+                    Commit = $developCommit; MainRevision = $mainCommit; Success = $false; ExitCode = 1
+                    Error = $runError.Exception.Message; Domains = @($script:HistoryRun.Metadata.Domains)
+                    CoverageTags = @($script:HistoryRun.Metadata.CoverageTags); NeedsRerun = $true
+                    Interrupted = $runInterrupted
+                })
+            $script:HistoryRun.Completed = $true
+        }
+        catch {
+            Write-Host "WARNING: Could not record cross-revision test history: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
     if ($script:State -and $script:StatePath) {
         $script:State.Status = 'Failed'
-        $script:State.LastError = $_.Exception.Message
+        $script:State.LastError = $runError.Exception.Message
         Save-State
     }
-    Write-Host "FAIL: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "FAIL: $($runError.Exception.Message)" -ForegroundColor Red
     if ($script:MainBaselineFailureCleanupPossible) {
         Write-Host 'Exact-main may have removed failed Phase 1 VMs using its historical cleanup behavior.' -ForegroundColor Yellow
     }

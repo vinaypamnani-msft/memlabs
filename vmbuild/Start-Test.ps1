@@ -13,6 +13,17 @@
     Prints the curated exact-main to develop upgrade matrix without touching Hyper-V.
 
 .EXAMPLE
+    .\Start-Test.ps1 -Continuous
+
+    Continuously selects the highest-value test that fits current host memory.
+    Runs only while this foreground Start-Test process remains open.
+
+.EXAMPLE
+    .\Start-Test.ps1 -Continuous -ContinuousPlanOnly
+
+    Displays the ranked candidates and exits without touching Hyper-V.
+
+.EXAMPLE
     .\Start-Test.ps1 -All -MainToDevelopExpansion -CrossRevisionPlanOnly
 
     Prints the Core suite's pinned main-to-develop expansion matrix without touching Hyper-V.
@@ -72,6 +83,30 @@ param (
     [Parameter(Mandatory = $true, HelpMessage = "Curated test suite", ParameterSetName = 'Suite')]
     [ValidateSet('Core', 'Upgrade', 'Specialized', 'Stress', 'Full')]
     [string]$Suite,
+
+    [Parameter(Mandatory = $true, HelpMessage = "Continuously run the highest-value test that fits the host", ParameterSetName = 'Continuous')]
+    [switch]$Continuous,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [switch]$ContinuousPlanOnly,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [int]$ContinuousMaxIterations = 0,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [double]$MinimumRetentionFreeGB = 250,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [int]$MaximumRetainedLabs = 2,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [int]$RetentionDays = 7,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [string]$TestHistoryPath,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [string]$TestRetentionPath,
 
     [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'TestName')]
@@ -178,15 +213,34 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'Suite')]
     [switch]$ResetCrossRevisionState,
 
+    [Parameter(Mandatory = $false, ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'Suite')]
+    [string]$CrossRevisionStateRoot,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'Suite')]
+    [string]$DevelopRevision,
+
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'TestName')]
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'Suite')]
     [switch]$RequireCleanSource,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Do not prompt after a failed fixture; return failure to the caller", ParameterSetName = 'TestName')]
+    [switch]$Automated,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Remove successful test domains before returning", ParameterSetName = 'TestName')]
+    [switch]$CleanupOnSuccess,
+
     [string]$MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
 )
 
 . (Join-Path $PSScriptRoot 'tools\Common.TestSuites.ps1')
+. (Join-Path $PSScriptRoot 'tools\Common.TestHistory.ps1')
+. (Join-Path $PSScriptRoot 'tools\Common.AttachedProcess.ps1')
+$script:StartTestVmbuildRoot = $PSScriptRoot
 $resolvedTestSuite = $null
 if ($Suite) {
     $resolvedTestSuite = Resolve-MemLabsTestSuite -VmbuildRoot $PSScriptRoot -Name $Suite
@@ -196,6 +250,28 @@ elseif ($All.IsPresent) {
 }
 $runCrossRevision = $MainToDevelopExpansion.IsPresent -or
     ($resolvedTestSuite -and $resolvedTestSuite.Mode -eq 'CrossRevision')
+
+if ($Continuous.IsPresent) {
+    $continuousPath = Join-Path $PSScriptRoot 'tools\Invoke-MemLabsContinuousTests.ps1'
+    $continuousArguments = @(
+        '-NoLogo', '-NoProfile', '-File', $continuousPath,
+        '-VmbuildRoot', $PSScriptRoot,
+        '-MaxIterations', $ContinuousMaxIterations,
+        '-MinimumFreeStorageGB', $MinimumRetentionFreeGB,
+        '-MaximumRetainedLabs', $MaximumRetainedLabs,
+        '-RetentionDays', $RetentionDays
+    )
+    if ($ContinuousPlanOnly.IsPresent) { $continuousArguments += '-PlanOnly' }
+    if ($TestHistoryPath) { $continuousArguments += @('-HistoryPath', $TestHistoryPath) }
+    if ($TestRetentionPath) { $continuousArguments += @('-RetentionPath', $TestRetentionPath) }
+    do {
+        $continuousExit = Invoke-MemLabsAttachedPowerShell -Arguments $continuousArguments
+        if ($continuousExit -eq 57) {
+            Write-Host 'Reloading the continuous scheduler after a source update.' -ForegroundColor Yellow
+        }
+    } while ($continuousExit -eq 57)
+    exit $continuousExit
+}
 
 
 # ============================================================
@@ -616,6 +692,7 @@ function Invoke-MainToDevelopExpansionCycle {
         [string] $PinnedDevelopRevision,
         [string] $TestPrefix,
         [string[]] $TestPrefixes,
+        [string] $StateRoot,
         [switch] $RunAll,
         [switch] $PlanOnly,
         [switch] $ResetState,
@@ -653,6 +730,7 @@ function Invoke-MainToDevelopExpansionCycle {
         if ($PlanOnly.IsPresent) { $arguments += '-PlanOnly' }
         if ($forwardResetState) { $arguments += '-ResetState' }
         if ($RequireCleanSource.IsPresent) { $arguments += '-RequireCleanSource' }
+        if ($StateRoot) { $arguments += @('-StateRoot', $StateRoot) }
 
         $global:LASTEXITCODE = 0
         & (Join-Path $PSHOME 'pwsh.exe') @arguments | Out-Host
@@ -754,6 +832,7 @@ function Get-TestFailureAction {
         return 'Abort'
     }
 
+    if ($Automated.IsPresent) { return 'Abort' }
     while ($true) {
         try {
             $answer = "$(Read-Host '  [R]etry this config, [S]kip it and continue, [A]bort all tests (default A)')".Trim()
@@ -809,6 +888,7 @@ function Run-Test {
                     $config.cmOptions.version = $cmVersion
                     write-host "updating cmVersion to $cmVersion"
                 } 
+
                 if ($DoNotInstallCM -and $config.cmOptions.Install)  {
                     $config.cmOptions.Install = $false
                 }
@@ -876,6 +956,50 @@ function Run-Test {
     return (-not $groupFailed)
 }
 
+function Invoke-RecordedTestFamily {
+    param(
+        [Parameter(Mandatory = $true)][string] $Family,
+        [string] $SuiteName = ''
+    )
+
+    $repositoryRoot = Split-Path -Parent $script:StartTestVmbuildRoot
+    $metadata = Get-MemLabsFamilyMetadata -VmbuildRoot $script:StartTestVmbuildRoot -Family $Family
+    $runId = [guid]::NewGuid().ToString('N')
+    $startedUtc = [DateTime]::UtcNow
+    $startCommit = Get-MemLabsCurrentCommit -RepositoryRoot $repositoryRoot
+    Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{
+            EventType = 'RunStarted'; RunId = $runId; CandidateKey = "Standard|$Family"
+            Mode = 'Standard'; Family = $Family; Suite = $SuiteName
+            StartedUtc = $startedUtc.ToString('o'); Commit = $startCommit
+            Domains = @($metadata.Domains); CoverageTags = @($metadata.CoverageTags)
+            RequiredMemoryGB = $metadata.EstimatedRequiredGB
+        })
+    $success = $false
+    $failureText = ''
+    try {
+        $success = (@(Run-Test -Test $Family) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
+        if (-not $success) { $failureText = "Test family '$Family' returned failure." }
+        return $success
+    }
+    catch {
+        $failureText = $_.Exception.Message
+        throw
+    }
+    finally {
+        $completedUtc = [DateTime]::UtcNow
+        Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{
+                EventType = 'RunCompleted'; RunId = $runId; CandidateKey = "Standard|$Family"
+                Mode = 'Standard'; Family = $Family; Suite = $SuiteName
+                StartedUtc = $startedUtc.ToString('o'); CompletedUtc = $completedUtc.ToString('o')
+                DurationSeconds = [Math]::Round(($completedUtc - $startedUtc).TotalSeconds, 1)
+                Commit = Get-MemLabsCurrentCommit -RepositoryRoot $repositoryRoot
+                StartCommit = $startCommit; Success = $success; ExitCode = $(if ($success) { 0 } else { 1 })
+                Error = $failureText; Domains = @($metadata.Domains)
+                CoverageTags = @($metadata.CoverageTags); NeedsRerun = -not $success
+            })
+    }
+}
+
 $script:TestMutationMutex = $null
 $script:TestMutationMutexHeld = $false
 if (-not $runCrossRevision -and -not $VMNoteCompatibilityOnly.IsPresent) {
@@ -915,7 +1039,16 @@ else {
         Write-Host "A live main-to-develop cycle must run from the develop branch; current branch is '$currentBranch'." -ForegroundColor Red
         exit 2
     }
-    if (-not $CrossRevisionPlanOnly.IsPresent) {
+    if ($DevelopRevision) {
+        $resolvedDevelop = @(& git -C $startTestRepoRoot rev-parse "$DevelopRevision^{commit}" 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $resolvedDevelop.Count -ne 1 -or $resolvedDevelop[0] -notmatch '^[0-9a-f]{40}$') {
+            Write-Host "Could not resolve pinned develop revision '$DevelopRevision'." -ForegroundColor Red
+            exit 2
+        }
+        $developRevision = $resolvedDevelop[0].Trim()
+        Write-Host "Using explicitly pinned develop revision $developRevision." -ForegroundColor DarkGray
+    }
+    elseif (-not $CrossRevisionPlanOnly.IsPresent) {
         try {
             $developRevision = Invoke-MixedRevisionGitRefresh -Context 'before mixed-revision cycle'
         }
@@ -946,7 +1079,7 @@ if (($CrossRevisionPlanOnly.IsPresent -or $ResetCrossRevisionState.IsPresent) -a
 }
 
 if ($runCrossRevision) {
-    if ($CrossRevisionPlanOnly.IsPresent) {
+    if ($CrossRevisionPlanOnly.IsPresent -and -not $developRevision) {
         $developOutput = @(& git -C $startTestRepoRoot rev-parse HEAD 2>$null)
         $developRevision = if ($developOutput.Count -eq 1) { $developOutput[0].Trim() } else { '' }
         if ($LASTEXITCODE -ne 0 -or $developRevision -notmatch '^[0-9a-f]{40}$') {
@@ -968,6 +1101,7 @@ if ($runCrossRevision) {
         -TestPrefix $Test `
         -TestPrefixes $crossRevisionFamilies `
         -RunAll:$crossRevisionRunAll `
+        -StateRoot $CrossRevisionStateRoot `
         -PlanOnly:$CrossRevisionPlanOnly `
         -ResetState:$ResetCrossRevisionState `
         -RequireCleanSource:$RequireCleanSource
@@ -988,12 +1122,31 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
 try {
     $global:history = @()
     $global:removedomains = @()
+    $script:StartTestFailed = $false
     if ($test) {
         # Coerce down to the single boolean: anything Run-Test's callees leak onto the
         # success stream would otherwise make this an array (and every -not test useless).
-        $result = (@(Run-Test -Test $Test) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
+        $result = (@(Invoke-RecordedTestFamily -Family $Test) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
         if (-not $result) {
+            $script:StartTestFailed = $true
             Write-Host "Test '$Test' FAILED. Labs left intact: $($global:removedomains -join ', ')" -ForegroundColor Red
+        }
+        elseif ($CleanupOnSuccess.IsPresent) {
+            foreach ($domain in @($global:removedomains | Select-Object -Unique)) {
+                Write-Host "CleanupOnSuccess: removing $domain" -ForegroundColor DarkGray
+                try {
+                    & ./Remove-lab.ps1 -DomainName $domain
+                    $remaining = @(Get-List -Type VM -DomainName $domain -SmartUpdate)
+                    if ($remaining.Count -gt 0) {
+                        throw "Cleanup left VM(s): $($remaining.vmName -join ', ')."
+                    }
+                }
+                catch {
+                    $script:StartTestFailed = $true
+                    Write-Host "CleanupOnSuccess failed for '$domain': $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+            $global:removedomains = @()
         }
     }
 
@@ -1006,9 +1159,11 @@ try {
                 write-host "$Test already ran skipping"
                 continue
             }
-            $result = (@(Run-Test -Test $($Test + "-")) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
+            $result = (@(Invoke-RecordedTestFamily -Family $Test -SuiteName $resolvedTestSuite.Name) |
+                    Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
             Write-Host "$Test returned $result"
             if (-not $result) {
+                $script:StartTestFailed = $true
                 Write-Host "Stopping: '$Test' failed. Labs left intact for repair: $($global:removedomains -join ', ')" -ForegroundColor Red
                 break
             }
@@ -1044,3 +1199,4 @@ finally {
     }
     if ($script:TestMutationMutex) { $script:TestMutationMutex.Dispose() }
 }
+if ($script:StartTestFailed) { exit 1 }
