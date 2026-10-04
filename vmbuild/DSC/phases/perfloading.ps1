@@ -130,6 +130,81 @@ Write-DscStatus "$Tag Starting perfloading"
         return $MemberKeys.ContainsKey($DistributionPointName.ToUpperInvariant())
     }
 
+    function Get-MemLabsOsdTargetingPlan {
+        param (
+            [object] $DeployConfig,
+            [string] $PrimarySiteCode,
+            [object[]] $LiveDistributionPoints
+        )
+
+        $defaultNetwork = "$($DeployConfig.vmOptions.network)"
+        $networkOf = {
+            param($vm)
+            if ($vm -and $vm.network) { return "$($vm.network)" }
+            if ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
+            return $defaultNetwork
+        }
+        $scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+            "$($_.PrimarySiteCode)" -eq $PrimarySiteCode
+        } | Select-Object -First 1
+        if ($scope -and $scope.PSObject.Properties['OsdClientSubnets']) {
+            $clientSubnets = @($scope.OsdClientSubnets)
+        }
+        else {
+            $clientSubnets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
+                    ForEach-Object { & $networkOf $_ })
+            $clientSubnets += @($DeployConfig.phase8OsdClientSubnets)
+        }
+        $clientSubnets = @($clientSubnets | Where-Object { $_ } | Select-Object -Unique)
+        $scopeRecords = @($scope.DistributionPoints)
+        $targets = @()
+        foreach ($liveDp in @($LiveDistributionPoints)) {
+            $fqdn = if ($liveDp.Fqdn) {
+                "$($liveDp.Fqdn)".TrimStart('\')
+            }
+            elseif ($liveDp.NetworkOSPath) {
+                "$($liveDp.NetworkOSPath)" -replace '^\\\\', ''
+            }
+            elseif ($liveDp.ServerName) {
+                "$($liveDp.ServerName)".TrimStart('\')
+            }
+            else { '' }
+            if (-not $fqdn) { continue }
+            $shortName = ($fqdn -split '\.')[0]
+            $vm = $DeployConfig.virtualMachines | Where-Object {
+                $_.vmName -ieq $shortName -or $_.vmName -ieq $fqdn
+            } | Select-Object -First 1
+            $record = $scopeRecords | Where-Object {
+                $_.Fqdn -ieq $fqdn -or $_.VmName -ieq $shortName
+            } | Select-Object -First 1
+            $role = if ($vm) { "$($vm.role)" } else { "$($record.Role)" }
+            $siteCode = if ($vm -and $vm.siteCode) { "$($vm.siteCode)" } else { "$($record.SiteCode)" }
+            # An implicit Secondary DP is not configured for PXE by MemLabs.
+            if ($role -eq 'Secondary' -or $siteCode -ne $PrimarySiteCode) { continue }
+            $network = if ($vm -and $vm.network) {
+                "$($vm.network)"
+            }
+            elseif ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) {
+                "$($vm.thisParams.vmNetwork)"
+            }
+            elseif ($record -and $record.Network) {
+                "$($record.Network)"
+            }
+            else {
+                $defaultNetwork
+            }
+            if (-not $network -or $clientSubnets -notcontains $network) { continue }
+            $targets += [pscustomobject]@{ Fqdn = $fqdn; Short = $shortName; Subnet = $network }
+        }
+        $targets = @($targets | Sort-Object Fqdn -Unique)
+        $coveredSubnets = @($targets | ForEach-Object { $_.Subnet } | Where-Object { $_ } | Select-Object -Unique)
+        [pscustomobject]@{
+            ClientSubnets      = @($clientSubnets)
+            DistributionPoints = @($targets)
+            UncoveredSubnets   = @($clientSubnets | Where-Object { $coveredSubnets -notcontains $_ })
+        }
+    }
+
     function Get-MemLabsBootImageSourceVersionProblem {
         param (
             [string] $CurrentSourceVersion,
@@ -1364,14 +1439,9 @@ Write-DscStatus "$Tag Starting perfloading"
     # content is still created but NOT distributed anywhere (saves ~25GB per DP);
     # add an OSDClient on a DP's subnet and re-run to distribute + enable PXE.
     $OsdDpGroupName = "OSD DPS"
-    $osdDefaultNet = $deployConfig.vmOptions.network
-    $osdNetOf = {
-        param($vm)
-        if ($vm.network) { return "$($vm.network)" }
-        if ($vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
-        return "$osdDefaultNet"
-    }
-    $osdSubnets = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | ForEach-Object { & $osdNetOf $_ } | Where-Object { $_ } | Select-Object -Unique)
+    $osdTargetingPlan = Get-MemLabsOsdTargetingPlan -DeployConfig $deployConfig -PrimarySiteCode $SiteCode `
+        -LiveDistributionPoints @(Get-CMDistributionPoint -AllSite -ErrorAction SilentlyContinue)
+    $osdSubnets = @($osdTargetingPlan.ClientSubnets)
     $osdDistTarget = $null
     $hasOsdTargets = $false
     if ($osdSubnets.Count -eq 0) {
@@ -1379,18 +1449,8 @@ Write-DscStatus "$Tag Starting perfloading"
     }
     else {
         Write-DscStatus "$Tag OSDClient subnet(s): $($osdSubnets -join ', ') -- locating same-subnet DP(s) for OSD content + PXE"
-        $osdDps = @()
-        foreach ($dp in @(Get-CMDistributionPoint -AllSite -ErrorAction SilentlyContinue)) {
-            $dpFqdn = ($dp.NetworkOSPath -replace '^\\\\', '')
-            $dpShort = ($dpFqdn -split '\.')[0]
-            $dpVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $dpShort } | Select-Object -First 1
-            if (-not $dpVm) { continue }
-            $dpSubnet = & $osdNetOf $dpVm
-            if ($osdSubnets -contains $dpSubnet) { $osdDps += [PSCustomObject]@{ Fqdn = $dpFqdn; Short = $dpShort; Subnet = $dpSubnet } }
-        }
-        $osdDps = @($osdDps | Sort-Object Short -Unique)
-        $coveredOsdSubnets = @($osdDps | ForEach-Object { $_.Subnet } | Where-Object { $_ } | Select-Object -Unique)
-        $uncoveredOsdSubnets = @($osdSubnets | Where-Object { $coveredOsdSubnets -notcontains $_ })
+        $osdDps = @($osdTargetingPlan.DistributionPoints)
+        $uncoveredOsdSubnets = @($osdTargetingPlan.UncoveredSubnets)
         if ($uncoveredOsdSubnets.Count -gt 0) {
             # Was -Failure + return, which ended the script here and took the OSD share, the
             # boot image, both OS packages, all seven task sequences, the collections, the

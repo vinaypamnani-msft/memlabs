@@ -20,6 +20,83 @@
 # read and emitted by Phase11Job after Test-VmFunctionality returns.
 $script:Phase11OutputBuffer = $null
 
+function Get-Phase11OsdTargetingExpectation {
+    param(
+        [object] $DeployConfig,
+        [string] $SiteCode,
+        [string] $Domain
+    )
+
+    $defaultNetwork = "$($DeployConfig.vmOptions.network)"
+    $networkOf = {
+        param($vm)
+        if ($vm -and $vm.network) { return "$($vm.network)" }
+        if ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
+        return $defaultNetwork
+    }
+    $scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+        "$($_.PrimarySiteCode)" -eq $SiteCode
+    } | Select-Object -First 1
+    if ($scope -and $scope.PSObject.Properties['OsdClientSubnets']) {
+        $clientSubnets = @($scope.OsdClientSubnets)
+    }
+    else {
+        $clientSubnets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
+                ForEach-Object { & $networkOf $_ })
+        $clientSubnets += @($DeployConfig.phase8OsdClientSubnets)
+    }
+    $clientSubnets = @($clientSubnets | Where-Object { $_ } | Select-Object -Unique)
+    $scopeRecords = @($scope.DistributionPoints)
+    $records = @($DeployConfig.virtualMachines | Where-Object {
+            $_.vmName -and $_.role -ne 'Secondary' -and
+            ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Primary')
+        } | ForEach-Object {
+            $candidateVm = $_
+            $fqdn = "$($candidateVm.vmName)"
+            if ($fqdn -notmatch '\.') { $fqdn = "$fqdn.$Domain" }
+            $scopeRecord = $scopeRecords | Where-Object {
+                $_.Fqdn -ieq $fqdn -or $_.VmName -ieq "$($candidateVm.vmName)"
+            } | Select-Object -First 1
+            $network = if ($candidateVm.network) {
+                "$($candidateVm.network)"
+            }
+            elseif ($candidateVm.thisParams -and $candidateVm.thisParams.vmNetwork) {
+                "$($candidateVm.thisParams.vmNetwork)"
+            }
+            elseif ($scopeRecord -and $scopeRecord.Network) {
+                "$($scopeRecord.Network)"
+            }
+            else {
+                $defaultNetwork
+            }
+            [pscustomobject]@{
+                Name = $fqdn
+                Network = $network
+                SiteCode = "$($candidateVm.siteCode)"
+                Role = "$($candidateVm.role)"
+            }
+        })
+    $records += @($scopeRecords | Where-Object { $_ -and $_.Role -ne 'Secondary' } | ForEach-Object {
+            [pscustomobject]@{
+                Name = "$($_.Fqdn)"
+                Network = "$($_.Network)"
+                SiteCode = "$($_.SiteCode)"
+                Role = "$($_.Role)"
+            }
+        })
+    $records = @($records | Where-Object {
+            $_.Name -and $_.Network -and $_.SiteCode -eq $SiteCode -and
+            $clientSubnets -contains $_.Network
+        } | Sort-Object Name -Unique)
+    $coveredSubnets = @($records | ForEach-Object { $_.Network } | Where-Object { $_ } | Select-Object -Unique)
+
+    [pscustomobject]@{
+        ClientSubnets = @($clientSubnets)
+        DistributionPoints = @($records)
+        UncoveredSubnets = @($clientSubnets | Where-Object { $coveredSubnets -notcontains $_ })
+    }
+}
+
 function Add-Phase11Output {
     <#
     .SYNOPSIS
@@ -5750,8 +5827,18 @@ function Test-SiteSystemFunctionality {
             if ($v.thisParams -and $v.thisParams.vmNetwork) { return "$($v.thisParams.vmNetwork)" }
             return $osdDefaultNet
         }
-        $osdClientNets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
-                ForEach-Object { & $netOfVm $_ } | Where-Object { $_ } | Select-Object -Unique)
+        $phase8Scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+            "$($_.PrimarySiteCode)" -eq "$($CurrentItem.siteCode)"
+        } | Select-Object -First 1
+        if ($phase8Scope -and $phase8Scope.PSObject.Properties['OsdClientSubnets']) {
+            $osdClientNets = @($phase8Scope.OsdClientSubnets)
+        }
+        else {
+            $osdClientNets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
+                    ForEach-Object { & $netOfVm $_ })
+            $osdClientNets += @($DeployConfig.phase8OsdClientSubnets)
+        }
+        $osdClientNets = @($osdClientNets | Where-Object { $_ } | Select-Object -Unique)
         # MemLabs does not configure PXE on the implicit Secondary DP. Only
         # explicit SiteSystem DPs go through Add-CMDistributionPoint -EnablePxe.
         $dpServesOsd = [bool](-not $isSecondary -and $osdClientNets.Count -gt 0 -and $osdClientNets -contains (& $netOfVm $CurrentItem))
@@ -12503,33 +12590,32 @@ function Test-CMSiteWideFunctionality {
     # content (boot/OS images) to DP(s) on an OSDClient's subnet (to save space +
     # because PXE is subnet-local), so with NO OSDClient the boot image is
     # intentionally not distributed anywhere -- that's INFO, not a WARN.
-    $hasOsdClient = [bool]($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | Select-Object -First 1)
+    $phase8Scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+        "$($_.PrimarySiteCode)" -eq $siteCode
+    } | Select-Object -First 1
+    $hasOsdClient = if ($phase8Scope -and $phase8Scope.PSObject.Properties['OsdClientSubnets']) {
+        @($phase8Scope.OsdClientSubnets | Where-Object { $_ }).Count -gt 0
+    }
+    else {
+        [bool](
+            ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | Select-Object -First 1) -or
+            @($DeployConfig.phase8OsdClientSubnets | Where-Object { $_ }).Count -gt 0
+        )
+    }
 
     # perfloading used to abort Phase 8 outright when an OSDClient subnet had no DP, or when
     # a DP failed to join 'OSD DPS'. It now warns and carries on, so these become Phase 11's
     # to detect -- and they must be measured against the CONFIG, because reading the group's
     # own membership can only ever confirm itself.
-    $osdDefaultNet = "$($DeployConfig.vmOptions.network)"
-    $osdNetOfVm = {
-        param($vm)
-        if ($vm.network) { return "$($vm.network)" }
-        if ($vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
-        return $osdDefaultNet
-    }
     $expectedOsdDpCsv = ''
     $uncoveredOsdSubnetCsv = ''
     try {
-        $osdClientSubnets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
-            ForEach-Object { & $osdNetOfVm $_ } | Where-Object { $_ } | Select-Object -Unique)
+        $osdExpectation = Get-Phase11OsdTargetingExpectation -DeployConfig $DeployConfig `
+            -SiteCode $siteCode -Domain $domain
+        $osdClientSubnets = @($osdExpectation.ClientSubnets)
         if ($osdClientSubnets.Count -gt 0) {
-            $configDpVms = @($DeployConfig.virtualMachines | Where-Object {
-                    $_.vmName -and ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
-                })
-            $osdDpVms = @($configDpVms | Where-Object { $osdClientSubnets -contains (& $osdNetOfVm $_) })
-            $coveredOsdSubnets = @($osdDpVms | ForEach-Object { & $osdNetOfVm $_ } | Select-Object -Unique)
-            $uncoveredOsdSubnetCsv = (@($osdClientSubnets | Where-Object { $coveredOsdSubnets -notcontains $_ }) -join '|')
-            $expectedOsdDpCsv = (@($osdDpVms | Where-Object { "$($_.siteCode)" -eq $siteCode } |
-                    ForEach-Object { "$($_.vmName).$domain" } | Select-Object -Unique) -join '|')
+            $uncoveredOsdSubnetCsv = (@($osdExpectation.UncoveredSubnets) -join '|')
+            $expectedOsdDpCsv = (@($osdExpectation.DistributionPoints.Name | Select-Object -Unique) -join '|')
         }
     }
     catch {

@@ -1365,6 +1365,7 @@ function Add-Phase8DistributionPointMetadata {
     )
 
     $Config | Add-Member -MemberType NoteProperty -Name phase8ManagedDistributionPointScopes -Value @() -Force
+    $Config | Add-Member -MemberType NoteProperty -Name phase8OsdClientSubnets -Value @() -Force
     $domainName = "$($Config.vmOptions.domainName)"
     $phase8Primaries = @($Config.virtualMachines | Where-Object {
             $_.role -eq 'Primary' -and (-not $_.domain -or $_.domain -eq $domainName)
@@ -1400,6 +1401,38 @@ function Add-Phase8DistributionPointMetadata {
         if ($configuredVmName) { $configuredVmKeys[$configuredVmName.ToUpperInvariant()] = $true }
     }
     $allExistingVMs = @($ExistingVMs)
+    $getProjectedNetwork = {
+        param([object]$Vm)
+        if ($Vm.network) { return "$($Vm.network)" }
+        if ($Vm.thisParams -and $Vm.thisParams.vmNetwork) { return "$($Vm.thisParams.vmNetwork)" }
+        $vmName = "$($Vm.vmName)".Trim()
+        if ($vmName) {
+            $inventoryVm = $allExistingVMs | Where-Object { $_.vmName -ieq $vmName } | Select-Object -First 1
+            if ($inventoryVm -and $inventoryVm.network) { return "$($inventoryVm.network)" }
+        }
+        return "$($Config.vmOptions.network)"
+    }
+    $configuredOsdClientKeys = @{}
+    foreach ($configuredOsdClient in @($Config.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })) {
+        $configuredName = "$($configuredOsdClient.vmName)".Trim()
+        if ($configuredName) { $configuredOsdClientKeys[$configuredName.ToUpperInvariant()] = $true }
+    }
+    $osdClientVms = @($Config.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })
+    $osdClientVms += @($allExistingVMs | Where-Object {
+            $_.role -eq 'OSDClient' -and
+            ($_.domain -eq $domainName -or -not $_.domain) -and
+            (-not $_.vmName -or -not $configuredOsdClientKeys.ContainsKey("$($_.vmName)".ToUpperInvariant()))
+        })
+    $osdClientSubnets = @($osdClientVms | ForEach-Object { & $getProjectedNetwork $_ } |
+            Where-Object { $_ } | Select-Object -Unique)
+    $Config | Add-Member -MemberType NoteProperty -Name phase8OsdClientSubnets -Value @($osdClientSubnets) -Force
+    $domainDpNetworks = @((@($Config.virtualMachines) + @($allExistingVMs)) | Where-Object {
+            ($_.domain -eq $domainName -or -not $_.domain) -and
+            $_.role -ne 'Secondary' -and
+            ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Primary')
+        } | ForEach-Object { & $getProjectedNetwork $_ } | Where-Object { $_ } | Select-Object -Unique)
+    $unownedOsdClientSubnets = @($osdClientSubnets | Where-Object { $domainDpNetworks -notcontains $_ })
+
     $managedDpScopes = @()
     foreach ($primary in $phase8Primaries) {
         $primarySiteCode = "$($primary.siteCode)".Trim()
@@ -1428,14 +1461,23 @@ function Add-Phase8DistributionPointMetadata {
             })
         $allDpCandidates = @($configuredDpCandidates) + @($existingDpCandidates)
         $scopeDpNames = @()
+        $scopeDpRecords = @()
         foreach ($candidate in $allDpCandidates) {
             $candidateName = "$($candidate.vmName)".Trim()
             if (-not $candidateName) { continue }
+            $candidateVmName = $candidateName
             if (-not $candidateName.Contains('.')) {
                 $candidateDomain = if ($candidate.domain) { "$($candidate.domain)".Trim() } else { $domainName }
                 if ($candidateDomain) { $candidateName = "$candidateName.$candidateDomain" }
             }
             $scopeDpNames += $candidateName
+            $scopeDpRecords += [pscustomobject]@{
+                Fqdn     = $candidateName
+                VmName   = $candidateVmName
+                Network  = & $getProjectedNetwork $candidate
+                SiteCode = "$($candidate.siteCode)"
+                Role     = "$($candidate.role)"
+            }
         }
 
         $siteHasManagedDp = $allDpCandidates | Where-Object {
@@ -1446,6 +1488,13 @@ function Add-Phase8DistributionPointMetadata {
             if (-not $primaryName) { continue }
             if (-not $primaryName.Contains('.') -and $domainName) { $primaryName = "$primaryName.$domainName" }
             $scopeDpNames += $primaryName
+            $scopeDpRecords += [pscustomobject]@{
+                Fqdn     = $primaryName
+                VmName   = "$($primary.vmName)"
+                Network  = & $getProjectedNetwork $primary
+                SiteCode = "$($primary.siteCode)"
+                Role     = "$($primary.role)"
+            }
             Write-Log "Add-to-existing Phase 8: no managed DP is represented for site $($primary.siteCode); recording the Primary '$($primary.vmName)' deploy-time DP fallback." -LogOnly
         }
 
@@ -1457,9 +1506,17 @@ function Add-Phase8DistributionPointMetadata {
             $scopeNameKeys[$scopeNameKey] = $true
             $uniqueScopeNames += $scopeDpName
         }
+        $scopeNetworks = @($scopeDpRecords | ForEach-Object { "$($_.Network)" })
+        $scopeNetworks += @(& $getProjectedNetwork $primary)
+        $scopeNetworks = @($scopeNetworks | Where-Object { $_ } | Select-Object -Unique)
+        $scopeOsdClientSubnets = @($osdClientSubnets | Where-Object {
+                $scopeNetworks -contains $_ -or $unownedOsdClientSubnets -contains $_
+            })
         $managedDpScopes += [pscustomobject]@{
             PrimarySiteCode       = $primarySiteCode
             DistributionPointNames = @($uniqueScopeNames)
+            DistributionPoints     = @($scopeDpRecords | Sort-Object Fqdn -Unique)
+            OsdClientSubnets       = @($scopeOsdClientSubnets)
         }
     }
 
