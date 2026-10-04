@@ -237,7 +237,7 @@ $global:Phase11Job = {
                 # Re-enable Windows Update services disabled in Phase 1.
                 # Services need to be startable for WSUS/ConfigMgr-initiated updates.
                 foreach ($svc in @('UsoSvc', 'wuauserv')) {
-                    $s = Get-Service -Name $svc -ErrorAction Ignore
+                    $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                     if ($s -and $s.StartType -eq 'Disabled') {
                         Set-Service $svc -StartupType Manual -ErrorAction SilentlyContinue
                     }
@@ -257,21 +257,37 @@ $global:Phase11Job = {
                 $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
                 $auPath = "$wuPath\AU"
 
+                function Get-OptionalRegistryValue {
+                    param([string]$Path, [string]$Name)
+                    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+                    try {
+                        $item = Get-ItemProperty -LiteralPath $Path -ErrorAction Stop
+                        $property = $item.PSObject.Properties[$Name]
+                        if ($property) { return $property.Value }
+                    }
+                    catch { }
+                    return $null
+                }
+                function Remove-OptionalRegistryValue {
+                    param([string]$Path, [string]$Name)
+                    if (-not (Test-Path -LiteralPath $Path)) { return }
+                    try { Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop } catch { }
+                }
+
                 # Check our ownership marker
-                $marker = Get-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -ErrorAction Ignore
-                if (-not $marker -or $marker.WsusSetByMemLabs -ne 1) {
+                $marker = Get-OptionalRegistryValue -Path $mlPath -Name "WsusSetByMemLabs"
+                if ($marker -ne 1) {
                     return "Skipped: not set by MemLabs"
                 }
 
-                $isReal = 0
-                $realMarker = Get-ItemProperty -Path $mlPath -Name "WsusIsReal" -ErrorAction Ignore
-                if ($realMarker) { $isReal = $realMarker.WsusIsReal }
+                $realMarker = Get-OptionalRegistryValue -Path $mlPath -Name "WsusIsReal"
+                $isReal = if ($null -ne $realMarker) { [int]$realMarker } else { 0 }
 
                 # Always remove blocking keys (deploy is done)
-                Remove-ItemProperty -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations" -Force -ErrorAction Ignore
-                Remove-ItemProperty -Path $wuPath -Name "DisableWindowsUpdateAccess" -Force -ErrorAction Ignore
-                Remove-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Force -ErrorAction Ignore
-                Remove-ItemProperty -Path $auPath -Name "AUOptions" -Force -ErrorAction Ignore
+                Remove-OptionalRegistryValue -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations"
+                Remove-OptionalRegistryValue -Path $wuPath -Name "DisableWindowsUpdateAccess"
+                Remove-OptionalRegistryValue -Path $auPath -Name "NoAutoUpdate"
+                Remove-OptionalRegistryValue -Path $auPath -Name "AUOptions"
 
                 if ($isReal -eq 1 -or $UseFakeWSUS -eq 1) {
                     # Real WSUS or user-chosen fake WSUS: keep WUServer/WUStatusServer/UseWUServer
@@ -279,17 +295,19 @@ $global:Phase11Job = {
                 }
                 else {
                     # Fake localhost that we set as fallback — remove everything
-                    Remove-ItemProperty -Path $wuPath -Name "WUServer" -Force -ErrorAction Ignore
-                    Remove-ItemProperty -Path $wuPath -Name "WUStatusServer" -Force -ErrorAction Ignore
-                    Remove-ItemProperty -Path $auPath -Name "UseWUServer" -Force -ErrorAction Ignore
+                    Remove-OptionalRegistryValue -Path $wuPath -Name "WUServer"
+                    Remove-OptionalRegistryValue -Path $wuPath -Name "WUStatusServer"
+                    Remove-OptionalRegistryValue -Path $auPath -Name "UseWUServer"
                     $action = "Removed all WU policy (no WSUS)"
                 }
 
                 # Clean up MemLabs markers
-                Remove-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -Force -ErrorAction Ignore
-                Remove-ItemProperty -Path $mlPath -Name "WsusIsReal" -Force -ErrorAction Ignore
+                Remove-OptionalRegistryValue -Path $mlPath -Name "WsusSetByMemLabs"
+                Remove-OptionalRegistryValue -Path $mlPath -Name "WsusIsReal"
                 # Remove MemLabs key if empty
-                $remaining = Get-ItemProperty -Path $mlPath -ErrorAction Ignore
+                $remaining = if (Test-Path -LiteralPath $mlPath) {
+                    try { Get-ItemProperty -LiteralPath $mlPath -ErrorAction Stop } catch { $null }
+                }
                 if ($remaining) {
                     $props = $remaining.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }
                     if (-not $props) { Remove-Item -Path $mlPath -Force -ErrorAction SilentlyContinue }
@@ -1067,7 +1085,9 @@ $global:VM_Create = {
                     if ($Dev.InstanceId -ne $null) {
                         Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
                         $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
-                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ErrorAction Ignore }
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object {
+                            try { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ErrorAction Stop } catch { }
+                        }
                     }
                 }
             }
@@ -1312,7 +1332,7 @@ $global:VM_Create = {
             # Phase 2 sets the full policy (WSUS server + blocking keys per config).
             try {
                 foreach ($svc in @('wuauserv', 'UsoSvc')) {
-                    $s = Get-Service -Name $svc -ErrorAction Ignore
+                    $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1336,7 +1356,7 @@ $global:VM_Create = {
             try {
                 Invoke-WithCimRetry {
                 foreach ($svc in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService')) {
-                    $s = Get-Service -Name $svc -ErrorAction Ignore
+                    $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1353,7 +1373,7 @@ $global:VM_Create = {
             try {
                 Invoke-WithCimRetry {
                 foreach ($svc in @('DiagTrack', 'dmwappushservice')) {
-                    $s = Get-Service -Name $svc -ErrorAction Ignore
+                    $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1486,7 +1506,7 @@ $global:VM_Create = {
                 New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Force -ErrorAction SilentlyContinue | Out-Null
                 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'EnableDynamicContentInWSB' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
                 # SysMain (Superfetch) — counterproductive on dynamic-memory VMs
-                $s = Get-Service -Name 'SysMain' -ErrorAction Ignore
+                $s = try { Get-Service -Name 'SysMain' -ErrorAction Stop } catch { $null }
                 if ($s) {
                     Stop-Service 'SysMain' -Force -ErrorAction SilentlyContinue
                     Set-Service  'SysMain' -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1692,9 +1712,11 @@ $global:VM_Create = {
             $arbSb = {
                 $key = 'HKLM:\SOFTWARE\Microsoft\WBEM\CIMOM'
                 if (-not (Test-Path -LiteralPath $key)) { return 'CIMOM key not present -- not set' }
-                $prior = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction Ignore).ArbThrottlingEnabled
+                $keyState = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
+                $priorProperty = $keyState.PSObject.Properties['ArbThrottlingEnabled']
+                $prior = if ($priorProperty) { $priorProperty.Value } else { $null }
                 New-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-                $now = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction Ignore).ArbThrottlingEnabled
+                $now = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).ArbThrottlingEnabled
                 $priorText = 'unset'
                 if ($null -ne $prior) { $priorText = "$prior" }
                 return ("ArbThrottlingEnabled was {0}, now {1} (applies at next Winmgmt start)" -f $priorText, $now)
@@ -3230,7 +3252,10 @@ function Save-CMSetupSqlFailureEvidence {
             $instProps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction Stop
             $instName = ($instProps.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | Select-Object -First 1).Name
             $instId = [string]$instProps.$instName
-            $params = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\Parameters" -ErrorAction Ignore
+            $paramsPath = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\Parameters"
+            $params = if (Test-Path -LiteralPath $paramsPath) {
+                try { Get-ItemProperty -LiteralPath $paramsPath -ErrorAction Stop } catch { $null }
+            }
             if ($params) {
                 foreach ($p in $params.PSObject.Properties) {
                     if ($p.Name -like 'SQLArg*' -and ([string]$p.Value).StartsWith('-e')) {
@@ -3606,10 +3631,12 @@ function Save-CMClientPackagePrestageLogsFromVm {
 $Set_WSManRetryWindow = {
     $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Client'
     if (-not (Test-Path -LiteralPath $key)) { return 'WSMAN Client key not present -- not set' }
-    $prior = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction Ignore).max_retry_timeout_ms
+    $keyState = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
+    $priorProperty = $keyState.PSObject.Properties['max_retry_timeout_ms']
+    $prior = if ($priorProperty) { $priorProperty.Value } else { $null }
     if ($prior -eq 2000) { return 'max_retry_timeout_ms already 2000' }
     New-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -Value 2000 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-    $now = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction Ignore).max_retry_timeout_ms
+    $now = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).max_retry_timeout_ms
     $priorText = 'unset (default 180000)'
     if ($null -ne $prior) { $priorText = "$prior" }
     return ("max_retry_timeout_ms was {0}, now {1}; server window is this +15000 (applies at next WinRM start)" -f $priorText, $now)
@@ -3829,12 +3856,22 @@ $global:VM_Config = {
                         if (Test-Path -LiteralPath $pendingKey.Path) { $servicingPending += $pendingKey.Name }
                     }
                     if (Test-Path -LiteralPath 'C:\Windows\WinSxS\pending.xml') { $servicingPending += 'WinSxS pending.xml' }
-                    $updateExeVolatile = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Updates' -Name 'UpdateExeVolatile' -ErrorAction Ignore
+                    $updateExeVolatile = $null
+                    $updatesKeyPath = 'HKLM:\SOFTWARE\Microsoft\Updates'
+                    if (Test-Path -LiteralPath $updatesKeyPath) {
+                        try {
+                            $updatesKey = Get-ItemProperty -LiteralPath $updatesKeyPath -ErrorAction Stop
+                            if ($updatesKey.PSObject.Properties['UpdateExeVolatile']) {
+                                $updateExeVolatile = $updatesKey.UpdateExeVolatile
+                            }
+                        }
+                        catch { }
+                    }
                     if ($null -ne $updateExeVolatile -and [int]$updateExeVolatile -ne 0) { $servicingPending += "UpdateExeVolatile=$updateExeVolatile" }
 
                     $acted = @()
                     foreach ($svc in @('wuauserv', 'UsoSvc')) {
-                        $s = Get-Service -Name $svc -ErrorAction Ignore
+                        $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                         if ($s) {
                             if ($s.Status -eq 'Running') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
                             if ($s.StartType -ne 'Disabled') { Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue }
@@ -4646,7 +4683,7 @@ $global:VM_Config = {
             # on CS4-CS1SQL). Judge on the boolean the function actually returned.
             $injectedOk = ((@($injected) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true)
             if (-not $injectedOk) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Initial tool injection did not complete; starting guarded guest recovery before classifying the result." -LogOnly
 
                 # Use the shared readiness/recovery ladder instead of treating every
                 # session miss as a dead guest. It waits through ordinary reboots and
@@ -4661,6 +4698,9 @@ $global:VM_Config = {
                     $injectedOk = ((@($injected) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true)
                     if (-not $injectedOk) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection still failing after guarded guest recovery." -Warning -OutputStream
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection recovered successfully after guarded guest recovery." -OutputStream
                     }
                 }
                 else {
@@ -8832,9 +8872,12 @@ $global:VM_Config = {
                             else {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO auto-remediate: replica '$stuckVmName' has been Op=UNKNOWN/Rec=UNKNOWN/Sync=NOT_HEALTHY for $($stuck.SpanMinutes) min ($($stuck.Count) consecutive AGWaitForSynchronizationHealth poll(s) in ConfigMgrSetup.log). Restarting SQL on '$stuckVmName' to clear the stuck recovery thread." -Warning -OutputStream
                                 $bounceResult = Invoke-VmCommand -VmName $stuckVmName -VmDomainName $domainName -DisplayName "SQLAO auto-remediate: bounce SQL on $stuckVmName" -ScriptBlock {
-                                    $svc = Get-Service -Name 'MSSQLSERVER' -ErrorAction Ignore
+                                    $svc = try { Get-Service -Name 'MSSQLSERVER' -ErrorAction Stop } catch { $null }
                                     if (-not $svc) {
-                                        $svc = Get-Service -Name 'MSSQL$*' -ErrorAction Ignore | Select-Object -First 1
+                                        $svc = try {
+                                            Get-Service -Name 'MSSQL$*' -ErrorAction Stop | Select-Object -First 1
+                                        }
+                                        catch { $null }
                                     }
                                     if (-not $svc) { return [pscustomobject]@{ Ok = $false; Error = 'No MSSQLSERVER service found' } }
                                     $svcName = $svc.Name
@@ -8999,12 +9042,23 @@ $global:VM_Config = {
             $check_ExternalWsus = {
                 $markerPath = "HKLM:\SOFTWARE\MemLabs"
                 $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
-                $marker = Get-ItemProperty -Path $markerPath -Name "WsusSetByMemLabs" -ErrorAction Ignore
-                if ($marker -and $marker.WsusSetByMemLabs -eq 1) {
+                function Get-OptionalRegistryValue {
+                    param([string]$Path, [string]$Name)
+                    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+                    try {
+                        $item = Get-ItemProperty -LiteralPath $Path -ErrorAction Stop
+                        $property = $item.PSObject.Properties[$Name]
+                        if ($property) { return $property.Value }
+                    }
+                    catch { }
+                    return $null
+                }
+                $marker = Get-OptionalRegistryValue -Path $markerPath -Name "WsusSetByMemLabs"
+                if ($marker -eq 1) {
                     return "OwnedByMemLabs"
                 }
-                $existing = Get-ItemProperty -Path $wuPath -Name "WUServer" -ErrorAction Ignore
-                if ($existing -and $existing.WUServer) {
+                $existing = Get-OptionalRegistryValue -Path $wuPath -Name "WUServer"
+                if ($existing) {
                     return "External"
                 }
                 return "NotSet"
