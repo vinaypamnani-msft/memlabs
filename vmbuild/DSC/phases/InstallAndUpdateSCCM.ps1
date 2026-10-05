@@ -1402,6 +1402,40 @@ if (-not $SiteCode) {
     return
 }
 
+# Existing sites can emerge from Phase 3 with ConfigMgr core services stopped
+# after Windows feature servicing. Provider WMI can remain reachable while
+# ScriptWorkflow silently runs without distmgr/rcm/hman. Restore and verify the
+# producer services before any role/content work.
+foreach ($coreServiceName in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')) {
+    $coreServiceReady = $false
+    for ($serviceAttempt = 1; $serviceAttempt -le 3; $serviceAttempt++) {
+        $coreService = Get-Service -Name $coreServiceName -ErrorAction SilentlyContinue
+        if ($coreService -and $coreService.Status -eq 'Running') {
+            $coreServiceReady = $true
+            break
+        }
+        try {
+            Start-Service -Name $coreServiceName -ErrorAction Stop
+            (Get-Service -Name $coreServiceName -ErrorAction Stop).WaitForStatus(
+                [System.ServiceProcess.ServiceControllerStatus]::Running,
+                [TimeSpan]::FromSeconds(30))
+            $coreServiceReady = $true
+            break
+        }
+        catch {
+            Write-DscStatus "$coreServiceName was not Running; start attempt $serviceAttempt/3 failed: $($_.Exception.Message)"
+        }
+        if ($serviceAttempt -lt 3) { Start-Sleep -Seconds 5 }
+    }
+    if (-not $coreServiceReady) {
+        $finalService = Get-Service -Name $coreServiceName -ErrorAction SilentlyContinue
+        $finalState = if ($finalService) { "$($finalService.Status)" } else { 'Absent' }
+        Write-DscStatus "ConfigMgr core service '$coreServiceName' did not reach Running after 3 attempts (state=$finalState). Stopping before provider, role, and content work." -Failure
+        return
+    }
+    Write-DscStatus "ConfigMgr core service '$coreServiceName' is Running."
+}
+
 # Provider
 $smsProvider = Get-SMSProvider -SiteCode $SiteCode
 if (-not $smsProvider.FQDN) {

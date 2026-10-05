@@ -70,4 +70,11 @@ if ($deadlineWarnings.Count -ne 1) {
     throw "Expected one authoritative deadline warning; found $($deadlineWarnings.Count)."
 }
 
+if ($coverageAst.Extent.Text -notmatch '(?s)dpProviderSiteCode.+?InstallSMSProv') {
+    throw 'Dedicated DP diagnostics are no longer guarded from invalid SMS Provider namespace probes.'
+}
+if ($coverageAst.Extent.Text -notmatch '(?s)clientPackageDiagCredential.+?sourceInvoke\.Credential') {
+    throw 'Cross-site source-node diagnostics no longer use an explicit credential when available.'
+}
+
 Write-Host 'PASS -- pre-stage race is informational; coverage success/deadline remain authoritative.'

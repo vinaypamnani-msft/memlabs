@@ -1,0 +1,103 @@
+<#
+.SYNOPSIS
+    Verifies partial add-to-existing configs retain hierarchy-wide SUP product demand.
+#>
+[CmdletBinding()]
+param([string] $RootPath)
+
+$ErrorActionPreference = 'Stop'
+if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
+$configPath = Join-Path $RootPath 'common\Common.Config.ps1'
+$perfloadingPath = Join-Path $RootPath 'DSC\phases\perfloading.ps1'
+
+function Import-TestFunction {
+    param([string] $Path, [string] $Name)
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw "$Path has parse errors: $($errors -join '; ')" }
+    $functions = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
+            }, $true))
+    if ($functions.Count -ne 1) { throw "Expected one $Name definition, found $($functions.Count)." }
+    [scriptblock]::Create($functions[0].Extent.Text)
+}
+function Assert-Equal {
+    param($Expected, $Actual, [string] $Message)
+    if ("$Expected" -ne "$Actual") {
+        throw "$Message`nExpected: $Expected`nActual:   $Actual"
+    }
+}
+function Assert-True {
+    param([bool] $Condition, [string] $Message)
+    if (-not $Condition) { throw $Message }
+}
+function Write-Log { param($Message, [switch]$LogOnly, [switch]$Warning) }
+function Get-VMDeployedNetwork { param($VmName, $Domain) return $null }
+
+. (Import-TestFunction -Path $configPath -Name 'Test-PushClientRequested')
+. (Import-TestFunction -Path $configPath -Name 'Get-EligiblePushSites')
+. (Import-TestFunction -Path $configPath -Name 'Resolve-PushClientSite')
+. (Import-TestFunction -Path $configPath -Name 'Add-Phase8SoftwareUpdateProductMetadata')
+
+$config = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'upgrade.test'; network = '10.20.2.0' }
+    cmOptions = [pscustomobject]@{ pushClientToDomainMembers = $true }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'CAS1'; role = 'CAS'; siteCode = 'CAS'; domain = 'upgrade.test'
+        },
+        [pscustomobject]@{
+            vmName = 'PRI1'; role = 'Primary'; siteCode = 'PRI'; parentSiteCode = 'CAS'
+            domain = 'upgrade.test'; network = '10.20.1.0'
+        },
+        [pscustomobject]@{
+            vmName = 'NEW-SUP'; role = 'SiteSystem'; siteCode = 'PRI'; domain = 'upgrade.test'
+            installSUP = $true; pushClient = $false
+        }
+    )
+}
+$inventory = @(
+    [pscustomobject]@{
+        vmName = 'W10'; role = 'DomainMember'; domain = 'upgrade.test'
+        operatingSystem = 'Windows 10 Latest (64-bit)'; network = '10.20.1.0'
+    },
+    [pscustomobject]@{
+        vmName = 'W11'; role = 'DomainMember'; domain = 'upgrade.test'
+        operatingSystem = 'Windows 11 Latest'; network = '10.20.1.0'
+    },
+    [pscustomobject]@{
+        vmName = 'SQL1'; role = 'DomainMember'; domain = 'upgrade.test'
+        operatingSystem = 'Server 2022'; sqlVersion = 'SQL Server 2019'; network = '10.20.1.0'
+    },
+    [pscustomobject]@{
+        vmName = 'OPT-OUT'; role = 'DomainMember'; domain = 'upgrade.test'
+        operatingSystem = 'Windows 11 Latest'; network = '10.20.1.0'; pushClient = $false
+    },
+    [pscustomobject]@{
+        vmName = 'FOREIGN'; role = 'DomainMember'; domain = 'foreign.test'
+        operatingSystem = 'Windows 11 Latest'; network = '10.20.1.0'
+    }
+)
+
+Add-Phase8SoftwareUpdateProductMetadata -Config $config -ExistingVMs $inventory
+$projected = @($config.phase8SoftwareUpdateProductInventory)
+Assert-Equal 'SQL1,W10,W11' (@($projected.VmName | Sort-Object) -join ',') `
+    'Existing push-client inventory was not projected exactly once.'
+Assert-Equal 'CAS' (@($projected.TopSiteCode | Select-Object -Unique) -join ',') `
+    'Projected clients were not assigned to the owning CAS hierarchy.'
+Assert-Equal 'PRI' (@($projected.TargetSiteCode | Select-Object -Unique) -join ',') `
+    'Projected clients were not assigned to their Primary site.'
+Assert-True (@($projected | Where-Object { $_.OperatingSystem -like 'Windows 10*' }).Count -eq 1) `
+    'Windows 10 product demand was lost.'
+Assert-True (@($projected | Where-Object { $_.SqlVersion -eq 'SQL Server 2019' }).Count -eq 1) `
+    'SQL Server product demand was lost.'
+
+$perfloading = Get-Content -LiteralPath $perfloadingPath -Raw
+Assert-True ($perfloading -match 'phase8SoftwareUpdateProductInventory') `
+    'perfloading does not consume projected existing-client product demand.'
+Assert-True ($perfloading -match '(?s)\$clientByName.+?\$deployConfig\.virtualMachines.+?\$clientVMs') `
+    'perfloading does not de-duplicate projected and configured clients.'
+
+Write-Host 'PASS -- partial configs retain hierarchy-wide existing-client SUP product demand.'

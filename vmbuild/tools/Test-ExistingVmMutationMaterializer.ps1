@@ -43,38 +43,42 @@ function Assert-ThrowsLike {
 }
 
 . (Import-TestFunction -Path $materializerPath -Name 'Set-MemLabsExistingVmMutation')
+. (Import-TestFunction -Path $materializerPath -Name 'Assert-MemLabsExistingVmMutationTopology')
 
 $vm = [pscustomobject]@{
-    vmName = 'CT3-CS1RPSUP1'
+    vmName = 'CT3-DPMP1'
     role = 'SiteSystem'
-    InstallDP = $false
-    InstallMP = $false
-    memory = '8GB'
+    siteCode = 'PS1'
+    InstallDP = $true
+    InstallMP = $true
+    InstallSUP = $false
+    memory = '3GB'
     virtualProcs = 4
 }
 $changes = [pscustomobject]@{
-    InstallDP = $true
-    InstallMP = $true
-    memory = '10GB'
+    InstallSUP = $true
+    wsusContentDir = 'E:\WSUS'
+    memory = '8GB'
     dynamicMinRam = '2GB'
     virtualProcs = 6
 }
-$allowed = @('InstallDP', 'InstallMP', 'memory', 'dynamicMinRam', 'virtualProcs')
+$allowed = @('InstallDP', 'InstallMP', 'InstallSUP', 'wsusContentDir', 'memory', 'dynamicMinRam', 'virtualProcs')
 Set-MemLabsExistingVmMutation -Vm $vm -Changes $changes -AllowedProperties $allowed
 
 Assert-Equal $true ([bool]$vm.InstallDP) 'DP mutation was not applied.'
 Assert-Equal $true ([bool]$vm.InstallMP) 'MP mutation was not applied.'
-Assert-Equal '10GB' $vm.memory 'Memory mutation was not applied.'
+Assert-Equal $true ([bool]$vm.InstallSUP) 'SUP mutation was not applied.'
+Assert-Equal 'E:\WSUS' $vm.wsusContentDir 'WSUS content directory mutation was not applied.'
+Assert-Equal '8GB' $vm.memory 'Memory mutation was not applied.'
 Assert-Equal '2GB' $vm.dynamicMinRam 'Dynamic-memory mutation was not applied.'
 Assert-Equal 6 $vm.virtualProcs 'CPU mutation was not applied.'
-Assert-Equal $false ([bool]$vm.'InstallDP-Original') 'Original DP state was not retained.'
-Assert-Equal $false ([bool]$vm.'InstallMP-Original') 'Original MP state was not retained.'
-Assert-Equal '8GB' $vm.'memory-Original' 'Original memory was not retained.'
+Assert-Equal $false ([bool]$vm.'InstallSUP-Original') 'Original SUP state was not retained.'
+Assert-Equal '3GB' $vm.'memory-Original' 'Original memory was not retained.'
 Assert-Equal 4 $vm.'virtualProcs-Original' 'Original CPU count was not retained.'
 
 Set-MemLabsExistingVmMutation -Vm $vm `
     -Changes ([pscustomobject]@{ memory = '12GB' }) -AllowedProperties $allowed
-Assert-Equal '8GB' $vm.'memory-Original' 'A replay overwrote the original GenConfig comparison value.'
+Assert-Equal '3GB' $vm.'memory-Original' 'A replay overwrote the original GenConfig comparison value.'
 Assert-Equal '12GB' $vm.memory 'A replay did not update the requested value.'
 
 Assert-ThrowsLike {
@@ -84,6 +88,25 @@ Assert-ThrowsLike {
 Assert-ThrowsLike {
     Set-MemLabsExistingVmMutation -Vm $vm -Changes ([pscustomobject]@{}) -AllowedProperties $allowed
 } '*contains no changes*' 'Empty mutation did not fail closed.'
+
+$inventory = @(
+    [pscustomobject]@{ vmName = 'CT3-CS1SITE'; role = 'CAS'; siteCode = 'CS1'; domain = 'cstest3.com' },
+    [pscustomobject]@{ vmName = 'CT3-PS1SITE'; role = 'Primary'; siteCode = 'PS1'; domain = 'cstest3.com' }
+)
+Assert-MemLabsExistingVmMutationTopology -Vm $vm -Inventory $inventory -DomainName 'cstest3.com'
+Assert-ThrowsLike {
+    Assert-MemLabsExistingVmMutationTopology -Vm ([pscustomobject]@{
+            vmName = 'CT3-CS1RPSUP1'; role = 'SiteSystem'; siteCode = 'CS1'
+            InstallDP = $true; InstallMP = $true
+        }) -Inventory $inventory -DomainName 'cstest3.com'
+} '*does not support Distribution Point or Management Point roles at a CAS*' `
+    'Unsupported CAS DP/MP mutation did not fail closed.'
+Assert-ThrowsLike {
+    Assert-MemLabsExistingVmMutationTopology -Vm ([pscustomobject]@{
+            vmName = 'CT3-W22'; role = 'DomainMember'; InstallDP = $true
+        }) -Inventory $inventory -DomainName 'cstest3.com'
+} '*DP/MP role mutations require an existing SiteSystem VM*' `
+    'DP/MP mutation on a generic DomainMember did not fail closed.'
 
 $runnerSource = Get-Content -LiteralPath $runnerPath -Raw
 Assert-Equal $true ([bool]($runnerSource -match '(?s)Start-Step -Step \$step.*?Invoke-ExistingVmMutationMaterializer')) `
@@ -96,15 +119,16 @@ Assert-Equal $true ([bool]($runnerSource -match 'generated-mutations')) `
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $baseline = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-Json
 Assert-Equal 1 ([int]$manifest.existingVmMutationVersion) 'Mutation manifest schema version changed unexpectedly.'
-Assert-Equal 'CS1RPSUP1' "$($manifest.virtualMachines[0].vmName)" 'Mutation fixture target changed unexpectedly.'
-Assert-Equal 'dynamicMinRam,InstallDP,InstallMP,memory,virtualProcs' `
+Assert-Equal 'DPMP1' "$($manifest.virtualMachines[0].vmName)" 'Mutation fixture target changed unexpectedly.'
+Assert-Equal 'dynamicMinRam,InstallSUP,memory,virtualProcs,wsusContentDir' `
     (@($manifest.virtualMachines[0].changes.PSObject.Properties.Name | Sort-Object) -join ',') `
     'Mutation fixture no longer covers the intended role and resource changes.'
 $baselineTarget = $baseline.virtualMachines | Where-Object vmName -eq $manifest.virtualMachines[0].vmName | Select-Object -First 1
 Assert-Equal 'SiteSystem' "$($baselineTarget.role)" 'Mutation target is not created by the CSTest3 main baseline.'
-Assert-Equal $false ([bool]$baselineTarget.installDP) 'Main baseline target already has the DP role.'
-Assert-Equal $false ([bool]$baselineTarget.installMP) 'Main baseline target already has the MP role.'
-Assert-Equal $true ([bool]$baselineTarget.installSUP) 'Main baseline target no longer carries the inherited SUP role.'
-Assert-Equal $true ([bool]$baselineTarget.installRP) 'Main baseline target no longer carries the inherited RP role.'
+Assert-Equal $true ([bool]$baselineTarget.installDP) 'Main baseline target no longer carries its DP role.'
+Assert-Equal $true ([bool]$baselineTarget.installMP) 'Main baseline target no longer carries its MP role.'
+Assert-Equal $false ([bool]$baselineTarget.installSUP) 'Main baseline target already has the SUP role.'
+Assert-Equal $false ([bool]$baselineTarget.installRP) 'Main baseline target unexpectedly has the RP role.'
+Assert-Equal 'PS1' "$($baselineTarget.siteCode)" 'Mutation target is not owned by the Primary site.'
 
 Write-Host 'PASS -- declarative existing-VM mutations preserve supported-property, original-value, checkpoint, and replay semantics.'

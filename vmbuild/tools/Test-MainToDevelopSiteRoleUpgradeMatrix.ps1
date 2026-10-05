@@ -184,6 +184,9 @@ function Add-RemoteSQLVMToDeployConfig {
 function Add-Phase8DistributionPointMetadata {
     param([object]$Config, [object[]]$ExistingVMs, [bool]$InventoryRefreshVerified)
 }
+function Add-Phase8SoftwareUpdateProductMetadata {
+    param([object]$Config, [object[]]$ExistingVMs)
+}
 
 $config = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ domainName = 'upgrade.test'; network = '10.20.1.0' }

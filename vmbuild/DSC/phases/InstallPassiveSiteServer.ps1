@@ -315,7 +315,7 @@ $add_local_admin = {
                     $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
                 } | Where-Object { $_ -eq $computer.TrimEnd('$') -or $_ -eq $computer }
                 if (-not $isMember) {
-                    Add-LocalGroupMember -Group "Administrators" -Member $computer -ErrorAction Stop
+                    Add-LocalGroupMember -Group "Administrators" -Member $memberToCheck -ErrorAction Stop
                 }
                 break
             }

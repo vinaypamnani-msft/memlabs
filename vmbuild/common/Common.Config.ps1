@@ -1535,6 +1535,101 @@ function Add-Phase11HierarchyParentsToDeployConfig {
     return @($addedSupportNames | Where-Object { $_ } | Select-Object -Unique)
 }
 
+function Add-Phase8SoftwareUpdateProductMetadata {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $ExistingVMs
+    )
+
+    $Config | Add-Member -MemberType NoteProperty -Name phase8SoftwareUpdateProductInventory -Value @() -Force
+    $domainName = "$($Config.vmOptions.domainName)"
+    if (-not $domainName) { return }
+
+    $configuredNames = @{}
+    foreach ($vm in @($Config.virtualMachines)) {
+        $name = "$($vm.vmName)".Trim()
+        if ($name) { $configuredNames[$name.ToUpperInvariant()] = $true }
+    }
+    $existingDomainVms = @($ExistingVMs | Where-Object {
+            ($_.domain -eq $domainName -or -not $_.domain) -and
+            (-not $_.vmName -or -not $configuredNames.ContainsKey("$($_.vmName)".ToUpperInvariant()))
+        })
+    $allVms = @($Config.virtualMachines) + @($existingDomainVms)
+    $eligibleSites = @(Get-EligiblePushSites -Config $Config -Domain $domainName -Inventory $allVms)
+    if ($eligibleSites.Count -eq 0) { return }
+
+    $records = @()
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    foreach ($vm in $allVms) {
+        if ($vm.role -notin $pushableRoles) { continue }
+
+        $pushVm = $vm
+        $pushRequested = Test-PushClientRequested -VM $vm
+        if (-not $pushRequested -and
+            -not ($vm.PSObject.Properties.Name -contains 'pushClient') -and
+            $vm.role -eq 'DomainMember') {
+            $vmOptions = if ($vm.cmOptions) { $vm.cmOptions } else { $Config.cmOptions }
+            if ($vmOptions -and $vmOptions.pushClientToDomainMembers -eq $true) {
+                $pushVm = $vm | Select-Object *
+                $pushVm | Add-Member -MemberType NoteProperty -Name pushClient -Value $true -Force
+                $pushRequested = $true
+            }
+        }
+        if (-not $pushRequested) { continue }
+
+        $targetSiteCode = Resolve-PushClientSite -VM $pushVm -Config $Config -Domain $domainName `
+            -EligibleSites $eligibleSites
+        if (-not $targetSiteCode) { continue }
+
+        $currentSiteCode = "$targetSiteCode"
+        $topSiteCode = ''
+        $visitedSiteCodes = @{}
+        for ($depth = 0; $depth -lt 10; $depth++) {
+            $siteKey = $currentSiteCode.ToUpperInvariant()
+            if ($visitedSiteCodes.ContainsKey($siteKey)) {
+                throw "SUP product inventory: hierarchy cycle detected while resolving site '$targetSiteCode' for '$($vm.vmName)'."
+            }
+            $visitedSiteCodes[$siteKey] = $true
+            $owners = @($allVms | Where-Object {
+                    $_.role -in @('CAS', 'Primary', 'Secondary') -and
+                    "$($_.siteCode)" -ieq $currentSiteCode -and
+                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                } | Sort-Object vmName -Unique)
+            if ($owners.Count -ne 1) {
+                throw "SUP product inventory: expected one owner for site '$currentSiteCode' while resolving '$($vm.vmName)', found $($owners.Count)."
+            }
+            $owner = $owners[0]
+            if ($owner.parentSiteCode) {
+                $currentSiteCode = "$($owner.parentSiteCode)"
+                continue
+            }
+            $topSiteCode = "$($owner.siteCode)"
+            break
+        }
+        if (-not $topSiteCode) {
+            throw "SUP product inventory: could not resolve a top-level site for '$($vm.vmName)' (target '$targetSiteCode')."
+        }
+
+        $records += [pscustomobject]@{
+            VmName          = "$($vm.vmName)"
+            Role            = "$($vm.role)"
+            OperatingSystem = "$($vm.operatingSystem)"
+            SqlVersion      = "$($vm.sqlVersion)"
+            InstallOffice   = $vm.installOffice
+            PushClient      = "$targetSiteCode"
+            TargetSiteCode  = "$targetSiteCode"
+            TopSiteCode     = $topSiteCode
+        }
+    }
+
+    $Config | Add-Member -MemberType NoteProperty -Name phase8SoftwareUpdateProductInventory `
+        -Value @($records | Sort-Object VmName -Unique) -Force
+}
+
 function Add-Phase8DistributionPointMetadata {
     [CmdletBinding()]
     param (
@@ -2082,6 +2177,7 @@ function Add-ExistingVMsToDeployConfig {
         $hierarchyParentVmNames.Count -gt 0) {
         $null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $config -ExistingVMs @($refreshedVmInventory)
     }
+    Add-Phase8SoftwareUpdateProductMetadata -Config $config -ExistingVMs @($refreshedVmInventory)
 
     # Heal a SQLAO node whose partner (OtherNode) no longer exists. If the
     # second AG node was removed (e.g. via the remove script / Remove-Lab),

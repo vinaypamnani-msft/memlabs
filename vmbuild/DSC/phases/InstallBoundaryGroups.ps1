@@ -46,6 +46,22 @@ if (-not $usePKI) {
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
+$clientPackageDiagCredential = $null
+$cmSvcPasswordPath = Join-Path $LogPath 'cm_svc.txt'
+if (Test-Path -LiteralPath $cmSvcPasswordPath -PathType Leaf) {
+    try {
+        $cmSvcPassword = Get-Content -LiteralPath $cmSvcPasswordPath -Raw -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace($cmSvcPassword)) {
+            $securePassword = ConvertTo-SecureString $cmSvcPassword.Trim() -AsPlainText -Force
+            $clientPackageDiagCredential = New-Object System.Management.Automation.PSCredential(
+                "$NetbiosDomainName\cm_svc", $securePassword)
+        }
+    }
+    catch {
+        Write-DscStatus "Client pkg coverage diagnostics: could not construct explicit source-site credential: $($_.Exception.Message)"
+    }
+}
+
 # Read Site Code from registry
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
 if (-not $SiteCode) {
@@ -403,13 +419,18 @@ $ensureClientPkgCoverage = {
                     $dpHost = ("$dp" -split '\.')[0]
                     $dpVm = @($deployConfig.virtualMachines | Where-Object { $_.vmName -ieq $dpHost }) | Select-Object -First 1
                     $dpSiteCode = if ($dpVm) { "$($dpVm.siteCode)" } else { '' }
+                    $dpProviderSiteCode = if ($dpVm -and
+                        ($dpVm.role -in @('CAS', 'Primary', 'Secondary') -or $dpVm.InstallSMSProv -eq $true)) {
+                        $dpSiteCode
+                    }
+                    else { '' }
                     try {
                         $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 15000
                         $nodeState = if ($dpHost -ieq $env:COMPUTERNAME) {
-                            & $collectNodeContentState $PackageID $dpSiteCode
+                            & $collectNodeContentState $PackageID $dpProviderSiteCode
                         }
                         else {
-                            Invoke-Command -ComputerName $dpHost -ScriptBlock $collectNodeContentState -ArgumentList $PackageID, $dpSiteCode `
+                            Invoke-Command -ComputerName $dpHost -ScriptBlock $collectNodeContentState -ArgumentList $PackageID, $dpProviderSiteCode `
                                 -SessionOption $sessionOption -ErrorAction Stop
                         }
                         $nodeRows.Add([ordered]@{ DistributionPoint = $dp; State = $nodeState })
@@ -440,8 +461,17 @@ $ensureClientPkgCoverage = {
                             & $collectNodeContentState $PackageID "$($package.SourceSite)"
                         }
                         else {
-                            Invoke-Command -ComputerName $sourceHost -ScriptBlock $collectNodeContentState `
-                                -ArgumentList $PackageID, "$($package.SourceSite)" -SessionOption $sessionOption -ErrorAction Stop
+                            $sourceInvoke = @{
+                                ComputerName = $sourceHost
+                                ScriptBlock  = $collectNodeContentState
+                                ArgumentList = @($PackageID, "$($package.SourceSite)")
+                                SessionOption = $sessionOption
+                                ErrorAction  = 'Stop'
+                            }
+                            if ($clientPackageDiagCredential) {
+                                $sourceInvoke.Credential = $clientPackageDiagCredential
+                            }
+                            Invoke-Command @sourceInvoke
                         }
                         $sourceNode = [ordered]@{ Server = $sourceHost; State = $sourceState }
                     }

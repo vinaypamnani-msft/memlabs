@@ -44,6 +44,39 @@ function Set-MemLabsExistingVmMutation {
     }
 }
 
+function Assert-MemLabsExistingVmMutationTopology {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $Vm,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $Inventory,
+        [Parameter(Mandatory = $true)]
+        [string] $DomainName
+    )
+
+    $requestsClientRole = [bool]($Vm.installDP -eq $true -or $Vm.installMP -eq $true)
+    if (-not $requestsClientRole) { return }
+    if ($Vm.role -ne 'SiteSystem') {
+        throw "Mutation target '$($Vm.vmName)' requests DP/MP but has role '$($Vm.role)'. DP/MP role mutations require an existing SiteSystem VM."
+    }
+    if (-not $Vm.siteCode) {
+        throw "Mutation target '$($Vm.vmName)' requests DP/MP but has no siteCode."
+    }
+
+    $owners = @($Inventory | Where-Object {
+            $_.role -in @('CAS', 'Primary', 'Secondary') -and
+            "$($_.siteCode)" -ieq "$($Vm.siteCode)" -and
+            (-not $_.domain -or "$($_.domain)" -ieq $DomainName)
+        })
+    if ($owners.Count -ne 1) {
+        throw "Mutation target '$($Vm.vmName)' requests DP/MP for site '$($Vm.siteCode)', but exactly one owning site server was required and $($owners.Count) were found."
+    }
+    if ($owners[0].role -eq 'CAS') {
+        throw "Mutation target '$($Vm.vmName)' requests DP/MP for CAS site '$($Vm.siteCode)'. Configuration Manager does not support Distribution Point or Management Point roles at a CAS."
+    }
+}
+
 if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
     throw "Mutation manifest not found: $ManifestPath"
 }
@@ -93,6 +126,7 @@ foreach ($target in $targets) {
 
     $mutableVm = $matches[0] | ConvertTo-Json -Depth 20 -Compress | ConvertFrom-Json
     Set-MemLabsExistingVmMutation -Vm $mutableVm -Changes $target.changes -AllowedProperties $allowedProperties
+    Assert-MemLabsExistingVmMutationTopology -Vm $mutableVm -Inventory $inventory -DomainName $domainName
     Add-ModifiedExistingVMToDeployConfig -Vm $mutableVm -ConfigToModify $config -Hidden $true
 }
 

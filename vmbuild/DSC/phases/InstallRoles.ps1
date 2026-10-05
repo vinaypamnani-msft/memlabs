@@ -112,6 +112,10 @@ if ($allRolesInstalled) {
             $allRolesInstalled = $false
             break
         }
+        if (-not (Confirm-CMWsusPoolHardening -ServerFQDN $supFQDN)) {
+            $allRolesInstalled = $false
+            break
+        }
     }
 }
 

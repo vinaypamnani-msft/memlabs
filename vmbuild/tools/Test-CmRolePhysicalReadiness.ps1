@@ -13,6 +13,7 @@ $rolesPath = Join-Path $RootPath 'DSC\phases\InstallRoles.ps1'
 $workflowPath = Join-Path $RootPath 'DSC\phases\ScriptWorkflow.ps1'
 $phase3Path = Join-Path $RootPath 'DSC\phases\Phase3.ps1'
 $genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
+$siteInstallerPath = Join-Path $RootPath 'DSC\phases\InstallAndUpdateSCCM.ps1'
 
 function Get-TestFunctionText {
     param([string] $Path, [string] $Name)
@@ -161,6 +162,7 @@ $rolesText = Get-Content -LiteralPath $rolesPath -Raw
 $workflowText = Get-Content -LiteralPath $workflowPath -Raw
 $phase3Text = Get-Content -LiteralPath $phase3Path -Raw
 $genConfigText = Get-Content -LiteralPath $genConfigPath -Raw
+$siteInstallerText = Get-Content -LiteralPath $siteInstallerPath -Raw
 $targetCommandText = Get-TestFunctionText -Path $functionsPath -Name 'Invoke-CMRoleTargetCommand'
 $prerequisiteStateText = Get-TestFunctionText -Path $functionsPath -Name 'Get-CMRoleTargetPrerequisiteState'
 $confirmPrerequisitesText = Get-TestFunctionText -Path $functionsPath -Name 'Confirm-CMRoleTargetPrerequisites'
@@ -169,6 +171,7 @@ $installPullDpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-Pu
 $installMpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-MP'
 $installSupText = Get-TestFunctionText -Path $functionsPath -Name 'Install-SUP'
 $installSrpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-SRP'
+$wsusPoolText = Get-TestFunctionText -Path $functionsPath -Name 'Confirm-CMWsusPoolHardening'
 $dpFeatures = @(Get-CMRoleRequiredWindowsFeatures -RoleName DP)
 $mpFeatures = @(Get-CMRoleRequiredWindowsFeatures -RoleName MP)
 foreach ($feature in @('Web-Server', 'Web-Windows-Auth', 'Web-WMI', 'Rdc', 'Web-Mgmt-Service')) {
@@ -226,6 +229,15 @@ Assert-True ($installMpText -match "(?s)MP physical readiness.+?-TimeoutSeconds 
     'Install-MP no longer waits for bounded physical readiness.'
 Assert-True ($installSupText -match "(?s)SUP physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
     'Install-SUP no longer waits for bounded physical readiness.'
+Assert-True ($installSupText -match 'Confirm-CMWsusPoolHardening') `
+    'Install-SUP no longer reapplies WsusPool hardening after role installation.'
+foreach ($setting in @('recycling.periodicRestart.privateMemory', 'recycling.periodicRestart.requests',
+        'recycling.periodicRestart.time', 'queueLength', 'processModel.idleTimeout',
+        'startMode', 'failure.rapidFailProtection')) {
+    Assert-True ($wsusPoolText.Contains($setting)) "WsusPool hardening dropped '$setting'."
+}
+Assert-True ($rolesText -match '(?s)allRolesInstalled.+?Confirm-CMWsusPoolHardening.+?All roles \(RP \+ SUP\) already installed') `
+    'InstallRoles quick path no longer verifies WsusPool hardening.'
 Assert-True ($installSrpText -match "(?s)Reporting Point physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
     'Install-SRP no longer waits for bounded physical readiness.'
 Assert-True (([regex]::Matches($functionsText, 'Restart-CMRoleProvisioning -RoleName').Count) -ge 4) `
@@ -254,5 +266,9 @@ Assert-True (([regex]::Matches($workflowText, 'Stopping before boundary, content
     'Both site-server workflow branches must stop after incomplete DP/MP installation.'
 Assert-True ($workflowText -match 'Additional SMS Provider installation did not converge.+?-Failure') `
     'Remote SMS Provider failure no longer blocks workflow completion.'
+foreach ($serviceName in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')) {
+    Assert-True ($siteInstallerText -match "(?s)coreServiceName.+?$serviceName.+?did not reach Running.+?-Failure") `
+        "Existing-site workflow no longer fails closed when $serviceName is stopped."
+}
 
 Write-Host 'PASS -- asynchronous ConfigMgr roles require stable physical readiness, bounded recovery, and fail-fast workflow gating.'

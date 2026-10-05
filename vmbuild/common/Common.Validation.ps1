@@ -1407,7 +1407,19 @@ function Test-ValidRoleSiteSystem {
         }
     }
     if (-not $allowOnCAS) {
-        $casVM = Get-List2 -DeployConfig $ConfigObject | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $VM.siteCode }
+        $casVM = @($ConfigObject.virtualMachines | Where-Object {
+                $_.role -eq 'CAS' -and $_.siteCode -eq $VM.siteCode
+            })
+        if ($casVM.Count -eq 0) {
+            try {
+                $casVM = @(Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName `
+                        -Role CAS -SiteCode $VM.siteCode)
+            }
+            catch {
+                Add-ValidationMessage -Message "$vmRole Validation: Could not safely determine whether site [$($VM.siteCode)] is a CAS. $($_.Exception.Message)" -ReturnObject $ReturnObject -Failure
+                $casVM = @()
+            }
+        }
         if ($casVM) {
             Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a SiteSystem role (DP or MP) that is not allowed on CAS." -ReturnObject $ReturnObject -Failure
         }

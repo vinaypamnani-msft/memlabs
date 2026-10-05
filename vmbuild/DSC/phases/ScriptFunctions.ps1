@@ -1796,6 +1796,97 @@ function Get-CMSoftwareUpdatePointReadiness {
     }
 }
 
+function Confirm-CMWsusPoolHardening {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ServerFQDN
+    )
+
+    $probe = {
+        $result = [ordered]@{
+            Ready   = $false
+            Changed = $false
+            Detail  = ''
+            Error   = $null
+        }
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            $poolPath = 'IIS:\AppPools\WsusPool'
+            if (-not (Test-Path -LiteralPath $poolPath)) {
+                throw "WsusPool was not found at $poolPath"
+            }
+            $settings = @(
+                @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
+                @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
+                @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
+                @{ Name = 'queueLength'; Value = 25000 }
+                @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
+                @{ Name = 'startMode'; Value = 'AlwaysRunning' }
+                @{ Name = 'failure.rapidFailProtection'; Value = $false }
+            )
+            foreach ($setting in $settings) {
+                $current = (Get-ItemProperty -Path $poolPath -Name $setting.Name -ErrorAction Stop).Value
+                if ("$current" -ne "$($setting.Value)") {
+                    Set-ItemProperty -Path $poolPath -Name $setting.Name -Value $setting.Value -ErrorAction Stop
+                    $result.Changed = $true
+                }
+            }
+            if ($result.Changed) {
+                Restart-WebAppPool -Name WsusPool -ErrorAction Stop
+                Start-Sleep -Seconds 2
+            }
+
+            $privateMemory = [long](Get-ItemProperty -Path $poolPath `
+                    -Name recycling.periodicRestart.privateMemory -ErrorAction Stop).Value
+            $requests = [long](Get-ItemProperty -Path $poolPath `
+                    -Name recycling.periodicRestart.requests -ErrorAction Stop).Value
+            $periodicRestart = [TimeSpan](Get-ItemProperty -Path $poolPath `
+                    -Name recycling.periodicRestart.time -ErrorAction Stop).Value
+            $queueLength = [long](Get-ItemProperty -Path $poolPath -Name queueLength -ErrorAction Stop).Value
+            $idleTimeout = [TimeSpan](Get-ItemProperty -Path $poolPath `
+                    -Name processModel.idleTimeout -ErrorAction Stop).Value
+            $startMode = "$((Get-ItemProperty -Path $poolPath -Name startMode -ErrorAction Stop).Value)"
+            $rapidFailProtection = [bool](Get-ItemProperty -Path $poolPath `
+                    -Name failure.rapidFailProtection -ErrorAction Stop).Value
+            $state = "$((Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value)"
+            $result.Ready = $privateMemory -eq 0 -and $requests -eq 0 -and
+                $periodicRestart -eq [TimeSpan]::Zero -and $queueLength -ge 25000 -and
+                $idleTimeout -eq [TimeSpan]::Zero -and $startMode -eq 'AlwaysRunning' -and
+                -not $rapidFailProtection -and $state -eq 'Started'
+            $result.Detail = "privateMemory=$privateMemory, requests=$requests, periodicRestart=$periodicRestart, queueLength=$queueLength, idleTimeout=$idleTimeout, startMode=$startMode, rapidFailProtection=$rapidFailProtection, state=$state"
+        }
+        catch {
+            $result.Error = $_.Exception.Message
+        }
+        [pscustomobject]$result
+    }
+
+    $lastState = $null
+    foreach ($attempt in 1..2) {
+        try {
+            $lastState = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN `
+                -ScriptBlock $probe -OperationTimeoutMs 60000
+        }
+        catch {
+            $lastState = [pscustomobject]@{
+                Ready = $false; Changed = $false; Detail = ''; Error = $_.Exception.Message
+            }
+        }
+        if ($lastState.Ready) {
+            $action = if ($lastState.Changed) { 'repaired and verified' } else { 'verified' }
+            Write-DscStatus "WsusPool on $ServerFQDN was $action ($($lastState.Detail))."
+            return $true
+        }
+        if ($attempt -lt 2) {
+            Write-DscStatus "WsusPool on $ServerFQDN is not hardened ($($lastState.Detail); error=$($lastState.Error)). Retrying once in 5 seconds." -Warning
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    Write-DscStatus "WsusPool on $ServerFQDN could not be hardened after 2 attempts ($($lastState.Detail); error=$($lastState.Error))." -Warning
+    return $false
+}
+
 function Get-CMReportingPointReadiness {
     param(
         [Parameter(Mandatory = $true)]
@@ -2515,6 +2606,11 @@ function Install-SUP {
                 Write-CMRoleProvisioningDiagnostics -RoleName 'SUP' -ServerFQDN $ServerFQDN
                 Write-DscStatus "SUP on $ServerFQDN did not become physically ready after $i bounded attempt(s) ($detail)." -Failure
             }
+        }
+        elseif (-not (Confirm-CMWsusPoolHardening -ServerFQDN $ServerFQDN)) {
+            Write-DscStatus "SUP on $ServerFQDN is physically present, but WsusPool hardening did not converge." -Failure
+            $installed = $false
+            $installFailure = $true
         }
 
         if ($i -ge $maxAttempts -and -not $installed) {

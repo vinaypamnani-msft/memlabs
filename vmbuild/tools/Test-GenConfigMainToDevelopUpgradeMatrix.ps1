@@ -283,6 +283,8 @@ foreach ($requiredFailure in @(
     Assert-True ($validationSource -match $requiredFailure) `
         "SiteSystem validation is not fail-closed for pattern '$requiredFailure'."
 }
+Assert-True ($validationSource -match '(?s)Get-ExistingSiteServer.+?-Role CAS.+?-SiteCode') `
+    'SiteSystem validation no longer checks existing CAS ownership when the CAS is absent from a partial config.'
 
 $mutationValues = @{
     memory = '8GB'

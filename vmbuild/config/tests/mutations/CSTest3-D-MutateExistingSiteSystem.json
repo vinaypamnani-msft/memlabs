@@ -9,12 +9,12 @@
   },
   "virtualMachines": [
     {
-      "vmName": "CS1RPSUP1",
+      "vmName": "DPMP1",
       "role": "SiteSystem",
       "changes": {
-        "InstallDP": true,
-        "InstallMP": true,
-        "memory": "10GB",
+        "InstallSUP": true,
+        "wsusContentDir": "E:\\WSUS",
+        "memory": "8GB",
         "dynamicMinRam": "2GB",
         "virtualProcs": 6
       }

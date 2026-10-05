@@ -3441,9 +3441,22 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # WSUS, SQLAO, WorkgroupMember, InternetClient, AADClient) is excluded
         # and we don't pull thousands of irrelevant updates into the lab catalog.
         $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-        $clientVMs = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -in $pushableRoles -and (Test-PushClientRequested -VM $_)
+        $hierarchyTopSiteCode = if ($ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
+        $clientInventory = @($deployConfig.phase8SoftwareUpdateProductInventory | Where-Object {
+                "$($_.TopSiteCode)" -ieq $hierarchyTopSiteCode
             })
+        $clientByName = @{}
+        foreach ($client in $clientInventory) {
+            $name = "$($client.vmName)".ToUpperInvariant()
+            if ($name) { $clientByName[$name] = $client }
+        }
+        foreach ($client in @($deployConfig.virtualMachines | Where-Object {
+                    $_.role -in $pushableRoles -and (Test-PushClientRequested -VM $_)
+                })) {
+            $name = "$($client.vmName)".ToUpperInvariant()
+            if ($name) { $clientByName[$name] = $client }
+        }
+        $clientVMs = @($clientByName.Values)
 
         $products = ($clientVMs.operatingSystem | Select-Object -Unique) + ($clientVMs.sqlversion | Select-Object -Unique)
 
