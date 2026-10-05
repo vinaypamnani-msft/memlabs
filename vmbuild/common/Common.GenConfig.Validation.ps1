@@ -555,10 +555,7 @@ function Get-AdditionalValidations {
                         }
                     }
 
-                    $value = $property.Memory
-                    if (($value / 1) -lt 5GB) {
-                        $property.Memory = "5GB"
-                    }
+                    Set-WsusMemoryFloor -property $property -UsesWID ($database -eq "WID")
                 }
 
                 $newName = Rename-VirtualMachine -vm $property

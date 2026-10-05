@@ -1128,6 +1128,22 @@ Function Get-ReplicaSQLVM {
     Get-TestResult -SuccessOnWarning | Out-Null
 }
 
+Function Set-WsusMemoryFloor {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [Object] $property,
+        [Parameter(Mandatory = $true)]
+        [bool] $UsesWID
+    )
+
+    $minimumBytes = if ($UsesWID) { 8GB } else { 5GB }
+    $minimumValue = if ($UsesWID) { "8GB" } else { "5GB" }
+    if (($property.Memory / 1) -lt $minimumBytes) {
+        $property.Memory = $minimumValue
+    }
+}
+
 Function Get-WsusDBName {
     [CmdletBinding()]
     param (
@@ -1226,6 +1242,7 @@ Function Get-WsusDBName {
         }
 
     }
+    Set-WsusMemoryFloor -property $property -UsesWID ($property."$name" -eq "WID")
 }
 Function Get-remoteSQLVM {
     [CmdletBinding()]
