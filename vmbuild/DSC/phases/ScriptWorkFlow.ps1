@@ -1017,6 +1017,7 @@ if ($installProviderCount -eq 0) {
     Write-DscStatus "Skipping InstallProvider.ps1: no VM in this config has InstallSMSProv=true"
 }
 else {
+$installProviderFailed = $false
 $installProviderJob = Start-Job -Name "InstallProvider" -ScriptBlock {
     param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
     # Dot-source ScriptFunctions.ps1 so InstallProvider.ps1 can call Write-DscStatus.
@@ -1047,21 +1048,28 @@ Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
           $installProviderElapsed = [math]::Round(((Get-Date) - $installProviderWaitStart).TotalSeconds, 1)
           if ($installProviderJob.State -eq 'Failed') {
               Write-DscStatus "InstallProvider.ps1 job FAILED (state=Failed) after $($installProviderElapsed)s -- see the [InstallProv] lines above; any flagged provider is NOT installed."
+              $installProviderFailed = $true
           }
           else {
               Write-DscStatus "InstallProvider.ps1 job finished (state=$($installProviderJob.State)) in $($installProviderElapsed)s"
           }
       }
       else {
-          Write-DscStatus "InstallProvider.ps1 job did not finish within $installProviderTimeout s (state=$($installProviderJob.State)) -- abandoning it and continuing." -Warning
+          Write-DscStatus "InstallProvider.ps1 job did not finish within $installProviderTimeout s (state=$($installProviderJob.State)) -- abandoning it." -Warning
+          $installProviderFailed = $true
           Stop-Job -Job $installProviderJob -ErrorAction SilentlyContinue
       }
   }
   catch {
       Write-DscStatus "InstallProvider.ps1 failed: $_" -Warning
+      $installProviderFailed = $true
   }
   finally {
       Remove-Job -Job $installProviderJob -Force -ErrorAction SilentlyContinue
+  }
+  if ($installProviderFailed) {
+      Write-DscStatus "Additional SMS Provider installation did not converge. Stopping Phase 8 before workflow completion." -Failure
+      return
   }
 }
   

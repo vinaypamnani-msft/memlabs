@@ -94,7 +94,7 @@ $allRolesInstalled = $true
 $rpVMs = @($deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true -and ($_.SiteCode -eq $thisVM.SiteCode -or $_.vmName -eq $thisVM.RemoteSQLVM) })
 foreach ($rp in $rpVMs) {
     $rpFQDN = $rp.vmName + "." + $DomainFullName
-    if (-not (Get-CMReportingServicePoint -SiteSystemServerName $rpFQDN)) {
+    if (-not (Get-CMReportingPointReadiness -ServerFQDN $rpFQDN -SiteCode $thisVM.SiteCode).Ready) {
         $allRolesInstalled = $false
         break
     }
@@ -108,7 +108,7 @@ if ($allRolesInstalled) {
     $supVMs = @($deployConfig.virtualMachines | Where-Object { $_.installSUP -eq $true -and $_.siteCode -in $ValidSiteCodes })
     foreach ($sup in $supVMs) {
         $supFQDN = $sup.vmName.Trim() + "." + $DomainFullName
-        if (-not (Get-CMSoftwareUpdatePoint -SiteSystemServerName $supFQDN)) {
+        if (-not (Get-CMSoftwareUpdatePointReadiness -ServerFQDN $supFQDN -SiteCode $sup.siteCode).Ready) {
             $allRolesInstalled = $false
             break
         }
@@ -224,6 +224,7 @@ foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -e
 
 # Trim nulls/blanks
 $SUPNames = $SUPs.ServerName | Where-Object { $_ -and $_.Trim() }
+$supFailed = $false
 if ($SUPNames) {
     Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
 }
@@ -254,7 +255,7 @@ $allSUPsInstalled = $true
 foreach ($SUP in $SUPs) {
     if ([string]::IsNullOrWhiteSpace($SUP.ServerName)) { continue }
     $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
-    if (-not (Get-CMSoftwareUpdatePoint -SiteSystemServerName $SUPFQDN)) {
+    if (-not (Get-CMSoftwareUpdatePointReadiness -ServerFQDN $SUPFQDN -SiteCode $SUP.ServerSiteCode).Ready) {
         $allSUPsInstalled = $false
         break
     }
@@ -265,7 +266,7 @@ if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
     # returning, so the caller's Phase 11 taxonomy assertion sees a populated
     # SUSDB. No-op when the import short-circuited (no state file).
     try { Wait-WsusBaselineImport -Tag "[InstallRoles]" } catch { Write-DscStatus "WARNING: Wait-WsusBaselineImport (allSUPsInstalled path) threw: $($_.Exception.Message)" }
-    if (-not $rpFailed) {
+    if (-not $rpFailed -and -not $supFailed) {
         $Configuration.InstallSUP.Status = 'Completed'
         $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     } else {
@@ -276,7 +277,7 @@ if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
 }
 if ($SUPs.Count -eq 0) {
     Write-DscStatus "No SUPs configured. Skipping SUP install."
-    if (-not $rpFailed) {
+    if (-not $rpFailed -and -not $supFailed) {
         $Configuration.InstallSUP.Status = 'Completed'
         $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     } else {
@@ -320,7 +321,11 @@ foreach ($SUP in $SUPs) {
             if ($_.Exception.Message -notmatch 'already assigned') { Write-DscStatus "WARNING: New-CMAdministrativeUser failed: $($_.Exception.Message)" }
         }
     }
-    Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode -usePKI:$usePKI
+    $supResult = @(Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode -usePKI:$usePKI)
+    if ($supResult.Count -eq 0 -or -not [bool]$supResult[-1]) {
+        Write-DscStatus "Software Update Point installation failed for $($SUP.ServerName). InstallRoles will retry on next ScriptWorkflow pass."
+        $supFailed = $true
+    }
 }
 
 # Configure SUP
@@ -480,11 +485,14 @@ if ($configureSUP) {
     }
 }
 
-if (-not $rpFailed) {
+if (-not $rpFailed -and -not $supFailed) {
     $Configuration.InstallSUP.Status = 'Completed'
     $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 } else {
-    Write-DscStatus "Not marking InstallSUP as Completed because Reporting Point failed."
+    $failedRoles = @()
+    if ($rpFailed) { $failedRoles += 'Reporting Point' }
+    if ($supFailed) { $failedRoles += 'Software Update Point' }
+    Write-DscStatus "Not marking InstallSUP as Completed because role readiness failed: $($failedRoles -join ', ')."
 }
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
