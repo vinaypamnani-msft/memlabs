@@ -54,6 +54,12 @@ function Assert-ThrowsLike {
     Write-TestResult -Passed ([bool]($message -like $Pattern)) -What $What -Detail "actual=[$message]"
 }
 
+$childLauncherText = Get-Content -LiteralPath $childLauncherPath -Raw
+Assert-True ($childLauncherText -match 'Console\.CancelKeyPress' -and
+    $childLauncherText -match 'Environment\.Exit\(130\)' -and
+    $childLauncherText -match 'InstallImmediateCancelExit') `
+    'pinned child launcher converts Ctrl-C into immediate Job Object teardown'
+
 function Import-TestFunction {
     param([string] $Path, [string] $Name)
 

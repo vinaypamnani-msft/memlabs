@@ -31,6 +31,8 @@ using System.Runtime.InteropServices;
 
 public static class MemLabsCrossRevisionJob
 {
+    private static ConsoleCancelEventHandler cancelHandler;
+
     [StructLayout(LayoutKind.Sequential)]
     private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
     {
@@ -101,11 +103,25 @@ public static class MemLabsCrossRevisionJob
 
         return job;
     }
+
+    public static void InstallImmediateCancelExit()
+    {
+        if (cancelHandler != null)
+            return;
+
+        cancelHandler = delegate(object sender, ConsoleCancelEventArgs args)
+        {
+            args.Cancel = true;
+            Environment.Exit(130);
+        };
+        Console.CancelKeyPress += cancelHandler;
+    }
 }
 '@
 }
 
 $script:CrossRevisionJobHandle = [MemLabsCrossRevisionJob]::CreateKillOnCloseForCurrentProcess()
+[MemLabsCrossRevisionJob]::InstallImmediateCancelExit()
 
 if ($PidPath) {
     $identity = [ordered]@{
