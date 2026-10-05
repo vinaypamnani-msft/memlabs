@@ -1803,6 +1803,20 @@ function Confirm-CMWsusPoolHardening {
     )
 
     $probe = {
+        function Get-WsusPoolPropertyValue {
+            param(
+                [Parameter(Mandatory = $true)][string] $Path,
+                [Parameter(Mandatory = $true)][string] $Name
+            )
+
+            $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+            $namedProperty = $item.PSObject.Properties[$Name]
+            if ($namedProperty) { return $namedProperty.Value }
+            $valueProperty = $item.PSObject.Properties['Value']
+            if ($valueProperty) { return $valueProperty.Value }
+            return $null
+        }
+
         $result = [ordered]@{
             Ready   = $false
             Changed = $false
@@ -1825,7 +1839,7 @@ function Confirm-CMWsusPoolHardening {
                 @{ Name = 'failure.rapidFailProtection'; Value = $false }
             )
             foreach ($setting in $settings) {
-                $current = (Get-ItemProperty -Path $poolPath -Name $setting.Name -ErrorAction Stop).Value
+                $current = Get-WsusPoolPropertyValue -Path $poolPath -Name $setting.Name
                 if ("$current" -ne "$($setting.Value)") {
                     Set-ItemProperty -Path $poolPath -Name $setting.Name -Value $setting.Value -ErrorAction Stop
                     $result.Changed = $true
@@ -1836,18 +1850,18 @@ function Confirm-CMWsusPoolHardening {
                 Start-Sleep -Seconds 2
             }
 
-            $privateMemory = [long](Get-ItemProperty -Path $poolPath `
-                    -Name recycling.periodicRestart.privateMemory -ErrorAction Stop).Value
-            $requests = [long](Get-ItemProperty -Path $poolPath `
-                    -Name recycling.periodicRestart.requests -ErrorAction Stop).Value
-            $periodicRestart = [TimeSpan](Get-ItemProperty -Path $poolPath `
-                    -Name recycling.periodicRestart.time -ErrorAction Stop).Value
-            $queueLength = [long](Get-ItemProperty -Path $poolPath -Name queueLength -ErrorAction Stop).Value
-            $idleTimeout = [TimeSpan](Get-ItemProperty -Path $poolPath `
-                    -Name processModel.idleTimeout -ErrorAction Stop).Value
-            $startMode = "$((Get-ItemProperty -Path $poolPath -Name startMode -ErrorAction Stop).Value)"
-            $rapidFailProtection = [bool](Get-ItemProperty -Path $poolPath `
-                    -Name failure.rapidFailProtection -ErrorAction Stop).Value
+            $privateMemory = [long](Get-WsusPoolPropertyValue -Path $poolPath `
+                    -Name recycling.periodicRestart.privateMemory)
+            $requests = [long](Get-WsusPoolPropertyValue -Path $poolPath `
+                    -Name recycling.periodicRestart.requests)
+            $periodicRestart = [TimeSpan](Get-WsusPoolPropertyValue -Path $poolPath `
+                    -Name recycling.periodicRestart.time)
+            $queueLength = [long](Get-WsusPoolPropertyValue -Path $poolPath -Name queueLength)
+            $idleTimeout = [TimeSpan](Get-WsusPoolPropertyValue -Path $poolPath `
+                    -Name processModel.idleTimeout)
+            $startMode = "$(Get-WsusPoolPropertyValue -Path $poolPath -Name startMode)"
+            $rapidFailProtection = [bool](Get-WsusPoolPropertyValue -Path $poolPath `
+                    -Name failure.rapidFailProtection)
             $state = "$((Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value)"
             $result.Ready = $privateMemory -eq 0 -and $requests -eq 0 -and
                 $periodicRestart -eq [TimeSpan]::Zero -and $queueLength -ge 25000 -and

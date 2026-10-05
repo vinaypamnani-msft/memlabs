@@ -236,6 +236,8 @@ foreach ($setting in @('recycling.periodicRestart.privateMemory', 'recycling.per
         'startMode', 'failure.rapidFailProtection')) {
     Assert-True ($wsusPoolText.Contains($setting)) "WsusPool hardening dropped '$setting'."
 }
+Assert-True ($wsusPoolText -match '(?s)PSObject\.Properties\[\$Name\].+?PSObject\.Properties\[''Value''\]') `
+    'WsusPool verification no longer supports both named-property and Value-property IIS result shapes.'
 Assert-True ($rolesText -match '(?s)allRolesInstalled.+?Confirm-CMWsusPoolHardening.+?All roles \(RP \+ SUP\) already installed') `
     'InstallRoles quick path no longer verifies WsusPool hardening.'
 Assert-True ($installSrpText -match "(?s)Reporting Point physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
