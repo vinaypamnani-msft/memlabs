@@ -35,6 +35,8 @@ Invoke-Expression $bulkStopFunction.Extent.Text
 $script:Events = [System.Collections.Generic.List[string]]::new()
 $script:StopCalls = [System.Collections.Generic.List[object]]::new()
 $script:GetVMCalls = 0
+$script:StopJobState = 'Completed'
+$script:StopJobThrows = $false
 $script:HyperVVMs = @(
     [pscustomobject]@{ Name = 'LINUX01'; State = 'Running' },
     [pscustomobject]@{ Name = 'WIN01'; State = 'Running' },
@@ -47,7 +49,8 @@ function Write-Log {
         [Parameter(Position = 0)] [string] $Message,
         [switch] $Activity,
         [switch] $SubActivity,
-        [switch] $Warning
+        [switch] $Warning,
+        [switch] $LogOnly
     )
 }
 
@@ -94,7 +97,7 @@ function Stop-VM {
             })
         if ($AsJob) {
             return [pscustomobject]@{
-                State        = 'Completed'
+                State        = $script:StopJobState
                 ChildJobs    = @()
                 JobStateInfo = [pscustomobject]@{ Reason = [pscustomobject]@{ Message = $null } }
             }
@@ -116,6 +119,11 @@ function Wait-Job {
 function Stop-Job {
     [CmdletBinding()]
     param([object] $Job)
+
+    $script:Events.Add('stop-job')
+    if ($script:StopJobThrows) {
+        throw [System.NullReferenceException]::new('synthetic Hyper-V Stop-Job failure')
+    }
 }
 
 function Remove-CompletedHyperVJob {
@@ -174,6 +182,22 @@ if (@($script:StopCalls | Where-Object { -not $_.WhatIf -or $_.AsJob }).Count -g
 }
 if (@($script:Events | Where-Object { $_ -like 'wait:*' }).Count -gt 0) {
     throw 'WhatIf waited for jobs even though it should not create any.'
+}
+
+$script:Events.Clear()
+$script:StopCalls.Clear()
+$script:StopJobState = 'Running'
+$script:StopJobThrows = $true
+$timedOutIPs = @{}
+Stop-VirtualMachinesForRemoval -VMRecords $records -CapturedLinuxIPs $timedOutIPs -TimeoutSeconds 1
+
+$stopJobEvents = @($script:Events | Where-Object { $_ -eq 'stop-job' })
+$cleanupEvents = @($script:Events | Where-Object { $_ -like 'cleanup:*' })
+if ($stopJobEvents.Count -ne 2) {
+    throw "Expected both timed-out Hyper-V jobs to receive Stop-Job; observed $($stopJobEvents.Count)."
+}
+if ($cleanupEvents.Count -ne 2) {
+    throw "A Stop-Job exception interrupted bulk cleanup; observed cleanup events: $($cleanupEvents -join ', ')."
 }
 
 foreach ($functionName in @('Remove-Domain', 'Remove-All')) {

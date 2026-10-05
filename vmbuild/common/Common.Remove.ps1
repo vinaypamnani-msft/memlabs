@@ -117,13 +117,77 @@ function Stop-LockingProcesses {
     return $killedAny
 }
 
+function Get-VirtualMachineForRemoval {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $VmName,
+        [Parameter()]
+        [object] $VmRecord
+    )
+
+    if ([string]::IsNullOrWhiteSpace($VmName)) {
+        throw 'A VM name is required to verify removal state.'
+    }
+    if ($VmRecord -and $VmRecord.vmName -and "$($VmRecord.vmName)" -ine $VmName) {
+        throw "VM record '$($VmRecord.vmName)' does not match removal target '$VmName'."
+    }
+
+    $expectedVmId = [guid]::Empty
+    $hasExpectedVmId = $false
+    if ($VmRecord -and $VmRecord.vmID) {
+        $hasExpectedVmId = [guid]::TryParse("$($VmRecord.vmID)", [ref]$expectedVmId)
+        if (-not $hasExpectedVmId) {
+            throw "VM '$VmName' has invalid vmID '$($VmRecord.vmID)'; refusing to treat it as absent."
+        }
+    }
+
+    try {
+        $vmMatches = if ($hasExpectedVmId) {
+            @(Get-VM -Id $expectedVmId -ErrorAction Stop)
+        }
+        else {
+            @(Get-VM -Name $VmName -ErrorAction Stop)
+        }
+    }
+    catch {
+        $confirmedMissing = if ($hasExpectedVmId) {
+            $_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound
+        }
+        else {
+            "$($_.FullyQualifiedErrorId)".StartsWith(
+                'InvalidParameter,Microsoft.HyperV.PowerShell.Commands.GetVM',
+                [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
+        if ($confirmedMissing) {
+            return $null
+        }
+
+        $identity = if ($hasExpectedVmId) { "id '$expectedVmId'" } else { "name '$VmName'" }
+        throw "Could not query Hyper-V for removable VM '$VmName' by $identity. $($_.Exception.Message)"
+    }
+
+    if ($vmMatches.Count -eq 0) {
+        $identity = if ($hasExpectedVmId) { "id '$expectedVmId'" } else { "name '$VmName'" }
+        throw "Hyper-V returned no result and no not-found error for removable VM '$VmName' by $identity; absence is unconfirmed."
+    }
+    if ($vmMatches.Count -gt 1) {
+        throw "Hyper-V returned $($vmMatches.Count) VMs for removal target '$VmName'; refusing an ambiguous removal."
+    }
+
+    return $vmMatches[0]
+}
+
 function Get-DomainHyperVVM {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
         [string] $DomainName,
         [Parameter()]
-        [string] $VmStorageRoot
+        [string] $VmStorageRoot,
+        [Parameter()]
+        [object[]] $ExpectedVMRecords
     )
 
     $domainFolder = $null
@@ -132,9 +196,60 @@ function Get-DomainHyperVVM {
         $domainFolder = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($VmStorageRoot, $DomainName)).TrimEnd('\')
         $domainPrefix = $domainFolder + '\'
     }
+
+    $expectedNames = @{}
+    $expectedIds = @{}
+    foreach ($record in @($ExpectedVMRecords | Where-Object { $null -ne $_ })) {
+        if (-not $record.vmName) {
+            throw 'A VM record without vmName cannot be used to verify domain removal state.'
+        }
+        $expectedNames["$($record.vmName)"] = $true
+        if ($record.vmID) {
+            $recordId = [guid]::Empty
+            if (-not [guid]::TryParse("$($record.vmID)", [ref]$recordId)) {
+                throw "VM '$($record.vmName)' has invalid vmID '$($record.vmID)'; domain removal state cannot be verified."
+            }
+            $expectedIds[$recordId.ToString()] = $true
+        }
+    }
+
     $liveVms = @(Get-VM -ErrorAction Stop)
+    $observedNames = @{}
+    $observedIds = @{}
+    $candidates = [System.Collections.Generic.List[object]]::new()
     foreach ($vm in $liveVms) {
+        [void]$candidates.Add($vm)
+        if ($vm.Name) { $observedNames["$($vm.Name)"] = $true }
+        $vmId = if ($vm.VMId) { $vm.VMId } else { $vm.Id }
+        if ($vmId) { $observedIds["$vmId"] = $true }
+    }
+
+    # A bulk Get-VM call can transiently omit objects while Hyper-V jobs are
+    # settling. Probe every expected identity that was not in that snapshot so
+    # an empty or partial enumeration cannot authorize destructive cleanup.
+    foreach ($record in @($ExpectedVMRecords | Where-Object { $null -ne $_ -and $_.vmName })) {
+        $recordId = if ($record.vmID) { "$([guid]$record.vmID)" } else { $null }
+        $wasObserved = $observedNames.ContainsKey("$($record.vmName)") -or
+            ($recordId -and $observedIds.ContainsKey($recordId))
+        if ($wasObserved) { continue }
+
+        $resolvedVm = Get-VirtualMachineForRemoval -VmName $record.vmName -VmRecord $record
+        if ($resolvedVm) {
+            [void]$candidates.Add($resolvedVm)
+        }
+    }
+
+    $reportedVMs = @{}
+    foreach ($vm in $candidates) {
+        $vmId = if ($vm.VMId) { "$($vm.VMId)" } else { "$($vm.Id)" }
+        $vmKey = if ($vmId) { "id:$vmId" } else { "name:$($vm.Name)" }
+        if ($reportedVMs.ContainsKey($vmKey)) { continue }
+
         $belongsToDomain = $false
+        if (($vm.Name -and $expectedNames.ContainsKey("$($vm.Name)")) -or
+            ($vmId -and $expectedIds.ContainsKey($vmId))) {
+            $belongsToDomain = $true
+        }
         if ($vm.Path) {
             try {
                 $vmPath = [System.IO.Path]::GetFullPath("$($vm.Path)").TrimEnd('\')
@@ -153,7 +268,10 @@ function Get-DomainHyperVVM {
             }
             catch { }
         }
-        if ($belongsToDomain) { $vm }
+        if ($belongsToDomain) {
+            $reportedVMs[$vmKey] = $true
+            $vm
+        }
     }
 }
 
@@ -263,7 +381,12 @@ function Stop-VirtualMachinesForRemoval {
         $jobState = [string]$job.State
         if ($jobState -eq 'Running') {
             Write-Log "VM '$($request.VMName)': Bulk TurnOff did not return within $TimeoutSeconds seconds; per-VM removal will escalate." -Warning
-            Stop-Job $job -ErrorAction SilentlyContinue
+            try {
+                Stop-Job -Job $job -ErrorAction Stop
+            }
+            catch {
+                Write-Log "VM '$($request.VMName)': Could not stop the timed-out Hyper-V job ($($_.Exception.Message)); leaving it allocated and continuing with per-VM verification." -LogOnly
+            }
         }
         elseif ($jobState -eq 'Failed') {
             $reason = if (@($job.ChildJobs | Where-Object { $null -ne $_ }).Count) {
@@ -436,9 +559,9 @@ function Remove-VirtualMachine {
         }
     }
 
-    $vmTest = Get-VM2 -Name $VmName -Fallback
+    $vmTest = Get-VirtualMachineForRemoval -VmName $VmName -VmRecord $vmFromList
     if (-not $vmTest) {
-        Write-Log "VM '$VmName' does not exist in Hyper-V." -Warning
+        Write-Log "VM '$VmName' is confirmed absent from Hyper-V." -SubActivity
         return
     }
 
@@ -1137,7 +1260,7 @@ function Remove-Domain {
             Write-Log "Parallel removal reported $($result.Failed) failed VM job(s); checking live Hyper-V state before removing network resources." -Warning
         }
 
-        $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot)
+        $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot -ExpectedVMRecords $vmsToDelete)
         if ($survivors.Count -gt 0) {
             Write-Log "Live Hyper-V verification found $($survivors.Count) VM(s) still registered for '$DomainName': $($survivors.Name -join ', '). Retrying them once serially." -Warning
             $refreshedRecords = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate)
@@ -1157,7 +1280,7 @@ function Remove-Domain {
                 }
             }
 
-            $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot)
+            $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot -ExpectedVMRecords $vmsToDelete)
         }
 
         if ($survivors.Count -gt 0) {
@@ -1217,7 +1340,7 @@ function Remove-Domain {
                 if (-not $domainFolderRemoved -and -not $WhatIf) {
                     Write-Log "Domain folder '$domainFolder' remains after cleanup retries. Identifying every process with an open handle below it." -Warning
                     $null = Stop-LockingProcesses -FolderPath $domainFolder -IdentifyOnly
-                    $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot)
+                    $survivors = @(Get-DomainHyperVVM -DomainName $DomainName -VmStorageRoot $vmStorageRoot -ExpectedVMRecords $vmsToDelete)
                     foreach ($survivor in $survivors) {
                         Write-Log "Registered VM still references the folder: $($survivor.Name) (state=$($survivor.State), id=$($survivor.VMId), path='$($survivor.Path)')." -Failure
                     }

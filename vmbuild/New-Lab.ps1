@@ -104,8 +104,18 @@ try {
     $shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
     $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+    $canonicalRepositoryRoot = $env:MEMLABS_CANONICAL_REPOSITORY_ROOT
+    if (-not [string]::IsNullOrWhiteSpace($canonicalRepositoryRoot)) {
+        $canonicalScriptDirectory = Join-Path $canonicalRepositoryRoot 'vmbuild'
+        $canonicalLauncher = Join-Path $canonicalScriptDirectory 'VMBuild.cmd'
+        if (-not (Test-Path -LiteralPath $canonicalLauncher -PathType Leaf)) {
+            throw "Canonical VMBuild launcher not found: $canonicalLauncher"
+        }
+        $scriptDirectory = $canonicalScriptDirectory
+    }
 
     $shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
+    $shortcut.WorkingDirectory = $scriptDirectory
     $shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
     $shortcut.Save()
     $exitcode = 1

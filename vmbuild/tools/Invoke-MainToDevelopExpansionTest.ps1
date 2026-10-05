@@ -16,9 +16,9 @@
     is written after every completed stage. Each worktree's vmbuild\logs directory
     is linked to the source checkout's normal log directory so existing log-sync
     automation captures mixed-test failures.
-    Follow-on stages resume without replaying
-    the main baseline. If the harness branch advances, one active checkpoint for the
-    same main revision keeps its original develop pin and takes precedence over HEAD.
+    Follow-on stages resume without replaying the main baseline. If develop advances
+    by fast-forward, an interrupted develop or cleanup step can resume with the newer
+    code when the same fixture or cleanup domain still exists in the new plan.
     An interruption while exact-main A itself is running fails closed because no
     pre-mutation VM/domain identity exists to prove what survived; remove that family
     lab and reset its state before retrying. Use -PlanOnly to inspect the revision and
@@ -202,7 +202,15 @@ function Assert-CrossRevisionCheckpointCanAdvance {
         throw "Cannot advance develop while exact-main baseline step '$currentStep' is in progress. Remove that family lab and reset its state."
     }
     if ($stageType -eq 'cleanup') {
-        throw "Cannot advance develop while cleanup step '$currentStep' is in progress. Finish cleanup with the pinned revision first."
+        $familyPlan = @($Plan | Where-Object { $_.Family -ieq $familyKey })
+        if ($familyPlan.Count -ne 1) {
+            throw "The cleanup family '$familyKey' is not present exactly once in requested develop $NewDevelopCommit."
+        }
+        $cleanupDomain = $parts[2]
+        if (@($familyPlan[0].Domains | Where-Object { $_ -ieq $cleanupDomain }).Count -ne 1) {
+            throw "The cleanup domain '$cleanupDomain' is not present exactly once for family '$familyKey' in requested develop $NewDevelopCommit."
+        }
+        return
     }
     if ($stageType -ne 'develop' -or $parts.Count -lt 4) {
         throw "Active checkpoint step '$currentStep' is not a recognized develop stage."
@@ -289,6 +297,34 @@ function Resolve-CrossRevisionResetFamily {
         throw "-ResetState with -Test '$TestPrefix' must resolve to exactly one family; matched $($matches.Count): $detail."
     }
     return [string]$matches[0].Family
+}
+
+function Resolve-CrossRevisionActiveResetFamily {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Plan,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$State
+    )
+
+    $currentStep = [string]$State.CurrentStep
+    if ([string]::IsNullOrWhiteSpace($currentStep)) { return $null }
+
+    $parts = @($currentStep -split '\|')
+    if ($parts.Count -lt 2 -or [string]::IsNullOrWhiteSpace($parts[0])) {
+        throw "Active checkpoint has an invalid current step: '$currentStep'."
+    }
+
+    $familyPlans = @($Plan | Where-Object { $_.Family -ieq $parts[0] })
+    if ($familyPlans.Count -ne 1) {
+        $detail = if ($familyPlans.Count -gt 0) {
+            @($familyPlans | ForEach-Object { $_.Family }) -join ', '
+        }
+        else {
+            '<none>'
+        }
+        throw "The in-progress family '$($parts[0])' must resolve exactly once in the requested plan; matched $($familyPlans.Count): $detail."
+    }
+
+    return [string]$familyPlans[0].Family
 }
 
 function Move-CrossRevisionCheckpoint {
@@ -1127,6 +1163,55 @@ function Stop-CrossRevisionLauncher {
     }
 }
 
+function Set-CrossRevisionCanonicalVmBuildShortcut {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RepositoryRoot,
+        [string] $ShortcutPath
+    )
+
+    $vmbuildPath = Join-Path $RepositoryRoot 'vmbuild'
+    $launcherPath = Join-Path $vmbuildPath 'VMBuild.cmd'
+    if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
+        throw "Canonical VMBuild launcher not found: $launcherPath"
+    }
+
+    if (-not $ShortcutPath) {
+        $desktopPath = [Environment]::GetFolderPath('CommonDesktop')
+        if ([string]::IsNullOrWhiteSpace($desktopPath)) {
+            throw 'The common desktop path is unavailable.'
+        }
+        $ShortcutPath = Join-Path $desktopPath 'MEMLABS - VMBuild.lnk'
+    }
+
+    $shortcutDirectory = Split-Path -Parent $ShortcutPath
+    if ($shortcutDirectory -and -not (Test-Path -LiteralPath $shortcutDirectory -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $shortcutDirectory -Force -ErrorAction Stop
+    }
+
+    $shell = $null
+    $shortcut = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        $shortcut.TargetPath = $launcherPath
+        $shortcut.WorkingDirectory = $vmbuildPath
+        $shortcut.IconLocation = '%SystemRoot%\System32\SHELL32.dll,208'
+        $shortcut.Save()
+    }
+    finally {
+        if ($shortcut) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) }
+        if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
+    }
+
+    $bytes = [IO.File]::ReadAllBytes($ShortcutPath)
+    if ($bytes.Length -le 0x15) {
+        throw "VMBuild shortcut is unexpectedly short after creation: $ShortcutPath"
+    }
+    $bytes[0x15] = $bytes[0x15] -bor 0x20
+    [IO.File]::WriteAllBytes($ShortcutPath, $bytes)
+}
+
 function Invoke-ChildScript {
     param(
         [string] $WorktreePath,
@@ -1164,8 +1249,11 @@ function Invoke-ChildScript {
         $global:LASTEXITCODE = 0
         $hadNativePreference = $null -ne (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue)
         if ($hadNativePreference) { $oldNativePreference = $PSNativeCommandUseErrorActionPreference }
+        $canonicalRootVariable = 'MEMLABS_CANONICAL_REPOSITORY_ROOT'
+        $priorCanonicalRoot = [Environment]::GetEnvironmentVariable($canonicalRootVariable, 'Process')
         try {
             if ($hadNativePreference) { $PSNativeCommandUseErrorActionPreference = $false }
+            [Environment]::SetEnvironmentVariable($canonicalRootVariable, $RepositoryRoot, 'Process')
             & $pwshPath -NoLogo -NoProfile -NonInteractive -File $script:ChildLauncherPath `
                 -ScriptPath $scriptPath -ParameterPath $parameterPath -PidPath $pidPath -InvocationToken $invocationToken 2>&1 |
                 Tee-Object -FilePath $logPath -Append -ErrorAction Stop |
@@ -1174,6 +1262,7 @@ function Invoke-ChildScript {
             $childInvocationCompleted = $true
         }
         finally {
+            [Environment]::SetEnvironmentVariable($canonicalRootVariable, $priorCanonicalRoot, 'Process')
             if ($hadNativePreference) { $PSNativeCommandUseErrorActionPreference = $oldNativePreference }
         }
         if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
@@ -1188,6 +1277,12 @@ function Invoke-ChildScript {
         Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
         Pop-Location
+        try {
+            Set-CrossRevisionCanonicalVmBuildShortcut -RepositoryRoot $RepositoryRoot
+        }
+        catch {
+            Write-Host "WARNING: Could not restore the canonical VMBuild desktop shortcut: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
 }
 
@@ -1269,6 +1364,43 @@ function Assert-MainBaselineCanStart {
     Assert-DomainsAbsent -Domains $Domains -VmNames @(Get-ExpectedVmNames -Config $Config)
 }
 
+function Get-CrossRevisionAncestorProcessIds {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int] $ProcessId,
+        [scriptblock] $ProcessResolver = {
+            param($Id)
+            Get-CimInstance Win32_Process -Filter "ProcessId=$Id" -ErrorAction SilentlyContinue
+        }
+    )
+
+    $ancestorIds = [Collections.Generic.List[int]]::new()
+    $seen = [Collections.Generic.HashSet[int]]::new()
+    $currentId = $ProcessId
+    while ($currentId -gt 0 -and $seen.Add($currentId)) {
+        $ancestorIds.Add($currentId)
+        $process = & $ProcessResolver $currentId
+        if (-not $process) { break }
+        $currentId = [int]$process.ParentProcessId
+    }
+    return @($ancestorIds)
+}
+
+function Assert-NoOtherMemLabsRunner {
+    $ancestorIds = @(Get-CrossRevisionAncestorProcessIds -ProcessId $PID)
+    $otherRunners = @(Get-CimInstance Win32_Process -Filter "Name='pwsh.exe' OR Name='powershell.exe'" -ErrorAction Stop |
+            Where-Object {
+                $_.ProcessId -notin $ancestorIds -and
+                $_.CommandLine -match '(?:Start-Test|New-Lab|Remove-Lab)\.ps1'
+            })
+    if ($otherRunners.Count -eq 0) { return }
+
+    $details = @($otherRunners | ForEach-Object {
+            "PID=$($_.ProcessId) started=$($_.CreationDate) command=$($_.CommandLine)"
+        }) -join [Environment]::NewLine
+    throw "Another MemLabs test/deployment process is active. Do not share Hyper-V infrastructure between test cycles.$([Environment]::NewLine)$details"
+}
+
 try {
     if (-not (Test-Path -LiteralPath $RepositoryRoot -PathType Container)) {
         throw "Repository root not found: $RepositoryRoot"
@@ -1326,6 +1458,7 @@ try {
         if (-not $script:MutationMutexHeld) {
             throw 'Another MemLabs test cycle owns the host mutation lock.'
         }
+        Assert-NoOtherMemLabsRunner
     }
 
     $checkpointToAdvance = $null
@@ -1335,12 +1468,16 @@ try {
         $activeCheckpoint = Get-ActiveCrossRevisionCheckpoint -Root $StateRoot -MainCommit $mainCommit
         if ($activeCheckpoint) {
             $checkpointState = Get-Content -LiteralPath $activeCheckpoint.Path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
-            if ($ResetState.IsPresent -and $resetFamily) {
-                Reset-CrossRevisionFamilyState -State $checkpointState -Family $resetFamily
+            $activeResetFamily = $resetFamily
+            if ($ResetState.IsPresent -and -not $activeResetFamily) {
+                $activeResetFamily = Resolve-CrossRevisionActiveResetFamily -Plan $plan -State $checkpointState
+            }
+            if ($ResetState.IsPresent -and $activeResetFamily) {
+                Reset-CrossRevisionFamilyState -State $checkpointState -Family $activeResetFamily
                 Write-CrossRevisionStateFile -Path $activeCheckpoint.Path -State $checkpointState
                 $activeCheckpoint.CurrentStep = [string]$checkpointState.CurrentStep
                 $familyResetHandled = $true
-                Write-Host "RESET: cleared checkpoint state for family '$resetFamily' after its lab was deliberately removed; preserving other family progress." -ForegroundColor Yellow
+                Write-Host "RESET: cleared checkpoint state for family '$activeResetFamily' after its lab was deliberately removed; preserving other family progress." -ForegroundColor Yellow
             }
             elseif ($ResetState.IsPresent) {
                 $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
@@ -1382,17 +1519,6 @@ try {
     }
     if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) {
         throw "PowerShell 7 executable not found: $pwshPath"
-    }
-
-    $selfProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
-    $parentId = if ($selfProcess) { [int]$selfProcess.ParentProcessId } else { -1 }
-    $otherRunners = @(Get-CimInstance Win32_Process -Filter "Name='pwsh.exe' OR Name='powershell.exe'" -ErrorAction Stop |
-            Where-Object {
-                $_.ProcessId -notin @($PID, $parentId) -and
-                $_.CommandLine -match '(?:Start-Test|New-Lab|Remove-Lab)\.ps1'
-            })
-    if ($otherRunners.Count -gt 0) {
-        throw "Another MemLabs test/deployment process is active (PID(s): $($otherRunners.ProcessId -join ', ')). Do not share Hyper-V infrastructure between test cycles."
     }
 
     $null = New-Item -ItemType Directory -Path $StateRoot -Force -ErrorAction Stop

@@ -208,9 +208,9 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'Suite')]
     [switch]$CrossRevisionPlanOnly,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'ALL')]
-    [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'TestName')]
-    [Parameter(Mandatory = $false, HelpMessage = "Reset checkpoint state after deliberately removing any interrupted family lab", ParameterSetName = 'Suite')]
+    [Parameter(Mandatory = $false, HelpMessage = "Reset the in-progress family checkpoint after deliberately removing its lab", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Reset the selected family checkpoint after deliberately removing its lab", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Reset the in-progress family checkpoint after deliberately removing its lab", ParameterSetName = 'Suite')]
     [switch]$ResetCrossRevisionState,
 
     [Parameter(Mandatory = $false, ParameterSetName = 'ALL')]

@@ -12991,6 +12991,12 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
             }
             catch {}
         }
+        if (-not $InJob -and -not $effectiveSkipEnvironmentDetection -and $envCacheLikelyStale) {
+            $recreatedCimProxyPath = Repair-CimProxyTempPath
+            if ($recreatedCimProxyPath -or (Test-CimProxyStale)) {
+                Reset-CimProxyModuleState | Out-Null
+            }
+        }
         if ($PS7 -and -not $InJob -and -not $effectiveSkipEnvironmentDetection -and $envCacheLikelyStale `
                 -and (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
             try {
@@ -13078,33 +13084,33 @@ if (-not $Common.Initialized -or $initUpgradeReason) {
                     $corpNetInterfaceIndex = $envFromJob.CorpNetInterfaceIndex
                     $isAzureVM = [bool]$envFromJob.IsAzureVM
                 }
-                else {
-                    $dnsClient = Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" } | Select-Object -First 1
+                elseif (-not $effectiveSkipEnvironmentDetection) {
+                    $dnsClient = Get-DnsClient -ErrorAction Stop |
+                        Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" } |
+                        Select-Object -First 1
                     if ($dnsClient) {
                         $corpNetInterfaceIndex = $dnsClient.InterfaceIndex
                     }
 
-                    if (-not $effectiveSkipEnvironmentDetection) {
-                        # The 10.1.0.4 NIC check is specific to one Azure
-                        # environment's address plan; other environments use a
-                        # different gateway/subnet, so it can't be the sole
-                        # signal. IMDS is the authoritative, environment-agnostic
-                        # probe -- always fall back to it when the NIC check
-                        # doesn't match. ($meta must be cleared first so a stale
-                        # value from a failed call can't be misread as success.)
-                        if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
-                        if (-not $isAzureVM) {
-                            $meta = $null
-                            try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -TimeoutSec 2 -ErrorAction Stop }
-                            catch {}
-                            if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
-                                $isAzureVM = $true
-                            }
+                    # The 10.1.0.4 NIC check is specific to one Azure
+                    # environment's address plan; other environments use a
+                    # different gateway/subnet, so it can't be the sole
+                    # signal. IMDS is the authoritative, environment-agnostic
+                    # probe -- always fall back to it when the NIC check
+                    # doesn't match. ($meta must be cleared first so a stale
+                    # value from a failed call can't be misread as success.)
+                    if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
+                    if (-not $isAzureVM) {
+                        $meta = $null
+                        try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -TimeoutSec 2 -ErrorAction Stop }
+                        catch {}
+                        if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
+                            $isAzureVM = $true
                         }
                     }
-                    else {
-                        Write-Log "Skipping Azure/environment detection during initialization." -LogOnly
-                    }
+                }
+                else {
+                    Write-Log "Skipping DNS/Azure environment detection during initialization." -LogOnly
                 }
 
                 if (-not $DisableInitContextCache) {

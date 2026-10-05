@@ -284,12 +284,14 @@ finally {
 . (Import-TestFunction -Path $runnerPath -Name Write-CrossRevisionStateFile)
 . (Import-TestFunction -Path $runnerPath -Name Reset-CrossRevisionFamilyState)
 . (Import-TestFunction -Path $runnerPath -Name Resolve-CrossRevisionResetFamily)
+. (Import-TestFunction -Path $runnerPath -Name Resolve-CrossRevisionActiveResetFamily)
 . (Import-TestFunction -Path $runnerPath -Name ConvertTo-CrossRevisionNormalizedPath)
 . (Import-TestFunction -Path $runnerPath -Name Assert-CrossRevisionPathLayout)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-PinnedWorktree)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeLogPath)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-ExistingCrossRevisionLogPaths)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeRuntime)
+. (Import-TestFunction -Path $runnerPath -Name Set-CrossRevisionCanonicalVmBuildShortcut)
 $stopLauncherFunction = Import-TestFunction -Path $runnerPath -Name Stop-CrossRevisionLauncher
 $invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildScript
 . $stopLauncherFunction
@@ -311,11 +313,62 @@ $invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildS
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainJoinedVmHealth)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainsAbsent)
 . (Import-TestFunction -Path $runnerPath -Name Assert-MainBaselineCanStart)
+. (Import-TestFunction -Path $runnerPath -Name Get-CrossRevisionAncestorProcessIds)
 . (Import-TestFunction -Path $runnerPath -Name Save-State)
 . (Import-TestFunction -Path $runnerPath -Name Test-StepComplete)
 . (Import-TestFunction -Path $runnerPath -Name Test-StepInProgress)
 . (Import-TestFunction -Path $runnerPath -Name Start-Step)
 . (Import-TestFunction -Path $runnerPath -Name Complete-Step)
+
+$shortcutTestRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-shortcut-$PID"
+try {
+    $shortcutRepo = Join-Path $shortcutTestRoot 'repo'
+    $shortcutVmbuild = Join-Path $shortcutRepo 'vmbuild'
+    $shortcutPath = Join-Path $shortcutTestRoot 'MEMLABS - VMBuild.lnk'
+    $null = New-Item -ItemType Directory -Path $shortcutVmbuild -Force
+    [IO.File]::WriteAllText((Join-Path $shortcutVmbuild 'VMBuild.cmd'), '@echo off')
+
+    Set-CrossRevisionCanonicalVmBuildShortcut -RepositoryRoot $shortcutRepo -ShortcutPath $shortcutPath
+    $shortcutShell = New-Object -ComObject WScript.Shell
+    $shortcut = $shortcutShell.CreateShortcut($shortcutPath)
+    try {
+        Assert-Equal (Join-Path $shortcutVmbuild 'VMBuild.cmd') $shortcut.TargetPath `
+            'cross-revision shortcut repair targets the canonical launcher'
+        Assert-Equal $shortcutVmbuild $shortcut.WorkingDirectory `
+            'cross-revision shortcut repair restores the canonical working directory'
+    }
+    finally {
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut)
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcutShell)
+    }
+    $shortcutBytes = [IO.File]::ReadAllBytes($shortcutPath)
+    Assert-True (($shortcutBytes[0x15] -band 0x20) -ne 0) `
+        'cross-revision shortcut repair preserves run-as-administrator'
+}
+finally {
+    Remove-Item -LiteralPath $shortcutTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$newLabText = Get-Content -LiteralPath $newLabPath -Raw
+Assert-True ($newLabText -match 'MEMLABS_CANONICAL_REPOSITORY_ROOT' -and
+    $newLabText -match '\$shortcut\.WorkingDirectory\s*=\s*\$scriptDirectory') `
+    'New-Lab honors the canonical repository root supplied by the runner'
+$invokeChildText = (Import-TestFunction -Path $runnerPath -Name Invoke-ChildScript).ToString()
+Assert-True ($invokeChildText -match 'MEMLABS_CANONICAL_REPOSITORY_ROOT' -and
+    $invokeChildText -match 'Set-CrossRevisionCanonicalVmBuildShortcut') `
+    'pinned child invocation propagates and restores the canonical shortcut target'
+
+$processMap = @{
+    100 = [pscustomobject]@{ ProcessId = 100; ParentProcessId = 200 }
+    200 = [pscustomobject]@{ ProcessId = 200; ParentProcessId = 300 }
+    300 = [pscustomobject]@{ ProcessId = 300; ParentProcessId = 0 }
+}
+$ancestorIds = @(Get-CrossRevisionAncestorProcessIds -ProcessId 100 -ProcessResolver {
+        param($Id)
+        return $processMap[$Id]
+    })
+Assert-Equal '100,200,300' ($ancestorIds -join ',') `
+    'competing-runner guard excludes the complete launching process chain'
 
 $cancelRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-cancel-$PID"
 $cancelSource = Join-Path $cancelRoot 'source'
@@ -581,6 +634,7 @@ $rollingState = [ordered]@{
 }
 $rollingPlan = @([pscustomobject]@{
         Family = 'NOCM'
+        Domains = @('nocm.com')
         FollowOns = @([pscustomobject]@{ Name = 'NOCM-B-AddWin11.json' })
     })
 try {
@@ -613,6 +667,9 @@ $familyResetState = [ordered]@{
         'cstest2|fixture.json' = @{ Sid = 'sid2' }
     }
 }
+Assert-Equal 'CSTest2' (Resolve-CrossRevisionActiveResetFamily `
+        -Plan @([pscustomobject]@{ Family = 'CSTest1' }, [pscustomobject]@{ Family = 'CSTest2' }) `
+        -State $familyResetState) 'suite reset resolves only the in-progress family'
 Reset-CrossRevisionFamilyState -State $familyResetState -Family 'CSTest2'
 Assert-Equal $null $familyResetState.CurrentStep 'family reset clears the interrupted CSTest2 main baseline step'
 Assert-Equal 'cstest1|complete' ($familyResetState.CompletedSteps -join ',') 'family reset preserves completed CSTest1 progress'
@@ -652,7 +709,7 @@ catch {
 $runnerTokens = $null
 $runnerErrors = $null
 $runnerAst = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$runnerTokens, [ref]$runnerErrors)
-foreach ($helperName in @('Write-CrossRevisionStateFile', 'Reset-CrossRevisionFamilyState', 'Resolve-CrossRevisionResetFamily')) {
+foreach ($helperName in @('Write-CrossRevisionStateFile', 'Reset-CrossRevisionFamilyState', 'Resolve-CrossRevisionResetFamily', 'Resolve-CrossRevisionActiveResetFamily')) {
     $definition = @($runnerAst.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $helperName
@@ -668,14 +725,27 @@ foreach ($helperName in @('Write-CrossRevisionStateFile', 'Reset-CrossRevisionFa
     Assert-True ($definition.Count -eq 1 -and -not $nested) "$helperName is callable from runner script scope"
 }
 $mainLockIndex = $runnerText.LastIndexOf('$script:MutationMutex = [Threading.Mutex]::new')
+$processGuardIndex = $runnerText.LastIndexOf('Assert-NoOtherMemLabsRunner')
 $familyResetCallIndex = $runnerText.IndexOf('Reset-CrossRevisionFamilyState -State $checkpointState')
 $allResetMoveIndex = $runnerText.IndexOf('Move-Item -LiteralPath $activeCheckpoint.Path')
 Assert-True ($mainLockIndex -ge 0 -and $familyResetCallIndex -gt $mainLockIndex -and $allResetMoveIndex -gt $mainLockIndex) `
     'mutation lock is acquired before checkpoint reset writes or archives'
+Assert-True ($processGuardIndex -gt $mainLockIndex -and
+    $processGuardIndex -lt $familyResetCallIndex -and
+    $processGuardIndex -lt $allResetMoveIndex) `
+    'competing-process guard runs before checkpoint reset writes or archives'
 $rollingState.CurrentStep = 'nocm|cleanup|nocm.com'
+try {
+    Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
+    Write-TestResult -Passed $true -What 'rolling cleanup adopts fast-forward develop fixes'
+}
+catch {
+    Write-TestResult -Passed $false -What 'rolling cleanup adopts fast-forward develop fixes' -Detail $_.Exception.Message
+}
+$rollingState.CurrentStep = 'nocm|cleanup|renamed.example'
 Assert-ThrowsLike -Action {
     Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
-} -Pattern '*Cannot advance develop while cleanup*' -What 'rolling develop cannot switch revisions during cleanup'
+} -Pattern '*cleanup domain*not present exactly once*' -What 'rolling cleanup requires the same domain in the new plan'
 $rollingState.CurrentStep = 'nocm|develop|1|Renamed-Fixture.json'
 Assert-ThrowsLike -Action {
     Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
