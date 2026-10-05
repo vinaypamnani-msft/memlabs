@@ -506,6 +506,11 @@ if ($scenario -eq "Standalone") {
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         Set-Location $LogPath
         Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
+            Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
+            return
+        }
     }
     else {
         Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
@@ -635,6 +640,11 @@ if ($scenario -eq "Hierarchy") {
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
             Set-Location $LogPath
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
+                Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
+                return
+            }
         }
         else {
             Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
@@ -1637,4 +1647,3 @@ if ($ScriptWorkflowRunId) {
         Write-DscStatus "ScriptWorkflow.ps1 WARNING: failed to stamp completion RunId: $($_.Exception.Message)"
     }
 }
-

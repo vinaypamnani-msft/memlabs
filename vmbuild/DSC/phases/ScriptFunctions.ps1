@@ -1176,6 +1176,112 @@ function Wait-CMRoleRegistered {
     return $result
 }
 
+function Get-CMDistributionPointReadiness {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ServerFQDN,
+        [Parameter(Mandatory = $true)]
+        [string] $SiteCode
+    )
+
+    $shortName = ($ServerFQDN -split '\.')[0]
+    $configuration = $null
+    $providerInfo = $null
+    $shareReady = $false
+    $errors = @()
+    try {
+        $configuration = Get-CMDistributionPoint -SiteSystemServerName $ServerFQDN -SiteCode $SiteCode -ErrorAction Stop
+    }
+    catch { $errors += "configuration: $($_.Exception.Message)" }
+    try {
+        $providerInfo = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPointInfo `
+            -ErrorAction Stop | Where-Object {
+                $serverName = "$($_.ServerName)".TrimStart('\')
+                $networkPath = "$($_.NetworkOSPath)".TrimStart('\')
+                $serverName -ieq $ServerFQDN -or $serverName -ieq $shortName -or
+                $networkPath -ieq $ServerFQDN -or $networkPath -ieq $shortName
+            } | Select-Object -First 1
+    }
+    catch { $errors += "provider: $($_.Exception.Message)" }
+    try {
+        $shareReady = Test-Path -LiteralPath "\\$ServerFQDN\SMS_DP$" -PathType Container -ErrorAction Stop
+    }
+    catch { $errors += "SMS_DP`$: $($_.Exception.Message)" }
+
+    [pscustomobject]@{
+        Ready                = [bool]($configuration -and $providerInfo -and $shareReady)
+        ConfigurationVisible = [bool]$configuration
+        ProviderVisible      = [bool]$providerInfo
+        ShareReady           = [bool]$shareReady
+        Detail               = "configuration=$([bool]$configuration), providerInfo=$([bool]$providerInfo), SMS_DP`$=$([bool]$shareReady)$(if ($errors.Count) { "; errors=$($errors -join ' | ')" })"
+    }
+}
+
+function Get-CMManagementPointReadiness {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ServerFQDN,
+        [Parameter(Mandatory = $true)]
+        [string] $SiteCode
+    )
+
+    $configuration = $null
+    $guestState = $null
+    $errors = @()
+    try {
+        $configuration = Get-CMManagementPoint -SiteSystemServerName $ServerFQDN -SiteCode $SiteCode -ErrorAction Stop
+    }
+    catch { $errors += "configuration: $($_.Exception.Message)" }
+    try {
+        $guestState = Invoke-Command -ComputerName $ServerFQDN -ErrorAction Stop -ScriptBlock {
+            $registryReady = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\MP'
+            $iisReady = $false
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                $iisReady = [bool](Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue)
+            }
+            catch {}
+            [pscustomobject]@{
+                RegistryReady = [bool]$registryReady
+                IisReady      = [bool]$iisReady
+                W3SvcRunning  = [bool]((Get-Service -Name W3SVC -ErrorAction SilentlyContinue).Status -eq 'Running')
+            }
+        }
+    }
+    catch { $errors += "guest: $($_.Exception.Message)" }
+
+    $registryReady = [bool]($guestState -and $guestState.RegistryReady)
+    $iisReady = [bool]($guestState -and $guestState.IisReady)
+    $w3SvcRunning = [bool]($guestState -and $guestState.W3SvcRunning)
+    [pscustomobject]@{
+        Ready                = [bool]($configuration -and $registryReady -and $iisReady -and $w3SvcRunning)
+        ConfigurationVisible = [bool]$configuration
+        RegistryReady        = $registryReady
+        IisReady             = $iisReady
+        W3SvcRunning         = $w3SvcRunning
+        Detail               = "configuration=$([bool]$configuration), registry=$registryReady, SMS_MP=$iisReady, W3SVC=$w3SvcRunning$(if ($errors.Count) { "; errors=$($errors -join ' | ')" })"
+    }
+}
+
+function Restart-CMRoleProvisioning {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RoleName,
+        [Parameter(Mandatory = $true)]
+        [string] $ServerFQDN,
+        [Parameter(Mandatory = $true)]
+        [string] $Detail
+    )
+
+    try {
+        Restart-Service -Name SMS_SITE_COMPONENT_MANAGER -Force -ErrorAction Stop
+        Write-DscStatus "$RoleName on $ServerFQDN is not physically ready ($Detail). Restarted SMS_SITE_COMPONENT_MANAGER before retrying."
+    }
+    catch {
+        Write-DscStatus "$RoleName on $ServerFQDN is not physically ready ($Detail). Could not restart SMS_SITE_COMPONENT_MANAGER: $($_.Exception.Message)" -Warning
+    }
+}
+
 function Install-DP {
     param (
         [Parameter()]
@@ -1188,6 +1294,7 @@ function Install-DP {
     )
 
     $i = 0
+    $maxAttempts = 3
     $installFailure = $false
     $DPFQDN = $ServerFQDN
 
@@ -1207,8 +1314,8 @@ function Install-DP {
 
         # Install DP
         #============
-        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
-        if (-not $dpinstalled) {
+        $dpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+        if (-not $dpReadiness.ConfigurationVisible) {
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
             $Date = [DateTime]::Now.AddYears(30)
             #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date *>&1 | Write-StatusLogEntry
@@ -1235,16 +1342,31 @@ function Install-DP {
                 Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force *>&1 | Write-StatusLogEntry
             }
             if (-not $installFailure) {
-                $dpinstalled = Wait-CMRoleRegistered -RoleName 'DP' -ServerFQDN $DPFQDN -TimeoutSeconds 60 `
+                $null = Wait-CMRoleRegistered -RoleName 'DP configuration' -ServerFQDN $DPFQDN -TimeoutSeconds 60 `
                     -Probe { Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode }
             }
         }
-        else {
-            Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
-            $dpinstalled = $true
+        if (-not $installFailure) {
+            $lastDpReadiness = $null
+            $dpinstalled = Wait-CMRoleRegistered -RoleName 'DP physical readiness' -ServerFQDN $DPFQDN `
+                -TimeoutSeconds 300 -PollSeconds 15 -Probe {
+                    $currentReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+                    if ($currentReadiness.Ready) { return $currentReadiness }
+                    return $null
+                }
+            if (-not $dpinstalled) {
+                $lastDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+                $detail = if ($lastDpReadiness) { $lastDpReadiness.Detail } else { 'readiness could not be measured' }
+                if ($i -lt $maxAttempts) {
+                    Restart-CMRoleProvisioning -RoleName 'DP' -ServerFQDN $DPFQDN -Detail $detail
+                }
+                else {
+                    Write-DscStatus "DP on $DPFQDN did not become physically ready after $i bounded attempt(s) ($detail)." -Failure
+                }
+            }
         }
 
-        if ($i -gt 10) {
+        if ($i -ge $maxAttempts -and -not $dpinstalled) {
             Write-DscStatus "No Progress after $i tries, Giving up on $DPFQDN SiteCode: $ServerSiteCode ."
             $installFailure = $true
         }
@@ -1528,6 +1650,7 @@ function Install-MP {
     )
 
     $i = 0
+    $maxAttempts = 3
     $installFailure = $false
     $MPFQDN = $ServerFQDN
 
@@ -1550,8 +1673,8 @@ function Install-MP {
                 -Probe { Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode }
         }
 
-        $mpinstalled = Get-CMManagementPoint -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode
-        if (-not $mpinstalled) {
+        $mpReadiness = Get-CMManagementPointReadiness -ServerFQDN $MPFQDN -SiteCode $ServerSiteCode
+        if (-not $mpReadiness.ConfigurationVisible) {
             Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
             if ($UsePKI) {
                 Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Https -EnableSSL *>&1 | Write-StatusLogEntry
@@ -1559,15 +1682,28 @@ function Install-MP {
             else {
                 Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http *>&1 | Write-StatusLogEntry
             }
-            $mpinstalled = Wait-CMRoleRegistered -RoleName 'MP' -ServerFQDN $MPFQDN -TimeoutSeconds 60 `
+            $null = Wait-CMRoleRegistered -RoleName 'MP configuration' -ServerFQDN $MPFQDN -TimeoutSeconds 60 `
                 -Probe { Get-CMManagementPoint -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode }
         }
-        else {
-            Write-DscStatus "MP Role detected on $MPFQDN"
-            $mpinstalled = $true
+        $lastMpReadiness = $null
+        $mpinstalled = Wait-CMRoleRegistered -RoleName 'MP physical readiness' -ServerFQDN $MPFQDN `
+            -TimeoutSeconds 300 -PollSeconds 15 -Probe {
+                $currentReadiness = Get-CMManagementPointReadiness -ServerFQDN $MPFQDN -SiteCode $ServerSiteCode
+                if ($currentReadiness.Ready) { return $currentReadiness }
+                return $null
+            }
+        if (-not $mpinstalled) {
+            $lastMpReadiness = Get-CMManagementPointReadiness -ServerFQDN $MPFQDN -SiteCode $ServerSiteCode
+            $detail = if ($lastMpReadiness) { $lastMpReadiness.Detail } else { 'readiness could not be measured' }
+            if ($i -lt $maxAttempts) {
+                Restart-CMRoleProvisioning -RoleName 'MP' -ServerFQDN $MPFQDN -Detail $detail
+            }
+            else {
+                Write-DscStatus "MP on $MPFQDN did not become physically ready after $i bounded attempt(s) ($detail)." -Failure
+            }
         }
 
-        if ($i -gt 10) {
+        if ($i -ge $maxAttempts -and -not $mpinstalled) {
             Write-DscStatus "No Progress after $i tries, Giving up."
             $installFailure = $true
         }
@@ -1577,6 +1713,8 @@ function Install-MP {
         }
 
     } until ($mpinstalled -or $installFailure)
+
+    return [bool]$mpinstalled
 }
 
 function Install-SUP {
