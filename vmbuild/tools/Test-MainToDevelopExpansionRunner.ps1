@@ -313,6 +313,7 @@ $invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildS
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainJoinedVmHealth)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainsAbsent)
 . (Import-TestFunction -Path $runnerPath -Name Assert-MainBaselineCanStart)
+. (Import-TestFunction -Path $runnerPath -Name Repair-InterruptedMainBaseline)
 . (Import-TestFunction -Path $runnerPath -Name Get-CrossRevisionAncestorProcessIds)
 . (Import-TestFunction -Path $runnerPath -Name Save-State)
 . (Import-TestFunction -Path $runnerPath -Name Test-StepComplete)
@@ -645,9 +646,13 @@ catch {
     Write-TestResult -Passed $false -What 'fast-forward develop can retry a failed follow-on over the saved main baseline' -Detail $_.Exception.Message
 }
 $rollingState.CurrentStep = 'nocm|main|A'
-Assert-ThrowsLike -Action {
+try {
     Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
-} -Pattern '*Cannot advance develop while exact-main baseline*' -What 'rolling develop cannot adopt an interrupted main baseline'
+    Write-TestResult -Passed $true -What 'interrupted exact-main checkpoint advances to current develop recovery code'
+}
+catch {
+    Write-TestResult -Passed $false -What 'interrupted exact-main checkpoint advances to current develop recovery code' -Detail $_.Exception.Message
+}
 
 $familyResetState = [ordered]@{
     MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
@@ -727,13 +732,14 @@ foreach ($helperName in @('Write-CrossRevisionStateFile', 'Reset-CrossRevisionFa
 $mainLockIndex = $runnerText.LastIndexOf('$script:MutationMutex = [Threading.Mutex]::new')
 $processGuardIndex = $runnerText.LastIndexOf('Assert-NoOtherMemLabsRunner')
 $familyResetCallIndex = $runnerText.IndexOf('Reset-CrossRevisionFamilyState -State $checkpointState')
-$allResetMoveIndex = $runnerText.IndexOf('Move-Item -LiteralPath $activeCheckpoint.Path')
-Assert-True ($mainLockIndex -ge 0 -and $familyResetCallIndex -gt $mainLockIndex -and $allResetMoveIndex -gt $mainLockIndex) `
-    'mutation lock is acquired before checkpoint reset writes or archives'
+Assert-True ($mainLockIndex -ge 0 -and $familyResetCallIndex -gt $mainLockIndex) `
+    'mutation lock is acquired before checkpoint family-reset writes'
 Assert-True ($processGuardIndex -gt $mainLockIndex -and
-    $processGuardIndex -lt $familyResetCallIndex -and
-    $processGuardIndex -lt $allResetMoveIndex) `
-    'competing-process guard runs before checkpoint reset writes or archives'
+    $processGuardIndex -lt $familyResetCallIndex) `
+    'competing-process guard runs before checkpoint family-reset writes'
+Assert-True ($runnerText -notmatch 'Move-Item -LiteralPath \$activeCheckpoint\.Path' -and
+    $runnerText -match 'refusing to archive completed family progress') `
+    'repeated reset cannot archive a checkpoint after its active family was already cleared'
 $rollingState.CurrentStep = 'nocm|cleanup|nocm.com'
 try {
     Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
@@ -951,6 +957,76 @@ Assert-ThrowsLike -Action {
 } -Pattern '*mutation began*Automatic replay or adoption is unsafe*' -What 'completed-looking exact-main baseline cannot be adopted without pre-crash identity'
 $script:MockVms.Remove('RES-DC1')
 $script:MockVms.Remove('RES-MEM1')
+
+$interruptedState = [ordered]@{
+    Status = 'Failed'
+    CurrentStep = 'resume|main|A'
+    LastError = 'The pipeline has been stopped.'
+    Interrupted = $true
+    CompletedSteps = @('nocm|complete')
+    Baselines = @{ nocm = @([pscustomobject]@{ Name = 'NOC-DC1' }) }
+    DomainIdentities = @{ nocm = [pscustomobject]@{ Sid = 'S-1-5-21-1' } }
+    DevelopIdentities = @{}
+    DevelopDomainIdentities = @{}
+}
+$script:MockVms['RES-DC1'] = [pscustomobject]@{
+    Name = 'RES-DC1'; Id = [guid]::NewGuid(); Notes = '{"domain":"resume.test","success":false,"inProgress":true}'
+}
+$recoveryCalls = [Collections.Generic.List[object]]::new()
+$recovered = Repair-InterruptedMainBaseline -State $interruptedState `
+    -Plan @([pscustomobject]@{
+            Family = 'Resume'
+            Domains = @('resume.test')
+            BaselineConfig = $resumeConfig
+        }) `
+    -DevelopWorktree 'develop-current' `
+    -CleanupInvoker {
+        param($WorktreePath, $Parameters, $Label)
+        $recoveryCalls.Add([pscustomobject]@{
+                WorktreePath = $WorktreePath
+                Parameters = $Parameters
+                Label = $Label
+            })
+        if ($Parameters.DomainName -eq 'resume.test' -or $Parameters.VmName -eq 'RES-DC1') {
+            $script:MockVms.Remove('RES-DC1')
+            $script:MockVms.Remove('RES-MEM1')
+        }
+        return 0
+    }
+Assert-Equal $true $recovered 'interrupted exact-main baseline is recovered automatically'
+Assert-Equal 'develop-current' $recoveryCalls[0].WorktreePath 'interrupted baseline cleanup uses current develop worktree'
+Assert-Equal $null $interruptedState.CurrentStep 'interrupted family checkpoint is cleared after verified cleanup'
+Assert-Equal 'nocm|complete' ($interruptedState.CompletedSteps -join ',') 'automatic recovery preserves completed family progress'
+Assert-Equal $false $interruptedState.Interrupted 'automatic recovery clears the interruption marker'
+Assert-Equal 0 @($script:MockVms.Keys | Where-Object { $_ -like 'RES-*' }).Count `
+    'automatic recovery removes planned family VMs before replay'
+
+$failedRecoveryState = [ordered]@{
+    Status = 'Failed'
+    CurrentStep = 'resume|main|A'
+    LastError = 'interrupted'
+    Interrupted = $true
+    CompletedSteps = @('nocm|complete')
+    Baselines = @{ nocm = @([pscustomobject]@{ Name = 'NOC-DC1' }) }
+    DomainIdentities = @{ nocm = [pscustomobject]@{ Sid = 'S-1-5-21-1' } }
+    DevelopIdentities = @{}
+    DevelopDomainIdentities = @{}
+}
+Assert-ThrowsLike -Action {
+    Repair-InterruptedMainBaseline -State $failedRecoveryState `
+        -Plan @([pscustomobject]@{
+                Family = 'Resume'
+                Domains = @('resume.test')
+                BaselineConfig = $resumeConfig
+            }) `
+        -DevelopWorktree 'develop-current' `
+        -CleanupInvoker { return 9 }
+} -Pattern '*recovery cleanup*failed with exit code 9*' `
+    -What 'failed automatic cleanup remains an explicit recovery failure'
+Assert-Equal 'resume|main|A' $failedRecoveryState.CurrentStep `
+    'failed automatic cleanup preserves the interrupted checkpoint for retry'
+Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
+    'failed automatic cleanup preserves completed family progress'
 
 $baselineId = [guid]::NewGuid()
 $script:MockVms['NOC-DC1'] = [pscustomobject]@{

@@ -12,10 +12,11 @@
     may remove Phase 1 VMs when its baseline deployment fails; this runner does not
     patch that historical behavior.
 
-    The runner uses separate Git worktrees and never pulls during the cycle. State
-    is written after every completed stage. Each worktree's vmbuild\logs directory
-    is linked to the source checkout's normal log directory so existing log-sync
-    automation captures mixed-test failures.
+    The runner uses separate Git worktrees and never pulls during one family. State
+    is written after every completed stage. Develop commit IDs are retained only as
+    provenance; every restart and family boundary advances to current fast-forward
+    develop code. Each worktree's vmbuild\logs directory is linked to the source
+    checkout's normal log directory so existing log-sync automation captures mixed-test failures.
     Follow-on stages resume without replaying the main baseline. If develop advances
     by fast-forward, an interrupted develop or cleanup step can resume with the newer
     code when the same fixture or cleanup domain still exists in the new plan.
@@ -199,7 +200,14 @@ function Assert-CrossRevisionCheckpointCanAdvance {
     $familyKey = $parts[0].ToLowerInvariant()
     $stageType = $parts[1].ToLowerInvariant()
     if ($stageType -eq 'main') {
-        throw "Cannot advance develop while exact-main baseline step '$currentStep' is in progress. Remove that family lab and reset its state."
+        if ($parts[2] -ine 'A') {
+            throw "Active exact-main checkpoint '$currentStep' is not the recognized A baseline step."
+        }
+        $familyPlan = @($Plan | Where-Object { $_.Family -ieq $familyKey })
+        if ($familyPlan.Count -ne 1) {
+            throw "The interrupted exact-main family '$familyKey' is not present exactly once in requested develop $NewDevelopCommit."
+        }
+        return
     }
     if ($stageType -eq 'cleanup') {
         $familyPlan = @($Plan | Where-Object { $_.Family -ieq $familyKey })
@@ -1108,6 +1116,7 @@ function Start-Step {
     $script:State.Status = 'Running'
     $script:State.CurrentStep = $Step
     $script:State.LastError = $null
+    $script:State['Interrupted'] = $false
     Save-State
 }
 
@@ -1364,6 +1373,83 @@ function Assert-MainBaselineCanStart {
     Assert-DomainsAbsent -Domains $Domains -VmNames @(Get-ExpectedVmNames -Config $Config)
 }
 
+function Repair-InterruptedMainBaseline {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Collections.IDictionary] $State,
+        [Parameter(Mandatory = $true)]
+        [object[]] $Plan,
+        [Parameter(Mandatory = $true)]
+        [string] $DevelopWorktree,
+        [scriptblock] $CleanupInvoker = {
+            param($WorktreePath, $Parameters, $Label)
+            Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'Remove-Lab.ps1' `
+                -Parameters $Parameters -Label $Label
+        }
+    )
+
+    $currentStep = [string]$State.CurrentStep
+    if ([string]::IsNullOrWhiteSpace($currentStep)) { return $false }
+    $parts = @($currentStep -split '\|')
+    if ($parts.Count -ne 3 -or $parts[1] -ine 'main' -or $parts[2] -ine 'A') {
+        return $false
+    }
+
+    $familyPlan = @($Plan | Where-Object { $_.Family -ieq $parts[0] })
+    if ($familyPlan.Count -ne 1) {
+        throw "Interrupted exact-main family '$($parts[0])' is not present exactly once in the current develop plan."
+    }
+
+    $family = [string]$familyPlan[0].Family
+    $expectedVmNames = @(Get-ExpectedVmNames -Config $familyPlan[0].BaselineConfig)
+    Write-Host "RECOVERY: '$family' exact-main baseline was interrupted. Cleaning its partial lab with current develop before restarting the family." -ForegroundColor Yellow
+
+    foreach ($domain in @($familyPlan[0].Domains | Where-Object { $_ } | Select-Object -Unique)) {
+        $exitCode = & $CleanupInvoker $DevelopWorktree `
+            ([ordered]@{ DomainName = [string]$domain }) `
+            "$family-recover-domain-$domain"
+        if ($exitCode -ne 0) {
+            throw "Interrupted exact-main recovery cleanup of '$domain' failed with exit code $exitCode."
+        }
+    }
+
+    $namedSurvivors = @(Get-ExistingNamedVms -VmNames $expectedVmNames)
+    foreach ($vm in $namedSurvivors) {
+        $exitCode = & $CleanupInvoker $DevelopWorktree `
+            ([ordered]@{ VmName = [string]$vm.Name }) `
+            "$family-recover-vm-$($vm.Name)"
+        if ($exitCode -ne 0) {
+            throw "Interrupted exact-main recovery cleanup of VM '$($vm.Name)' failed with exit code $exitCode."
+        }
+    }
+
+    # A VM removed by exact name may have been too incomplete for domain
+    # discovery. Re-run domain cleanup so its folder, scope, switch, and NAT
+    # receive the same idempotent cleanup as a normally attributed VM.
+    foreach ($domain in @($familyPlan[0].Domains | Where-Object { $_ } | Select-Object -Unique)) {
+        $exitCode = & $CleanupInvoker $DevelopWorktree `
+            ([ordered]@{ DomainName = [string]$domain }) `
+            "$family-recover-finalize-$domain"
+        if ($exitCode -ne 0) {
+            throw "Interrupted exact-main recovery finalization of '$domain' failed with exit code $exitCode."
+        }
+    }
+
+    $remaining = @(Get-DomainVms -Domains @($familyPlan[0].Domains))
+    $remaining += @(Get-ExistingNamedVms -VmNames $expectedVmNames)
+    $remaining = @($remaining | Sort-Object Name -Unique)
+    if ($remaining.Count -gt 0) {
+        throw "Interrupted exact-main recovery left VM(s) registered: $($remaining.Name -join ', ')."
+    }
+
+    Reset-CrossRevisionFamilyState -State $State -Family $family
+    $State.Status = 'Running'
+    $State.LastError = $null
+    $State['Interrupted'] = $false
+    Write-Host "RECOVERY: '$family' partial baseline was removed and its family checkpoint was reset. Restarting from exact-main A." -ForegroundColor Yellow
+    return $true
+}
+
 function Get-CrossRevisionAncestorProcessIds {
     param(
         [Parameter(Mandatory = $true)]
@@ -1480,11 +1566,7 @@ try {
                 Write-Host "RESET: cleared checkpoint state for family '$activeResetFamily' after its lab was deliberately removed; preserving other family progress." -ForegroundColor Yellow
             }
             elseif ($ResetState.IsPresent) {
-                $timestamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
-                Move-Item -LiteralPath $activeCheckpoint.Path -Destination "$($activeCheckpoint.Path).reset-$timestamp" -Force
-                Write-Host "RESET: archived active checkpoint '$($activeCheckpoint.Path)'." -ForegroundColor Yellow
-                $activeCheckpoint = $null
-                $checkpointState = $null
+                throw "Reset was requested, but the active checkpoint has no in-progress family. Omit -ResetState to resume; refusing to archive completed family progress."
             }
         }
         if ($activeCheckpoint) {
@@ -1574,6 +1656,7 @@ try {
             Status          = 'Ready'
             CurrentStep     = $null
             LastError       = $null
+            Interrupted     = $false
             CompletedSteps  = @()
             Baselines       = @{}
             DomainIdentities = @{}
@@ -1606,6 +1689,9 @@ try {
         Save-State
     }
 
+    if (Repair-InterruptedMainBaseline -State $script:State -Plan $plan -DevelopWorktree $developWorktree) {
+        Save-State
+    }
     $plan = @(Get-OrderedCrossRevisionPlan -Plan $plan -CurrentStep ([string]$script:State.CurrentStep))
 
     $credentialPath = Join-Path $mainWorktree 'vmbuild\cache\vmbuildadmin.txt'
@@ -1856,6 +1942,7 @@ catch {
     if ($script:State -and $script:StatePath) {
         $script:State.Status = 'Failed'
         $script:State.LastError = $runError.Exception.Message
+        $script:State['Interrupted'] = $runInterrupted
         Save-State
     }
     Write-Host "FAIL: $($runError.Exception.Message)" -ForegroundColor Red
