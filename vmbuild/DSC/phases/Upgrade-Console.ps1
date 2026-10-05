@@ -179,11 +179,14 @@ function Resolve-ExpectedConsoleRelease {
     $releaseOptions = $CmOptions
     $releaseVm = $VM
     if ($VM.parentSiteCode) {
+        $currentDomain = if ($VM.domain) { "$($VM.domain)" } else { "$($DeployConfig.vmOptions.domainName)" }
         $parentSites = @($DeployConfig.virtualMachines | Where-Object {
-                "$($_.siteCode)" -ieq "$($VM.parentSiteCode)"
+                $_.role -eq 'CAS' -and
+                "$($_.siteCode)" -ieq "$($VM.parentSiteCode)" -and
+                (-not $_.domain -or "$($_.domain)" -ieq $currentDomain)
             })
         if ($parentSites.Count -ne 1) {
-            throw "Upgrade-Console: expected exactly one parent site '$($VM.parentSiteCode)' in deployConfig, found $($parentSites.Count)"
+            throw "Upgrade-Console: expected exactly one parent CAS '$($VM.parentSiteCode)' in domain '$currentDomain' in deployConfig, found $($parentSites.Count)"
         }
         $releaseVm = $parentSites[0]
         $releaseOptions = if ($releaseVm.cmOptions) { $releaseVm.cmOptions } else { $DeployConfig.cmOptions }

@@ -46,15 +46,37 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
+function Assert-ThrowsLike {
+    param([scriptblock]$Action, [string]$Pattern, [string]$Message)
+    try {
+        & $Action
+    }
+    catch {
+        if ($_.Exception.Message -like $Pattern) { return }
+        throw "$Message`nExpected: $Pattern`nActual:   $($_.Exception.Message)"
+    }
+    throw "$Message`nExpected an exception matching: $Pattern"
+}
+
 function Write-Log {
     param([string]$Message, [switch]$Verbose, [switch]$LogOnly, [switch]$Warning)
 }
-function Start-VM2 { param([string]$Name) }
+$script:StartedVms = [System.Collections.Generic.List[string]]::new()
+function Start-VM2 {
+    param([string]$Name)
+    $script:StartedVms.Add($Name)
+}
 function Set-VMNote { param([string]$VmName, [object]$VmNote) }
+function Get-VMNote {
+    param([string]$VMName)
+    return $script:Inventory | Where-Object { $_.vmName -ieq $VMName } | Select-Object -First 1
+}
 
 . (Import-TestFunction -Path $configPath -Name 'Get-ExistingConfigMgrRoleUpgradePlan')
 . (Import-TestFunction -Path $configPath -Name 'Add-ModifiedExistingVMToDeployConfig')
+. (Import-TestFunction -Path $configPath -Name 'Add-ExistingVMToDeployConfig')
 . (Import-TestFunction -Path $configPath -Name 'Add-ExistingVMsToDeployConfig')
+. (Import-TestFunction -Path $configPath -Name 'Add-Phase11HierarchyParentsToDeployConfig')
 . (Import-TestFunction -Path $configPath -Name 'Sync-ExistingHierarchyOptionsToDeployConfig')
 . (Import-TestFunction -Path $phasesPath -Name 'Test-MemLabsIncludeHiddenVmForPhase')
 . (Import-TestFunction -Path $validationPath -Name 'Get-Phase11ProjectedVmNetwork')
@@ -155,15 +177,6 @@ function Get-SiteServerForSiteCode {
     } | Select-Object -First 1
 }
 function Get-VMFromList2 { param([object]$DeployConfig, [string]$VmName, [switch]$SmartUpdate) return $null }
-function Add-ExistingVMToDeployConfig {
-    param([string]$VmName, [object]$ConfigToModify, [bool]$Hidden = $true, [bool]$OtherDC = $false)
-    if ($ConfigToModify.virtualMachines.vmName -contains $VmName) { return }
-    $source = $script:Inventory | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
-    if (-not $source) { return }
-    $clone = $source | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
-    $clone | Add-Member -NotePropertyName hidden -NotePropertyValue $Hidden -Force
-    $ConfigToModify.virtualMachines += $clone
-}
 function Add-RemoteSQLVMToDeployConfig {
     param([string]$VmName, [object]$ConfigToModify, [bool]$Hidden = $true)
     Add-ExistingVMToDeployConfig -VmName $VmName -ConfigToModify $ConfigToModify -Hidden $Hidden
@@ -275,6 +288,160 @@ Assert-Equal $false (Test-MemLabsIncludeHiddenVmForPhase -Vm ([pscustomobject]@{
     'Unmodified hidden dependency was unexpectedly included in Phase 11.'
 Assert-Equal $true (Test-MemLabsIncludeHiddenVmForPhase -Vm ([pscustomobject]@{ hidden = $true; osdValidate = $true }) -Phase 11) `
     'Existing OSD validation exception regressed.'
+
+$parentCas = [pscustomobject]@{
+    vmName = 'CAS1'; role = 'CAS'; siteCode = 'CAS'; domain = 'upgrade.test'
+    cmOptions = [pscustomobject]@{ Version = '2403'; UsePKI = $true }; state = 'Off'
+}
+$childValidationConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'upgrade.test' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'CHD1'; role = 'Primary'; siteCode = 'CHD'; parentSiteCode = 'CAS'
+            hidden = $true; phase11Validate = $true
+        }
+    )
+}
+$savedInventory = @($script:Inventory)
+$script:Inventory = @($parentCas)
+$script:StartedVms.Clear()
+$supportParents = @(Add-Phase11HierarchyParentsToDeployConfig -Config $childValidationConfig `
+        -ExistingVMs @($parentCas))
+$script:Inventory = @($savedInventory)
+Assert-Equal 'CAS1' ($supportParents -join ',') `
+    'Child Primary Phase 11 validation did not hydrate its parent CAS support dependency.'
+$supportCas = $childValidationConfig.virtualMachines | Where-Object vmName -eq 'CAS1' | Select-Object -First 1
+Assert-Equal $true ([bool]$supportCas.hidden) 'Parent CAS support dependency is not hidden.'
+Assert-Equal $true ([bool]$supportCas.phase11Validate) `
+    'Parent CAS support dependency was not scheduled for Phase 11.'
+Assert-Equal 'CAS1' (@($script:StartedVms) -join ',') `
+    'Powered-off parent CAS was not started as a hierarchy support dependency.'
+foreach ($phase in @(0, 2, 3, 4, 5, 6, 7, 8, 9, 11)) {
+    Assert-Equal $true (Test-MemLabsIncludeHiddenVmForPhase -Vm $supportCas -Phase $phase) `
+        "Parent CAS support dependency was excluded from Phase $phase."
+}
+foreach ($phase in @(1, 10)) {
+    Assert-Equal $false (Test-MemLabsIncludeHiddenVmForPhase -Vm $supportCas -Phase $phase) `
+        "Parent CAS support dependency violated hidden-VM safety in Phase $phase."
+}
+Assert-Equal 'CAS1,CHD1' (@($childValidationConfig.virtualMachines.vmName | Sort-Object) -join ',') `
+    'Hierarchy parent hydration did not preserve the complete deployConfig support snapshot.'
+$script:Inventory = @($parentCas)
+$secondSupportPass = @(Add-Phase11HierarchyParentsToDeployConfig -Config $childValidationConfig `
+        -ExistingVMs @($parentCas))
+$script:Inventory = @($savedInventory)
+Assert-Equal 0 $secondSupportPass.Count `
+    'Hierarchy support hydration was not idempotent when the parent CAS was already present.'
+$supportCas.phase11Validate = $false
+$script:Inventory = @($parentCas)
+$null = Add-Phase11HierarchyParentsToDeployConfig -Config $childValidationConfig -ExistingVMs @($parentCas)
+$script:Inventory = @($savedInventory)
+Assert-Equal $true ([bool]$supportCas.phase11Validate) `
+    'An already-present hidden parent CAS was not restored to Phase 11 validation scope.'
+Assert-ThrowsLike {
+    $duplicateParentConfig = [pscustomobject]@{
+        vmOptions = [pscustomobject]@{ domainName = 'upgrade.test' }
+        virtualMachines = @([pscustomobject]@{
+                vmName = 'CHD2'; role = 'Primary'; siteCode = 'CH2'; parentSiteCode = 'CAS'
+                hidden = $true; phase11Validate = $true
+            })
+    }
+    $duplicateParents = @(
+        $parentCas,
+        [pscustomobject]@{
+            vmName = 'CAS2'; role = 'CAS'; siteCode = 'CAS'; domain = 'upgrade.test'; state = 'Running'
+        }
+    )
+    Add-Phase11HierarchyParentsToDeployConfig -Config $duplicateParentConfig -ExistingVMs $duplicateParents
+} '*expected exactly one existing CAS*found 2*' `
+    'Ambiguous parent CAS inventory did not fail closed.'
+Assert-ThrowsLike {
+    $missingDependencyParent = [pscustomobject]@{
+        vmName = 'CAS-MISSING'; role = 'CAS'; siteCode = 'CMS'; domain = 'upgrade.test'
+        remoteSQLVM = 'SQL-MISSING'; state = 'Running'
+    }
+    $missingDependencyConfig = [pscustomobject]@{
+        vmOptions = [pscustomobject]@{ domainName = 'upgrade.test' }
+        virtualMachines = @([pscustomobject]@{
+                vmName = 'CHD-MISSING'; role = 'Primary'; siteCode = 'CHM'; parentSiteCode = 'CMS'
+                hidden = $true; phase11Validate = $true
+            })
+    }
+    $script:Inventory = @($missingDependencyParent)
+    try {
+        Add-Phase11HierarchyParentsToDeployConfig -Config $missingDependencyConfig `
+            -ExistingVMs @($missingDependencyParent)
+    }
+    finally {
+        $script:Inventory = @($savedInventory)
+    }
+} '*Failed to add remote SQL dependency ''SQL-MISSING''*' `
+    'Missing parent hierarchy support dependency did not fail closed.'
+
+$cstest3Inventory = @(
+    [pscustomobject]@{
+        vmName = 'CT3-CS1SITE'; role = 'CAS'; siteCode = 'CS1'; domain = 'cstest3.com'
+        cmOptions = [pscustomobject]@{ Version = 'current-branch'; Install = $true; UsePKI = $false }
+        remoteSQLVM = 'CT3-CS1SQL'; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'CT3-CS1SITE-P'; role = 'PassiveSite'; siteCode = 'CS1'; domain = 'cstest3.com'
+        remoteContentLibVM = 'CT3-FS1'; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'CT3-CS1RPSUP1'; role = 'SiteSystem'; siteCode = 'CS1'; domain = 'cstest3.com'
+        installSUP = $true; installRP = $true; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'CT3-CS1SQL'; role = 'DomainMember'; domain = 'cstest3.com'
+        sqlVersion = 'SQL Server 2019'; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'CT3-FS1'; role = 'FileServer'; domain = 'cstest3.com'; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'CT3-PS1SITE'; role = 'Primary'; siteCode = 'PS1'; parentSiteCode = 'CS1'
+        domain = 'cstest3.com'; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'CT3-DPMP1'; role = 'SiteSystem'; siteCode = 'PS1'; domain = 'cstest3.com'
+        installDP = $true; installMP = $true; state = 'Running'
+    }
+)
+$cstest3FollowOn = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'cstest3.com'; network = '192.168.31.0' }
+    parameters = [pscustomobject]@{ ExistingDCName = $null }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'CT3-PS1DPMPSUP1'; role = 'SiteSystem'; siteCode = 'PS1'
+            installDP = $true; installMP = $true; installSUP = $true
+        }
+    )
+}
+$script:Inventory = @($cstest3Inventory)
+Add-ExistingVMsToDeployConfig -Config $cstest3FollowOn
+$script:Inventory = @($savedInventory)
+Assert-Equal 'CT3-CS1RPSUP1,CT3-CS1SITE,CT3-CS1SITE-P,CT3-CS1SQL,CT3-DPMP1,CT3-FS1,CT3-PS1DPMPSUP1,CT3-PS1SITE' `
+    (@($cstest3FollowOn.virtualMachines.vmName | Sort-Object) -join ',') `
+    'CSTest3-C expansion did not retain the complete child/parent hierarchy support closure.'
+$cstest3Cas = $cstest3FollowOn.virtualMachines | Where-Object vmName -eq 'CT3-CS1SITE' | Select-Object -First 1
+$cstest3Primary = $cstest3FollowOn.virtualMachines | Where-Object vmName -eq 'CT3-PS1SITE' | Select-Object -First 1
+$cstest3Passive = $cstest3FollowOn.virtualMachines | Where-Object vmName -eq 'CT3-CS1SITE-P' | Select-Object -First 1
+$cstest3ParentRole = $cstest3FollowOn.virtualMachines | Where-Object vmName -eq 'CT3-CS1RPSUP1' | Select-Object -First 1
+Assert-Equal $true ([bool]$cstest3Cas.phase11Validate) `
+    'CSTest3-C parent CAS was not scheduled for functional validation.'
+Assert-Equal $true ([bool]$cstest3Primary.phase11Validate) `
+    'CSTest3-C owning Primary was not scheduled for functional validation.'
+Assert-Equal $true ([bool]$cstest3Passive.phase11Validate) `
+    'CSTest3-C parent passive site server was not scheduled for functional validation.'
+Assert-Equal $true ([bool]$cstest3ParentRole.phase11Validate) `
+    'CSTest3-C parent explicit role host was not scheduled for functional validation.'
+$cstest3Phase11Names = @($cstest3FollowOn.virtualMachines | Where-Object {
+        Test-MemLabsIncludeHiddenVmForPhase -Vm $_ -Phase 11
+    } | ForEach-Object { $_.vmName } | Sort-Object)
+Assert-Equal 'CT3-CS1RPSUP1,CT3-CS1SITE,CT3-CS1SITE-P,CT3-DPMP1,CT3-PS1DPMPSUP1,CT3-PS1SITE' `
+    ($cstest3Phase11Names -join ',') `
+    'CSTest3-C did not schedule the complete changed and supporting ConfigMgr surface for Phase 11.'
 
 $standalonePrimary = [pscustomobject]@{
     vmName = 'PRI1'; role = 'Primary'; siteCode = 'PRI'; installSUP = $true

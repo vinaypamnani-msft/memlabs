@@ -29,6 +29,7 @@ function Import-TestFunction {
 $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
 . (Import-TestFunction -Path $configPath -Name 'Test-PushClientRequested')
 . (Import-TestFunction -Path $configPath -Name 'Get-ExistingConfigMgrRoleUpgradePlan')
+. (Import-TestFunction -Path $configPath -Name 'Add-Phase11HierarchyParentsToDeployConfig')
 . (Import-TestFunction -Path $configPath -Name 'Add-ExistingVMsToDeployConfig')
 
 $script:AddedExistingVMs = [System.Collections.Generic.List[object]]::new()

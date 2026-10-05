@@ -12449,11 +12449,14 @@ function Resolve-EffectiveHierarchyCmRelease {
     $releaseOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
     $inheritedFromParent = $false
     if ($CurrentItem.parentSiteCode) {
+        $currentDomain = if ($CurrentItem.domain) { "$($CurrentItem.domain)" } else { "$($DeployConfig.vmOptions.domainName)" }
         $parentSites = @($DeployConfig.virtualMachines | Where-Object {
-                "$($_.siteCode)" -ieq "$($CurrentItem.parentSiteCode)"
+                $_.role -eq 'CAS' -and
+                "$($_.siteCode)" -ieq "$($CurrentItem.parentSiteCode)" -and
+                (-not $_.domain -or "$($_.domain)" -ieq $currentDomain)
             })
         if ($parentSites.Count -ne 1) {
-            throw "Expected exactly one parent site '$($CurrentItem.parentSiteCode)' in deployConfig, found $($parentSites.Count)"
+            throw "Expected exactly one parent CAS '$($CurrentItem.parentSiteCode)' in domain '$currentDomain' in deployConfig, found $($parentSites.Count)"
         }
         $releaseItem = $parentSites[0]
         $releaseOptions = if ($releaseItem.cmOptions) { $releaseItem.cmOptions } else { $DeployConfig.cmOptions }

@@ -71,6 +71,8 @@ $childOfflineVM = [pscustomobject]@{ parentSiteCode = 'CAS' }
 $offlineHierarchy = [pscustomobject]@{
     virtualMachines = @(
         [pscustomobject]@{
+            vmName   = 'CAS1'
+            role      = 'CAS'
             siteCode  = 'CAS'
             cmOptions = [pscustomobject]@{ Version = '2603'; OfflineSCP = $true }
             thisParams = [pscustomobject]@{
@@ -81,6 +83,8 @@ $offlineHierarchy = [pscustomobject]@{
 }
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2603'; OfflineSCP = $true }) -VM $childOfflineVM -DeployConfig $offlineHierarchy) -eq '2509') 'OfflineSCP child Primary inherits deployed baseline metadata from its CAS'
 $mainEraParent = [pscustomobject]@{
+    vmName   = 'CAS1'
+    role      = 'CAS'
     siteCode  = 'CS1'
     cmOptions = [pscustomobject]@{ Version = '2309'; OfflineSCP = $false }
     thisParams = [pscustomobject]@{
@@ -112,6 +116,23 @@ function Get-CMBaselineVersion { param([string]$CMVersion) [pscustomobject]@{ ba
 $validationRelease = Resolve-EffectiveHierarchyCmRelease -CurrentItem $developChild -DeployConfig $mixedHierarchy
 Assert-ConsoleUpgrade ($validationRelease.Version -eq '2309' -and $validationRelease.InheritedFromParent) `
     'Phase 11 uses the same parent hierarchy release as console maintenance'
+$parentSiteRoleDecoy = [pscustomobject]@{
+    vmName = 'CAS-SUP1'; role = 'SiteSystem'; siteCode = 'CS1'
+}
+$foreignParentDecoy = [pscustomobject]@{
+    vmName = 'FOREIGN-CAS'; role = 'CAS'; siteCode = 'CS1'; domain = 'foreign.test'
+}
+$developChild | Add-Member -MemberType NoteProperty -Name domain -Value 'upgrade.test' -Force
+$mainEraParent | Add-Member -MemberType NoteProperty -Name domain -Value 'upgrade.test' -Force
+$mixedHierarchy | Add-Member -MemberType NoteProperty -Name vmOptions `
+    -Value ([pscustomobject]@{ domainName = 'upgrade.test' }) -Force
+$mixedHierarchy.virtualMachines += @($parentSiteRoleDecoy, $foreignParentDecoy)
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions $developChild.cmOptions -VM $developChild `
+            -DeployConfig $mixedHierarchy) -eq '2309') `
+    'Console release routing confused a parent-site role host or foreign CAS with the owning CAS.'
+$decoyValidationRelease = Resolve-EffectiveHierarchyCmRelease -CurrentItem $developChild -DeployConfig $mixedHierarchy
+Assert-ConsoleUpgrade ($decoyValidationRelease.Version -eq '2309' -and $decoyValidationRelease.InheritedFromParent) `
+    'Phase 11 release routing confused a parent-site role host or foreign CAS with the owning CAS.'
 $mainEraParent.cmOptions.OfflineSCP = $true
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions $developChild.cmOptions -VM $developChild -DeployConfig $mixedHierarchy) -eq '2303') `
     'child Primary inherits an offline parent hierarchy baseline'
@@ -137,7 +158,7 @@ try {
     $null = Resolve-ExpectedConsoleRelease -CmOptions $developChild.cmOptions -VM $developChild `
         -DeployConfig ([pscustomobject]@{ virtualMachines = @($developChild) })
 }
-catch { $missingParentFailed = $_.Exception.Message -match 'expected exactly one parent site' }
+catch { $missingParentFailed = $_.Exception.Message -match 'expected exactly one parent CAS' }
 Assert-ConsoleUpgrade $missingParentFailed 'missing parent hierarchy metadata fails explicitly'
 Remove-Item Function:\Resolve-CmVersionAlias -ErrorAction SilentlyContinue
 Remove-Item Function:\Get-CMBaselineVersion -ErrorAction SilentlyContinue

@@ -1415,6 +1415,126 @@ function Get-ExistingConfigMgrRoleUpgradePlan {
     }
 }
 
+function Add-Phase11HierarchyParentsToDeployConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $ExistingVMs
+    )
+
+    $domainName = "$($Config.vmOptions.domainName)"
+    $addedSupportNames = @()
+    $childPrimaries = @($Config.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.parentSiteCode -and
+            (-not $_.hidden -or $_.phase11Validate -eq $true -or $_.osdValidate -eq $true)
+        })
+
+    foreach ($childPrimary in $childPrimaries) {
+        $parentSiteCode = "$($childPrimary.parentSiteCode)"
+        $configParents = @($Config.virtualMachines | Where-Object {
+                $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+            })
+        if ($configParents.Count -gt 1) {
+            $configParentNames = @($configParents | ForEach-Object { "$($_.vmName)" } | Where-Object { $_ })
+            throw "Cannot hydrate hierarchy support for child Primary '$($childPrimary.vmName)': parent site '$parentSiteCode' has $($configParents.Count) CAS rows in deployConfig ($($configParentNames -join ', '))."
+        }
+        if ($configParents.Count -eq 0) {
+            $existingParents = @($ExistingVMs | Where-Object {
+                    $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
+                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                })
+            if ($existingParents.Count -ne 1) {
+                throw "Cannot hydrate hierarchy support for child Primary '$($childPrimary.vmName)': expected exactly one existing CAS for parent site '$parentSiteCode' in domain '$domainName', found $($existingParents.Count)."
+            }
+
+            $parentName = "$($existingParents[0].vmName)"
+            if (-not $parentName) {
+                throw "Cannot hydrate hierarchy support for child Primary '$($childPrimary.vmName)': the CAS for parent site '$parentSiteCode' has no VM name."
+            }
+            Add-ExistingVMToDeployConfig -vmName $parentName -configToModify $Config -hidden:$true
+            $addedSupportNames += $parentName
+            $configParents = @($Config.virtualMachines | Where-Object {
+                    $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
+                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                })
+        }
+
+        if ($configParents.Count -ne 1) {
+            throw "Failed to add exactly one CAS for parent site '$parentSiteCode' as hierarchy support for child Primary '$($childPrimary.vmName)'."
+        }
+        $supportParent = $configParents[0]
+        if ($supportParent.hidden) {
+            $supportParent | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+        }
+
+        $parentSiteSupportRows = @($ExistingVMs | Where-Object {
+                "$($_.siteCode)" -ieq $parentSiteCode -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domainName) -and
+                ($_.role -eq 'PassiveSite' -or
+                 $_.installDP -eq $true -or $_.enablePullDP -eq $true -or
+                 $_.installMP -eq $true -or $_.installSUP -eq $true -or
+                 $_.installRP -eq $true -or $_.installSMSProv -eq $true)
+            })
+        foreach ($supportRow in $parentSiteSupportRows) {
+            $supportName = "$($supportRow.vmName)"
+            if (-not $supportName -or $Config.virtualMachines.vmName -contains $supportName) { continue }
+            Add-ExistingVMToDeployConfig -vmName $supportName -configToModify $Config -hidden:$true
+            if ($Config.virtualMachines.vmName -notcontains $supportName) {
+                throw "Failed to add parent-site support VM '$supportName' for child Primary '$($childPrimary.vmName)'."
+            }
+            $addedSupportNames += $supportName
+        }
+
+        $parentWorkflowVms = @($Config.virtualMachines | Where-Object {
+                "$($_.siteCode)" -ieq $parentSiteCode -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domainName) -and
+                ($_.role -in @('CAS', 'PassiveSite') -or
+                 $_.installDP -eq $true -or $_.enablePullDP -eq $true -or
+                 $_.installMP -eq $true -or $_.installSUP -eq $true -or
+                 $_.installRP -eq $true -or $_.installSMSProv -eq $true)
+            })
+        foreach ($workflowVm in $parentWorkflowVms) {
+            if ($workflowVm.hidden) {
+                $workflowVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+            }
+            if ($workflowVm.remoteSQLVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.remoteSQLVM -configToModify $Config
+                if ($Config.virtualMachines.vmName -notcontains $workflowVm.remoteSQLVM) {
+                    throw "Failed to add remote SQL dependency '$($workflowVm.remoteSQLVM)' for hierarchy support VM '$($workflowVm.vmName)'."
+                }
+            }
+            if ($workflowVm.replicaSqlServerVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.replicaSqlServerVM -configToModify $Config
+                if ($Config.virtualMachines.vmName -notcontains $workflowVm.replicaSqlServerVM) {
+                    throw "Failed to add replica SQL dependency '$($workflowVm.replicaSqlServerVM)' for hierarchy support VM '$($workflowVm.vmName)'."
+                }
+            }
+            if ($workflowVm.wsusDataBaseServer -and $workflowVm.wsusDataBaseServer -ne 'WID') {
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.wsusDataBaseServer -configToModify $Config
+                if ($Config.virtualMachines.vmName -notcontains $workflowVm.wsusDataBaseServer) {
+                    throw "Failed to add WSUS database dependency '$($workflowVm.wsusDataBaseServer)' for hierarchy support VM '$($workflowVm.vmName)'."
+                }
+            }
+            foreach ($dependencyName in @(
+                    $workflowVm.pullDPSourceDP,
+                    $workflowVm.PatchMyPCFileServer,
+                    $workflowVm.remoteContentLibVM
+                ) | Where-Object { $_ }) {
+                Add-ExistingVMToDeployConfig -vmName $dependencyName -configToModify $Config
+                if ($Config.virtualMachines.vmName -notcontains $dependencyName) {
+                    throw "Failed to add dependency '$dependencyName' for hierarchy support VM '$($workflowVm.vmName)'."
+                }
+            }
+        }
+    }
+
+    return @($addedSupportNames | Where-Object { $_ } | Select-Object -Unique)
+}
+
 function Add-Phase8DistributionPointMetadata {
     [CmdletBinding()]
     param (
@@ -1944,6 +2064,8 @@ function Add-ExistingVMsToDeployConfig {
             Add-ExistingVMToDeployConfig -vmName $roleVm.remoteContentLibVM -configToModify $config
         }
     }
+    $hierarchyParentVmNames = @(Add-Phase11HierarchyParentsToDeployConfig -Config $config `
+            -ExistingVMs @($refreshedVmInventory))
     $repairedProxyClients = @($config.virtualMachines | Where-Object {
             $_.phase11Validate -and $_.useProxy -eq $true
         })
@@ -1955,7 +2077,9 @@ function Add-ExistingVMsToDeployConfig {
             Add-ExistingVMToDeployConfig -vmName $proxyName -configToModify $config
         }
     }
-    if (@($roleUpgradePlan.OwnerSiteVmNames).Count -gt 0 -or @($roleUpgradePlan.ExistingRoleVmNames).Count -gt 0) {
+    if (@($roleUpgradePlan.OwnerSiteVmNames).Count -gt 0 -or
+        @($roleUpgradePlan.ExistingRoleVmNames).Count -gt 0 -or
+        $hierarchyParentVmNames.Count -gt 0) {
         $null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $config -ExistingVMs @($refreshedVmInventory)
     }
 
