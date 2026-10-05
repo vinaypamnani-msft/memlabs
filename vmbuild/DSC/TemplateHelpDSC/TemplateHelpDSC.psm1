@@ -1227,27 +1227,20 @@ class InstallADK {
 
     [bool] Test() {
         Write-Status "Checking ADK installation status"
+        $deploymentTools = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
+        $winPe = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
+        $usmt = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
         $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\Windows Kits\Installed Roots")
-        if ($subKey) {
-            $tool1 = $tool2 = $tool3 = $false
-            if ($null -ne $subKey.GetValue('KitsRoot10')) {
-                if ($subKey.GetValueNames() | Where-Object { $subkey.GetValue($_) -like "*Deployment Tools*" }) {
-                    $tool1 = $true
-                }
-                if ($subKey.GetValueNames() | Where-Object { $subkey.GetValue($_) -like "*Windows PE*" }) {
-                    $tool2 = $true
-                }
-                if ($subKey.GetValueNames() | Where-Object { $subkey.GetValue($_) -like "*User State Migration*" }) {
-                    $tool3 = $true
-                }
-
-                if ($tool1 -and $tool2 -and $tool3) {
-                    return $true
-                }
-            }
-        }
-        return $false
+        $kitsRoot = if ($subKey) { "$($subKey.GetValue('KitsRoot10'))" } else { '' }
+        if ($subKey) { $subKey.Dispose() }
+        $key.Dispose()
+        $deploymentToolsReady = Test-Path -LiteralPath $deploymentTools -PathType Container
+        $winPeReady = Test-Path -LiteralPath $winPe -PathType Container
+        $usmtReady = Test-Path -LiteralPath $usmt -PathType Container
+        $ready = [bool]($kitsRoot -and $deploymentToolsReady -and $winPeReady -and $usmtReady)
+        Write-Status "ADK readiness: KitsRoot10='$kitsRoot'; DeploymentTools=$deploymentToolsReady; WinPE=$winPeReady; USMT=$usmtReady; Ready=$ready"
+        return $ready
     }
 
     [InstallADK] Get() {
@@ -1754,24 +1747,22 @@ class InstallReportBuilder {
     [bool] Test() {
 
         Write-Status "Checking Report Builder installation status"
-        $_path = $this.Path
-
-        if (-not (Test-Path -Path $_path)) {
-            return $false
-        }
 
         try {
 
-            $product = Get-InstalledProducts | Where-Object { $_.ProductName -like "*Report Builder*" }
+            $product = Get-InstalledProducts | Where-Object { $_.ProductName -like "*Report Builder*" } | Select-Object -First 1
 
             if (-not $product) {
+                Write-Status "Report Builder readiness: installed product not found"
                 return $false
             }
 
+            Write-Status "Report Builder readiness: ProductName='$($product.ProductName)'; Version=$($product.VersionString); ProductCode=$($product.ProductCode); Ready=True"
             return $true
        
         }
         catch {
+            Write-Status "Report Builder readiness probe failed: $($_.Exception.Message)"
             return $false
         }
     }

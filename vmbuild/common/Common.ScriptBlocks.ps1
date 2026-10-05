@@ -2114,6 +2114,10 @@ function Save-CMSetupLogsFromVm {
         On failure, files from C:\staging\DSC\ADKSetupLogs modified in the
         last eight hours are also pulled. Files over 16MB retain their first
         and last 5000 lines so one large Burn log cannot swamp PSDirect.
+        Phase 8 failures also capture a structured prerequisite snapshot
+        (ADK physical components, ODBC, Report Builder, IIS, reboot state,
+        and certificates) plus bounded tails from MSI, PBIRS, DISM, and CBS
+        logs. ConfigMgrPrereq.log is captured with the CM provider evidence.
         Baseline files are packaged into one guest ZIP; only its small manifest
         crosses PSDirect, and a separately bounded host worker copies the ZIP.
         On Phase 8 failure, collection also pulls bounded copies
@@ -2129,6 +2133,8 @@ function Save-CMSetupLogsFromVm {
             <VmName>-Phase<N>-<timestamp>-DSC_Log.log                 (always: tail 4000)
             <VmName>-Phase8-<timestamp>-ClientPackageTimeline.jsonl   (when package coverage runs)
             <VmName>-Phase<N>-<timestamp>-adksetup-*.log/.txt          (failure only)
+            <VmName>-Phase8-<timestamp>-PrerequisiteDiagnostics.json
+            <VmName>-Phase8-<timestamp>-Prereq-<installer>.log
             <VmName>-Phase8-<timestamp>-SMSProv.log, dmpdownloader.log, etc. (failure only)
             <VmName>-Phase8-<timestamp>-ConfigMgrUpdateDiagnostics.json
             <VmName>-Phase8-<timestamp>-ConfigMgrProviderState.json
@@ -2163,6 +2169,8 @@ function Save-CMSetupLogsFromVm {
             ClientPackageTimelineTail   = $false
             ClientPackageTimelineBundleName = $null
             AdkArtifacts   = @()
+            PrereqArtifacts = @()
+            PrerequisiteDiagnostics = $null
             CmArtifacts    = @()
             UpdateDiagnostics = $null
             BundlePath     = $null
@@ -2249,6 +2257,126 @@ function Save-CMSetupLogsFromVm {
                     $out.ClientPackageTimelineContent = (@($head) + @($marker) + @($tail)) -join "`r`n"
                 }
             }
+        }
+        if ($Mode -eq 'Failure' -and $Phase -eq 8) {
+            $prereq = [ordered]@{
+                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                ComputerName  = $env:COMPUTERNAME
+                ADK           = [ordered]@{}
+                ODBC          = [ordered]@{}
+                ReportBuilder = [ordered]@{}
+                IIS           = [ordered]@{}
+                PendingReboot = @()
+                Certificates  = [ordered]@{}
+                Errors        = @()
+            }
+            try {
+                $adkRootKey = Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots' -ErrorAction Stop
+                $prereq.ADK.KitsRoot10 = "$($adkRootKey.KitsRoot10)"
+            }
+            catch { $prereq.Errors += "ADK registry: $($_.Exception.Message)" }
+            $adkComponents = [ordered]@{
+                    DeploymentTools = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools'
+                    WinPE           = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment'
+                    USMT            = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool'
+                }
+            foreach ($component in $adkComponents.GetEnumerator()) {
+                $prereq.ADK[$component.Key] = [ordered]@{
+                    Path   = $component.Value
+                    Exists = [bool](Test-Path -LiteralPath $component.Value -PathType Container)
+                }
+            }
+            try {
+                $odbc = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18' -ErrorAction Stop
+                $prereq.ODBC.InstalledVersion = "$($odbc.InstalledVersion)"
+                $prereq.ODBC.RegistryPresent = $true
+            }
+            catch {
+                $prereq.ODBC.RegistryPresent = $false
+                $prereq.Errors += "ODBC: $($_.Exception.Message)"
+            }
+            try {
+                $uninstallRows = @()
+                foreach ($uninstallPath in @(
+                        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+                    )) {
+                    try { $uninstallRows += @(Get-ItemProperty $uninstallPath -ErrorAction Stop) } catch {}
+                }
+                $reportBuilder = $uninstallRows | Where-Object { $_.DisplayName -like '*Report Builder*' } | Select-Object -First 1
+                $prereq.ReportBuilder.Found = [bool]$reportBuilder
+                if ($reportBuilder) {
+                    $prereq.ReportBuilder.DisplayName = "$($reportBuilder.DisplayName)"
+                    $prereq.ReportBuilder.DisplayVersion = "$($reportBuilder.DisplayVersion)"
+                    $prereq.ReportBuilder.InstallLocation = "$($reportBuilder.InstallLocation)"
+                }
+            }
+            catch { $prereq.Errors += "Report Builder: $($_.Exception.Message)" }
+            try {
+                try { $w3svc = Get-Service -Name W3SVC -ErrorAction Stop } catch { $w3svc = $null }
+                $prereq.IIS.W3SVC = if ($w3svc) { "$($w3svc.Status)" } else { 'Absent' }
+                if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+                    foreach ($featureName in @('Web-Server', 'Web-WMI', 'Web-Net-Ext45', 'BITS-IIS-Ext')) {
+                        try { $feature = Get-WindowsFeature -Name $featureName -ErrorAction Stop } catch { $feature = $null }
+                        $prereq.IIS[$featureName] = if ($feature) { "$($feature.InstallState)" } else { 'Unknown' }
+                    }
+                }
+            }
+            catch { $prereq.Errors += "IIS: $($_.Exception.Message)" }
+            foreach ($pendingPath in @(
+                    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+                    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+                )) {
+                if (Test-Path -LiteralPath $pendingPath) { $prereq.PendingReboot += $pendingPath }
+            }
+            try {
+                $pendingFileRenames = @((Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' `
+                            -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations |
+                        Where-Object { $_ })
+                if ($pendingFileRenames.Count -gt 0) {
+                    $prereq.PendingReboot += "PendingFileRenameOperations=$($pendingFileRenames.Count)"
+                }
+            }
+            catch { $prereq.Errors += "Pending reboot: $($_.Exception.Message)" }
+            try {
+                $now = Get-Date
+                $webCerts = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop | Where-Object {
+                        $_.NotBefore -lt $now -and $_.NotAfter -gt $now -and
+                        ($_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.1')
+                    })
+                $prereq.Certificates.ValidWebServerCertificates = $webCerts.Count
+                Import-Module WebAdministration -ErrorAction Stop
+                if (Get-Command Get-WebBinding -ErrorAction SilentlyContinue) {
+                    $prereq.Certificates.IisHttpsBindings = @(Get-WebBinding -Protocol https -ErrorAction Stop).Count
+                }
+            }
+            catch { $prereq.Errors += "Certificates: $($_.Exception.Message)" }
+            try { $out.PrerequisiteDiagnostics = $prereq | ConvertTo-Json -Depth 8 }
+            catch { $out.PrerequisiteDiagnostics = "{`"CollectorSerializationError`":`"$($_.Exception.Message -replace '"', '\"')`"}" }
+
+            $prereqArtifacts = New-Object System.Collections.Generic.List[object]
+            foreach ($candidate in @(
+                    'C:\temp\reportbuilder.log',
+                    'C:\temp\odbcinstallation.log',
+                    'C:\temp\msoledbsql.install.log',
+                    'C:\staging\PBI.log',
+                    'C:\Windows\Logs\DISM\dism.log',
+                    'C:\Windows\Logs\CBS\CBS.log'
+                )) {
+                try { $artifact = Get-Item -LiteralPath $candidate -ErrorAction Stop } catch { $artifact = $null }
+                if (-not $artifact) { continue }
+                $tailLines = if ($artifact.Length -gt 8MB) { 3000 } else { 8000 }
+                $content = (Get-Content -LiteralPath $artifact.FullName -Tail $tailLines -ErrorAction SilentlyContinue) -join "`r`n"
+                $prereqArtifacts.Add([pscustomobject]@{
+                        Name             = $artifact.Name
+                        SourcePath       = $artifact.FullName
+                        Bytes            = $artifact.Length
+                        LastWriteTimeUtc = $artifact.LastWriteTimeUtc
+                        TailLines        = $tailLines
+                        Content          = $content
+                    })
+            }
+            $out.PrereqArtifacts = @($prereqArtifacts)
         }
         if ($Mode -eq 'Failure' -and (Test-Path 'C:\staging\DSC\ADKSetupLogs' -PathType Container)) {
             $artifacts = New-Object System.Collections.Generic.List[object]
@@ -2507,6 +2635,13 @@ function Save-CMSetupLogsFromVm {
                     Add-Member -InputObject $artifact -NotePropertyName BundleName -NotePropertyValue $bundleName -Force
                     Set-Content -LiteralPath (Join-Path $bundleRoot $bundleName) -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
                 }
+                $prereqIndex = 0
+                foreach ($artifact in @($out.PrereqArtifacts)) {
+                    $prereqIndex++
+                    $bundleName = "Prereq-$prereqIndex-$($artifact.Name)"
+                    Add-Member -InputObject $artifact -NotePropertyName BundleName -NotePropertyValue $bundleName -Force
+                    Set-Content -LiteralPath (Join-Path $bundleRoot $bundleName) -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
+                }
 
                 $bundleFiles = @(Get-ChildItem -LiteralPath $bundleRoot -File -ErrorAction Stop)
                 if ($bundleFiles.Count -gt 0) {
@@ -2524,6 +2659,7 @@ function Save-CMSetupLogsFromVm {
                     $out.DscLogContent = $null
                     $out.ClientPackageTimelineContent = $null
                     foreach ($artifact in @($out.AdkArtifacts)) { $artifact.Content = $null }
+                    foreach ($artifact in @($out.PrereqArtifacts)) { $artifact.Content = $null }
                 }
                 else {
                     Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -2542,6 +2678,7 @@ function Save-CMSetupLogsFromVm {
                 $out.DscLogContent = $null
                 $out.ClientPackageTimelineContent = $null
                 foreach ($artifact in @($out.AdkArtifacts)) { $artifact.Content = $null }
+                foreach ($artifact in @($out.PrereqArtifacts)) { $artifact.Content = $null }
             }
         }
         [pscustomobject]$out
@@ -2630,6 +2767,9 @@ function Save-CMSetupLogsFromVm {
                 foreach ($artifact in @($r.AdkArtifacts)) {
                     if ($artifact.BundleName) { $artifact.Content = & $readBundleContent $artifact.BundleName }
                 }
+                foreach ($artifact in @($r.PrereqArtifacts)) {
+                    if ($artifact.BundleName) { $artifact.Content = & $readBundleContent $artifact.BundleName }
+                }
                 $bundleReady = $true
                 $baselineCaptureStatus = 'Completed'
             }
@@ -2660,6 +2800,8 @@ function Save-CMSetupLogsFromVm {
             DscLogExists  = $false
             ClientPackageTimelineExists = $false
             AdkArtifacts  = @()
+            PrereqArtifacts = @()
+            PrerequisiteDiagnostics = $null
         }
         $baselineStatusData = [ordered]@{
             CapturedAtUtc     = (Get-Date).ToUniversalTime().ToString('o')
@@ -3063,6 +3205,30 @@ function Save-CMSetupLogsFromVm {
             }
             catch {
                 Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write ADK diagnostic '$safeName': $_" -Warning
+            }
+        }
+        if ($r.PSObject.Properties.Name -contains 'PrerequisiteDiagnostics' -and $r.PrerequisiteDiagnostics) {
+            $dest = Join-Path $logDir "$base-PrerequisiteDiagnostics.json"
+            try {
+                Set-Content -LiteralPath $dest -Value $r.PrerequisiteDiagnostics -Encoding UTF8 -ErrorAction Stop
+                Write-Log "[Phase $Phase]: $VmName`: Captured prerequisite state -> $dest" -OutputStream
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write prerequisite state: $_" -Warning
+            }
+        }
+        if ($r.PSObject.Properties.Name -contains 'PrereqArtifacts') {
+            foreach ($artifact in @($r.PrereqArtifacts | Where-Object { $null -ne $_ })) {
+                $safeName = [IO.Path]::GetFileName("$($artifact.Name)")
+                if (-not $safeName -or -not $artifact.Content) { continue }
+                $dest = Join-Path $logDir "$base-Prereq-$safeName"
+                try {
+                    Set-Content -LiteralPath $dest -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
+                    Write-Log "[Phase $Phase]: $VmName`: Pulled prerequisite diagnostic $safeName ($($artifact.TailLines) tail lines) -> $dest" -OutputStream
+                }
+                catch {
+                    Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write prerequisite diagnostic '$safeName': $_" -Warning
+                }
             }
         }
     }
