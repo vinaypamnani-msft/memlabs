@@ -3458,7 +3458,8 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
         $clientVMs = @($clientByName.Values)
 
-        $products = ($clientVMs.operatingSystem | Select-Object -Unique) + ($clientVMs.sqlversion | Select-Object -Unique)
+        $products = @($clientVMs.operatingSystem | Select-Object -Unique) +
+            @($clientVMs.sqlversion | Select-Object -Unique)
 
         # Filter out Linux OS names — WSUS has no products for Ubuntu/Linux
         $products = @($products | Where-Object { $_ -and $_ -notmatch '^Ubuntu|^CentOS|^RHEL|^Debian|^Linux' })
@@ -4176,9 +4177,12 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             if ($catalogHasOurProducts) {
                 Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) and products already in catalog — skipping sync 1 wait"
             }
-            else {
+            elseif ($isTopLevel) {
                 Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) — triggering background sync 1 and NOT waiting"
                 Invoke-FullSync
+            }
+            else {
+                Write-DscStatus "$Tag Hidden downstream Primary (parent=$($ThisVM.parentSiteCode)) - not forcing sync 1 before the upstream subscription/catalog replicates"
             }
             $sync1Done = $true
         }

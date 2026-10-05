@@ -233,7 +233,7 @@ Assert-True ($installSupText -match 'Confirm-CMWsusPoolHardening') `
     'Install-SUP no longer reapplies WsusPool hardening after role installation.'
 foreach ($setting in @('recycling.periodicRestart.privateMemory', 'recycling.periodicRestart.requests',
         'recycling.periodicRestart.time', 'queueLength', 'processModel.idleTimeout',
-        'startMode', 'failure.rapidFailProtection')) {
+        'failure.rapidFailProtection')) {
     Assert-True ($wsusPoolText.Contains($setting)) "WsusPool hardening dropped '$setting'."
 }
 Assert-True ($wsusPoolText -match '(?s)PSObject\.Properties\[\$Name\].+?PSObject\.Properties\[''Value''\]') `

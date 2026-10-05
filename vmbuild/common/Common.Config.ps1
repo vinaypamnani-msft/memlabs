@@ -1569,8 +1569,21 @@ function Add-Phase8SoftwareUpdateProductMetadata {
 
         $pushVm = $vm
         $pushRequested = Test-PushClientRequested -VM $vm
+        $pushPropertyIsAuthoritative = $vm.PSObject.Properties.Name -contains 'pushClient'
+        $vmName = "$($vm.vmName)".Trim()
+        if ($vmName -and -not $configuredNames.ContainsKey($vmName.ToUpperInvariant())) {
+            try {
+                $rawNote = Get-VMNote -VMName $vmName
+                if ($rawNote) {
+                    $pushPropertyIsAuthoritative = $rawNote.PSObject.Properties.Name -contains 'pushClient'
+                }
+            }
+            catch {
+                Write-Log "SUP product inventory: could not read raw VM note for '$vmName'; preserving normalized pushClient=$($vm.pushClient). $($_.Exception.Message)" -LogOnly -Warning
+            }
+        }
         if (-not $pushRequested -and
-            -not ($vm.PSObject.Properties.Name -contains 'pushClient') -and
+            -not $pushPropertyIsAuthoritative -and
             $vm.role -eq 'DomainMember') {
             $vmOptions = if ($vm.cmOptions) { $vm.cmOptions } else { $Config.cmOptions }
             if ($vmOptions -and $vmOptions.pushClientToDomainMembers -eq $true) {

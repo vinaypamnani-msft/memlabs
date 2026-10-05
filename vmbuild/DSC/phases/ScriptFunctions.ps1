@@ -1835,9 +1835,13 @@ function Confirm-CMWsusPoolHardening {
                 @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
                 @{ Name = 'queueLength'; Value = 25000 }
                 @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
-                @{ Name = 'startMode'; Value = 'AlwaysRunning' }
                 @{ Name = 'failure.rapidFailProtection'; Value = $false }
             )
+            # ConfigureWSUS also sets startMode=AlwaysRunning. Do not hard-gate it
+            # here: on Server 2022 WebAdministration returns no value for that
+            # attribute through Get-ItemProperty even while appcmd reports
+            # AlwaysRunning. Pool state plus the recycle/queue settings above are
+            # the portable convergence surface.
             foreach ($setting in $settings) {
                 $current = Get-WsusPoolPropertyValue -Path $poolPath -Name $setting.Name
                 if ("$current" -ne "$($setting.Value)") {
@@ -1859,15 +1863,14 @@ function Confirm-CMWsusPoolHardening {
             $queueLength = [long](Get-WsusPoolPropertyValue -Path $poolPath -Name queueLength)
             $idleTimeout = [TimeSpan](Get-WsusPoolPropertyValue -Path $poolPath `
                     -Name processModel.idleTimeout)
-            $startMode = "$(Get-WsusPoolPropertyValue -Path $poolPath -Name startMode)"
             $rapidFailProtection = [bool](Get-WsusPoolPropertyValue -Path $poolPath `
                     -Name failure.rapidFailProtection)
             $state = "$((Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value)"
             $result.Ready = $privateMemory -eq 0 -and $requests -eq 0 -and
                 $periodicRestart -eq [TimeSpan]::Zero -and $queueLength -ge 25000 -and
-                $idleTimeout -eq [TimeSpan]::Zero -and $startMode -eq 'AlwaysRunning' -and
-                -not $rapidFailProtection -and $state -eq 'Started'
-            $result.Detail = "privateMemory=$privateMemory, requests=$requests, periodicRestart=$periodicRestart, queueLength=$queueLength, idleTimeout=$idleTimeout, startMode=$startMode, rapidFailProtection=$rapidFailProtection, state=$state"
+                $idleTimeout -eq [TimeSpan]::Zero -and -not $rapidFailProtection -and
+                $state -eq 'Started'
+            $result.Detail = "privateMemory=$privateMemory, requests=$requests, periodicRestart=$periodicRestart, queueLength=$queueLength, idleTimeout=$idleTimeout, rapidFailProtection=$rapidFailProtection, state=$state"
         }
         catch {
             $result.Error = $_.Exception.Message

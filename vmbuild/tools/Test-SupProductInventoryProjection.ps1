@@ -35,6 +35,11 @@ function Assert-True {
 }
 function Write-Log { param($Message, [switch]$LogOnly, [switch]$Warning) }
 function Get-VMDeployedNetwork { param($VmName, $Domain) return $null }
+$script:RawNotes = @{}
+function Get-VMNote {
+    param([string] $VMName)
+    return $script:RawNotes[$VMName]
+}
 
 . (Import-TestFunction -Path $configPath -Name 'Test-PushClientRequested')
 . (Import-TestFunction -Path $configPath -Name 'Get-EligiblePushSites')
@@ -61,15 +66,15 @@ $config = [pscustomobject]@{
 $inventory = @(
     [pscustomobject]@{
         vmName = 'W10'; role = 'DomainMember'; domain = 'upgrade.test'
-        operatingSystem = 'Windows 10 Latest (64-bit)'; network = '10.20.1.0'
+        operatingSystem = 'Windows 10 Latest (64-bit)'; network = '10.20.1.0'; pushClient = $false
     },
     [pscustomobject]@{
         vmName = 'W11'; role = 'DomainMember'; domain = 'upgrade.test'
-        operatingSystem = 'Windows 11 Latest'; network = '10.20.1.0'
+        operatingSystem = 'Windows 11 Latest'; network = '10.20.1.0'; pushClient = $false
     },
     [pscustomobject]@{
         vmName = 'SQL1'; role = 'DomainMember'; domain = 'upgrade.test'
-        operatingSystem = 'Server 2022'; sqlVersion = 'SQL Server 2019'; network = '10.20.1.0'
+        operatingSystem = 'Server 2022'; sqlVersion = 'SQL Server 2019'; network = '10.20.1.0'; pushClient = $false
     },
     [pscustomobject]@{
         vmName = 'OPT-OUT'; role = 'DomainMember'; domain = 'upgrade.test'
@@ -80,6 +85,12 @@ $inventory = @(
         operatingSystem = 'Windows 11 Latest'; network = '10.20.1.0'
     }
 )
+$script:RawNotes['W10'] = [pscustomobject]@{ vmName = 'W10'; role = 'DomainMember' }
+$script:RawNotes['W11'] = [pscustomobject]@{ vmName = 'W11'; role = 'DomainMember' }
+$script:RawNotes['SQL1'] = [pscustomobject]@{ vmName = 'SQL1'; role = 'DomainMember' }
+$script:RawNotes['OPT-OUT'] = [pscustomobject]@{
+    vmName = 'OPT-OUT'; role = 'DomainMember'; pushClient = $false
+}
 
 Add-Phase8SoftwareUpdateProductMetadata -Config $config -ExistingVMs $inventory
 $projected = @($config.phase8SoftwareUpdateProductInventory)
@@ -99,5 +110,9 @@ Assert-True ($perfloading -match 'phase8SoftwareUpdateProductInventory') `
     'perfloading does not consume projected existing-client product demand.'
 Assert-True ($perfloading -match '(?s)\$clientByName.+?\$deployConfig\.virtualMachines.+?\$clientVMs') `
     'perfloading does not de-duplicate projected and configured clients.'
+Assert-True ($perfloading -match '(?s)\$products\s*=\s*@\(\$clientVMs\.operatingSystem.+?\+\s*@\(\$clientVMs\.sqlversion') `
+    'perfloading can concatenate scalar OS and SQL product names instead of building two arrays.'
+Assert-True ($perfloading -match '(?s)if \(\$ThisVM\.hidden\).+?elseif \(\$isTopLevel\).+?Invoke-FullSync.+?Hidden downstream Primary') `
+    'A hidden downstream Primary can still force a WSUS sync before its upstream subscription replicates.'
 
 Write-Host 'PASS -- partial configs retain hierarchy-wide existing-client SUP product demand.'
