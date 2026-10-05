@@ -262,6 +262,8 @@ Assert-True ($rolesText -match 'Get-CMReportingPointReadiness.+?\.Ready') `
     'InstallRoles quick paths still trust Reporting Point configuration rows.'
 Assert-True ($rolesText -match '\$supResult\s*=\s*@\(Install-SUP') `
     'InstallRoles does not consume the SUP physical-readiness result.'
+Assert-True ($rolesText -match '(?s)\$accountDomain.+?NetbiosDomainName.+?\$domainUserName') `
+    'SUP computer-account grants no longer use the NetBIOS domain name.'
 Assert-True (([regex]::Matches($workflowText, 'Stopping before boundary, content, and perfloading work').Count) -eq 2) `
     'Both site-server workflow branches must stop after incomplete DP/MP installation.'
 Assert-True ($workflowText -match 'Additional SMS Provider installation did not converge.+?-Failure') `

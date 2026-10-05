@@ -9,6 +9,7 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get required values from config
 $DomainFullName = $deployConfig.vmOptions.domainName
+$NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
@@ -313,7 +314,8 @@ foreach ($SUP in $SUPs) {
     # the trailing '$' New-CMAdministrativeUser's AD validation fails every run with
     # "Validation of input parameters failed. Cannot continue." (the account never
     # resolves), so the intended grant silently never happened.
-    $domainUserName = "$($DomainFullName)\$($SUP.ServerName.Trim())" + '$'
+    $accountDomain = if ($NetbiosDomainName) { $NetbiosDomainName } else { $DomainFullName }
+    $domainUserName = "$accountDomain\$($SUP.ServerName.Trim())" + '$'
     Write-DscStatus "Installing SUP on $SUPFQDN"
     $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$domainUserName*" } -ErrorAction SilentlyContinue
 
