@@ -74,10 +74,23 @@
         if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
             $featureRoles += "Site Server"
         }
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary") {
+            $featureRoles += @("Distribution point", "Management point")
+        }
+
+        if ($ThisVM.installDP -eq $true -or $ThisVM.enablePullDP -eq $true) {
+            $featureRoles += "Distribution point"
+        }
+
+        if ($ThisVM.installMP -eq $true) {
+            $featureRoles += "Management point"
+        }
 
         if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") {
             $featureRoles += "WSUS"
         }
+
+        $featureRoles = @($featureRoles | Select-Object -Unique)
 
         # Per-VM cmOptions (multi-hierarchy safe); $cmo is reused below for the
         # CM source-folder ($CM) selection.

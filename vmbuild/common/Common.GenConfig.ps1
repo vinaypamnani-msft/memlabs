@@ -1,4 +1,18 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function Test-ConfigMgrRemoteRoleRequested {
+    param([object] $VM)
+
+    if (-not $VM) { return $false }
+    return [bool](
+        $VM.installDP -eq $true -or
+        $VM.enablePullDP -eq $true -or
+        $VM.installMP -eq $true -or
+        $VM.installSUP -eq $true -or
+        $VM.installRP -eq $true -or
+        $VM.installSMSProv -eq $true
+    )
+}
+
 Function Get-ValidSubnets {
     [CmdletBinding()]
     param (
@@ -1117,7 +1131,7 @@ function ConvertTo-DeployConfigEx {
                 }
             }
             "SiteSystem" {
-                if ($thisVM.InstallSUP) {
+                if (Test-ConfigMgrRemoteRoleRequested -VM $thisVM) {
                     $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
                     Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
 
@@ -1125,7 +1139,9 @@ function ConvertTo-DeployConfigEx {
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
                     }
+                }
 
+                if ($thisVM.InstallSUP) {
                     $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
 
                     $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM

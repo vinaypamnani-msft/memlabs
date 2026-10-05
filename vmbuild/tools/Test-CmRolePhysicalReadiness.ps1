@@ -11,8 +11,10 @@ $functionsPath = Join-Path $RootPath 'DSC\phases\ScriptFunctions.ps1'
 $installerPath = Join-Path $RootPath 'DSC\phases\InstallDPMPClient.ps1'
 $rolesPath = Join-Path $RootPath 'DSC\phases\InstallRoles.ps1'
 $workflowPath = Join-Path $RootPath 'DSC\phases\ScriptWorkflow.ps1'
+$phase3Path = Join-Path $RootPath 'DSC\phases\Phase3.ps1'
+$genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
 
-function Import-TestFunction {
+function Get-TestFunctionText {
     param([string] $Path, [string] $Name)
     $tokens = $null
     $errors = $null
@@ -23,7 +25,11 @@ function Import-TestFunction {
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
             }, $true))
     if ($functions.Count -ne 1) { throw "Expected one $Name definition, found $($functions.Count)." }
-    [scriptblock]::Create($functions[0].Extent.Text)
+    return $functions[0].Extent.Text
+}
+function Import-TestFunction {
+    param([string] $Path, [string] $Name)
+    [scriptblock]::Create((Get-TestFunctionText -Path $Path -Name $Name))
 }
 function Assert-True {
     param([bool] $Condition, [string] $Message)
@@ -39,6 +45,8 @@ function Assert-False {
 . (Import-TestFunction -Path $functionsPath -Name 'Get-CMSoftwareUpdatePointReadiness')
 . (Import-TestFunction -Path $functionsPath -Name 'Get-CMReportingPointReadiness')
 . (Import-TestFunction -Path $functionsPath -Name 'Wait-CMRoleRegistered')
+. (Import-TestFunction -Path $functionsPath -Name 'Get-CMRoleRequiredWindowsFeatures')
+. (Import-TestFunction -Path $genConfigPath -Name 'Test-ConfigMgrRemoteRoleRequested')
 
 $script:DpConfiguration = $null
 $script:DpProviderInfo = $null
@@ -73,13 +81,19 @@ function Get-WmiObject {
     param([string] $Namespace, [string] $Class, $ErrorAction)
     if ($Class -eq 'SMS_DistributionPointInfo') { return $script:DpProviderInfo }
 }
-function Test-Path {
-    param([string] $LiteralPath, $PathType, $ErrorAction)
-    if ($LiteralPath -like '\\*\SMS_DP$') { return $script:DpShareReady }
-    return $false
-}
 function Invoke-Command {
     param([string] $ComputerName, [scriptblock] $ScriptBlock, [object[]] $ArgumentList, $ErrorAction)
+    return $script:GuestState
+}
+function Invoke-CMRoleTargetCommand {
+    param(
+        [string] $ComputerName,
+        [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList,
+        [int] $OpenTimeoutMs,
+        [int] $OperationTimeoutMs
+    )
+    if ("$ScriptBlock" -match 'SMS_DP') { return $script:DpShareReady }
     return $script:GuestState
 }
 
@@ -145,18 +159,83 @@ $functionsText = Get-Content -LiteralPath $functionsPath -Raw
 $installerText = Get-Content -LiteralPath $installerPath -Raw
 $rolesText = Get-Content -LiteralPath $rolesPath -Raw
 $workflowText = Get-Content -LiteralPath $workflowPath -Raw
-Assert-True ($functionsText -match "(?s)function Install-DP.+?DP physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
+$phase3Text = Get-Content -LiteralPath $phase3Path -Raw
+$genConfigText = Get-Content -LiteralPath $genConfigPath -Raw
+$targetCommandText = Get-TestFunctionText -Path $functionsPath -Name 'Invoke-CMRoleTargetCommand'
+$prerequisiteStateText = Get-TestFunctionText -Path $functionsPath -Name 'Get-CMRoleTargetPrerequisiteState'
+$confirmPrerequisitesText = Get-TestFunctionText -Path $functionsPath -Name 'Confirm-CMRoleTargetPrerequisites'
+$installDpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-DP'
+$installPullDpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-PullDP'
+$installMpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-MP'
+$installSupText = Get-TestFunctionText -Path $functionsPath -Name 'Install-SUP'
+$installSrpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-SRP'
+$dpFeatures = @(Get-CMRoleRequiredWindowsFeatures -RoleName DP)
+$mpFeatures = @(Get-CMRoleRequiredWindowsFeatures -RoleName MP)
+foreach ($feature in @('Web-Server', 'Web-Windows-Auth', 'Web-WMI', 'Rdc', 'Web-Mgmt-Service')) {
+    Assert-True ($feature -in $dpFeatures) "DP prerequisite contract dropped Windows feature '$feature'."
+}
+foreach ($feature in @('BITS', 'BITS-IIS-Ext', 'Web-Asp-Net45', 'Web-Net-Ext45')) {
+    Assert-True ($feature -in $mpFeatures) "MP prerequisite contract dropped Windows feature '$feature'."
+}
+Assert-True ($phase3Text -match '(?s)installDP.+?Distribution point') `
+    'Phase 3 no longer projects installDP into the Distribution point prerequisite feature set.'
+Assert-True ($phase3Text -match '(?s)enablePullDP.+?Distribution point') `
+    'Phase 3 no longer projects pull-DP intent into the Distribution point prerequisite feature set.'
+Assert-True ($phase3Text -match '(?s)installMP.+?Management point') `
+    'Phase 3 no longer projects installMP into the Management point prerequisite feature set.'
+Assert-True ($phase3Text -match '(?s)role -in "CAS", "Primary", "Secondary".+?Distribution point.+?Management point') `
+    'Phase 3 no longer pre-stages prerequisites for automatic site-server DP/MP placement.'
+foreach ($roleProperty in @('installDP', 'enablePullDP', 'installMP', 'installSUP', 'installRP', 'installSMSProv')) {
+    $fixture = [pscustomobject]@{ $roleProperty = $true }
+    Assert-True (Test-ConfigMgrRemoteRoleRequested -VM $fixture) `
+        "Remote ConfigMgr role prerequisite projection dropped '$roleProperty'."
+}
+Assert-False (Test-ConfigMgrRemoteRoleRequested -VM ([pscustomobject]@{ role = 'SiteSystem' })) `
+    'A bare site system was incorrectly classified as requiring remote role installation access.'
+Assert-True ($genConfigText -match '(?s)"SiteSystem".+?Test-ConfigMgrRemoteRoleRequested.+?Get-SiteServerForSiteCode.+?-LocalAdminAccounts') `
+    'Remote role targets no longer receive the owning site server computer account as a local administrator.'
+Assert-True ([bool]$prerequisiteStateText) `
+    'Role installation no longer has a shared producer-prerequisite probe.'
+Assert-True ($targetCommandText -match '(?s)OpenTimeout.+?OperationTimeout.+?New-PSSessionOption') `
+    'Role-target probes no longer have explicit WSMan open/operation bounds.'
+foreach ($evidence in @('ADMIN`$Write', 'ManagementScope', 'RebootPending', 'ExpectedSiteServerAccount',
+        'ExpectedComputerName', 'IdentityReady', 'MissingFeatures')) {
+    Assert-True ($prerequisiteStateText.Contains($evidence)) "Producer prerequisite diagnostics dropped '$evidence'."
+}
+Assert-True ($prerequisiteStateText -match 'InstallFeatureStatus\*\.txt') `
+    'Producer prerequisites no longer consume the authoritative Phase 3 feature receipt.'
+Assert-False ($prerequisiteStateText -match 'Get-WindowsFeature') `
+    'Phase 8 producer prerequisites regressed to an unbounded ServerManager/CBS feature scan.'
+Assert-True ($confirmPrerequisitesText -match '(?s)after 2 bounded attempts.+?Role configuration was not requested') `
+    'Producer prerequisites no longer retry boundedly and fail before requesting invalid role state.'
+Assert-True ($installDpText -match '(?s)Confirm-CMRoleTargetPrerequisites.+?RoleName ''DP''.+?Add-CMDistributionPoint') `
+    'Install-DP does not gate role creation on producer prerequisites.'
+Assert-True ($installPullDpText -match '(?s)Confirm-CMRoleTargetPrerequisites.+?RoleName ''DP''.+?Add-CMDistributionPoint') `
+    'Install-PullDP does not gate role creation on producer prerequisites.'
+Assert-True ($installMpText -match '(?s)Confirm-CMRoleTargetPrerequisites.+?RoleName ''MP''.+?Add-CMManagementPoint') `
+    'Install-MP does not gate role creation on producer prerequisites.'
+Assert-True ($installSupText -match '(?s)Confirm-CMRoleTargetPrerequisites.+?RoleName ''SUP''.+?Add-CMSoftwareUpdatePoint') `
+    'Install-SUP does not gate role creation on producer prerequisites.'
+Assert-True ($installSrpText -match '(?s)Confirm-CMRoleTargetPrerequisites.+?RoleName ''RP''.+?Add-CMReportingServicePoint') `
+    'Install-SRP does not gate role creation on producer prerequisites.'
+Assert-True ($installDpText -match "(?s)DP physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
     'Install-DP no longer waits for bounded physical readiness.'
-Assert-True ($functionsText -match "(?s)function Install-MP.+?MP physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
+Assert-True ($installPullDpText -match "(?s)Pull DP physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
+    'Install-PullDP no longer waits for bounded physical readiness.'
+Assert-True ($installMpText -match "(?s)MP physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
     'Install-MP no longer waits for bounded physical readiness.'
-Assert-True ($functionsText -match "(?s)function Install-SUP.+?SUP physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
+Assert-True ($installSupText -match "(?s)SUP physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
     'Install-SUP no longer waits for bounded physical readiness.'
-Assert-True ($functionsText -match "(?s)function Install-SRP.+?Reporting Point physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
+Assert-True ($installSrpText -match "(?s)Reporting Point physical readiness.+?-TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2") `
     'Install-SRP no longer waits for bounded physical readiness.'
 Assert-True (([regex]::Matches($functionsText, 'Restart-CMRoleProvisioning -RoleName').Count) -ge 4) `
     'Asynchronous role readiness no longer retries Site Component Manager.'
 Assert-True ($functionsText -match 'function Write-CMRoleProvisioningDiagnostics') `
     'Physical-readiness failures no longer capture bounded producer/target diagnostics.'
+foreach ($targetEvidence in @('SMS_BOOTSTRAP.log', 'Windows\Logs\DISM\dism.log', 'Windows\Logs\CBS\CBS.log',
+        'FeatureReceipts', 'PendingReboot')) {
+    Assert-True ($functionsText.Contains($targetEvidence)) "Role-target diagnostics dropped '$targetEvidence'."
+}
 Assert-True (([regex]::Matches($functionsText, 'Write-CMRoleProvisioningDiagnostics -RoleName').Count) -ge 5) `
     'Retry and terminal physical-readiness failures are not both diagnosed.'
 Assert-True ($installerText -match 'Get-CMDistributionPointReadiness.+?\.Ready') `

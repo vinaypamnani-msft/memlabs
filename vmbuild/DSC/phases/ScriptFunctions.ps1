@@ -1185,6 +1185,471 @@ function Wait-CMRoleRegistered {
     return $result
 }
 
+function Invoke-CMRoleTargetCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ComputerName,
+        [Parameter(Mandatory = $true)]
+        [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList = @(),
+        [ValidateRange(1000, 300000)]
+        [int] $OpenTimeoutMs = 10000,
+        [ValidateRange(1000, 300000)]
+        [int] $OperationTimeoutMs = 45000
+    )
+
+    $shortName = ($ComputerName -split '\.')[0]
+    if ($shortName -ieq $env:COMPUTERNAME) {
+        return & $ScriptBlock @ArgumentList
+    }
+
+    $sessionOption = New-PSSessionOption -OpenTimeout $OpenTimeoutMs `
+        -OperationTimeout $OperationTimeoutMs -CancelTimeout 5000
+    return Invoke-Command -ComputerName $ComputerName -ScriptBlock $ScriptBlock `
+        -ArgumentList $ArgumentList -SessionOption $sessionOption -ErrorAction Stop
+}
+
+function Get-CMRoleRequiredWindowsFeatures {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('DP', 'MP', 'SUP', 'RP')]
+        [string] $RoleName
+    )
+
+    switch ($RoleName) {
+        'DP' {
+            return @(
+                'Web-Server', 'Web-WebServer', 'Web-Common-Http', 'Web-Static-Content',
+                'Web-Default-Doc', 'Web-Dir-Browsing', 'Web-Http-Errors', 'Web-Http-Redirect',
+                'Web-Mgmt-Tools', 'Web-Mgmt-Compat', 'Web-Metabase', 'Web-Windows-Auth',
+                'Web-WMI', 'Web-ISAPI-Ext', 'Web-Scripting-Tools', 'Rdc',
+                'Web-Mgmt-Service', 'Web-Net-Ext', 'Web-Net-Ext45'
+            )
+        }
+        'MP' {
+            return @(
+                'BITS', 'BITS-IIS-Ext', 'Web-WMI', 'Web-Metabase',
+                'Web-Asp-Net45', 'Web-Net-Ext', 'Web-Net-Ext45'
+            )
+        }
+        default {
+            return @()
+        }
+    }
+}
+
+function Get-CMRoleTargetPrerequisiteState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ServerFQDN,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('DP', 'MP', 'SUP', 'RP')]
+        [string] $RoleName
+    )
+
+    $errors = @()
+    $warnings = @()
+    $shortName = ($ServerFQDN -split '\.')[0]
+    $isLocal = $shortName -ieq $env:COMPUTERNAME
+    $dnsAddresses = @()
+    $dnsReady = $false
+    $rpcReady = $false
+    $smbReady = $false
+    $winRmReady = $false
+    $adminShareWriteReady = $false
+    $wmiReady = $false
+    $guestProbeReady = $false
+    $identityReady = $false
+    $siteServerAdmin = $false
+    $missingFeatures = @()
+    $featureEvidence = 'not measured'
+    $pendingReboot = @()
+    $roleSurfaceReady = $false
+    $roleSurfaceDetail = 'not measured'
+
+    try {
+        $dnsAddresses = @([Net.Dns]::GetHostAddresses($ServerFQDN) |
+                ForEach-Object { $_.IPAddressToString } |
+                Where-Object { $_ } |
+                Select-Object -Unique)
+        $dnsReady = $dnsAddresses.Count -gt 0
+    }
+    catch {
+        $errors += "DNS: $($_.Exception.Message)"
+    }
+
+    if ($isLocal) {
+        $rpcReady = $true
+        $smbReady = $true
+        $winRmReady = $true
+    }
+    else {
+        $rpcReady = Test-TcpPortFast -ComputerName $ServerFQDN -Port 135 -TimeoutMs 3000 -Retries 2
+        $smbReady = Test-TcpPortFast -ComputerName $ServerFQDN -Port 445 -TimeoutMs 3000 -Retries 2
+        $winRmReady = Test-TcpPortFast -ComputerName $ServerFQDN -Port 5985 -TimeoutMs 3000 -Retries 2
+    }
+
+    $adminProbePath = if ($isLocal) {
+        Join-Path $env:windir "Temp\MemLabs-CMRolePrereq-$([guid]::NewGuid().ToString('N')).tmp"
+    }
+    else {
+        "\\$ServerFQDN\ADMIN`$\Temp\MemLabs-CMRolePrereq-$([guid]::NewGuid().ToString('N')).tmp"
+    }
+    $adminProbeJob = $null
+    try {
+        $adminProbeJob = Start-Job -ScriptBlock {
+            param($Path)
+            $ready = $false
+            $probeError = $null
+            $cleanupError = $null
+            try {
+                [IO.File]::WriteAllText($Path, 'MemLabs ConfigMgr role prerequisite probe')
+                $ready = [bool][IO.File]::Exists($Path)
+            }
+            catch {
+                $probeError = $_.Exception.Message
+            }
+            finally {
+                try {
+                    if ([IO.File]::Exists($Path)) { [IO.File]::Delete($Path) }
+                }
+                catch { $cleanupError = $_.Exception.Message }
+            }
+            [pscustomobject]@{
+                Ready        = $ready
+                Error        = $probeError
+                CleanupError = $cleanupError
+            }
+        } -ArgumentList $adminProbePath
+        if (-not (Wait-Job -Job $adminProbeJob -Timeout 20)) {
+            Stop-Job -Job $adminProbeJob -ErrorAction SilentlyContinue
+            $errors += "ADMIN`$ write: timed out after 20 seconds"
+        }
+        else {
+            $adminProbe = @(Receive-Job -Job $adminProbeJob -ErrorAction Stop) | Select-Object -Last 1
+            $adminShareWriteReady = [bool]($adminProbe -and $adminProbe.Ready)
+            if (-not $adminShareWriteReady -and $adminProbe.Error) {
+                $errors += "ADMIN`$ write: $($adminProbe.Error)"
+            }
+            if ($adminProbe.CleanupError) {
+                $warnings += "ADMIN`$ cleanup: $($adminProbe.CleanupError)"
+            }
+        }
+    }
+    catch {
+        $errors += "ADMIN`$ write: $($_.Exception.Message)"
+    }
+    finally {
+        if ($adminProbeJob) {
+            if ($adminProbeJob.State -eq 'Running') {
+                Stop-Job -Job $adminProbeJob -ErrorAction SilentlyContinue
+            }
+            Remove-Job -Job $adminProbeJob -ErrorAction SilentlyContinue
+        }
+    }
+
+    try {
+        $scopePath = if ($isLocal) { '\\.\root\cimv2' } else { "\\$ServerFQDN\root\cimv2" }
+        $scope = [System.Management.ManagementScope]::new([string]$scopePath)
+        $scope.Options.Timeout = [TimeSpan]::FromSeconds(15)
+        $scope.Connect()
+        $query = [System.Management.ObjectQuery]::new('SELECT Caption, Version FROM Win32_OperatingSystem')
+        $options = [System.Management.EnumerationOptions]::new()
+        $options.Timeout = [TimeSpan]::FromSeconds(15)
+        $searcher = [System.Management.ManagementObjectSearcher]::new($scope, $query, $options)
+        try {
+            $results = $searcher.Get()
+            try {
+                $wmiReady = [bool]($results | Select-Object -First 1)
+            }
+            finally {
+                if ($results) { $results.Dispose() }
+            }
+        }
+        finally {
+            $searcher.Dispose()
+        }
+    }
+    catch {
+        $errors += "WMI: $($_.Exception.Message)"
+    }
+
+    $requirements = [pscustomobject]@{
+        RoleName                  = $RoleName
+        RequiredFeatures          = @(Get-CMRoleRequiredWindowsFeatures -RoleName $RoleName)
+        ExpectedSiteServerAccount = "$env:COMPUTERNAME`$"
+        ExpectedComputerName       = $shortName
+        CheckSiteServerAdmin      = -not $isLocal
+        ExpectedFqdn              = $ServerFQDN
+    }
+    $guestProbe = {
+        param($Requirements)
+
+        $probeErrors = @()
+        $probeWarnings = @()
+        $missing = @()
+        $featureEvidence = 'not required'
+        if (@($Requirements.RequiredFeatures).Count -gt 0) {
+            try {
+                $featureEvidence = 'no matching Phase 3 receipt'
+                $bestUnverified = @($Requirements.RequiredFeatures)
+                $markers = @(Get-ChildItem -Path 'C:\staging\InstallFeatureStatus*.txt' -File `
+                        -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
+                foreach ($marker in $markers) {
+                    try {
+                        $recorded = @((Get-Content -LiteralPath $marker.FullName -TotalCount 1 -ErrorAction Stop) -split ',' |
+                                ForEach-Object { "$_".Trim() } |
+                                Where-Object { $_ })
+                        $unverified = @($Requirements.RequiredFeatures | Where-Object { $recorded -notcontains $_ })
+                        if ($unverified.Count -lt $bestUnverified.Count) {
+                            $bestUnverified = @($unverified)
+                        }
+                        if ($unverified.Count -eq 0) {
+                            $featureEvidence = $marker.FullName
+                            $missing = @()
+                            break
+                        }
+                    }
+                    catch {
+                        $probeWarnings += "feature receipt $($marker.FullName): $($_.Exception.Message)"
+                    }
+                }
+                if ($featureEvidence -eq 'no matching Phase 3 receipt') {
+                    $missing = @($bestUnverified)
+                    $probeErrors += "Phase 3 feature-compliance receipt does not prove the $($Requirements.RoleName) feature set"
+                }
+
+                $appHostPath = Join-Path $env:windir 'system32\inetsrv\config\applicationHost.config'
+                if (-not (Test-Path -LiteralPath $appHostPath)) {
+                    $probeErrors += "IIS physical state: $appHostPath is missing"
+                }
+                else {
+                    $appHost = [xml](Get-Content -LiteralPath $appHostPath -Raw -ErrorAction Stop)
+                    $missingModules = @()
+                    foreach ($module in @($appHost.configuration.'system.webServer'.globalModules.add)) {
+                        $moduleImage = [Environment]::ExpandEnvironmentVariables("$($module.image)")
+                        if ($moduleImage -and -not (Test-Path -LiteralPath $moduleImage)) {
+                            $missingModules += "$($module.name)=$moduleImage"
+                        }
+                    }
+                    if ($missingModules.Count -gt 0) {
+                        $probeErrors += "IIS global modules missing files: $($missingModules -join ', ')"
+                    }
+                }
+                if (-not (Get-Service -Name W3SVC -ErrorAction SilentlyContinue)) {
+                    $probeErrors += 'IIS physical state: W3SVC is absent'
+                }
+            }
+            catch {
+                $probeErrors += "Phase 3 feature receipt: $($_.Exception.Message)"
+            }
+        }
+
+        $pending = @()
+        try {
+            if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+                $pending += 'CBS'
+            }
+            if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+                $pending += 'WindowsUpdate'
+            }
+        }
+        catch {
+            $probeErrors += "pending reboot: $($_.Exception.Message)"
+        }
+
+        $adminReady = -not [bool]$Requirements.CheckSiteServerAdmin
+        if ($Requirements.CheckSiteServerAdmin) {
+            try {
+                $administrators = ([Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate(
+                    [Security.Principal.NTAccount]).Value.Split('\')[-1]
+                $group = [ADSI]"WinNT://./$administrators,group"
+                $memberNames = @($group.psbase.Invoke('Members') | ForEach-Object {
+                        $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
+                    })
+                $adminReady = $memberNames -icontains "$($Requirements.ExpectedSiteServerAccount)"
+            }
+            catch {
+                $probeErrors += "local Administrators: $($_.Exception.Message)"
+            }
+        }
+
+        $surfaceReady = $true
+        $surfaceDetail = 'not applicable'
+        if ($Requirements.RoleName -eq 'SUP') {
+            $serviceReady = [bool]((Get-Service -Name WsusService -ErrorAction SilentlyContinue).Status -eq 'Running')
+            $poolReady = $false
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                $poolReady = [bool]((Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value -eq 'Started')
+            }
+            catch {
+                $probeErrors += "WSUS IIS: $($_.Exception.Message)"
+            }
+            $portReady = [bool](Get-NetTCPConnection -State Listen -LocalPort 8530, 8531 -ErrorAction SilentlyContinue |
+                    Select-Object -First 1)
+            $apiReady = $false
+            try {
+                [void][Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                $apiReady = [bool]([Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer())
+            }
+            catch {
+                $probeErrors += "WSUS API: $($_.Exception.Message)"
+            }
+            $surfaceReady = [bool]($serviceReady -and $poolReady -and $portReady -and $apiReady)
+            $surfaceDetail = "WsusService=$serviceReady, WsusPool=$poolReady, listener=$portReady, API=$apiReady"
+        }
+        elseif ($Requirements.RoleName -eq 'RP') {
+            $service = @('PowerBIReportServer', 'SQLServerReportingServices', 'ReportServer') |
+                ForEach-Object { Get-Service -Name $_ -ErrorAction SilentlyContinue } |
+                Where-Object { $_ } |
+                Select-Object -First 1
+            $serviceReady = [bool]($service -and $service.Status -eq 'Running')
+            $endpointReady = $false
+            $endpointErrors = @()
+            $oldCallback = [Net.ServicePointManager]::ServerCertificateValidationCallback
+            try {
+                [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                foreach ($url in @(
+                        "https://$($Requirements.ExpectedFqdn)/ReportServer/ReportService2005.asmx",
+                        "http://$($Requirements.ExpectedFqdn)/ReportServer/ReportService2005.asmx",
+                        'http://localhost/ReportServer/ReportService2005.asmx'
+                    )) {
+                    try {
+                        $response = Invoke-WebRequest -Uri $url -UseDefaultCredentials -UseBasicParsing `
+                            -TimeoutSec 10 -ErrorAction Stop
+                        if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+                            $endpointReady = $true
+                            break
+                        }
+                    }
+                    catch {
+                        $endpointErrors += "$url`: $($_.Exception.Message)"
+                    }
+                }
+            }
+            finally {
+                [Net.ServicePointManager]::ServerCertificateValidationCallback = $oldCallback
+            }
+            if (-not $endpointReady -and $endpointErrors.Count -gt 0) {
+                $probeErrors += "ReportServer endpoints: $($endpointErrors -join ' | ')"
+            }
+            $surfaceReady = [bool]($serviceReady -and $endpointReady)
+            $surfaceDetail = "reportService=$serviceReady, ReportServer endpoint=$endpointReady"
+        }
+
+        [pscustomobject]@{
+            ProbeCompleted  = $true
+            ComputerName    = "$env:COMPUTERNAME"
+            IdentityReady   = [bool]("$env:COMPUTERNAME" -ieq "$($Requirements.ExpectedComputerName)")
+            MissingFeatures = @($missing)
+            FeatureEvidence = $featureEvidence
+            PendingReboot   = @($pending)
+            SiteServerAdmin = [bool]$adminReady
+            SurfaceReady    = [bool]$surfaceReady
+            SurfaceDetail   = $surfaceDetail
+            Errors          = @($probeErrors)
+            Warnings        = @($probeWarnings)
+        }
+    }
+
+    try {
+        if ($isLocal) {
+            $guestState = & $guestProbe $requirements
+        }
+        else {
+            $guestState = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock $guestProbe `
+                -ArgumentList @($requirements) -OperationTimeoutMs 90000
+        }
+        $guestProbeReady = [bool]($guestState -and $guestState.ProbeCompleted)
+        $identityReady = [bool]($guestState -and $guestState.IdentityReady)
+        if ($guestState -and -not $identityReady) {
+            $errors += "target identity: expected $shortName, reached $($guestState.ComputerName)"
+        }
+        $missingFeatures = @($guestState.MissingFeatures)
+        $featureEvidence = "$($guestState.FeatureEvidence)"
+        $pendingReboot = @($guestState.PendingReboot)
+        $siteServerAdmin = [bool]($guestState.SiteServerAdmin)
+        $roleSurfaceReady = [bool]($guestState.SurfaceReady)
+        $roleSurfaceDetail = "$($guestState.SurfaceDetail)"
+        $errors += @($guestState.Errors | Where-Object { $_ })
+        $warnings += @($guestState.Warnings | Where-Object { $_ })
+    }
+    catch {
+        $errors += "guest probe: $($_.Exception.Message)"
+    }
+
+    $ready = [bool](
+        $dnsReady -and $rpcReady -and $smbReady -and $winRmReady -and
+        $adminShareWriteReady -and $wmiReady -and $guestProbeReady -and
+        $identityReady -and $siteServerAdmin -and $missingFeatures.Count -eq 0 -and
+        $pendingReboot.Count -eq 0 -and $roleSurfaceReady -and
+        $errors.Count -eq 0
+    )
+    $detail = "dns=$dnsReady [$($dnsAddresses -join ',')], RPC135=$rpcReady, SMB445=$smbReady, " +
+        "WinRM5985=$winRmReady, ADMIN`$Write=$adminShareWriteReady, WMI=$wmiReady, " +
+        "identity=$identityReady, siteServerAdmin=$siteServerAdmin, featureEvidence=[$featureEvidence], " +
+        "unverifiedFeatures=[$($missingFeatures -join ',')], " +
+        "pendingReboot=[$($pendingReboot -join ',')], roleSurface=[$roleSurfaceDetail]"
+    if ($errors.Count -gt 0) {
+        $detail += "; errors=$($errors -join ' | ')"
+    }
+    if ($warnings.Count -gt 0) {
+        $detail += "; warnings=$($warnings -join ' | ')"
+    }
+
+    [pscustomobject]@{
+        Ready                = $ready
+        RoleName             = $RoleName
+        ServerFQDN           = $ServerFQDN
+        DnsReady             = $dnsReady
+        DnsAddresses         = @($dnsAddresses)
+        RpcReady             = $rpcReady
+        SmbReady             = $smbReady
+        WinRmReady           = $winRmReady
+        AdminShareWriteReady = $adminShareWriteReady
+        WmiReady             = $wmiReady
+        GuestProbeReady      = $guestProbeReady
+        IdentityReady        = $identityReady
+        SiteServerAdmin      = $siteServerAdmin
+        MissingFeatures      = @($missingFeatures)
+        FeatureEvidence      = $featureEvidence
+        PendingReboot        = @($pendingReboot)
+        RoleSurfaceReady     = $roleSurfaceReady
+        RoleSurfaceDetail    = $roleSurfaceDetail
+        Errors               = @($errors)
+        Warnings             = @($warnings)
+        Detail               = $detail
+    }
+}
+
+function Confirm-CMRoleTargetPrerequisites {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ServerFQDN,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('DP', 'MP', 'SUP', 'RP')]
+        [string] $RoleName
+    )
+
+    $state = $null
+    foreach ($attempt in 1..2) {
+        $state = Get-CMRoleTargetPrerequisiteState -ServerFQDN $ServerFQDN -RoleName $RoleName
+        if ($state.Ready) {
+            Write-DscStatus "$RoleName producer prerequisites verified on $ServerFQDN ($($state.Detail))."
+            return $true
+        }
+        if ($attempt -lt 2) {
+            Write-DscStatus "$RoleName producer prerequisites are not ready on $ServerFQDN ($($state.Detail)). Retrying once in 10 seconds." -Warning
+            Start-Sleep -Seconds 10
+        }
+    }
+
+    Write-CMRoleProvisioningDiagnostics -RoleName "$RoleName prerequisite" -ServerFQDN $ServerFQDN
+    Write-DscStatus "$RoleName producer prerequisites failed on $ServerFQDN after 2 bounded attempts ($($state.Detail)). Role configuration was not requested; rerun from Phase 3 after correcting the target." -Failure
+    return $false
+}
+
 function Get-CMDistributionPointReadiness {
     param(
         [Parameter(Mandatory = $true)]
@@ -1213,7 +1678,9 @@ function Get-CMDistributionPointReadiness {
     }
     catch { $errors += "provider: $($_.Exception.Message)" }
     try {
-        $shareReady = Test-Path -LiteralPath "\\$ServerFQDN\SMS_DP$" -PathType Container -ErrorAction Stop
+        $shareReady = [bool](Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock {
+                [bool](Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue)
+            })
     }
     catch { $errors += "SMS_DP`$: $($_.Exception.Message)" }
 
@@ -1242,7 +1709,7 @@ function Get-CMManagementPointReadiness {
     }
     catch { $errors += "configuration: $($_.Exception.Message)" }
     try {
-        $guestState = Invoke-Command -ComputerName $ServerFQDN -ErrorAction Stop -ScriptBlock {
+        $guestState = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock {
             $registryReady = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\MP'
             $iisReady = $false
             try {
@@ -1288,7 +1755,7 @@ function Get-CMSoftwareUpdatePointReadiness {
     }
     catch { $errors += "configuration: $($_.Exception.Message)" }
     try {
-        $guestState = Invoke-Command -ComputerName $ServerFQDN -ErrorAction Stop -ScriptBlock {
+        $guestState = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock {
             $serviceReady = [bool]((Get-Service -Name WsusService -ErrorAction SilentlyContinue).Status -eq 'Running')
             $poolReady = $false
             try {
@@ -1345,7 +1812,8 @@ function Get-CMReportingPointReadiness {
     }
     catch { $errors += "configuration: $($_.Exception.Message)" }
     try {
-        $guestState = Invoke-Command -ComputerName $ServerFQDN -ArgumentList $ServerFQDN -ErrorAction Stop -ScriptBlock {
+        $guestState = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ArgumentList @($ServerFQDN) `
+            -OperationTimeoutMs 100000 -ScriptBlock {
             param($ExpectedFqdn)
             $service = @('PowerBIReportServer', 'SQLServerReportingServices', 'ReportServer') |
                 ForEach-Object { Get-Service -Name $_ -ErrorAction SilentlyContinue } |
@@ -1435,8 +1903,8 @@ function Write-CMRoleProvisioningDiagnostics {
     }
 
     try {
-        $remote = Invoke-Command -ComputerName $ServerFQDN -ErrorAction Stop -ScriptBlock {
-            $services = @('SMS_EXECUTIVE', 'W3SVC', 'WsusService', 'PowerBIReportServer',
+        $remote = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -OperationTimeoutMs 45000 -ScriptBlock {
+            $services = @('RpcSs', 'Winmgmt', 'LanmanServer', 'WinRM', 'SMS_EXECUTIVE', 'W3SVC', 'WsusService', 'PowerBIReportServer',
                     'SQLServerReportingServices', 'ReportServer') |
                 ForEach-Object {
                     $service = Get-Service -Name $_ -ErrorAction SilentlyContinue
@@ -1445,10 +1913,29 @@ function Write-CMRoleProvisioningDiagnostics {
             $shares = @(Get-SmbShare -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -match '^SMS|^SCCM' } |
                     ForEach-Object { "$($_.Name)=$($_.Path)" })
+            $featureReceipts = @(Get-ChildItem -Path 'C:\staging\InstallFeatureStatus*.txt' -File `
+                    -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending |
+                    Select-Object -First 4 | ForEach-Object {
+                        "$($_.Name)=$(Get-Content -LiteralPath $_.FullName -TotalCount 1 -ErrorAction SilentlyContinue)"
+                    })
+            $pendingReboot = @()
+            if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+                $pendingReboot += 'CBS'
+            }
+            if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+                $pendingReboot += 'WindowsUpdate'
+            }
             $tails = @()
             $candidateLogs = @(
                 'C:\Windows\Temp\mpMSI.log',
                 'C:\Windows\Temp\mpsetup.log',
+                'C:\SMS_BOOTSTRAP.log',
+                'C:\SMS\Logs\SMS_BOOTSTRAP.log',
+                'C:\SMS\Logs\smsdpprov.log',
+                'C:\SMS\Logs\mpMSI.log',
+                'C:\SMS\Logs\mpsetup.log',
+                'C:\Windows\Logs\DISM\dism.log',
+                'C:\Windows\Logs\CBS\CBS.log',
                 'C:\Program Files\Microsoft Power BI Report Server\PBIRS\LogFiles\ReportingServicesService*.log'
             )
             $dpShare = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
@@ -1466,12 +1953,15 @@ function Write-CMRoleProvisioningDiagnostics {
                 }
             }
             [pscustomobject]@{
-                Services = @($services)
-                Shares   = @($shares)
-                Tails    = @($tails)
+                Services        = @($services)
+                Shares          = @($shares)
+                FeatureReceipts = @($featureReceipts)
+                PendingReboot   = @($pendingReboot)
+                Tails           = @($tails)
             }
         }
         Write-DscStatus "  [$RoleName target] services=$(@($remote.Services) -join ', '); shares=$(@($remote.Shares) -join ', ')"
+        Write-DscStatus "  [$RoleName target] featureReceipts=$(@($remote.FeatureReceipts) -join ' | '); pendingReboot=$(@($remote.PendingReboot) -join ', ')"
         foreach ($tail in @($remote.Tails)) { Write-DscStatus "  [$RoleName target] $tail" }
     }
     catch {
@@ -1494,6 +1984,13 @@ function Install-DP {
     $maxAttempts = 3
     $installFailure = $false
     $DPFQDN = $ServerFQDN
+    $dpinstalled = $false
+
+    $initialDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+    if (-not $initialDpReadiness.Ready -and
+        -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $DPFQDN -RoleName 'DP')) {
+        return $false
+    }
 
     do {
 
@@ -1598,8 +2095,16 @@ function Install-PullDP {
     )
 
     $i = 0
+    $maxAttempts = 3
     $installFailure = $false
     $DPFQDN = $ServerFQDN
+    $dpinstalled = $false
+
+    $initialDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+    if (-not $initialDpReadiness.Ready -and
+        -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $DPFQDN -RoleName 'DP')) {
+        return $false
+    }
 
     do {
 
@@ -1617,17 +2122,17 @@ function Install-PullDP {
 
         # Install Pull DP
         #=================
-        $dpinstalled = Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
-        if (-not $dpinstalled) {
+        $dpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+        if (-not $dpReadiness.ConfigurationVisible) {
             # The source DP MUST already be an installed standard DP, otherwise
             # Add-CMDistributionPoint -SourceDistributionPoint throws a terminating
             # "No object corresponds to the specified parameters" that aborts the
             # caller. Guard here so a not-yet-ready source degrades to a retry/skip
             # instead of taking down the whole InstallDPMPClient run.
-            $sourceDPObj = Get-CMDistributionPoint -SiteSystemServerName $SourceDPFQDN -SiteCode $ServerSiteCode
-            if (-not $sourceDPObj) {
-                Write-DscStatus "Pull DP source '$SourceDPFQDN' is not an installed Distribution Point yet; cannot add pull DP $DPFQDN this pass."
-                if ($i -gt 10) { $installFailure = $true }
+            $sourceDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $SourceDPFQDN -SiteCode $ServerSiteCode
+            if (-not $sourceDpReadiness.Ready) {
+                Write-DscStatus "Pull DP source '$SourceDPFQDN' is not physically ready ($($sourceDpReadiness.Detail)); cannot add pull DP $DPFQDN this pass."
+                if ($i -ge $maxAttempts) { $installFailure = $true }
                 else { Start-Sleep -Seconds 30 }
                 continue
             }
@@ -1656,16 +2161,32 @@ function Install-PullDP {
 
             }
             if (-not $installFailure) {
-                $dpinstalled = Wait-CMRoleRegistered -RoleName 'DP' -ServerFQDN $DPFQDN -TimeoutSeconds 60 `
+                $null = Wait-CMRoleRegistered -RoleName 'DP configuration' -ServerFQDN $DPFQDN -TimeoutSeconds 60 `
                     -Probe { Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode }
             }
         }
-        else {
-            Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
-            $dpinstalled = $true
+
+        if (-not $installFailure) {
+            $dpinstalled = Wait-CMRoleRegistered -RoleName 'Pull DP physical readiness' -ServerFQDN $DPFQDN `
+                -TimeoutSeconds 300 -PollSeconds 15 -ConsecutiveSuccesses 2 -Probe {
+                    $currentReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+                    if ($currentReadiness.Ready) { return $currentReadiness }
+                    return $null
+                }
+            if (-not $dpinstalled) {
+                $lastDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+                $detail = if ($lastDpReadiness) { $lastDpReadiness.Detail } else { 'readiness could not be measured' }
+                if ($i -lt $maxAttempts) {
+                    Restart-CMRoleProvisioning -RoleName 'Pull DP' -ServerFQDN $DPFQDN -Detail $detail
+                }
+                else {
+                    Write-CMRoleProvisioningDiagnostics -RoleName 'Pull DP' -ServerFQDN $DPFQDN
+                    Write-DscStatus "Pull DP on $DPFQDN did not become physically ready after $i bounded attempt(s) ($detail)." -Failure
+                }
+            }
         }
 
-        if ($i -gt 10) {
+        if ($i -ge $maxAttempts -and -not $dpinstalled) {
             Write-DscStatus "No Progress after $i tries, Giving up on $DPFQDN SiteCode: $ServerSiteCode ."
             $installFailure = $true
         }
@@ -1852,6 +2373,12 @@ function Install-MP {
     $installFailure = $false
     $MPFQDN = $ServerFQDN
 
+    $initialMpReadiness = Get-CMManagementPointReadiness -ServerFQDN $MPFQDN -SiteCode $ServerSiteCode
+    if (-not $initialMpReadiness.Ready -and
+        -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $MPFQDN -RoleName 'MP')) {
+        return $false
+    }
+
     # For an HTTPS (PKI) MP, guarantee the MP box's IIS 443 SSL binding is in
     # place before we ever call Add-CMManagementPoint -CommunicationType Https;
     # otherwise the remote MP MSI aborts with "Error 25055 ... not correctly
@@ -1930,7 +2457,11 @@ function Install-SUP {
     $maxAttempts = 3
     $installFailure = $false
 
-
+    $initialSupReadiness = Get-CMSoftwareUpdatePointReadiness -ServerFQDN $ServerFQDN -SiteCode $ServerSiteCode
+    if (-not $initialSupReadiness.Ready -and
+        -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $ServerFQDN -RoleName 'SUP')) {
+        return $false
+    }
     
     do {
 
@@ -2053,6 +2584,12 @@ function Install-SRP {
     $i = 0
     $maxAttempts = 3
     $installFailure = $false
+
+    $initialRpReadiness = Get-CMReportingPointReadiness -ServerFQDN $ServerFQDN -SiteCode $ServerSiteCode
+    if (-not $initialRpReadiness.Ready -and
+        -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $ServerFQDN -RoleName 'RP')) {
+        return $false
+    }
 
     do {
 
