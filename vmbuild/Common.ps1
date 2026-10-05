@@ -4253,7 +4253,7 @@ function Update-VMNoteProperty {
         [Parameter(Mandatory = $true)]
         [string]$PropertyName,
         [Parameter(Mandatory = $true)]
-        [string]$PropertyValue
+        [object]$PropertyValue
     )
 
     $vmNote = Get-VMNote -VMName $VmName
