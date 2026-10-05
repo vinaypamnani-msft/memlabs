@@ -2222,6 +2222,16 @@ function Add-ExistingVMsToDeployConfig {
     Add-Phase8DistributionPointMetadata -Config $config -ExistingVMs @($refreshedVmInventory) -InventoryRefreshVerified $inventoryRefreshVerified
 }
 
+function ConvertFrom-MemLabsVmNoteScalar {
+    param([object] $Value)
+
+    if ($Value -isnot [string]) { return $Value }
+    $trimmed = $Value.Trim()
+    if ($trimmed.Equals('true', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    if ($trimmed.Equals('false', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return $trimmed
+}
+
 function Add-ModifiedExistingVMToDeployConfig {
     [CmdletBinding()]
     param (
@@ -2298,7 +2308,8 @@ function Add-ModifiedExistingVMToDeployConfig {
         if ($prop.Name.EndsWith("-Original")) {
             continue
         }
-        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+        $normalizedValue = ConvertFrom-MemLabsVmNoteScalar -Value $prop.Value
+        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $normalizedValue -Force
     }
     $newVMObject | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
     $newVMObject | Add-Member -MemberType NoteProperty -Name 'ExistingVM' -Value $true -Force
@@ -2383,7 +2394,8 @@ function Add-ExistingVMToDeployConfig {
         if ($prop.Name -in $propsToExclude) {
             continue
         }
-        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+        $normalizedValue = ConvertFrom-MemLabsVmNoteScalar -Value $prop.Value
+        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $normalizedValue -Force
     }
 
     if (-not $newVMObject.vmName) {

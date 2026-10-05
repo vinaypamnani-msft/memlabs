@@ -139,6 +139,7 @@ foreach ($pkiProperty in @('EnablePKI', 'IssuingCAVM', 'UseOfflineRoot', 'Offlin
         "Develop existing-domain PKI defaults are missing '$pkiProperty'."
 }
 
+. (Import-TestFunction -Path $configPath -Name 'ConvertFrom-MemLabsVmNoteScalar')
 . (Import-TestFunction -Path $configPath -Name 'Add-ModifiedExistingVMToDeployConfig')
 . (Import-TestFunction -Path $validationPath -Name 'Test-ValidSiteRoleFlags')
 

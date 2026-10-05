@@ -73,6 +73,7 @@ function Get-VMNote {
 }
 
 . (Import-TestFunction -Path $configPath -Name 'Get-ExistingConfigMgrRoleUpgradePlan')
+. (Import-TestFunction -Path $configPath -Name 'ConvertFrom-MemLabsVmNoteScalar')
 . (Import-TestFunction -Path $configPath -Name 'Add-ModifiedExistingVMToDeployConfig')
 . (Import-TestFunction -Path $configPath -Name 'Add-ExistingVMToDeployConfig')
 . (Import-TestFunction -Path $configPath -Name 'Add-ExistingVMsToDeployConfig')
@@ -274,6 +275,10 @@ Assert-Equal $true ([bool]$mergedDp.phase11Validate) `
     'Modified main-era role host was not scheduled for Phase 11 validation.'
 Assert-Equal $true ([bool]$mergedDp.ExistingVM) `
     'Modified main-era role host lost its per-run existing-VM mutation marker.'
+Assert-Equal $false ([bool](ConvertFrom-MemLabsVmNoteScalar -Value 'False')) `
+    'String False from a VM note was not normalized to Boolean false.'
+Assert-Equal $true ([bool](ConvertFrom-MemLabsVmNoteScalar -Value 'True')) `
+    'String True from a VM note was not normalized to Boolean true.'
 Assert-True ($null -eq $mergedDp.PSObject.Properties['osdValidate']) `
     'Stale OSD validation metadata leaked from a VM note into the upgraded config.'
 Assert-True ($null -eq $mergedDp.PSObject.Properties['osdMetadataOnly']) `

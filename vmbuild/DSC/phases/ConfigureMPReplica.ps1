@@ -78,8 +78,19 @@ else {
 # do not depend on $AllNodes). Only SiteSystem MPs with useDatabaseReplica whose
 # siteCode is this site. CAS never runs this step (not dot-sourced there).
 # ---------------------------------------------------------------------------
+function Test-MPReplicaEnabled {
+    param([object] $Value)
+
+    if ($Value -is [bool]) { return [bool]$Value }
+    if ($Value -is [string]) {
+        return $Value.Trim().Equals('true', [StringComparison]::OrdinalIgnoreCase)
+    }
+    return $false
+}
+
 $replicaMPs = @($deployConfig.virtualMachines | Where-Object {
-        $_.role -eq 'SiteSystem' -and $_.installMP -and $_.useDatabaseReplica -and $_.siteCode -eq $SiteCode
+        $_.role -eq 'SiteSystem' -and $_.installMP -and
+        (Test-MPReplicaEnabled -Value $_.useDatabaseReplica) -and $_.siteCode -eq $SiteCode
     })
 
 if ($replicaMPs.Count -eq 0) {
@@ -90,6 +101,32 @@ if ($replicaMPs.Count -eq 0) {
 
 Set-MPReplicaStatus -Status 'Running'
 Write-DscStatus "$Tag Configuring $($replicaMPs.Count) MP database replica(s) for site $SiteCode (site DB $siteSqlConn\$siteDbName)."
+
+$invalidReplicaMps = @()
+foreach ($replicaMp in $replicaMPs) {
+    $replicaHost = "$($replicaMp.replicaSqlServerVM)"
+    $replicaVmPresent = if ($replicaHost) {
+        $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $replicaHost } | Select-Object -First 1
+    }
+    else { $null }
+    if ([string]::IsNullOrWhiteSpace($replicaHost) -or -not $replicaVmPresent) {
+        $invalidReplicaMps += $replicaMp
+    }
+}
+if ($invalidReplicaMps.Count -gt 0) {
+    foreach ($invalidReplicaMp in $invalidReplicaMps) {
+        $replicaHost = "$($invalidReplicaMp.replicaSqlServerVM)"
+        $reason = if ([string]::IsNullOrWhiteSpace($replicaHost)) {
+            'replicaSqlServerVM is missing'
+        }
+        else {
+            "replica SQL VM '$replicaHost' is absent from deployConfig"
+        }
+        Write-DscStatus "$Tag [Replica[$($invalidReplicaMp.vmName)]] invalid configuration: useDatabaseReplica=true but $reason. Stopping before STEP 1." -Failure
+    }
+    Set-MPReplicaStatus -Status 'NotStart'
+    return
+}
 
 # ---------------------------------------------------------------------------
 # Build per-MP targets. Per-server ordinal (group by replica SQL VM, ordered by
