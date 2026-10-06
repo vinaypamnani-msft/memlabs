@@ -1038,6 +1038,72 @@ function Initialize-PinnedWorktree {
     }
 }
 
+function Publish-CrossRevisionSshCacheFromWorktree {
+    param([Parameter(Mandatory = $true)][string] $WorktreePath)
+
+    $sourceSsh = Join-Path (Join-Path (Join-Path $RepositoryRoot 'vmbuild') 'cache') 'ssh'
+    $worktreeSsh = Join-Path (Join-Path (Join-Path $WorktreePath 'vmbuild') 'cache') 'ssh'
+    if (-not (Test-Path -LiteralPath $worktreeSsh -PathType Container)) { return $false }
+    $worktreeItem = Get-Item -LiteralPath $worktreeSsh -Force -ErrorAction Stop
+    if ($worktreeItem.LinkType -in @('Junction', 'SymbolicLink')) { return $false }
+
+    $sourcePrivate = Join-Path $sourceSsh 'memlabs_ed25519'
+    $sourcePublic = "$sourcePrivate.pub"
+    $worktreePrivate = Join-Path $worktreeSsh 'memlabs_ed25519'
+    $worktreePublic = "$worktreePrivate.pub"
+    if (-not (Test-Path -LiteralPath $worktreePrivate -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $worktreePublic -PathType Leaf)) {
+        return $false
+    }
+
+    $null = New-Item -ItemType Directory -Path $sourceSsh -Force -ErrorAction Stop
+    Copy-Item -LiteralPath $worktreePrivate -Destination $sourcePrivate -Force -ErrorAction Stop
+    Copy-Item -LiteralPath $worktreePublic -Destination $sourcePublic -Force -ErrorAction Stop
+    Write-Host "Promoted the active mixed-test SSH keypair from '$worktreeSsh' into the shared cache before revision migration." -ForegroundColor Yellow
+    return $true
+}
+
+function Initialize-WorktreeSshCache {
+    param([Parameter(Mandatory = $true)][string] $WorktreePath)
+
+    $sourceSsh = Join-Path (Join-Path (Join-Path $RepositoryRoot 'vmbuild') 'cache') 'ssh'
+    $targetSsh = Join-Path (Join-Path (Join-Path $WorktreePath 'vmbuild') 'cache') 'ssh'
+    $null = New-Item -ItemType Directory -Path $sourceSsh -Force -ErrorAction Stop
+
+    if (Test-Path -LiteralPath $targetSsh) {
+        $targetItem = Get-Item -LiteralPath $targetSsh -Force -ErrorAction Stop
+        $targets = @($targetItem.Target | Where-Object { $null -ne $_ })
+        if ($targetItem.LinkType -in @('Junction', 'SymbolicLink')) {
+            if ($targets.Count -ne 1) {
+                throw "Pinned worktree SSH cache '$targetSsh' is not a single junction/symbolic link."
+            }
+            $actualTarget = [string]$targets[0]
+            if (-not [IO.Path]::IsPathRooted($actualTarget)) {
+                $actualTarget = Join-Path $targetItem.Parent.FullName $actualTarget
+            }
+            $actualTarget = [IO.Path]::GetFullPath($actualTarget).TrimEnd('\')
+            $expectedTarget = [IO.Path]::GetFullPath($sourceSsh).TrimEnd('\')
+            if ($actualTarget -ine $expectedTarget) {
+                throw "Pinned worktree SSH cache '$targetSsh' targets '$actualTarget', expected '$expectedTarget'. Remove the stale worktree before retrying."
+            }
+            return
+        }
+        if (-not $targetItem.PSIsContainer) {
+            throw "Pinned worktree SSH cache '$targetSsh' is not a directory or junction."
+        }
+
+        $sourcePrivate = Join-Path $sourceSsh 'memlabs_ed25519'
+        $sourcePublic = "$sourcePrivate.pub"
+        if ((-not (Test-Path -LiteralPath $sourcePrivate -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $sourcePublic -PathType Leaf))) {
+            $null = Publish-CrossRevisionSshCacheFromWorktree -WorktreePath $WorktreePath
+        }
+        Remove-Item -LiteralPath $targetSsh -Recurse -Force -ErrorAction Stop
+    }
+
+    $null = New-Item -ItemType Junction -Path $targetSsh -Target $sourceSsh -ErrorAction Stop
+}
+
 function Initialize-WorktreeRuntime {
     param([string] $WorktreePath)
 
@@ -1082,10 +1148,7 @@ function Initialize-WorktreeRuntime {
             Copy-Item -LiteralPath $source -Destination (Join-Path $targetCache $cacheItem) -Force
         }
     }
-    $sourceSsh = Join-Path (Join-Path $sourceVmbuild 'cache') 'ssh'
-    if (Test-Path -LiteralPath $sourceSsh -PathType Container) {
-        Copy-Item -LiteralPath $sourceSsh -Destination $targetCache -Recurse -Force
-    }
+    Initialize-WorktreeSshCache -WorktreePath $WorktreePath
 
     $targetConfig = Join-Path $targetVmbuild 'config'
     foreach ($storageConfig in @(Get-ChildItem (Join-Path $sourceVmbuild 'config') -Filter '_StorageConfig*.json' -File -Force)) {
@@ -1607,6 +1670,8 @@ try {
     $worktreeRoot = Join-Path $StateRoot 'worktrees'
     Initialize-ExistingCrossRevisionLogPaths -WorktreeRoot $worktreeRoot
     if ($checkpointToAdvance) {
+        $previousDevelopWorktree = Join-Path $worktreeRoot "develop-$($checkpointDevelopCommit.Substring(0, 8))"
+        $null = Publish-CrossRevisionSshCacheFromWorktree -WorktreePath $previousDevelopWorktree
         $migratedStatePath = Move-CrossRevisionCheckpoint -ActivePath $checkpointToAdvance.Path -State $checkpointState `
             -Root $StateRoot -MainCommit $mainCommit -NewDevelopCommit $developCommit
         Write-Host "ROLLING RESUME: checkpoint advanced to '$migratedStatePath'." -ForegroundColor Yellow

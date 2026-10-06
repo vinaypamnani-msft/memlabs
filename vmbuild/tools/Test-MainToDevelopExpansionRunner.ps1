@@ -296,6 +296,8 @@ finally {
 . (Import-TestFunction -Path $runnerPath -Name Initialize-PinnedWorktree)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeLogPath)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-ExistingCrossRevisionLogPaths)
+. (Import-TestFunction -Path $runnerPath -Name Publish-CrossRevisionSshCacheFromWorktree)
+. (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeSshCache)
 . (Import-TestFunction -Path $runnerPath -Name Initialize-WorktreeRuntime)
 . (Import-TestFunction -Path $runnerPath -Name Set-CrossRevisionCanonicalVmBuildShortcut)
 $stopLauncherFunction = Import-TestFunction -Path $runnerPath -Name Stop-CrossRevisionLauncher
@@ -843,15 +845,24 @@ try {
             (Join-Path $runtimeSource 'vmbuild\cache'),
             (Join-Path $runtimeSource 'vmbuild\config'),
             (Join-Path $runtimeSource 'vmbuild\logs'),
-            (Join-Path $runtimeWorktree 'vmbuild\cache'),
+            (Join-Path $runtimeWorktree 'vmbuild\cache\ssh'),
             (Join-Path $runtimeWorktree 'vmbuild\config'),
             $wrongAssets
         )) {
         $null = New-Item -ItemType Directory -Path $directory -Force
     }
+    [IO.File]::WriteAllText((Join-Path $runtimeSource 'vmbuild\cache\ssh-source-placeholder'), 'source cache exists')
+    [IO.File]::WriteAllText((Join-Path $runtimeWorktree 'vmbuild\cache\ssh\memlabs_ed25519'), 'active-private-key')
+    [IO.File]::WriteAllText((Join-Path $runtimeWorktree 'vmbuild\cache\ssh\memlabs_ed25519.pub'), 'active-public-key')
     [IO.File]::WriteAllText((Join-Path $runtimeWorktree 'vmbuild\cache\git-branch-context.json'), '{"CurrentBranch":"main"}')
     $global:RepositoryRoot = $runtimeSource
     $StateRoot = Join-Path $runtimeTestRoot 'state'
+    Assert-Equal $true (Publish-CrossRevisionSshCacheFromWorktree -WorktreePath $runtimeWorktree) `
+        'active develop worktree SSH key is promoted before revision migration'
+    Assert-Equal 'active-private-key' (Get-Content (Join-Path $runtimeSource 'vmbuild\cache\ssh\memlabs_ed25519') -Raw) `
+        'shared cache receives the active private key bytes'
+    Assert-Equal 'active-public-key' (Get-Content (Join-Path $runtimeSource 'vmbuild\cache\ssh\memlabs_ed25519.pub') -Raw) `
+        'shared cache receives the active public key bytes'
     Initialize-WorktreeRuntime -WorktreePath $runtimeWorktree
     $runtimeLink = Get-Item -LiteralPath (Join-Path $runtimeWorktree 'vmbuild\azureFiles') -Force
     Assert-Equal ([IO.Path]::GetFullPath((Join-Path $runtimeSource 'vmbuild\azureFiles')).TrimEnd('\')) `
@@ -860,6 +871,10 @@ try {
     $runtimeSharedLogs = Join-Path $runtimeSource 'vmbuild\logs\CrossRevision\worktree'
     Assert-Equal ([IO.Path]::GetFullPath($runtimeSharedLogs).TrimEnd('\')) `
         ([IO.Path]::GetFullPath([string]$runtimeLogLink.Target).TrimEnd('\')) 'runtime worktree log link targets its folder under normal logs'
+    $runtimeSshLink = Get-Item -LiteralPath (Join-Path $runtimeWorktree 'vmbuild\cache\ssh') -Force
+    Assert-Equal 'Junction' $runtimeSshLink.LinkType 'runtime worktree uses a shared SSH cache junction'
+    Assert-Equal ([IO.Path]::GetFullPath((Join-Path $runtimeSource 'vmbuild\cache\ssh')).TrimEnd('\')) `
+        ([IO.Path]::GetFullPath([string]$runtimeSshLink.Target).TrimEnd('\')) 'runtime SSH junction targets the shared source key'
     Assert-Equal $false (Test-Path -LiteralPath (Join-Path $runtimeWorktree 'vmbuild\cache\git-branch-context.json')) 'runtime initialization clears stale branch context'
 
     Remove-Item -LiteralPath $runtimeLogLink.FullName -Force
@@ -903,6 +918,8 @@ finally {
     if (Test-Path -LiteralPath $runtimeAssets) { Remove-Item -LiteralPath $runtimeAssets -Force -ErrorAction SilentlyContinue }
     $runtimeLogs = Join-Path $runtimeWorktree 'vmbuild\logs'
     if (Test-Path -LiteralPath $runtimeLogs) { Remove-Item -LiteralPath $runtimeLogs -Force -ErrorAction SilentlyContinue }
+    $runtimeSsh = Join-Path $runtimeWorktree 'vmbuild\cache\ssh'
+    if (Test-Path -LiteralPath $runtimeSsh) { Remove-Item -LiteralPath $runtimeSsh -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $runtimeTestRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 

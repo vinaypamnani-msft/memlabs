@@ -9754,7 +9754,9 @@ $global:Linux_Configure = {
 
         $ok = Invoke-LinuxRoleConfiguration -Vm $currentItem -DeployConfig $deployConfig
         if (-not $ok) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux_Configure failed." -OutputStream -Failure
+            $failureSummary = "$global:LinuxRoleConfigurationFailureSummary".Trim()
+            $failureSuffix = if ($failureSummary) { " ($failureSummary)" } else { '' }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux_Configure failed$failureSuffix." -OutputStream -Failure
             return
         }
 
