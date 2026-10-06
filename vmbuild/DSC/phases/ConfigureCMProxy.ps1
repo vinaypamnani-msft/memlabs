@@ -36,6 +36,7 @@ $Configuration.ConfigureCMProxy.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:s
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 try {
+    $proxyFailures = [System.Collections.Generic.List[string]]::new()
     $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
     $proxyClients = @($deployConfig.virtualMachines | Where-Object {
         $_.useProxy -eq $true -and $_.role -ne 'Proxy'
@@ -80,9 +81,9 @@ try {
                 if ($cvm.role -notin $siteSystemRoles -and -not ($cvm.installSUP -eq $true)) { continue }
 
                 $fqdn = "$($cvm.vmName).$DomainFullName"
-                $ss = Get-CMSiteSystemServer -SiteSystemServerName $fqdn -ErrorAction SilentlyContinue
+                $ss = Get-CMSiteSystemServer -SiteSystemServerName $fqdn -SiteCode $cvm.siteCode -ErrorAction SilentlyContinue
                 if (-not $ss) {
-                    Write-DscStatus "$fqdn`: not a CM site system (yet); skipping proxy config"
+                    $proxyFailures.Add("$fqdn`: site system is not visible in site $($cvm.siteCode) yet")
                     continue
                 }
 
@@ -90,26 +91,31 @@ try {
                     # Note: parameter is -EnableProxy on Set-CMSiteSystemServer
                     # (the underlying WMI property surfaced by validation is "UseProxy",
                     # but the cmdlet exposes it as -EnableProxy).
-                    Set-CMSiteSystemServer -SiteSystemServerName $fqdn -EnableProxy $true `
+                    Set-CMSiteSystemServer -SiteSystemServerName $fqdn -SiteCode $cvm.siteCode -EnableProxy $true `
                         -ProxyServerName $proxyFqdn -ProxyServerPort $proxyPort `
                         -ErrorAction Stop *>&1 | Write-StatusLogEntry
                     Write-DscStatus "$fqdn`: site system proxy set -> $proxyFqdn`:$proxyPort"
                 }
                 catch {
+                    $proxyFailures.Add("$fqdn`: Set-CMSiteSystemServer -EnableProxy failed: $($_.Exception.Message)")
                     Write-DscStatus "$fqdn`: Set-CMSiteSystemServer -EnableProxy failed: $_"
                 }
 
                 if ($cvm.installSUP -eq $true) {
-                    $sup = Get-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -ErrorAction SilentlyContinue
+                    $sup = Get-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -SiteCode $cvm.siteCode -ErrorAction SilentlyContinue
                     if ($sup) {
                         try {
-                            Set-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -UseProxy $true `
+                            Set-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -SiteCode $cvm.siteCode -UseProxy $true `
                                 -ErrorAction Stop *>&1 | Write-StatusLogEntry
                             Write-DscStatus "$fqdn`: SUP UseProxy enabled"
                         }
                         catch {
+                            $proxyFailures.Add("$fqdn`: Set-CMSoftwareUpdatePoint -UseProxy failed: $($_.Exception.Message)")
                             Write-DscStatus "$fqdn`: Set-CMSoftwareUpdatePoint -UseProxy failed: $_"
                         }
+                    }
+                    else {
+                        $proxyFailures.Add("$fqdn`: SUP is not visible in site $($cvm.siteCode) yet")
                     }
                 }
             }
@@ -123,35 +129,49 @@ try {
                 if ($cvm.role -notin $siteSystemRoles -and -not ($cvm.installSUP -eq $true)) { continue }
 
                 $fqdn = "$($cvm.vmName).$DomainFullName"
-                $ss = Get-CMSiteSystemServer -SiteSystemServerName $fqdn -ErrorAction SilentlyContinue
-                if (-not $ss) { continue }
+                $ss = Get-CMSiteSystemServer -SiteSystemServerName $fqdn -SiteCode $cvm.siteCode -ErrorAction SilentlyContinue
+                if (-not $ss) {
+                    $proxyFailures.Add("$fqdn`: site system is not visible in site $($cvm.siteCode) yet")
+                    continue
+                }
 
                 try {
-                    Set-CMSiteSystemServer -SiteSystemServerName $fqdn -EnableProxy $false `
+                    Set-CMSiteSystemServer -SiteSystemServerName $fqdn -SiteCode $cvm.siteCode -EnableProxy $false `
                         -ErrorAction Stop *>&1 | Write-StatusLogEntry
                     Write-DscStatus "$fqdn`: site system proxy disabled"
                 }
                 catch {
+                    $proxyFailures.Add("$fqdn`: Set-CMSiteSystemServer -EnableProxy false failed: $($_.Exception.Message)")
                     Write-DscStatus "$fqdn`: Set-CMSiteSystemServer -EnableProxy false failed: $_"
                 }
 
                 if ($cvm.installSUP -eq $true) {
-                    $sup = Get-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -ErrorAction SilentlyContinue
+                    $sup = Get-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -SiteCode $cvm.siteCode -ErrorAction SilentlyContinue
                     if ($sup) {
                         try {
-                            Set-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -UseProxy $false `
+                            Set-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -SiteCode $cvm.siteCode -UseProxy $false `
                                 -ErrorAction Stop *>&1 | Write-StatusLogEntry
                             Write-DscStatus "$fqdn`: SUP UseProxy disabled"
                         }
                         catch {
+                            $proxyFailures.Add("$fqdn`: Set-CMSoftwareUpdatePoint -UseProxy false failed: $($_.Exception.Message)")
                             Write-DscStatus "$fqdn`: Set-CMSoftwareUpdatePoint -UseProxy false failed: $_"
                         }
+                    }
+                    else {
+                        $proxyFailures.Add("$fqdn`: SUP is not visible in site $($cvm.siteCode) yet")
                     }
                 }
             }
         }
 
-        $Configuration.ConfigureCMProxy.Status = 'Completed'
+        if ($proxyFailures.Count -gt 0) {
+            $Configuration.ConfigureCMProxy.Status = 'NotStart'
+            Write-DscStatus "ConfigureCMProxy has $($proxyFailures.Count) retryable failure(s): $($proxyFailures -join '; ')" -Failure
+        }
+        else {
+            $Configuration.ConfigureCMProxy.Status = 'Completed'
+        }
     }
 }
 catch {

@@ -1,4 +1,18 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function Test-ConfigMgrRemoteRoleRequested {
+    param([object] $VM)
+
+    if (-not $VM) { return $false }
+    return [bool](
+        $VM.installDP -eq $true -or
+        $VM.enablePullDP -eq $true -or
+        $VM.installMP -eq $true -or
+        $VM.installSUP -eq $true -or
+        $VM.installRP -eq $true -or
+        $VM.installSMSProv -eq $true
+    )
+}
+
 Function Get-ValidSubnets {
     [CmdletBinding()]
     param (
@@ -916,6 +930,7 @@ function ConvertTo-DeployConfigEx {
             SchemaAdmins        = @($deployConfig.vmOptions.adminName)
         }
         $thisParams = [pscustomobject]@{}
+        $pushInventory = $null
         if ($thisVM.domainUser) {
             $accountLists.LocalAdminAccounts += $thisVM.domainUser
             $accountLists.SQLSysAdminAccounts += $deployConfig.vmOptions.domainNetBiosName + "\" + $thisVM.domainUser
@@ -1114,7 +1129,7 @@ function ConvertTo-DeployConfigEx {
                 }
             }
             "SiteSystem" {
-                if ($thisVM.InstallSUP) {
+                if (Test-ConfigMgrRemoteRoleRequested -VM $thisVM) {
                     $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
                     Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
 
@@ -1122,7 +1137,9 @@ function ConvertTo-DeployConfigEx {
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
                     }
+                }
 
+                if ($thisVM.InstallSUP) {
                     $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
 
                     $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
@@ -1159,7 +1176,8 @@ function ConvertTo-DeployConfigEx {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
                     }
                 }
-                $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                $effectiveCmOptions = if ($thisVM.cmOptions) { $thisVM.cmOptions } else { $deployConfig.cmOptions }
+                $url = Get-CMBaselineVersion -CMVersion $effectiveCmOptions.version
                 $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
             }
             "Primary" {
@@ -1200,7 +1218,8 @@ function ConvertTo-DeployConfigEx {
                     }
                 }
                 else {
-                    $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                    $effectiveCmOptions = if ($thisVM.cmOptions) { $thisVM.cmOptions } else { $deployConfig.cmOptions }
+                    $url = Get-CMBaselineVersion -CMVersion $effectiveCmOptions.version
                     $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
                 }
 
@@ -1215,15 +1234,16 @@ function ConvertTo-DeployConfigEx {
                 # a client on ANY subnet lands on the correct site (subnet no
                 # longer has to match the site server's own subnet).
                 $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-                $eligiblePushSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName)
-                $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object {
-                    $_.role -in $pushableRoles -and ($_.pushClient -ne $false)
+                $pushInventory = @(get-list2 -DeployConfig $deployConfig)
+                $eligiblePushSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName -Inventory $pushInventory)
+                $ClientNames = $pushInventory | Where-Object {
+                    $_.role -in $pushableRoles -and (Test-PushClientRequested -VM $_)
                 }
                 # Site codes this Primary is responsible for pushing: its own
                 # site + any child Secondary (a Secondary has no client-push
                 # workflow of its own; the parent Primary pushes its clients).
                 $myPushSiteCodes = @($thisVM.siteCode)
-                $myPushSiteCodes += (get-list2 -deployConfig $deployConfig | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
+                $myPushSiteCodes += ($pushInventory | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
                 $myPushSiteCodes = @($myPushSiteCodes | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
 
                 $clientPush = @()
@@ -1255,8 +1275,14 @@ function ConvertTo-DeployConfigEx {
         #add the SiteCodes and Subnets so DC can add ad sites, and primary can setup BG's
         if ($thisVM.Role -eq "DC" -or $thisVM.Role -eq "Primary") {
             $sitesAndNetworks = @()
+            $siteInventory = if ($thisVM.Role -eq "Primary" -and $null -ne $pushInventory) {
+                @($pushInventory)
+            }
+            else {
+                @(get-list2 -DeployConfig $deployConfig)
+            }
 
-            foreach ($vm in get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -in "Primary", "Secondary" }) {
+            foreach ($vm in $siteInventory | Where-Object { $_.role -in "Primary", "Secondary" }) {
                 if ($vm.SiteCode -in $sitesAndNetworks.siteCode) {
                     Write-Log "Warning: $($vm.vmName) has a sitecode already in use by another Primary or Secondary" -Warning
                     continue
@@ -1278,8 +1304,8 @@ function ConvertTo-DeployConfigEx {
             # site's BG and the DC creates the matching AD subnet. Without this a
             # client on a standalone subnet gets no boundary and never assigns.
             $bgPushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-            $bgEligibleSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName)
-            foreach ($vm in get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -in $bgPushableRoles -and ($_.pushClient -ne $false) }) {
+            $bgEligibleSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName -Inventory $siteInventory)
+            foreach ($vm in $siteInventory | Where-Object { $_.role -in $bgPushableRoles -and (Test-PushClientRequested -VM $_) }) {
                 $targetSite = Resolve-PushClientSite -VM $vm -Config $deployConfig -Domain $DomainName -EligibleSites $bgEligibleSites
                 if (-not $targetSite) { continue }
                 $vmSubnet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }

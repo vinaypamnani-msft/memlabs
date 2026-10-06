@@ -27,6 +27,9 @@ function Import-TestFunction {
 }
 
 $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
+. (Import-TestFunction -Path $configPath -Name 'Test-PushClientRequested')
+. (Import-TestFunction -Path $configPath -Name 'Get-ExistingConfigMgrRoleUpgradePlan')
+. (Import-TestFunction -Path $configPath -Name 'Add-Phase11HierarchyParentsToDeployConfig')
 . (Import-TestFunction -Path $configPath -Name 'Add-ExistingVMsToDeployConfig')
 
 $script:AddedExistingVMs = [System.Collections.Generic.List[object]]::new()
@@ -65,6 +68,9 @@ function Add-ExistingVMToDeployConfig {
 
 function Add-Phase8DistributionPointMetadata {
     param ([object] $Config, [object[]] $ExistingVMs, [bool] $InventoryRefreshVerified)
+}
+function Add-Phase8SoftwareUpdateProductMetadata {
+    param ([object] $Config, [object[]] $ExistingVMs)
 }
 
 function Add-CmOptionsPersistenceTargetForPhase8 {
@@ -115,6 +121,13 @@ if ($script:AddedExistingVMs[0].VmName -ne 'CS2-FS1') {
 }
 if (-not $script:AddedExistingVMs[0].Hidden) {
     throw 'Expected the remote content library dependency to be hidden'
+}
+
+$passiveInstaller = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\InstallPassiveSiteServer.ps1') -Raw
+if ($passiveInstaller -notmatch 'SID = "S-1-5-32-544"' -or
+    $passiveInstaller -notmatch '\$memberPath = "WinNT://\$domainName/\$computer"' -or
+    $passiveInstaller -notmatch '\$group\.Add\(\$memberPath\)') {
+    throw 'Passive-site setup no longer resolves the local admin group by SID and adds the domain-qualified computer account.'
 }
 
 Write-Host 'PASS existing remote content library VM is added as a hidden dependency'

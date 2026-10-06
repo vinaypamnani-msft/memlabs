@@ -899,7 +899,10 @@ function Confirm-IsoVisibleInGuest {
             $pend = @()
             if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $pend += 'CBS' }
             if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $pend += 'WU' }
-            $pfro = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+            $sessionManagerPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+            $sessionManager = Get-ItemProperty -LiteralPath $sessionManagerPath -ErrorAction Stop
+            $pfroProperty = $sessionManager.PSObject.Properties['PendingFileRenameOperations']
+            $pfro = if ($pfroProperty) { $pfroProperty.Value } else { $null }
             if ($pfro) { $pend += 'PendingFileRename' }
             $r.PendingReboot = if ($pend.Count -gt 0) { $pend -join '+' } else { 'no' }
         }
@@ -1043,6 +1046,174 @@ function Dismount-IsoFromVm {
     catch {
         Write-Log "$tag$($VmName): $Context ISO eject failed: $($_.Exception.Message)" -LogOnly
     }
+}
+
+function Repair-PrimaryPrepopulationPayload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$VirtualMachine,
+        [Parameter(Mandatory)][string]$VmDomainName,
+        [Parameter(Mandatory)][object]$AzureFileList,
+        [Parameter(Mandatory)][string]$AzureFilesPath,
+        [int]$Phase = 8,
+        [switch]$RequireDomainIdentity
+    )
+
+    $vmName = "$($VirtualMachine.vmName)"
+    if (-not $vmName -or "$($VirtualMachine.role)" -ne 'Primary') {
+        Write-Log "[Phase $Phase]: Primary prepopulation repair requires a Primary VM with a name." -Failure
+        return $false
+    }
+    if (-not $VirtualMachine.cmInstallDir) {
+        Write-Log "[Phase $Phase]: ${vmName}: Cannot repair prepopulation payload because cmInstallDir is missing." -Failure
+        return $false
+    }
+
+    $driveLetter = Split-Path -Path "$($VirtualMachine.cmInstallDir)" -Qualifier
+    if (-not $driveLetter) {
+        Write-Log "[Phase $Phase]: ${vmName}: Cannot derive the OSD drive from cmInstallDir '$($VirtualMachine.cmInstallDir)'." -Failure
+        return $false
+    }
+    $osdRoot = "$($driveLetter.TrimEnd('\'))\OSD"
+    $requiredOs = @('Windows 11 24h2', 'Windows 10 22h2')
+    $probeScript = {
+        param($osdRoot)
+        $required = @('Windows 11 24h2', 'Windows 10 22h2')
+        $missing = @($required | Where-Object {
+                -not (Test-Path -LiteralPath (Join-Path $osdRoot "$_\sources\install.wim") -PathType Leaf)
+            })
+        [pscustomobject]@{
+            BaselinesPresent = Test-Path -LiteralPath 'C:\tools\baselines.zip' -PathType Leaf
+            MissingOs        = [string[]]$missing
+        }
+    }
+    $readState = {
+        param([string]$DisplayName)
+        $result = Invoke-VmCommand -VmName $vmName -VmDomainName $VmDomainName `
+            -RequireDomainIdentity:$RequireDomainIdentity -AsJob -TimeoutSeconds 120 `
+            -DisplayName $DisplayName -ScriptBlock $probeScript -ArgumentList $osdRoot
+        if ($result.ScriptBlockFailed) {
+            $detail = (@($result.ErrorDetails) + @($result.ScriptBlockOutput) | Where-Object { $_ }) -join '; '
+            Write-Log "[Phase $Phase]: ${vmName}: Could not inspect Primary prepopulation payload: $detail" -Failure
+            return $null
+        }
+        $states = @($result.ScriptBlockOutput | Where-Object {
+                $_ -and $_.PSObject.Properties['BaselinesPresent'] -and $_.PSObject.Properties['MissingOs']
+            })
+        if ($states.Count -eq 0) {
+            Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation probe returned no state." -Failure
+            return $null
+        }
+        return $states[-1]
+    }
+
+    $state = & $readState 'Inspect Primary prepopulation payload'
+    if ($null -eq $state) { return $false }
+    $missingOs = @($state.MissingOs | ForEach-Object { "$_" })
+    if ($state.BaselinesPresent -and $missingOs.Count -eq 0) {
+        Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation payload is complete." -LogOnly
+        return $true
+    }
+
+    Write-Log "[Phase $Phase]: ${vmName}: Repairing Primary prepopulation payload (baselinesPresent=$($state.BaselinesPresent), missingOS=$($missingOs -join ', '))."
+    Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status 'Repairing missing payload' -Force
+
+    if (-not $state.BaselinesPresent) {
+        Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status 'Copying baselines.zip' -Force
+        $baselineSource = Join-Path $AzureFilesPath 'support\baselines.zip'
+        if (-not (Test-Path -LiteralPath $baselineSource -PathType Leaf)) {
+            Write-Log "[Phase $Phase]: ${vmName}: Cannot repair baselines.zip; host source is missing: $baselineSource" -Failure
+            return $false
+        }
+        $baselineCopied = Copy-ItemSafe -VmName $vmName -VMDomainName $VmDomainName `
+            -Path $baselineSource -Destination 'C:\tools' -Recurse -Container -Force `
+            -RequireDomainIdentity:$RequireDomainIdentity
+        if (-not $baselineCopied) {
+            Write-Log "[Phase $Phase]: ${vmName}: Failed to copy baselines.zip to C:\tools." -Failure
+            return $false
+        }
+    }
+
+    $isoById = @{}
+    foreach ($osId in $requiredOs) {
+        $entries = @($AzureFileList.OSISO | Where-Object { $_.id -eq $osId })
+        $isoNames = @()
+        if ($entries.Count -eq 1) {
+            $isoNames = @($entries[0].filename | Where-Object { $_ -and $_.ToLowerInvariant().EndsWith('.iso') })
+        }
+        if ($entries.Count -eq 1 -and $isoNames.Count -eq 1) {
+            $isoById[$osId] = Join-Path $AzureFilesPath $isoNames[0]
+        }
+        elseif ($missingOs -contains $osId) {
+            Write-Log "[Phase $Phase]: ${vmName}: Cannot repair '$osId'; expected exactly one ISO entry but found entries=$($entries.Count), isoFiles=$($isoNames.Count)." -Failure
+            return $false
+        }
+    }
+
+    foreach ($osId in $missingOs) {
+        $isoPath = $isoById[$osId]
+        if (-not $isoPath -or -not (Test-Path -LiteralPath $isoPath -PathType Leaf)) {
+            Write-Log "[Phase $Phase]: ${vmName}: Cannot repair '$osId'; host ISO is missing: $isoPath" -Failure
+            return $false
+        }
+
+        foreach ($knownIsoPath in @($isoById.Values | Where-Object { $_ })) {
+            Dismount-IsoFromVm -VmName $vmName -IsoPath $knownIsoPath -Context 'OS prepopulation' -Phase $Phase
+        }
+        if (-not (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "OS prepopulation ($osId)" -Phase $Phase)) {
+            Write-Log "[Phase $Phase]: ${vmName}: Failed to mount '$osId' ISO for prepopulation repair." -Failure
+            return $false
+        }
+        if (-not (Confirm-IsoVisibleInGuest -VmName $vmName -VmDomainName $VmDomainName `
+                    -MarkerRelativePath 'sources\install.wim' -Context "OS prepopulation ($osId)" `
+                    -TimeoutSeconds 120 -Phase $Phase)) {
+            Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "OS prepopulation ($osId)" -Phase $Phase
+            Write-Log "[Phase $Phase]: ${vmName}: '$osId' ISO mounted on the host but never became visible in the guest." -Failure
+            return $false
+        }
+
+        try {
+            $destination = "$osdRoot\$osId"
+            Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status "Copying $osId" -Force
+            $copyResult = Invoke-VmCommand -VmName $vmName -VmDomainName $VmDomainName `
+                -RequireDomainIdentity:$RequireDomainIdentity -AsJob -TimeoutSeconds 3600 `
+                -DisplayName "Repair Primary OSD media ($osId)" -ScriptBlock {
+                param($destination)
+                $media = @(Get-Volume -ErrorAction Stop |
+                        Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } |
+                        Where-Object { Test-Path -LiteralPath "$($_.DriveLetter):\sources\install.wim" })
+                if ($media.Count -ne 1) {
+                    $visible = @($media | ForEach-Object { "$($_.DriveLetter): '$($_.FileSystemLabel)'" }) -join ', '
+                    throw "Expected exactly one mounted OS ISO with sources\install.wim; found $($media.Count): $visible"
+                }
+                $sourceRoot = "$($media[0].DriveLetter):\"
+                New-Item -Path $destination -ItemType Directory -Force | Out-Null
+                Copy-Item -Path "$sourceRoot*" -Destination $destination -Recurse -Force -Confirm:$false -ErrorAction Stop
+                $wim = Get-Item -LiteralPath (Join-Path $destination 'sources\install.wim') -ErrorAction Stop
+                [pscustomobject]@{ Path = $wim.FullName; Length = $wim.Length }
+            } -ArgumentList $destination
+            if ($copyResult.ScriptBlockFailed) {
+                $detail = (@($copyResult.ErrorDetails) + @($copyResult.ScriptBlockOutput) | Where-Object { $_ }) -join '; '
+                Write-Log "[Phase $Phase]: ${vmName}: Failed to copy '$osId' media into '$destination': $detail" -Failure
+                return $false
+            }
+        }
+        finally {
+            Dismount-IsoFromVm -VmName $vmName -IsoPath $isoPath -Context "OS prepopulation ($osId)" -Phase $Phase
+        }
+    }
+
+    $verified = & $readState 'Verify Primary prepopulation payload'
+    if ($null -eq $verified) { return $false }
+    $stillMissing = @($verified.MissingOs | ForEach-Object { "$_" })
+    if (-not $verified.BaselinesPresent -or $stillMissing.Count -gt 0) {
+        Write-Log "[Phase $Phase]: ${vmName}: Prepopulation repair verification failed (baselinesPresent=$($verified.BaselinesPresent), missingOS=$($stillMissing -join ', '))." -Failure
+        return $false
+    }
+
+    Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation payload repair completed and verified." -Success
+    Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status 'Done' -Completed -Force
+    return $true
 }
 
 function Reset-IsoDriveOnVm {

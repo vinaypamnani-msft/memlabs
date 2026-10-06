@@ -5,8 +5,7 @@
 .DESCRIPTION
     The producer functions are lifted from the pinned main Git object and run against an
     in-memory Hyper-V mock. Their serialized Notes JSON is then consumed by the functions
-    in the current worktree. Known compatibility defects are reported as XFAIL; an XPASS
-    fails the test so the expectation must be reviewed when a defect is fixed.
+    in the current worktree.
 #>
 [CmdletBinding()]
 param(
@@ -17,7 +16,6 @@ param(
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $repoRoot = Split-Path -Parent $RootPath
 $script:Failures = 0
-$script:ExpectedFailures = 0
 $script:ProducerVm = $null
 $script:VmStore = @{}
 $script:Inventory = @()
@@ -64,16 +62,12 @@ function Assert-True {
     Write-TestResult -State FAIL -What $What -Detail $Detail
 }
 
-function Assert-KnownFailure {
-    param([bool] $Condition, [string] $What, [string] $Detail)
+function Assert-ThrowsLike {
+    param([scriptblock] $Action, [string] $Pattern, [string] $What)
 
-    if (-not $Condition) {
-        $script:ExpectedFailures++
-        Write-TestResult -State XFAIL -What $What -Detail $Detail
-        return
-    }
-    $script:Failures++
-    Write-TestResult -State XPASS -What $What -Detail 'The known defect no longer reproduces; convert this case to a passing assertion.'
+    $message = $null
+    try { & $Action } catch { $message = $_.Exception.Message }
+    Assert-True ($message -like $Pattern) $What "actual=[$message]"
 }
 
 function Get-GitFileText {
@@ -92,7 +86,7 @@ function Get-FunctionText {
     $tokens = $null
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
-    if (@($errors).Count -ne 0) { throw "$Source has $(@($errors).Count) parse error(s)." }
+    if ($errors.Count -ne 0) { throw "$Source has $($errors.Count) parse error(s)." }
     $definitions = @($ast.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
@@ -112,6 +106,9 @@ function Get-WorktreeFunctionText {
 $mainCommonText = Get-GitFileText -Revision $MainRevision -Path 'vmbuild/Common.ps1'
 $mainNewVmNoteText = Get-FunctionText -Text $mainCommonText -Name New-VmNote -Source "$MainRevision`:vmbuild/Common.ps1"
 $mainSetVmNoteText = Get-FunctionText -Text $mainCommonText -Name Set-VMNote -Source "$MainRevision`:vmbuild/Common.ps1"
+$currentCommonText = [IO.File]::ReadAllText((Join-Path $RootPath 'Common.ps1'))
+$currentNewVmNoteText = Get-FunctionText -Text $currentCommonText -Name New-VmNote -Source 'current:vmbuild/Common.ps1'
+$currentSetVmNoteText = Get-FunctionText -Text $currentCommonText -Name Set-VMNote -Source 'current:vmbuild/Common.ps1'
 
 function Invoke-MainNoteProducer {
     param(
@@ -131,6 +128,7 @@ function Invoke-MainNoteProducer {
             [switch] $Warning
         )
     }
+
     function Get-VM2 {
         [CmdletBinding()]
         param([Parameter(Position = 0)][string] $Name, [switch] $Fallback)
@@ -157,6 +155,40 @@ function Invoke-MainNoteProducer {
     . ([scriptblock]::Create($mainNewVmNoteText))
 
     New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+    New-VmNote -VmName $VmName -DeployConfig $DeployConfig -Successful $true
+    return [string]$script:ProducerVm.Notes
+}
+
+function Invoke-CurrentNoteProducer {
+    param(
+        [Parameter(Mandatory)] [object] $DeployConfig,
+        [Parameter(Mandatory)] [string] $VmName
+    )
+
+    $script:ProducerVm = [pscustomobject]@{ Name = $VmName; Notes = '' }
+    Set-Variable -Name Common -Value ([pscustomobject]@{ MemLabsVersion = 'current-test' }) -Scope Local
+    function Write-Log { param($Message, [switch]$Failure, [switch]$LogOnly, [switch]$Verbose, [switch]$Warning) }
+    function Get-VM2 {
+        [CmdletBinding()]
+        param([Parameter(Position = 0)][string] $Name, [switch] $Fallback)
+        if ($script:ProducerVm -and $script:ProducerVm.Name -eq $Name) { return $script:ProducerVm }
+        return $null
+    }
+    function Get-VMNote {
+        param([string] $VMName)
+        if ($script:ProducerVm -and $script:ProducerVm.Name -eq $VMName -and $script:ProducerVm.Notes -like '*lastUpdate*') {
+            return $script:ProducerVm.Notes | ConvertFrom-Json
+        }
+        return $null
+    }
+    function Set-VM {
+        [CmdletBinding()]
+        param([Parameter(ValueFromPipeline = $true)] $InputObject, [string] $Notes)
+        process { $script:ProducerVm.Notes = $Notes }
+    }
+
+    . ([scriptblock]::Create($currentSetVmNoteText))
+    . ([scriptblock]::Create($currentNewVmNoteText))
     New-VmNote -VmName $VmName -DeployConfig $DeployConfig -Successful $true
     return [string]$script:ProducerVm.Notes
 }
@@ -203,6 +235,9 @@ function Set-VMNote {
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Get-DomainNetbiosName)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'Common.ps1' -Name Test-VmPhase1Incomplete)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Test-SiteSystemClientOperatingSystem)))
+. ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Get-TopLevelSiteServer)))
+. ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Get-ConfigCmOptions)))
+. ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Sync-ExistingHierarchyOptionsToDeployConfig)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Update-VMFromHyperV)))
 . ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.GenConfig.Existing.ps1' -Name New-UserConfig)))
 
@@ -299,10 +334,16 @@ Assert-Equal $false ($null -ne $nocmNote.PSObject.Properties['thisParams']) 'mai
 Assert-Equal $false ($null -ne $nocmNote.PSObject.Properties['SQLAO']) 'main writer excludes generated SQLAO metadata'
 
 $nocmProjection = Convert-MainNoteToInventory -RawNote $nocmRaw
+$script:LegacyNetbiosNames['nocm.com'] = 'nocm'
 Assert-Equal 'DC' $nocmProjection.role 'develop hydrates the main role'
 Assert-Equal 'nocm.com' $nocmProjection.domain 'develop hydrates the main domain'
 Assert-Equal 'Server 2022' $nocmProjection.OperatingSystem 'develop maps deployedOS to OperatingSystem'
 Assert-Equal $true ([bool]$nocmProjection.vmBuild) 'develop recognizes the main note as MemLabs-managed'
+$blankProjection = [pscustomobject]@{ vmName = 'BLANK-TEST'; vmId = [guid]::NewGuid(); Memory = '4GB' }
+Update-VMFromHyperV -vm ([pscustomobject]@{ Name = 'BLANK-TEST'; State = 'Off'; vmID = $blankProjection.vmId }) `
+    -vmObject $blankProjection -vmNoteObject ([pscustomobject]@{ role = 'DomainMember'; blankSetting = '' })
+Assert-True ($blankProjection.blankSetting -is [string]) 'blank VM-note property remains a string instead of coercing to integer zero'
+Assert-Equal '' $blankProjection.blankSetting 'blank VM-note property remains blank'
 
 $readBack = Get-VMNote -VMName $nocmDcName
 Assert-True ($null -ne $readBack) 'develop Get-VMNote admits the exact-main note'
@@ -350,9 +391,108 @@ $script:RecoveredCmOptions['legacypki.lab'] = [pscustomobject]@{
 $legacyPkiExisting = New-UserConfig -Domain 'legacypki.lab' -Subnet '10.220.202.0'
 Assert-Equal $true ([bool]$legacyPkiExisting.pkiOptions.EnablePKI) 'legacy CA metadata reconstructs pkiOptions'
 Assert-Equal $true ([bool]$legacyPkiExisting.cmOptions.UsePKI) 'legacy ConfigMgr PKI mode is recovered from the original guest config'
+$legacyExpansionConfig = [pscustomobject]@{
+    vmOptions       = [pscustomobject]@{ domainName = 'legacypki.lab' }
+    virtualMachines = @([pscustomobject]@{ vmName = 'LPK-MEM1'; role = 'DomainMember' })
+}
+Assert-Equal $true ([bool](Get-ConfigCmOptions -Config $legacyExpansionConfig).UsePKI) 'deploy-time resolver recovers authoritative legacy ConfigMgr PKI mode'
+
+$existingHierarchy = @(
+    [pscustomobject]@{
+        vmName = 'LPK-CS1SITE'; role = 'CAS'; siteCode = 'CS1'; domain = 'legacypki.lab'
+        cmOptions = [pscustomobject]@{ Version = '2403'; Install = $true; PrePopulateObjects = $true; UsePKI = $true }
+    }
+    [pscustomobject]@{
+        vmName = 'LPK-PS1SITE'; role = 'Primary'; siteCode = 'PS1'; parentSiteCode = 'CS1'; domain = 'legacypki.lab'
+    }
+    [pscustomobject]@{
+        vmName = 'LPK-DC1'; role = 'DC'; domain = 'legacypki.lab'; InstallCA = $true
+    }
+)
+$secondaryExpansion = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'legacypki.lab' }
+    cmOptions = [pscustomobject]@{ Version = '2509'; Install = $true; UsePKI = $false }
+    pkiOptions = [pscustomobject]@{ EnablePKI = $false; IssuingCAVM = ''; UseOfflineRoot = $false; OfflineRootCAVM = '' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'LPK-SS1SITE'; role = 'Secondary'; siteCode = 'SS1'; parentSiteCode = 'PS1' }
+        [pscustomobject]@{ vmName = 'LPK-PS1SITE'; role = 'Primary'; siteCode = 'PS1'; parentSiteCode = 'CS1'; hidden = $true }
+    )
+}
+$null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $secondaryExpansion -ExistingVMs $existingHierarchy
+Assert-Equal '2403' $secondaryExpansion.cmOptions.Version 'existing hierarchy version overrides a stale follow-on fixture target'
+Assert-Equal $true ([bool]$secondaryExpansion.cmOptions.UsePKI) 'existing hierarchy PKI mode overrides stale follow-on eHTTP'
+Assert-Equal $true ([bool]$secondaryExpansion.pkiOptions.EnablePKI) 'existing hierarchy restores PKI deployment metadata'
+Assert-Equal 'LPK-DC1' $secondaryExpansion.pkiOptions.IssuingCAVM 'existing hierarchy restores the issuing CA reference'
+Assert-Equal $true ([bool]$secondaryExpansion.virtualMachines[0].cmOptions.UsePKI) 'new Secondary inherits authoritative hierarchy options'
+Assert-Equal $true ([bool]$secondaryExpansion.virtualMachines[1].cmOptions.UsePKI) 'hidden parent Primary inherits authoritative hierarchy options'
+
+$freshConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'fresh.test' }
+    virtualMachines = @([pscustomobject]@{ vmName = 'FRE-DC1'; role = 'DC' })
+}
+Assert-Equal 0 @(Sync-ExistingHierarchyOptionsToDeployConfig -Config $freshConfig -ExistingVMs @()).Count `
+    'fresh deployment accepts an empty existing inventory'
+
+$unrelatedPrimary = [pscustomobject]@{
+    vmName = 'LPK-NEWPS'; role = 'Primary'; siteCode = 'NEW'
+    cmOptions = [pscustomobject]@{ Version = '2509'; Install = $true; UsePKI = $false }
+}
+$mixedExpansion = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'legacypki.lab' }
+    cmOptions = [pscustomobject]@{ Version = '2509'; Install = $true; UsePKI = $false }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'LPK-SS2SITE'; role = 'Secondary'; siteCode = 'SS2'; parentSiteCode = 'PS1' }
+        $unrelatedPrimary
+    )
+}
+$null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $mixedExpansion -ExistingVMs $existingHierarchy
+Assert-Equal '2403' $mixedExpansion.virtualMachines[0].cmOptions.Version 'existing child still receives its hierarchy options in a mixed deployment'
+Assert-Equal '2509' $mixedExpansion.virtualMachines[1].cmOptions.Version 'new standalone hierarchy retains its own options'
+Assert-Equal '2509' $mixedExpansion.cmOptions.Version 'existing hierarchy does not clobber mixed-deployment root options'
+
+$conflictingTops = @(
+    [pscustomobject]@{ vmName = 'LPK-CS1A'; role = 'CAS'; siteCode = 'CS1'; cmOptions = $existingHierarchy[0].cmOptions }
+    [pscustomobject]@{ vmName = 'LPK-CS1B'; role = 'CAS'; siteCode = 'CS1'; cmOptions = $existingHierarchy[0].cmOptions }
+)
+Assert-ThrowsLike {
+    Sync-ExistingHierarchyOptionsToDeployConfig -Config $secondaryExpansion -ExistingVMs $conflictingTops
+} '*hierarchy ownership is ambiguous*' 'ambiguous existing hierarchy ownership fails closed'
+
+$twoHierarchyConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'multihierarchy.test'; prefix = 'MUL-' }
+    cmOptions = [pscustomobject]@{ Version = '2403'; UsePKI = $true }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'MUL-CAS'; role = 'CAS'; siteCode = 'CAS'
+            cmOptions = [pscustomobject]@{ Version = '2403'; UsePKI = $true }
+            ExistingVM = $true; osdMetadataOnly = $true; osdValidate = $true; phase11Validate = $true
+        }
+        [pscustomobject]@{
+            vmName = 'MUL-PRI'; role = 'Primary'; siteCode = 'PRI'
+            cmOptions = [pscustomobject]@{ Version = '2509'; UsePKI = $false }
+        }
+    )
+}
+$casNote = (Invoke-CurrentNoteProducer -DeployConfig $twoHierarchyConfig -VmName 'MUL-CAS') | ConvertFrom-Json
+$primaryNote = (Invoke-CurrentNoteProducer -DeployConfig $twoHierarchyConfig -VmName 'MUL-PRI') | ConvertFrom-Json
+Assert-Equal '2403' $casNote.cmOptions.Version 'CAS note persists its own hierarchy options'
+Assert-Equal $true ([bool]$casNote.cmOptions.UsePKI) 'CAS note persists its own PKI mode'
+foreach ($runtimeProperty in @('ExistingVM', 'osdMetadataOnly', 'osdValidate', 'phase11Validate')) {
+    Assert-Equal $false ($null -ne $casNote.PSObject.Properties[$runtimeProperty]) `
+        "current note excludes per-run routing property '$runtimeProperty'"
+}
+Assert-Equal '2509' $primaryNote.cmOptions.Version 'standalone Primary note persists its own hierarchy options'
+Assert-Equal $false ([bool]$primaryNote.cmOptions.UsePKI) 'standalone Primary note does not inherit root PKI mode'
+
+$script:RecoveredCmOptions['legacypki.lab'] = $null
+Assert-ThrowsLike {
+    Get-ConfigCmOptions -Config $legacyExpansionConfig
+} '*no authoritative deployConfig backup was readable*' 'deploy-time ambiguous legacy ConfigMgr mode fails closed'
+Assert-ThrowsLike {
+    New-UserConfig -Domain 'legacypki.lab' -Subnet '10.220.202.0'
+} '*no authoritative deployConfig backup was readable*' 'ambiguous legacy ConfigMgr mode fails closed'
 
 Write-Host ''
-Write-Host "expected failures : $script:ExpectedFailures" -ForegroundColor Yellow
 if ($script:Failures -gt 0) {
     Write-Host "FAIL: $script:Failures unexpected result(s)." -ForegroundColor Red
     exit 1

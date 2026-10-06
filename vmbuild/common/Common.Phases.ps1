@@ -1,5 +1,42 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 
+function Get-MemLabsDomainControllerReadinessProbe {
+    {
+        param([string] $Role)
+
+        $netlogonService = Get-Service -Name Netlogon -ErrorAction SilentlyContinue
+        $dnsService = Get-Service -Name DNS -ErrorAction SilentlyContinue
+        $ntdsService = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+        $dnsInstalled = $null -ne $dnsService
+        $dnsRequired = $Role -eq 'DC' -or $dnsInstalled
+        $netlogonState = if ($netlogonService) { "$($netlogonService.Status)" } else { 'NotInstalled' }
+        $dnsState = if ($dnsService) { "$($dnsService.Status)" } else { 'NotInstalled' }
+        $ntdsState = if ($ntdsService) { "$($ntdsService.Status)" } else { 'NotInstalled' }
+
+        [pscustomobject]@{
+            Ready = $netlogonState -eq 'Running' -and
+                $ntdsState -eq 'Running' -and
+                (-not $dnsRequired -or $dnsState -eq 'Running')
+            Role = $Role
+            Netlogon = $netlogonState
+            DNS = $dnsState
+            NTDS = $ntdsState
+            DNSRequired = $dnsRequired
+        }
+    }
+}
+
+function Test-MemLabsIncludeHiddenVmForPhase {
+    param(
+        [object] $Vm,
+        [int] $Phase
+    )
+
+    if (-not $Vm.hidden) { return $true }
+    if ($Phase -notin @(1, 10, 11)) { return $true }
+    return $Phase -eq 11 -and ($Vm.osdValidate -eq $true -or $Vm.phase11Validate -eq $true)
+}
+
 function Get-CriticalVMs {
     [CmdletBinding()]
     param (
@@ -2807,7 +2844,9 @@ DROP TABLE #memlabs_idxprobe;
             }
         }
 
-        # Confirm EVERY domain controller is actually serving AD DS / DNS / Netlogon
+        # Confirm EVERY domain controller is actually serving AD DS / Netlogon and
+        # DNS where applicable. Exact-main BDCs were promoted with InstallDns=false;
+        # a modern BDC that has DNS installed must still have it running.
         # over PowerShell Direct before releasing the dependent VMs and dispatching
         # the per-VM maintenance/validation jobs. This runs for ALL DCs -- not just
         # the ones we started above -- because an ALREADY-running DC can have a
@@ -2819,21 +2858,27 @@ DROP TABLE #memlabs_idxprobe;
         # after Phase 10, no reboot) adds negligible delay.
         if ($dcNames.Count -gt 0) {
             $dcWaitTimeoutSec = 300
+            $dcReadinessProbe = Get-MemLabsDomainControllerReadinessProbe
             foreach ($dcName in $dcNames) {
-                Write-Progress2 "Preparing Phase $Phase" -Status "Waiting for domain controller $dcName (AD DS / DNS / Netlogon)" -PercentComplete $global:preparePhasePercent
+                $dcInventory = $existingVMs | Where-Object { $_.vmName -eq $dcName } | Select-Object -First 1
+                if (-not $dcInventory) {
+                    $dcInventory = $allDomainVMs | Where-Object { $_.vmName -eq $dcName } | Select-Object -First 1
+                }
+                $dcRole = "$($dcInventory.Role)"
+                Write-Progress2 "Preparing Phase $Phase" -Status "Waiting for domain controller $dcName (AD DS / Netlogon / applicable DNS)" -PercentComplete $global:preparePhasePercent
                 $dcReady = $false
+                $dcLastReadiness = $null
                 $dcChannelBrokenCount = 0
                 $dcChannelRebootDone = $false
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
                 while ($sw.Elapsed.TotalSeconds -lt $dcWaitTimeoutSec) {
                     $probe = Invoke-VmCommand -VmName $dcName -VmDomainName $deployConfig.vmOptions.domainName `
-                        -ScriptBlock {
-                        $nl = (Get-Service -Name Netlogon -ErrorAction SilentlyContinue).Status
-                        $dns = (Get-Service -Name DNS -ErrorAction SilentlyContinue).Status
-                        $ntds = (Get-Service -Name NTDS -ErrorAction SilentlyContinue).Status
-                            ($nl -eq 'Running') -and ($dns -eq 'Running') -and ($ntds -eq 'Running')
-                    } -DisplayName "Phase$Phase-DCReady-$dcName" -SuppressLog -CommandReturnsBool -SessionMaxRetries 2
-                    if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput -eq $true) {
+                        -ScriptBlock $dcReadinessProbe -ArgumentList @($dcRole) `
+                        -DisplayName "Phase$Phase-DCReady-$dcName" -SuppressLog -SessionMaxRetries 2
+                    if ($probe -and -not $probe.ScriptBlockFailed) {
+                        $dcLastReadiness = @($probe.ScriptBlockOutput | Where-Object { $_ -and $_.PSObject.Properties['Ready'] }) | Select-Object -Last 1
+                    }
+                    if ($dcLastReadiness -and $dcLastReadiness.Ready -eq $true) {
                         $dcReady = $true
                         break
                     }
@@ -2867,10 +2912,17 @@ DROP TABLE #memlabs_idxprobe;
                     Start-Sleep -Seconds 10
                 }
                 if ($dcReady) {
-                    Write-Log "[Phase $Phase] Domain controller $dcName is serving AD DS / DNS / Netlogon ($([int]$sw.Elapsed.TotalSeconds)s)." -LogOnly
+                    Write-Log "[Phase $Phase] Domain controller $dcName is ready ($([int]$sw.Elapsed.TotalSeconds)s): role=$($dcLastReadiness.Role), Netlogon=$($dcLastReadiness.Netlogon), NTDS=$($dcLastReadiness.NTDS), DNS=$($dcLastReadiness.DNS), DNSRequired=$($dcLastReadiness.DNSRequired)." -LogOnly
                 }
                 else {
-                    Write-Log "[Phase $Phase] Domain controller $dcName not confirmed ready after ${dcWaitTimeoutSec}s; starting remaining VMs anyway." -Warning
+                    $readinessDetail = if ($dcLastReadiness) {
+                        "role=$($dcLastReadiness.Role), Netlogon=$($dcLastReadiness.Netlogon), NTDS=$($dcLastReadiness.NTDS), DNS=$($dcLastReadiness.DNS), DNSRequired=$($dcLastReadiness.DNSRequired)"
+                    }
+                    else {
+                        $probeFailure = if ($probe -and $probe.PSObject.Properties['ScriptBlockFailed']) { "$($probe.ScriptBlockFailed)" } else { '<no probe result>' }
+                        "service state unavailable, ScriptBlockFailed=$probeFailure"
+                    }
+                    Write-Log "[Phase $Phase] Domain controller $dcName not confirmed ready after ${dcWaitTimeoutSec}s ($readinessDetail); starting remaining VMs anyway." -Warning
                 }
             }
         }
@@ -3224,15 +3276,10 @@ DROP TABLE #memlabs_idxprobe;
             continue
         }
 
-        # Don't touch hidden VM's in Phase 1, 10, or 11 -- except a VM pulled in ONLY so OSD
-        # could be configured (the DP that serves PXE, the Primary that owns the boot image
-        # and the task-sequence deployments). Those arrive hidden, so the run that INTRODUCES
-        # an OSDClient used to validate none of the chain it just built. Phase 11 is read-only;
-        # 1 and 10 would rebuild them, so they stay excluded there.
-        if ($currentItem.hidden -and $Phase -in @(1, 10, 11)) {
-            if (-not ($Phase -eq 11 -and $currentItem.osdValidate)) {
-                continue
-            }
+        # Don't touch hidden VMs in Phase 1 or 10. Phase 11 is read-only, so include
+        # explicitly requested upgrade/OSD validation targets without rebuilding them.
+        if (-not (Test-MemLabsIncludeHiddenVmForPhase -Vm $currentItem -Phase $Phase)) {
+            continue
             Write-Log "[Phase $Phase] $($currentItem.vmName): hidden, but pulled in for OSD -- validating it so the PXE chain this run configured is actually checked" -LogOnly
         }
 
@@ -4673,12 +4720,12 @@ function Wait-Phase {
 # guaranteeing the checkpoint is ISO-free and the media can then be locked in and
 # left untouched for the whole phase. Gating is unchanged from the old inline
 # block: only snapshot when a CAS/Primary in the Phase 8 set has never finished
-# Phase 8 (the risky first CM install), honoring $global:NoSnapshot and an
+# Phase 8 (the risky first CM install), honoring $global:MemLabsNoSnapshot and an
 # existing snapshot of the same name.
 function Invoke-Phase8PreInstallSnapshot {
     param([object]$deployConfig)
 
-    if ($global:NoSnapshot) { return }
+    if ($global:MemLabsNoSnapshot) { return }
     $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
     if (-not $cd) { return }
 
@@ -4809,7 +4856,7 @@ function Get-ConfigurationData {
         }
 
         $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
-        if ($dc -and -not $global:MemLabsStartPhaseRequested) {
+        if ($dc -and -not $global:MemLabsStartPhase) {
 
             $global:preparePhasePercent++
             Start-Sleep -Milliseconds 251
@@ -5205,12 +5252,17 @@ function Get-Phase8ConfigurationData {
         }
     }
 
-    if ($deployConfig.cmOptions.Install -ne $false) {
+    $cmPhase8Vms = @($deployConfig.virtualMachines | Where-Object {
+            if ($_.role -notin @('Primary', 'CAS', 'PassiveSite', 'Secondary', 'SiteSystem', 'WSUS') -or $_.osdMetadataOnly) {
+                return $false
+            }
+            $effectiveCmOptions = if ($_.cmOptions) { $_.cmOptions } else { $deployConfig.cmOptions }
+            return $effectiveCmOptions -and $effectiveCmOptions.Install -ne $false
+        })
+    if ($cmPhase8Vms.Count -gt 0) {
 
         $fsVMsAdded = @()
-        foreach ($vm in $deployConfig.virtualMachines | Where-Object {
-                $_.role -in ("Primary", "CAS", "PassiveSite", "Secondary", "SiteSystem", "WSUS") -and -not $_.osdMetadataOnly
-            }) {
+        foreach ($vm in $cmPhase8Vms) {
 
             $global:preparePhasePercent++
 
@@ -5297,66 +5349,92 @@ function Get-Phase8ConfigurationData {
             }
         }
 
-        $all = @{
-            NodeName                    = "*"
-            PSDscAllowDomainUser        = $true
-            PSDscAllowPlainTextPassword = $true
-        }
-        $cd.AllNodes += $all
-
     }
 
     # Even when cmOptions.Install is false (existing CM), include hidden Primary nodes
     # when new VMs need BLM membership, client push, or OSD content/PXE reconciliation.
-    # OSD add-deltas inject every existing Primary because the target DP can belong to
-    # any child site; other add workflows retain the existing single-Primary behavior.
-    if ($NumberOfNodesAdded -eq 0) {
-        $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
-        # Per-VM pushClient opt-in (null/absent treated as $true for back-compat)
-        $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-        $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
-            })
-        $newOsdVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
-        $cmOptionsTargets = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -eq 'Primary' -and $_.hidden -and $_.cmOptionsChanged -eq $true -and
-                (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
-            })
-        $blmHierarchyTargets = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -eq 'Primary' -and $_.hidden -and $_.blmHierarchyTarget -eq $true -and
-                (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
-            })
-        $clientPushTargets = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -eq 'Primary' -and $_.hidden -and $_.clientPushTarget -eq $true -and
-                (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
-            })
-        if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0 -or $newOsdVMs.Count -gt 0 -or $cmOptionsTargets.Count -gt 0) {
-            $hiddenPrimaries = @($deployConfig.virtualMachines | Where-Object {
+    # This merge is independent of normal Install=true nodes: a new hierarchy
+    # must not suppress maintenance work for an existing sibling hierarchy.
+    $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
+            $_.role -in $pushableRoles -and -not $_.hidden -and (Test-PushClientRequested -VM $_)
+        })
+    $newOsdVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
+    $cmOptionsTargets = @($deployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.hidden -and $_.cmOptionsChanged -eq $true -and
+            (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
+        })
+    $blmHierarchyTargets = @($deployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.hidden -and $_.blmHierarchyTarget -eq $true -and
+            (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
+        })
+    $clientPushTargets = @($deployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.hidden -and $_.clientPushTarget -eq $true -and
+            (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
+        })
+    $workloadTargets = @($cmOptionsTargets) + @($blmHierarchyTargets) + @($clientPushTargets)
+    if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0 -or $newOsdVMs.Count -gt 0 -or $workloadTargets.Count -gt 0) {
+        $hiddenPrimaries = @($deployConfig.virtualMachines | Where-Object {
                 $_.role -eq "Primary" -and $_.hidden -and
                 (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
             })
-            if ($newOsdVMs.Count -eq 0) {
-                $workloadTargets = @($cmOptionsTargets) + @($blmHierarchyTargets) + @($clientPushTargets)
-                $workloadTargetNames = @($workloadTargets | ForEach-Object { $_.vmName } | Where-Object { $_ } | Select-Object -Unique)
-                if ($workloadTargetNames.Count -gt 0) {
-                    $hiddenPrimaries = @($hiddenPrimaries | Where-Object { $_.vmName -in $workloadTargetNames })
-                } else {
-                    $hiddenPrimaries = @($hiddenPrimaries | Select-Object -First 1)
+        $requiredHiddenPrimaries = @()
+        $workloadTargetNames = @($workloadTargets | ForEach-Object { $_.vmName } | Where-Object { $_ } | Select-Object -Unique)
+        if ($workloadTargetNames.Count -gt 0) {
+            $requiredHiddenPrimaries += @($hiddenPrimaries | Where-Object { $_.vmName -in $workloadTargetNames })
+        }
+        if ($newOsdVMs.Count -gt 0) {
+            # An OSD target DP can belong to any child site, so every existing
+            # Primary remains authoritative for its own content/PXE state.
+            $requiredHiddenPrimaries += $hiddenPrimaries
+        }
+        else {
+            $targetSiteCodes = @(($newPushVMs + $newBLMVMs) | ForEach-Object {
+                    if ($_.pushClient -is [string] -and -not [string]::IsNullOrWhiteSpace($_.pushClient)) {
+                        "$($_.pushClient)".Trim()
+                    }
+                } | Where-Object { $_ } | Select-Object -Unique)
+            $needsLegacyPrimaryFallback = $targetSiteCodes.Count -eq 0 -and $workloadTargetNames.Count -eq 0
+            foreach ($targetSiteCode in $targetSiteCodes) {
+                $ownerSiteCode = $targetSiteCode
+                $secondary = $deployConfig.virtualMachines | Where-Object {
+                    $_.role -eq 'Secondary' -and "$($_.siteCode)" -eq $targetSiteCode
+                } | Select-Object -First 1
+                if ($secondary -and $secondary.parentSiteCode) {
+                    $ownerSiteCode = "$($secondary.parentSiteCode)"
+                }
+                $ownerPrimary = $deployConfig.virtualMachines | Where-Object {
+                    $_.role -eq 'Primary' -and "$($_.siteCode)" -eq $ownerSiteCode
+                } | Select-Object -First 1
+                if (-not $ownerPrimary) {
+                    $needsLegacyPrimaryFallback = $true
+                    continue
+                }
+                if ($ownerPrimary.hidden) {
+                    $requiredHiddenPrimaries += @($hiddenPrimaries | Where-Object {
+                            $_.vmName -eq $ownerPrimary.vmName
+                        })
                 }
             }
-            foreach ($hiddenPrimary in $hiddenPrimaries) {
-                if ($cd.AllNodes.NodeName -contains $hiddenPrimary.vmName) { continue }
-                $cd.AllNodes += @{ NodeName = $hiddenPrimary.vmName; Role = $hiddenPrimary.Role }
-                $NumberOfNodesAdded++
+            if ($needsLegacyPrimaryFallback) {
+                # Preserve the legacy single-hierarchy fallback for BLM work or
+                # old configs whose client target cannot be resolved to a site.
+                $requiredHiddenPrimaries += @($hiddenPrimaries | Select-Object -First 1)
             }
-            if ($NumberOfNodesAdded -gt 0) {
-                $cd.AllNodes += @{ NodeName = "*"; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
-            }
+        }
+        foreach ($hiddenPrimary in @($requiredHiddenPrimaries | Sort-Object vmName -Unique)) {
+            if ($cd.AllNodes.NodeName -contains $hiddenPrimary.vmName) { continue }
+            $cd.AllNodes += @{ NodeName = $hiddenPrimary.vmName; Role = $hiddenPrimary.Role }
+            $NumberOfNodesAdded++
         }
     }
 
     if ($NumberOfNodesAdded -eq 0) {
         return
+    }
+    if ($cd.AllNodes.NodeName -notcontains '*') {
+        $cd.AllNodes += @{ NodeName = "*"; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
     }
     return $cd
 }

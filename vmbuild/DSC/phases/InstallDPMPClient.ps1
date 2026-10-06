@@ -649,7 +649,7 @@ $allInstalled = $true
 foreach ($DP in $DPs) {
     if ([string]::IsNullOrWhiteSpace($DP.ServerName)) { continue }
     $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
-    if (-not (Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $DP.ServerSiteCode)) {
+    if (-not (Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $DP.ServerSiteCode).Ready) {
         $allInstalled = $false
         break
     }
@@ -659,7 +659,7 @@ if ($allInstalled) {
     foreach ($PDP in $PullDPs) {
         if ([string]::IsNullOrWhiteSpace($PDP.ServerName)) { continue }
         $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
-        if (-not (Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $PDP.ServerSiteCode)) {
+        if (-not (Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $PDP.ServerSiteCode).Ready) {
             $allInstalled = $false
             break
         }
@@ -669,7 +669,7 @@ if ($allInstalled) {
     foreach ($MP in $MPs) {
         if ([string]::IsNullOrWhiteSpace($MP.ServerName)) { continue }
         $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
-        if (-not (Get-CMManagementPoint -SiteSystemServerName $MPFQDN)) {
+        if (-not (Get-CMManagementPointReadiness -ServerFQDN $MPFQDN -SiteCode $MP.ServerSiteCode).Ready) {
             $allInstalled = $false
             break
         }
@@ -793,7 +793,10 @@ foreach ($MP in $MPs) {
     }
 
     $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
-    Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode -usePKI:$usePKI
+    $mpInstallResult = @(Install-MP -ServerFQDN $MPFQDN -ServerSiteCode $MP.ServerSiteCode -usePKI:$usePKI)
+    if ($mpInstallResult.Count -eq 0 -or -not [bool]$mpInstallResult[-1]) {
+        $dpInstallFailed = $true
+    }
 }
 
 # A Pull DP requires its Source DP to already be an INSTALLED standard DP.
@@ -894,6 +897,8 @@ if ($dpInstallFailed) {
     Write-DscStatus "One or more Distribution Point roles or client-package targeting checks failed. Leaving InstallDP incomplete so Phase 8 retries before boundary-group and client-package validation." -Failure
     $Configuration.InstallDP.Status = 'NotStart'
     $Configuration.InstallDP.EndTime = ''
+    $Configuration.InstallMP.Status = 'NotStart'
+    $Configuration.InstallMP.EndTime = ''
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
 }

@@ -568,11 +568,15 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
 if ($Configuration.InstallSCCM.Status -eq 'Completed') {
 
     $regPresent = $false
-    try {
-        $regSiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue
-        if ($regSiteCode) { $regPresent = $true }
+    $identificationPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
+    if (Test-Path -LiteralPath $identificationPath) {
+        try {
+            $identification = Get-ItemProperty -LiteralPath $identificationPath -ErrorAction Stop
+            $siteCodeProperty = $identification.PSObject.Properties['Site Code']
+            if ($siteCodeProperty -and $siteCodeProperty.Value) { $regPresent = $true }
+        }
+        catch { }
     }
-    catch { }
 
     # If registry says CM is installed, try WMI first. The SMS Provider uses
     # CM's own SQL connection (with proper SPNs/auth) so it works reliably
@@ -974,7 +978,16 @@ CurrentBranch=1
                     $dcName = $allDCs[0]
                 }
                 else {
-                    $dcName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
+                    $gpHistoryPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History'
+                    $dcName = $null
+                    if (Test-Path -LiteralPath $gpHistoryPath) {
+                        try {
+                            $gpHistory = Get-ItemProperty -LiteralPath $gpHistoryPath -ErrorAction Stop
+                            $dcNameProperty = $gpHistory.PSObject.Properties['DCName']
+                            if ($dcNameProperty) { $dcName = $dcNameProperty.Value }
+                        }
+                        catch { }
+                    }
                     if ($dcName) { $dcName = $dcName.TrimStart('\\') }
                     $dcCandidates = @($dcName, ("$env:LOGONSERVER".TrimStart('\\')) | Where-Object { $_ })
                     try {
@@ -1569,7 +1582,13 @@ WHERE drs.is_suspended = 1
     # "already installed" path and waits for an SMS Provider that will never exist.
     # Same tail and patterns the host monitor uses, so both sides agree on "fatal".
     $setupLogTail = if (Test-Path 'C:\ConfigMgrSetup.log') { @(Get-Content 'C:\ConfigMgrSetup.log' -Tail 60 -ErrorAction SilentlyContinue) } else { @() }
-    $uiInstallDirectory = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'UI Installation Directory' -ErrorAction SilentlyContinue
+    $uiInstallDirectory = $null
+    try {
+        $uiInstallDirectory = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' `
+            -Name 'UI Installation Directory' -ErrorAction Stop
+    }
+    catch [System.Management.Automation.ItemNotFoundException] {}
+    catch [System.Management.Automation.PSArgumentException] {}
     $configurationManagerModule = if ($uiInstallDirectory) { Join-Path $uiInstallDirectory 'bin\ConfigurationManager.psd1' } else { '' }
     $configurationManagerModuleExists = [bool]($configurationManagerModule -and (Test-Path -LiteralPath $configurationManagerModule -PathType Leaf))
     $completionFailureReason = Get-CmSetupCompletionFailureReason -LogLines $setupLogTail -ExitCode $setupExitCode `
@@ -1654,6 +1673,50 @@ WHERE ip_address IN
     }
 }
 
+# Existing sites can emerge from Phase 3 with ConfigMgr core services stopped
+# after Windows feature servicing. Provider WMI can remain reachable while
+# ScriptWorkflow silently runs without distmgr/rcm/hman. Restore and verify the
+# producer services before any role/content work.
+foreach ($coreServiceName in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')) {
+    $coreServiceReady = $false
+    for ($serviceAttempt = 1; $serviceAttempt -le 3; $serviceAttempt++) {
+        $coreService = try {
+            Get-Service -Name $coreServiceName -ErrorAction Stop
+        }
+        catch [Microsoft.PowerShell.Commands.ServiceCommandException] {
+            $null
+        }
+        if ($coreService -and $coreService.Status -eq 'Running') {
+            $coreServiceReady = $true
+            break
+        }
+        try {
+            Start-Service -Name $coreServiceName -ErrorAction Stop
+            (Get-Service -Name $coreServiceName -ErrorAction Stop).WaitForStatus(
+                [System.ServiceProcess.ServiceControllerStatus]::Running,
+                [TimeSpan]::FromSeconds(30))
+            $coreServiceReady = $true
+            break
+        }
+        catch {
+            Write-DscStatus "$coreServiceName was not Running; start attempt $serviceAttempt/3 failed: $($_.Exception.Message)"
+        }
+        if ($serviceAttempt -lt 3) { Start-Sleep -Seconds 5 }
+    }
+    if (-not $coreServiceReady) {
+        $finalService = try {
+            Get-Service -Name $coreServiceName -ErrorAction Stop
+        }
+        catch [Microsoft.PowerShell.Commands.ServiceCommandException] {
+            $null
+        }
+        $finalState = if ($finalService) { "$($finalService.Status)" } else { 'Absent' }
+        Write-DscStatus "ConfigMgr core service '$coreServiceName' did not reach Running after 3 attempts (state=$finalState). Stopping before provider, role, and content work." -Failure
+        return
+    }
+    Write-DscStatus "ConfigMgr core service '$coreServiceName' is Running."
+}
+
 # Provider
 $smsProvider = Get-SMSProvider -SiteCode $SiteCode
 if (-not $smsProvider.FQDN) {
@@ -1672,6 +1735,34 @@ if (-not $worked) {
 Set-Location "$($SiteCode):\"
 if ((Get-Location).Drive.Name -ne $SiteCode) {
     Write-DscStatus "Failed to Set-Location to $SiteCode`:"
+    return $false
+}
+
+function Ensure-CmProviderLocalAdminMembership {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$AccountName,
+        [int]$Attempts = 6,
+        [int]$RetrySeconds = 5
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            $group = Get-LocalGroup -Name 'SMS Admins' -ErrorAction Stop
+            $members = @(Get-LocalGroupMember -Group $group.Name -ErrorAction Stop)
+            if (@($members | Where-Object { $_.Name -ieq $AccountName }).Count -gt 0) {
+                Write-DscStatus "'$AccountName' is present in local group 'SMS Admins' (attempt $attempt/$Attempts)."
+                return $true
+            }
+
+            Write-DscStatus "Adding '$AccountName' to local group 'SMS Admins' (attempt $attempt/$Attempts)."
+            Add-LocalGroupMember -Group $group.Name -Member $AccountName -ErrorAction Stop
+        }
+        catch {
+            Write-DscStatus "Could not ensure '$AccountName' in local group 'SMS Admins' (attempt $attempt/$Attempts): $($_.Exception.Message)"
+        }
+        if ($attempt -lt $Attempts) { Start-Sleep -Seconds $RetrySeconds }
+    }
     return $false
 }
 
@@ -1697,6 +1788,10 @@ if (-not $exists) {
 
 if (-not $exists) {
     Write-DscStatus "Failed to add 'vmbuildadmin' account as Full Administrator in ConfigMgr"
+}
+if (-not (Ensure-CmProviderLocalAdminMembership -AccountName $domainUserName)) {
+    Write-DscStatus "Failed to add '$domainUserName' to local group 'SMS Admins'. Phase 11 provider queries would run with no local provider authorization." -Failure
+    return $false
 }
 
 # Check if we should update
@@ -2219,7 +2314,13 @@ if ($UpdateRequired) {
             if ($elapsedMin -ge $monitorDeadlineMin) {
                 $diag = ""
                 try {
-                    $cmInstallDir = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction SilentlyContinue).'Installation Directory'
+                    $cmSetupPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Setup'
+                    $cmInstallDir = $null
+                    if (Test-Path -LiteralPath $cmSetupPath) {
+                        $cmSetup = Get-ItemProperty -LiteralPath $cmSetupPath -ErrorAction Stop
+                        $installDirProperty = $cmSetup.PSObject.Properties['Installation Directory']
+                        if ($installDirProperty) { $cmInstallDir = $installDirProperty.Value }
+                    }
                     if ($cmInstallDir) {
                         # cmupdate.log is the decisive one -- tail it deeper. The 2303->2309
                         # in-console update hangs mid-install in a KNOWN product bug
@@ -2245,7 +2346,10 @@ if ($UpdateRequired) {
                 # INSTALL_IN_PROGRESS on this hop (fixed in later builds; the RTM 2309
                 # in-console update still hits it).
                 try {
-                    $oleProps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Ole' -ErrorAction SilentlyContinue
+                    $olePath = 'HKLM:\SOFTWARE\Microsoft\Ole'
+                    $oleProps = if (Test-Path -LiteralPath $olePath) {
+                        Get-ItemProperty -LiteralPath $olePath -ErrorAction Stop
+                    }
                     $haveAccess = $oleProps -and $null -ne $oleProps.MachineAccessRestriction
                     $haveLaunch = $oleProps -and $null -ne $oleProps.MachineLaunchRestriction
                     if (-not $haveAccess -or -not $haveLaunch) {

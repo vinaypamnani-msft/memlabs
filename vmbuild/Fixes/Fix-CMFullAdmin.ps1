@@ -2,8 +2,17 @@
 # ConfigMgr site so admin console + sqlcmd-via-CM provider both work.
 
 $Fix_CMFullAdmin = {
-    $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar -ErrorAction SilentlyContinue
-    if ($ErrVar.Count -ne 0 -or [string]::IsNullOrWhiteSpace($SiteCode)) {
+    $SiteCode = $null
+    $identificationPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
+    if (Test-Path -LiteralPath $identificationPath) {
+        try {
+            $identification = Get-ItemProperty -LiteralPath $identificationPath -ErrorAction Stop
+            $siteCodeProperty = $identification.PSObject.Properties['Site Code']
+            if ($siteCodeProperty) { $SiteCode = $siteCodeProperty.Value }
+        }
+        catch { }
+    }
+    if ([string]::IsNullOrWhiteSpace($SiteCode)) {
         return [pscustomobject]@{ Success = $true; Message = 'No site code; CM not installed or uninstalled - skipping' }
     }
 

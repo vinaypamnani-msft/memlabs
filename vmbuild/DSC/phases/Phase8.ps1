@@ -1480,7 +1480,7 @@
 
         WriteStatus WaitActive {
             Status    = "Waiting for $($ThisVM.thisParams.ActiveNode) to finish adding passive site server role"
-            DependsOn = '[InstallADK]ADKInstall'
+            DependsOn = $nextDepend
         }
 
         WaitForAll ActiveNode {

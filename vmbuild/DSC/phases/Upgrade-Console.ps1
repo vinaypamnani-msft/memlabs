@@ -176,24 +176,37 @@ function Resolve-ExpectedConsoleRelease {
         [object]$DeployConfig
     )
 
-    $configuredRelease = "$($CmOptions.Version)".Trim()
+    $releaseOptions = $CmOptions
+    $releaseVm = $VM
+    if ($VM.parentSiteCode) {
+        $currentDomain = if ($VM.domain) { "$($VM.domain)" } else { "$($DeployConfig.vmOptions.domainName)" }
+        $parentSites = @($DeployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'CAS' -and
+                "$($_.siteCode)" -ieq "$($VM.parentSiteCode)" -and
+                (-not $_.domain -or "$($_.domain)" -ieq $currentDomain)
+            })
+        if ($parentSites.Count -ne 1) {
+            throw "Upgrade-Console: expected exactly one parent CAS '$($VM.parentSiteCode)' in domain '$currentDomain' in deployConfig, found $($parentSites.Count)"
+        }
+        $releaseVm = $parentSites[0]
+        $releaseOptions = if ($releaseVm.cmOptions) { $releaseVm.cmOptions } else { $DeployConfig.cmOptions }
+    }
+
+    $configuredRelease = "$($releaseOptions.Version)".Trim()
     if (-not $configuredRelease) { throw 'Upgrade-Console: cmOptions.Version is missing from deployConfig' }
 
-    $deployedRelease = "$($VM.thisParams.cmDownloadVersion.baselineVersion)".Trim()
-    if (-not $deployedRelease -and $DeployConfig -and $VM.parentSiteCode) {
-        $parentSite = @($DeployConfig.virtualMachines | Where-Object {
-                "$($_.siteCode)" -ieq "$($VM.parentSiteCode)" -and $_.thisParams.cmDownloadVersion.baselineVersion
-            }) | Select-Object -First 1
-        if ($parentSite) {
-            $deployedRelease = "$($parentSite.thisParams.cmDownloadVersion.baselineVersion)".Trim()
-        }
-    }
-    if ([bool]$CmOptions.OfflineSCP -and $deployedRelease -and
+    $deployedRelease = "$($releaseVm.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+    if ([bool]$releaseOptions.OfflineSCP -and $deployedRelease -and
         $deployedRelease -notin @('current-branch', 'tech-preview')) {
         return $deployedRelease
     }
 
     if ($configuredRelease -notin @('current-branch', 'tech-preview')) { return $configuredRelease }
+
+    $deployedVersions = @($releaseVm.thisParams.cmDownloadVersion.versions |
+            ForEach-Object { "$_".Trim() } |
+            Where-Object { $_ -and $_ -notin @('current-branch', 'tech-preview') })
+    if ($deployedVersions.Count -gt 0) { return $deployedVersions[-1] }
 
     if (-not $deployedRelease -or $deployedRelease -in @('current-branch', 'tech-preview')) {
         throw "Upgrade-Console: could not resolve symbolic cmOptions.Version '$configuredRelease' to the deployed media release"

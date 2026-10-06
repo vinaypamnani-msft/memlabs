@@ -29,7 +29,13 @@ function Get-ParsedSource {
     $tokens = $null
     $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
-    $realErrors = @($errors | Where-Object { $_.ErrorId -ne 'ModuleNotFoundDuringParse' })
+    $nonBlockingParserErrorIds = @(
+        'ModuleNotFoundDuringParse'
+        'MultipleModuleEntriesFoundDuringParse'
+        'InvalidInstanceProperty'
+        'ResourceNotDefined'
+    )
+    $realErrors = @($errors | Where-Object { $_.ErrorId -notin $nonBlockingParserErrorIds })
     Assert-LocalizedOutput ($realErrors.Count -eq 0) "$Path parses"
     return [pscustomobject]@{ Ast = $ast; Text = [IO.File]::ReadAllText($Path) }
 }

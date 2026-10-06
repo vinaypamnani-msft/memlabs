@@ -291,15 +291,15 @@ $newLabAst = Get-DcSourceAst 'New-Lab.ps1'
 $startPhaseStateAssignment = $newLabAst.Find({
         param($candidate)
         $candidate -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $candidate.Left.Extent.Text -eq '$global:MemLabsStartPhaseRequested' -and
-        $candidate.Right.Extent.Text -eq '[bool]$StartPhase'
+        $candidate.Left.Extent.Text -eq '$global:MemLabsStartPhase' -and
+        $candidate.Right.Extent.Text -eq '[int]$StartPhase'
     }, $true)
 $legacyStartPhaseAssignment = $newLabAst.Find({
         param($candidate)
         $candidate -is [System.Management.Automation.Language.AssignmentStatementAst] -and
         $candidate.Left.Extent.Text -eq '$global:StartPhase'
     }, $true)
-Assert-DcEqual $true ([bool]$startPhaseStateAssignment) 'New-Lab publishes resume state without reassigning its validated StartPhase parameter'
+Assert-DcEqual $true ([bool]$startPhaseStateAssignment) 'New-Lab publishes the phase mode without reassigning its validated StartPhase parameter'
 Assert-DcEqual $false ([bool]$legacyStartPhaseAssignment) 'New-Lab avoids top-level fresh-run StartPhase self-assignment'
 $dnsIf = $newLabAst.Find({
         param($candidate)
@@ -359,7 +359,7 @@ function Test-VmResponsive { param($VmName, $TimeoutSeconds) $script:VmResponsiv
 function Restart-UnresponsiveVm { param($VmName, $WaitTimeSeconds) return $false }
 
 $global:Common = [pscustomobject]@{ VerboseEnabled = $false }
-$global:MemLabsStartPhaseRequested = $false
+$global:MemLabsStartPhase = 0
 $global:preparePhasePercent = 0
 $script:VmResponsiveCalls = 0
 $preflightConfig = [pscustomobject]@{
@@ -371,7 +371,7 @@ catch { $threw = $true }
 Assert-DcEqual $true $threw 'Failed DC recovery terminates configuration preflight'
 Assert-DcEqual 1 $script:VmResponsiveCalls 'Fresh deployment probes DC responsiveness'
 
-$global:MemLabsStartPhaseRequested = $true
+$global:MemLabsStartPhase = 3
 $script:VmResponsiveCalls = 0
 $resumeConfigurationData = Get-ConfigurationData -Phase 3 -deployConfig $preflightConfig
 Assert-DcEqual 'PT1-DC1' $resumeConfigurationData.AllNodes[0].NodeName 'Resume deployment preserves DC configuration data'
@@ -382,12 +382,12 @@ $script:Phase3ConfigurationData = @{
     NonNodeData = @{ SqlAo = @{ Listener = @{ Endpoint = @{ Port = 5022 } } } }
 }
 $global:Common.VerboseEnabled = $true
-$global:MemLabsStartPhaseRequested = $true
+$global:MemLabsStartPhase = 3
 $verboseRecords = @(& { Get-ConfigurationData -Phase 3 -deployConfig $preflightConfig } 3>&1)
 $jsonWarnings = @($verboseRecords | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
 Assert-DcEqual 0 $jsonWarnings.Count 'Verbose configuration data renders without JSON depth warnings'
 $global:Common.VerboseEnabled = $false
-$global:MemLabsStartPhaseRequested = $false
+$global:MemLabsStartPhase = 0
 
 $startPhaseJobs = $phasesAst.Find({
         param($candidate)

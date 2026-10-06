@@ -702,6 +702,27 @@ function Test-ValidUserName {
     }
 }
 
+function Test-ValidSiteRoleFlags {
+    param (
+        [object] $VM,
+        [object] $ReturnObject
+    )
+
+    $requestedRoles = @(
+        [pscustomobject]@{ Name = 'installMP'; Value = [bool]$VM.installMP },
+        [pscustomobject]@{ Name = 'installDP'; Value = [bool]$VM.installDP },
+        [pscustomobject]@{ Name = 'installSUP'; Value = [bool]$VM.installSUP },
+        [pscustomobject]@{ Name = 'installRP'; Value = [bool]$VM.installRP },
+        [pscustomobject]@{ Name = 'installSMSProv'; Value = [bool]$VM.installSMSProv }
+    ) | Where-Object { $_.Value }
+    if ($requestedRoles.Count -eq 0) { return }
+
+    $siteCapableRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'WSUS')
+    if ($VM.role -notin $siteCapableRoles) {
+        Add-ValidationMessage -Message "VM Validation: [$($VM.vmName)] role [$($VM.role)] cannot host ConfigMgr site-system flags [$($requestedRoles.Name -join ', ')]. Change the VM to a supported SiteSystem/site-server role and specify its owning siteCode before deploying roles." -ReturnObject $ReturnObject -Failure
+    }
+}
+
 function Test-ValidVmSupported {
     param (
         [object] $VM,
@@ -851,6 +872,7 @@ function Test-ValidVmSupported {
         }
     }
 
+    Test-ValidSiteRoleFlags -VM $VM -ReturnObject $ReturnObject
 }
 
 function Test-ValidVmMemory {
@@ -1442,21 +1464,33 @@ function Test-ValidRoleSiteSystem {
     }
 
     if (-not $VM.siteCode) {
-        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain siteCode; When deploying $vmRole Role, you must specify the siteCode of a Primary Site Server." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain siteCode; When deploying $vmRole Role, you must specify the siteCode of a Primary Site Server." -ReturnObject $ReturnObject -Failure
     }
     else {
         $ssInConfig = $ConfigObject.virtualMachines | Where-Object { $_.sitecode -eq $VM.siteCode -and ($_.role -in "Primary", "Secondary", "CAS") }
         if (-not $ssInConfig) {
             $ssVM = Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName -SiteCode $VM.siteCode
             if (($ssVM | Measure-Object).Count -eq 0) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Site Server." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a siteCode [$($VM.siteCode)] which doesn't belong to an existing Site Server." -ReturnObject $ReturnObject -Failure
             }
         }
     }
     if (-not $allowOnCAS) {
-        $casVM = Get-List2 -DeployConfig $ConfigObject | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $VM.siteCode }
+        $casVM = @($ConfigObject.virtualMachines | Where-Object {
+                $_.role -eq 'CAS' -and $_.siteCode -eq $VM.siteCode
+            })
+        if ($casVM.Count -eq 0) {
+            try {
+                $casVM = @(Get-ExistingSiteServer -DomainName $ConfigObject.vmOptions.DomainName `
+                        -Role CAS -SiteCode $VM.siteCode)
+            }
+            catch {
+                Add-ValidationMessage -Message "$vmRole Validation: Could not safely determine whether site [$($VM.siteCode)] is a CAS. $($_.Exception.Message)" -ReturnObject $ReturnObject -Failure
+                $casVM = @()
+            }
+        }
         if ($casVM) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a SiteSystem role (DP or MP) that is not allowed on CAS." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains a SiteSystem role (DP or MP) that is not allowed on CAS." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -2676,7 +2710,7 @@ function Test-Configuration {
         }
 
 
-        if ($global:SkipValidation) {
+        if ($global:MemLabsSkipValidation) {
             $return.Message = $null
             $return.Valid = $true
             $return.Problems = 0

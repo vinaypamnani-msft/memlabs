@@ -166,6 +166,83 @@ Write-DscStatus "$Tag Starting perfloading"
         return $MemberKeys.ContainsKey($DistributionPointName.ToUpperInvariant())
     }
 
+    function Get-MemLabsOsdTargetingPlan {
+        param (
+            [object] $DeployConfig,
+            [string] $PrimarySiteCode,
+            [object[]] $LiveDistributionPoints
+        )
+
+        $defaultNetwork = "$($DeployConfig.vmOptions.network)"
+        $networkOf = {
+            param($vm)
+            if ($vm -and $vm.network) { return "$($vm.network)" }
+            if ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
+            return $defaultNetwork
+        }
+        $scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+            "$($_.PrimarySiteCode)" -eq $PrimarySiteCode
+        } | Select-Object -First 1
+        $scopeIsAuthoritative = $scope -and $scope.PSObject.Properties['DistributionPoints']
+        if ($scope -and $scope.PSObject.Properties['OsdClientSubnets']) {
+            $clientSubnets = @($scope.OsdClientSubnets)
+        }
+        else {
+            $clientSubnets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
+                    ForEach-Object { & $networkOf $_ })
+            $clientSubnets += @($DeployConfig.phase8OsdClientSubnets)
+        }
+        $clientSubnets = @($clientSubnets | Where-Object { $_ } | Select-Object -Unique)
+        $scopeRecords = @($scope.DistributionPoints)
+        $targets = @()
+        foreach ($liveDp in @($LiveDistributionPoints)) {
+            $fqdn = if ($liveDp.Fqdn) {
+                "$($liveDp.Fqdn)".TrimStart('\')
+            }
+            elseif ($liveDp.NetworkOSPath) {
+                "$($liveDp.NetworkOSPath)" -replace '^\\\\', ''
+            }
+            elseif ($liveDp.ServerName) {
+                "$($liveDp.ServerName)".TrimStart('\')
+            }
+            else { '' }
+            if (-not $fqdn) { continue }
+            $shortName = ($fqdn -split '\.')[0]
+            $vm = $DeployConfig.virtualMachines | Where-Object {
+                $_.vmName -ieq $shortName -or $_.vmName -ieq $fqdn
+            } | Select-Object -First 1
+            $record = $scopeRecords | Where-Object {
+                $_.Fqdn -ieq $fqdn -or $_.VmName -ieq $shortName
+            } | Select-Object -First 1
+            if ($scopeIsAuthoritative -and -not $record) { continue }
+            $role = if ($record -and $record.Role) { "$($record.Role)" } elseif ($vm) { "$($vm.role)" } else { '' }
+            $siteCode = if ($record -and $record.SiteCode) { "$($record.SiteCode)" } elseif ($vm -and $vm.siteCode) { "$($vm.siteCode)" } else { '' }
+            # An implicit Secondary DP is not configured for PXE by MemLabs.
+            if ($role -eq 'Secondary' -or $siteCode -ne $PrimarySiteCode) { continue }
+            $network = if ($record -and $record.Network) {
+                "$($record.Network)"
+            }
+            elseif ($vm -and $vm.network) {
+                "$($vm.network)"
+            }
+            elseif ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) {
+                "$($vm.thisParams.vmNetwork)"
+            }
+            else {
+                $defaultNetwork
+            }
+            if (-not $network -or $clientSubnets -notcontains $network) { continue }
+            $targets += [pscustomobject]@{ Fqdn = $fqdn; Short = $shortName; Subnet = $network }
+        }
+        $targets = @($targets | Sort-Object Fqdn -Unique)
+        $coveredSubnets = @($targets | ForEach-Object { $_.Subnet } | Where-Object { $_ } | Select-Object -Unique)
+        [pscustomobject]@{
+            ClientSubnets      = @($clientSubnets)
+            DistributionPoints = @($targets)
+            UncoveredSubnets   = @($clientSubnets | Where-Object { $coveredSubnets -notcontains $_ })
+        }
+    }
+
     function Get-MemLabsBootImageSourceVersionProblem {
         param (
             [string] $CurrentSourceVersion,
@@ -2433,14 +2510,9 @@ if ($licensed) { Write-Output 'Activated' }
     # topology resolver. Direct and relayed paths target the same DP group and
     # PXE settings. No consumer is allowed to re-derive coverage by subnet.
     $OsdDpGroupName = "OSD DPS"
-    $osdDefaultNet = $deployConfig.vmOptions.network
-    $osdNetOf = {
-        param($vm)
-        if ($vm.network) { return "$($vm.network)" }
-        if ($vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
-        return "$osdDefaultNet"
-    }
-    $osdSubnets = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | ForEach-Object { & $osdNetOf $_ } | Where-Object { $_ } | Select-Object -Unique)
+    $osdTargetingPlan = Get-MemLabsOsdTargetingPlan -DeployConfig $deployConfig -PrimarySiteCode $SiteCode `
+        -LiveDistributionPoints @(Get-CMDistributionPoint -AllSite -ErrorAction SilentlyContinue)
+    $osdSubnets = @($osdTargetingPlan.ClientSubnets)
     $osdDistTarget = $null
     $hasOsdTargets = $false
     if ($osdSubnets.Count -eq 0) {
@@ -2558,13 +2630,13 @@ if ($licensed) { Write-Output 'Activated' }
                 # Enable PXE. Prefer the NonWDS PXE responder (no separate WDS role);
                 # fall back to plain EnablePxe if this build lacks -EnableNonWdsPxe.
                 try {
-                    Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableNonWdsPxe $true -ErrorAction Stop
-                    Write-DscStatus "$Tag Enabled PXE (NonWDS) on OSD DP '$($d.Short)'"
+                    Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableUnknownComputerSupport $true -EnableNonWdsPxe $true -ErrorAction Stop
+                    Write-DscStatus "$Tag Enabled PXE (NonWDS) with unknown-computer support on OSD DP '$($d.Short)'"
                 }
                 catch {
                     try {
-                        Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -ErrorAction Stop
-                        Write-DscStatus "$Tag Enabled PXE on OSD DP '$($d.Short)'"
+                        Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableUnknownComputerSupport $true -ErrorAction Stop
+                        Write-DscStatus "$Tag Enabled PXE with unknown-computer support on OSD DP '$($d.Short)'"
                     }
                     catch { Write-DscStatus "$Tag WARNING: Failed to enable PXE on OSD DP '$($d.Short)': $($_.Exception.Message)" }
                 }
@@ -3150,12 +3222,11 @@ if ($licensed) { Write-Output 'Activated' }
     }
 
 
-    # Phase 1 copies the Win10/Win11 OSD ISOs to <CM install drive>\OSD for EVERY
-    # Primary when PrePopulateObjects is set (which gated entry to perfloading), so
-    # by here a Primary SHOULD have the media. A miss is a real gap, not an expected
-    # child-primary case -- capture exactly what's present so the next run shows
-    # WHICH file went missing and whether the whole folder was emptied
-    # (wacky ZZ-GYRO 2026-08-17 skipped all task sequences on this signal).
+    # Phase 1 seeds the Win10/Win11 OSD ISOs on every new Primary, and the Phase 8
+    # host preflight repairs inherited Primaries created by revisions that copied
+    # media only to the hierarchy's top-level site. By here a Primary MUST have the
+    # media. A miss means the host repair was skipped or failed -- capture exactly
+    # what's present so the next run shows which file is still missing.
     $win11OsdPath = Join-Path $folderPath "Windows 11 24h2"
     $win10OsdPath = Join-Path $folderPath "Windows 10 22h2"
     $hasOsdMedia = (Test-Path "$win11OsdPath\sources\install.wim") -and (Test-Path "$win10OsdPath\sources\install.wim")
@@ -3165,7 +3236,7 @@ if ($licensed) { Write-Output 'Activated' }
         $w10 = Test-Path "$win10OsdPath\sources\install.wim"
         $cfgDrive = if ($CMInstallDir) { (Split-Path -Path $CMInstallDir -Qualifier) } else { '<unset>' }
         $freeGB = try { [math]::Round((Get-PSDrive -Name ($DriveLetter.TrimEnd(':')) -ErrorAction Stop).Free / 1GB, 1) } catch { '?' }
-        Write-DscStatus "$Tag WARNING: OSD media missing under '$folderPath' -- skipping OS packages and task sequences. win11 install.wim=$w11; win10 install.wim=$w10; OSD drive '$DriveLetter' free=${freeGB}GB; config CMInstallDir drive '$cfgDrive'. Phase 1 copies OSD to the CMInstallDir drive only when the VM is (re)created, so a rerun will NOT restore it -- rebuild the site server or re-copy the ISOs." -Warning
+        Write-DscStatus "$Tag WARNING: OSD media missing under '$folderPath' -- skipping OS packages and task sequences. win11 install.wim=$w11; win10 install.wim=$w10; OSD drive '$DriveLetter' free=${freeGB}GB; config CMInstallDir drive '$cfgDrive'. The Phase 8 host preflight should repair this payload before perfloading; verify the host OS ISOs are available and rerun from Phase 8." -Warning
         # Enumerate the OSD tree so a partial/misplaced copy or an emptied folder is visible.
         try {
             if (Test-Path $folderPath) {
@@ -4537,11 +4608,25 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # WSUS, SQLAO, WorkgroupMember, InternetClient, AADClient) is excluded
         # and we don't pull thousands of irrelevant updates into the lab catalog.
         $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-        $clientVMs = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -in $pushableRoles -and ($_.pushClient -ne $false)
+        $hierarchyTopSiteCode = if ($ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
+        $clientInventory = @($deployConfig.phase8SoftwareUpdateProductInventory | Where-Object {
+                "$($_.TopSiteCode)" -ieq $hierarchyTopSiteCode
             })
+        $clientByName = @{}
+        foreach ($client in $clientInventory) {
+            $name = "$($client.vmName)".ToUpperInvariant()
+            if ($name) { $clientByName[$name] = $client }
+        }
+        foreach ($client in @($deployConfig.virtualMachines | Where-Object {
+                    $_.role -in $pushableRoles -and (Test-PushClientRequested -VM $_)
+                })) {
+            $name = "$($client.vmName)".ToUpperInvariant()
+            if ($name) { $clientByName[$name] = $client }
+        }
+        $clientVMs = @($clientByName.Values)
 
-        $products = ($clientVMs.operatingSystem | Select-Object -Unique) + ($clientVMs.sqlversion | Select-Object -Unique)
+        $products = @($clientVMs.operatingSystem | Select-Object -Unique) +
+            @($clientVMs.sqlversion | Select-Object -Unique)
 
         # Filter out Linux OS names — WSUS has no products for Ubuntu/Linux
         $products = @($products | Where-Object { $_ -and $_ -notmatch '^Ubuntu|^CentOS|^RHEL|^Debian|^Linux' })
@@ -5277,9 +5362,12 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             if ($catalogHasOurProducts) {
                 Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) and products already in catalog — skipping sync 1 wait"
             }
-            else {
+            elseif ($isTopLevel) {
                 Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) — triggering background sync 1 and NOT waiting"
                 Invoke-FullSync
+            }
+            else {
+                Write-DscStatus "$Tag Hidden downstream Primary (parent=$($ThisVM.parentSiteCode)) - not forcing sync 1 before the upstream subscription/catalog replicates"
             }
             $sync1Done = $true
         }

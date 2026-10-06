@@ -13,7 +13,7 @@ $Fix_EnableLogMachine = {
     # Schedule service is up first, and retry the register/verify a few times.
 
     try {
-        $svc = Get-Service -Name 'Schedule' -ErrorAction SilentlyContinue
+        $svc = try { Get-Service -Name 'Schedule' -ErrorAction Stop } catch { $null }
         if ($svc -and $svc.Status -ne 'Running') {
             Start-Service -Name 'Schedule' -ErrorAction SilentlyContinue
         }

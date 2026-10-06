@@ -110,6 +110,27 @@ if ($validationText -notmatch 'SMS_DistributionDPStatus' -or
 if ($validationText -notmatch 'FAIL: \$\(\$pkgClass\.Class\) query failed, so required') {
     throw 'Required OS content query failures do not fail closed.'
 }
+if ($validationText -notmatch '\$siteTaskSequenceReferenceIds' -or
+    $validationText -notmatch '\$taskSequence\.References' -or
+    $validationText -notmatch '\$reference\.Package') {
+    throw 'Phase 11 does not resolve hierarchy-owned OSD content through this site''s task-sequence references.'
+}
+if ($validationText -notmatch 'hierarchy-owned OSD content is valid when referenced') {
+    throw 'Phase 11 does not explain hierarchy-owned OSD content acceptance.'
+}
+if ($validationText -notmatch '\$siteTaskSequenceReferenceErrors' -or
+    $validationText -notmatch 'could not read package references') {
+    throw 'Task-sequence reference read failures are silently treated as an empty reference set.'
+}
+if ($validationText -notmatch 'FAIL: SMS_TaskSequencePackage query failed, so required OSD task sequences and their content references were not measured') {
+    throw 'A required task-sequence query failure does not fail closed.'
+}
+if (@([regex]::Matches($validationText, '& \$selectRelevantOsdContent')).Count -ne 2) {
+    throw 'Pending and final OSD content checks do not share one task-sequence-reference selector.'
+}
+if ($validationText -notmatch 'FAIL: \$missingContentMessage') {
+    throw 'A task sequence with no referenced OS image or upgrade package does not fail required OSD validation.'
+}
 if ($validationText -notmatch 'Phase11-CMSite-Test[\s\S]{0,200}-TimeoutSeconds 600 -PollProgress') {
     throw 'The site-wide validation call does not use progress-aware stall timeout semantics.'
 }

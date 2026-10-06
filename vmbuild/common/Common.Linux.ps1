@@ -184,6 +184,31 @@ function Test-LinuxSshKeyPairMatches {
     return $result
 }
 
+function Set-LinuxSshPrivateKeyAcl {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$PrivateKeyPath
+    )
+
+    if (-not (Test-Path -LiteralPath $PrivateKeyPath -PathType Leaf)) { return $false }
+    try {
+        $acl = Get-Acl -Path $PrivateKeyPath
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
+        $sysSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
+        $admSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+        $acl.SetOwner($admSid)
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sysSid, 'FullControl', 'Allow')))
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($admSid, 'FullControl', 'Allow')))
+        Set-Acl -Path $PrivateKeyPath -AclObject $acl
+        return $true
+    }
+    catch {
+        Write-Log "Failed to lock down ACL on $PrivateKeyPath`: $_" -Warning
+        return $false
+    }
+}
+
 function Get-LinuxAdminSshKeyPair {
     [CmdletBinding()]
     param (
@@ -220,6 +245,11 @@ function Get-LinuxAdminSshKeyPair {
         if ($ForceNew.IsPresent) { $regenReason = '-ForceNew specified' }
         elseif (-not (Test-Path $privateKeyPath) -or -not (Test-Path $publicKeyPath)) { $regenReason = 'keypair not present' }
         else {
+            # Copying a valid private key into a pinned worktree changes its inherited ACL.
+            # Repair permissions before asking ssh-keygen to validate the bytes; otherwise
+            # "bad permissions" is misclassified as a broken pair and needlessly rotates
+            # the key away from retained Linux VMs.
+            $null = Set-LinuxSshPrivateKeyAcl -PrivateKeyPath $privateKeyPath
             $pairCheck = Test-LinuxSshKeyPairMatches -PrivateKeyPath $privateKeyPath -PublicKeyPath $publicKeyPath
             if (-not $pairCheck.Matches) { $regenReason = "cached keypair is unusable ($($pairCheck.Reason))" }
         }
@@ -280,19 +310,7 @@ function Get-LinuxAdminSshKeyPair {
     # disable inheritance, owner=BUILTIN\Administrators, only SYSTEM + Admins
     # have FullControl. That works regardless of which admin account invokes
     # ssh (interactive elevated user, scheduled task as SYSTEM, etc.).
-    try {
-        $acl = Get-Acl -Path $privateKeyPath
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
-        $sysSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
-        $admSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
-        $acl.SetOwner($admSid)
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sysSid, 'FullControl', 'Allow')))
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($admSid, 'FullControl', 'Allow')))
-        Set-Acl -Path $privateKeyPath -AclObject $acl
-    } catch {
-        Write-Log "Failed to lock down ACL on $privateKeyPath`: $_" -Warning
-    }
+    $null = Set-LinuxSshPrivateKeyAcl -PrivateKeyPath $privateKeyPath
 
     return [pscustomobject]@{
         PrivateKeyPath = $privateKeyPath
@@ -347,6 +365,7 @@ function Repair-LinuxAdminSshKeyPair {
     $needsRepair = $false
 
     if ($hadCachedPair) {
+        $null = Set-LinuxSshPrivateKeyAcl -PrivateKeyPath $privateKeyPath
         $check = Test-LinuxSshKeyPairMatches -PrivateKeyPath $privateKeyPath -PublicKeyPath $publicKeyPath
         if ($check.Matches) {
             Write-Log "Linux SSH keypair preflight: cached keypair at $privateKeyPath is valid." -LogOnly
@@ -4538,6 +4557,7 @@ function Invoke-LinuxRoleConfiguration {
     $vmName  = $Vm.vmName
     $role    = $Vm.role
     $activity = "$vmName [$role]"
+    $global:LinuxRoleConfigurationFailureSummary = ''
 
     # Build ordered list of operations. Each entry: Name (short id), Label
     # (human-readable, surfaced in Phase 3 row), Script (bash), TimeoutSec,
@@ -4661,6 +4681,7 @@ function Invoke-LinuxRoleConfiguration {
     $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $Vm -VmCount $vmCount
     $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
     if (-not $ip) {
+        $global:LinuxRoleConfigurationFailureSummary = 'stage=ssh; VM not reachable'
         Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable; cannot apply config." -Failure
         return $false
     }
@@ -4701,6 +4722,7 @@ function Invoke-LinuxRoleConfiguration {
                 Start-Sleep -Seconds 15
                 $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
                 if (-not $ip) {
+                    $global:LinuxRoleConfigurationFailureSummary = 'stage=cloud-init-reboot; VM not reachable'
                     Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable after cloud-init reboot." -Failure
                     return $false
                 }
@@ -4808,6 +4830,8 @@ fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks
                 $rebooted = $true
                 $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
                 if (-not $ip) {
+                    $exitCode = if ($result) { "$($result.ExitCode)" } else { '<no result>' }
+                    $global:LinuxRoleConfigurationFailureSummary = "module=$($op.Name); exit=$exitCode; VM not reachable after reboot"
                     Write-Log "[LinuxConfig] $vmName`: VM not reachable after reboot; aborting." -Failure
                     return $false
                 }
@@ -4822,8 +4846,10 @@ fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks
                     $lines = ($result.ScriptBlockOutput -split "`n")
                     $tail = ($lines | Select-Object -Last 20) -join "`n"
                 }
-            Write-Log "[LinuxConfig] $vmName`: module '$($op.Name)' FAILED (exit=$($result.ExitCode)). Tail:`n$tail" -Failure
-            return $false
+                $exitCode = if ($result) { "$($result.ExitCode)" } else { '<no result>' }
+                $global:LinuxRoleConfigurationFailureSummary = "module=$($op.Name); exit=$exitCode"
+                Write-Log "[LinuxConfig] $vmName`: module '$($op.Name)' FAILED (exit=$exitCode). Tail:`n$tail" -Failure
+                return $false
             }
         }
         Write-Log "[Phase 3]: $vmName`: $($op.Label) complete." -Success
@@ -6564,5 +6590,3 @@ $bakeWriteFilesYaml
     Write-Log "Bake complete on $VhdxPath" -Success
     return $true
 }
-
-

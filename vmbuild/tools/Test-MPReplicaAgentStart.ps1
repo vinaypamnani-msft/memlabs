@@ -217,6 +217,12 @@ if ($missingFailure -notmatch 'No SQL Agent job was found') {
 }
 
 $sourceText = Get-Content -LiteralPath $sourcePath -Raw
+if ($sourceText -notmatch 'Test-MPReplicaEnabled -Value \$_.useDatabaseReplica') {
+    throw 'ConfigureMPReplica still treats non-empty string False as enabled.'
+}
+if ($sourceText -notmatch '(?s)replicaSqlServerVM is missing.+?Stopping before STEP 1.+?-Failure') {
+    throw 'ConfigureMPReplica no longer fails invalid replica targets before STEP 1.'
+}
 if ($sourceText -notmatch 'Start-MPReplicaAgentJob -Instance \$siteSqlConn.+-Subsystem Snapshot -RestartIfAlreadyRunning' -or
     $sourceText -notmatch 'Start-MPReplicaAgentJob -Instance \$t\.ReplicaConn.+-Subsystem Distribution') {
     throw 'ConfigureMPReplica does not use the idempotent helper for both agent jobs.'

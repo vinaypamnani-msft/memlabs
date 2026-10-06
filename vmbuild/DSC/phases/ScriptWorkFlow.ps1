@@ -134,7 +134,15 @@ if ($DownloadOnly) {
         # registry value is the same local "CM installed" signal that
         # InstallAndUpdateSCCM's ground-truth check uses.
         $regSiteCode = $null
-        try { $regSiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue } catch { }
+        $identificationPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
+        if (Test-Path -LiteralPath $identificationPath) {
+            try {
+                $identification = Get-ItemProperty -LiteralPath $identificationPath -ErrorAction Stop
+                $siteCodeProperty = $identification.PSObject.Properties['Site Code']
+                if ($siteCodeProperty) { $regSiteCode = $siteCodeProperty.Value }
+            }
+            catch { }
+        }
         if ($regSiteCode) {
             Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: ConfigMgr already installed on this site server (Site Code '$regSiteCode'); skipping pre-req pre-warm."
             return
@@ -498,6 +506,11 @@ if ($scenario -eq "Standalone") {
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         Set-Location $LogPath
         Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
+            Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
+            return
+        }
     }
     else {
         Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
@@ -627,6 +640,11 @@ if ($scenario -eq "Hierarchy") {
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
             Set-Location $LogPath
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
+                Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
+                return
+            }
         }
         else {
             Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
@@ -1060,6 +1078,7 @@ if ($installProviderCount -eq 0) {
     Write-DscStatus "Skipping InstallProvider.ps1: no VM in this config has InstallSMSProv=true"
 }
 else {
+$installProviderFailed = $false
 $installProviderJob = Start-Job -Name "InstallProvider" -ScriptBlock {
     param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
     # Dot-source ScriptFunctions.ps1 so InstallProvider.ps1 can call Write-DscStatus.
@@ -1090,21 +1109,28 @@ Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
           $installProviderElapsed = [math]::Round(((Get-Date) - $installProviderWaitStart).TotalSeconds, 1)
           if ($installProviderJob.State -eq 'Failed') {
               Write-DscStatus "InstallProvider.ps1 job FAILED (state=Failed) after $($installProviderElapsed)s -- see the [InstallProv] lines above; any flagged provider is NOT installed."
+              $installProviderFailed = $true
           }
           else {
               Write-DscStatus "InstallProvider.ps1 job finished (state=$($installProviderJob.State)) in $($installProviderElapsed)s"
           }
       }
       else {
-          Write-DscStatus "InstallProvider.ps1 job did not finish within $installProviderTimeout s (state=$($installProviderJob.State)) -- abandoning it and continuing." -Warning
+          Write-DscStatus "InstallProvider.ps1 job did not finish within $installProviderTimeout s (state=$($installProviderJob.State)) -- abandoning it." -Warning
+          $installProviderFailed = $true
           Stop-Job -Job $installProviderJob -ErrorAction SilentlyContinue
       }
   }
   catch {
       Write-DscStatus "InstallProvider.ps1 failed: $_" -Warning
+      $installProviderFailed = $true
   }
   finally {
       Remove-Job -Job $installProviderJob -Force -ErrorAction SilentlyContinue
+  }
+  if ($installProviderFailed) {
+      Write-DscStatus "Additional SMS Provider installation did not converge. Stopping Phase 8 before workflow completion." -Failure
+      return
   }
 }
   
@@ -1690,5 +1716,3 @@ if ($ScriptWorkflowRunId) {
         Write-DscStatus "ScriptWorkflow.ps1 WARNING: failed to stamp completion RunId: $($_.Exception.Message)"
     }
 }
-
-

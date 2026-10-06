@@ -90,6 +90,10 @@ $global:Phase10Job = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM (role '$($currentItem.role)'); Windows maintenance not applicable. Skipping." -OutputStream -Success
             return
         }
+        $global:MemLabsRequireDomainIdentity = [bool](
+            $domainNameForLogging -and
+            $currentItem.role -notin @('WorkgroupMember', 'InternetClient', 'StandaloneRootCA')
+        )
         # Pre-flight: a VM can be Running with a healthy heartbeat yet have a
         # wedged PSDirect/VMBus channel, which would make Start-VMMaintenance
         # fail with "returned no data". Recover it (reboot once to clear VMBus)
@@ -179,6 +183,10 @@ $global:Phase11Job = {
         try { Flush-LogBuffer -All } catch { }
         $domainNameForLogging = $deployConfig.vmOptions.domainName
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+        $global:MemLabsRequireDomainIdentity = [bool](
+            -not (Test-VmIsLinux -Vm $currentItem) -and
+            $currentItem.role -notin @('WorkgroupMember', 'InternetClient', 'StandaloneRootCA')
+        )
         Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] JobBootstrap completed in $([Math]::Round(([DateTime]::UtcNow - $sbBootStart).TotalSeconds,1)) seconds" -LogOnly
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting functional validation for role '$($currentItem.role)'" -LogOnly
@@ -262,7 +270,7 @@ $global:Phase11Job = {
                 # Re-enable Windows Update services disabled in Phase 1.
                 # Services need to be startable for WSUS/ConfigMgr-initiated updates.
                 foreach ($svc in @('UsoSvc', 'wuauserv')) {
-                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                     if ($s -and $s.StartType -eq 'Disabled') {
                         Set-Service $svc -StartupType Manual -ErrorAction SilentlyContinue
                     }
@@ -282,21 +290,37 @@ $global:Phase11Job = {
                 $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
                 $auPath = "$wuPath\AU"
 
+                function Get-OptionalRegistryValue {
+                    param([string]$Path, [string]$Name)
+                    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+                    try {
+                        $item = Get-ItemProperty -LiteralPath $Path -ErrorAction Stop
+                        $property = $item.PSObject.Properties[$Name]
+                        if ($property) { return $property.Value }
+                    }
+                    catch { }
+                    return $null
+                }
+                function Remove-OptionalRegistryValue {
+                    param([string]$Path, [string]$Name)
+                    if (-not (Test-Path -LiteralPath $Path)) { return }
+                    try { Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop } catch { }
+                }
+
                 # Check our ownership marker
-                $marker = Get-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -ErrorAction SilentlyContinue
-                if (-not $marker -or $marker.WsusSetByMemLabs -ne 1) {
+                $marker = Get-OptionalRegistryValue -Path $mlPath -Name "WsusSetByMemLabs"
+                if ($marker -ne 1) {
                     return "Skipped: not set by MemLabs"
                 }
 
-                $isReal = 0
-                $realMarker = Get-ItemProperty -Path $mlPath -Name "WsusIsReal" -ErrorAction SilentlyContinue
-                if ($realMarker) { $isReal = $realMarker.WsusIsReal }
+                $realMarker = Get-OptionalRegistryValue -Path $mlPath -Name "WsusIsReal"
+                $isReal = if ($null -ne $realMarker) { [int]$realMarker } else { 0 }
 
                 # Always remove blocking keys (deploy is done)
-                Remove-ItemProperty -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations" -Force -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $wuPath -Name "DisableWindowsUpdateAccess" -Force -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Force -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $auPath -Name "AUOptions" -Force -ErrorAction SilentlyContinue
+                Remove-OptionalRegistryValue -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations"
+                Remove-OptionalRegistryValue -Path $wuPath -Name "DisableWindowsUpdateAccess"
+                Remove-OptionalRegistryValue -Path $auPath -Name "NoAutoUpdate"
+                Remove-OptionalRegistryValue -Path $auPath -Name "AUOptions"
 
                 if ($isReal -eq 1 -or $UseFakeWSUS -eq 1) {
                     # Real WSUS or user-chosen fake WSUS: keep WUServer/WUStatusServer/UseWUServer
@@ -304,17 +328,19 @@ $global:Phase11Job = {
                 }
                 else {
                     # Fake localhost that we set as fallback — remove everything
-                    Remove-ItemProperty -Path $wuPath -Name "WUServer" -Force -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $wuPath -Name "WUStatusServer" -Force -ErrorAction SilentlyContinue
-                    Remove-ItemProperty -Path $auPath -Name "UseWUServer" -Force -ErrorAction SilentlyContinue
+                    Remove-OptionalRegistryValue -Path $wuPath -Name "WUServer"
+                    Remove-OptionalRegistryValue -Path $wuPath -Name "WUStatusServer"
+                    Remove-OptionalRegistryValue -Path $auPath -Name "UseWUServer"
                     $action = "Removed all WU policy (no WSUS)"
                 }
 
                 # Clean up MemLabs markers
-                Remove-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -Force -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path $mlPath -Name "WsusIsReal" -Force -ErrorAction SilentlyContinue
+                Remove-OptionalRegistryValue -Path $mlPath -Name "WsusSetByMemLabs"
+                Remove-OptionalRegistryValue -Path $mlPath -Name "WsusIsReal"
                 # Remove MemLabs key if empty
-                $remaining = Get-ItemProperty -Path $mlPath -ErrorAction SilentlyContinue
+                $remaining = if (Test-Path -LiteralPath $mlPath) {
+                    try { Get-ItemProperty -LiteralPath $mlPath -ErrorAction Stop } catch { $null }
+                }
                 if ($remaining) {
                     $props = $remaining.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }
                     if (-not $props) { Remove-Item -Path $mlPath -Force -ErrorAction SilentlyContinue }
@@ -1092,7 +1118,9 @@ $global:VM_Create = {
                     if ($Dev.InstanceId -ne $null) {
                         Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
                         $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
-                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ErrorAction SilentlyContinue }
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object {
+                            try { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ErrorAction Stop } catch { }
+                        }
                     }
                 }
             }
@@ -1337,7 +1365,7 @@ $global:VM_Create = {
             # Phase 2 sets the full policy (WSUS server + blocking keys per config).
             try {
                 foreach ($svc in @('wuauserv', 'UsoSvc')) {
-                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1361,7 +1389,7 @@ $global:VM_Create = {
             try {
                 Invoke-WithCimRetry {
                 foreach ($svc in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService')) {
-                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1378,7 +1406,7 @@ $global:VM_Create = {
             try {
                 Invoke-WithCimRetry {
                 foreach ($svc in @('DiagTrack', 'dmwappushservice')) {
-                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                     if ($s) {
                         Stop-Service $svc -Force -ErrorAction SilentlyContinue
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1511,7 +1539,7 @@ $global:VM_Create = {
                 New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Force -ErrorAction SilentlyContinue | Out-Null
                 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'EnableDynamicContentInWSB' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
                 # SysMain (Superfetch) — counterproductive on dynamic-memory VMs
-                $s = Get-Service -Name 'SysMain' -ErrorAction SilentlyContinue
+                $s = try { Get-Service -Name 'SysMain' -ErrorAction Stop } catch { $null }
                 if ($s) {
                     Stop-Service 'SysMain' -Force -ErrorAction SilentlyContinue
                     Set-Service  'SysMain' -StartupType Disabled -ErrorAction SilentlyContinue
@@ -1717,9 +1745,11 @@ $global:VM_Create = {
             $arbSb = {
                 $key = 'HKLM:\SOFTWARE\Microsoft\WBEM\CIMOM'
                 if (-not (Test-Path -LiteralPath $key)) { return 'CIMOM key not present -- not set' }
-                $prior = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction SilentlyContinue).ArbThrottlingEnabled
+                $keyState = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
+                $priorProperty = $keyState.PSObject.Properties['ArbThrottlingEnabled']
+                $prior = if ($priorProperty) { $priorProperty.Value } else { $null }
                 New-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-                $now = (Get-ItemProperty -LiteralPath $key -Name 'ArbThrottlingEnabled' -ErrorAction SilentlyContinue).ArbThrottlingEnabled
+                $now = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).ArbThrottlingEnabled
                 $priorText = 'unset'
                 if ($null -ne $prior) { $priorText = "$prior" }
                 return ("ArbThrottlingEnabled was {0}, now {1} (applies at next Winmgmt start)" -f $priorText, $now)
@@ -2054,77 +2084,15 @@ $global:VM_Create = {
             }
         }
         
-        if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.role -eq 'Primary' -and $createVM) {
-            Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying OSD ISOs to Primary" -force
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary site server — copying OSD content for perfloading"
-
-                if ($currentItem.cmInstallDir) {
-                    $driveLetter = (Split-Path -Path $currentItem.cmInstallDir -Qualifier)
-                }
-
-                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying baselines.zip" -force
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM."
-                $sourceLocation = Join-Path $Common.AzureFilesPath "support\baselines.zip"
-                Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $sourceLocation -Destination "C:\tools" -Recurse -Container -Force
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished copying baselines.zip to the VM."
-
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying OS ISO files to the VM."
-
-                $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
-
-                $isoFiles = @($azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet })
-                $isoIndex = 0
-                $isoTotal = $isoFiles.Count
-
-                foreach ($isoFile in $isoFiles) {
-                    $isoIndex++
-
-                    # OS ISO Path
-                    $Iso = $isoFile.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
-                    Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Mounting $($isoFile.id) ($isoIndex/$isoTotal)" -force
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying $iso files to the VM."
-                    $IsoPath = Join-Path $Common.AzureFilesPath $Iso
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $IsoPath to the VM."
-                    # Idempotent, per-drive, multi-drive-safe mount (gets its own drive
-                    # if a cache/other disc is already mounted). The guest copy below
-                    # picks THIS OS disc by content (sources\install.wim), never "the
-                    # CD-ROM", so a co-mounted disc can't be copied by mistake.
-                    if (-not (Mount-IsoOnVm -VmName $currentItem.vmName -IsoPath $IsoPath -Context "OS ($($isoFile.id))" -Phase $Phase)) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to mount OS ISO $IsoPath after retries" -Failure -OutputStream
-                        return
-                    }
-                    $dirname = "$driveLetter\OSD\$($isoFile.id)"
-
-                    $CopyIsoFiles = {
-                        param ($dirname)
-                        New-Item -Path $dirname -ItemType Directory -Force | Out-Null
-                        $cd = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | Where-Object {
-                            Test-Path ("$($_.DriveLetter):\sources\install.wim")
-                        } | Select-Object -First 1
-                        if (-not $cd) { throw "OS media DVD not visible (no CD-ROM with sources\install.wim)" }
-                        Copy-Item -Path "$($cd.DriveLetter):\*" -Destination $dirname -Recurse -Force -Confirm:$false
-                    }
-
-                    # Copy files from DVD
-                    Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying $($isoFile.id) ISO to VM ($isoIndex/$isoTotal)" -force
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying ISO WIM files to $dirname"
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock $CopyIsoFiles -ArgumentList $dirname
-                    if ($result.ScriptBlockFailed) {
-                        $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } | ForEach-Object { "$($_.DriveLetter): $($_.FileSystemLabel)" } }
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): CD-ROM volumes: $($result2.ScriptBlockOutput)"
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy ISO WIM files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                        return
-                    }
-
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test WIM Files" -ScriptBlock { param ($dirname) get-item "$dirname\sources\install.wim" } -ArgumentList $dirname 
-                    if ($result.ScriptBlockFailed) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy WIM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                        return
-                    }
-
-                    Dismount-IsoFromVm -VmName $currentItem.vmName -IsoPath $IsoPath -Context "OS ($($isoFile.id))" -Phase $Phase
-                }
-                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed -force
+        $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+        if ($currentCmOptions.PrePopulateObjects -and $currentItem.role -eq 'Primary' -and $createVM) {
+            $payloadReady = Repair-PrimaryPrepopulationPayload -VirtualMachine $currentItem `
+                -VmDomainName $domainName -AzureFileList $azureFileList `
+                -AzureFilesPath $Common.AzureFilesPath -Phase $Phase
+            if (-not $payloadReady) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary prepopulation payload repair failed. See preceding diagnostics." -Failure -OutputStream
+                return
+            }
         }
 
         if ($createVM) {
@@ -2179,6 +2147,10 @@ function Save-CMSetupLogsFromVm {
         On failure, files from C:\staging\DSC\ADKSetupLogs modified in the
         last eight hours are also pulled. Files over 16MB retain their first
         and last 5000 lines so one large Burn log cannot swamp PSDirect.
+        Phase 8 failures also capture a structured prerequisite snapshot
+        (ADK physical components, ODBC, Report Builder, IIS, reboot state,
+        and certificates) plus bounded tails from MSI, PBIRS, DISM, and CBS
+        logs. ConfigMgrPrereq.log is captured with the CM provider evidence.
         Baseline files are packaged into one guest ZIP; only its small manifest
         crosses PSDirect, and a separately bounded host worker copies the ZIP.
         On Phase 8 failure, collection also pulls bounded copies
@@ -2194,6 +2166,8 @@ function Save-CMSetupLogsFromVm {
             <VmName>-Phase<N>-<timestamp>-DSC_Log.log                 (always: tail 4000)
             <VmName>-Phase8-<timestamp>-ClientPackageTimeline.jsonl   (when package coverage runs)
             <VmName>-Phase<N>-<timestamp>-adksetup-*.log/.txt          (failure only)
+            <VmName>-Phase8-<timestamp>-PrerequisiteDiagnostics.json
+            <VmName>-Phase8-<timestamp>-Prereq-<installer>.log
             <VmName>-Phase8-<timestamp>-SMSProv.log, dmpdownloader.log, etc. (failure only)
             <VmName>-Phase8-<timestamp>-ConfigMgrUpdateDiagnostics.json
             <VmName>-Phase8-<timestamp>-ConfigMgrProviderState.json
@@ -2228,6 +2202,8 @@ function Save-CMSetupLogsFromVm {
             ClientPackageTimelineTail   = $false
             ClientPackageTimelineBundleName = $null
             AdkArtifacts   = @()
+            PrereqArtifacts = @()
+            PrerequisiteDiagnostics = $null
             CmArtifacts    = @()
             UpdateDiagnostics = $null
             BundlePath     = $null
@@ -2314,6 +2290,126 @@ function Save-CMSetupLogsFromVm {
                     $out.ClientPackageTimelineContent = (@($head) + @($marker) + @($tail)) -join "`r`n"
                 }
             }
+        }
+        if ($Mode -eq 'Failure' -and $Phase -eq 8) {
+            $prereq = [ordered]@{
+                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                ComputerName  = $env:COMPUTERNAME
+                ADK           = [ordered]@{}
+                ODBC          = [ordered]@{}
+                ReportBuilder = [ordered]@{}
+                IIS           = [ordered]@{}
+                PendingReboot = @()
+                Certificates  = [ordered]@{}
+                Errors        = @()
+            }
+            try {
+                $adkRootKey = Get-ItemProperty -Path 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots' -ErrorAction Stop
+                $prereq.ADK.KitsRoot10 = "$($adkRootKey.KitsRoot10)"
+            }
+            catch { $prereq.Errors += "ADK registry: $($_.Exception.Message)" }
+            $adkComponents = [ordered]@{
+                    DeploymentTools = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools'
+                    WinPE           = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment'
+                    USMT            = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool'
+                }
+            foreach ($component in $adkComponents.GetEnumerator()) {
+                $prereq.ADK[$component.Key] = [ordered]@{
+                    Path   = $component.Value
+                    Exists = [bool](Test-Path -LiteralPath $component.Value -PathType Container)
+                }
+            }
+            try {
+                $odbc = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18' -ErrorAction Stop
+                $prereq.ODBC.InstalledVersion = "$($odbc.InstalledVersion)"
+                $prereq.ODBC.RegistryPresent = $true
+            }
+            catch {
+                $prereq.ODBC.RegistryPresent = $false
+                $prereq.Errors += "ODBC: $($_.Exception.Message)"
+            }
+            try {
+                $uninstallRows = @()
+                foreach ($uninstallPath in @(
+                        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+                    )) {
+                    try { $uninstallRows += @(Get-ItemProperty $uninstallPath -ErrorAction Stop) } catch {}
+                }
+                $reportBuilder = $uninstallRows | Where-Object { $_.DisplayName -like '*Report Builder*' } | Select-Object -First 1
+                $prereq.ReportBuilder.Found = [bool]$reportBuilder
+                if ($reportBuilder) {
+                    $prereq.ReportBuilder.DisplayName = "$($reportBuilder.DisplayName)"
+                    $prereq.ReportBuilder.DisplayVersion = "$($reportBuilder.DisplayVersion)"
+                    $prereq.ReportBuilder.InstallLocation = "$($reportBuilder.InstallLocation)"
+                }
+            }
+            catch { $prereq.Errors += "Report Builder: $($_.Exception.Message)" }
+            try {
+                try { $w3svc = Get-Service -Name W3SVC -ErrorAction Stop } catch { $w3svc = $null }
+                $prereq.IIS.W3SVC = if ($w3svc) { "$($w3svc.Status)" } else { 'Absent' }
+                if (Get-Command Get-WindowsFeature -ErrorAction SilentlyContinue) {
+                    foreach ($featureName in @('Web-Server', 'Web-WMI', 'Web-Net-Ext45', 'BITS-IIS-Ext')) {
+                        try { $feature = Get-WindowsFeature -Name $featureName -ErrorAction Stop } catch { $feature = $null }
+                        $prereq.IIS[$featureName] = if ($feature) { "$($feature.InstallState)" } else { 'Unknown' }
+                    }
+                }
+            }
+            catch { $prereq.Errors += "IIS: $($_.Exception.Message)" }
+            foreach ($pendingPath in @(
+                    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+                    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+                )) {
+                if (Test-Path -LiteralPath $pendingPath) { $prereq.PendingReboot += $pendingPath }
+            }
+            try {
+                $pendingFileRenames = @((Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' `
+                            -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations |
+                        Where-Object { $_ })
+                if ($pendingFileRenames.Count -gt 0) {
+                    $prereq.PendingReboot += "PendingFileRenameOperations=$($pendingFileRenames.Count)"
+                }
+            }
+            catch { $prereq.Errors += "Pending reboot: $($_.Exception.Message)" }
+            try {
+                $now = Get-Date
+                $webCerts = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop | Where-Object {
+                        $_.NotBefore -lt $now -and $_.NotAfter -gt $now -and
+                        ($_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.1')
+                    })
+                $prereq.Certificates.ValidWebServerCertificates = $webCerts.Count
+                Import-Module WebAdministration -ErrorAction Stop
+                if (Get-Command Get-WebBinding -ErrorAction SilentlyContinue) {
+                    $prereq.Certificates.IisHttpsBindings = @(Get-WebBinding -Protocol https -ErrorAction Stop).Count
+                }
+            }
+            catch { $prereq.Errors += "Certificates: $($_.Exception.Message)" }
+            try { $out.PrerequisiteDiagnostics = $prereq | ConvertTo-Json -Depth 8 }
+            catch { $out.PrerequisiteDiagnostics = "{`"CollectorSerializationError`":`"$($_.Exception.Message -replace '"', '\"')`"}" }
+
+            $prereqArtifacts = New-Object System.Collections.Generic.List[object]
+            foreach ($candidate in @(
+                    'C:\temp\reportbuilder.log',
+                    'C:\temp\odbcinstallation.log',
+                    'C:\temp\msoledbsql.install.log',
+                    'C:\staging\PBI.log',
+                    'C:\Windows\Logs\DISM\dism.log',
+                    'C:\Windows\Logs\CBS\CBS.log'
+                )) {
+                try { $artifact = Get-Item -LiteralPath $candidate -ErrorAction Stop } catch { $artifact = $null }
+                if (-not $artifact) { continue }
+                $tailLines = if ($artifact.Length -gt 8MB) { 3000 } else { 8000 }
+                $content = (Get-Content -LiteralPath $artifact.FullName -Tail $tailLines -ErrorAction SilentlyContinue) -join "`r`n"
+                $prereqArtifacts.Add([pscustomobject]@{
+                        Name             = $artifact.Name
+                        SourcePath       = $artifact.FullName
+                        Bytes            = $artifact.Length
+                        LastWriteTimeUtc = $artifact.LastWriteTimeUtc
+                        TailLines        = $tailLines
+                        Content          = $content
+                    })
+            }
+            $out.PrereqArtifacts = @($prereqArtifacts)
         }
         if ($Mode -eq 'Failure' -and (Test-Path 'C:\staging\DSC\ADKSetupLogs' -PathType Container)) {
             $artifacts = New-Object System.Collections.Generic.List[object]
@@ -2572,6 +2668,13 @@ function Save-CMSetupLogsFromVm {
                     Add-Member -InputObject $artifact -NotePropertyName BundleName -NotePropertyValue $bundleName -Force
                     Set-Content -LiteralPath (Join-Path $bundleRoot $bundleName) -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
                 }
+                $prereqIndex = 0
+                foreach ($artifact in @($out.PrereqArtifacts)) {
+                    $prereqIndex++
+                    $bundleName = "Prereq-$prereqIndex-$($artifact.Name)"
+                    Add-Member -InputObject $artifact -NotePropertyName BundleName -NotePropertyValue $bundleName -Force
+                    Set-Content -LiteralPath (Join-Path $bundleRoot $bundleName) -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
+                }
 
                 $bundleFiles = @(Get-ChildItem -LiteralPath $bundleRoot -File -ErrorAction Stop)
                 if ($bundleFiles.Count -gt 0) {
@@ -2589,6 +2692,7 @@ function Save-CMSetupLogsFromVm {
                     $out.DscLogContent = $null
                     $out.ClientPackageTimelineContent = $null
                     foreach ($artifact in @($out.AdkArtifacts)) { $artifact.Content = $null }
+                    foreach ($artifact in @($out.PrereqArtifacts)) { $artifact.Content = $null }
                 }
                 else {
                     Remove-Item -LiteralPath $bundleRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -2607,6 +2711,7 @@ function Save-CMSetupLogsFromVm {
                 $out.DscLogContent = $null
                 $out.ClientPackageTimelineContent = $null
                 foreach ($artifact in @($out.AdkArtifacts)) { $artifact.Content = $null }
+                foreach ($artifact in @($out.PrereqArtifacts)) { $artifact.Content = $null }
             }
         }
         [pscustomobject]$out
@@ -2695,6 +2800,9 @@ function Save-CMSetupLogsFromVm {
                 foreach ($artifact in @($r.AdkArtifacts)) {
                     if ($artifact.BundleName) { $artifact.Content = & $readBundleContent $artifact.BundleName }
                 }
+                foreach ($artifact in @($r.PrereqArtifacts)) {
+                    if ($artifact.BundleName) { $artifact.Content = & $readBundleContent $artifact.BundleName }
+                }
                 $bundleReady = $true
                 $baselineCaptureStatus = 'Completed'
             }
@@ -2725,6 +2833,8 @@ function Save-CMSetupLogsFromVm {
             DscLogExists  = $false
             ClientPackageTimelineExists = $false
             AdkArtifacts  = @()
+            PrereqArtifacts = @()
+            PrerequisiteDiagnostics = $null
         }
         $baselineStatusData = [ordered]@{
             CapturedAtUtc     = (Get-Date).ToUniversalTime().ToString('o')
@@ -3130,6 +3240,30 @@ function Save-CMSetupLogsFromVm {
                 Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write ADK diagnostic '$safeName': $_" -Warning
             }
         }
+        if ($r.PSObject.Properties.Name -contains 'PrerequisiteDiagnostics' -and $r.PrerequisiteDiagnostics) {
+            $dest = Join-Path $logDir "$base-PrerequisiteDiagnostics.json"
+            try {
+                Set-Content -LiteralPath $dest -Value $r.PrerequisiteDiagnostics -Encoding UTF8 -ErrorAction Stop
+                Write-Log "[Phase $Phase]: $VmName`: Captured prerequisite state -> $dest" -OutputStream
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write prerequisite state: $_" -Warning
+            }
+        }
+        if ($r.PSObject.Properties.Name -contains 'PrereqArtifacts') {
+            foreach ($artifact in @($r.PrereqArtifacts | Where-Object { $null -ne $_ })) {
+                $safeName = [IO.Path]::GetFileName("$($artifact.Name)")
+                if (-not $safeName -or -not $artifact.Content) { continue }
+                $dest = Join-Path $logDir "$base-Prereq-$safeName"
+                try {
+                    Set-Content -LiteralPath $dest -Value $artifact.Content -Encoding UTF8 -ErrorAction Stop
+                    Write-Log "[Phase $Phase]: $VmName`: Pulled prerequisite diagnostic $safeName ($($artifact.TailLines) tail lines) -> $dest" -OutputStream
+                }
+                catch {
+                    Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write prerequisite diagnostic '$safeName': $_" -Warning
+                }
+            }
+        }
     }
 }
 
@@ -3317,7 +3451,10 @@ function Save-CMSetupSqlFailureEvidence {
             $instProps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction Stop
             $instName = ($instProps.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | Select-Object -First 1).Name
             $instId = [string]$instProps.$instName
-            $params = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\Parameters" -ErrorAction SilentlyContinue
+            $paramsPath = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$instId\MSSQLServer\Parameters"
+            $params = if (Test-Path -LiteralPath $paramsPath) {
+                try { Get-ItemProperty -LiteralPath $paramsPath -ErrorAction Stop } catch { $null }
+            }
             if ($params) {
                 foreach ($p in $params.PSObject.Properties) {
                     if ($p.Name -like 'SQLArg*' -and ([string]$p.Value).StartsWith('-e')) {
@@ -3693,10 +3830,12 @@ function Save-CMClientPackagePrestageLogsFromVm {
 $Set_WSManRetryWindow = {
     $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WSMAN\Client'
     if (-not (Test-Path -LiteralPath $key)) { return 'WSMAN Client key not present -- not set' }
-    $prior = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
+    $keyState = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
+    $priorProperty = $keyState.PSObject.Properties['max_retry_timeout_ms']
+    $prior = if ($priorProperty) { $priorProperty.Value } else { $null }
     if ($prior -eq 2000) { return 'max_retry_timeout_ms already 2000' }
     New-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -Value 2000 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-    $now = (Get-ItemProperty -LiteralPath $key -Name 'max_retry_timeout_ms' -ErrorAction SilentlyContinue).max_retry_timeout_ms
+    $now = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).max_retry_timeout_ms
     $priorText = 'unset (default 180000)'
     if ($null -ne $prior) { $priorText = "$prior" }
     return ("max_retry_timeout_ms was {0}, now {1}; server window is this +15000 (applies at next WinRM start)" -f $priorText, $now)
@@ -3855,6 +3994,17 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM responded after last-resort reboot." -Success -OutputStream
         }
 
+        $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+        if ($Phase -eq 8 -and $currentItem.role -eq 'Primary' -and $currentCmOptions.PrePopulateObjects) {
+            $payloadReady = Repair-PrimaryPrepopulationPayload -VirtualMachine $currentItem `
+                -VmDomainName $domainName -AzureFileList $Common.AzureFileList `
+                -AzureFilesPath $Common.AzureFilesPath -Phase $Phase -RequireDomainIdentity
+            if (-not $payloadReady) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary prepopulation payload repair failed. See preceding diagnostics." -Failure -OutputStream
+                return
+            }
+        }
+
         Write-Progress2 $Activity -Status "Establishing a session with the VM" -percentcomplete 2 -force
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
@@ -3936,13 +4086,22 @@ $global:VM_Config = {
                         if (Test-Path -LiteralPath $pendingKey.Path) { $servicingPending += $pendingKey.Name }
                     }
                     if (Test-Path -LiteralPath 'C:\Windows\WinSxS\pending.xml') { $servicingPending += 'WinSxS pending.xml' }
-                    $updatesKey = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Updates' -ErrorAction SilentlyContinue
-                    $updateExeVolatile = if ($updatesKey -and $updatesKey.PSObject.Properties.Name -contains 'UpdateExeVolatile') { $updatesKey.UpdateExeVolatile } else { $null }
+                    $updateExeVolatile = $null
+                    $updatesKeyPath = 'HKLM:\SOFTWARE\Microsoft\Updates'
+                    if (Test-Path -LiteralPath $updatesKeyPath) {
+                        try {
+                            $updatesKey = Get-ItemProperty -LiteralPath $updatesKeyPath -ErrorAction Stop
+                            if ($updatesKey.PSObject.Properties['UpdateExeVolatile']) {
+                                $updateExeVolatile = $updatesKey.UpdateExeVolatile
+                            }
+                        }
+                        catch { }
+                    }
                     if ($null -ne $updateExeVolatile -and [int]$updateExeVolatile -ne 0) { $servicingPending += "UpdateExeVolatile=$updateExeVolatile" }
 
                     $acted = @()
                     foreach ($svc in @('wuauserv', 'UsoSvc')) {
-                        $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                        $s = try { Get-Service -Name $svc -ErrorAction Stop } catch { $null }
                         if ($s) {
                             if ($s.Status -eq 'Running') { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue }
                             if ($s.StartType -ne 'Disabled') { Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue }
@@ -4738,8 +4897,9 @@ $global:VM_Config = {
             $toolInjectSw = [System.Diagnostics.Stopwatch]::StartNew()
             $toolInjectRecovered = $false
             $SkipAutoDeploy = $false
-            if ($deployConfig.cmOptions.PrePopulateObjects) {
-                if ($deployConfig.cmOptions.Install) {
+            $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+            if ($currentCmOptions.PrePopulateObjects) {
+                if ($currentCmOptions.Install) {
                     $SkipAutoDeploy = $true
                 }
             }
@@ -4749,7 +4909,7 @@ $global:VM_Config = {
             # on CS4-CS1SQL). Judge on the boolean the function actually returned.
             $injectedOk = ((@($injected) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true)
             if (-not $injectedOk) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Initial tool injection did not complete; starting guarded guest recovery before classifying the result." -LogOnly
 
                 # Use the shared readiness/recovery ladder instead of treating every
                 # session miss as a dead guest. It waits through ordinary reboots and
@@ -4764,6 +4924,9 @@ $global:VM_Config = {
                     $injectedOk = ((@($injected) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true)
                     if (-not $injectedOk) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection still failing after guarded guest recovery." -Warning -OutputStream
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection recovered successfully after guarded guest recovery." -OutputStream
                     }
                 }
                 else {
@@ -6933,10 +7096,18 @@ $global:VM_Config = {
                 # what shipped -- 35/35 probes came back unknown and every one paid the serial
                 # fallback, so the fan-out cost more than it saved.
                 $probeVmIds = @{}
-                $probeCred = $null
+                $probeCredentialSet = $null
                 if ($Common.LocalAdmin) {
-                    $probeCred = New-Object System.Management.Automation.PSCredential (
-                        "$($deployConfig.vmOptions.domainName)\$($Common.LocalAdmin.UserName)", $Common.LocalAdmin.Password)
+                    $probeUserNames = @(Get-VmSessionCredentialUserNames -VmName $currentItem.vmName `
+                            -VmDomainName $deployConfig.vmOptions.domainName `
+                            -DomainNetBiosName $deployConfig.vmOptions.domainNetBiosName `
+                            -AccountName $Common.LocalAdmin.UserName)
+                    $probeCredentialSet = [pscustomobject]@{
+                        Credentials = @($probeUserNames | ForEach-Object {
+                                New-Object System.Management.Automation.PSCredential (
+                                    $_, $Common.LocalAdmin.Password)
+                            })
+                    }
                     foreach ($node in $nodeList) {
                         try {
                             $probeVm = Get-VM2 -Name $node -Fallback
@@ -6945,7 +7116,11 @@ $global:VM_Config = {
                         catch { }
                     }
                 }
-                Write-Log "[Phase $Phase]: NodeReadyProbe fan-out armed for $($probeVmIds.Count)/$($nodeList.Count) node(s), cred=$($null -ne $probeCred)" -LogOnly
+                $probeCredentialNames = if ($probeCredentialSet) {
+                    @($probeCredentialSet.Credentials | ForEach-Object { $_.UserName }) -join ', '
+                }
+                else { '<none>' }
+                Write-Log "[Phase $Phase]: NodeReadyProbe fan-out armed for $($probeVmIds.Count)/$($nodeList.Count) node(s), credentials=[$probeCredentialNames]" -LogOnly
 
                 # Budget is wall-clock, not attempts: an attempt costs one round trip PER NODE, so an
                 # attempt-capped loop silently shortened the real timeout as node count grew.
@@ -6980,38 +7155,49 @@ $global:VM_Config = {
                     $threadProbeBlock = {
                         param(
                             [guid]$VmId,
-                            [pscredential]$VmCredential,
-                            [string]$ExpectedGuid
+                            [object]$VmCredentialSet,
+                            [string]$ExpectedGuid,
+                            [string]$ExpectedDomain,
+                            [string]$ExpectedUser
                         )
 
-                        $session = $null
-                        try {
-                            $session = New-PSSession -VMId $VmId -Credential $VmCredential -ErrorAction Stop
-                            $ready = Invoke-Command -Session $session -ScriptBlock {
-                                param($targetGuid)
-                                $f = "C:\staging\DSC\RunGuid.txt"
-                                if (-not (Test-Path $f)) { return $false }
-                                $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
-                                if ($content) { $content = $content.Trim() }
-                                return ([string]$content -eq [string]$targetGuid)
-                            } -ArgumentList $ExpectedGuid -ErrorAction Stop
-                            [pscustomobject]@{
-                                Ready = [bool]$ready
-                                Error = $null
-                                Source = 'ThreadJob'
-                                Unknown = $false
+                        $credentialErrors = [System.Collections.Generic.List[string]]::new()
+                        foreach ($vmCredential in @($VmCredentialSet.Credentials)) {
+                            $session = $null
+                            try {
+                                $session = New-PSSession -VMId $VmId -Credential $vmCredential -ErrorAction Stop
+                                $ready = Invoke-Command -Session $session -ScriptBlock {
+                                    param($targetGuid, $targetDomain, $targetUser)
+                                    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                                    $actualUser = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { $env:USERNAME }
+                                    if ($env:USERDNSDOMAIN -ine $targetDomain -or $actualUser -ine $targetUser) {
+                                        throw "Identity mismatch: expected $targetUser@$targetDomain, actual $identity (USERDNSDOMAIN=$env:USERDNSDOMAIN)"
+                                    }
+                                    $f = "C:\staging\DSC\RunGuid.txt"
+                                    if (-not (Test-Path $f)) { return $false }
+                                    $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
+                                    if ($content) { $content = $content.Trim() }
+                                    return ([string]$content -eq [string]$targetGuid)
+                                } -ArgumentList $ExpectedGuid, $ExpectedDomain, $ExpectedUser -ErrorAction Stop
+                                return [pscustomobject]@{
+                                    Ready = [bool]$ready
+                                    Error = $null
+                                    Source = 'ThreadJob'
+                                    Unknown = $false
+                                }
+                            }
+                            catch {
+                                $credentialErrors.Add("$($vmCredential.UserName): $($_.Exception.Message)")
+                            }
+                            finally {
+                                if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
                             }
                         }
-                        catch {
-                            [pscustomobject]@{
-                                Ready = $false
-                                Error = $_.Exception.Message
-                                Source = 'ThreadJob'
-                                Unknown = $true
-                            }
-                        }
-                        finally {
-                            if ($session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+                        return [pscustomobject]@{
+                            Ready = $false
+                            Error = $credentialErrors -join '; '
+                            Source = 'ThreadJob'
+                            Unknown = $true
                         }
                     }
 
@@ -7021,13 +7207,16 @@ $global:VM_Config = {
                         }
 
                         if ($useThreadProbe -and $probeVmIds.ContainsKey($node)) {
-                            $readyProbeJobs[$node] = Start-ThreadJob -ScriptBlock $threadProbeBlock -ArgumentList $probeVmIds[$node], $probeCred, $phaseRunGuid -ThrottleLimit $readyProbeThrottle -ErrorAction Stop
+                            $readyProbeJobs[$node] = Start-ThreadJob -ScriptBlock $threadProbeBlock `
+                                -ArgumentList $probeVmIds[$node], $probeCredentialSet, $phaseRunGuid, $deployConfig.vmOptions.domainName, $Common.LocalAdmin.UserName `
+                                -ThrottleLimit $readyProbeThrottle -ErrorAction Stop
                             continue
                         }
 
                         # Fallback when ThreadJob is unavailable: keep the original serial probe path.
                         $nodeProbeSw = [System.Diagnostics.Stopwatch]::StartNew()
-                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock {
+                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName `
+                            -RequireDomainIdentity -CommandReturnsBool -ScriptBlock {
                             param($expectedGuid)
                             $f = "C:\staging\DSC\RunGuid.txt"
                             if (-not (Test-Path $f)) { return $false }
@@ -7115,7 +7304,8 @@ $global:VM_Config = {
                                 # A ThreadJob error means we cannot trust the raw session result; use the
                                 # same serial probe path as today for just that node so a false 'not ready'
                                 # doesn't wait on a healthy VM and then reboot it.
-                                $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock {
+                                $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName `
+                                    -RequireDomainIdentity -CommandReturnsBool -ScriptBlock {
                                     param($expectedGuid)
                                     $f = "C:\staging\DSC\RunGuid.txt"
                                     if (-not (Test-Path $f)) { return $false }
@@ -8088,7 +8278,11 @@ $global:VM_Config = {
                         if (-not $certPulseDone -and $currentStatusTrimmed -match 'MEMLABS-PULSE-CERTS') {
                             $certPulseDone = $true
                             $pkiOn = $false
-                            try { $pkiOn = [bool]$deployConfig.cmOptions.UsePKI } catch { $pkiOn = $false }
+                            try {
+                                $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+                                $pkiOn = [bool]$currentCmOptions.UsePKI
+                            }
+                            catch { $pkiOn = $false }
                             if ($pkiOn) {
                                 # Resolve this site server's push-client list.
                                 $pulseTargets = @()
@@ -9129,9 +9323,12 @@ $global:VM_Config = {
                             else {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO auto-remediate: replica '$stuckVmName' has been Op=UNKNOWN/Rec=UNKNOWN/Sync=NOT_HEALTHY for $($stuck.SpanMinutes) min ($($stuck.Count) consecutive AGWaitForSynchronizationHealth poll(s) in ConfigMgrSetup.log). Restarting SQL on '$stuckVmName' to clear the stuck recovery thread." -Warning -OutputStream
                                 $bounceResult = Invoke-VmCommand -VmName $stuckVmName -VmDomainName $domainName -DisplayName "SQLAO auto-remediate: bounce SQL on $stuckVmName" -ScriptBlock {
-                                    $svc = Get-Service -Name 'MSSQLSERVER' -ErrorAction SilentlyContinue
+                                    $svc = try { Get-Service -Name 'MSSQLSERVER' -ErrorAction Stop } catch { $null }
                                     if (-not $svc) {
-                                        $svc = Get-Service -Name 'MSSQL$*' -ErrorAction SilentlyContinue | Select-Object -First 1
+                                        $svc = try {
+                                            Get-Service -Name 'MSSQL$*' -ErrorAction Stop | Select-Object -First 1
+                                        }
+                                        catch { $null }
                                     }
                                     if (-not $svc) { return [pscustomobject]@{ Ok = $false; Error = 'No MSSQLSERVER service found' } }
                                     $svcName = $svc.Name
@@ -9296,12 +9493,23 @@ $global:VM_Config = {
             $check_ExternalWsus = {
                 $markerPath = "HKLM:\SOFTWARE\MemLabs"
                 $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
-                $marker = Get-ItemProperty -Path $markerPath -Name "WsusSetByMemLabs" -ErrorAction SilentlyContinue
-                if ($marker -and $marker.WsusSetByMemLabs -eq 1) {
+                function Get-OptionalRegistryValue {
+                    param([string]$Path, [string]$Name)
+                    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+                    try {
+                        $item = Get-ItemProperty -LiteralPath $Path -ErrorAction Stop
+                        $property = $item.PSObject.Properties[$Name]
+                        if ($property) { return $property.Value }
+                    }
+                    catch { }
+                    return $null
+                }
+                $marker = Get-OptionalRegistryValue -Path $markerPath -Name "WsusSetByMemLabs"
+                if ($marker -eq 1) {
                     return "OwnedByMemLabs"
                 }
-                $existing = Get-ItemProperty -Path $wuPath -Name "WUServer" -ErrorAction SilentlyContinue
-                if ($existing -and $existing.WUServer) {
+                $existing = Get-OptionalRegistryValue -Path $wuPath -Name "WUServer"
+                if ($existing) {
                     return "External"
                 }
                 return "NotSet"
@@ -9840,7 +10048,9 @@ $global:Linux_Configure = {
 
         $ok = Invoke-LinuxRoleConfiguration -Vm $currentItem -DeployConfig $deployConfig
         if (-not $ok) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux_Configure failed." -OutputStream -Failure
+            $failureSummary = "$global:LinuxRoleConfigurationFailureSummary".Trim()
+            $failureSuffix = if ($failureSummary) { " ($failureSummary)" } else { '' }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux_Configure failed$failureSuffix." -OutputStream -Failure
             return
         }
 

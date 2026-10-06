@@ -20,6 +20,94 @@
 # read and emitted by Phase11Job after Test-VmFunctionality returns.
 $script:Phase11OutputBuffer = $null
 
+function Get-Phase11ProjectedVmNetwork {
+    param(
+        [object] $DeployConfig,
+        [object] $Vm
+    )
+
+    if ($Vm -and $Vm.network) { return "$($Vm.network)" }
+    if ($Vm -and $Vm.thisParams -and $Vm.thisParams.vmNetwork) { return "$($Vm.thisParams.vmNetwork)" }
+    $vmName = "$($Vm.vmName)"
+    if ($vmName) {
+        $record = $DeployConfig.phase8ManagedDistributionPointScopes | ForEach-Object {
+            @($_.DistributionPoints)
+        } | Where-Object {
+            $_.VmName -ieq $vmName -or $_.Fqdn -ieq $vmName -or
+            $_.Fqdn -like "$vmName.*"
+        } | Select-Object -First 1
+        if ($record -and $record.Network) { return "$($record.Network)" }
+    }
+    return "$($DeployConfig.vmOptions.network)"
+}
+
+function Get-Phase11OsdTargetingExpectation {
+    param(
+        [object] $DeployConfig,
+        [string] $SiteCode,
+        [string] $Domain
+    )
+
+    $defaultNetwork = "$($DeployConfig.vmOptions.network)"
+    $networkOf = {
+        param($vm)
+        if ($vm -and $vm.network) { return "$($vm.network)" }
+        if ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
+        return $defaultNetwork
+    }
+    $scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+        "$($_.PrimarySiteCode)" -eq $SiteCode
+    } | Select-Object -First 1
+    if ($scope -and $scope.PSObject.Properties['OsdClientSubnets']) {
+        $clientSubnets = @($scope.OsdClientSubnets)
+    }
+    else {
+        $clientSubnets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
+                ForEach-Object { & $networkOf $_ })
+        $clientSubnets += @($DeployConfig.phase8OsdClientSubnets)
+    }
+    $clientSubnets = @($clientSubnets | Where-Object { $_ } | Select-Object -Unique)
+    $scopeRecords = @($scope.DistributionPoints)
+    $scopeIsAuthoritative = $scope -and $scope.PSObject.Properties['DistributionPoints']
+    $records = if ($scopeIsAuthoritative) {
+        @($scopeRecords | Where-Object { $_ -and $_.Role -ne 'Secondary' } | ForEach-Object {
+            [pscustomobject]@{
+                Name = "$($_.Fqdn)"
+                Network = "$($_.Network)"
+                SiteCode = "$($_.SiteCode)"
+                Role = "$($_.Role)"
+            }
+        })
+    }
+    else {
+        @($DeployConfig.virtualMachines | Where-Object {
+                $_.vmName -and $_.role -ne 'Secondary' -and
+                ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Primary')
+            } | ForEach-Object {
+                $candidateVm = $_
+                $fqdn = "$($candidateVm.vmName)"
+                if ($fqdn -notmatch '\.') { $fqdn = "$fqdn.$Domain" }
+                [pscustomobject]@{
+                    Name = $fqdn
+                    Network = Get-Phase11ProjectedVmNetwork -DeployConfig $DeployConfig -Vm $candidateVm
+                    SiteCode = "$($candidateVm.siteCode)"
+                    Role = "$($candidateVm.role)"
+                }
+            })
+    }
+    $records = @($records | Where-Object {
+            $_.Name -and $_.Network -and $_.SiteCode -eq $SiteCode -and
+            $clientSubnets -contains $_.Network
+        } | Sort-Object Name -Unique)
+    $coveredSubnets = @($records | ForEach-Object { $_.Network } | Where-Object { $_ } | Select-Object -Unique)
+
+    [pscustomobject]@{
+        ClientSubnets = @($clientSubnets)
+        DistributionPoints = @($records)
+        UncoveredSubnets = @($clientSubnets | Where-Object { $coveredSubnets -notcontains $_ })
+    }
+}
+
 function Add-Phase11Output {
     <#
     .SYNOPSIS
@@ -4979,31 +5067,79 @@ function Test-CMSiteFunctionality {
 
         if (-not $results.Passed) { return $results }
 
+        function Invoke-CmSiteIdentityQueryWithRetry {
+            param(
+                [Parameter(Mandatory)][string]$Namespace,
+                [Parameter(Mandatory)][string]$SiteCode,
+                [int]$Attempts = 6,
+                [int]$RetrySeconds = 30
+            )
+
+            $details = [System.Collections.Generic.List[string]]::new()
+            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+                $site = $null
+                try {
+                    $site = Get-WmiObject -Namespace $Namespace -Class SMS_Site -ErrorAction Stop
+                    if (-not $site) {
+                        $details.Add("  Attempt $attempt/${Attempts}: SMS_Site returned null")
+                    }
+                }
+                catch {
+                    $details.Add("  Attempt $attempt/${Attempts} failed: $($_.Exception.Message)")
+                }
+
+                if ($site) {
+                    return [pscustomobject]@{
+                        Site     = $site
+                        Attempt  = $attempt
+                        Details  = @($details)
+                    }
+                }
+                if ($attempt -lt $Attempts) { Start-Sleep -Seconds $RetrySeconds }
+            }
+
+            return [pscustomobject]@{
+                Site     = $null
+                Attempt  = $Attempts
+                Details  = @($details)
+            }
+        }
+
         # WMI site query with retry (CM components still initializing after fresh build)
         $maxRetries = 6
         $retryDelay = 30
-        $siteOk = $false
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_Site (max ${maxRetries} attempts, ${retryDelay}s apart)")
-        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+        $siteQuery = Invoke-CmSiteIdentityQueryWithRetry -Namespace "root\SMS\site_$sc" `
+            -SiteCode $sc -Attempts $maxRetries -RetrySeconds $retryDelay
+        foreach ($detail in @($siteQuery.Details)) { $results.Details.Add($detail) }
+        if ($siteQuery.Site) {
+            $results.Details.Add("OK: WMI SMS_Site query returned site '$sc' (attempt $($siteQuery.Attempt))")
+        }
+        else {
             try {
-                $site = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_Site -ErrorAction Stop
-                if ($site) {
-                    $results.Details.Add("OK: WMI SMS_Site query returned site '$sc' (attempt $attempt)")
-                    $siteOk = $true
-                    break
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                $smsAdmins = @(Get-LocalGroupMember -Group 'SMS Admins' -ErrorAction Stop |
+                        Select-Object -ExpandProperty Name)
+                $results.Details.Add("DIAG: provider query identity='$identity'; local SMS Admins members=[$($smsAdmins -join ', ')]")
+            }
+            catch {
+                $results.Details.Add("DIAG: could not read local SMS Admins membership: $($_.Exception.Message)")
+            }
+            try {
+                $providerLocations = @(Get-WmiObject -Namespace 'root\SMS' -Class SMS_ProviderLocation -ErrorAction Stop)
+                if ($providerLocations.Count -gt 0) {
+                    $providerSummary = @($providerLocations | ForEach-Object {
+                            "Site=$($_.SiteCode), Machine=$($_.Machine), Namespace=$($_.NamespacePath), Local=$($_.ProviderForLocalSite)"
+                        })
+                    $results.Details.Add("DIAG: SMS_ProviderLocation rows: $($providerSummary -join '; ')")
                 }
                 else {
-                    $results.Details.Add("  Attempt $attempt/${maxRetries}: SMS_Site returned null")
+                    $results.Details.Add('DIAG: SMS_ProviderLocation returned no rows')
                 }
             }
             catch {
-                $results.Details.Add("  Attempt $attempt/${maxRetries} failed: $($_.Exception.Message)")
-                if ($attempt -lt $maxRetries) {
-                    Start-Sleep -Seconds $retryDelay
-                }
+                $results.Details.Add("DIAG: SMS_ProviderLocation query failed: $($_.Exception.Message)")
             }
-        }
-        if (-not $siteOk) {
             $results.Passed = $false
             $results.Details.Add("FAIL: WMI SMS_Site query failed after $maxRetries attempts")
             return $results
@@ -5504,7 +5640,7 @@ function Test-CMSiteFunctionality {
             $isActive = ($linkActive.ContainsKey($csc) -and $linkActive[$csc] -eq $true)
             if ($isActive) { continue }
             $assigned = @($DeployConfig.virtualMachines | Where-Object {
-                    ($_.pushClient -ne $false) -and (
+                    (Test-PushClientRequested -VM $_) -and (
                         ("$($_.pushClient)" -eq $csc) -or
                         (($_.pushClient -eq $true) -and $csNet -and ("$($_.network)" -eq $csNet))
                     )
@@ -6748,6 +6884,96 @@ function Test-SiteSystemFunctionality {
             $dpServesOsd = ("$dpServesOsdInner" -eq 'True')
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+            function Test-DpSignatureConfigPendingContent {
+                [CmdletBinding()]
+                param(
+                    [Parameter(Mandatory)][string]$ConfigPath,
+                    [Parameter(Mandatory)][string]$Description,
+                    [Parameter(Mandatory)][string]$FileName,
+                    [Parameter(Mandatory)][string]$LineNumber,
+                    [Parameter(Mandatory)][string]$PhysicalPath,
+                    [Parameter(Mandatory)][bool]$SignatureSharePresent,
+                    [Parameter(Mandatory)][ValidateSet('Missing', 'Empty', 'Populated', 'Unknown')][string]$PackageState,
+                    [Parameter(Mandatory)][bool]$DpRegistryPresent,
+                    [Parameter(Mandatory)][bool]$DpSharePresent,
+                    [Parameter(Mandatory)][bool]$ProviderRan,
+                    [Parameter(Mandatory)][bool]$ProviderFailed,
+                    [Parameter(Mandatory)][string[]]$LocalNames
+                )
+
+                if ($ConfigPath -notmatch '^Default Web Site/(?:NOCERT_|CCMTOKENAUTH_)?SMS_DP_SMSSIG\$$' -or
+                    $Description -ine 'Cannot read configuration file' -or
+                    $LineNumber -ne '0' -or
+                    $SignatureSharePresent -or
+                    $PackageState -notin @('Missing', 'Empty') -or
+                    -not $DpRegistryPresent -or
+                    -not $DpSharePresent -or
+                    -not $ProviderRan -or
+                    $ProviderFailed) {
+                    return $false
+                }
+
+                $normalizedFile = $FileName -replace '^\\\\\?\\UNC\\', '\\'
+                if ($normalizedFile -notmatch '^\\\\([^\\]+)\\SMSSIG\$\\web\.config$') {
+                    return $false
+                }
+                $fileServer = $Matches[1].TrimEnd('.')
+
+                $normalizedPhysicalPath = $PhysicalPath -replace '/', '\'
+                if ($normalizedPhysicalPath -notmatch '^\\\\([^\\]+)\\SMSSIG\$$') {
+                    return $false
+                }
+                $pathServer = $Matches[1].TrimEnd('.')
+
+                $selfNames = @($LocalNames | Where-Object { $_ } | ForEach-Object { "$_".TrimEnd('.') })
+                return $fileServer -iin $selfNames -and $pathServer -iin $selfNames
+            }
+
+            function Get-DpProviderProvisioningEvidence {
+                [CmdletBinding()]
+                param(
+                    [AllowEmptyCollection()][string[]]$Lines
+                )
+
+                $allLines = @($Lines | Where-Object { $null -ne $_ })
+                if ($allLines.Count -eq 0) {
+                    return [pscustomobject]@{ Ran = $false; Failed = $false }
+                }
+
+                $sessionStart = -1
+                for ($i = 0; $i -lt $allLines.Count; $i++) {
+                    if ($allLines[$i] -match 'CSMSDPInstProv::CreateVirtualDirectory creating virtual directory SMS_DP_SMSPKG\$') {
+                        $sessionStart = $i
+                    }
+                }
+                $sessionLines = if ($sessionStart -ge 0) {
+                    @($allLines[$sessionStart..($allLines.Count - 1)])
+                }
+                else {
+                    $allLines
+                }
+
+                $ran = @($sessionLines | Where-Object {
+                        $_ -match 'Successfully created the virtual directory SMS_DP_SMSSIG\$'
+                    }).Count -gt 0
+                $failed = @($sessionLines | Where-Object {
+                        $_ -match 'Failed to create the content library|CreateContentLibrary.*fail|fatal error'
+                    }).Count -gt 0
+                return [pscustomobject]@{ Ran = $ran; Failed = $failed }
+            }
+
+            function Get-DpProviderLogPath {
+                [CmdletBinding()]
+                param(
+                    [AllowEmptyString()][string]$DpSharePath
+                )
+
+                if ([string]::IsNullOrWhiteSpace($DpSharePath)) {
+                    return $null
+                }
+                return "$($DpSharePath.TrimEnd('\'))\sms\logs\smsdpprov.log"
+            }
+
             $results.Details.Add("CMD: Get-SmbShare -Name 'SMS_DP`$'")
             $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
             if ($share) {
@@ -6905,6 +7131,78 @@ function Test-SiteSystemFunctionality {
                     $badDesc = ''
                     if ($appcmdText -match '(?m)^\s*Description:\s*(\S.*?)\s*$') { $badDesc = $Matches[1] }
                     if (-not $badDesc) { $badDesc = (($appcmdText -replace '\s+', ' ').Trim()) }
+
+                    if ($cfgPath -match '(?:NOCERT_|CCMTOKENAUTH_)?SMS_DP_SMSSIG\$$' -and
+                        $badDesc -ieq 'Cannot read configuration file' -and
+                        $badLine -eq '0') {
+                        $appName = $cfgPath -replace '^Default Web Site/', ''
+                        $signatureApp = Get-WebApplication -Site 'Default Web Site' -Name $appName -ErrorAction SilentlyContinue
+                        $signatureShare = Get-SmbShare -Name 'SMSSIG$' -ErrorAction SilentlyContinue
+                        $dpShare = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
+                        $dpRegistryPresent = Test-Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP'
+                        $packageState = 'Unknown'
+                        if ($dpRegistryPresent) {
+                            try {
+                                $dpProperties = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -ErrorAction Stop
+                                $contentLibraryPath = "$($dpProperties.ContentLibraryPath)"
+                                if ($contentLibraryPath -and $contentLibraryPath -notmatch '^\\\\') {
+                                    $pkgLibPath = Join-Path $contentLibraryPath 'PkgLib'
+                                    if (-not (Test-Path -LiteralPath $pkgLibPath)) {
+                                        $packageState = 'Missing'
+                                    }
+                                    else {
+                                        $packageCount = @(Get-ChildItem -LiteralPath $pkgLibPath -Filter '*.INI' -File -ErrorAction Stop).Count
+                                        $packageState = if ($packageCount -eq 0) { 'Empty' } else { 'Populated' }
+                                    }
+                                }
+                            }
+                            catch {
+                                $packageState = 'Unknown'
+                            }
+                        }
+
+                        $providerLog = Get-DpProviderLogPath -DpSharePath "$($dpShare.Path)"
+                        if ($providerLog -and -not (Test-Path -LiteralPath $providerLog)) {
+                            $providerLog = $null
+                        }
+                        $providerRan = $false
+                        $providerFailed = $false
+                        if ($providerLog) {
+                            try {
+                                $providerLines = @(Get-Content -LiteralPath $providerLog -ErrorAction Stop)
+                                $providerEvidence = Get-DpProviderProvisioningEvidence -Lines $providerLines
+                                $providerRan = [bool]$providerEvidence.Ran
+                                $providerFailed = [bool]$providerEvidence.Failed
+                            }
+                            catch {
+                                $providerFailed = $true
+                            }
+                        }
+
+                        $computerSystem = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+                        $localNames = @($env:COMPUTERNAME)
+                        if ($computerSystem.Domain) {
+                            $localNames += "$env:COMPUTERNAME.$($computerSystem.Domain)"
+                        }
+                        $pendingSignatureParams = @{
+                            ConfigPath           = $cfgPath
+                            Description          = $badDesc
+                            FileName             = $badFile
+                            LineNumber           = "$badLine"
+                            PhysicalPath         = "$($signatureApp.PhysicalPath)"
+                            SignatureSharePresent = [bool]$signatureShare
+                            PackageState         = $packageState
+                            DpRegistryPresent    = [bool]$dpRegistryPresent
+                            DpSharePresent       = [bool]$dpShare
+                            ProviderRan          = [bool]$providerRan
+                            ProviderFailed       = [bool]$providerFailed
+                            LocalNames           = $localNames
+                        }
+                        if (Test-DpSignatureConfigPendingContent @pendingSignatureParams) {
+                            $results.Details.Add("WARN: IIS signature application '$cfgPath' still references '$($signatureApp.PhysicalPath)' while ConfigMgr has not imported any packages or published the local 'SMSSIG`$' share. This is a pre-content DP provisioning state; ConfigMgr reconciles the path when signature content is published.")
+                            continue
+                        }
+                    }
 
                     $where = ''
                     if ($badFile) {
@@ -7993,6 +8291,101 @@ function Test-PKICertificatesOnVM {
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        function Invoke-X509RevocationCheckWithRetry {
+            param(
+                [Parameter(Mandatory)][object]$Certificate,
+                [int]$Attempts = 4,
+                [int]$RetrySeconds = 15,
+                [scriptblock]$Verifier,
+                [scriptblock]$BeforeRetry
+            )
+
+            if (-not $Verifier) {
+                $Verifier = {
+                    param($CertificateToCheck)
+                    $chain = $null
+                    try {
+                        $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
+                        $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+                        $chain.ChainPolicy.RevocationFlag = [Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+                        $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+                        $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(30)
+                        $passed = $chain.Build($CertificateToCheck)
+                        $chainStatus = @($chain.ChainStatus | ForEach-Object {
+                                $detail = "$($_.StatusInformation)".Trim()
+                                if ($detail) { "$($_.Status): $detail" } else { "$($_.Status)" }
+                            })
+                        [pscustomobject]@{
+                            Passed = [bool]$passed
+                            ChainStatus = $chainStatus
+                            Error = ''
+                        }
+                    }
+                    catch {
+                        [pscustomobject]@{
+                            Passed = $false
+                            ChainStatus = @()
+                            Error = $_.Exception.Message
+                        }
+                    }
+                    finally {
+                        if ($chain) { $chain.Dispose() }
+                    }
+                }
+            }
+            if (-not $BeforeRetry) {
+                $BeforeRetry = {
+                    param($CertificateToCheck)
+                    try {
+                        $nativeOutput = @(& certutil.exe -urlcache CRL delete 2>&1)
+                        [pscustomobject]@{
+                            ExitCode = $LASTEXITCODE
+                            Output   = $nativeOutput
+                        }
+                    }
+                    catch {
+                        [pscustomobject]@{
+                            ExitCode = -1
+                            Output   = @($_.Exception.Message)
+                        }
+                    }
+                }
+            }
+
+            $last = $null
+            $retryDiagnostics = [System.Collections.Generic.List[string]]::new()
+            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+                $check = & $Verifier $Certificate
+                $passed = [bool]($check -and $check.Passed)
+                $chainStatus = if ($check) { @($check.ChainStatus | ForEach-Object { "$_" }) } else { @() }
+                $errorText = if ($check -and $check.PSObject.Properties['Error']) { "$($check.Error)" } else { '' }
+                $last = [pscustomobject]@{
+                    Passed = $passed
+                    ChainStatus = $chainStatus
+                    Error = $errorText
+                    Attempts = $attempt
+                    RetryDiagnostics = @($retryDiagnostics)
+                }
+                if ($passed) { return $last }
+                if ($attempt -lt $Attempts) {
+                    try {
+                        $cacheReset = & $BeforeRetry $Certificate
+                        if (-not $cacheReset -or [int]$cacheReset.ExitCode -ne 0) {
+                            $cacheExit = if ($cacheReset) { [int]$cacheReset.ExitCode } else { -1 }
+                            $cacheText = if ($cacheReset) { @($cacheReset.Output) -join ' ' } else { 'no result' }
+                            $retryDiagnostics.Add("CRL cache clear before attempt $($attempt + 1) failed (exit $cacheExit): $cacheText")
+                        }
+                    }
+                    catch {
+                        $retryDiagnostics.Add("CRL cache clear before attempt $($attempt + 1) threw: $($_.Exception.Message)")
+                    }
+                    Start-Sleep -Seconds $RetrySeconds
+                }
+            }
+            if ($last) { $last.RetryDiagnostics = @($retryDiagnostics) }
+            return $last
+        }
+
         # ---- Check 1: Duplicate certificate detection ----
         $friendlyNames = @(
             'ConfigMgr WebServer Certificate'
@@ -8238,26 +8631,25 @@ function Test-PKICertificatesOnVM {
             }
             catch {}
 
-            # X509Chain exposes language-neutral revocation status. certutil's
-            # success prose and evidence labels are localized and its exit code
-            # alone does not prove that a CRL was retrieved.
-            $chain = $null
             try {
-                $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
-                $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::Online
-                $chain.ChainPolicy.RevocationFlag = [Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
-                $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
-                $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(30)
-                $chainOk = $chain.Build($webCert)
-                $chainStatus = @($chain.ChainStatus | ForEach-Object {
-                        "$($_.Status): $($_.StatusInformation.Trim())"
-                    } | Where-Object { $_ })
-                if ($chainOk) {
-                    $results.Details.Add("OK: Certificate chain + CRL verification passed")
+                $verifyResult = Invoke-X509RevocationCheckWithRetry -Certificate $webCert
+                foreach ($retryDiagnostic in @($verifyResult.RetryDiagnostics)) {
+                    $results.Details.Add("WARN: $retryDiagnostic")
+                }
+                if ($verifyResult.Passed) {
+                    $results.Details.Add("OK: Certificate chain + CRL verification passed (attempt $($verifyResult.Attempts)/4)")
                 }
                 else {
                     $results.Passed = $false
-                    $why = if ($chainStatus.Count -gt 0) { $chainStatus -join '; ' } else { 'chain build returned false without status' }
+                    $why = if ($verifyResult.Error) {
+                        $verifyResult.Error
+                    }
+                    elseif (@($verifyResult.ChainStatus).Count -gt 0) {
+                        @($verifyResult.ChainStatus) -join '; '
+                    }
+                    else {
+                        "typed chain revocation check failed after $($verifyResult.Attempts) attempts without status"
+                    }
                     $results.Details.Add("FAIL: Revocation checking is broken for '$($webCert.Subject)': $why. The site is configured to check the CRL for site systems, so an unreachable CDP breaks HTTPS MP/DP traffic and PXE.")
                     if ($cdpUrls.Count -eq 0) {
                         $results.Details.Add("  CDP in cert: (none - the certificate carries no CRL Distribution Point)")
@@ -8266,10 +8658,8 @@ function Test-PKICertificatesOnVM {
                 }
             }
             catch {
-                $results.Details.Add("WARN: CRL verification skipped: $($_.Exception.Message)")
-            }
-            finally {
-                if ($chain) { $chain.Dispose() }
+                $results.Passed = $false
+                $results.Details.Add("FAIL: CRL verification could not run: $($_.Exception.Message)")
             }
 
             # ---- Check 5: IIS 443 binding ----
@@ -10057,9 +10447,24 @@ $Phase11DpContentLogCollector = {
     # site/app pool looks identical to "content never arrived" from the site's side.
     try {
         Import-Module WebAdministration -ErrorAction Stop
-        foreach ($vd in @('SMS_DP_SMSPKG$', 'SMS_DP_SMSSIG$', 'NOCERT_SMS_DP_SMSPKG$')) {
+        $signatureShare = Get-SmbShare -Name 'SMSSIG$' -ErrorAction SilentlyContinue
+        if ($signatureShare) {
+            $lines += "SMSSIG$ share = '$($signatureShare.Path)'"
+            $lines += "SMSSIG$ local path exists = $(Test-Path -LiteralPath $signatureShare.Path)"
+            $signatureAccess = @(Get-SmbShareAccess -Name 'SMSSIG$' -ErrorAction SilentlyContinue |
+                    ForEach-Object { "$($_.AccountName):$($_.AccessControlType):$($_.AccessRight)" })
+            $lines += "SMSSIG$ share access = $($signatureAccess -join ', ')"
+        }
+        else {
+            $lines += 'SMSSIG$ share = MISSING'
+        }
+        foreach ($vd in @('SMS_DP_SMSPKG$', 'SMS_DP_SMSSIG$', 'NOCERT_SMS_DP_SMSPKG$', 'NOCERT_SMS_DP_SMSSIG$')) {
             $exists = Test-Path "IIS:\Sites\Default Web Site\$vd"
             $lines += "IIS vdir '$vd': $(if ($exists) { 'present' } else { 'MISSING' })"
+            if ($exists) {
+                $app = Get-WebApplication -Site 'Default Web Site' -Name $vd -ErrorAction SilentlyContinue
+                $lines += "IIS vdir '$vd' physical path = '$($app.PhysicalPath)'"
+            }
         }
         $site = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
         if ($site) { $lines += "IIS 'Default Web Site' state = $($site.State)" }
@@ -10386,7 +10791,8 @@ function Test-DomainMemberFunctionality {
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
 
-    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $usePKI = [bool]$effectiveCmOptions.UsePKI
 
     # Cross-forest client management: a domain whose DC has
     # externalDomainJoinSiteCode is NOT managed by a local Primary -- its clients
@@ -10430,7 +10836,7 @@ function Test-DomainMemberFunctionality {
     # explicitly false) must not make us expect/warn about a missing client.
     $hasLocalCmSite = @($DeployConfig.virtualMachines | Where-Object { $_.role -in @('CAS', 'Primary', 'Secondary') }).Count -gt 0
     $cmManagesDomain = ($hasLocalCmSite -or $isExternallyManaged)
-    $pushExpected = $cmManagesDomain -and ($CurrentItem.pushClient -ne $false)
+    $pushExpected = $cmManagesDomain -and (Test-PushClientRequested -VM $CurrentItem)
 
     Write-Log "[Phase $Phase] $VMName [DomainMember]: Testing domain join and CCM client (if present)" -LogOnly
 
@@ -11864,7 +12270,8 @@ function Test-InternetClientFunctionality {
 
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
-    $usePKI = [bool]($DeployConfig.cmOptions.UsePKI)
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $usePKI = [bool]$effectiveCmOptions.UsePKI
 
     Write-Log "[Phase $Phase] $VMName [InternetClient]: Testing internet client VM (UsePKI=$usePKI)" -LogOnly
 
@@ -12249,7 +12656,7 @@ function Test-PullDPConfiguration {
                 $smsProvider = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
                 $null = New-PSDrive -Name $sc -PSProvider CMSite -Root $smsProvider -ErrorAction SilentlyContinue
                 Push-Location "${sc}:\"
-                $cmDp = Get-CMDistributionPoint -SiteSystemServerName $dpFqdn -ErrorAction SilentlyContinue
+                $cmDp = Get-CMDistributionPoint -SiteSystemServerName $dpFqdn -SiteCode $sc -ErrorAction SilentlyContinue
                 Pop-Location
                 if ($cmDp) {
                     $results.Details.Add("OK: Get-CMDistributionPoint returned the DP via CM module")
@@ -13428,6 +13835,60 @@ function Test-BitLockerProtection {
     return (Format-TestResult -VMName $VMName -RoleLabel 'BitLocker' -Result $result)
 }
 
+function Resolve-EffectiveHierarchyCmRelease {
+    param(
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $releaseItem = $CurrentItem
+    $releaseOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $inheritedFromParent = $false
+    if ($CurrentItem.parentSiteCode) {
+        $currentDomain = if ($CurrentItem.domain) { "$($CurrentItem.domain)" } else { "$($DeployConfig.vmOptions.domainName)" }
+        $parentSites = @($DeployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'CAS' -and
+                "$($_.siteCode)" -ieq "$($CurrentItem.parentSiteCode)" -and
+                (-not $_.domain -or "$($_.domain)" -ieq $currentDomain)
+            })
+        if ($parentSites.Count -ne 1) {
+            throw "Expected exactly one parent CAS '$($CurrentItem.parentSiteCode)' in domain '$currentDomain' in deployConfig, found $($parentSites.Count)"
+        }
+        $releaseItem = $parentSites[0]
+        $releaseOptions = if ($releaseItem.cmOptions) { $releaseItem.cmOptions } else { $DeployConfig.cmOptions }
+        $inheritedFromParent = $true
+    }
+
+    $configuredVersion = Resolve-CmVersionAlias -Version ([string]$releaseOptions.version)
+    $effectiveVersion = $configuredVersion
+    $baselineVersion = "$($releaseItem.thisParams.cmDownloadVersion.baselineVersion)".Trim()
+    $baselineResolutionError = ''
+    if ([bool]$releaseOptions.OfflineSCP) {
+        if (-not $baselineVersion) {
+            try {
+                $catalogBaseline = Get-CMBaselineVersion -CMVersion $configuredVersion | Select-Object -First 1
+                $baselineVersion = "$($catalogBaseline.baselineVersion)".Trim()
+            }
+            catch {
+                $baselineResolutionError = $_.Exception.Message
+            }
+        }
+        if ($baselineVersion -and $baselineVersion -notin @('current-branch', 'tech-preview')) {
+            $effectiveVersion = $baselineVersion
+        }
+    }
+
+    [pscustomobject]@{
+        Version             = $effectiveVersion
+        ConfiguredVersion   = $configuredVersion
+        BaselineVersion     = $baselineVersion
+        OfflineSCP          = [bool]$releaseOptions.OfflineSCP
+        InheritedFromParent = $inheritedFromParent
+        ParentSiteCode      = if ($inheritedFromParent) { [string]$CurrentItem.parentSiteCode } else { '' }
+        BaselineResolutionError = $baselineResolutionError
+    }
+}
+
 function Test-CMSiteWideFunctionality {
     <#
     .SYNOPSIS
@@ -13452,7 +13913,8 @@ function Test-CMSiteWideFunctionality {
     $domain = $DeployConfig.vmOptions.domainName
     $siteCode = $CurrentItem.siteCode
     $hierarchySiteCode = if ($CurrentItem.parentSiteCode) { "$($CurrentItem.parentSiteCode)" } else { "$siteCode" }
-    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $usePKI = [bool]$effectiveCmOptions.UsePKI
     $role = $CurrentItem.role
 
     # Build expected apps list by mirroring perfloading.ps1 EXACTLY:
@@ -13473,36 +13935,21 @@ function Test-CMSiteWideFunctionality {
     # and another with false.
     $expectedAppNames = @()
     $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
-    # Resolve this independently of Get-UserConfiguration. If a symbolic alias
-    # ever survives config loading again, querying SMS_CM_UpdatePackages for the
-    # literal name "Configuration Manager current-branch" returns zero rows and
-    # the deliberately conservative zero-row path can only report NOT measured.
-    $effectiveCmVersion = Resolve-CmVersionAlias -Version ([string]$effectiveCmOptions.version)
-    if ([bool]$effectiveCmOptions.OfflineSCP) {
-        $offlineBaselineVersion = "$($CurrentItem.thisParams.cmDownloadVersion.baselineVersion)".Trim()
-        if (-not $offlineBaselineVersion -and $CurrentItem.parentSiteCode) {
-            $parentSite = @($DeployConfig.virtualMachines | Where-Object {
-                    "$($_.siteCode)" -ieq "$($CurrentItem.parentSiteCode)" -and $_.thisParams.cmDownloadVersion.baselineVersion
-                }) | Select-Object -First 1
-            if ($parentSite) {
-                $offlineBaselineVersion = "$($parentSite.thisParams.cmDownloadVersion.baselineVersion)".Trim()
-            }
+    $releaseResolution = Resolve-EffectiveHierarchyCmRelease -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    $effectiveCmVersion = $releaseResolution.Version
+    if ($releaseResolution.InheritedFromParent) {
+        Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Child site inherits ConfigMgr release $effectiveCmVersion from parent site $($releaseResolution.ParentSiteCode); local configured target is $($effectiveCmOptions.version)." -LogOnly
+    }
+    if ($releaseResolution.OfflineSCP) {
+        if ($releaseResolution.BaselineResolutionError) {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not derive the OfflineSCP baseline from the ConfigMgr catalog: $($releaseResolution.BaselineResolutionError)" -Warning
         }
-        if (-not $offlineBaselineVersion) {
-            try {
-                $catalogBaseline = Get-CMBaselineVersion -CMVersion $effectiveCmVersion | Select-Object -First 1
-                $offlineBaselineVersion = "$($catalogBaseline.baselineVersion)".Trim()
-            }
-            catch {
-                Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not derive the OfflineSCP baseline from the ConfigMgr catalog: $($_.Exception.Message)" -Warning
-            }
-        }
-        if ($offlineBaselineVersion -and $offlineBaselineVersion -notin @('current-branch', 'tech-preview')) {
-            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP pins the effective ConfigMgr release to deployed baseline $offlineBaselineVersion (configured online target is $effectiveCmVersion)." -LogOnly
-            $effectiveCmVersion = $offlineBaselineVersion
+        if ($releaseResolution.BaselineVersion -and
+            $releaseResolution.BaselineVersion -notin @('current-branch', 'tech-preview')) {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP pins the effective ConfigMgr release to deployed baseline $($releaseResolution.BaselineVersion) (configured online target is $($releaseResolution.ConfiguredVersion))." -LogOnly
         }
         else {
-            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP is enabled but deployed baseline metadata is missing or symbolic ('$offlineBaselineVersion'); falling back to configured release $effectiveCmVersion for validation." -Warning
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP is enabled but deployed baseline metadata is missing or symbolic ('$($releaseResolution.BaselineVersion)'); falling back to configured release $effectiveCmVersion for validation." -Warning
         }
     }
     $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
@@ -13544,7 +13991,18 @@ function Test-CMSiteWideFunctionality {
 
     # Whether any OSDClient exists in this lab. With none, OSD content is
     # intentionally not distributed anywhere -- that's INFO, not a WARN.
-    $hasOsdClient = [bool]($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | Select-Object -First 1)
+    $phase8Scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+        "$($_.PrimarySiteCode)" -eq $siteCode
+    } | Select-Object -First 1
+    $hasOsdClient = if ($phase8Scope -and $phase8Scope.PSObject.Properties['OsdClientSubnets']) {
+        @($phase8Scope.OsdClientSubnets | Where-Object { $_ }).Count -gt 0
+    }
+    else {
+        [bool](
+            ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } | Select-Object -First 1) -or
+            @($DeployConfig.phase8OsdClientSubnets | Where-Object { $_ }).Count -gt 0
+        )
+    }
 
     # Expected membership comes from config intent, never from the group's own
     # membership (which can only confirm itself).
@@ -14597,11 +15055,38 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
         # 7. Task sequences (Primary only) — MEMLABS-* should exist
         if ($isPrimary) {
+            $siteTaskSequenceReferenceIds = @()
+            $siteTaskSequenceReferencesMeasured = $false
+            $siteTaskSequenceReferenceErrors = [System.Collections.Generic.List[string]]::new()
             try {
                 # Task sequences are global objects, so an unfiltered read at a child Primary
                 # also returns another site's -- which would let this site's missing set pass.
                 $tsList = @(Get-WmiObject -Namespace $ns -Class SMS_TaskSequencePackage `
                     -Filter "Name LIKE 'MEMLABS-%' AND PackageID LIKE '$sc%'" -ErrorAction Stop)
+                $siteTaskSequenceReferenceIds = @(
+                    foreach ($taskSequence in $tsList) {
+                        try { $null = $taskSequence.Get() }
+                        catch {
+                            $siteTaskSequenceReferenceErrors.Add("$($taskSequence.PackageID): $($_.Exception.Message)")
+                            continue
+                        }
+                        foreach ($reference in @($taskSequence.References)) {
+                            $packageId = "$($reference.Package)"
+                            if ($packageId -match '^[A-Za-z0-9]{8}$') { $packageId }
+                        }
+                    }
+                ) | Where-Object { $_ } | Select-Object -Unique
+                $siteTaskSequenceReferencesMeasured = $siteTaskSequenceReferenceErrors.Count -eq 0
+                if (-not $siteTaskSequenceReferencesMeasured) {
+                    $message = "could not read package references for $($siteTaskSequenceReferenceErrors.Count) site task sequence(s): $($siteTaskSequenceReferenceErrors -join '; ')"
+                    if ($expectOsd) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: $message")
+                    }
+                    else {
+                        $results.Details.Add("WARN: $message")
+                    }
+                }
                 # perfloading creates exactly these seven. Counting >= 1 as OK let a partial
                 # set (e.g. the two upgrade TSes created before a boot-image failure aborted
                 # the rest) report success.
@@ -14618,11 +15103,14 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 $missingTsNames = @($expectedTsNames | Where-Object { $tsPresentNames -notcontains $_ })
                 if ($missingTsNames.Count -eq 0) {
                     $results.Details.Add("OK: all $($expectedTsNames.Count) MEMLABS task sequence(s) found")
+                    if ($siteTaskSequenceReferencesMeasured) {
+                        $results.Details.Add("INFO: those task sequences reference $($siteTaskSequenceReferenceIds.Count) package(s); hierarchy-owned OSD content is valid when referenced by this site's task sequences")
+                    }
                 }
                 else {
                     # TS creation in Phase 8 (perfloading) is gated on OSD media under
                     # <CM install drive>\OSD -- probe it here so the message names the cause:
-                    # media absent -> Phase 1 copy gap; media present -> TS creation
+                    # media absent -> Phase 8 host repair gap; media present -> TS creation
                     # itself failed (e.g. a transient SQL deadlock or an unresolved boot image).
                     $osdHint = 'OSD media state unknown'
                     try {
@@ -14631,7 +15119,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         $w11 = Test-Path "$osdFolder\Windows 11 24h2\sources\install.wim"
                         $w10 = Test-Path "$osdFolder\Windows 10 22h2\sources\install.wim"
                         if ($w11 -and $w10) { $osdHint = "OSD media IS present under '$osdFolder' -- TS creation itself failed in Phase 8 (check the perfloading task-sequence and boot-image lines, e.g. a transient SQL deadlock or 'no boot image resolved')" }
-                        else { $osdHint = "OSD media MISSING under '$osdFolder' (win11 install.wim=$w11; win10 install.wim=$w10) -- Phase 8 skipped TS creation; see the Phase 8 '[perfloading] OSD media missing' + 'OSD DIAG' lines for why the Phase 1 copy is gone" }
+                        else { $osdHint = "OSD media MISSING under '$osdFolder' (win11 install.wim=$w11; win10 install.wim=$w10) -- Phase 8 skipped TS creation; the host preflight should have repaired inherited media before perfloading, so verify the host OS ISOs and repair diagnostics" }
                     }
                     catch {}
                     $tsMessage = "$($tsPresentNames.Count) of $($expectedTsNames.Count) MEMLABS task sequences exist at site ${sc}; missing: $($missingTsNames -join ', '). $osdHint."
@@ -14645,7 +15133,13 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 }
             }
             catch {
-                $results.Details.Add("WARN: SMS_TaskSequencePackage query failed: $($_.Exception.Message)")
+                if ($expectOsd) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SMS_TaskSequencePackage query failed, so required OSD task sequences and their content references were not measured: $($_.Exception.Message)")
+                }
+                else {
+                    $results.Details.Add("WARN: SMS_TaskSequencePackage query failed: $($_.Exception.Message)")
+                }
             }
         }
 
@@ -14703,6 +15197,14 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 @{ Class = 'SMS_ImagePackage'; Label = 'OS image' }
                 @{ Class = 'SMS_OperatingSystemInstallPackage'; Label = 'OS upgrade package' }
             )
+            $selectRelevantOsdContent = {
+                param([object[]] $VisibleContent)
+
+                if ($siteTaskSequenceReferencesMeasured) {
+                    return @($VisibleContent | Where-Object { $siteTaskSequenceReferenceIds -contains "$($_.PackageID)" })
+                }
+                return @($VisibleContent | Where-Object { "$($_.PackageID)" -like "$sc*" })
+            }
             $getOsdContentTargetRows = {
                 param([string]$PackageId, [string]$RequiredDp)
 
@@ -14716,7 +15218,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $readPendingOsdContent = {
                 $pendingRows = [System.Collections.Generic.List[object]]::new()
                 foreach ($contentClass in $osdPackageClasses) {
-                    foreach ($contentPackage in @(Get-WmiObject -Namespace $ns -Class $contentClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)) {
+                    $visibleContent = @(Get-WmiObject -Namespace $ns -Class $contentClass.Class -ErrorAction Stop)
+                    $relevantContent = @(& $selectRelevantOsdContent -VisibleContent $visibleContent)
+                    foreach ($contentPackage in $relevantContent) {
                         $statusRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($contentPackage.PackageID)'" -ErrorAction Stop)
                         foreach ($requiredDp in $expectedOsdDpNames) {
                             $requiredShort = ($requiredDp -split '\.')[0]
@@ -14925,9 +15429,22 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
             foreach ($pkgClass in $osdPackageClasses) {
                 try {
-                    $osPkgs = @(Get-WmiObject -Namespace $ns -Class $pkgClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)
+                    $visibleOsPkgs = @(Get-WmiObject -Namespace $ns -Class $pkgClass.Class -ErrorAction Stop)
+                    $osPkgs = @(& $selectRelevantOsdContent -VisibleContent $visibleOsPkgs)
                     if ($osPkgs.Count -eq 0) {
-                        $results.Details.Add("WARN: no $($pkgClass.Label) owned by site $sc, so an OSD task sequence has nothing to install")
+                        $missingContentMessage = if ($siteTaskSequenceReferencesMeasured) {
+                            "no $($pkgClass.Label) is referenced by site $sc MEMLABS task sequences, so those task sequences have nothing to install"
+                        }
+                        else {
+                            "task-sequence references could not be measured and no $($pkgClass.Label) owned by site $sc was found"
+                        }
+                        if ($expectOsd) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: $missingContentMessage")
+                        }
+                        else {
+                            $results.Details.Add("WARN: $missingContentMessage")
+                        }
                         continue
                     }
                     # An empty DP list would make the loop below iterate zero times and then

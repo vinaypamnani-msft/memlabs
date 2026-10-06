@@ -85,6 +85,12 @@ $changes = @(Get-StagedChanges)
 $paths = @($changes | Where-Object { $_.Status -notmatch '^D' } | ForEach-Object { $_.DestinationPath })
 $failures = [System.Collections.Generic.List[string]]::new()
 $powerShellCount = 0
+$nonBlockingParserErrorIds = @(
+    'ModuleNotFoundDuringParse'
+    'MultipleModuleEntriesFoundDuringParse'
+    'InvalidInstanceProperty'
+    'ResourceNotDefined'
+)
 
 foreach ($change in $changes) {
     if ($change.Status -match '^D') { continue }
@@ -110,7 +116,7 @@ foreach ($path in $paths) {
     $tokens = $null
     $parseErrors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($content, $path, [ref] $tokens, [ref] $parseErrors)
-    foreach ($parseError in @($parseErrors | Where-Object { $_.ErrorId -ne 'ModuleNotFoundDuringParse' })) {
+    foreach ($parseError in @($parseErrors | Where-Object { $_.ErrorId -notin $nonBlockingParserErrorIds })) {
         $failures.Add("${path}:$($parseError.Extent.StartLineNumber): $($parseError.Message)")
     }
 

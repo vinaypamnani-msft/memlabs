@@ -1,4 +1,24 @@
-﻿configuration Phase7
+﻿function Test-MemLabsSupSyncsFromMicrosoftUpdate {
+    param(
+        [object] $Vm,
+        [object] $DeployConfig
+    )
+
+    if ($Vm.role -eq 'WSUS') { return $true }
+    if ($Vm.installSUP -ne $true -or -not $Vm.siteCode) { return $false }
+    $siteOwner = $DeployConfig.virtualMachines | Where-Object {
+        "$($_.siteCode)" -eq "$($Vm.siteCode)" -and
+        $_.role -in @('CAS', 'Primary', 'Secondary')
+    } | Select-Object -First 1
+    if (-not $siteOwner -and $Vm.role -in @('CAS', 'Primary', 'Secondary')) {
+        $siteOwner = $Vm
+    }
+    if (-not $siteOwner) { return $false }
+    return $siteOwner.role -eq 'CAS' -or
+        ($siteOwner.role -eq 'Primary' -and -not $siteOwner.parentSiteCode)
+}
+
+configuration Phase7
 {
     param
     (
@@ -118,11 +138,7 @@
         # interrupt the in-flight sync. Only the top-of-hierarchy SUP syncs
         # from MU (CAS, or standalone Primary). Child Primaries / Secondaries
         # sync from upstream and don't need an early kick.
-        $hasCAS = ($deployConfig.VirtualMachines | Where-Object { $_.role -eq 'CAS' }).Count -gt 0
-        $syncsFromMU = ($thisVM.installSUP -eq $true) -and (
-            ($thisVM.role -eq 'CAS') -or
-            ($thisVM.role -eq 'Primary' -and -not $hasCAS)
-        )
+        $syncsFromMU = Test-MemLabsSupSyncsFromMicrosoftUpdate -Vm $thisVM -DeployConfig $deployConfig
         if ($syncsFromMU) {
             # Drain any pending reboot left over from PBIRS install before
             # firing the WSUS sync. If any reboot is pending, PendingReboot
@@ -172,14 +188,7 @@
         $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }
 
         # Only the top-of-hierarchy SUP (or a standalone WSUS) syncs from MU.
-        $hasCAS = ($deployConfig.VirtualMachines | Where-Object { $_.role -eq 'CAS' }).Count -gt 0
-        $standalone = ($thisVM.role -eq 'WSUS')
-        $syncsFromMU = $standalone -or (
-            ($thisVM.installSUP -eq $true) -and (
-                ($thisVM.role -eq 'CAS') -or
-                ($thisVM.role -eq 'Primary' -and -not $hasCAS)
-            )
-        )
+        $syncsFromMU = Test-MemLabsSupSyncsFromMicrosoftUpdate -Vm $thisVM -DeployConfig $deployConfig
 
         if ($syncsFromMU) {
             WriteStatus StartWSUSSync {

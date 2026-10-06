@@ -54,6 +54,11 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
 # init so $Common.LocalAdmin is available for RDCMan file generation.
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose -SkipMaintenanceRefresh -SkipVmCacheRefresh -SkipEnvironmentDetection -SkipHostPreparation
 
+if ($global:init_failed) {
+    Write-Log "Failed to initialize common. Cleanup was not started." -Failure
+    exit 1
+}
+
 if ($Orphaned.IsPresent) {
     Remove-Orphaned -WhatIf:$WhatIf
     return

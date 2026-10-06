@@ -581,10 +581,7 @@ function Get-AdditionalValidations {
                     }
                     $property | Add-Member -MemberType NoteProperty -Name "wsusDataBaseServer" -Value $database -Force
 
-                    $value = $property.Memory
-                    if (($value / 1) -lt 5GB) {
-                        $property.Memory = "5GB"
-                    }
+                    Set-WsusMemoryFloor -property $property -UsesWID ($database -eq "WID")
                 }
 
                 $newName = Rename-VirtualMachine -vm $property

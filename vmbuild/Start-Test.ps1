@@ -1,4 +1,48 @@
-﻿#Start-Test.ps1
+﻿<#
+.SYNOPSIS
+    Runs MemLabs deployment test fixtures.
+
+.EXAMPLE
+    .\Start-Test.ps1 -All
+
+    Runs the curated Core suite. Use -Suite Full for every ordinary test family.
+
+.EXAMPLE
+    .\Start-Test.ps1 -Suite Upgrade -CrossRevisionPlanOnly
+
+    Prints the curated exact-main to develop upgrade matrix without touching Hyper-V.
+
+.EXAMPLE
+    .\Start-Test.ps1 -Continuous
+
+    Continuously selects the highest-value test that fits current host memory.
+    Runs only while this foreground Start-Test process remains open.
+
+.EXAMPLE
+    .\Start-Test.ps1 -Continuous -ContinuousPlanOnly
+
+    Displays the ranked candidates and exits without touching Hyper-V.
+
+.EXAMPLE
+    .\Start-Test.ps1 -All -MainToDevelopExpansion -CrossRevisionPlanOnly
+
+    Prints the Core suite's pinned main-to-develop expansion matrix without touching Hyper-V.
+
+.EXAMPLE
+    .\Start-Test.ps1 -Test NOCM -MainToDevelopExpansion
+
+    Deploys NOCM-A once with pinned main, then runs develop's NOCM B+ fixtures
+    twice before validating and removing the family.
+
+.EXAMPLE
+    .\Start-Test.ps1 -All -MainToDevelopExpansion
+
+    Runs every family that has an A fixture in pinned main and B+ fixtures in
+    pinned develop. Completed stages are checkpointed under
+    ProgramData\MemLabs\CrossRevision. If exact-main A is interrupted, remove
+    that family lab and reset its state; the runner will not replay or adopt an
+    uncheckpointed baseline.
+#>
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true, HelpMessage = "Prefix of tests to perform", ParameterSetName = 'TestName')]
@@ -36,8 +80,37 @@ param (
     [Parameter(Mandatory = $true, HelpMessage = "Prefix of tests to perform", ParameterSetName = 'ALL')]
     [switch]$All,
 
+    [Parameter(Mandatory = $true, HelpMessage = "Curated test suite", ParameterSetName = 'Suite')]
+    [ValidateSet('Core', 'Upgrade', 'Specialized', 'Stress', 'Full')]
+    [string]$Suite,
+
+    [Parameter(Mandatory = $true, HelpMessage = "Continuously run the highest-value test that fits the host", ParameterSetName = 'Continuous')]
+    [switch]$Continuous,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [switch]$ContinuousPlanOnly,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [int]$ContinuousMaxIterations = 0,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [double]$MinimumRetentionFreeGB = 250,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [int]$MaximumRetainedLabs = 2,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [int]$RetentionDays = 7,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [string]$TestHistoryPath,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
+    [string]$TestRetentionPath,
+
     [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'Suite')]
     [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
             # Fast path: read CM versions from cache file instead of loading Common.ps1
@@ -61,14 +134,17 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Dynamic Memory", ParameterSetName = 'Suite')]
     [switch]$dynamicMemory,
 
     [Parameter(Mandatory = $false, HelpMessage = "Override Install CM", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Override Install CM", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Install CM", ParameterSetName = 'Suite')]
     [switch]$DoNotInstallCM,
 
     [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Override Server Version", ParameterSetName = 'Suite')]
     [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
             # Not -InJob: the completer needs Get-SupportedOperatingSystemsForRole, which
@@ -91,22 +167,27 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable BitLocker Management (BLM) on the site + a BitLocker client", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Enable BitLocker Management (BLM) on the site + a BitLocker client", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Enable BitLocker Management (BLM) on the site + a BitLocker client", ParameterSetName = 'Suite')]
     [switch]$EnableBLM,
 
     [Parameter(Mandatory = $false, HelpMessage = "Add a Proxy server and route Windows clients through it", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Add a Proxy server and route Windows clients through it", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Add a Proxy server and route Windows clients through it", ParameterSetName = 'Suite')]
     [switch]$EnableProxy,
 
     [Parameter(Mandatory = $false, HelpMessage = "Two-tier PKI: issuing CA on the DC + offline standalone root CA", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Two-tier PKI: issuing CA on the DC + offline standalone root CA", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Two-tier PKI: issuing CA on the DC + offline standalone root CA", ParameterSetName = 'Suite')]
     [switch]$TwoTierPKI,
 
     [Parameter(Mandatory = $false, HelpMessage = "Deploy Microsoft 365 Apps (Office) to Windows clients", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Deploy Microsoft 365 Apps (Office) to Windows clients", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy Microsoft 365 Apps (Office) to Windows clients", ParameterSetName = 'Suite')]
     [switch]$Office,
 
     [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Enable BLM + Proxy + Two-tier PKI + Office together", ParameterSetName = 'Suite')]
     [switch]$TheWorks,
 
     [Parameter(Mandatory = $true, HelpMessage = "Run only the main-to-develop VM-note compatibility tests", ParameterSetName = 'VMNoteCompatibility')]
@@ -114,12 +195,83 @@ param (
 
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'Suite')]
     [switch]$SkipVMNoteCompatibility,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'Suite')]
+    [switch]$MainToDevelopExpansion,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Print the mixed-revision expansion plan without changing worktrees or Hyper-V", ParameterSetName = 'Suite')]
+    [switch]$CrossRevisionPlanOnly,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Reset the in-progress family checkpoint after deliberately removing its lab", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Reset the selected family checkpoint after deliberately removing its lab", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Reset the in-progress family checkpoint after deliberately removing its lab", ParameterSetName = 'Suite')]
+    [switch]$ResetCrossRevisionState,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'Suite')]
+    [string]$CrossRevisionStateRoot,
+
+    [Parameter(Mandatory = $false, ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, ParameterSetName = 'Suite')]
+    [string]$DevelopRevision,
 
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'TestName')]
-    [switch]$RequireCleanSource
+    [Parameter(Mandatory = $false, HelpMessage = "Require every deployment to use clean/current source with machine-readable provenance", ParameterSetName = 'Suite')]
+    [switch]$RequireCleanSource,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Do not prompt after a failed fixture; return failure to the caller", ParameterSetName = 'TestName')]
+    [switch]$Automated,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Remove successful test domains before returning", ParameterSetName = 'TestName')]
+    [switch]$CleanupOnSuccess,
+
+    [string]$MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
 )
+
+. (Join-Path $PSScriptRoot 'tools\Common.TestSuites.ps1')
+. (Join-Path $PSScriptRoot 'tools\Common.TestHistory.ps1')
+. (Join-Path $PSScriptRoot 'tools\Common.AttachedProcess.ps1')
+$script:StartTestVmbuildRoot = $PSScriptRoot
+$resolvedTestSuite = $null
+if ($Suite) {
+    $resolvedTestSuite = Resolve-MemLabsTestSuite -VmbuildRoot $PSScriptRoot -Name $Suite
+}
+elseif ($All.IsPresent) {
+    $resolvedTestSuite = Resolve-MemLabsTestSuite -VmbuildRoot $PSScriptRoot -Name 'Core'
+}
+$runCrossRevision = $MainToDevelopExpansion.IsPresent -or
+    ($resolvedTestSuite -and $resolvedTestSuite.Mode -eq 'CrossRevision')
+
+if ($Continuous.IsPresent) {
+    $continuousPath = Join-Path $PSScriptRoot 'tools\Invoke-MemLabsContinuousTests.ps1'
+    $continuousArguments = @(
+        '-NoLogo', '-NoProfile', '-File', $continuousPath,
+        '-VmbuildRoot', $PSScriptRoot,
+        '-MaxIterations', $ContinuousMaxIterations,
+        '-MinimumFreeStorageGB', $MinimumRetentionFreeGB,
+        '-MaximumRetainedLabs', $MaximumRetainedLabs,
+        '-RetentionDays', $RetentionDays
+    )
+    if ($ContinuousPlanOnly.IsPresent) { $continuousArguments += '-PlanOnly' }
+    if ($TestHistoryPath) { $continuousArguments += @('-HistoryPath', $TestHistoryPath) }
+    if ($TestRetentionPath) { $continuousArguments += @('-RetentionPath', $TestRetentionPath) }
+    do {
+        $continuousExit = Invoke-MemLabsAttachedPowerShell -Arguments $continuousArguments
+        if ($continuousExit -eq 57) {
+            Write-Host 'Reloading the continuous scheduler after a source update.' -ForegroundColor Yellow
+        }
+    } while ($continuousExit -eq 57)
+    exit $continuousExit
+}
 
 
 # ============================================================
@@ -474,7 +626,36 @@ function Invoke-TestGitPull {
     }
 }
 
+function Invoke-MixedRevisionGitRefresh {
+    param([string]$Context)
+
+    $mutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+    $held = $false
+    try {
+        try { $held = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $held = $true }
+        if (-not $held) {
+            throw 'Another MemLabs test cycle owns the host mutation lock; refusing to update the shared checkout.'
+        }
+
+        Invoke-TestGitPull -Context $Context
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        $revisionOutput = @(& git -C $repoRoot rev-parse HEAD 2>$null)
+        $revision = if ($revisionOutput.Count -eq 1) { $revisionOutput[0].Trim() } else { '' }
+        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+            throw "Could not pin develop after git pull ($Context)."
+        }
+        return $revision
+    }
+    finally {
+        if ($held) { try { $mutex.ReleaseMutex() } catch {} }
+        $mutex.Dispose()
+    }
+}
+
 function Invoke-VMNoteCompatibilityPreflight {
+    param([string] $PinnedMainRevision)
+
     $testPath = Join-Path $PSScriptRoot 'tools\Test-VMNoteMainToDevelopCompatibility.ps1'
     if (-not (Test-Path -LiteralPath $testPath)) {
         Write-Host "VM-note compatibility test not found: $testPath" -ForegroundColor Red
@@ -495,7 +676,7 @@ function Invoke-VMNoteCompatibilityPreflight {
 
         Write-Host "Running under $($engine.Name)..." -ForegroundColor Cyan
         $global:LASTEXITCODE = 0
-        & $engine.Path @($engine.Arguments) -File $testPath | Out-Host
+        & $engine.Path @($engine.Arguments) -File $testPath -MainRevision $PinnedMainRevision | Out-Host
         $exitCode = [int]$LASTEXITCODE
         if ($exitCode -ne 0) {
             Write-Host "FAIL: VM-note compatibility preflight returned $exitCode under $($engine.Name)." -ForegroundColor Red
@@ -505,6 +686,69 @@ function Invoke-VMNoteCompatibilityPreflight {
 
     Write-Host 'PASS: VM-note compatibility preflight passed under both PowerShell engines.' -ForegroundColor Green
     return $true
+}
+
+function Invoke-MainToDevelopExpansionCycle {
+    param(
+        [string] $PinnedMainRevision,
+        [string] $PinnedDevelopRevision,
+        [string] $TestPrefix,
+        [string[]] $TestPrefixes,
+        [string] $StateRoot,
+        [switch] $RunAll,
+        [switch] $PlanOnly,
+        [switch] $ResetState,
+        [switch] $RequireCleanSource
+    )
+
+    $runnerPath = Join-Path $PSScriptRoot 'tools\Invoke-MainToDevelopExpansionTest.ps1'
+    if (-not (Test-Path -LiteralPath $runnerPath)) {
+        Write-Host "Cross-revision expansion runner not found: $runnerPath" -ForegroundColor Red
+        return 2
+    }
+
+    $currentDevelopRevision = $PinnedDevelopRevision
+    $forwardResetState = $ResetState.IsPresent
+    do {
+        $arguments = @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $runnerPath,
+            '-RepositoryRoot', (Split-Path -Parent $PSScriptRoot),
+            '-MainRevision', $PinnedMainRevision,
+            '-DevelopRevision', $currentDevelopRevision
+        )
+        if ($RunAll.IsPresent) {
+            $arguments += '-All'
+        }
+        elseif ($TestPrefixes.Count -gt 1) {
+            $arguments += @('-TestsCsv', ($TestPrefixes -join ','))
+        }
+        elseif ($TestPrefixes.Count -eq 1) {
+            $arguments += @('-Test', $TestPrefixes[0])
+        }
+        else {
+            $arguments += @('-Test', $TestPrefix)
+        }
+        $arguments += '-PauseAtFamilyBoundary'
+        if ($PlanOnly.IsPresent) { $arguments += '-PlanOnly' }
+        if ($forwardResetState) { $arguments += '-ResetState' }
+        if ($RequireCleanSource.IsPresent) { $arguments += '-RequireCleanSource' }
+        if ($StateRoot) { $arguments += @('-StateRoot', $StateRoot) }
+
+        $global:LASTEXITCODE = 0
+        & (Join-Path $PSHOME 'pwsh.exe') @arguments | Out-Host
+        $exitCode = [int]$LASTEXITCODE
+        $forwardResetState = $false
+        if ($exitCode -ne 56) { return $exitCode }
+
+        try {
+            $currentDevelopRevision = Invoke-MixedRevisionGitRefresh -Context 'between mixed-revision families'
+        }
+        catch {
+            Write-Host "Could not refresh develop at the family boundary: $($_.Exception.Message)" -ForegroundColor Red
+            return 2
+        }
+        Write-Host "Restarting mixed-revision runner at develop $currentDevelopRevision." -ForegroundColor Yellow
+    } while ($true)
 }
 
 function Invoke-NewLab {
@@ -590,6 +834,7 @@ function Get-TestFailureAction {
         return 'Abort'
     }
 
+    if ($Automated.IsPresent) { return 'Abort' }
     while ($true) {
         try {
             $answer = "$(Read-Host '  [R]etry this config, [S]kip it and continue, [A]bort all tests (default A)')".Trim()
@@ -645,6 +890,7 @@ function Run-Test {
                     $config.cmOptions.version = $cmVersion
                     write-host "updating cmVersion to $cmVersion"
                 } 
+
                 if ($DoNotInstallCM -and $config.cmOptions.Install)  {
                     $config.cmOptions.Install = $false
                 }
@@ -712,17 +958,156 @@ function Run-Test {
     return (-not $groupFailed)
 }
 
-Invoke-TestGitPull -Context 'before VM-note compatibility preflight'
+function Invoke-RecordedTestFamily {
+    param(
+        [Parameter(Mandatory = $true)][string] $Family,
+        [string] $SuiteName = ''
+    )
+
+    $repositoryRoot = Split-Path -Parent $script:StartTestVmbuildRoot
+    $metadata = Get-MemLabsFamilyMetadata -VmbuildRoot $script:StartTestVmbuildRoot -Family $Family
+    $runId = [guid]::NewGuid().ToString('N')
+    $startedUtc = [DateTime]::UtcNow
+    $startCommit = Get-MemLabsCurrentCommit -RepositoryRoot $repositoryRoot
+    Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{
+            EventType = 'RunStarted'; RunId = $runId; CandidateKey = "Standard|$Family"
+            Mode = 'Standard'; Family = $Family; Suite = $SuiteName
+            StartedUtc = $startedUtc.ToString('o'); Commit = $startCommit
+            Domains = @($metadata.Domains); CoverageTags = @($metadata.CoverageTags)
+            RequiredMemoryGB = $metadata.EstimatedRequiredGB
+        })
+    $success = $false
+    $failureText = ''
+    try {
+        $success = (@(Run-Test -Test $Family) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
+        if (-not $success) { $failureText = "Test family '$Family' returned failure." }
+        return $success
+    }
+    catch {
+        $failureText = $_.Exception.Message
+        throw
+    }
+    finally {
+        $completedUtc = [DateTime]::UtcNow
+        Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{
+                EventType = 'RunCompleted'; RunId = $runId; CandidateKey = "Standard|$Family"
+                Mode = 'Standard'; Family = $Family; Suite = $SuiteName
+                StartedUtc = $startedUtc.ToString('o'); CompletedUtc = $completedUtc.ToString('o')
+                DurationSeconds = [Math]::Round(($completedUtc - $startedUtc).TotalSeconds, 1)
+                Commit = Get-MemLabsCurrentCommit -RepositoryRoot $repositoryRoot
+                StartCommit = $startCommit; Success = $success; ExitCode = $(if ($success) { 0 } else { 1 })
+                Error = $failureText; Domains = @($metadata.Domains)
+                CoverageTags = @($metadata.CoverageTags); NeedsRerun = -not $success
+            })
+    }
+}
+
+$script:TestMutationMutex = $null
+$script:TestMutationMutexHeld = $false
+if (-not $runCrossRevision -and -not $VMNoteCompatibilityOnly.IsPresent) {
+    try {
+        $script:TestMutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+        try { $script:TestMutationMutexHeld = $script:TestMutationMutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $script:TestMutationMutexHeld = $true }
+        if (-not $script:TestMutationMutexHeld) {
+            Write-Host 'Another MemLabs test cycle owns the host mutation lock. Stop it or wait for it to finish.' -ForegroundColor Red
+            exit 2
+        }
+    }
+    catch {
+        Write-Host "Could not acquire the host mutation lock: $($_.Exception.Message)" -ForegroundColor Red
+        exit 2
+    }
+}
+
+if (-not $runCrossRevision) {
+    Invoke-TestGitPull -Context 'before VM-note compatibility preflight'
+}
+else {
+    if ($cmVersion -or $dynamicMemory.IsPresent -or $DoNotInstallCM.IsPresent -or $serverVersion -or
+        $EnableBLM.IsPresent -or $EnableProxy.IsPresent -or $TwoTierPKI.IsPresent -or $Office.IsPresent -or $TheWorks.IsPresent) {
+        Write-Host 'Feature and platform overrides are not supported in a pinned main-to-develop cycle; use the committed fixtures unchanged.' -ForegroundColor Red
+        exit 2
+    }
+
+    $startTestRepoRoot = Split-Path -Parent $PSScriptRoot
+    $branchOutput = @(& git -C $startTestRepoRoot branch --show-current 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $branchOutput.Count -gt 1) {
+        Write-Host 'Could not determine the current Git branch.' -ForegroundColor Red
+        exit 2
+    }
+    $currentBranch = if ($branchOutput.Count -eq 1) { $branchOutput[0].Trim() } else { '' }
+    if (-not $CrossRevisionPlanOnly.IsPresent -and $currentBranch -ne 'develop') {
+        Write-Host "A live main-to-develop cycle must run from the develop branch; current branch is '$currentBranch'." -ForegroundColor Red
+        exit 2
+    }
+    if ($DevelopRevision) {
+        $resolvedDevelop = @(& git -C $startTestRepoRoot rev-parse "$DevelopRevision^{commit}" 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $resolvedDevelop.Count -ne 1 -or $resolvedDevelop[0] -notmatch '^[0-9a-f]{40}$') {
+            Write-Host "Could not resolve pinned develop revision '$DevelopRevision'." -ForegroundColor Red
+            exit 2
+        }
+        $developRevision = $resolvedDevelop[0].Trim()
+        Write-Host "Using explicitly pinned develop revision $developRevision." -ForegroundColor DarkGray
+    }
+    elseif (-not $CrossRevisionPlanOnly.IsPresent) {
+        try {
+            $developRevision = Invoke-MixedRevisionGitRefresh -Context 'before mixed-revision cycle'
+        }
+        catch {
+            Write-Host "Could not refresh develop before the mixed-revision cycle: $($_.Exception.Message)" -ForegroundColor Red
+            exit 2
+        }
+    }
+    else {
+        Write-Host 'Mixed-revision plan-only mode uses the current committed HEAD without pulling.' -ForegroundColor DarkGray
+    }
+}
 if ($SkipVMNoteCompatibility.IsPresent) {
     Write-Host 'WARNING: main-to-develop VM-note compatibility preflight skipped by request.' -ForegroundColor Yellow
 }
-elseif (-not (Invoke-VMNoteCompatibilityPreflight)) {
+elseif (-not (Invoke-VMNoteCompatibilityPreflight -PinnedMainRevision $MainRevision)) {
     Write-Host 'Start-Test stopped before lab mutation because the VM-note compatibility preflight failed.' -ForegroundColor Red
     exit 1
 }
 
 if ($VMNoteCompatibilityOnly.IsPresent) {
     exit 0
+}
+
+if (($CrossRevisionPlanOnly.IsPresent -or $ResetCrossRevisionState.IsPresent) -and -not $runCrossRevision) {
+    Write-Host '-CrossRevisionPlanOnly and -ResetCrossRevisionState require -MainToDevelopExpansion or -Suite Upgrade.' -ForegroundColor Red
+    exit 2
+}
+
+if ($runCrossRevision) {
+    if ($CrossRevisionPlanOnly.IsPresent -and -not $developRevision) {
+        $developOutput = @(& git -C $startTestRepoRoot rev-parse HEAD 2>$null)
+        $developRevision = if ($developOutput.Count -eq 1) { $developOutput[0].Trim() } else { '' }
+        if ($LASTEXITCODE -ne 0 -or $developRevision -notmatch '^[0-9a-f]{40}$') {
+            Write-Host 'Could not pin the current develop commit.' -ForegroundColor Red
+            exit 2
+        }
+    }
+    $crossRevisionFamilies = if ($resolvedTestSuite -and -not $resolvedTestSuite.IncludeAll) {
+        @($resolvedTestSuite.Families)
+    }
+    else {
+        @()
+    }
+    $crossRevisionRunAll = ($resolvedTestSuite -and $resolvedTestSuite.IncludeAll) -or
+        (-not $resolvedTestSuite -and $All.IsPresent)
+    $crossRevisionExit = Invoke-MainToDevelopExpansionCycle `
+        -PinnedMainRevision $MainRevision `
+        -PinnedDevelopRevision $developRevision `
+        -TestPrefix $Test `
+        -TestPrefixes $crossRevisionFamilies `
+        -RunAll:$crossRevisionRunAll `
+        -StateRoot $CrossRevisionStateRoot `
+        -PlanOnly:$CrossRevisionPlanOnly `
+        -ResetState:$ResetCrossRevisionState `
+        -RequireCleanSource:$RequireCleanSource
+    exit $crossRevisionExit
 }
 
 # Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
@@ -739,39 +1124,48 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
 try {
     $global:history = @()
     $global:removedomains = @()
+    $script:StartTestFailed = $false
     if ($test) {
         # Coerce down to the single boolean: anything Run-Test's callees leak onto the
         # success stream would otherwise make this an array (and every -not test useless).
-        $result = (@(Run-Test -Test $Test) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
+        $result = (@(Invoke-RecordedTestFamily -Family $Test) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
         if (-not $result) {
+            $script:StartTestFailed = $true
             Write-Host "Test '$Test' FAILED. Labs left intact: $($global:removedomains -join ', ')" -ForegroundColor Red
+        }
+        elseif ($CleanupOnSuccess.IsPresent) {
+            foreach ($domain in @($global:removedomains | Select-Object -Unique)) {
+                Write-Host "CleanupOnSuccess: removing $domain" -ForegroundColor DarkGray
+                try {
+                    & ./Remove-lab.ps1 -DomainName $domain
+                    $remaining = @(Get-List -Type VM -DomainName $domain -SmartUpdate)
+                    if ($remaining.Count -gt 0) {
+                        throw "Cleanup left VM(s): $($remaining.vmName -join ', ')."
+                    }
+                }
+                catch {
+                    $script:StartTestFailed = $true
+                    Write-Host "CleanupOnSuccess failed for '$domain': $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+            $global:removedomains = @()
         }
     }
 
-    if ($all) {
-        $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name }
-        $Tests = @()
-        foreach ($name in $ConfigPaths.Name) {
-     
-            $Testname = ($name -split "-")[0]
-            if ($Testname.contains("json")) {
-                continue
-            }
-            if ($Testname.Contains("storageconfig")) {
-                continue
-            }
-            $Tests += $Testname
-        }                        
-        $Tests = $Tests | Select-Object -Unique
+    if ($all -or $Suite) {
+        $Tests = @($resolvedTestSuite.Families)
+        Write-Host "Running '$($resolvedTestSuite.Name)' suite: $($Tests -join ', ')" -ForegroundColor Cyan
 
         foreach ($Test in $Tests) {
             if (Get-Content "c:\temp\CompletedTests.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -eq $Test }) {
                 write-host "$Test already ran skipping"
                 continue
             }
-            $result = (@(Run-Test -Test $($Test + "-")) | Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
+            $result = (@(Invoke-RecordedTestFamily -Family $Test -SuiteName $resolvedTestSuite.Name) |
+                    Where-Object { $_ -is [bool] } | Select-Object -Last 1) -eq $true
             Write-Host "$Test returned $result"
             if (-not $result) {
+                $script:StartTestFailed = $true
                 Write-Host "Stopping: '$Test' failed. Labs left intact for repair: $($global:removedomains -join ', ')" -ForegroundColor Red
                 break
             }
@@ -802,4 +1196,9 @@ finally {
         }
     }
     Write-host "Delete C:\temp\CompletedTests.txt to re-run all tests"
+    if ($script:TestMutationMutexHeld) {
+        try { $script:TestMutationMutex.ReleaseMutex() } catch { }
+    }
+    if ($script:TestMutationMutex) { $script:TestMutationMutex.Dispose() }
 }
+if ($script:StartTestFailed) { exit 1 }

@@ -30,19 +30,114 @@ Deliberately conservative -- it only reports a call when ALL of these hold:
 [CmdletBinding()]
 param(
     [string[]]$Path,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$nonBlockingParserErrorIds = @(
+    'ModuleNotFoundDuringParse'
+    'MultipleModuleEntriesFoundDuringParse'
+    'InvalidInstanceProperty'
+    'ResourceNotDefined'
+)
+$script:ParserDiagnostics = New-Object System.Collections.Generic.List[object]
 
-if (-not $Path) {
-    $files = @(Get-ChildItem -Path (Join-Path $repoRoot 'vmbuild') -Filter *.ps1 -File -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch '\\(temp|logs|azureFiles)\\' -and $_.FullName -notmatch '\\baseimagestaging\\filesToInject\\tools\\' })
+if ($SelfTest) {
+    if ($Path) { throw '-SelfTest cannot be combined with -Path.' }
+
+    $fixtureRoot = Join-Path $env:TEMP ('undeclared-param-' + [guid]::NewGuid().ToString('N'))
+    $fixtureTools = Join-Path $fixtureRoot 'tools'
+    try {
+        $null = New-Item -ItemType Directory -Path $fixtureTools -Force
+        [IO.File]::WriteAllText((Join-Path $fixtureRoot 'Production.ps1'), @'
+Invoke-External -RealParameter value
+function Invoke-Local { param($AllowedParameter) }
+Invoke-Local -Allowed value
+Invoke-Local -Bogus value
+function Invoke-ArgsConsumer { param($Known); $null = $args }
+Invoke-ArgsConsumer -Anything value
+'@, [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllText((Join-Path $fixtureTools 'Test-Mock.ps1'), @'
+function Invoke-External { param($MockParameter) }
+'@, [Text.Encoding]::ASCII)
+
+        $engine = if ($PSVersionTable.PSEdition -eq 'Core') {
+            Join-Path $PSHOME 'pwsh.exe'
+        }
+        else {
+            Join-Path $PSHOME 'powershell.exe'
+        }
+        $engineArguments = @('-NoLogo', '-NoProfile', '-NonInteractive')
+        if ($PSVersionTable.PSEdition -ne 'Core') {
+            $engineArguments += @('-ExecutionPolicy', 'Bypass')
+        }
+        $engineArguments += @('-File', $PSCommandPath, '-Path', $fixtureRoot)
+        $output = @(& $engine @engineArguments 2>&1 | ForEach-Object { "$_" })
+        $exitCode = $LASTEXITCODE
+        $text = $output -join [Environment]::NewLine
+        if ($exitCode -ne 1 -or
+            $text -notlike '*Invoke-Local -Bogus is not declared*' -or
+            $text -like '*Invoke-External -RealParameter is not declared*' -or
+            $text -like '*Invoke-Local -Allowed is not declared*' -or
+            $text -like '*Invoke-ArgsConsumer -Anything is not declared*') {
+            $output | Write-Host
+            Write-Host "SELF-TEST FAILED: expected one Invoke-Local -Bogus violation, child exit=$exitCode." -ForegroundColor Red
+            exit 1
+        }
+        if (-not $Quiet) {
+            Write-Host 'SELF-TEST PASSED: test-local mocks, valid prefixes, and $args consumers were ignored; the real violation was reported.' -ForegroundColor Green
+        }
+        exit 0
+    }
+    finally {
+        if (Test-Path -LiteralPath $fixtureRoot) {
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
-else {
-    $files = @($Path | ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue })
+
+function Get-ScanFiles {
+    param([string[]]$RequestedPath)
+
+    $resolved = @()
+    if (-not $RequestedPath) {
+        $repositoryPaths = @(& git -C $repoRoot ls-files --cached --others --exclude-standard -- `
+                'vmbuild/*.ps1' 'vmbuild/**/*.ps1')
+        if ($LASTEXITCODE -ne 0) {
+            throw "git ls-files failed with exit code $LASTEXITCODE while enumerating PowerShell sources."
+        }
+        $resolved = @($repositoryPaths |
+                ForEach-Object { Get-Item -LiteralPath (Join-Path $repoRoot $_) -ErrorAction SilentlyContinue } |
+                Where-Object {
+                    $_ -and
+                    $_.FullName -notmatch '\\(temp|logs|azureFiles)\\' -and
+                    $_.FullName -notmatch '\\baseimagestaging\\filesToInject\\tools\\'
+                })
+    }
+    else {
+        foreach ($candidate in $RequestedPath) {
+            $item = Get-Item -LiteralPath $candidate -ErrorAction SilentlyContinue
+            if (-not $item) { throw "Scan path not found: '$candidate'." }
+            if ($item.PSIsContainer) {
+                $resolved += @(Get-ChildItem -LiteralPath $item.FullName -Filter *.ps1 -File -Recurse -ErrorAction Stop)
+            }
+            elseif ($item.Extension -eq '.ps1') {
+                $resolved += $item
+            }
+            else {
+                throw "Scan path is not a PowerShell script: '$candidate'."
+            }
+        }
+    }
+
+    $files = @($resolved | Sort-Object FullName -Unique)
+    if ($files.Count -eq 0) { throw 'No PowerShell scripts were found in the requested scan scope.' }
+    return $files
 }
+
+$files = @(Get-ScanFiles -RequestedPath $Path)
 
 $defs = @{}
 $asts = @{}
@@ -50,7 +145,21 @@ $asts = @{}
 foreach ($f in $files) {
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
-    if (-not $ast) { continue }
+    $blockingParseErrors = @($errors | Where-Object { $_.ErrorId -notin $nonBlockingParserErrorIds })
+    if ($blockingParseErrors.Count -gt 0) {
+        $details = @($blockingParseErrors | ForEach-Object {
+                "line $($_.Extent.StartLineNumber): $($_.Message)"
+            }) -join '; '
+        throw "Cannot scan '$($f.FullName)' because it has PowerShell parse errors: $details"
+    }
+    foreach ($parseDiagnostic in @($errors | Where-Object { $_.ErrorId -in $nonBlockingParserErrorIds })) {
+        $script:ParserDiagnostics.Add([pscustomobject]@{
+                Path = $f.FullName
+                Line = $parseDiagnostic.Extent.StartLineNumber
+                ErrorId = $parseDiagnostic.ErrorId
+                Message = $parseDiagnostic.Message
+            })
+    }
     $asts[$f.FullName] = $ast
 
     foreach ($fn in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
@@ -80,11 +189,25 @@ foreach ($f in $files) {
 
         if (-not $defs.ContainsKey($fn.Name)) { $defs[$fn.Name] = New-Object System.Collections.Generic.List[object] }
         $defs[$fn.Name].Add([pscustomobject]@{
-                Names      = $names
-                HasParam   = [bool]$paramBlock
-                IsAdvanced = $isAdvanced
-                UsesArgs   = $usesArgs
+            Source     = $f.FullName
+            Names      = $names
+            HasParam   = [bool]$paramBlock
+            IsAdvanced = $isAdvanced
+            UsesArgs   = $usesArgs
             })
+    }
+}
+
+function Write-ParserDiagnosticSummary {
+    if ($script:ParserDiagnostics.Count -eq 0) { return }
+
+    $counts = @($script:ParserDiagnostics |
+            Group-Object ErrorId |
+            Sort-Object Name |
+            ForEach-Object { "$($_.Name)=$($_.Count)" })
+    Write-Host "NOTE: Scanned partial ASTs after $($script:ParserDiagnostics.Count) environment-dependent DSC parser diagnostic(s): $($counts -join ', ')." -ForegroundColor Yellow
+    foreach ($diagnostic in $script:ParserDiagnostics) {
+        Write-Verbose "$($diagnostic.Path):$($diagnostic.Line) [$($diagnostic.ErrorId)] $($diagnostic.Message)"
     }
 }
 
@@ -92,7 +215,11 @@ foreach ($f in $files) {
 # silent-swallow candidate, and accept a parameter that ANY definition declares.
 $funcs = @{}
 foreach ($kv in $defs.GetEnumerator()) {
-    $all = $kv.Value.ToArray()
+    # Test fixture functions are local to the test script that defines them. Treating
+    # their mock signatures as repo-wide contracts misclassifies real module cmdlets
+    # on hosts where those modules are not installed.
+    $all = @($kv.Value.ToArray() | Where-Object { $_.Source -notmatch '\\tools\\Test-[^\\]+\.ps1$' })
+    if ($all.Count -eq 0) { continue }
     $eligible = $true
     foreach ($d in $all) {
         if ($d.IsAdvanced -or -not $d.HasParam -or $d.UsesArgs) { $eligible = $false; break }
@@ -147,6 +274,7 @@ foreach ($kv in $asts.GetEnumerator()) {
 }
 
 if (-not $Quiet) {
+    Write-ParserDiagnosticSummary
     "Scanned $($files.Count) file(s); $($funcs.Count) repo function(s) are simple functions that silently swallow unknown parameters."
 }
 

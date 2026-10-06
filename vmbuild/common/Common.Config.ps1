@@ -130,6 +130,126 @@ function Get-ConfigCmOptions {
     return $null
 }
 
+function Sync-ExistingHierarchyOptionsToDeployConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $ExistingVMs
+    )
+
+    if (-not $Config.virtualMachines -or -not $Config.vmOptions.domainName) { return }
+    $siteRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+    $existingTopSites = @($ExistingVMs | Where-Object {
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.siteCode
+        })
+    if ($existingTopSites.Count -eq 0) { return }
+
+    $allSites = @($ExistingVMs) + @($Config.virtualMachines)
+    $hierarchies = @()
+    $configVmOwners = @{}
+    foreach ($topSite in $existingTopSites) {
+        $siteCodes = @{}
+        $siteCodes["$($topSite.siteCode)".ToLowerInvariant()] = $true
+        $added = $true
+        while ($added) {
+            $added = $false
+            foreach ($site in $allSites) {
+                if (-not $site.siteCode -or -not $site.parentSiteCode) { continue }
+                $parentKey = "$($site.parentSiteCode)".ToLowerInvariant()
+                $siteKey = "$($site.siteCode)".ToLowerInvariant()
+                if ($siteCodes.ContainsKey($parentKey) -and -not $siteCodes.ContainsKey($siteKey)) {
+                    $siteCodes[$siteKey] = $true
+                    $added = $true
+                }
+            }
+        }
+
+        $matchingConfigVms = @($Config.virtualMachines | Where-Object {
+                $_.role -in $siteRoles -and $_.siteCode -and
+                $siteCodes.ContainsKey("$($_.siteCode)".ToLowerInvariant())
+            })
+        if ($matchingConfigVms.Count -eq 0) { continue }
+
+        foreach ($siteVm in $matchingConfigVms) {
+            $vmKey = if ($siteVm.vmName) { "$($siteVm.vmName)".ToLowerInvariant() } else { "$($siteVm.role)|$($siteVm.siteCode)".ToLowerInvariant() }
+            if ($configVmOwners.ContainsKey($vmKey)) {
+                throw "ConfigMgr hierarchy ownership is ambiguous for '$($siteVm.vmName)' (site '$($siteVm.siteCode)'): both '$($configVmOwners[$vmKey])' and '$($topSite.siteCode)' claim it."
+            }
+            $configVmOwners[$vmKey] = "$($topSite.siteCode)"
+        }
+        $hierarchies += [pscustomobject]@{
+            TopSite           = $topSite
+            MatchingConfigVms = $matchingConfigVms
+            CmOptions         = $null
+        }
+    }
+
+    foreach ($hierarchy in $hierarchies) {
+        $topSite = $hierarchy.TopSite
+        $authoritativeCm = $topSite.cmOptions
+        $recoveredFromBackup = $false
+        if (-not $authoritativeCm) {
+            $authoritativeCm = Get-CmOptionsFromSiteServerBackup -VmName $topSite.vmName -DomainName $Config.vmOptions.domainName
+            $recoveredFromBackup = $true
+        }
+        if (-not $authoritativeCm) {
+            throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($Config.vmOptions.domainName)': site server '$($topSite.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
+        }
+        if ($recoveredFromBackup) {
+            Write-Log "Recovered authoritative ConfigMgr options (UsePKI=$($authoritativeCm.UsePKI)) from '$($topSite.vmName)' deployConfig backup and stamped its VM note." -Verbose
+            try { Set-VMNote -vmName $topSite.vmName -vmNote ([PSCustomObject]@{ cmOptions = $authoritativeCm }) } catch {}
+        }
+        $hierarchy.CmOptions = $authoritativeCm
+    }
+
+    foreach ($hierarchy in $hierarchies) {
+        foreach ($siteVm in $hierarchy.MatchingConfigVms) {
+            $clone = $hierarchy.CmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            $siteVm | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
+        }
+    }
+
+    $configSiteVms = @($Config.virtualMachines | Where-Object { $_.role -in $siteRoles -and $_.siteCode })
+    if ($hierarchies.Count -eq 1 -and $configVmOwners.Count -eq $configSiteVms.Count) {
+        $authoritativeCm = $hierarchies[0].CmOptions
+        $rootClone = $authoritativeCm | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+        $Config | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $rootClone -Force
+
+        if ([bool]$authoritativeCm.UsePKI) {
+            $existingPki = $ExistingVMs | Where-Object {
+                $_.role -eq 'DC' -and $_.pkiOptions -and $_.pkiOptions.EnablePKI
+            } | Select-Object -First 1 -ExpandProperty pkiOptions
+            if ($existingPki) {
+                $pkiClone = $existingPki | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            }
+            elseif ($Config.pkiOptions) {
+                $pkiClone = $Config.pkiOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            }
+            else {
+                $pkiClone = [pscustomobject]@{
+                    EnablePKI      = $true
+                    IssuingCAVM    = ''
+                    UseOfflineRoot = $false
+                    OfflineRootCAVM = ''
+                }
+            }
+            $pkiClone.EnablePKI = $true
+            if (-not $pkiClone.IssuingCAVM) {
+                $issuingCa = @($ExistingVMs) + @($Config.virtualMachines) | Where-Object {
+                    $_.role -eq 'DC' -and $_.InstallCA
+                } | Select-Object -First 1
+                if ($issuingCa) { $pkiClone.IssuingCAVM = $issuingCa.vmName }
+            }
+            $Config | Add-Member -MemberType NoteProperty -Name 'pkiOptions' -Value $pkiClone -Force
+        }
+    }
+
+    return $hierarchies
+}
+
 # Resolves a symbolic ConfigMgr media choice to the concrete version used by
 # deployment and validation. Explicit numeric targets pass through unchanged.
 function Resolve-CmVersionAlias {
@@ -199,11 +319,12 @@ function Resolve-ConfigCmVersionAliases {
 # Resolves the cmOptions block that should apply to a given VM, by walking up
 # its hierarchy to the top-level site server (CAS or standalone Primary) that
 # owns the canonical block. Returns $null when the VM has no hierarchy
-# affiliation (e.g. DC/DomainMember not bound to a site).
+# affiliation (e.g. a DC, or a DomainMember without an explicit push site).
 #
 # Walks: $vm -> parentSiteCode -> ... -> top. For Passive/SiteSystem VMs which
-# only have a SiteCode (no parentSiteCode), finds the owning CAS/Primary in the
-# same SiteCode and resumes the walk from there. Cycle-guarded.
+# only have a SiteCode (no parentSiteCode), and clients that carry a resolved
+# pushClient site code, finds the owning CAS/Primary/Secondary and resumes the
+# walk from there. Cycle-guarded.
 function Resolve-VmCmOptions {
     [CmdletBinding()]
     param (
@@ -226,9 +347,18 @@ function Resolve-VmCmOptions {
             continue
         }
 
-        if ($current.SiteCode) {
+        $affiliatedSiteCode = "$($current.SiteCode)".Trim()
+        if (-not $affiliatedSiteCode -and
+            ($current.PSObject.Properties.Name -contains 'pushClient') -and
+            $current.pushClient -is [string]) {
+            $affiliatedSiteCode = "$($current.pushClient)".Trim()
+        }
+
+        if ($affiliatedSiteCode) {
             $owner = $Config.virtualMachines | Where-Object {
-                $_.SiteCode -eq $current.SiteCode -and $_.Role -in 'CAS', 'Primary' -and $_.vmName -ne $current.vmName
+                "$($_.SiteCode)" -eq $affiliatedSiteCode -and
+                $_.Role -in 'CAS', 'Primary', 'Secondary' -and
+                $_.vmName -ne $current.vmName
             } | Select-Object -First 1
             if (-not $owner) { return $null }
             $current = $owner
@@ -240,20 +370,18 @@ function Resolve-VmCmOptions {
     return $null
 }
 
-# Stamps a resolved cmOptions block onto every site-role VM (CAS/Primary/
-# Secondary/PassiveSite/SiteSystem) in the config that doesn't already carry
-# one, so DSC phases can read $ThisVM.cmOptions directly without per-hierarchy
-# guesswork. Deep-clones via JSON round-trip so later mutations don't bleed
-# across VMs.
+# Stamps a resolved cmOptions block onto every hierarchy-affiliated VM in the
+# config that doesn't already carry one. Affiliation can come from siteCode,
+# parentSiteCode, or an explicit pushClient site code, so clients and WSUS roles
+# consume the same version/PKI/install settings as their owning hierarchy.
+# Deep-clones via JSON round-trip so later mutations don't bleed across VMs.
 function Set-VmCmOptionsResolved {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)] [object] $Config
     )
     if (-not $Config -or -not $Config.virtualMachines) { return }
-    $siteRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
     foreach ($vm in $Config.virtualMachines) {
-        if ($vm.Role -notin $siteRoles) { continue }
         if ($null -ne $vm.cmOptions) { continue }
         $resolved = Resolve-VmCmOptions -Config $Config -vm $vm
         if (-not $resolved) { continue }
@@ -1384,51 +1512,16 @@ function New-DeployConfig {
     )
     try {
 
-        # --- Legacy-lab PKI recovery (must run BEFORE trusting the config's cmOptions) ---
-        # A lab first built on the legacy branch never persisted cmOptions to its VM notes.
-        # When such a lab is later re-deployed with a regenerated config, that config can
-        # carry a cmOptions block whose UsePKI is $false even though the site was actually
-        # built as PKI (HTTPS) -- legacy defaulted DC.InstallCA=$true even for eHTTP labs,
-        # so PKI cannot be inferred from per-VM flags. The stale $false makes the guest run
-        # EnableEHTTP.ps1, the MP web cert is never bound, and the HTTPS MP install fails
-        # with MSI 25055 (SMS_MP never created -> Phase 11 functional validation fails).
-        # The site server keeps a timestamped backup of every deployConfig it was given;
-        # the OLDEST is the original build config and carries the authoritative UsePKI.
-        # So: when the existing top-level site server's VM NOTE has no cmOptions at all
-        # (the legacy signal), recover cmOptions from that backup, stamp the note (so future
-        # runs read it directly), and adopt it here -- overriding the possibly-stale config
-        # block and dropping any per-VM clones so Set-VmCmOptionsResolved re-derives them.
-        # Host-context only (needs PSDirect). A genuine modern eHTTP lab persists cmOptions
-        # to its note, so this is skipped for it.
+        # Existing ConfigMgr hierarchy settings are authoritative for add-to-existing.
+        # Static follow-on fixtures can carry newer/default cmOptions, but child sites
+        # cannot independently change their hierarchy's version or HTTPS mode.
         if ($Common -and -not $Common.InJob -and $configObject.vmOptions.domainName) {
             try {
-                $topSiteServer = Get-LegacyCmOptionsRecoverySite -Config $configObject
-                if ($topSiteServer -and -not $topSiteServer.cmOptions) {
-                    $backupCm = Get-CmOptionsFromSiteServerBackup -VmName $topSiteServer.vmName -DomainName $configObject.vmOptions.domainName
-                    if (-not $backupCm) {
-                        throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($configObject.vmOptions.domainName)': site server '$($topSiteServer.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
-                    }
-                    Write-Log "New-DeployConfig: '$($topSiteServer.vmName)' VM note had no cmOptions (legacy build); recovered cmOptions (UsePKI=$($backupCm.UsePKI)) from its oldest deployConfig backup. Stamping note and adopting for this deploy (prevents eHTTP/MP 25055)." -Verbose
-                    try { Set-VMNote -vmName $topSiteServer.vmName -vmNote ([PSCustomObject]@{ cmOptions = $backupCm }) } catch {}
-                    # Adopt for THIS deploy, overriding the stale block the regenerated
-                    # config carries. Move-CmOptionsToTopLevelSiteServer may already have
-                    # copied that stale (UsePKI=$false) block onto the in-config top site
-                    # server VM, and Resolve-VmCmOptions walks VM->VM (it does NOT read root),
-                    # so we must overwrite it THERE for the corrected value to propagate to
-                    # this hierarchy's child site systems. Also mirror onto root for the guest
-                    # fallback read ($deployConfig.cmOptions). We deliberately touch ONLY this
-                    # recovered top site server (not every site VM) so a second hierarchy in
-                    # the same config keeps its own cmOptions.
-                    $topInConfig = $configObject.virtualMachines | Where-Object { $_.vmName -eq $topSiteServer.vmName } | Select-Object -First 1
-                    if ($topInConfig) {
-                        $topClone = $backupCm | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
-                        $topInConfig | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $topClone -Force
-                    }
-                    $configObject | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $backupCm -Force
-                }
+                $existingDomainVMs = @(Get-List -Type VM -DomainName $configObject.vmOptions.domainName)
+                $null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $configObject -ExistingVMs $existingDomainVMs
             }
             catch {
-                throw "New-DeployConfig: legacy ConfigMgr option recovery failed closed. $($_.Exception.Message)"
+                throw "New-DeployConfig: existing ConfigMgr option recovery failed closed. $($_.Exception.Message)"
             }
         }
 
@@ -1682,6 +1775,295 @@ function Add-RemoteSQLVMToDeployConfig {
     }
 }
 
+function Get-ExistingConfigMgrRoleUpgradePlan {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $ExistingVMs
+    )
+
+    $domainName = "$($Config.vmOptions.domainName)"
+    $allSiteVms = @($ExistingVMs) + @($Config.virtualMachines)
+    $roleTriggers = @($Config.virtualMachines | Where-Object {
+            $_.siteCode -and
+            (-not $_.hidden -or $_.phase11Validate) -and
+            ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or
+             $_.installMP -eq $true -or $_.installSUP -eq $true -or $_.installRP -eq $true)
+        })
+    $ownerSiteNames = @()
+    $existingRoleVmNames = @()
+    foreach ($trigger in $roleTriggers) {
+        $ownerSiteCode = "$($trigger.siteCode)"
+        $secondaryRows = @($allSiteVms | Where-Object {
+                $_.role -eq 'Secondary' -and "$($_.siteCode)" -eq $ownerSiteCode
+            } | Sort-Object vmName -Unique)
+        if ($secondaryRows.Count -gt 1) {
+            throw "Cannot scope ConfigMgr role upgrade for '$($trigger.vmName)': site '$ownerSiteCode' has $($secondaryRows.Count) Secondary owners."
+        }
+        if ($secondaryRows.Count -eq 1 -and $secondaryRows[0].parentSiteCode) {
+            $ownerSiteCode = "$($secondaryRows[0].parentSiteCode)"
+        }
+
+        $ownerRows = @($allSiteVms | Where-Object {
+                $_.role -in @('CAS', 'Primary') -and "$($_.siteCode)" -eq $ownerSiteCode
+            } | Sort-Object vmName -Unique)
+        if ($ownerRows.Count -ne 1) {
+            throw "Cannot scope ConfigMgr role upgrade for '$($trigger.vmName)': expected one CAS/Primary owner for site '$ownerSiteCode', found $($ownerRows.Count)."
+        }
+        $ownerSiteNames += "$($ownerRows[0].vmName)"
+
+        $managedSiteCodes = @($ownerSiteCode)
+        if ($ownerRows[0].role -eq 'Primary') {
+            $managedSiteCodes += @($allSiteVms | Where-Object {
+                    $_.role -eq 'Secondary' -and "$($_.parentSiteCode)" -eq $ownerSiteCode
+                } | ForEach-Object { "$($_.siteCode)" })
+        }
+        $managedSiteCodes = @($managedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
+        $existingRoleVmNames += @($ExistingVMs | Where-Object {
+                ($_.domain -eq $domainName -or -not $_.domain) -and
+                "$($_.siteCode)" -in $managedSiteCodes -and
+                ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or
+                 $_.installMP -eq $true -or $_.installSUP -eq $true -or $_.installRP -eq $true)
+            } | ForEach-Object { "$($_.vmName)" })
+    }
+
+    [pscustomobject]@{
+        OwnerSiteVmNames      = @($ownerSiteNames | Where-Object { $_ } | Select-Object -Unique)
+        ExistingRoleVmNames   = @($existingRoleVmNames | Where-Object { $_ } | Select-Object -Unique)
+    }
+}
+
+function Add-Phase11HierarchyParentsToDeployConfig {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $ExistingVMs
+    )
+
+    $domainName = "$($Config.vmOptions.domainName)"
+    $addedSupportNames = @()
+    $childPrimaries = @($Config.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.parentSiteCode -and
+            (-not $_.hidden -or $_.phase11Validate -eq $true -or $_.osdValidate -eq $true)
+        })
+
+    foreach ($childPrimary in $childPrimaries) {
+        $parentSiteCode = "$($childPrimary.parentSiteCode)"
+        $configParents = @($Config.virtualMachines | Where-Object {
+                $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+            })
+        if ($configParents.Count -gt 1) {
+            $configParentNames = @($configParents | ForEach-Object { "$($_.vmName)" } | Where-Object { $_ })
+            throw "Cannot hydrate hierarchy support for child Primary '$($childPrimary.vmName)': parent site '$parentSiteCode' has $($configParents.Count) CAS rows in deployConfig ($($configParentNames -join ', '))."
+        }
+        if ($configParents.Count -eq 0) {
+            $existingParents = @($ExistingVMs | Where-Object {
+                    $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
+                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                })
+            if ($existingParents.Count -ne 1) {
+                throw "Cannot hydrate hierarchy support for child Primary '$($childPrimary.vmName)': expected exactly one existing CAS for parent site '$parentSiteCode' in domain '$domainName', found $($existingParents.Count)."
+            }
+
+            $parentName = "$($existingParents[0].vmName)"
+            if (-not $parentName) {
+                throw "Cannot hydrate hierarchy support for child Primary '$($childPrimary.vmName)': the CAS for parent site '$parentSiteCode' has no VM name."
+            }
+            Add-ExistingVMToDeployConfig -vmName $parentName -configToModify $Config -hidden:$true
+            $addedSupportNames += $parentName
+            $configParents = @($Config.virtualMachines | Where-Object {
+                    $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
+                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                })
+        }
+
+        if ($configParents.Count -ne 1) {
+            throw "Failed to add exactly one CAS for parent site '$parentSiteCode' as hierarchy support for child Primary '$($childPrimary.vmName)'."
+        }
+        $supportParent = $configParents[0]
+        if ($supportParent.hidden) {
+            $supportParent | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+        }
+
+        $parentSiteSupportRows = @($ExistingVMs | Where-Object {
+                "$($_.siteCode)" -ieq $parentSiteCode -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domainName) -and
+                ($_.role -eq 'PassiveSite' -or
+                 $_.installDP -eq $true -or $_.enablePullDP -eq $true -or
+                 $_.installMP -eq $true -or $_.installSUP -eq $true -or
+                 $_.installRP -eq $true -or $_.installSMSProv -eq $true)
+            })
+        foreach ($supportRow in $parentSiteSupportRows) {
+            $supportName = "$($supportRow.vmName)"
+            if (-not $supportName -or $Config.virtualMachines.vmName -contains $supportName) { continue }
+            Add-ExistingVMToDeployConfig -vmName $supportName -configToModify $Config -hidden:$true
+            if ($Config.virtualMachines.vmName -notcontains $supportName) {
+                throw "Failed to add parent-site support VM '$supportName' for child Primary '$($childPrimary.vmName)'."
+            }
+            $addedSupportNames += $supportName
+        }
+
+        $parentWorkflowVms = @($Config.virtualMachines | Where-Object {
+                "$($_.siteCode)" -ieq $parentSiteCode -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domainName) -and
+                ($_.role -in @('CAS', 'PassiveSite') -or
+                 $_.installDP -eq $true -or $_.enablePullDP -eq $true -or
+                 $_.installMP -eq $true -or $_.installSUP -eq $true -or
+                 $_.installRP -eq $true -or $_.installSMSProv -eq $true)
+            })
+        foreach ($workflowVm in $parentWorkflowVms) {
+            if ($workflowVm.hidden) {
+                $workflowVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+            }
+            if ($workflowVm.remoteSQLVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.remoteSQLVM -configToModify $Config
+                if ($Config.virtualMachines.vmName -notcontains $workflowVm.remoteSQLVM) {
+                    throw "Failed to add remote SQL dependency '$($workflowVm.remoteSQLVM)' for hierarchy support VM '$($workflowVm.vmName)'."
+                }
+            }
+            if ($workflowVm.replicaSqlServerVM) {
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.replicaSqlServerVM -configToModify $Config
+                if ($Config.virtualMachines.vmName -notcontains $workflowVm.replicaSqlServerVM) {
+                    throw "Failed to add replica SQL dependency '$($workflowVm.replicaSqlServerVM)' for hierarchy support VM '$($workflowVm.vmName)'."
+                }
+            }
+            if ($workflowVm.wsusDataBaseServer -and $workflowVm.wsusDataBaseServer -ne 'WID') {
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.wsusDataBaseServer -configToModify $Config
+                if ($Config.virtualMachines.vmName -notcontains $workflowVm.wsusDataBaseServer) {
+                    throw "Failed to add WSUS database dependency '$($workflowVm.wsusDataBaseServer)' for hierarchy support VM '$($workflowVm.vmName)'."
+                }
+            }
+            foreach ($dependencyName in @(
+                    $workflowVm.pullDPSourceDP,
+                    $workflowVm.PatchMyPCFileServer,
+                    $workflowVm.remoteContentLibVM
+                ) | Where-Object { $_ }) {
+                Add-ExistingVMToDeployConfig -vmName $dependencyName -configToModify $Config
+                if ($Config.virtualMachines.vmName -notcontains $dependencyName) {
+                    throw "Failed to add dependency '$dependencyName' for hierarchy support VM '$($workflowVm.vmName)'."
+                }
+            }
+        }
+    }
+
+    return @($addedSupportNames | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Add-Phase8SoftwareUpdateProductMetadata {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $ExistingVMs
+    )
+
+    $Config | Add-Member -MemberType NoteProperty -Name phase8SoftwareUpdateProductInventory -Value @() -Force
+    $domainName = "$($Config.vmOptions.domainName)"
+    if (-not $domainName) { return }
+
+    $configuredNames = @{}
+    foreach ($vm in @($Config.virtualMachines)) {
+        $name = "$($vm.vmName)".Trim()
+        if ($name) { $configuredNames[$name.ToUpperInvariant()] = $true }
+    }
+    $existingDomainVms = @($ExistingVMs | Where-Object {
+            ($_.domain -eq $domainName -or -not $_.domain) -and
+            (-not $_.vmName -or -not $configuredNames.ContainsKey("$($_.vmName)".ToUpperInvariant()))
+        })
+    $allVms = @($Config.virtualMachines) + @($existingDomainVms)
+    $eligibleSites = @(Get-EligiblePushSites -Config $Config -Domain $domainName -Inventory $allVms)
+    if ($eligibleSites.Count -eq 0) { return }
+
+    $records = @()
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    foreach ($vm in $allVms) {
+        if ($vm.role -notin $pushableRoles) { continue }
+
+        $pushVm = $vm
+        $pushRequested = Test-PushClientRequested -VM $vm
+        $pushPropertyIsAuthoritative = $vm.PSObject.Properties.Name -contains 'pushClient'
+        $vmName = "$($vm.vmName)".Trim()
+        if ($vmName -and -not $configuredNames.ContainsKey($vmName.ToUpperInvariant())) {
+            try {
+                $rawNote = Get-VMNote -VMName $vmName
+                if ($rawNote) {
+                    $pushPropertyIsAuthoritative = $rawNote.PSObject.Properties.Name -contains 'pushClient'
+                }
+            }
+            catch {
+                Write-Log "SUP product inventory: could not read raw VM note for '$vmName'; preserving normalized pushClient=$($vm.pushClient). $($_.Exception.Message)" -LogOnly -Warning
+            }
+        }
+        if (-not $pushRequested -and
+            -not $pushPropertyIsAuthoritative -and
+            $vm.role -eq 'DomainMember') {
+            $vmOptions = if ($vm.cmOptions) { $vm.cmOptions } else { $Config.cmOptions }
+            if ($vmOptions -and $vmOptions.pushClientToDomainMembers -eq $true) {
+                $pushVm = $vm | Select-Object *
+                $pushVm | Add-Member -MemberType NoteProperty -Name pushClient -Value $true -Force
+                $pushRequested = $true
+            }
+        }
+        if (-not $pushRequested) { continue }
+
+        $targetSiteCode = Resolve-PushClientSite -VM $pushVm -Config $Config -Domain $domainName `
+            -EligibleSites $eligibleSites
+        if (-not $targetSiteCode) { continue }
+
+        $currentSiteCode = "$targetSiteCode"
+        $topSiteCode = ''
+        $visitedSiteCodes = @{}
+        for ($depth = 0; $depth -lt 10; $depth++) {
+            $siteKey = $currentSiteCode.ToUpperInvariant()
+            if ($visitedSiteCodes.ContainsKey($siteKey)) {
+                throw "SUP product inventory: hierarchy cycle detected while resolving site '$targetSiteCode' for '$($vm.vmName)'."
+            }
+            $visitedSiteCodes[$siteKey] = $true
+            $owners = @($allVms | Where-Object {
+                    $_.role -in @('CAS', 'Primary', 'Secondary') -and
+                    "$($_.siteCode)" -ieq $currentSiteCode -and
+                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                } | Sort-Object vmName -Unique)
+            if ($owners.Count -ne 1) {
+                throw "SUP product inventory: expected one owner for site '$currentSiteCode' while resolving '$($vm.vmName)', found $($owners.Count)."
+            }
+            $owner = $owners[0]
+            if ($owner.parentSiteCode) {
+                $currentSiteCode = "$($owner.parentSiteCode)"
+                continue
+            }
+            $topSiteCode = "$($owner.siteCode)"
+            break
+        }
+        if (-not $topSiteCode) {
+            throw "SUP product inventory: could not resolve a top-level site for '$($vm.vmName)' (target '$targetSiteCode')."
+        }
+
+        $records += [pscustomobject]@{
+            VmName          = "$($vm.vmName)"
+            Role            = "$($vm.role)"
+            OperatingSystem = "$($vm.operatingSystem)"
+            SqlVersion      = "$($vm.sqlVersion)"
+            InstallOffice   = $vm.installOffice
+            PushClient      = "$targetSiteCode"
+            TargetSiteCode  = "$targetSiteCode"
+            TopSiteCode     = $topSiteCode
+        }
+    }
+
+    $Config | Add-Member -MemberType NoteProperty -Name phase8SoftwareUpdateProductInventory `
+        -Value @($records | Sort-Object VmName -Unique) -Force
+}
+
 function Add-Phase8DistributionPointMetadata {
     [CmdletBinding()]
     param (
@@ -1693,6 +2075,7 @@ function Add-Phase8DistributionPointMetadata {
     )
 
     $Config | Add-Member -MemberType NoteProperty -Name phase8ManagedDistributionPointScopes -Value @() -Force
+    $Config | Add-Member -MemberType NoteProperty -Name phase8OsdClientSubnets -Value @() -Force
     $domainName = "$($Config.vmOptions.domainName)"
     $phase8Primaries = @($Config.virtualMachines | Where-Object {
             $_.role -eq 'Primary' -and (-not $_.domain -or $_.domain -eq $domainName)
@@ -1728,6 +2111,38 @@ function Add-Phase8DistributionPointMetadata {
         if ($configuredVmName) { $configuredVmKeys[$configuredVmName.ToUpperInvariant()] = $true }
     }
     $allExistingVMs = @($ExistingVMs)
+    $getProjectedNetwork = {
+        param([object]$Vm)
+        if ($Vm.network) { return "$($Vm.network)" }
+        if ($Vm.thisParams -and $Vm.thisParams.vmNetwork) { return "$($Vm.thisParams.vmNetwork)" }
+        $vmName = "$($Vm.vmName)".Trim()
+        if ($vmName) {
+            $inventoryVm = $allExistingVMs | Where-Object { $_.vmName -ieq $vmName } | Select-Object -First 1
+            if ($inventoryVm -and $inventoryVm.network) { return "$($inventoryVm.network)" }
+        }
+        return "$($Config.vmOptions.network)"
+    }
+    $configuredOsdClientKeys = @{}
+    foreach ($configuredOsdClient in @($Config.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })) {
+        $configuredName = "$($configuredOsdClient.vmName)".Trim()
+        if ($configuredName) { $configuredOsdClientKeys[$configuredName.ToUpperInvariant()] = $true }
+    }
+    $osdClientVms = @($Config.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })
+    $osdClientVms += @($allExistingVMs | Where-Object {
+            $_.role -eq 'OSDClient' -and
+            ($_.domain -eq $domainName -or -not $_.domain) -and
+            (-not $_.vmName -or -not $configuredOsdClientKeys.ContainsKey("$($_.vmName)".ToUpperInvariant()))
+        })
+    $osdClientSubnets = @($osdClientVms | ForEach-Object { & $getProjectedNetwork $_ } |
+            Where-Object { $_ } | Select-Object -Unique)
+    $Config | Add-Member -MemberType NoteProperty -Name phase8OsdClientSubnets -Value @($osdClientSubnets) -Force
+    $domainDpNetworks = @((@($Config.virtualMachines) + @($allExistingVMs)) | Where-Object {
+            ($_.domain -eq $domainName -or -not $_.domain) -and
+            $_.role -ne 'Secondary' -and
+            ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Primary')
+        } | ForEach-Object { & $getProjectedNetwork $_ } | Where-Object { $_ } | Select-Object -Unique)
+    $unownedOsdClientSubnets = @($osdClientSubnets | Where-Object { $domainDpNetworks -notcontains $_ })
+
     $managedDpScopes = @()
     foreach ($primary in $phase8Primaries) {
         $primarySiteCode = "$($primary.siteCode)".Trim()
@@ -1756,14 +2171,23 @@ function Add-Phase8DistributionPointMetadata {
             })
         $allDpCandidates = @($configuredDpCandidates) + @($existingDpCandidates)
         $scopeDpNames = @()
+        $scopeDpRecords = @()
         foreach ($candidate in $allDpCandidates) {
             $candidateName = "$($candidate.vmName)".Trim()
             if (-not $candidateName) { continue }
+            $candidateVmName = $candidateName
             if (-not $candidateName.Contains('.')) {
                 $candidateDomain = if ($candidate.domain) { "$($candidate.domain)".Trim() } else { $domainName }
                 if ($candidateDomain) { $candidateName = "$candidateName.$candidateDomain" }
             }
             $scopeDpNames += $candidateName
+            $scopeDpRecords += [pscustomobject]@{
+                Fqdn     = $candidateName
+                VmName   = $candidateVmName
+                Network  = & $getProjectedNetwork $candidate
+                SiteCode = "$($candidate.siteCode)"
+                Role     = "$($candidate.role)"
+            }
         }
 
         $siteHasManagedDp = $allDpCandidates | Where-Object {
@@ -1774,6 +2198,13 @@ function Add-Phase8DistributionPointMetadata {
             if (-not $primaryName) { continue }
             if (-not $primaryName.Contains('.') -and $domainName) { $primaryName = "$primaryName.$domainName" }
             $scopeDpNames += $primaryName
+            $scopeDpRecords += [pscustomobject]@{
+                Fqdn     = $primaryName
+                VmName   = "$($primary.vmName)"
+                Network  = & $getProjectedNetwork $primary
+                SiteCode = "$($primary.siteCode)"
+                Role     = "$($primary.role)"
+            }
             Write-Log "Add-to-existing Phase 8: no managed DP is represented for site $($primary.siteCode); recording the Primary '$($primary.vmName)' deploy-time DP fallback." -LogOnly
         }
 
@@ -1785,9 +2216,17 @@ function Add-Phase8DistributionPointMetadata {
             $scopeNameKeys[$scopeNameKey] = $true
             $uniqueScopeNames += $scopeDpName
         }
+        $scopeNetworks = @($scopeDpRecords | ForEach-Object { "$($_.Network)" })
+        $scopeNetworks += @(& $getProjectedNetwork $primary)
+        $scopeNetworks = @($scopeNetworks | Where-Object { $_ } | Select-Object -Unique)
+        $scopeOsdClientSubnets = @($osdClientSubnets | Where-Object {
+                $scopeNetworks -contains $_ -or $unownedOsdClientSubnets -contains $_
+            })
         $managedDpScopes += [pscustomobject]@{
             PrimarySiteCode       = $primarySiteCode
             DistributionPointNames = @($uniqueScopeNames)
+            DistributionPoints     = @($scopeDpRecords | Sort-Object Fqdn -Unique)
+            OsdClientSubnets       = @($scopeOsdClientSubnets)
         }
     }
 
@@ -1881,7 +2320,7 @@ function Add-ExistingVMsToDeployConfig {
     $newBLMVMs = @($config.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
     $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
     $newPushVMs = @($config.virtualMachines | Where-Object {
-            $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
+            $_.role -in $pushableRoles -and -not $_.hidden -and (Test-PushClientRequested -VM $_)
         })
     $newOsdVMs = @($config.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and -not $_.hidden })
     $phase8PrimaryNames = @()
@@ -1955,13 +2394,15 @@ function Add-ExistingVMsToDeployConfig {
 
     foreach ($primaryName in @($phase8PrimaryNames | Where-Object { $_ } | Select-Object -Unique)) {
         Add-ExistingVMToDeployConfig -vmName $primaryName -configToModify $config
-        if ($primaryName -in $blmPrimaryNames) {
-            $blmPrimary = $config.virtualMachines | Where-Object { $_.vmName -eq $primaryName -and $_.hidden } | Select-Object -First 1
-            if ($blmPrimary) { $blmPrimary | Add-Member -MemberType NoteProperty -Name 'blmHierarchyTarget' -Value $true -Force }
-        }
-        if ($primaryName -in $pushPrimaryNames) {
-            $pushPrimary = $config.virtualMachines | Where-Object { $_.vmName -eq $primaryName -and $_.hidden } | Select-Object -First 1
-            if ($pushPrimary) { $pushPrimary | Add-Member -MemberType NoteProperty -Name 'clientPushTarget' -Value $true -Force }
+        $phase8Primary = $config.virtualMachines | Where-Object { $_.vmName -ieq $primaryName } | Select-Object -First 1
+        if ($phase8Primary -and $phase8Primary.hidden) {
+            $phase8Primary | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+            if ($primaryName -in $blmPrimaryNames) {
+                $phase8Primary | Add-Member -MemberType NoteProperty -Name 'blmHierarchyTarget' -Value $true -Force
+            }
+            if ($primaryName -in $pushPrimaryNames) {
+                $phase8Primary | Add-Member -MemberType NoteProperty -Name 'clientPushTarget' -Value $true -Force
+            }
         }
     }
 
@@ -2190,6 +2631,66 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
+    # A develop role addition to a main-era hierarchy is also a repair pass for
+    # every existing explicit MP/DP/SUP/RP in that owner site. Main did not have
+    # the current content, boundary, certificate, MSI, and Phase 11 safeguards.
+    # Pull those role hosts into the deploy snapshot, run the idempotent phases,
+    # and validate both the changed host and its authoritative site server.
+    $roleUpgradePlan = Get-ExistingConfigMgrRoleUpgradePlan -Config $config -ExistingVMs @($refreshedVmInventory)
+    foreach ($roleVmName in @($roleUpgradePlan.ExistingRoleVmNames)) {
+        Add-ExistingVMToDeployConfig -vmName $roleVmName -configToModify $config
+    }
+    foreach ($validationVmName in @(
+            @($roleUpgradePlan.OwnerSiteVmNames) + @($roleUpgradePlan.ExistingRoleVmNames) |
+                Where-Object { $_ } | Select-Object -Unique
+        )) {
+        $validationVm = $config.virtualMachines | Where-Object { $_.vmName -ieq $validationVmName } | Select-Object -First 1
+        if ($validationVm -and $validationVm.hidden) {
+            $validationVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+        }
+    }
+    foreach ($roleVmName in @($roleUpgradePlan.ExistingRoleVmNames)) {
+        $roleVm = $config.virtualMachines | Where-Object { $_.vmName -ieq $roleVmName } | Select-Object -First 1
+        if (-not $roleVm) { continue }
+        if ($roleVm.remoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.remoteSQLVM -configToModify $config
+        }
+        if ($roleVm.replicaSqlServerVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.replicaSqlServerVM -configToModify $config
+        }
+        if ($roleVm.wsusDataBaseServer -and $roleVm.wsusDataBaseServer -ne 'WID') {
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.wsusDataBaseServer -configToModify $config
+        }
+        if ($roleVm.pullDPSourceDP) {
+            Add-ExistingVMToDeployConfig -vmName $roleVm.pullDPSourceDP -configToModify $config
+        }
+        if ($roleVm.PatchMyPCFileServer) {
+            Add-ExistingVMToDeployConfig -vmName $roleVm.PatchMyPCFileServer -configToModify $config
+        }
+        if ($roleVm.remoteContentLibVM) {
+            Add-ExistingVMToDeployConfig -vmName $roleVm.remoteContentLibVM -configToModify $config
+        }
+    }
+    $hierarchyParentVmNames = @(Add-Phase11HierarchyParentsToDeployConfig -Config $config `
+            -ExistingVMs @($refreshedVmInventory))
+    $repairedProxyClients = @($config.virtualMachines | Where-Object {
+            $_.phase11Validate -and $_.useProxy -eq $true
+        })
+    if ($repairedProxyClients.Count -gt 0 -and
+        -not ($config.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1)) {
+        $existingProxy = Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role 'Proxy'
+        if ($existingProxy) {
+            $proxyName = if ($existingProxy -is [array]) { $existingProxy[0] } else { $existingProxy }
+            Add-ExistingVMToDeployConfig -vmName $proxyName -configToModify $config
+        }
+    }
+    if (@($roleUpgradePlan.OwnerSiteVmNames).Count -gt 0 -or
+        @($roleUpgradePlan.ExistingRoleVmNames).Count -gt 0 -or
+        $hierarchyParentVmNames.Count -gt 0) {
+        $null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $config -ExistingVMs @($refreshedVmInventory)
+    }
+    Add-Phase8SoftwareUpdateProductMetadata -Config $config -ExistingVMs @($refreshedVmInventory)
+
     # Heal a SQLAO node whose partner (OtherNode) no longer exists. If the
     # second AG node was removed (e.g. via the remove script / Remove-Lab),
     # the surviving node's note still carries a dangling OtherNode pointing at
@@ -2213,6 +2714,16 @@ function Add-ExistingVMsToDeployConfig {
     Add-Phase8DistributionPointMetadata -Config $config -ExistingVMs @($refreshedVmInventory) -InventoryRefreshVerified $inventoryRefreshVerified
 }
 
+function ConvertFrom-MemLabsVmNoteScalar {
+    param([object] $Value)
+
+    if ($Value -isnot [string]) { return $Value }
+    $trimmed = $Value.Trim()
+    if ($trimmed.Equals('true', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    if ($trimmed.Equals('false', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return $trimmed
+}
+
 function Add-ModifiedExistingVMToDeployConfig {
     [CmdletBinding()]
     param (
@@ -2227,10 +2738,9 @@ function Add-ModifiedExistingVMToDeployConfig {
     $vmName = $vm.vmName
 
     Write-Log -verbose "Adding Modified $($vmName) to Deploy config"
-    $existingConfigVM = $configToModify.virtualMachines | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
-    if ($existingConfigVM -and -not $existingConfigVM.hidden) {
-        Write-Log "Not adding $vmName as it already exists in deployConfig" -LogOnly
-        return
+    $matchingConfigVms = @($configToModify.virtualMachines | Where-Object { $_.vmName -ieq $vmName })
+    if ($matchingConfigVms.Count -gt 1) {
+        throw "Cannot merge modified existing VM '$vmName': deployConfig contains $($matchingConfigVms.Count) matching entries."
     }
     $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
     if (-not $existingVM) {
@@ -2253,10 +2763,27 @@ function Add-ModifiedExistingVMToDeployConfig {
         "inProgress",
         "success",
         "deployedOS",
+        "domain",
+        "domainNetBiosName",
         "network",
         "prefix",
         "domaindefaults"
         "pkiOptions",
+        "ExistingVM",
+        "AssignedIP",
+        "ReservationCreated",
+        "ToolsFingerprint",
+        "DscShortcutsCreated",
+        "lastPhaseComplete",
+        "appliedFixes",
+        "osdMetadataOnly",
+        "osdValidate",
+        "phase11Validate",
+        "state",
+        "vmBuild",
+        "DiskUsedGB",
+        "memoryGB",
+        "memoryStartupGB",
         "memLabsDeployVersion",
         "memLabsVersion",
         "adminName",
@@ -2273,16 +2800,29 @@ function Add-ModifiedExistingVMToDeployConfig {
         if ($prop.Name.EndsWith("-Original")) {
             continue
         }
-        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+        $normalizedValue = ConvertFrom-MemLabsVmNoteScalar -Value $prop.Value
+        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $normalizedValue -Force
     }
+    $newVMObject | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+    $newVMObject | Add-Member -MemberType NoteProperty -Name 'ExistingVM' -Value $true -Force
 
     Set-AddToExistingCmOptionsOnHiddenSiteRole -Config $configToModify -VM $newVMObject
 
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
     }
-    if ($existingConfigVM) {
-        $configToModify.virtualMachines = @($configToModify.virtualMachines | Where-Object { $_.vmName -ne $vmName })
+    if ($matchingConfigVms.Count -eq 1) {
+        $target = $matchingConfigVms[0]
+        # Generated phase data belongs to the pre-edit shape. Retaining it after a
+        # role/property mutation can route the old role through later phases.
+        foreach ($generatedProperty in @('thisParams', 'SQLAO')) {
+            $target.PSObject.Properties.Remove($generatedProperty)
+        }
+        foreach ($prop in $newVMObject.PSObject.Properties) {
+            $target | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+        }
+        Write-Log "Merged modified existing VM '$vmName' into its existing deployConfig entry." -LogOnly
+        return
     }
     if ($null -eq $configToModify.virtualMachines) {
         $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
@@ -2340,13 +2880,18 @@ function Add-ExistingVMToDeployConfig {
         "memLabsDeployVersion",
         "memLabsVersion",
         "adminName",
-        "lastUpdate"
+        "lastUpdate",
+        "ExistingVM",
+        "osdMetadataOnly",
+        "osdValidate",
+        "phase11Validate"
     )
     foreach ($prop in $vmNote.PSObject.Properties) {
         if ($prop.Name -in $propsToExclude) {
             continue
         }
-        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+        $normalizedValue = ConvertFrom-MemLabsVmNoteScalar -Value $prop.Value
+        $newVMObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $normalizedValue -Force
     }
 
     Set-AddToExistingCmOptionsOnHiddenSiteRole -Config $configToModify -VM $newVMObject
@@ -2822,11 +3367,18 @@ function Get-EligiblePushSites {
     #>
     param (
         [Parameter(Mandatory = $false)] [object] $Config,
-        [Parameter(Mandatory = $false)] [string] $Domain
+        [Parameter(Mandatory = $false)] [string] $Domain,
+        [Parameter(Mandatory = $false)] [object] $Inventory
     )
 
     $sites = @()
     $seen = @{}
+    $inventorySites = @()
+    if ($PSBoundParameters.ContainsKey('Inventory')) {
+        $inventorySites = @($Inventory | Where-Object {
+                $_.Role -in 'Primary', 'Secondary' -and $_.SiteCode
+            })
+    }
 
     $lookupDomain = $Domain
     if (-not $lookupDomain -and $Config -and $Config.vmOptions) { $lookupDomain = $Config.vmOptions.domainName }
@@ -2843,7 +3395,16 @@ function Get-EligiblePushSites {
             # An existing site server carries no 'network' in the config; using
             # $defaultNet here would put it on the subnet being deployed now and
             # make it tie with (and lose to) the new Primary on every subnet match.
-            if (-not $net) { $net = Get-VMDeployedNetwork -VmName $vm.vmName -Domain $lookupDomain }
+            if (-not $net -and $PSBoundParameters.ContainsKey('Inventory')) {
+                $inventoryMatch = @($inventorySites | Where-Object {
+                        ($vm.vmName -and $_.vmName -ieq $vm.vmName) -or
+                        $_.SiteCode -ieq $vm.SiteCode
+                    }) | Select-Object -First 1
+                if ($inventoryMatch) { $net = $inventoryMatch.Network }
+            }
+            if (-not $net -and -not $PSBoundParameters.ContainsKey('Inventory')) {
+                $net = Get-VMDeployedNetwork -VmName $vm.vmName -Domain $lookupDomain
+            }
             if (-not $net) { $net = $defaultNet }
             $sites += [PSCustomObject]@{ SiteCode = $vm.siteCode; Network = $net; Role = $vm.role }
             $seen[$key] = $true
@@ -2851,22 +3412,59 @@ function Get-EligiblePushSites {
     }
 
     # Existing domain sites (for add-to-existing where the Primary is hidden).
-    if ($Domain) {
+    # Callers that already resolved Get-List2 should pass that exact snapshot so
+    # site discovery and client selection cannot observe different inventories.
+    if ($PSBoundParameters.ContainsKey('Inventory')) {
+        $existingSites = $inventorySites
+    }
+    elseif ($Domain) {
         try {
-            foreach ($e in @(Get-ExistingSiteServer -DomainName $Domain | Where-Object { $_.Role -in 'Primary', 'Secondary' })) {
-                if (-not $e.SiteCode) { continue }
-                $key = $e.SiteCode.ToLowerInvariant()
-                if ($seen.ContainsKey($key)) { continue }
-                $sites += [PSCustomObject]@{ SiteCode = $e.SiteCode; Network = $e.Network; Role = $e.Role }
-                $seen[$key] = $true
-            }
+            $existingSites = @(Get-ExistingSiteServer -DomainName $Domain | Where-Object {
+                    $_.Role -in 'Primary', 'Secondary'
+                })
         }
         catch {
             Write-Log "Get-EligiblePushSites: failed to enumerate existing site servers for '$Domain': $($_.Exception.Message)" -LogOnly -Warning
+            $existingSites = @()
         }
+    }
+    else {
+        $existingSites = @()
+    }
+    foreach ($e in $existingSites) {
+        if (-not $e.SiteCode) { continue }
+        $key = $e.SiteCode.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $sites += [PSCustomObject]@{ SiteCode = $e.SiteCode; Network = $e.Network; Role = $e.Role }
+        $seen[$key] = $true
     }
 
     return $sites
+}
+
+function Test-PushClientRequested {
+    <#
+    .SYNOPSIS
+    Returns true only when a VM explicitly requests ConfigMgr client push.
+    .DESCRIPTION
+    pushClient is either Boolean true, a non-empty target site-code string, or
+    Boolean false. Missing, null, empty, and non-Boolean/non-string values are
+    opt-out so exact-main VM notes cannot become push targets by omission.
+    #>
+    param (
+        [Parameter(Mandatory = $false)] [object] $VM
+    )
+
+    if ($null -eq $VM -or -not ($VM.PSObject.Properties.Name -contains 'pushClient')) {
+        return $false
+    }
+    if ($VM.pushClient -is [bool]) {
+        return [bool]$VM.pushClient
+    }
+    if ($VM.pushClient -is [string]) {
+        return -not [string]::IsNullOrWhiteSpace($VM.pushClient)
+    }
+    return $false
 }
 
 function Resolve-PushClientSite {
@@ -2877,6 +3475,7 @@ function Resolve-PushClientSite {
     Returns the site code string, or $false when the VM should not get a client.
 
     Resolution:
+      - pushClient missing/null/empty   -> $false (opt-out).
       - pushClient -eq $false           -> $false (explicit opt-out).
       - pushClient is a valid site code -> that site code (kept as-is).
       - pushClient -eq $true / invalid  -> auto-resolve: the site whose own
@@ -2893,10 +3492,7 @@ function Resolve-PushClientSite {
         [Parameter(Mandatory = $false)] [object] $EligibleSites
     )
 
-    if ($null -eq $VM) { return $false }
-
-    # Explicit opt-out (boolean $false).
-    if (($VM.pushClient -is [bool]) -and ($VM.pushClient -eq $false)) { return $false }
+    if (-not (Test-PushClientRequested -VM $VM)) { return $false }
 
     $eligible = @($EligibleSites)
     if (-not $eligible -or $eligible.Count -eq 0) {
@@ -2994,7 +3590,7 @@ function Resolve-PushClientWithLock {
         [Parameter(Mandatory = $false)] [object] $EligibleSites,
         [Parameter(Mandatory = $false)] [string] $DefaultNet
     )
-    if (($VM.pushClient -is [bool]) -and ($VM.pushClient -eq $false)) { return $false }
+    if (-not (Test-PushClientRequested -VM $VM)) { return $false }
     $eligible = @($EligibleSites)
     if (-not $eligible -or $eligible.Count -eq 0) { return $VM.pushClient }
     $codes = @($eligible | ForEach-Object { $_.SiteCode })
@@ -3020,8 +3616,7 @@ function Update-PushClientTargets {
     )
     foreach ($vm in @($Targets)) {
         if (-not $vm) { continue }
-        if (-not ($vm.PSObject.Properties.Name -contains 'pushClient')) { continue }
-        if (($vm.pushClient -is [bool]) -and ($vm.pushClient -eq $false)) { continue }
+        if (-not (Test-PushClientRequested -VM $vm)) { continue }
         $new = Resolve-PushClientWithLock -VM $vm -Config $Config -Domain $Domain -EligibleSites $Eligible -DefaultNet $DefaultNet
         if ($null -ne $new -and $vm.pushClient -ne $new) {
             $vm.pushClient = $new
@@ -3762,13 +4357,14 @@ function Get-LabWsusUrl {
     $allVMs = $DeployConfig.virtualMachines
 
     # Determine protocol/port from PKI setting
-    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $usePKI = [bool]$effectiveCmOptions.UsePKI
     $protocol = if ($usePKI) { "https" } else { "http" }
     $port = if ($usePKI) { 8531 } else { 8530 }
 
     # --- Step 1: Will this VM get a ConfigMgr client? (mirrors Common.GenConfig.ps1 ~L1396)
     $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
-    $getsClient = $CurrentItem.role -in $pushableRoles -and $CurrentItem.pushClient -ne $false
+    $getsClient = $CurrentItem.role -in $pushableRoles -and (Test-PushClientRequested -VM $CurrentItem)
 
     if ($getsClient) {
         # Find the Primary that would push to this VM (same network or child Secondary's network)
@@ -5062,6 +5658,13 @@ function Update-VMFromHyperV {
                         }
                     }
                 }
+                { $_ -in @('pushClient', 'siteCode', 'parentSiteCode') } {
+                    # Site identifiers can be all digits (including leading
+                    # zeroes). Preserve their JSON Boolean/string type rather
+                    # than letting generic integer coercion change "001" into
+                    # Int32 1 and break site lookup or explicit push selection.
+                    $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                }
                 default {
                     $parsedInteger = 0
                     $isInteger = [int]::TryParse([string]$value, [ref]$parsedInteger)
@@ -5099,6 +5702,14 @@ function Update-VMFromHyperV {
 
     if ($vmObject.Role -eq "DPMP") {
         $vmObject.Role = "SiteSystem"
+    }
+
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $hasPushClient = $vmObject.PSObject.Properties.Name -contains 'pushClient'
+    if ($vmObject.Role -in $pushableRoles -and
+        (-not $hasPushClient -or $null -eq $vmObject.pushClient -or
+            (($vmObject.pushClient -is [string]) -and [string]::IsNullOrWhiteSpace($vmObject.pushClient)))) {
+        $vmObject | Add-Member -MemberType NoteProperty -Name 'pushClient' -Value $false -Force
     }
 
     if (-not $vmObject.DynamicMinRam) {

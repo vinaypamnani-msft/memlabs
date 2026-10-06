@@ -205,10 +205,23 @@
         if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
             $featureRoles += "Site Server"
         }
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary") {
+            $featureRoles += @("Distribution point", "Management point")
+        }
+
+        if ($ThisVM.installDP -eq $true -or $ThisVM.enablePullDP -eq $true) {
+            $featureRoles += "Distribution point"
+        }
+
+        if ($ThisVM.installMP -eq $true) {
+            $featureRoles += "Management point"
+        }
 
         if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") {
             $featureRoles += "WSUS"
         }
+
+        $featureRoles = @($featureRoles | Select-Object -Unique)
 
         # Per-VM cmOptions (multi-hierarchy safe); $cmo is reused below for the
         # CM source-folder ($CM) selection.
@@ -501,20 +514,28 @@
             Ensure    = "Present"
         }
 
-        WriteStatus ODBCDriverInstall {
-            DependsOn = "[InstallSQLClient]SQLClientInstall"
-            Status    = "Downloading and installing ODBC driver"
-        }
+        $nextDepend = "[InstallSQLClient]SQLClientInstall"
+        $cmServerRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'DPMP')
+        $odbcRequired = $ThisVM.role -in $cmServerRoles -or
+            $ThisVM.role -eq 'WSUS' -or
+            -not [string]::IsNullOrWhiteSpace("$($ThisVM.sqlVersion)")
+        if ($odbcRequired) {
+            WriteStatus ODBCDriverInstall {
+                DependsOn = $nextDepend
+                Status    = "Downloading and installing ODBC driver"
+            }
 
-        InstallODBCDriver ODBCDriverInstall {
-            DependsOn = "[WriteStatus]ODBCDriverInstall"
-            URL       = $deployConfig.URLS.ODBC
-            ODBCPath  = "C:\temp\msodbcsql.msi"
-            Ensure    = "Present"
+            InstallODBCDriver ODBCDriverInstall {
+                DependsOn = "[WriteStatus]ODBCDriverInstall"
+                URL       = $deployConfig.URLS.ODBC
+                ODBCPath  = "C:\temp\msodbcsql.msi"
+                Ensure    = "Present"
+            }
+            $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
         }
 
         WriteStatus OleDbDriverInstall {
-            DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
+            DependsOn = $nextDepend
             Status    = "Downloading and installing OleDB driver"
         }
 

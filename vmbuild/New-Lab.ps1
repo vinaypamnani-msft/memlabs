@@ -70,7 +70,7 @@ if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -lt [vers
     exit 1
 }
 
-$global:NoSnapshot = $NoSnapshot
+$global:MemLabsNoSnapshot = [bool]$NoSnapshot.IsPresent
 $global:NewLabResumeCommand = $null
 
 function Write-NewLabResumeCommand {
@@ -235,8 +235,18 @@ try {
     $shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
     $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
     $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+    $canonicalRepositoryRoot = $env:MEMLABS_CANONICAL_REPOSITORY_ROOT
+    if (-not [string]::IsNullOrWhiteSpace($canonicalRepositoryRoot)) {
+        $canonicalScriptDirectory = Join-Path $canonicalRepositoryRoot 'vmbuild'
+        $canonicalLauncher = Join-Path $canonicalScriptDirectory 'VMBuild.cmd'
+        if (-not (Test-Path -LiteralPath $canonicalLauncher -PathType Leaf)) {
+            throw "Canonical VMBuild launcher not found: $canonicalLauncher"
+        }
+        $scriptDirectory = $canonicalScriptDirectory
+    }
 
     $shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
+    $shortcut.WorkingDirectory = $scriptDirectory
     $shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
     $shortcut.Save()
     $exitcode = 1
@@ -608,10 +618,7 @@ try {
         Write-Host ("`r`n" * 6)
     }
 
-    $global:SkipValidation = $false
-    if ($SkipValidation.IsPresent) {
-        $global:SkipValidation = $true
-    }
+    $global:MemLabsSkipValidation = [bool]$SkipValidation.IsPresent
 
     Set-QuickEdit -DisableQuickEdit
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
@@ -1304,7 +1311,10 @@ try {
     # Define phases
     $start = 1
     $maxPhase = 11
-    $global:MemLabsStartPhaseRequested = [bool]$StartPhase
+    # A script launched with pwsh -File can place its validated parameter in global
+    # scope. Mirroring an omitted [int] value (0) back to the same name then reruns
+    # ValidateRange(2, 11) and fails before Phase 1.
+    $global:MemLabsStartPhase = [int]$StartPhase
 
     # Pre-build the host download-cache ISO ONCE, before any phase fans out to
     # per-VM jobs. Building it here (single host process) instead of lazily inside
@@ -1443,7 +1453,7 @@ try {
                 }
                 if ($i -eq 11) {
                     # Phase 11 passed: merge the Phase 8 auto-snapshot if it exists
-                    if (-not $global:NoSnapshot) {
+                    if (-not $global:MemLabsNoSnapshot) {
                         Merge-Phase8AutoSnapshot -DeployConfig $deployConfig
                     }
                     else {
@@ -1619,7 +1629,7 @@ try {
 
 }
 catch {
-    Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json)
+    Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json -Depth 12)
     $NewLabsuccess = $false
 }
 finally {

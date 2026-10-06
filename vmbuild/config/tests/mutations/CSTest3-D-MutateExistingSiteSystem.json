@@ -1,0 +1,23 @@
+{
+  "existingVmMutationVersion": 1,
+  "vmOptions": {
+    "prefix": "CT3-",
+    "domainName": "cstest3.com",
+    "domainNetBiosName": "cstest3",
+    "adminName": "admin",
+    "network": "192.168.30.0"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "DPMP1",
+      "role": "SiteSystem",
+      "changes": {
+        "InstallSUP": true,
+        "wsusContentDir": "E:\\WSUS",
+        "memory": "8GB",
+        "dynamicMinRam": "2GB",
+        "virtualProcs": 6
+      }
+    }
+  ]
+}
