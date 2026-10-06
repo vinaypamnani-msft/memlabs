@@ -928,6 +928,7 @@ function ConvertTo-DeployConfigEx {
             throw "VM with no vmName property found."
 
         }
+        $DomainName = if ($thisVM.domain) { "$($thisVM.domain)" } else { "$($deployConfig.vmOptions.domainName)" }
         $cm_svc = "cm_svc"
         $accountLists = [pscustomobject]@{
             SQLSysAdminAccounts = @()
@@ -1073,7 +1074,9 @@ function ConvertTo-DeployConfigEx {
                     if ($vm.Role -eq "Primary") {
                         $thisPSName = $vm.vmName
                         if ($vm.ParentSiteCode) {
-                            $thisCSName = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $vm.ParentSiteCode
+                            $vmDomainName = if ($vm.domain) { "$($vm.domain)" } else { "$($deployConfig.vmOptions.domainName)" }
+                            $thisCSName = Get-SiteServerForSiteCode -deployConfig $deployConfig `
+                                -SiteCode $vm.ParentSiteCode -DomainName $vmDomainName
                         }
                     }
                     if ($vm.Role -eq "CAS") {
@@ -1114,7 +1117,7 @@ function ConvertTo-DeployConfigEx {
 
             }
             "PassiveSite" {
-                $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+                $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
                 if ($ActiveVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "ActiveNode" -Value $ActiveVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $ActiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
@@ -1122,7 +1125,7 @@ function ConvertTo-DeployConfigEx {
                         $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $ActiveVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) }
                         if ($primaryVM) {
                             Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
-                            $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                            $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM -DomainName $DomainName
                             if ($PassiveVM) {
                                 Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                             }
@@ -1132,19 +1135,19 @@ function ConvertTo-DeployConfigEx {
             }
             "SiteSystem" {
                 if (Test-ConfigMgrRemoteRoleRequested -VM $thisVM) {
-                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM -DomainName $DomainName
                     Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
 
-                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM -DomainName $DomainName
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
                     }
                 }
 
                 if ($thisVM.InstallSUP) {
-                    $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+                    $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
 
-                    $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM -DomainName $DomainName
                     if (-not $ActiveVM.InstallSUP) {
                         if (-not $sql.InstallSUP) {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "WSUSSqlServer" -Value $($sql.vmName)  -Force
@@ -1159,10 +1162,10 @@ function ConvertTo-DeployConfigEx {
             }
             "WSUS" {
                 if ($thisVM.InstallSUP) {
-                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM -DomainName $DomainName
                     Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
 
-                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM -DomainName $DomainName
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
                     }
@@ -1173,7 +1176,7 @@ function ConvertTo-DeployConfigEx {
                 if ($primaryVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
-                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM -DomainName $DomainName
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
                     }
@@ -1214,7 +1217,7 @@ function ConvertTo-DeployConfigEx {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CASVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
 
-                    $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM
+                    $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM -DomainName $DomainName
                     if ($CASPassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                     }
@@ -1266,7 +1269,7 @@ function ConvertTo-DeployConfigEx {
                 if ($primaryVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
-                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM -DomainName $DomainName
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                     }
@@ -1350,7 +1353,7 @@ function ConvertTo-DeployConfigEx {
             #}
 
             $DomainAdminName = $deployConfig.vmOptions.adminName
-            $DomainName = $deployConfig.vmOptions.domainName
+            $DomainName = if ($thisVM.domain) { "$($thisVM.domain)" } else { "$($deployConfig.vmOptions.domainName)" }
             #$DName = $DomainName.Split(".")[0]
             $DName = $deployConfig.vmOptions.domainNetBiosName
             $cm_admin = "$DNAME\$DomainAdminName"
@@ -1387,7 +1390,7 @@ function ConvertTo-DeployConfigEx {
             }
 
             if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
-                $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
+                $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM -DomainName $DomainName
             }
             if (-not $SiteServerVM -and $thisVM.Role -in "Primary", "CAS") {
                 $SiteServerVM = $thisVM
@@ -1405,7 +1408,7 @@ function ConvertTo-DeployConfigEx {
             foreach ($SSVM in $SiteServerVM) {
                 if ($SSVM -and $SSVM.SiteCode) {
                     Add-VMToAccountLists -thisVM $thisVM -VM $SSVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                    $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SSVM.siteCode -type VM
+                    $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SSVM.siteCode -type VM -DomainName $DomainName
                     if ($passiveNodeVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $passiveNodeVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
                     }
@@ -1415,7 +1418,7 @@ function ConvertTo-DeployConfigEx {
                         if ($CASVM) {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "CAS" -Value $CASVM.vmName -Force
                             Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                            $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM
+                            $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM -DomainName $DomainName
                             if ($CASPassiveVM) {
                                 Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
                             }
@@ -1427,7 +1430,7 @@ function ConvertTo-DeployConfigEx {
                         if ($primaryVM) {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
                             Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                            $primaryPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                            $primaryPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM -DomainName $DomainName
                             if ($primaryPassiveVM) {
                                 Add-VMToAccountLists -thisVM $thisVM -VM $primaryPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
                             }
@@ -1441,21 +1444,21 @@ function ConvertTo-DeployConfigEx {
 
         #Get the SiteServer this VM's SiteCode reports to.  If it has a passive node, get that as -P
         if ($thisVM.siteCode -and -not $thisVM.Hidden) {
-            $SiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+            $SiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
             $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer" -Value $SiteServerVM.vmName -Force
             Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
-            $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+            $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
             if ($passiveSiteServerVM) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServerPassive" -Value $passiveSiteServerVM.vmName -Force
                 Add-VMToAccountLists -thisVM $thisVM -VM $passiveSiteServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
             }
             #If we report to a Secondary, get the Primary as well, and passive as -P
             if ((get-RoleForSitecode -ConfigTocheck $deployConfig -siteCode $thisVM.siteCode) -eq "Secondary") {
-                $PrimaryServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                $PrimaryServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM -DomainName $DomainName
                 if ($PrimaryServerVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServer" -Value $PrimaryServerVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $PrimaryServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
-                    $PassivePrimaryVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -siteCode $PrimaryServerVM.SiteCode -type VM
+                    $PassivePrimaryVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -siteCode $PrimaryServerVM.SiteCode -type VM -DomainName $DomainName
                     if ($PassivePrimaryVM) {
                         $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServerPassive" -Value $PassivePrimaryVM.vmName -Force
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassivePrimaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
@@ -1466,9 +1469,9 @@ function ConvertTo-DeployConfigEx {
         }
         #Get the VM Name of the Parent Site Code Site Server
         if ($thisVM.parentSiteCode -and -not $thisVM.Hidden) {
-            $parentSiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
+            $parentSiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM -DomainName $DomainName
             $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServer" -Value $parentSiteServerVM.vmName -Force
-            $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
+            $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM -DomainName $DomainName
             if ($passiveSiteServerVM) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServerPassive" -Value $passiveSiteServerVM.vmName -Force
             }

@@ -584,6 +584,13 @@ try {
     # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig -Final -StartPhase ([int]$StartPhase)
+        if (-not $testConfigResult -or -not $testConfigResult.DeployConfig) {
+            Write-Host
+            Write-Log "Configuration validation did not produce a deployConfig. Deployment cannot continue, even with validation bypassed." -Failure
+            if ($testConfigResult) { Write-ValidationMessages -TestObject $testConfigResult }
+            Write-Host
+            exit 1
+        }
         if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
             # Skip validation in phased run or when asked to skip
             $deployConfig = $testConfigResult.DeployConfig
@@ -595,7 +602,7 @@ try {
 
                 if ($runPhase1 -eq $false -and -not $SkipValidation.IsPresent) {         
                     Write-Host       
-                    $response = Read-YesOrNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (Y/n)" -HideHelp -Default "y" -timeout 15
+                    $response = Read-YesOrNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (y/N)" -HideHelp -Default "n" -timeout 15
                     if (-not [String]::IsNullOrWhiteSpace($response)) {
                         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {                           
                             write-host
