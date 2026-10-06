@@ -138,9 +138,9 @@ $liveDps = @(
 $plan = Get-MemLabsOsdTargetingPlan -DeployConfig $config -PrimarySiteCode 'PRI' -LiveDistributionPoints $liveDps
 Assert-Equal '10.10.1.0,10.10.2.0,10.10.3.0' (@($plan.ClientSubnets | Sort-Object) -join ',') `
     'Perfloading did not consume projected legacy OSD client subnets.'
-Assert-Equal 'DP1.multisubnet.test,DP2.multisubnet.test,DP3.multisubnet.test,PRI1.multisubnet.test' `
+Assert-Equal 'DP1.multisubnet.test,DP2.multisubnet.test,DP3.multisubnet.test' `
     (@($plan.DistributionPoints.Fqdn | Sort-Object) -join ',') `
-    'OSD targeting did not select exactly the same-subnet Primary-site DPs.'
+    'OSD targeting did not select exactly the authoritative same-subnet managed DPs.'
 Assert-Equal '10.10.3.0' "$(($plan.DistributionPoints | Where-Object Fqdn -eq 'DP3.multisubnet.test').Subnet)" `
     'A hidden DP without a config network did not recover its authoritative inventory network.'
 Assert-Equal 0 @($plan.UncoveredSubnets).Count 'Covered legacy OSD subnets were reported uncovered.'
@@ -152,12 +152,48 @@ Assert-Equal (@($plan.UncoveredSubnets | Sort-Object) -join ',') `
     (@($phase11.UncoveredSubnets | Sort-Object) -join ',') `
     'Phase 11 uncovered-subnet validation diverged from perfloading.'
 
+$fallbackConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'fallback.test'; network = '10.20.1.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'FALLBACKPRI'; role = 'Primary'; siteCode = 'FBK'; hidden = $true; network = '10.20.1.0' },
+        [pscustomobject]@{ vmName = 'OSD1'; role = 'OSDClient'; network = '10.20.1.0' }
+    )
+}
+Add-Phase8DistributionPointMetadata -Config $fallbackConfig -ExistingVMs @() -InventoryRefreshVerified $true
+$fallbackLiveDps = @([pscustomobject]@{ NetworkOSPath = '\\FALLBACKPRI.fallback.test' })
+$fallbackPlan = Get-MemLabsOsdTargetingPlan -DeployConfig $fallbackConfig -PrimarySiteCode 'FBK' -LiveDistributionPoints $fallbackLiveDps
+$fallbackPhase11 = Get-Phase11OsdTargetingExpectation -DeployConfig $fallbackConfig -SiteCode 'FBK' -Domain 'fallback.test'
+Assert-Equal 'FALLBACKPRI.fallback.test' (@($fallbackPlan.DistributionPoints.Fqdn) -join ',') `
+    'The Primary deploy-time DP fallback was not retained when no managed DP exists.'
+Assert-Equal 'FALLBACKPRI.fallback.test' (@($fallbackPhase11.DistributionPoints.Name) -join ',') `
+    'Phase 11 dropped the Primary deploy-time DP fallback.'
+
+$explicitDpConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'explicit.test'; network = '10.30.1.0' }
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'EXPLICITPRI'; role = 'Primary'; siteCode = 'EXP'; hidden = $true; network = '10.30.1.0' },
+        [pscustomobject]@{ vmName = 'EXPLICITDP'; role = 'SiteSystem'; siteCode = 'EXP'; installDP = $true; hidden = $true; network = '10.30.1.0' },
+        [pscustomobject]@{ vmName = 'OSD1'; role = 'OSDClient'; network = '10.30.1.0' }
+    )
+}
+Add-Phase8DistributionPointMetadata -Config $explicitDpConfig -ExistingVMs @() -InventoryRefreshVerified $true
+$explicitLiveDps = @(
+    [pscustomobject]@{ NetworkOSPath = '\\EXPLICITPRI.explicit.test' },
+    [pscustomobject]@{ NetworkOSPath = '\\EXPLICITDP.explicit.test' }
+)
+$explicitPlan = Get-MemLabsOsdTargetingPlan -DeployConfig $explicitDpConfig -PrimarySiteCode 'EXP' -LiveDistributionPoints $explicitLiveDps
+$explicitPhase11 = Get-Phase11OsdTargetingExpectation -DeployConfig $explicitDpConfig -SiteCode 'EXP' -Domain 'explicit.test'
+Assert-Equal 'EXPLICITDP.explicit.test' (@($explicitPlan.DistributionPoints.Fqdn) -join ',') `
+    'A live but unprojected Primary DP displaced the explicit managed DP.'
+Assert-Equal 'EXPLICITDP.explicit.test' (@($explicitPhase11.DistributionPoints.Name) -join ',') `
+    'Phase 11 fabricated the Primary as a required DP when an explicit managed DP exists.'
+
 $config.virtualMachines += [pscustomobject]@{
     vmName = 'NEWOSD4'; role = 'OSDClient'; network = '10.10.4.0'
 }
 Add-Phase8DistributionPointMetadata -Config $config -ExistingVMs $existing -InventoryRefreshVerified $true
 $planWithNewClient = Get-MemLabsOsdTargetingPlan -DeployConfig $config -PrimarySiteCode 'PRI' -LiveDistributionPoints $liveDps
-Assert-Equal 'DP1.multisubnet.test,DP2.multisubnet.test,DP3.multisubnet.test,NEWDP4.multisubnet.test,PRI1.multisubnet.test' `
+Assert-Equal 'DP1.multisubnet.test,DP2.multisubnet.test,DP3.multisubnet.test,NEWDP4.multisubnet.test' `
     (@($planWithNewClient.DistributionPoints.Fqdn | Sort-Object) -join ',') `
     'Develop OSD client did not add its same-subnet new DP without disturbing legacy targets.'
 $phase11WithNewClient = Get-Phase11OsdTargetingExpectation -DeployConfig $config -SiteCode 'PRI' -Domain 'multisubnet.test'
@@ -176,4 +212,4 @@ $phase11Uncovered = Get-Phase11OsdTargetingExpectation -DeployConfig $config -Si
 Assert-Equal '10.10.5.0' (@($phase11Uncovered.UncoveredSubnets) -join ',') `
     'Phase 11 did not report the same uncovered OSD subnet as perfloading.'
 
-Write-Host 'PASS -- multi-subnet perfloading preserves legacy DPs and targets OSD content only to same-subnet Primary-site DPs.'
+Write-Host 'PASS -- multi-subnet perfloading and Phase 11 share one authoritative managed-DP scope.'

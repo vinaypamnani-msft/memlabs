@@ -68,21 +68,9 @@ function Get-Phase11OsdTargetingExpectation {
     }
     $clientSubnets = @($clientSubnets | Where-Object { $_ } | Select-Object -Unique)
     $scopeRecords = @($scope.DistributionPoints)
-    $records = @($DeployConfig.virtualMachines | Where-Object {
-            $_.vmName -and $_.role -ne 'Secondary' -and
-            ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Primary')
-        } | ForEach-Object {
-            $candidateVm = $_
-            $fqdn = "$($candidateVm.vmName)"
-            if ($fqdn -notmatch '\.') { $fqdn = "$fqdn.$Domain" }
-            [pscustomobject]@{
-                Name = $fqdn
-                Network = Get-Phase11ProjectedVmNetwork -DeployConfig $DeployConfig -Vm $candidateVm
-                SiteCode = "$($candidateVm.siteCode)"
-                Role = "$($candidateVm.role)"
-            }
-        })
-    $records += @($scopeRecords | Where-Object { $_ -and $_.Role -ne 'Secondary' } | ForEach-Object {
+    $scopeIsAuthoritative = $scope -and $scope.PSObject.Properties['DistributionPoints']
+    $records = if ($scopeIsAuthoritative) {
+        @($scopeRecords | Where-Object { $_ -and $_.Role -ne 'Secondary' } | ForEach-Object {
             [pscustomobject]@{
                 Name = "$($_.Fqdn)"
                 Network = "$($_.Network)"
@@ -90,6 +78,23 @@ function Get-Phase11OsdTargetingExpectation {
                 Role = "$($_.Role)"
             }
         })
+    }
+    else {
+        @($DeployConfig.virtualMachines | Where-Object {
+                $_.vmName -and $_.role -ne 'Secondary' -and
+                ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Primary')
+            } | ForEach-Object {
+                $candidateVm = $_
+                $fqdn = "$($candidateVm.vmName)"
+                if ($fqdn -notmatch '\.') { $fqdn = "$fqdn.$Domain" }
+                [pscustomobject]@{
+                    Name = $fqdn
+                    Network = Get-Phase11ProjectedVmNetwork -DeployConfig $DeployConfig -Vm $candidateVm
+                    SiteCode = "$($candidateVm.siteCode)"
+                    Role = "$($candidateVm.role)"
+                }
+            })
+    }
     $records = @($records | Where-Object {
             $_.Name -and $_.Network -and $_.SiteCode -eq $SiteCode -and
             $clientSubnets -contains $_.Network
@@ -13247,7 +13252,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             })
                         if ($missingOsdGroupDps.Count -gt 0) {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: distribution point group 'OSD DPS' is missing $($missingOsdGroupDps.Count) DP(s) the config puts on an OSDClient subnet: $($missingOsdGroupDps -join ', '). Distribution to the group is a no-op for those, so OSD content never reaches the client.")
+                            $results.Details.Add("FAIL: distribution point group 'OSD DPS' is missing $($missingOsdGroupDps.Count) DP(s) the authoritative Phase 8 scope puts on an OSDClient subnet: $($missingOsdGroupDps -join ', '). Distribution to the group is a no-op for those, so OSD content never reaches the client.")
                             $expectedOsdDpNames = @(@($expectedOsdDpNames) + @($missingOsdGroupDps) | Where-Object { $_ } | Select-Object -Unique)
                         }
                         if ($expectedOsdDpNames.Count -eq 0) {
@@ -13664,11 +13669,38 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
         # 7. Task sequences (Primary only) — MEMLABS-* should exist
         if ($isPrimary) {
+            $siteTaskSequenceReferenceIds = @()
+            $siteTaskSequenceReferencesMeasured = $false
+            $siteTaskSequenceReferenceErrors = [System.Collections.Generic.List[string]]::new()
             try {
                 # Task sequences are global objects, so an unfiltered read at a child Primary
                 # also returns another site's -- which would let this site's missing set pass.
                 $tsList = @(Get-WmiObject -Namespace $ns -Class SMS_TaskSequencePackage `
                     -Filter "Name LIKE 'MEMLABS-%' AND PackageID LIKE '$sc%'" -ErrorAction Stop)
+                $siteTaskSequenceReferenceIds = @(
+                    foreach ($taskSequence in $tsList) {
+                        try { $null = $taskSequence.Get() }
+                        catch {
+                            $siteTaskSequenceReferenceErrors.Add("$($taskSequence.PackageID): $($_.Exception.Message)")
+                            continue
+                        }
+                        foreach ($reference in @($taskSequence.References)) {
+                            $packageId = "$($reference.Package)"
+                            if ($packageId -match '^[A-Za-z0-9]{8}$') { $packageId }
+                        }
+                    }
+                ) | Where-Object { $_ } | Select-Object -Unique
+                $siteTaskSequenceReferencesMeasured = $siteTaskSequenceReferenceErrors.Count -eq 0
+                if (-not $siteTaskSequenceReferencesMeasured) {
+                    $message = "could not read package references for $($siteTaskSequenceReferenceErrors.Count) site task sequence(s): $($siteTaskSequenceReferenceErrors -join '; ')"
+                    if ($expectOsd) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: $message")
+                    }
+                    else {
+                        $results.Details.Add("WARN: $message")
+                    }
+                }
                 # perfloading creates exactly these seven. Counting >= 1 as OK let a partial
                 # set (e.g. the two upgrade TSes created before a boot-image failure aborted
                 # the rest) report success.
@@ -13685,6 +13717,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 $missingTsNames = @($expectedTsNames | Where-Object { $tsPresentNames -notcontains $_ })
                 if ($missingTsNames.Count -eq 0) {
                     $results.Details.Add("OK: all $($expectedTsNames.Count) MEMLABS task sequence(s) found")
+                    if ($siteTaskSequenceReferencesMeasured) {
+                        $results.Details.Add("INFO: those task sequences reference $($siteTaskSequenceReferenceIds.Count) package(s); hierarchy-owned OSD content is valid when referenced by this site's task sequences")
+                    }
                 }
                 else {
                     # TS creation in Phase 8 (perfloading) is gated on OSD media under
@@ -13712,7 +13747,13 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 }
             }
             catch {
-                $results.Details.Add("WARN: SMS_TaskSequencePackage query failed: $($_.Exception.Message)")
+                if ($expectOsd) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SMS_TaskSequencePackage query failed, so required OSD task sequences and their content references were not measured: $($_.Exception.Message)")
+                }
+                else {
+                    $results.Details.Add("WARN: SMS_TaskSequencePackage query failed: $($_.Exception.Message)")
+                }
             }
         }
 
@@ -13770,6 +13811,14 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 @{ Class = 'SMS_ImagePackage'; Label = 'OS image' }
                 @{ Class = 'SMS_OperatingSystemInstallPackage'; Label = 'OS upgrade package' }
             )
+            $selectRelevantOsdContent = {
+                param([object[]] $VisibleContent)
+
+                if ($siteTaskSequenceReferencesMeasured) {
+                    return @($VisibleContent | Where-Object { $siteTaskSequenceReferenceIds -contains "$($_.PackageID)" })
+                }
+                return @($VisibleContent | Where-Object { "$($_.PackageID)" -like "$sc*" })
+            }
             $getOsdContentTargetRows = {
                 param([string]$PackageId, [string]$RequiredDp)
 
@@ -13783,7 +13832,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $readPendingOsdContent = {
                 $pendingRows = [System.Collections.Generic.List[object]]::new()
                 foreach ($contentClass in $osdPackageClasses) {
-                    foreach ($contentPackage in @(Get-WmiObject -Namespace $ns -Class $contentClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)) {
+                    $visibleContent = @(Get-WmiObject -Namespace $ns -Class $contentClass.Class -ErrorAction Stop)
+                    $relevantContent = @(& $selectRelevantOsdContent -VisibleContent $visibleContent)
+                    foreach ($contentPackage in $relevantContent) {
                         $statusRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($contentPackage.PackageID)'" -ErrorAction Stop)
                         foreach ($requiredDp in $expectedOsdDpNames) {
                             $requiredShort = ($requiredDp -split '\.')[0]
@@ -13992,9 +14043,22 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
             foreach ($pkgClass in $osdPackageClasses) {
                 try {
-                    $osPkgs = @(Get-WmiObject -Namespace $ns -Class $pkgClass.Class -Filter "PackageID LIKE '$sc%'" -ErrorAction Stop)
+                    $visibleOsPkgs = @(Get-WmiObject -Namespace $ns -Class $pkgClass.Class -ErrorAction Stop)
+                    $osPkgs = @(& $selectRelevantOsdContent -VisibleContent $visibleOsPkgs)
                     if ($osPkgs.Count -eq 0) {
-                        $results.Details.Add("WARN: no $($pkgClass.Label) owned by site $sc, so an OSD task sequence has nothing to install")
+                        $missingContentMessage = if ($siteTaskSequenceReferencesMeasured) {
+                            "no $($pkgClass.Label) is referenced by site $sc MEMLABS task sequences, so those task sequences have nothing to install"
+                        }
+                        else {
+                            "task-sequence references could not be measured and no $($pkgClass.Label) owned by site $sc was found"
+                        }
+                        if ($expectOsd) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: $missingContentMessage")
+                        }
+                        else {
+                            $results.Details.Add("WARN: $missingContentMessage")
+                        }
                         continue
                     }
                     # An empty DP list would make the loop below iterate zero times and then

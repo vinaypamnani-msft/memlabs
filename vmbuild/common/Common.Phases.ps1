@@ -1,5 +1,31 @@
 ﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 
+function Get-MemLabsDomainControllerReadinessProbe {
+    {
+        param([string] $Role)
+
+        $netlogonService = Get-Service -Name Netlogon -ErrorAction SilentlyContinue
+        $dnsService = Get-Service -Name DNS -ErrorAction SilentlyContinue
+        $ntdsService = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+        $dnsInstalled = $null -ne $dnsService
+        $dnsRequired = $Role -eq 'DC' -or $dnsInstalled
+        $netlogonState = if ($netlogonService) { "$($netlogonService.Status)" } else { 'NotInstalled' }
+        $dnsState = if ($dnsService) { "$($dnsService.Status)" } else { 'NotInstalled' }
+        $ntdsState = if ($ntdsService) { "$($ntdsService.Status)" } else { 'NotInstalled' }
+
+        [pscustomobject]@{
+            Ready = $netlogonState -eq 'Running' -and
+                $ntdsState -eq 'Running' -and
+                (-not $dnsRequired -or $dnsState -eq 'Running')
+            Role = $Role
+            Netlogon = $netlogonState
+            DNS = $dnsState
+            NTDS = $ntdsState
+            DNSRequired = $dnsRequired
+        }
+    }
+}
+
 function Test-MemLabsIncludeHiddenVmForPhase {
     param(
         [object] $Vm,
@@ -2583,7 +2609,9 @@ DROP TABLE #memlabs_idxprobe;
             }
         }
 
-        # Confirm EVERY domain controller is actually serving AD DS / DNS / Netlogon
+        # Confirm EVERY domain controller is actually serving AD DS / Netlogon and
+        # DNS where applicable. Exact-main BDCs were promoted with InstallDns=false;
+        # a modern BDC that has DNS installed must still have it running.
         # over PowerShell Direct before releasing the dependent VMs and dispatching
         # the per-VM maintenance/validation jobs. This runs for ALL DCs -- not just
         # the ones we started above -- because an ALREADY-running DC can have a
@@ -2595,21 +2623,27 @@ DROP TABLE #memlabs_idxprobe;
         # after Phase 10, no reboot) adds negligible delay.
         if ($dcNames.Count -gt 0) {
             $dcWaitTimeoutSec = 300
+            $dcReadinessProbe = Get-MemLabsDomainControllerReadinessProbe
             foreach ($dcName in $dcNames) {
-                Write-Progress2 "Preparing Phase $Phase" -Status "Waiting for domain controller $dcName (AD DS / DNS / Netlogon)" -PercentComplete $global:preparePhasePercent
+                $dcInventory = $existingVMs | Where-Object { $_.vmName -eq $dcName } | Select-Object -First 1
+                if (-not $dcInventory) {
+                    $dcInventory = $allDomainVMs | Where-Object { $_.vmName -eq $dcName } | Select-Object -First 1
+                }
+                $dcRole = "$($dcInventory.Role)"
+                Write-Progress2 "Preparing Phase $Phase" -Status "Waiting for domain controller $dcName (AD DS / Netlogon / applicable DNS)" -PercentComplete $global:preparePhasePercent
                 $dcReady = $false
+                $dcLastReadiness = $null
                 $dcChannelBrokenCount = 0
                 $dcChannelRebootDone = $false
                 $sw = [System.Diagnostics.Stopwatch]::StartNew()
                 while ($sw.Elapsed.TotalSeconds -lt $dcWaitTimeoutSec) {
                     $probe = Invoke-VmCommand -VmName $dcName -VmDomainName $deployConfig.vmOptions.domainName `
-                        -ScriptBlock {
-                        $nl = (Get-Service -Name Netlogon -ErrorAction SilentlyContinue).Status
-                        $dns = (Get-Service -Name DNS -ErrorAction SilentlyContinue).Status
-                        $ntds = (Get-Service -Name NTDS -ErrorAction SilentlyContinue).Status
-                            ($nl -eq 'Running') -and ($dns -eq 'Running') -and ($ntds -eq 'Running')
-                    } -DisplayName "Phase$Phase-DCReady-$dcName" -SuppressLog -CommandReturnsBool -SessionMaxRetries 2
-                    if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput -eq $true) {
+                        -ScriptBlock $dcReadinessProbe -ArgumentList @($dcRole) `
+                        -DisplayName "Phase$Phase-DCReady-$dcName" -SuppressLog -SessionMaxRetries 2
+                    if ($probe -and -not $probe.ScriptBlockFailed) {
+                        $dcLastReadiness = @($probe.ScriptBlockOutput | Where-Object { $_ -and $_.PSObject.Properties['Ready'] }) | Select-Object -Last 1
+                    }
+                    if ($dcLastReadiness -and $dcLastReadiness.Ready -eq $true) {
                         $dcReady = $true
                         break
                     }
@@ -2643,10 +2677,17 @@ DROP TABLE #memlabs_idxprobe;
                     Start-Sleep -Seconds 10
                 }
                 if ($dcReady) {
-                    Write-Log "[Phase $Phase] Domain controller $dcName is serving AD DS / DNS / Netlogon ($([int]$sw.Elapsed.TotalSeconds)s)." -LogOnly
+                    Write-Log "[Phase $Phase] Domain controller $dcName is ready ($([int]$sw.Elapsed.TotalSeconds)s): role=$($dcLastReadiness.Role), Netlogon=$($dcLastReadiness.Netlogon), NTDS=$($dcLastReadiness.NTDS), DNS=$($dcLastReadiness.DNS), DNSRequired=$($dcLastReadiness.DNSRequired)." -LogOnly
                 }
                 else {
-                    Write-Log "[Phase $Phase] Domain controller $dcName not confirmed ready after ${dcWaitTimeoutSec}s; starting remaining VMs anyway." -Warning
+                    $readinessDetail = if ($dcLastReadiness) {
+                        "role=$($dcLastReadiness.Role), Netlogon=$($dcLastReadiness.Netlogon), NTDS=$($dcLastReadiness.NTDS), DNS=$($dcLastReadiness.DNS), DNSRequired=$($dcLastReadiness.DNSRequired)"
+                    }
+                    else {
+                        $probeFailure = if ($probe -and $probe.PSObject.Properties['ScriptBlockFailed']) { "$($probe.ScriptBlockFailed)" } else { '<no probe result>' }
+                        "service state unavailable, ScriptBlockFailed=$probeFailure"
+                    }
+                    Write-Log "[Phase $Phase] Domain controller $dcName not confirmed ready after ${dcWaitTimeoutSec}s ($readinessDetail); starting remaining VMs anyway." -Warning
                 }
             }
         }

@@ -147,6 +147,7 @@ Write-DscStatus "$Tag Starting perfloading"
         $scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
             "$($_.PrimarySiteCode)" -eq $PrimarySiteCode
         } | Select-Object -First 1
+        $scopeIsAuthoritative = $scope -and $scope.PSObject.Properties['DistributionPoints']
         if ($scope -and $scope.PSObject.Properties['OsdClientSubnets']) {
             $clientSubnets = @($scope.OsdClientSubnets)
         }
@@ -177,18 +178,19 @@ Write-DscStatus "$Tag Starting perfloading"
             $record = $scopeRecords | Where-Object {
                 $_.Fqdn -ieq $fqdn -or $_.VmName -ieq $shortName
             } | Select-Object -First 1
-            $role = if ($vm) { "$($vm.role)" } else { "$($record.Role)" }
-            $siteCode = if ($vm -and $vm.siteCode) { "$($vm.siteCode)" } else { "$($record.SiteCode)" }
+            if ($scopeIsAuthoritative -and -not $record) { continue }
+            $role = if ($record -and $record.Role) { "$($record.Role)" } elseif ($vm) { "$($vm.role)" } else { '' }
+            $siteCode = if ($record -and $record.SiteCode) { "$($record.SiteCode)" } elseif ($vm -and $vm.siteCode) { "$($vm.siteCode)" } else { '' }
             # An implicit Secondary DP is not configured for PXE by MemLabs.
             if ($role -eq 'Secondary' -or $siteCode -ne $PrimarySiteCode) { continue }
-            $network = if ($vm -and $vm.network) {
+            $network = if ($record -and $record.Network) {
+                "$($record.Network)"
+            }
+            elseif ($vm -and $vm.network) {
                 "$($vm.network)"
             }
             elseif ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) {
                 "$($vm.thisParams.vmNetwork)"
-            }
-            elseif ($record -and $record.Network) {
-                "$($record.Network)"
             }
             else {
                 $defaultNetwork
