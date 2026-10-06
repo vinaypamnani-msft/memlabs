@@ -3444,8 +3444,10 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # and we don't pull thousands of irrelevant updates into the lab catalog.
         $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
         $hierarchyTopSiteCode = if ($ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
+        $hierarchyDomain = if ($ThisVM.domain) { "$($ThisVM.domain)" } else { "$DomainFullName" }
         $clientInventory = @($deployConfig.phase8SoftwareUpdateProductInventory | Where-Object {
-                "$($_.TopSiteCode)" -ieq $hierarchyTopSiteCode
+                "$($_.TopSiteCode)" -ieq $hierarchyTopSiteCode -and
+                (-not $_.TopSiteDomain -or "$($_.TopSiteDomain)" -ieq $hierarchyDomain)
             })
         $clientByName = @{}
         foreach ($client in $clientInventory) {

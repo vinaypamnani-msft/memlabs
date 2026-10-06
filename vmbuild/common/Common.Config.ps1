@@ -1559,6 +1559,7 @@ function Add-Phase8SoftwareUpdateProductMetadata {
             (-not $_.vmName -or -not $configuredNames.ContainsKey("$($_.vmName)".ToUpperInvariant()))
         })
     $allVms = @($Config.virtualMachines) + @($existingDomainVms)
+    $siteOwnerInventory = @($Config.virtualMachines) + @($ExistingVMs)
     $eligibleSites = @(Get-EligiblePushSites -Config $Config -Domain $domainName -Inventory $allVms)
     if ($eligibleSites.Count -eq 0) { return }
 
@@ -1598,22 +1599,64 @@ function Add-Phase8SoftwareUpdateProductMetadata {
             -EligibleSites $eligibleSites
         if (-not $targetSiteCode) { continue }
 
+        $clientDomain = if ($vm.domain) { "$($vm.domain)" } else { $domainName }
+        $externalOwnerDomains = @($Config.virtualMachines | Where-Object {
+                $_.role -eq 'DC' -and
+                (-not $_.domain -or "$($_.domain)" -ieq $clientDomain) -and
+                "$($_.externalDomainJoinSiteCode)" -ieq "$targetSiteCode" -and
+                $_.ForestTrust -and "$($_.ForestTrust)" -ne 'NONE'
+            } | ForEach-Object { "$($_.ForestTrust)" } | Select-Object -Unique)
+        if ($externalOwnerDomains.Count -gt 1) {
+            throw "SUP product inventory: site '$targetSiteCode' for '$($vm.vmName)' maps to multiple external owner domains: $($externalOwnerDomains -join ', ')."
+        }
+
+        $targetOwnerDomain = if ($externalOwnerDomains.Count -eq 1) {
+            $externalOwnerDomains[0]
+        }
+        else {
+            $targetOwners = @($siteOwnerInventory | Where-Object {
+                    $_.role -in @('CAS', 'Primary', 'Secondary') -and
+                    "$($_.siteCode)" -ieq "$targetSiteCode"
+                } | ForEach-Object {
+                    [pscustomobject]@{
+                        Vm = $_
+                        VmName = "$($_.vmName)"
+                        Domain = if ($_.domain) { "$($_.domain)" } else { $domainName }
+                    }
+                } | Sort-Object Domain, VmName -Unique)
+            $sameDomainOwners = @($targetOwners | Where-Object { $_.Domain -ieq $clientDomain })
+            if ($sameDomainOwners.Count -eq 1) {
+                $sameDomainOwners[0].Domain
+            }
+            elseif ($targetOwners.Count -eq 1) {
+                $targetOwners[0].Domain
+            }
+            else {
+                $ownerIdentities = @($targetOwners | ForEach-Object {
+                        "$($_.Vm.vmName)@$($_.Domain)"
+                    }) -join ', '
+                throw "SUP product inventory: could not uniquely resolve owner domain for site '$targetSiteCode' while resolving '$($vm.vmName)' (candidates: $ownerIdentities)."
+            }
+        }
+
         $currentSiteCode = "$targetSiteCode"
         $topSiteCode = ''
+        $topSiteDomain = ''
         $visitedSiteCodes = @{}
         for ($depth = 0; $depth -lt 10; $depth++) {
-            $siteKey = $currentSiteCode.ToUpperInvariant()
+            $siteKey = "$targetOwnerDomain|$currentSiteCode".ToUpperInvariant()
             if ($visitedSiteCodes.ContainsKey($siteKey)) {
-                throw "SUP product inventory: hierarchy cycle detected while resolving site '$targetSiteCode' for '$($vm.vmName)'."
+                throw "SUP product inventory: hierarchy cycle detected while resolving site '$targetSiteCode' in '$targetOwnerDomain' for '$($vm.vmName)'."
             }
             $visitedSiteCodes[$siteKey] = $true
-            $owners = @($allVms | Where-Object {
-                    $_.role -in @('CAS', 'Primary', 'Secondary') -and
-                    "$($_.siteCode)" -ieq $currentSiteCode -and
-                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+            $owners = @($siteOwnerInventory | Where-Object {
+                    if ($_.role -notin @('CAS', 'Primary', 'Secondary')) { return $false }
+                    if ("$($_.siteCode)" -ine $currentSiteCode) { return $false }
+                    $ownerDomain = if ($_.domain) { "$($_.domain)" } else { $domainName }
+                    return $ownerDomain -ieq $targetOwnerDomain
                 } | Sort-Object vmName -Unique)
             if ($owners.Count -ne 1) {
-                throw "SUP product inventory: expected one owner for site '$currentSiteCode' while resolving '$($vm.vmName)', found $($owners.Count)."
+                throw "SUP product inventory: expected one owner for site '$currentSiteCode' in '$targetOwnerDomain' while resolving '$($vm.vmName)', found $($owners.Count)."
             }
             $owner = $owners[0]
             if ($owner.parentSiteCode) {
@@ -1621,10 +1664,11 @@ function Add-Phase8SoftwareUpdateProductMetadata {
                 continue
             }
             $topSiteCode = "$($owner.siteCode)"
+            $topSiteDomain = $targetOwnerDomain
             break
         }
         if (-not $topSiteCode) {
-            throw "SUP product inventory: could not resolve a top-level site for '$($vm.vmName)' (target '$targetSiteCode')."
+            throw "SUP product inventory: could not resolve a top-level site for '$($vm.vmName)' (target '$targetSiteCode' in '$targetOwnerDomain')."
         }
 
         $records += [pscustomobject]@{
@@ -1635,7 +1679,9 @@ function Add-Phase8SoftwareUpdateProductMetadata {
             InstallOffice   = $vm.installOffice
             PushClient      = "$targetSiteCode"
             TargetSiteCode  = "$targetSiteCode"
+            TargetSiteDomain = "$targetOwnerDomain"
             TopSiteCode     = $topSiteCode
+            TopSiteDomain   = $topSiteDomain
         }
     }
 
