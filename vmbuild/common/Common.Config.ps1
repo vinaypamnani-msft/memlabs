@@ -1433,10 +1433,15 @@ function Add-Phase11HierarchyParentsToDeployConfig {
         })
 
     foreach ($childPrimary in $childPrimaries) {
+        $childDomainName = if ($childPrimary.domain) { "$($childPrimary.domain)" } else { $domainName }
+        $childSiteCode = "$($childPrimary.siteCode)"
+        if ($childPrimary.hidden) {
+            $childPrimary | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+        }
         $parentSiteCode = "$($childPrimary.parentSiteCode)"
         $configParents = @($Config.virtualMachines | Where-Object {
                 $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
-                (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                (-not $_.domain -or "$($_.domain)" -ieq $childDomainName)
             })
         if ($configParents.Count -gt 1) {
             $configParentNames = @($configParents | ForEach-Object { "$($_.vmName)" } | Where-Object { $_ })
@@ -1445,10 +1450,10 @@ function Add-Phase11HierarchyParentsToDeployConfig {
         if ($configParents.Count -eq 0) {
             $existingParents = @($ExistingVMs | Where-Object {
                     $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
-                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                    (-not $_.domain -or "$($_.domain)" -ieq $childDomainName)
                 })
             if ($existingParents.Count -ne 1) {
-                throw "Cannot hydrate hierarchy support for child Primary '$($childPrimary.vmName)': expected exactly one existing CAS for parent site '$parentSiteCode' in domain '$domainName', found $($existingParents.Count)."
+                throw "Cannot hydrate hierarchy support for child Primary '$($childPrimary.vmName)': expected exactly one existing CAS for parent site '$parentSiteCode' in domain '$childDomainName', found $($existingParents.Count)."
             }
 
             $parentName = "$($existingParents[0].vmName)"
@@ -1459,7 +1464,7 @@ function Add-Phase11HierarchyParentsToDeployConfig {
             $addedSupportNames += $parentName
             $configParents = @($Config.virtualMachines | Where-Object {
                     $_.role -eq 'CAS' -and "$($_.siteCode)" -ieq $parentSiteCode -and
-                    (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+                    (-not $_.domain -or "$($_.domain)" -ieq $childDomainName)
                 })
         }
 
@@ -1471,33 +1476,35 @@ function Add-Phase11HierarchyParentsToDeployConfig {
             $supportParent | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
         }
 
-        $parentSiteSupportRows = @($ExistingVMs | Where-Object {
-                "$($_.siteCode)" -ieq $parentSiteCode -and
-                (-not $_.domain -or "$($_.domain)" -ieq $domainName) -and
+        $workflowSiteCodes = @(@($childSiteCode, $parentSiteCode) |
+                Where-Object { $_ } | Select-Object -Unique)
+        $siteSupportRows = @($ExistingVMs | Where-Object {
+                "$($_.siteCode)" -in $workflowSiteCodes -and
+                (-not $_.domain -or "$($_.domain)" -ieq $childDomainName) -and
                 ($_.role -eq 'PassiveSite' -or
                  $_.installDP -eq $true -or $_.enablePullDP -eq $true -or
                  $_.installMP -eq $true -or $_.installSUP -eq $true -or
                  $_.installRP -eq $true -or $_.installSMSProv -eq $true)
             })
-        foreach ($supportRow in $parentSiteSupportRows) {
+        foreach ($supportRow in $siteSupportRows) {
             $supportName = "$($supportRow.vmName)"
             if (-not $supportName -or $Config.virtualMachines.vmName -contains $supportName) { continue }
             Add-ExistingVMToDeployConfig -vmName $supportName -configToModify $Config -hidden:$true
             if ($Config.virtualMachines.vmName -notcontains $supportName) {
-                throw "Failed to add parent-site support VM '$supportName' for child Primary '$($childPrimary.vmName)'."
+                throw "Failed to add hierarchy support VM '$supportName' for child Primary '$($childPrimary.vmName)'."
             }
             $addedSupportNames += $supportName
         }
 
-        $parentWorkflowVms = @($Config.virtualMachines | Where-Object {
-                "$($_.siteCode)" -ieq $parentSiteCode -and
-                (-not $_.domain -or "$($_.domain)" -ieq $domainName) -and
-                ($_.role -in @('CAS', 'PassiveSite') -or
+        $workflowVms = @($Config.virtualMachines | Where-Object {
+                "$($_.siteCode)" -in $workflowSiteCodes -and
+                (-not $_.domain -or "$($_.domain)" -ieq $childDomainName) -and
+                ($_.role -in @('CAS', 'Primary', 'PassiveSite') -or
                  $_.installDP -eq $true -or $_.enablePullDP -eq $true -or
                  $_.installMP -eq $true -or $_.installSUP -eq $true -or
                  $_.installRP -eq $true -or $_.installSMSProv -eq $true)
             })
-        foreach ($workflowVm in $parentWorkflowVms) {
+        foreach ($workflowVm in $workflowVms) {
             if ($workflowVm.hidden) {
                 $workflowVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
             }
@@ -2017,8 +2024,20 @@ function Add-ExistingVMsToDeployConfig {
                     $PrimarySiteServer = Get-SiteServerForSiteCode -deployConfig $config -SiteCode $RemoteSiteServer.ParentSiteCode -DomainName $dc.ForestTrust -type VM
                     write-Log "Adding $($PrimarySiteServer.vmName) to list" -LogOnly
                     Add-ExistingVMToDeployConfig -vmName $PrimarySiteServer.vmName -configToModify $config
+                    $primaryWorkflowVm = $config.virtualMachines | Where-Object {
+                        $_.vmName -ieq $PrimarySiteServer.vmName
+                    } | Select-Object -First 1
+                    if ($primaryWorkflowVm -and $primaryWorkflowVm.hidden) {
+                        $primaryWorkflowVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+                    }
                 }
                 Add-ExistingVMToDeployConfig -vmName $RemoteSiteServer.vmName -configToModify $config
+                $remoteWorkflowVm = $config.virtualMachines | Where-Object {
+                    $_.vmName -ieq $RemoteSiteServer.vmName
+                } | Select-Object -First 1
+                if ($remoteWorkflowVm -and $remoteWorkflowVm.hidden) {
+                    $remoteWorkflowVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+                }
             }
 
         }

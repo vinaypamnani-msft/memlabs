@@ -65,6 +65,11 @@ try {
         [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
     $remoteCert = $request.CreateSelfSigned((Get-Date).AddMinutes(-1), (Get-Date).AddDays(1))
     $remoteBytes = $remoteCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+    $decodedCertificates = @(& $certificatesOf $remoteBytes)
+    if ($decodedCertificates.Count -ne 1 -or
+        $decodedCertificates[0] -isnot [System.Security.Cryptography.X509Certificates.X509Certificate2]) {
+        throw "Remote-certificate decoder returned a nested/non-certificate shape: count=$($decodedCertificates.Count), type=$($decodedCertificates[0].GetType().FullName)."
+    }
     if (-not (& $containsExpectedCertificate $remoteBytes @($remoteCert.Thumbprint.ToUpperInvariant()))) {
         throw 'Remote-certificate matcher rejected the target CA.'
     }
@@ -103,6 +108,13 @@ if ($sourceText -match 'WARN: Remote CA NOT found in enterprise NTAuth store') {
 }
 if ($sourceText -notmatch '-ArgumentList @\(\$domain, \$remoteForest, \$remoteDcFqdn, \$externalSiteCode, \$remoteNetbios, \$remoteCaConfig, \$remoteIssuingHint\)') {
     throw 'Forest-trust validation does not forward the issuing-CA hint to the guest.'
+}
+if ($sourceText.Contains('return , $certificates.ToArray()') -or
+    $sourceText.Contains('return , @($granted | Select-Object -Unique)')) {
+    throw 'Forest-trust validation still returns nested certificate/ACL arrays.'
+}
+if ($sourceText -notmatch '(?s)\$pkiCertFailure.+?if \(\$pkiCertFailure\).+?elseif \(\$mpUnavailable\).+?elseif \(\$noDpLocations\)') {
+    throw 'ccmsetup diagnosis does not prioritize PKI rejection over secondary location symptoms.'
 }
 
 $verdictAssignments = @($ast.FindAll({

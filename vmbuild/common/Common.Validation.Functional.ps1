@@ -7857,7 +7857,7 @@ function Test-ForestTrustFunctionality {
                 }
                 catch {}
             }
-            return , $certificates.ToArray()
+            return $certificates.ToArray()
         }
         $containsExpectedCertificate = {
             param($rawCertificate, [string[]]$expectedThumbprints)
@@ -8229,7 +8229,7 @@ function Test-ForestTrustFunctionality {
                         elseif ($ot -eq $autoEnrollGuid) { $granted += 'AutoEnroll' }
                         elseif ("$($ace.ActiveDirectoryRights)" -match 'GenericRead|GenericAll') { $granted += 'Read' }
                     }
-                    return , @($granted | Select-Object -Unique)
+                    return @($granted | Select-Object -Unique)
                 }
 
                 foreach ($tgt in @(@{ Server = ''; Label = "this forest ($localDomain)" }, @{ Server = $remoteDcFqdn; Label = "CA forest ($remoteForest)" })) {
@@ -10235,10 +10235,17 @@ function Test-DomainMemberFunctionality {
                 # response containing no DP locations (0x87d00215). Both park ccmsetup
                 # in a retry loop, but they have different owners and remediations.
                 $ccmTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 60 -ErrorAction SilentlyContinue
+                $pkiCertFailure = $ccmTail | Where-Object {
+                    $_ -match '0x87d00454|CCM_E_NO_CLIENT_PKI_CERT|Unable to find any Certificate based on Certificate Issuers'
+                } | Select-Object -Last 1
                 $mpUnavailable = $ccmTail | Where-Object { $_ -match '0x87d0027e|status code 503|Service Unavailable' } | Select-Object -Last 1
                 $noDpLocations = $ccmTail | Where-Object { $_ -match "didn't return DP locations|Failed to find DP locations|0x87d00215|<LocationRecords\s*/>" } | Select-Object -Last 1
 
-                if ($mpUnavailable) {
+                if ($pkiCertFailure) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt because the client has no usable PKI client-auth certificate (CCM_E_NO_CLIENT_PKI_CERT / 0x87D00454). The request reached the HTTPS MP but was rejected before content-location evaluation; empty LocationRecords here are a consequence, not evidence of missing DP content. Check ConfigMgrClientCertificate Read+Enroll+AutoEnroll for this domain's Domain Computers, Root/NTAuth publication, then run gpupdate /force + certutil -pulse.")
+                }
+                elseif ($mpUnavailable) {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt because its Management Point is returning HTTP 503 Service Unavailable (0x87d0027e). This is an MP/IIS availability failure, not an empty DP-location response. Check the named MP's 'SMS Management Point Pool', W3SVC, and MP health.")
                 }

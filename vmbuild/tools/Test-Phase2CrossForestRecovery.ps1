@@ -101,6 +101,13 @@ if ($rootCert -match 'certutil\.exe\s+-config\s+\$caConfig\s+-ca\.cert') {
 if ($dc -notmatch 'InstallRootCertificate InstallRootCertificate[\s\S]{0,350}RemoteCreds\s*=\s*\$groupCreds') {
     throw 'Phase2DC does not pass explicit remote credentials to root-certificate retrieval.'
 }
+if ($otherDc -notmatch '(?s)RunPkiSync FinalizeCrossForestPki\s*\{.+?SourceForest\s*=\s*\$ThisVM\.Domain.+?TargetForest\s*=\s*\$DomainName.+?DependsOn\s*=\s*\$waitOnDependency') {
+    throw 'Phase2OtherDC does not re-publish finalized certificate-template ACLs after the foreign grants converge.'
+}
+if ($otherDc.IndexOf('RunPkiSync FinalizeCrossForestPki', [StringComparison]::Ordinal) -lt
+    $otherDc.IndexOf('AddCertificateTemplate ConfigMgrClientCertificate', [StringComparison]::Ordinal)) {
+    throw 'Final cross-forest PKI sync runs before the client-template ACL grant.'
+}
 
 $phaseStartStop = [regex]::Match(
     $scriptBlocks,

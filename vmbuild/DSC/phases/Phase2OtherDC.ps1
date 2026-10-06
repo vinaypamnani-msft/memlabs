@@ -199,8 +199,18 @@
             $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
 
-
-       
+        # Phase2DC starts the initial cross-forest PKI copy while this CA is still
+        # granting the foreign forest's template ACLs. Publish once more after the
+        # grants converge so the target forest receives the finalized DACL in this
+        # same run instead of requiring a second deployment pass.
+        if ($usePKI -and $ThisVM.Domain -and $ThisVM.Domain -ne $DomainName) {
+            RunPkiSync FinalizeCrossForestPki {
+                SourceForest = $ThisVM.Domain
+                TargetForest = $DomainName
+                DependsOn    = $waitOnDependency
+            }
+            $waitOnDependency = "[RunPkiSync]FinalizeCrossForestPki"
+        }
 
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
