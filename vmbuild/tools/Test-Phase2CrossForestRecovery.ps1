@@ -108,6 +108,24 @@ if ($otherDc.IndexOf('RunPkiSync FinalizeCrossForestPki', [StringComparison]::Or
     $otherDc.IndexOf('AddCertificateTemplate ConfigMgrClientCertificate', [StringComparison]::Ordinal)) {
     throw 'Final cross-forest PKI sync runs before the client-template ACL grant.'
 }
+if ($module -notmatch '(?s)-sourcedc \$sourceDc -targetdc \$targetDc -f.+?PKISync verification failed for \$relativeDn.+?Enrollment Services certificate verification failed.+?Enrollment Services template verification failed') {
+    throw 'RunPkiSync does not pin source/target PDCs and verify copied PKI containers.'
+}
+
+$pkiSyncPath = Join-Path $root 'DSC\phases\PKISync.ps1'
+$pkiSync = Get-Content -LiteralPath $pkiSyncPath -Raw
+if ($pkiSync -match '\$SystemMayContain\.Add\(') {
+    throw 'PKISync still mutates the schema attribute collection through the failing Add overload.'
+}
+foreach ($required in @(
+        '$Script:CopyFailures',
+        'Updating:',
+        'Target object was not visible after copy',
+        'PKISYNC_OK:')) {
+    if (-not $pkiSync.Contains($required)) {
+        throw "PKISync is missing fail-closed copy behavior: $required"
+    }
+}
 
 $phaseStartStop = [regex]::Match(
     $scriptBlocks,

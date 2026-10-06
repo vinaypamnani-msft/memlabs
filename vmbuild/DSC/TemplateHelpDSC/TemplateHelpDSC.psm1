@@ -9746,6 +9746,8 @@ class RunPkiSync {
         write-Status "Running PKISync from $($this.SourceForest) to $($this.TargetForest)"
         $MaxRetries = 20
         $retry = 0
+        $TargetForObj = $null
+        $SourceForObj = $null
         while ($true) {
 
             if ($retry -ge $MaxRetries) {
@@ -9791,7 +9793,60 @@ class RunPkiSync {
         }
 
         Write-Status "Running C:\staging\DSC\phases\PKISync.Ps1"
-        C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest -targetforest $this.TargetForest -f
+        $sourceDc = "$($SourceForObj.RootDomain.PdcRoleOwner.Name)"
+        $targetDc = "$($TargetForObj.RootDomain.PdcRoleOwner.Name)"
+        $syncOutput = @(
+            & C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest `
+                -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc -f 2>&1
+        )
+        if (-not $?) {
+            throw "PKISync failed: $(@($syncOutput | Select-Object -Last 20) -join ' | ')"
+        }
+
+        $sourceRoot = $SourceForObj.RootDomain.GetDirectoryEntry()
+        $targetRoot = $TargetForObj.RootDomain.GetDirectoryEntry()
+        $sourcePath = [regex]::Replace($sourceRoot.psbase.Path, 'LDAP://\S*/', "LDAP://$sourceDc/")
+        $targetPath = [regex]::Replace($targetRoot.psbase.Path, 'LDAP://\S*/', "LDAP://$targetDc/")
+        $sourceBoundRoot = New-Object System.DirectoryServices.DirectoryEntry $sourcePath
+        $targetBoundRoot = New-Object System.DirectoryServices.DirectoryEntry $targetPath
+        $sourcePki = $sourceBoundRoot.psbase.get_Children().find('CN=Public Key Services,CN=Services,CN=Configuration')
+        $targetPki = $targetBoundRoot.psbase.get_Children().find('CN=Public Key Services,CN=Services,CN=Configuration')
+        foreach ($relativeDn in @('CN=Enrollment Services', 'CN=Certificate Templates', 'CN=OID')) {
+            $sourceContainer = $sourcePki.psbase.get_Children().find($relativeDn)
+            $targetContainer = $targetPki.psbase.get_Children().find($relativeDn)
+            $sourceNames = @($sourceContainer.psbase.get_Children() | ForEach-Object { "$($_.Properties['cn'].Value)" } | Where-Object { $_ })
+            $targetNames = @($targetContainer.psbase.get_Children() | ForEach-Object { "$($_.Properties['cn'].Value)" } | Where-Object { $_ })
+            $missing = @($sourceNames | Where-Object { $targetNames -notcontains $_ })
+            if ($relativeDn -eq 'CN=Enrollment Services' -and $sourceNames.Count -eq 0) {
+                throw "Source forest '$($this.SourceForest)' has no issuing CA in Enrollment Services."
+            }
+            if ($missing.Count -gt 0) {
+                throw "PKISync verification failed for $relativeDn on $targetDc; missing: $($missing -join ', ')"
+            }
+            if ($relativeDn -eq 'CN=Enrollment Services') {
+                foreach ($caName in $sourceNames) {
+                    $sourceCa = $sourceContainer.psbase.get_Children().find("CN=$caName")
+                    $targetCa = $targetContainer.psbase.get_Children().find("CN=$caName")
+                    $sourceCerts = @($sourceCa.psbase.Properties['cACertificate'] |
+                            ForEach-Object { [Convert]::ToBase64String([byte[]]$_) })
+                    $targetCerts = @($targetCa.psbase.Properties['cACertificate'] |
+                            ForEach-Object { [Convert]::ToBase64String([byte[]]$_) })
+                    $missingCerts = @($sourceCerts | Where-Object { $targetCerts -notcontains $_ })
+                    if ($sourceCerts.Count -eq 0 -or $missingCerts.Count -gt 0) {
+                        throw "PKISync Enrollment Services certificate verification failed for '$caName' on $targetDc."
+                    }
+                    $sourceTemplates = @($sourceCa.psbase.Properties['certificateTemplates'] |
+                            ForEach-Object { "$_" } | Where-Object { $_ })
+                    $targetTemplates = @($targetCa.psbase.Properties['certificateTemplates'] |
+                            ForEach-Object { "$_" } | Where-Object { $_ })
+                    $missingTemplates = @($sourceTemplates | Where-Object { $targetTemplates -notcontains $_ })
+                    if ($missingTemplates.Count -gt 0) {
+                        throw "PKISync Enrollment Services template verification failed for '$caName' on $targetDc; missing: $($missingTemplates -join ', ')"
+                    }
+                }
+            }
+            Write-Status "PKISync verified $($sourceNames.Count) object(s) in $relativeDn on $targetDc"
+        }
     }
 
     [bool] Test() {
