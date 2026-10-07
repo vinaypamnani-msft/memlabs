@@ -107,8 +107,11 @@ if ($dc -notmatch 'RunPkiSync RunPkiSync[\s\S]{0,300}PsDscRunAsCredential\s*=\s*
 if ($otherDc -match 'RunPkiSync FinalizeCrossForestPki') {
     throw 'Phase2OtherDC still runs a redundant sync under a foreign credential on the source CA.'
 }
-if ($module -notmatch '(?s)targetComputersSid.+?Read\+Enroll\+AutoEnroll.+?-sourcedc \$sourceDc -targetdc \$targetDc -f.+?PKISync verification failed for \$relativeDn.+?Enrollment Services certificate verification failed.+?Enrollment Services template verification failed') {
+if ($module -notmatch '(?s)targetComputersSid.+?Read\+Enroll\+AutoEnroll.+?-sourcedc \$sourceDc -targetdc \$targetDc 2>&1.+?-type CA -f.+?-type Template -cn ConfigMgrClientCertificate -f.+?PKISync verification failed for \$relativeDn.+?Enrollment Services certificate verification failed.+?Enrollment Services template verification failed') {
     throw 'RunPkiSync does not pin source/target PDCs and verify copied PKI containers.'
+}
+if ($module -match '(?s)-targetdc \$targetDc -f 2>&1.+?-type CA') {
+    throw 'RunPkiSync still force-overwrites every built-in certificate template.'
 }
 
 $pkiSyncPath = Join-Path $root 'DSC\phases\PKISync.ps1'

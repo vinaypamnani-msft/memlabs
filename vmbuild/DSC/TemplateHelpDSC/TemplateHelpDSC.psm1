@@ -9842,12 +9842,35 @@ class RunPkiSync {
         }
         Write-Status "Source ConfigMgrClientCertificate grants $targetComputersSid Read+Enroll+AutoEnroll; starting authoritative copy"
 
+        # First copy only objects that are missing. Never force-overwrite all of
+        # the target forest's built-in templates; their protected DACLs reject
+        # that operation and they are unrelated to cross-forest ConfigMgr.
         $syncOutput = @(
             & C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest `
-                -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc -f 2>&1
+                -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc 2>&1
         )
         if (-not $?) {
-            throw "PKISync failed: $(@($syncOutput | Select-Object -Last 20) -join ' | ')"
+            throw "PKISync missing-object copy failed: $(@($syncOutput | Select-Object -Last 20) -join ' | ')"
+        }
+
+        # The source CA publication can change as templates are issued, and the
+        # ConfigMgr client template DACL just gained this target forest's SID.
+        # Refresh only those cross-forest objects with force.
+        $caSyncOutput = @(
+            & C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest `
+                -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc `
+                -type CA -f 2>&1
+        )
+        if (-not $?) {
+            throw "PKISync issuing-CA refresh failed: $(@($caSyncOutput | Select-Object -Last 20) -join ' | ')"
+        }
+        $templateSyncOutput = @(
+            & C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest `
+                -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc `
+                -type Template -cn ConfigMgrClientCertificate -f 2>&1
+        )
+        if (-not $?) {
+            throw "PKISync ConfigMgr client-template refresh failed: $(@($templateSyncOutput | Select-Object -Last 20) -join ' | ')"
         }
 
         $sourceRoot = $SourceForObj.RootDomain.GetDirectoryEntry()
