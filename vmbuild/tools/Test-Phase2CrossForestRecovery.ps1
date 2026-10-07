@@ -101,14 +101,13 @@ if ($rootCert -match 'certutil\.exe\s+-config\s+\$caConfig\s+-ca\.cert') {
 if ($dc -notmatch 'InstallRootCertificate InstallRootCertificate[\s\S]{0,350}RemoteCreds\s*=\s*\$groupCreds') {
     throw 'Phase2DC does not pass explicit remote credentials to root-certificate retrieval.'
 }
-if ($otherDc -notmatch '(?s)RunPkiSync FinalizeCrossForestPki\s*\{.+?SourceForest\s*=\s*\$ThisVM\.Domain.+?TargetForest\s*=\s*\$DomainName.+?DependsOn\s*=\s*\$waitOnDependency') {
-    throw 'Phase2OtherDC does not re-publish finalized certificate-template ACLs after the foreign grants converge.'
+if ($dc -notmatch 'RunPkiSync RunPkiSync[\s\S]{0,300}PsDscRunAsCredential\s*=\s*\$DomainCreds') {
+    throw 'Phase2DC PKISync does not run as the target forest Enterprise Admin.'
 }
-if ($otherDc.IndexOf('RunPkiSync FinalizeCrossForestPki', [StringComparison]::Ordinal) -lt
-    $otherDc.IndexOf('AddCertificateTemplate ConfigMgrClientCertificate', [StringComparison]::Ordinal)) {
-    throw 'Final cross-forest PKI sync runs before the client-template ACL grant.'
+if ($otherDc -match 'RunPkiSync FinalizeCrossForestPki') {
+    throw 'Phase2OtherDC still runs a redundant sync under a foreign credential on the source CA.'
 }
-if ($module -notmatch '(?s)-sourcedc \$sourceDc -targetdc \$targetDc -f.+?PKISync verification failed for \$relativeDn.+?Enrollment Services certificate verification failed.+?Enrollment Services template verification failed') {
+if ($module -notmatch '(?s)targetComputersSid.+?Read\+Enroll\+AutoEnroll.+?-sourcedc \$sourceDc -targetdc \$targetDc -f.+?PKISync verification failed for \$relativeDn.+?Enrollment Services certificate verification failed.+?Enrollment Services template verification failed') {
     throw 'RunPkiSync does not pin source/target PDCs and verify copied PKI containers.'
 }
 
@@ -116,6 +115,12 @@ $pkiSyncPath = Join-Path $root 'DSC\phases\PKISync.ps1'
 $pkiSync = Get-Content -LiteralPath $pkiSyncPath -Raw
 if ($pkiSync -match '\$SystemMayContain\.Add\(') {
     throw 'PKISync still mutates the schema attribute collection through the failing Add overload.'
+}
+if ($pkiSync -match '\$SourceValues\s*=') {
+    throw 'PKISync still expands binary AD attributes through the PowerShell pipeline.'
+}
+if ($pkiSync -notmatch 'attribute ''\$Attribute''.+GetType') {
+    throw 'PKISync attribute-copy failures do not identify the offending attribute and type.'
 }
 foreach ($required in @(
         '$Script:CopyFailures',

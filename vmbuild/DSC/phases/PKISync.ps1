@@ -269,14 +269,19 @@ function ProcessObject($SourcePKIServicesDE, $TargetPKIServicesDE, $RelativeDN, 
         #Copy attributes defined in the systemMayContain for the object type
         foreach($Attribute in $ObjectMayContain)
         {
-            $SourceValues = @($SourceObjectDE.psbase.Properties[$Attribute] | Where-Object { $null -ne $_ })
-            if ($SourceValues.Count -gt 0)
+            $AttributeValue = $SourceObjectDE.psbase.Properties[$Attribute].Value
+            if ($null -ne $AttributeValue)
             {
-                $TargetValues = $NewDE.psbase.Properties[$Attribute]
-                $TargetValues.Clear()
-                foreach ($value in $SourceValues)
+                try
                 {
-                    [void]$TargetValues.Add($value)
+                    # Assign the source value as one object. Pipelining a byte[] through
+                    # ForEach-Object expands it into individual bytes and violates the
+                    # cACertificate octet-string constraint on Enrollment Services.
+                    $NewDE.psbase.Properties[$Attribute].Value = $AttributeValue
+                }
+                catch
+                {
+                    throw "attribute '$Attribute' ($($AttributeValue.GetType().FullName)): $($_.Exception.Message)"
                 }
             }
         }

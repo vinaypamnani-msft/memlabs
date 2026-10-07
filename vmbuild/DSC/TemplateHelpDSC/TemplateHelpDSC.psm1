@@ -9795,6 +9795,53 @@ class RunPkiSync {
         Write-Status "Running C:\staging\DSC\phases\PKISync.Ps1"
         $sourceDc = "$($SourceForObj.RootDomain.PdcRoleOwner.Name)"
         $targetDc = "$($TargetForObj.RootDomain.PdcRoleOwner.Name)"
+
+        # Run on the TARGET DC as its Enterprise Admin. The source CA grants the
+        # target forest's Domain Computers SID in parallel, so wait for that exact
+        # DACL state before copying the template. This replaces a fragile second
+        # sync on the source CA under a foreign run-as credential.
+        $targetRootDse = [ADSI]"LDAP://$targetDc/RootDSE"
+        $targetDomainEntry = [ADSI]"LDAP://$targetDc/$($targetRootDse.defaultNamingContext)"
+        $targetDomainSid = [System.Security.Principal.SecurityIdentifier]::new(
+            [byte[]]$targetDomainEntry.Properties['objectSid'].Value, 0).Value
+        $targetComputersSid = "$targetDomainSid-515"
+        $sourceRootDse = [ADSI]"LDAP://$sourceDc/RootDSE"
+        $sourceTemplatePath = "LDAP://$sourceDc/CN=ConfigMgrClientCertificate,CN=Certificate Templates,CN=Public Key Services,CN=Services,$($sourceRootDse.configurationNamingContext)"
+        if (-not [System.DirectoryServices.DirectoryEntry]::Exists($sourceTemplatePath)) {
+            throw "Source forest '$($this.SourceForest)' has no ConfigMgrClientCertificate template to synchronize."
+        }
+        $enrollGuid = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
+        $autoEnrollGuid = 'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+        $templateAclReady = $false
+        for ($aclAttempt = 1; $aclAttempt -le 90 -and -not $templateAclReady; $aclAttempt++) {
+            $sourceTemplate = [ADSI]$sourceTemplatePath
+            $sourceTemplate.psbase.Options.SecurityMasks = [System.DirectoryServices.SecurityMasks]::Dacl
+            $granted = @()
+            foreach ($ace in @($sourceTemplate.psbase.ObjectSecurity.Access | Where-Object { $null -ne $_ })) {
+                if ("$($ace.AccessControlType)" -ne 'Allow') { continue }
+                $aceSid = "$($ace.IdentityReference)"
+                try { $aceSid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+                if ($aceSid -ne $targetComputersSid) { continue }
+                $objectType = "$($ace.ObjectType)"
+                if ($objectType -eq $enrollGuid) { $granted += 'Enroll' }
+                elseif ($objectType -eq $autoEnrollGuid) { $granted += 'AutoEnroll' }
+                elseif ("$($ace.ActiveDirectoryRights)" -match 'GenericRead|GenericAll') { $granted += 'Read' }
+            }
+            $granted = @($granted | Select-Object -Unique)
+            $templateAclReady = $granted -contains 'Read' -and
+                $granted -contains 'Enroll' -and $granted -contains 'AutoEnroll'
+            if (-not $templateAclReady) {
+                if ($aclAttempt -eq 1 -or $aclAttempt % 6 -eq 0) {
+                    Write-Status "Waiting for source ConfigMgrClientCertificate to grant $targetComputersSid Read+Enroll+AutoEnroll (attempt $aclAttempt/90; current=$($granted -join '+'))"
+                }
+                Start-Sleep -Seconds 10
+            }
+        }
+        if (-not $templateAclReady) {
+            throw "Source ConfigMgrClientCertificate did not grant target Domain Computers SID $targetComputersSid Read+Enroll+AutoEnroll within 15 minutes."
+        }
+        Write-Status "Source ConfigMgrClientCertificate grants $targetComputersSid Read+Enroll+AutoEnroll; starting authoritative copy"
+
         $syncOutput = @(
             & C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest `
                 -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc -f 2>&1
