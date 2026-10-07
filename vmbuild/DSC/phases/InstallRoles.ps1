@@ -87,6 +87,23 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
+function Invoke-VerifiedWsusBaselineImport {
+    param([object[]] $SupVms)
+
+    if (-not $SupVms -or @($SupVms).Count -eq 0) { return }
+    if ($ThisVM.parentSiteCode) {
+        Write-DscStatus "[InstallRoles] Downstream site (parent=$($ThisVM.parentSiteCode)) - skipping WSUS cab import; categories replicate from the upstream SUP."
+        return
+    }
+
+    # wsusutil import can temporarily stop WsusService. Launch it only after
+    # every configured SUP has passed physical readiness (or after a new SUP
+    # has converged), otherwise the producer-prerequisite gate observes the
+    # importer's transient service state and rejects a healthy WSUS/API surface.
+    Start-WsusBaselineImportBackground -Tag "[InstallRoles]" | Out-Null
+    Wait-WsusBaselineImport -Tag "[InstallRoles]"
+}
+
 # Early exit: check if all configured roles (RP + SUP) are already installed.
 # InstallRoles.ps1 is called on every ScriptWorkflow pass, so this avoids
 # redundant work when everything is already in place.
@@ -122,6 +139,7 @@ if ($allRolesInstalled) {
 
 if ($allRolesInstalled) {
     Write-DscStatus "All roles (RP + SUP) already installed. Nothing to do."
+    Invoke-VerifiedWsusBaselineImport -SupVms @($supVMs)
     $Configuration.InstallSUP.Status = 'Completed'
     $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
@@ -234,27 +252,6 @@ if ($SUPNames) {
     Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
 }
 
-# Kick off the WSUS categories cab import in the background NOW. Done BEFORE
-# the $allSUPsInstalled / $SUPs.Count early-returns so a -ResetOnly wipe of
-# SUSDB followed by a vmbuild re-run actually exercises the cab path: in that
-# scenario CM still has the SUP definition (Get-CMSoftwareUpdatePoint returns
-# truthy), $allSUPsInstalled=$true, and the early-return below would skip the
-# import. The function is idempotent: 'already-imported' (TaxonomyCats >= 100)
-# / 'no-cab' / 'no-wsusutil' all short-circuit cleanly, so it's safe to fire
-# on every InstallRoles run regardless of SUP state.
-#
-# TOP-LEVEL ONLY: only the top-level SUP (syncs from Microsoft Update) may
-# import the MU-sourced cab. On a downstream child primary, a local SUP (if any)
-# syncs from the CAS upstream; importing would corrupt the sync anchor and break
-# it with UssInternalError. Gate on no parentSiteCode. (The function also
-# self-guards on the live WSUS upstream config.)
-if (-not $ThisVM.parentSiteCode) {
-    Start-WsusBaselineImportBackground -Tag "[InstallRoles]" | Out-Null
-}
-else {
-    Write-DscStatus "[InstallRoles] Downstream site (parent=$($ThisVM.parentSiteCode)) - skipping WSUS cab import; categories replicate from the upstream SUP."
-}
-
 # Quick check: if all SUPs are already installed, skip the entire install+sync
 $allSUPsInstalled = $true
 foreach ($SUP in $SUPs) {
@@ -267,10 +264,7 @@ foreach ($SUP in $SUPs) {
 }
 if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
     Write-DscStatus "All SUP roles already installed. Skipping SUP install and configuration."
-    # Wait for any in-flight cab import we just kicked off above before
-    # returning, so the caller's Phase 11 taxonomy assertion sees a populated
-    # SUSDB. No-op when the import short-circuited (no state file).
-    try { Wait-WsusBaselineImport -Tag "[InstallRoles]" } catch { Write-DscStatus "WARNING: Wait-WsusBaselineImport (allSUPsInstalled path) threw: $($_.Exception.Message)" }
+    Invoke-VerifiedWsusBaselineImport -SupVms @($SUPs)
     if (-not $rpFailed -and -not $supFailed) {
         $Configuration.InstallSUP.Status = 'Completed'
         $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
@@ -332,6 +326,10 @@ foreach ($SUP in $SUPs) {
         Write-DscStatus "Software Update Point installation failed for $($SUP.ServerName). InstallRoles will retry on next ScriptWorkflow pass."
         $supFailed = $true
     }
+}
+
+if (-not $supFailed) {
+    Invoke-VerifiedWsusBaselineImport -SupVms @($SUPs)
 }
 
 # Configure SUP
@@ -399,16 +397,6 @@ if ($configureSUP) {
                     }
                 }
  
-                # Wait for the cab import launched at the top of this script
-                # (Start-WsusBaselineImportBackground) to finish AND verify
-                # the taxonomy actually landed (log marker + count threshold,
-                # with a single synchronous retry on partial). wsyncmgr ->
-                # WSUS.StartSynchronization() on top of an in-flight or
-                # partial cab import races on SUSDB writes and triggers the
-                # 'invalid update identity in XML' SqlException. No-op when
-                # the cab path wasn't used (no state file).
-                Wait-WsusBaselineImport -Tag "[InstallRoles]"
-
                 # Guard against re-runs: if a sync (especially a long Categories
                 # sync) is already in progress from a prior build attempt, don't
                 # restart it - triggering a new sync cancels the running one and
