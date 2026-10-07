@@ -20,6 +20,61 @@ foreach ($path in @($coveragePath, $validationPath)) {
 $coverageText = Get-Content -LiteralPath $coveragePath -Raw
 $validationText = Get-Content -LiteralPath $validationPath -Raw
 
+function Import-TestFunction {
+    param([string] $Path, [string] $Name)
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $Path, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) { throw "$Path has parse errors: $($errors -join '; ')" }
+    $functions = @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $Name
+            }, $true))
+    if ($functions.Count -ne 1) {
+        throw "Expected one $Name definition, found $($functions.Count)."
+    }
+    return [scriptblock]::Create($functions[0].Extent.Text)
+}
+
+. (Import-TestFunction -Path $coveragePath -Name 'Get-MemLabsDpVmMetadataMap')
+. (Import-TestFunction -Path $coveragePath -Name 'Test-MemLabsLocalComputerName')
+
+$metadataConfig = [pscustomobject]@{
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'PRI1'; role = 'Primary'; siteCode = 'PRI'
+        }
+    )
+    phase8ManagedDistributionPointScopes = @(
+        [pscustomobject]@{
+            DistributionPoints = @(
+                [pscustomobject]@{
+                    VmName = 'SEC1'; Fqdn = 'SEC1.lab.test'; Role = 'Secondary'
+                    SiteCode = 'SEC'; Network = '10.20.2.0'
+                }
+            )
+        }
+    )
+}
+$metadata = Get-MemLabsDpVmMetadataMap -DeployConfig $metadataConfig
+if (-not $metadata.ContainsKey('SEC1') -or
+    $metadata['SEC1'].role -ne 'Secondary' -or
+    $metadata['SEC1'].siteCode -ne 'SEC' -or
+    $metadata['SEC1'].network -ne '10.20.2.0') {
+    throw 'Projected Phase 8 DP metadata did not restore an omitted Secondary identity.'
+}
+if (-not (Test-MemLabsLocalComputerName -Candidate 'PRI1.lab.test' `
+        -LocalComputerName 'PRI1')) {
+    throw 'FQDN self-probe was not recognized as local.'
+}
+if (Test-MemLabsLocalComputerName -Candidate 'PRI2.lab.test' `
+        -LocalComputerName 'PRI1') {
+    throw 'A different host was misclassified as the local source node.'
+}
+
 if ($coverageText -notmatch '\$coverageExitReason\s*=\s*''OptionalGrace''') {
     throw 'Optional grace does not record a distinct exit reason.'
 }
@@ -34,6 +89,10 @@ if ($coverageText -notmatch 'optional grace ended, but final verification could 
 }
 if ($coverageText -notmatch "'optional-grace-complete'") {
     throw 'The timeline does not distinguish optional grace from a wall-clock deadline.'
+}
+if ($coverageText -notmatch
+    '(?s)ContentValidating but physically holds.+?Leaving RefreshNow untouched.+?continue') {
+    throw 'Current physical content can still be reset repeatedly while the summarizer validates it.'
 }
 
 $secondaryCase = [regex]::Match($validationText, "(?s)'Secondary'\s*\{(?:(?!\n\s{8}'\w+'\s*\{).)*?\n\s{8}\}")

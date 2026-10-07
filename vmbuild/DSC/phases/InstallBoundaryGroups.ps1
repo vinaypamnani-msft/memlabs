@@ -19,6 +19,52 @@ function Write-MemLabsClientPackageTimelineRecord {
     [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Get-MemLabsDpVmMetadataMap {
+    param([Parameter(Mandatory = $true)] $DeployConfig)
+
+    $result = @{}
+    foreach ($vm in @($DeployConfig.virtualMachines)) {
+        $vmName = "$($vm.vmName)".Trim()
+        if ($vmName) { $result[$vmName.ToUpperInvariant()] = $vm }
+    }
+    foreach ($record in @($DeployConfig.phase8ManagedDistributionPointScopes |
+            ForEach-Object { @($_.DistributionPoints) })) {
+        $vmName = "$($record.VmName)".Trim()
+        if (-not $vmName -and $record.Fqdn) {
+            $vmName = ("$($record.Fqdn)" -split '\.')[0]
+        }
+        if (-not $vmName) { continue }
+        $key = $vmName.ToUpperInvariant()
+        if ($result.ContainsKey($key)) { continue }
+        $result[$key] = [pscustomobject]@{
+            vmName   = $vmName
+            role     = "$($record.Role)"
+            siteCode = "$($record.SiteCode)"
+            network  = "$($record.Network)"
+            hidden   = $true
+            projectedPhase8Metadata = $true
+        }
+    }
+    return $result
+}
+
+function Test-MemLabsLocalComputerName {
+    param(
+        [Parameter(Mandatory = $true)][string] $Candidate,
+        [string] $LocalComputerName = $env:COMPUTERNAME
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Candidate) -or
+        [string]::IsNullOrWhiteSpace($LocalComputerName)) {
+        return $false
+    }
+    $candidateShort = ($Candidate.Trim() -split '\.')[0]
+    return $Candidate.Trim().Equals(
+        $LocalComputerName.Trim(), [StringComparison]::OrdinalIgnoreCase) -or
+        $candidateShort.Equals(
+            $LocalComputerName.Trim(), [StringComparison]::OrdinalIgnoreCase)
+}
+
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
@@ -457,7 +503,7 @@ $ensureClientPkgCoverage = {
                     }
                     try {
                         $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 15000
-                        $sourceState = if ($sourceHost -ieq $env:COMPUTERNAME) {
+                        $sourceState = if (Test-MemLabsLocalComputerName -Candidate $sourceHost) {
                             & $collectNodeContentState $PackageID "$($package.SourceSite)"
                         }
                         else {
@@ -712,11 +758,14 @@ $ensureClientPkgCoverage = {
     # or a legacy pushClient=$true client sits on the secondary's own subnet), WAIT
     # for it as before; if NONE are, give it only a short optional grace (the
     # parent-Primary DPs still cover every boundary, and the content will arrive
-    # through normal inter-site replication). Phase 11 verifies the Secondary's
-    # DP/MP plumbing but does not prove this optional package arrived; subsequent
-    # Phase 8 passes measure it again. Non-secondary DPs are always waited on.
-    $vmByHost = @{}
-    foreach ($v in @($deployConfig.virtualMachines)) { if ($v.vmName) { $vmByHost["$($v.vmName)".ToUpper()] = $v } }
+    # through normal inter-site replication). The Secondary creation pass validates
+    # its implicit DP/MP roles; subsequent Phase 8 passes measure optional package
+    # convergence again. Non-secondary DPs are always waited on.
+    #
+    # Partial follow-on configs may omit an unchanged Secondary from virtualMachines.
+    # Use the authoritative host-projected DP records as the fallback identity source,
+    # otherwise an omitted Secondary is misclassified as a required non-secondary DP.
+    $vmByHost = Get-MemLabsDpVmMetadataMap -DeployConfig $deployConfig
     # Grace is charged only AFTER every DP something depends on is Installed, because until
     # then the loop is polling anyway and these cost nothing. Sized from measurement, not
     # taste: on wacky 08-17 and 08-25 08:26 the unneeded secondary DP was already Installed
@@ -815,6 +864,8 @@ $ensureClientPkgCoverage = {
     $dpRoleLastCheck = @{}
     $dpWaitLogged = @{}
     $dpPendingSince = @{}
+    $contentCurrentCheckedAt = @{}
+    $contentCurrentLogged = @{}
     # DP-upper -> when this DP was first seen not-Installed while THIS site already held the
     # content. Feeds $isSendUnowned; cleared whenever content is still coming from the parent,
     # so the clock only ever measures time in which a send was actually possible.
@@ -1404,7 +1455,15 @@ $ensureClientPkgCoverage = {
         # Is the client package content present at THIS site yet? StoredPkgVersion=0
         # means it is still replicating down from a parent/CAS site.
         $storedVer = 0
-        try { $sp = Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue | Select-Object -First 1; if ($sp) { $storedVer = [int]$sp.StoredPkgVersion } } catch {}
+        $currentPackageSourceVersion = 0
+        try {
+            $sp = Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($sp) {
+                $storedVer = [int]$sp.StoredPkgVersion
+                $currentPackageSourceVersion = [int]$sp.SourceVersion
+            }
+        }
+        catch { }
         $contentPendingFromParent = ($storedVer -lt 1)
         if ($contentPendingFromParent -and -not $extendedCoverageWait) {
             $extendedCoverageWait = $true
@@ -1424,8 +1483,13 @@ $ensureClientPkgCoverage = {
             $lastParentFilePoke = Get-Date
         }
         $state = @{}
+        $stateVer = @{}
         foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
-            $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State }
+            $f = & $fqdnOf $r.ServerNALPath
+            if ($f) {
+                $state[$f.ToUpper()] = [int]$r.State
+                $stateVer[$f.ToUpper()] = "$($r.SourceVersion)"
+            }
         }
         $notInstalled = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
         $coverageFingerprint = "$storedVer|" + (@($bgDpFqdns | Sort-Object | ForEach-Object {
@@ -1515,6 +1579,33 @@ $ensureClientPkgCoverage = {
             }
             # InstallPending (1) is a distribution actually in flight -- leave it alone.
             if ($st -eq 1) { continue }
+            # ContentValidating with a current-version PkgLib payload is no longer a
+            # transfer problem. Repeated RefreshNow writes reset/requeue the same
+            # validation and can keep the summarizer in state 7 indefinitely. Recheck
+            # the physical proof every five minutes, but leave ConfigMgr's native
+            # validation untouched while the current payload remains present.
+            if ($st -eq 7 -and -not $contentPendingFromParent -and
+                $currentPackageSourceVersion -gt 0 -and
+                $stateVer.ContainsKey($u) -and
+                "$($stateVer[$u])" -eq "$currentPackageSourceVersion") {
+                $lastProof = if ($contentCurrentCheckedAt.ContainsKey($u)) {
+                    $contentCurrentCheckedAt[$u]
+                }
+                else {
+                    $null
+                }
+                if ($lastProof -and ((Get-Date) - $lastProof).TotalMinutes -lt 5) {
+                    continue
+                }
+                $contentCurrentCheckedAt[$u] = Get-Date
+                if ((& $dpHasPackageContent $dp) -eq $true) {
+                    if (-not $contentCurrentLogged.ContainsKey($u)) {
+                        Write-DscStatus "Client pkg coverage: DP '$dp' is ContentValidating but physically holds $PackageID at current SourceVersion=$currentPackageSourceVersion. Leaving RefreshNow untouched so native validation can publish its acknowledgement."
+                        $contentCurrentLogged[$u] = $true
+                    }
+                    continue
+                }
+            }
             # Re-arm at most every 5 minutes. RefreshNow is the ONLY remediation, by design.
             #
             # This runs while content is still pending from the parent too. RefreshNow does
