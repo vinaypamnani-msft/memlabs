@@ -761,23 +761,39 @@ function Invoke-NewLab {
     #     flatly contradicts the "left intact for investigation" message the harness prints
     #     next and makes the offered Retry-after-repair impossible.
     param(
-        [string]$ConfigFile
+        [string]$ConfigFile,
+        [int]$StartPhase = 0,
+        [switch]$Restore
     )
 
     $script:LastNewLabResumeCommand = $null
+    $script:LastNewLabResumeInfo = $null
     $global:NewLabResumeCommand = $null
+    $global:NewLabResumeInfo = $null
+    $newLabParameters = [ordered]@{
+        Configuration = $ConfigFile
+        NoSnapshot = $true
+        KeepFailedVMs = $true
+        ClearErrorHistoryOnExit = $true
+        RequireCleanSource = $RequireCleanSource
+    }
+    if ($StartPhase -gt 0) { $newLabParameters.StartPhase = $StartPhase }
+    if ($Restore.IsPresent) { $newLabParameters.Restore = $true }
     $global:LASTEXITCODE = 0
-    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit -RequireCleanSource:$RequireCleanSource | Out-Host
+    & ./New-Lab.ps1 @newLabParameters | Out-Host
     $code = [int]$LASTEXITCODE
     $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
+    $script:LastNewLabResumeInfo = $global:NewLabResumeInfo
 
     # 55 = New-Lab rebuilt DSC.zip and needs a restart to pick it up.
     if ($code -eq 55) {
         $global:NewLabResumeCommand = $null
+        $global:NewLabResumeInfo = $null
         $global:LASTEXITCODE = 0
-        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit -RequireCleanSource:$RequireCleanSource | Out-Host
+        & ./New-Lab.ps1 @newLabParameters | Out-Host
         $code = [int]$LASTEXITCODE
         $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
+        $script:LastNewLabResumeInfo = $global:NewLabResumeInfo
     }
 
     # New-Lab runs INSIDE this process, so its job workers are children of the
@@ -819,7 +835,7 @@ function Get-TestFailureAction {
     Write-Host "  Domain : $DomainName" -ForegroundColor DarkGray
     if ($ResumeCommand) {
         Write-Host "  Resume : $ResumeCommand" -ForegroundColor DarkGray
-        Write-Host "  Repair or resume it from another window, then choose Retry." -ForegroundColor DarkGray
+        Write-Host "  Phase 0 prepares retained VMs and reboots only those that prove they need it." -ForegroundColor DarkGray
     }
     else {
         Write-Host "  No -StartPhase command was produced; the failure occurred before a resumable phase was identified." -ForegroundColor DarkGray
@@ -921,14 +937,32 @@ function Run-Test {
             Write-Host "$exitCode was returned from $testjson ($passLabel)"
 
             $action = 'Continue'
+            $automatedResumeAttempts = 0
             while ($exitCode -ne 0) {
                 Write-Host "$testjson Failed ($passLabel)"
                 Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
-                $action = Get-TestFailureAction -ConfigFile $ModifiedtestFile -DomainName $domainName -ExitCode $exitCode -ResumeCommand $script:LastNewLabResumeCommand
+                $resumeInfo = $script:LastNewLabResumeInfo
+                $canAutoResume = $resumeInfo -and
+                    [int]$resumeInfo.Phase -gt 0 -and
+                    $automatedResumeAttempts -lt 1
+                if ($canAutoResume) {
+                    $action = 'Retry'
+                    $automatedResumeAttempts++
+                    Write-Host "Automatically resuming at Phase $($resumeInfo.Phase); Phase 0 will prepare retained VMs and reboot only when required (attempt 1 of 1)." -ForegroundColor Cyan
+                }
+                else {
+                    $action = Get-TestFailureAction -ConfigFile $ModifiedtestFile -DomainName $domainName -ExitCode $exitCode -ResumeCommand $script:LastNewLabResumeCommand
+                }
                 if ($action -ne 'Retry') { break }
                 Write-Host "Retrying $testjson ($passLabel)..." -ForegroundColor Cyan
                 Invoke-TestGitPull -Context "before retrying $(Split-Path $testjson -Leaf)"
-                $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
+                if ($resumeInfo -and [int]$resumeInfo.Phase -gt 0) {
+                    $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile `
+                        -StartPhase ([int]$resumeInfo.Phase) -Restore:([bool]$resumeInfo.Restore)
+                }
+                else {
+                    $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
+                }
                 Write-Host "$exitCode was returned from $testjson (retry, $passLabel)"
             }
 

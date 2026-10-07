@@ -8,7 +8,9 @@ param(
 
     [string] $PidPath,
 
-    [string] $InvocationToken
+    [string] $InvocationToken,
+
+    [string] $ResultPath
 )
 
 if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
@@ -133,5 +135,20 @@ if ($PidPath) {
 }
 
 $global:LASTEXITCODE = 0
+$global:NewLabResumeCommand = $null
+$global:NewLabResumeInfo = $null
 & $ScriptPath @parameters
-exit [int]$LASTEXITCODE
+$childExitCode = [int]$LASTEXITCODE
+
+if ($ResultPath) {
+    $result = [ordered]@{
+        InvocationToken = $InvocationToken
+        ExitCode        = $childExitCode
+        ResumeCommand   = $global:NewLabResumeCommand
+        ResumeInfo      = $global:NewLabResumeInfo
+    }
+    $resultJson = $result | ConvertTo-Json -Depth 5
+    [IO.File]::WriteAllText($ResultPath, $resultJson, (New-Object Text.UTF8Encoding($false)))
+}
+
+exit $childExitCode

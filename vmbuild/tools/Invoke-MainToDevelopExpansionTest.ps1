@@ -87,6 +87,7 @@ $script:MutationMutexHeld = $false
 $script:MainBaselineFailureCleanupPossible = $false
 $script:HistoryRun = $null
 $script:ExactMainClusterAdapterCompatibilityActive = $false
+$script:LastChildResult = $null
 
 function Invoke-Git {
     param(
@@ -1383,8 +1384,10 @@ function Invoke-ChildScript {
     }
     $parameterPath = Join-Path $StateRoot ('.child-parameters-{0}-{1}.clixml' -f $PID, [guid]::NewGuid().ToString('N'))
     $pidPath = Join-Path $StateRoot ('.child-pid-{0}-{1}.txt' -f $PID, [guid]::NewGuid().ToString('N'))
+    $resultPath = Join-Path $StateRoot ('.child-result-{0}-{1}.json' -f $PID, [guid]::NewGuid().ToString('N'))
     $invocationToken = [guid]::NewGuid().ToString('N')
     $childInvocationCompleted = $false
+    $script:LastChildResult = $null
     Write-Host "===== $Label =====" -ForegroundColor Magenta
     Push-Location $vmbuildPath
     try {
@@ -1398,7 +1401,8 @@ function Invoke-ChildScript {
             if ($hadNativePreference) { $PSNativeCommandUseErrorActionPreference = $false }
             [Environment]::SetEnvironmentVariable($canonicalRootVariable, $RepositoryRoot, 'Process')
             & $pwshPath -NoLogo -NoProfile -NonInteractive -File $script:ChildLauncherPath `
-                -ScriptPath $scriptPath -ParameterPath $parameterPath -PidPath $pidPath -InvocationToken $invocationToken 2>&1 |
+                -ScriptPath $scriptPath -ParameterPath $parameterPath -PidPath $pidPath `
+                -InvocationToken $invocationToken -ResultPath $resultPath 2>&1 |
                 Tee-Object -FilePath $logPath -Append -ErrorAction Stop |
                 Out-Host
             $childExitCode = [int]$LASTEXITCODE
@@ -1411,6 +1415,18 @@ function Invoke-ChildScript {
         if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
             throw "Mixed-test transcript verification failed for '$logPath'."
         }
+        if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+            throw "Pinned child did not publish its structured result: $resultPath"
+        }
+        $childResult = Get-Content -LiteralPath $resultPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if ("$($childResult.InvocationToken)" -ne $invocationToken) {
+            throw "Pinned child result token does not match invocation '$invocationToken'."
+        }
+        if ([int]$childResult.ExitCode -ne $childExitCode) {
+            throw "Pinned child result exit code $($childResult.ExitCode) does not match process exit code $childExitCode."
+        }
+        $script:LastChildResult = $childResult
         return $childExitCode
     }
     finally {
@@ -1419,6 +1435,7 @@ function Invoke-ChildScript {
         }
         Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
         Pop-Location
         try {
             Set-CrossRevisionCanonicalVmBuildShortcut -RepositoryRoot $RepositoryRoot
@@ -1447,6 +1464,22 @@ function Invoke-NewLabFixture {
     if ($exitCode -eq 55) {
         Write-Host "$Label requested one restart after rebuilding DSC.zip; rerunning." -ForegroundColor Yellow
         $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' -Parameters $parameters -Label "$Label-restart"
+    }
+    $resumeInfo = if ($script:LastChildResult) { $script:LastChildResult.ResumeInfo } else { $null }
+    if ($exitCode -ne 0 -and $resumeInfo -and [int]$resumeInfo.Phase -gt 0) {
+        $resumeParameters = [ordered]@{}
+        foreach ($key in $parameters.Keys) { $resumeParameters[$key] = $parameters[$key] }
+        $resumeParameters.StartPhase = [int]$resumeInfo.Phase
+        if ([bool]$resumeInfo.Restore) { $resumeParameters.Restore = $true }
+        $resumeLabel = "$Label-resume-phase$($resumeInfo.Phase)"
+        Write-Host "$Label failed; automatically resuming once at Phase $($resumeInfo.Phase). Phase 0 will reboot only VMs that prove they need it." -ForegroundColor Cyan
+        $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' `
+            -Parameters $resumeParameters -Label $resumeLabel
+        if ($exitCode -eq 55) {
+            Write-Host "$resumeLabel requested one restart after rebuilding DSC.zip; rerunning." -ForegroundColor Yellow
+            $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' `
+                -Parameters $resumeParameters -Label "$resumeLabel-restart"
+        }
     }
     return $exitCode
 }

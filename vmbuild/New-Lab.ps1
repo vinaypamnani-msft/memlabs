@@ -67,6 +67,7 @@ param (
 
 $global:MemLabsNoSnapshot = [bool]$NoSnapshot.IsPresent
 $global:NewLabResumeCommand = $null
+$global:NewLabResumeInfo = $null
 
 function Write-NewLabResumeCommand {
     [CmdletBinding()]
@@ -81,6 +82,11 @@ function Write-NewLabResumeCommand {
     $resumeCommand = "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $Phase"
     if ($Restore.IsPresent) { $resumeCommand += " -restore" }
     $global:NewLabResumeCommand = $resumeCommand
+    $global:NewLabResumeInfo = [pscustomobject]@{
+        Configuration = $Configuration
+        Phase         = $Phase
+        Restore       = [bool]$Restore.IsPresent
+    }
     Write-Log $resumeCommand
     Add-CmdHistory $resumeCommand
 }
@@ -1043,7 +1049,16 @@ try {
         return $deployConfig
     }
 
-    # Prepare existing VM - Phase 0
+    # Prepare existing VM - Phase 0. A non-restore -StartPhase invocation is a
+    # resumable retry: Phase 0 owns the readiness check and performs a
+    # graceful-first reboot only when the guest proves one is needed.
+    $resumePreparation = [bool]($StartPhase -gt 0 -and -not $Restore.IsPresent)
+    if (-not $deployConfig.parameters) {
+        $deployConfig | Add-Member -MemberType NoteProperty -Name parameters `
+            -Value ([pscustomobject]@{}) -Force
+    }
+    $deployConfig.parameters | Add-Member -MemberType NoteProperty `
+        -Name ResumePreparation -Value $resumePreparation -Force
     $prepared = $true
     # Default true like $prepared: if every phase is skipped (-Phase / -SkipPhase /
     # -StartPhase past the end) the loop never assigns it, and the end-of-run gate
@@ -1051,7 +1066,7 @@ try {
     # ran, and nothing failed, as FINISHED WITH FAILURES.
     $configured = $true
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
-    if ($containsHidden) {
+    if ($containsHidden -or $resumePreparation) {
         Write-Phase -Phase 0
         $prepared = Resolve-PhaseResult -Raw (Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf) -Phase 0
     }
@@ -1345,7 +1360,7 @@ try {
             }
             else {
                 Write-Host
-                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -NoIndent
+                Write-Log "To retry from the current phase, run the command below. Phase 0 will prepare the retained VMs and reboot only those that need it: " -NoIndent
                 Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase
 
             }
@@ -1550,7 +1565,7 @@ finally {
             }
             else {
                 write-host
-                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -NoIndent
+                Write-Log "To retry from the current phase, run the command below. Phase 0 will prepare the retained VMs and reboot only those that need it: " -NoIndent
                 Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase
             }
         }

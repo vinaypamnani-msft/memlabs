@@ -117,7 +117,12 @@ try {
     Assert-True ($newLabText.Contains('.source.json')) 'New-Lab writes and rotates a source sidecar'
     Assert-True ($newLabText.Contains('$global:CurrentDeploymentSourceIdentity')) 'New-Lab retains the run-start identity for stats'
     Assert-True ($newLabText.Contains('$RequireCleanSource')) 'New-Lab exposes the clean-source release gate'
-    Assert-Equal 2 ([regex]::Matches($startTestText, 'New-Lab\.ps1[^\r\n]*-RequireCleanSource').Count) 'Start-Test forwards the gate on both deployment paths'
+    $newLabSplatCarriesGate = $startTestText -match
+        '(?s)\$newLabParameters\s*=\s*\[ordered\]@\{.+?RequireCleanSource\s*=\s*\$RequireCleanSource.+?\}'
+    $newLabSplatInvocationCount = [regex]::Matches(
+        $startTestText, '&\s+\./New-Lab\.ps1\s+@newLabParameters').Count
+    Assert-True ($newLabSplatCarriesGate -and $newLabSplatInvocationCount -eq 2) `
+        'Start-Test forwards the gate on both deployment paths'
     if ($startTestText.Contains('Invoke-MainToDevelopExpansionCycle')) {
         $expansionRunnerText = [IO.File]::ReadAllText($expansionRunnerPath)
         Assert-True ($startTestText -match 'Invoke-MainToDevelopExpansionCycle[\s\S]+-RequireCleanSource:\$RequireCleanSource') 'Start-Test forwards the gate to cross-revision qualification'

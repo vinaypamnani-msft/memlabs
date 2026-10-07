@@ -455,6 +455,15 @@ $global:VM_Create = {
         # Params for child script blocks
         $createVM = $true
         if ($currentItem.hidden -eq $true) { $createVM = $false }
+        $resumePreparation = [bool](
+            $Phase -eq 0 -and
+            $deployConfig.parameters -and
+            $deployConfig.parameters.ResumePreparation -eq $true
+        )
+        if ($resumePreparation -and
+            (Get-VM2 -Fallback -Name $currentItem.vmName -ErrorAction SilentlyContinue)) {
+            $createVM = $false
+        }
 
         # Change log location. Flush any buffered lines targeting the previous
         # path so they aren't lost or written to the new file out of order.
@@ -1042,6 +1051,114 @@ $global:VM_Create = {
             if (-not $connected) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
                 return
+            }
+
+            if ($resumePreparation) {
+                $resumeRebootProbeBlock = {
+                    $reasons = New-Object System.Collections.Generic.List[string]
+                    if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+                        $reasons.Add('CBS\RebootPending')
+                    }
+                    if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+                        $reasons.Add('WindowsUpdate\RebootRequired')
+                    }
+
+                    $activeName = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' `
+                            -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+                    $pendingName = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' `
+                            -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+                    if ($activeName -and $pendingName -and $activeName -ne $pendingName) {
+                        $reasons.Add("ComputerRename:$activeName->$pendingName")
+                    }
+
+                    $updates = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Updates' -ErrorAction SilentlyContinue
+                    if ($updates -and $updates.PSObject.Properties['UpdateExeVolatile'] -and
+                        [int]$updates.UpdateExeVolatile -ne 0) {
+                        $reasons.Add("UpdateExeVolatile=$($updates.UpdateExeVolatile)")
+                    }
+
+                    $pendingFileRenames = @((Get-ItemProperty `
+                                -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' `
+                                -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
+                    $replacementCount = 0
+                    for ($i = 0; $i -lt $pendingFileRenames.Count; $i += 2) {
+                        if ($i + 1 -lt $pendingFileRenames.Count -and
+                            -not [string]::IsNullOrWhiteSpace([string]$pendingFileRenames[$i + 1])) {
+                            $replacementCount++
+                        }
+                    }
+                    if ($replacementCount -gt 0) {
+                        $reasons.Add("PendingFileRenameOperations(replace/move)=$replacementCount")
+                    }
+
+                    try {
+                        $ccmReboot = Invoke-CimMethod -Namespace 'root\ccm\ClientSDK' `
+                            -ClassName CCM_ClientUtilities -MethodName DetermineIfRebootPending `
+                            -OperationTimeoutSec 5 -ErrorAction Stop
+                        if ($ccmReboot.RebootPending -or $ccmReboot.IsHardRebootPending) {
+                            $reasons.Add('ConfigMgrClient\RebootPending')
+                        }
+                    }
+                    catch {
+                        $nativeCimError = "$($_.Exception.NativeErrorCode)"
+                        $ccmSurfaceAbsent = $nativeCimError -in @('InvalidNamespace', 'InvalidClass') -or
+                            $_.Exception.Message -match 'Invalid namespace|Invalid class|not found'
+                        if (-not $ccmSurfaceAbsent) {
+                            throw
+                        }
+                    }
+
+                    [pscustomobject]@{ Reasons = $reasons.ToArray() }
+                }
+
+                $resumeRebootProbe = $null
+                foreach ($probeAttempt in 1..2) {
+                    $resumeRebootProbe = Invoke-VmCommand -VmName $currentItem.vmName `
+                        -VmDomainName $domainName -AsJob -TimeoutSeconds 45 `
+                        -FailOnRemoteError -SuppressLog `
+                        -DisplayName "Phase 0 resume reboot check (attempt $probeAttempt/2)" `
+                        -ScriptBlock $resumeRebootProbeBlock
+                    if ($resumeRebootProbe -and -not $resumeRebootProbe.ScriptBlockFailed -and
+                        $resumeRebootProbe.ScriptBlockOutput) {
+                        break
+                    }
+                    if ($probeAttempt -lt 2) {
+                        Remove-VmSessionFromCache -VmName $currentItem.vmName
+                        Start-Sleep -Seconds 5
+                    }
+                }
+
+                if (-not $resumeRebootProbe -or $resumeRebootProbe.ScriptBlockFailed -or
+                    -not $resumeRebootProbe.ScriptBlockOutput) {
+                    $probeDetail = if ($resumeRebootProbe) {
+                        ((@($resumeRebootProbe.ErrorDetails) + @($resumeRebootProbe.ScriptBlockOutput)) -join ' ' -replace '\s+', ' ').Trim()
+                    }
+                    else { 'no result returned' }
+                    Write-Log "[Phase 0]: $($currentItem.vmName): Could not determine whether a resume reboot is needed after two bounded probes: $probeDetail" -Failure -OutputStream
+                    return
+                }
+
+                $resumeRebootReasons = @($resumeRebootProbe.ScriptBlockOutput.Reasons |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+                if ($resumeRebootReasons.Count -eq 0) {
+                    Write-Log "[Phase 0]: $($currentItem.vmName): retained VM is ready and has no actionable reboot markers; no reboot needed." -LogOnly
+                }
+                else {
+                    $resumeReason = $resumeRebootReasons -join ', '
+                    Write-Log "[Phase 0]: $($currentItem.vmName): reboot is required before resume ($resumeReason)."
+                    $resumeRestarted = Restart-VM2Smart -Name $currentItem.vmName `
+                        -AllowTurnOff -Reason "Phase 0 resume: $resumeReason"
+                    if (-not $resumeRestarted) {
+                        Write-Log "[Phase 0]: $($currentItem.vmName): Could not complete the required resume reboot." -Failure -OutputStream
+                        return
+                    }
+                    $connectedAfterResumeRestart = Wait-ForVM -VmName $currentItem.vmName `
+                        -PathToVerify "C:\Users" -VmDomainName $domainName
+                    if (-not $connectedAfterResumeRestart) {
+                        Write-Log "[Phase 0]: $($currentItem.vmName): VM did not become connectable after its required resume reboot." -Failure -OutputStream
+                        return
+                    }
+                }
             }
         }
 

@@ -3036,9 +3036,18 @@ DROP TABLE #memlabs_idxprobe;
         $global:preparePhasePercent++
         Write-Progress2 "Preparing Phase $Phase" -Status "Evaluating virtual machine $($currentItem.vmName)" -PercentComplete $global:preparePhasePercent
 
-        # Don't touch non-hidden VM's in Phase 0
+        # Ordinary Phase 0 prepares hidden existing dependencies only. A
+        # -StartPhase resume explicitly asks Phase 0 to prepare every retained
+        # VM, including an originally non-hidden VM created before the failure.
         if ($Phase -eq 0 -and -not $currentItem.hidden) {
-            continue
+            $resumePreparation = [bool](
+                $deployConfig.parameters -and
+                $deployConfig.parameters.ResumePreparation -eq $true
+            )
+            if (-not $resumePreparation -or
+                $currentItem.vmName -notin @($existingVMs.vmName)) {
+                continue
+            }
         }
 
         # Don't touch hidden VMs in Phase 1 or 10. Phase 11 is read-only, so include

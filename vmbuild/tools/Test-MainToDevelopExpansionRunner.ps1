@@ -221,6 +221,8 @@ $parameterPath = Join-Path $scopeTestRoot 'parameters.clixml'
 $resultPath = Join-Path $scopeTestRoot 'result.txt'
 $exitScriptPath = Join-Path $scopeTestRoot 'Exit-Code.ps1'
 $continueScriptPath = Join-Path $scopeTestRoot 'Continue-Error.ps1'
+$resumeScriptPath = Join-Path $scopeTestRoot 'Resume-Metadata.ps1'
+$launcherResultPath = Join-Path $scopeTestRoot 'launcher-result.json'
 $launcherPidPath = Join-Path $scopeTestRoot 'launcher.pid'
 try {
     $null = New-Item -ItemType Directory -Path $scopeTestRoot -Force
@@ -263,6 +265,28 @@ $global:StartPhase = $StartPhase
     & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
         -ScriptPath $exitScriptPath -ParameterPath $parameterPath
     Assert-Equal 55 $LASTEXITCODE 'child launcher preserves restart exit codes'
+
+    [IO.File]::WriteAllText($resumeScriptPath, @'
+[CmdletBinding()]
+param()
+$global:NewLabResumeCommand = './New-Lab.ps1 -Configuration "fixture.json" -startPhase 8 -restore'
+$global:NewLabResumeInfo = [pscustomobject]@{
+    Configuration = 'fixture.json'
+    Phase = 8
+    Restore = $true
+}
+exit 2
+'@)
+    [ordered]@{} | Export-Clixml -LiteralPath $parameterPath
+    $resultToken = [guid]::NewGuid().ToString('N')
+    & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
+        -ScriptPath $resumeScriptPath -ParameterPath $parameterPath `
+        -InvocationToken $resultToken -ResultPath $launcherResultPath
+    Assert-Equal 2 $LASTEXITCODE 'child launcher preserves failed deployment exit code while publishing a result'
+    $launcherResult = Get-Content -LiteralPath $launcherResultPath -Raw | ConvertFrom-Json
+    Assert-Equal $resultToken $launcherResult.InvocationToken 'child result is bound to its invocation token'
+    Assert-Equal 8 $launcherResult.ResumeInfo.Phase 'child result carries structured resume phase'
+    Assert-Equal $true $launcherResult.ResumeInfo.Restore 'child result carries structured restore mode'
 
     [IO.File]::WriteAllText($continueScriptPath, @'
 [CmdletBinding()]
