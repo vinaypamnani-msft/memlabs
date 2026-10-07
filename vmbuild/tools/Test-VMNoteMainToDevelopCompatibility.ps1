@@ -15,6 +15,7 @@ param(
 
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $repoRoot = Split-Path -Parent $RootPath
+$configText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Config.ps1') -Raw
 $script:Failures = 0
 $script:ProducerVm = $null
 $script:VmStore = @{}
@@ -430,6 +431,11 @@ $freshConfig = [pscustomobject]@{
 }
 Assert-Equal 0 @(Sync-ExistingHierarchyOptionsToDeployConfig -Config $freshConfig -ExistingVMs @()).Count `
     'fresh deployment accepts an empty existing inventory'
+Assert-Equal 0 @(Sync-ExistingHierarchyOptionsToDeployConfig -Config $freshConfig -ExistingVMs $null).Count `
+    'fresh deployment accepts a zero-output existing inventory represented as null'
+Assert-True ($configText -match
+    '(?s)\$refreshedVmInventoryResult\s*=\s*get-list.+?\[object\[\]\]\$refreshedVmInventory\s*=\s*@\(.+?\$null -ne \$_') `
+    'live inventory producer normalizes zero-output refreshes to a typed empty array'
 
 $unrelatedPrimary = [pscustomobject]@{
     vmName = 'LPK-NEWPS'; role = 'Primary'; siteCode = 'NEW'
@@ -489,6 +495,38 @@ Assert-ThrowsLike {
 Assert-ThrowsLike {
     New-UserConfig -Domain 'legacypki.lab' -Subnet '10.220.202.0'
 } '*no authoritative deployConfig backup was readable*' 'ambiguous legacy ConfigMgr mode fails closed'
+
+. ([scriptblock]::Create((Get-WorktreeFunctionText -RelativePath 'common\Common.Config.ps1' -Name Add-RemoteSQLVMToDeployConfig)))
+$script:RemoteSqlInventoryLookups = 0
+function Get-VMFromList2 {
+    param(
+        [object] $DeployConfig,
+        [string] $VmName,
+        [switch] $SmartUpdate,
+        [switch] $Global
+    )
+    $script:RemoteSqlInventoryLookups++
+    return $null
+}
+function Add-ExistingVMToDeployConfig {
+    param(
+        [string] $VmName,
+        [object] $ConfigToModify,
+        [bool] $Hidden
+    )
+}
+$freshReplicaConfig = [pscustomobject]@{
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'FRE-REP1'
+            role = 'SiteSystem'
+            replicaSqlServerVM = 'FRE-REP1'
+        }
+    )
+}
+Add-RemoteSQLVMToDeployConfig -VmName 'FRE-REP1' -ConfigToModify $freshReplicaConfig
+Assert-Equal 0 $script:RemoteSqlInventoryLookups `
+    'new replica SQL VM already in the config does not require a live Hyper-V inventory lookup'
 
 Write-Host ''
 if ($script:Failures -gt 0) {

@@ -34,15 +34,24 @@ $script:StartCalls = 0
 $script:StartFailure = ''
 $script:CleanupMode = $false
 $script:CleanupQueries = [System.Collections.Generic.List[string]]::new()
+$script:CleanupPublicationCount = 1
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 1
+$script:CleanupSubscriptionCatalogComplete = 1
+$script:CleanupDatabaseIsPublished = 1
+$script:CleanupAgentJobCount = 2
 function Invoke-ReplSql {
     param([string]$Instance, [string]$Query, [string]$Database)
     if ($script:CleanupMode) {
         $script:CleanupQueries.Add($Query)
         if ($script:CleanupQueries.Count -eq 1) {
             return [pscustomobject]@{
-                PublicationCount = 1
-                SubscriptionCount = 0
-                AgentJobCount = 2
+                PublicationCount = $script:CleanupPublicationCount
+                SubscriptionCount = $script:CleanupSubscriptionCount
+                PublicationCatalogPresent = $script:CleanupPublicationCatalogPresent
+                SubscriptionCatalogComplete = $script:CleanupSubscriptionCatalogComplete
+                DatabaseIsPublished = $script:CleanupDatabaseIsPublished
+                AgentJobCount = $script:CleanupAgentJobCount
             }
         }
         return [pscustomobject]@{
@@ -210,11 +219,70 @@ if (-not $cleanupResult -or $script:CleanupQueries.Count -ne 2) {
     throw 'Zero-subscription stale MP replica artifacts were not removed and verified.'
 }
 if ($script:CleanupQueries[0] -notmatch 'JOIN dbo\.sysarticles' -or
+    $script:CleanupQueries[0] -notmatch 'EXEC sys\.sp_executesql' -or
     $script:CleanupQueries[1] -notmatch 'sp_droppublication' -or
+    $script:CleanupQueries[1] -notmatch 'EXEC sys\.sp_executesql' -or
     $script:CleanupQueries[1] -notmatch 'sp_replicationdboption' -or
     $script:CleanupQueries[1] -notmatch 'sp_delete_job') {
     throw 'Stale MP replica cleanup did not inventory subscriptions or remove every owned SQL artifact.'
 }
+foreach ($unsafeStaticCatalogPattern in @(
+        'PublicationCount\s*=\s*CASE\s+WHEN\s+OBJECT_ID',
+        'DECLARE\s+@remainingPublications\s+int\s*=\s*CASE',
+        'ELSE\s+\(SELECT\s+COUNT\(\*\)\s+FROM\s+dbo\.syspublications'
+    )) {
+    if ($script:CleanupQueries[0] -match $unsafeStaticCatalogPattern -or
+        $script:CleanupQueries[1] -match $unsafeStaticCatalogPattern) {
+        throw "Absent replication catalogs can still fail SQL batch compilation: $unsafeStaticCatalogPattern"
+    }
+}
+
+$script:CleanupMode = $true
+$script:CleanupQueries.Clear()
+$script:CleanupPublicationCount = 0
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 0
+$script:CleanupSubscriptionCatalogComplete = 0
+$script:CleanupDatabaseIsPublished = 0
+$script:CleanupAgentJobCount = 0
+$freshDatabaseResult = Remove-StaleMPReplicaSiteArtifacts
+if (-not $freshDatabaseResult -or $script:CleanupQueries.Count -ne 1) {
+    throw 'A fresh unpublished site database did not converge as a zero-artifact cleanup state.'
+}
+
+$script:CleanupQueries.Clear()
+$script:CleanupPublicationCount = 1
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 1
+$script:CleanupSubscriptionCatalogComplete = 0
+$script:CleanupDatabaseIsPublished = 1
+$script:CleanupAgentJobCount = 0
+$incompleteCatalogFailure = $null
+try { $null = Remove-StaleMPReplicaSiteArtifacts }
+catch { $incompleteCatalogFailure = $_.Exception.Message }
+if ($incompleteCatalogFailure -notmatch 'live subscriptions cannot be ruled out') {
+    throw "Incomplete replication catalogs did not fail closed: '$incompleteCatalogFailure'."
+}
+
+$script:CleanupQueries.Clear()
+$script:CleanupPublicationCount = 0
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 0
+$script:CleanupSubscriptionCatalogComplete = 0
+$script:CleanupDatabaseIsPublished = 1
+$publishedCatalogFailure = $null
+try { $null = Remove-StaleMPReplicaSiteArtifacts }
+catch { $publishedCatalogFailure = $_.Exception.Message }
+if ($publishedCatalogFailure -notmatch 'site database is marked published') {
+    throw "A published database with an unavailable publication catalog did not fail closed: '$publishedCatalogFailure'."
+}
+$script:CleanupPublicationCount = 1
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 1
+$script:CleanupSubscriptionCatalogComplete = 1
+$script:CleanupDatabaseIsPublished = 1
+$script:CleanupAgentJobCount = 2
+$script:CleanupMode = $false
 
 Reset-TestState
 $script:StateQueue.Enqueue((New-State -Running $true -AgentRunning $false -ActivitySaysRunning $true))

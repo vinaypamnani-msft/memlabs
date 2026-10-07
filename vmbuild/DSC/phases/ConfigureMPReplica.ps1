@@ -279,14 +279,47 @@ function Remove-StaleMPReplicaSiteArtifacts {
     $jobPrefix = "$siteSqlShort-$siteDbName-".Replace("'", "''")
 
     $inventory = @(Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+DECLARE @publicationCount int = 0;
+DECLARE @subscriptionCount int = 0;
+DECLARE @publicationCatalogPresent bit =
+    CASE WHEN OBJECT_ID(N'dbo.syspublications') IS NULL THEN 0 ELSE 1 END;
+DECLARE @subscriptionCatalogComplete bit =
+    CASE WHEN OBJECT_ID(N'dbo.syssubscriptions') IS NOT NULL
+              AND OBJECT_ID(N'dbo.sysarticles') IS NOT NULL
+         THEN 1 ELSE 0 END;
+
+IF @publicationCatalogPresent = 1
+BEGIN
+    EXEC sys.sp_executesql
+        N'SELECT @result = COUNT(*)
+          FROM dbo.syspublications
+          WHERE name = N''ConfigMgr_MPReplica'';',
+        N'@result int OUTPUT',
+        @result = @publicationCount OUTPUT;
+END;
+
+IF @publicationCount > 0 AND @subscriptionCatalogComplete = 1
+BEGIN
+    EXEC sys.sp_executesql
+        N'SELECT @result = COUNT(*)
+          FROM dbo.syssubscriptions s
+          JOIN dbo.sysarticles a ON a.artid = s.artid
+          JOIN dbo.syspublications p ON p.pubid = a.pubid
+          WHERE p.name = N''ConfigMgr_MPReplica'';',
+        N'@result int OUTPUT',
+        @result = @subscriptionCount OUTPUT;
+END;
+
 SELECT
-    PublicationCount = CASE WHEN OBJECT_ID(N'dbo.syspublications') IS NULL THEN 0
-        ELSE (SELECT COUNT(*) FROM dbo.syspublications WHERE name = N'ConfigMgr_MPReplica') END,
-    SubscriptionCount = CASE WHEN OBJECT_ID(N'dbo.syssubscriptions') IS NULL OR OBJECT_ID(N'dbo.syspublications') IS NULL THEN 0
-        ELSE (SELECT COUNT(*) FROM dbo.syssubscriptions s
-              JOIN dbo.sysarticles a ON a.artid = s.artid
-              JOIN dbo.syspublications p ON p.pubid = a.pubid
-              WHERE p.name = N'ConfigMgr_MPReplica') END,
+    PublicationCount = @publicationCount,
+    SubscriptionCount = @subscriptionCount,
+    PublicationCatalogPresent = @publicationCatalogPresent,
+    SubscriptionCatalogComplete = @subscriptionCatalogComplete,
+    DatabaseIsPublished = (
+        SELECT CONVERT(bit, is_published)
+        FROM sys.databases
+        WHERE name = DB_NAME()
+    ),
     AgentJobCount = (
         SELECT COUNT(*)
         FROM msdb.dbo.sysjobs j
@@ -302,23 +335,46 @@ SELECT
     $publicationCount = [int]$state.PublicationCount
     $subscriptionCount = [int]$state.SubscriptionCount
     $agentJobCount = [int]$state.AgentJobCount
+    $publicationCatalogPresent = [int]$state.PublicationCatalogPresent -eq 1
+    $subscriptionCatalogComplete = [int]$state.SubscriptionCatalogComplete -eq 1
+    $databaseIsPublished = [int]$state.DatabaseIsPublished -eq 1
+    if ($databaseIsPublished -and -not $publicationCatalogPresent) {
+        throw 'Refusing automatic MP replica teardown: the site database is marked published but its publication catalog is unavailable, so publication ownership and live subscriptions cannot be ruled out.'
+    }
+    if ($publicationCount -gt 0 -and -not $subscriptionCatalogComplete) {
+        throw 'Refusing automatic MP replica teardown: publication ConfigMgr_MPReplica exists but its article/subscription catalogs are incomplete, so live subscriptions cannot be ruled out.'
+    }
     if ($subscriptionCount -gt 0) {
         throw "Refusing automatic MP replica teardown: publication ConfigMgr_MPReplica still has $subscriptionCount subscription(s). Hydrate the owning MP replica configuration or remove it explicitly."
     }
 
     if ($publicationCount -gt 0 -or $agentJobCount -gt 0) {
         $cleanupRows = @(Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+DECLARE @remainingPublications int = 0;
+
 IF OBJECT_ID(N'dbo.syspublications') IS NOT NULL
-   AND EXISTS (SELECT 1 FROM dbo.syspublications WHERE name = N'ConfigMgr_MPReplica')
 BEGIN
-    EXEC dbo.sp_droppublication @publication = N'ConfigMgr_MPReplica';
+    EXEC sys.sp_executesql
+        N'IF EXISTS (
+              SELECT 1
+              FROM dbo.syspublications
+              WHERE name = N''ConfigMgr_MPReplica''
+          )
+          BEGIN
+              EXEC dbo.sp_droppublication @publication = N''ConfigMgr_MPReplica'';
+          END;
+          SELECT @result = COUNT(*) FROM dbo.syspublications;',
+        N'@result int OUTPUT',
+        @result = @remainingPublications OUTPUT;
 END;
 
-DECLARE @remainingPublications int =
-    CASE WHEN OBJECT_ID(N'dbo.syspublications') IS NULL THEN 0
-         ELSE (SELECT COUNT(*) FROM dbo.syspublications) END;
-
 IF @remainingPublications = 0
+   AND EXISTS (
+       SELECT 1
+       FROM sys.databases
+       WHERE name = DB_NAME()
+         AND is_published = 1
+   )
 BEGIN
     EXEC master.dbo.sp_replicationdboption
         @dbname = N'$($siteDbName.Replace("'", "''"))',
@@ -346,14 +402,15 @@ CLOSE stale_jobs;
 DEALLOCATE stale_jobs;
 
 SELECT
-    PublicationCount = CASE WHEN OBJECT_ID(N'dbo.syspublications') IS NULL THEN 0
-        ELSE (SELECT COUNT(*) FROM dbo.syspublications WHERE name = N'ConfigMgr_MPReplica') END,
+    PublicationCount = @remainingPublications,
     AgentJobCount = (
         SELECT COUNT(*)
         FROM msdb.dbo.sysjobs j
         LEFT JOIN msdb.dbo.syscategories c ON c.category_id = j.category_id
         WHERE j.name LIKE N'%-ConfigMgr[_]MPReplica-%'
-           OR (c.name = N'REPL-LogReader' AND j.name LIKE N'$jobPrefix%')
+           OR (@remainingPublications = 0
+               AND c.name = N'REPL-LogReader'
+               AND j.name LIKE N'$jobPrefix%')
     );
 "@)
         $cleanupState = $cleanupRows | Select-Object -First 1

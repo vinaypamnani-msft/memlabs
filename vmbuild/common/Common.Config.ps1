@@ -117,6 +117,7 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
         [Parameter(Mandatory = $true)]
         [object] $Config,
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
         [AllowEmptyCollection()]
         [object[]] $ExistingVMs
     )
@@ -1354,8 +1355,18 @@ function Add-RemoteSQLVMToDeployConfig {
         [bool] $hidden = $true
     )
     Write-Log -Verbose "Adding Hidden SQL to config $vmName"
-    Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
-    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
+    $remoteSQLVM = $configToModify.virtualMachines |
+        Where-Object { $_.vmName -ieq $vmName } |
+        Select-Object -First 1
+    if (-not $remoteSQLVM) {
+        Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
+        $remoteSQLVM = $configToModify.virtualMachines |
+            Where-Object { $_.vmName -ieq $vmName } |
+            Select-Object -First 1
+    }
+    if (-not $remoteSQLVM) {
+        $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
+    }
     if (-not $remoteSQLVM) {
         Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it does not, please modify the hyper-v config to reflect the new name" -Failure
         return
@@ -1902,11 +1913,14 @@ function Add-ExistingVMsToDeployConfig {
     try {
         $global:DisableSmartUpdate = $false
         $global:vm_List_Dirty = $true
-        $refreshedVmInventory = get-list -type vm -SmartUpdate
-        $inventoryRefreshVerified = $null -ne $refreshedVmInventory -and
+        $refreshedVmInventoryResult = get-list -type vm -SmartUpdate
+        $inventoryRefreshVerified = $null -ne $refreshedVmInventoryResult -and
             $global:vm_List_LastUpdate -and
             $global:vm_List_LastUpdate -ge $inventoryRefreshStarted -and
             -not $global:vm_List_Dirty
+        [object[]]$refreshedVmInventory = @(
+            $refreshedVmInventoryResult | Where-Object { $null -ne $_ }
+        )
     }
     finally {
         $global:DisableSmartUpdate = [bool]$disableSmartUpdateValue
