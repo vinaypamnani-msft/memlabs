@@ -41,8 +41,11 @@ function Assert-Equal {
 
 $functionsPath = Join-Path $RootPath 'DSC\phases\ScriptFunctions.ps1'
 $perfloadingPath = Join-Path $RootPath 'DSC\phases\perfloading.ps1'
+. (Import-TestFunction -Path $functionsPath -Name 'Invoke-CMRoleTargetCommand')
 . (Import-TestFunction -Path $functionsPath -Name 'Test-CMWsusReplicaContractMismatch')
 . (Import-TestFunction -Path $functionsPath -Name 'Get-CMWsusPostinstallArguments')
+. (Import-TestFunction -Path $functionsPath -Name 'Wait-CMWsusPostinstallProgress')
+. (Import-TestFunction -Path $functionsPath -Name 'Invoke-CMWsusReplicaHealthCheck')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Repair-DownstreamWsusReplicaSync')
 
 $exactFailure = @"
@@ -68,11 +71,122 @@ Assert-Equal 'postinstall,SQL_INSTANCE_NAME=SQL1,5422,CONTENT_DIR=E:\WSUS' `
     ($sqlArgs -join ',') `
     'SQL-backed WSUS postinstall arguments lost the SQL target or content path.'
 
+$script:TransportOpenTimeout = 0
+$script:TransportOperationTimeout = 0
+$script:TransportCancelTimeout = 0
+function Write-DscStatus {
+    param([string] $Message, [switch] $Warning, [switch] $Failure)
+}
+function New-PSSessionOption {
+    [CmdletBinding()]
+    param(
+        [int] $OpenTimeout,
+        [int] $OperationTimeout,
+        [int] $CancelTimeout
+    )
+    $script:TransportOpenTimeout = $OpenTimeout
+    $script:TransportOperationTimeout = $OperationTimeout
+    $script:TransportCancelTimeout = $CancelTimeout
+    return [pscustomobject]@{
+        OpenTimeout = $OpenTimeout
+        OperationTimeout = $OperationTimeout
+        CancelTimeout = $CancelTimeout
+    }
+}
+function Invoke-Command {
+    [CmdletBinding()]
+    param(
+        [string] $ComputerName,
+        [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList,
+        [object] $SessionOption
+    )
+    return [pscustomobject]@{
+        Server = $ComputerName; ProbeSucceeded = $true; WsusRunning = $false
+        LastResult = 'Succeeded'; LastError = ''; LastErrorText = ''
+        ContractMismatch = $false; RepairAttempted = $false
+        RepairSucceeded = $true; PostinstallExitCode = $null
+        Detail = 'transport fixture'
+    }
+}
+
+$transportState = Invoke-CMWsusReplicaHealthCheck -ServerFQDN 'SUP-REMOTE.lab.test'
+Assert-True ([bool]$transportState.ProbeSucceeded) `
+    'The real WSUS health wrapper did not traverse the remote transport helper.'
+Assert-Equal 10000 $script:TransportOpenTimeout `
+    'WSUS health check changed the bounded remote open timeout.'
+Assert-Equal 300000 $script:TransportOperationTimeout `
+    'WSUS health check changed the bounded live-connection test timeout.'
+Assert-Equal 5000 $script:TransportCancelTimeout `
+    'WSUS health check changed the bounded remote cancellation timeout.'
+
+$overBudgetFailure = $null
+try {
+    $null = Invoke-CMRoleTargetCommand -ComputerName 'SUP-REMOTE.lab.test' `
+        -ScriptBlock { $true } -OperationTimeoutMs 300001
+}
+catch { $overBudgetFailure = $_.Exception.Message }
+Assert-True ($overBudgetFailure -match 'greater than the maximum allowed range of 300000') `
+    'Remote role operations no longer reject a dead-connection test above five minutes.'
+
+$monitorRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-wsus-monitor-$PID"
+$progressPath = Join-Path $monitorRoot 'progress.log'
+$stdoutPath = Join-Path $monitorRoot 'stdout.log'
+$stderrPath = Join-Path $monitorRoot 'stderr.log'
+$progressProcess = $null
+$stalledProcess = $null
+try {
+    $null = New-Item -ItemType Directory -Path $monitorRoot -Force
+    $enginePath = (Get-Process -Id $PID -ErrorAction Stop).Path
+    $escapedProgressPath = $progressPath.Replace("'", "''")
+    $progressCommand = "& { 1..5 | ForEach-Object { Add-Content -LiteralPath '$escapedProgressPath' -Value `$_; Start-Sleep -Milliseconds 500 } }"
+    $progressEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($progressCommand))
+    $progressProcess = Start-Process -FilePath $enginePath `
+        -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $progressEncoded) `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
+        -WindowStyle Hidden -PassThru
+    $progressResult = Wait-CMWsusPostinstallProgress -Process $progressProcess `
+        -OutputPaths @($stdoutPath, $stderrPath, $progressPath) `
+        -PollMilliseconds 250 -StallMilliseconds 1000
+    Assert-True ($progressResult.ElapsedSeconds -ge 2 -and $progressResult.ProgressEvents -ge 2) `
+        'A long-running process with continuing file progress was not allowed to finish.'
+
+    $stallCommand = '& { Start-Sleep -Seconds 30 }'
+    $stallEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($stallCommand))
+    $stalledProcess = Start-Process -FilePath $enginePath `
+        -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $stallEncoded) `
+        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
+        -WindowStyle Hidden -PassThru
+    $stallFailure = $null
+    try {
+        $null = Wait-CMWsusPostinstallProgress -Process $stalledProcess `
+            -OutputPaths @($stdoutPath, $stderrPath) `
+            -PollMilliseconds 250 -StallMilliseconds 1000
+    }
+    catch { $stallFailure = $_.Exception.Message }
+    Assert-True ($stallFailure -match 'made no observable progress') `
+        'A process with no output, log, or I/O progress was not stopped by the stall watchdog.'
+}
+finally {
+    foreach ($process in @($progressProcess, $stalledProcess)) {
+        if ($process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        if ($process) { $process.Dispose() }
+    }
+    Remove-Item -LiteralPath $monitorRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $perfloading = Get-Content -LiteralPath $perfloadingPath -Raw
 $functionsText = Get-Content -LiteralPath $functionsPath -Raw
 Assert-True ($functionsText -match
     '\$\{function:Get-CMWsusPostinstallArguments\}\.ToString\(\)') `
     'Remote WSUS repair does not execute the tested postinstall argument builder.'
+Assert-True ($functionsText -match
+    '\$\{function:Wait-CMWsusPostinstallProgress\}\.ToString\(\)') `
+    'Remote WSUS repair does not execute the tested progress/stall monitor.'
+Assert-True ($functionsText -notmatch 'WaitForExit\(900000\)') `
+    'WSUS postinstall still has a fixed total-duration deadline.'
 Assert-True ($perfloading -match
     'Repair-DownstreamWsusReplicaSync -SoftwareUpdatePoints @\(\$Sups\)') `
     'Downstream replica recovery is not wired independently of product changes.'
@@ -97,9 +211,6 @@ $DomainFullName = 'lab.test'
 $HierarchySiteCode = 'CAS'
 $Tag = '[test]'
 
-function Write-DscStatus {
-    param([string] $Message, [switch] $Warning, [switch] $Failure)
-}
 function Invoke-CMWsusReplicaHealthCheck {
     param([string] $ServerFQDN, [switch] $RepairContractMismatch)
 

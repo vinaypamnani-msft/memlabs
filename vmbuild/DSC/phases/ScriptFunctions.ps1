@@ -1934,6 +1934,115 @@ function Get-CMWsusPostinstallArguments {
     return [string[]]$arguments.ToArray()
 }
 
+function Wait-CMWsusPostinstallProgress {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process] $Process,
+        [Parameter(Mandatory = $true)]
+        [string[]] $OutputPaths,
+        [ValidateRange(100, 60000)]
+        [int] $PollMilliseconds = 10000,
+        [ValidateRange(1000, 86400000)]
+        [int] $StallMilliseconds = 1800000
+    )
+
+    $startedUtc = [DateTime]::UtcNow
+    $lastProgressUtc = $startedUtc
+    $progressEvents = 0
+    $lastFingerprint = ''
+
+    $getProgressFingerprint = {
+        $signals = [System.Collections.Generic.List[string]]::new()
+        $trackedPaths = [System.Collections.Generic.List[string]]::new()
+        foreach ($path in @($OutputPaths)) {
+            if (-not [string]::IsNullOrWhiteSpace($path)) { $trackedPaths.Add($path) }
+        }
+        foreach ($tempRoot in @($env:TEMP, (Join-Path $env:windir 'Temp'))) {
+            if ([string]::IsNullOrWhiteSpace($tempRoot) -or
+                -not (Test-Path -LiteralPath $tempRoot -PathType Container)) {
+                continue
+            }
+            foreach ($tempLog in @(Get-ChildItem -LiteralPath $tempRoot -File -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.LastWriteTimeUtc -ge $startedUtc.AddMinutes(-5) -and
+                        $_.Name -match '(?i)^WSUS.*\.(log|tmp)$'
+                    })) {
+                $trackedPaths.Add($tempLog.FullName)
+            }
+        }
+
+        foreach ($path in @($trackedPaths | Select-Object -Unique)) {
+            try {
+                $item = Get-Item -LiteralPath $path -ErrorAction Stop
+                $signals.Add("file=$path|bytes=$($item.Length)|write=$($item.LastWriteTimeUtc.Ticks)")
+            }
+            catch { }
+        }
+
+        try {
+            $processState = Get-CimInstance -ClassName Win32_Process `
+                -Filter "ProcessId = $($Process.Id)" -OperationTimeoutSec 5 `
+                -ErrorAction Stop
+            if ($processState) {
+                $signals.Add(
+                    "io=$($processState.ReadOperationCount)/$($processState.WriteOperationCount)/" +
+                    "$($processState.OtherOperationCount)/$($processState.ReadTransferCount)/" +
+                    "$($processState.WriteTransferCount)/$($processState.OtherTransferCount)"
+                )
+            }
+        }
+        catch { }
+
+        return (@($signals | Sort-Object) -join ';')
+    }
+
+    $lastFingerprint = & $getProgressFingerprint
+    while (-not $Process.WaitForExit($PollMilliseconds)) {
+        $Process.Refresh()
+        $fingerprint = & $getProgressFingerprint
+        if ($fingerprint -ne $lastFingerprint) {
+            $lastFingerprint = $fingerprint
+            $lastProgressUtc = [DateTime]::UtcNow
+            $progressEvents++
+        }
+
+        $elapsedSeconds = [int]([DateTime]::UtcNow - $startedUtc).TotalSeconds
+        $stalledSeconds = [int]([DateTime]::UtcNow - $lastProgressUtc).TotalSeconds
+        $cpuSeconds = 0
+        try { $cpuSeconds = [math]::Round($Process.TotalProcessorTime.TotalSeconds, 1) } catch { }
+        Write-Progress -Activity 'WSUS postinstall repair' `
+            -Status "elapsed=${elapsedSeconds}s; no observable progress=${stalledSeconds}s; progressEvents=$progressEvents; processCpu=${cpuSeconds}s" `
+            -PercentComplete -1
+
+        if (($stalledSeconds * 1000) -ge $StallMilliseconds) {
+            $tails = [System.Collections.Generic.List[string]]::new()
+            foreach ($path in @($OutputPaths)) {
+                try {
+                    $tail = (Get-Content -LiteralPath $path -Tail 6 -ErrorAction Stop) -join ' | '
+                    if ($tail) { $tails.Add("$path`: $tail") }
+                }
+                catch { }
+            }
+            try { Stop-Process -Id $Process.Id -Force -ErrorAction Stop } catch { }
+            try { [void]$Process.WaitForExit(5000) } catch { }
+            $stallMinutes = [math]::Round($StallMilliseconds / 60000, 1)
+            throw "wsusutil postinstall made no observable progress for $stallMinutes minute(s) " +
+                "(elapsed=${elapsedSeconds}s, progressEvents=$progressEvents, signal='$lastFingerprint'). " +
+                "Output tail: $($tails -join ' || ')"
+        }
+    }
+
+    Write-Progress -Activity 'WSUS postinstall repair' -Completed
+    $Process.WaitForExit()
+    $Process.Refresh()
+    return [pscustomobject]@{
+        ElapsedSeconds         = [int]([DateTime]::UtcNow - $startedUtc).TotalSeconds
+        LastProgressAgeSeconds = [int]([DateTime]::UtcNow - $lastProgressUtc).TotalSeconds
+        ProgressEvents         = $progressEvents
+    }
+}
+
 function Invoke-CMWsusReplicaHealthCheck {
     param(
         [Parameter(Mandatory = $true)]
@@ -1944,7 +2053,8 @@ function Invoke-CMWsusReplicaHealthCheck {
     $probe = {
         param(
             [bool] $AllowRepair,
-            [string] $PostinstallArgumentBuilderText
+            [string] $PostinstallArgumentBuilderText,
+            [string] $PostinstallProgressMonitorText
         )
 
         $result = [ordered]@{
@@ -2008,6 +2118,7 @@ function Invoke-CMWsusReplicaHealthCheck {
             }
             $sqlServerName = "$($setup.SqlServerName)"
             $argumentBuilder = [scriptblock]::Create($PostinstallArgumentBuilderText)
+            $progressMonitor = [scriptblock]::Create($PostinstallProgressMonitorText)
             $arguments = @(& $argumentBuilder -SqlServerName $sqlServerName `
                     -ContentPath $contentPath)
 
@@ -2018,11 +2129,8 @@ function Invoke-CMWsusReplicaHealthCheck {
                 $process = Start-Process -FilePath $wsusUtil -ArgumentList $arguments `
                     -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
                     -WindowStyle Hidden -PassThru -ErrorAction Stop
-                if (-not $process.WaitForExit(900000)) {
-                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-                    throw 'wsusutil postinstall exceeded its 15-minute deadline'
-                }
-                $process.Refresh()
+                $monitorResult = & $progressMonitor -Process $process `
+                    -OutputPaths @($stdoutPath, $stderrPath)
                 $result.PostinstallExitCode = [int]$process.ExitCode
                 $output = @(
                     [System.IO.File]::ReadAllText($stdoutPath)
@@ -2053,7 +2161,9 @@ function Invoke-CMWsusReplicaHealthCheck {
             [void][Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
             $result.RepairSucceeded = $true
             $result.Detail =
-                "wsusutil postinstall repaired the local WSUS database contract (SQL='$sqlServerName', ContentDir='$contentPath')"
+                "wsusutil postinstall repaired the local WSUS database contract " +
+                "(SQL='$sqlServerName', ContentDir='$contentPath', elapsed=$($monitorResult.ElapsedSeconds)s, " +
+                "progressEvents=$($monitorResult.ProgressEvents))"
         }
         catch {
             $result.Detail = $_.Exception.Message
@@ -2064,11 +2174,13 @@ function Invoke-CMWsusReplicaHealthCheck {
 
     try {
         $argumentBuilderText = ${function:Get-CMWsusPostinstallArguments}.ToString()
+        $progressMonitorText = ${function:Wait-CMWsusPostinstallProgress}.ToString()
         $state = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN `
             -ScriptBlock $probe -ArgumentList @(
-                [bool]$RepairContractMismatch, $argumentBuilderText
+                [bool]$RepairContractMismatch, $argumentBuilderText,
+                $progressMonitorText
             ) `
-            -OperationTimeoutMs 960000
+            -OperationTimeoutMs 300000
         $state = @($state | Where-Object { $_ -and
                 $_.PSObject.Properties.Name -contains 'ProbeSucceeded' }) | Select-Object -Last 1
     }
