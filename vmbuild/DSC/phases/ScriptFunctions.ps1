@@ -1904,6 +1904,214 @@ function Confirm-CMWsusPoolHardening {
     return $false
 }
 
+function Test-CMWsusReplicaContractMismatch {
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $ErrorText
+    )
+
+    return [bool]($ErrorText -match
+        "(?is)spGetUpdatesForBulkHideInReplicaSync.+expects parameter\s+'?@xmlAllUpdateIds'?.+not supplied")
+}
+
+function Get-CMWsusPostinstallArguments {
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $SqlServerName,
+        [Parameter(Mandatory = $true)]
+        [string] $ContentPath
+    )
+
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    $arguments.Add('postinstall')
+    if (-not [string]::IsNullOrWhiteSpace($SqlServerName) -and
+        $SqlServerName -notmatch '(?i)(MICROSOFT##WID|##WID|\\pipe\\MICROSOFT##WID)') {
+        $arguments.Add("SQL_INSTANCE_NAME=$SqlServerName")
+    }
+    $arguments.Add("CONTENT_DIR=$ContentPath")
+    return [string[]]$arguments.ToArray()
+}
+
+function Invoke-CMWsusReplicaHealthCheck {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ServerFQDN,
+        [switch] $RepairContractMismatch
+    )
+
+    $probe = {
+        param(
+            [bool] $AllowRepair,
+            [string] $PostinstallArgumentBuilderText
+        )
+
+        $result = [ordered]@{
+            Server             = $env:COMPUTERNAME
+            ProbeSucceeded     = $false
+            WsusRunning        = $false
+            LastResult         = 'Unknown'
+            LastError          = ''
+            LastErrorText      = ''
+            ContractMismatch   = $false
+            RepairAttempted    = $false
+            RepairSucceeded    = $false
+            PostinstallExitCode = $null
+            Detail             = ''
+        }
+
+        try {
+            [void][System.Reflection.Assembly]::LoadWithPartialName(
+                'Microsoft.UpdateServices.Administration')
+            $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+            $subscription = $wsus.GetSubscription()
+            try {
+                $result.WsusRunning =
+                    "$($subscription.GetSynchronizationStatus())" -eq 'Running'
+            }
+            catch { }
+
+            $history = @($subscription.GetSynchronizationHistory() |
+                Sort-Object StartTime -Descending | Select-Object -First 1)
+            if ($history.Count -gt 0) {
+                $latest = $history[0]
+                $result.LastResult = "$($latest.Result)"
+                $result.LastError = "$($latest.Error)"
+                $result.LastErrorText = "$($latest.ErrorText)"
+            }
+            $result.ProbeSucceeded = $true
+            $result.ContractMismatch = [bool]($result.LastErrorText -match
+                "(?is)spGetUpdatesForBulkHideInReplicaSync.+expects parameter\s+'?@xmlAllUpdateIds'?.+not supplied")
+            if (-not $result.ContractMismatch -or -not $AllowRepair) {
+                $result.RepairSucceeded = -not $result.ContractMismatch
+                $result.Detail = if ($result.ContractMismatch) {
+                    'WSUS replica API/SUSDB contract mismatch detected'
+                }
+                else {
+                    "LastResult=$($result.LastResult), Running=$($result.WsusRunning)"
+                }
+                return [pscustomobject]$result
+            }
+
+            $result.RepairAttempted = $true
+            $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
+            if (-not (Test-Path -LiteralPath $wsusUtil -PathType Leaf)) {
+                throw "wsusutil.exe was not found at '$wsusUtil'"
+            }
+            $setup = Get-ItemProperty `
+                -Path 'HKLM:\SOFTWARE\Microsoft\Update Services\Server\Setup' `
+                -ErrorAction Stop
+            $contentPath = "$($setup.ContentDir)"
+            if ([string]::IsNullOrWhiteSpace($contentPath)) {
+                throw 'WSUS ContentDir is empty in the server setup registry'
+            }
+            $sqlServerName = "$($setup.SqlServerName)"
+            $argumentBuilder = [scriptblock]::Create($PostinstallArgumentBuilderText)
+            $arguments = @(& $argumentBuilder -SqlServerName $sqlServerName `
+                    -ContentPath $contentPath)
+
+            $stdoutPath = [System.IO.Path]::GetTempFileName()
+            $stderrPath = [System.IO.Path]::GetTempFileName()
+            $process = $null
+            try {
+                $process = Start-Process -FilePath $wsusUtil -ArgumentList $arguments `
+                    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
+                    -WindowStyle Hidden -PassThru -ErrorAction Stop
+                if (-not $process.WaitForExit(900000)) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    throw 'wsusutil postinstall exceeded its 15-minute deadline'
+                }
+                $process.Refresh()
+                $result.PostinstallExitCode = [int]$process.ExitCode
+                $output = @(
+                    [System.IO.File]::ReadAllText($stdoutPath)
+                    [System.IO.File]::ReadAllText($stderrPath)
+                ) -join "`n"
+                if ($process.ExitCode -ne 0 -or
+                    $output -match '(?im)^\s*(Fatal Error|Exception|Post install failed)') {
+                    $tail = (($output -split '\r?\n' | Select-Object -Last 12) -join ' | ').Trim()
+                    throw "wsusutil postinstall failed (exit $($process.ExitCode)): $tail"
+                }
+            }
+            finally {
+                foreach ($path in @($stdoutPath, $stderrPath)) {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            Restart-Service -Name WsusService -Force -ErrorAction Stop
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                if (Test-Path -LiteralPath 'IIS:\AppPools\WsusPool') {
+                    Restart-WebAppPool -Name WsusPool -ErrorAction Stop
+                }
+            }
+            catch {
+                throw "WSUS postinstall succeeded, but WsusPool restart failed: $($_.Exception.Message)"
+            }
+            [void][Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+            $result.RepairSucceeded = $true
+            $result.Detail =
+                "wsusutil postinstall repaired the local WSUS database contract (SQL='$sqlServerName', ContentDir='$contentPath')"
+        }
+        catch {
+            $result.Detail = $_.Exception.Message
+        }
+
+        return [pscustomobject]$result
+    }
+
+    try {
+        $argumentBuilderText = ${function:Get-CMWsusPostinstallArguments}.ToString()
+        $state = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN `
+            -ScriptBlock $probe -ArgumentList @(
+                [bool]$RepairContractMismatch, $argumentBuilderText
+            ) `
+            -OperationTimeoutMs 960000
+        $state = @($state | Where-Object { $_ -and
+                $_.PSObject.Properties.Name -contains 'ProbeSucceeded' }) | Select-Object -Last 1
+    }
+    catch {
+        $state = [pscustomobject]@{
+            Server = $ServerFQDN; ProbeSucceeded = $false; WsusRunning = $false
+            LastResult = 'Unknown'; LastError = ''; LastErrorText = ''
+            ContractMismatch = $false; RepairAttempted = $false
+            RepairSucceeded = $false; PostinstallExitCode = $null
+            Detail = $_.Exception.Message
+        }
+    }
+
+    if (-not $state) {
+        $state = [pscustomobject]@{
+            Server = $ServerFQDN; ProbeSucceeded = $false; WsusRunning = $false
+            LastResult = 'Unknown'; LastError = ''; LastErrorText = ''
+            ContractMismatch = $false; RepairAttempted = $false
+            RepairSucceeded = $false; PostinstallExitCode = $null
+            Detail = 'WSUS replica health probe returned no structured result'
+        }
+    }
+
+    $level = if (-not $state.ProbeSucceeded -or
+        ($state.ContractMismatch -and -not $state.RepairSucceeded)) {
+        'Failure'
+    }
+    else {
+        ''
+    }
+    $message = "WSUS replica health on $ServerFQDN`: LastResult=$($state.LastResult), " +
+        "Running=$($state.WsusRunning), ContractMismatch=$($state.ContractMismatch), " +
+        "RepairAttempted=$($state.RepairAttempted), RepairSucceeded=$($state.RepairSucceeded); " +
+        "$($state.Detail)"
+    if ($level -eq 'Failure') {
+        Write-DscStatus $message -Failure
+    }
+    else {
+        Write-DscStatus $message
+    }
+    return $state
+}
+
 function Get-CMReportingPointReadiness {
     param(
         [Parameter(Mandatory = $true)]

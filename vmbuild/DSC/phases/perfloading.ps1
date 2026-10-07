@@ -3160,6 +3160,8 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             TotalItems     = -1
             ProcessedItems = -1
             LastResult     = 'Unknown'
+            LastError      = ''
+            LastErrorText  = ''
             UpdateCount    = -1
         }
         try {
@@ -3181,8 +3183,13 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                 catch { }
             }
             try {
-                $lastInfo = $sub.GetLastSynchronizationInfo()
-                $r.LastResult = $lastInfo.Result.ToString()
+                $lastInfo = @($sub.GetSynchronizationHistory() |
+                    Sort-Object StartTime -Descending | Select-Object -First 1)
+                if ($lastInfo.Count -gt 0) {
+                    $r.LastResult = "$($lastInfo[0].Result)"
+                    $r.LastError = "$($lastInfo[0].Error)"
+                    $r.LastErrorText = "$($lastInfo[0].ErrorText)"
+                }
             }
             catch { }
         }
@@ -3365,6 +3372,100 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
         Write-DscStatus "$Tag $Label did not complete after $MaxAttempts attempts."
         Write-WsusDiagnostics -Reason "$Label final timeout diagnostics"
+        return $false
+    }
+
+    function Repair-DownstreamWsusReplicaSync {
+        param([object[]] $SoftwareUpdatePoints)
+
+        if ($isTopLevel -or -not $SoftwareUpdatePoints) { return $true }
+
+        $initialStates = [System.Collections.Generic.List[object]]::new()
+        foreach ($supVm in @($SoftwareUpdatePoints | Sort-Object vmName -Unique)) {
+            $supHost = "$($supVm.vmName)"
+            if ([string]::IsNullOrWhiteSpace($supHost)) { continue }
+            if (-not $supHost.Contains('.')) { $supHost = "$supHost.$DomainFullName" }
+            $state = Invoke-CMWsusReplicaHealthCheck -ServerFQDN $supHost `
+                -RepairContractMismatch
+            $initialStates.Add($state)
+        }
+
+        $unreadable = @($initialStates | Where-Object { -not $_.ProbeSucceeded })
+        $repairFailed = @($initialStates | Where-Object {
+                $_.ContractMismatch -and -not $_.RepairSucceeded
+            })
+        if ($unreadable.Count -gt 0 -or $repairFailed.Count -gt 0) {
+            $bad = @($unreadable + $repairFailed | ForEach-Object {
+                    "$($_.Server): $($_.Detail)"
+                } | Select-Object -Unique)
+            Write-DscStatus "$Tag Downstream WSUS replica repair could not establish a healthy repair boundary: $($bad -join ' | ')" -Failure
+            return $false
+        }
+
+        $failed = @($initialStates | Where-Object {
+                $_.LastResult -eq 'Failed' -and -not $_.WsusRunning
+            })
+        if ($failed.Count -eq 0) {
+            Write-DscStatus "$Tag Downstream WSUS replicas do not have a failed native sync to recover."
+            return $true
+        }
+
+        $upstreamReady = $false
+        for ($attempt = 1; $attempt -le 40; $attempt++) {
+            $upstreamStatus = Get-CMSoftwareUpdateSyncStatus |
+                Where-Object { "$($_.SiteCode)" -ieq "$HierarchySiteCode" } |
+                Select-Object -First 1
+            if ($upstreamStatus -and [int]$upstreamStatus.LastSyncState -eq 6702) {
+                Write-DscStatus "$Tag Upstream site $HierarchySiteCode completed its SUP sync; downstream replica recovery may start."
+                $upstreamReady = $true
+                break
+            }
+            if ($upstreamStatus -and
+                [int]$upstreamStatus.LastSyncState -notin @(6701, 6704, 6705, 6706)) {
+                Write-DscStatus "$Tag Upstream site $HierarchySiteCode is not ready for replica recovery (state=$($upstreamStatus.LastSyncState), error=$($upstreamStatus.LastSyncErrorCode))." -Failure
+                return $false
+            }
+            $state = if ($upstreamStatus) { "$($upstreamStatus.LastSyncState)" } else { 'no-row' }
+            Write-DscStatus "$Tag Waiting for upstream site $HierarchySiteCode SUP sync before repairing child replicas (state=$state, attempt $attempt of 40)."
+            if ($attempt -lt 40) { Start-Sleep -Seconds 30 }
+        }
+        if (-not $upstreamReady) {
+            Write-DscStatus "$Tag Upstream site $HierarchySiteCode did not complete its SUP sync within 20 minutes; downstream replica retry was not started." -Failure
+            return $false
+        }
+
+        Write-DscStatus "$Tag Recovering failed downstream WSUS replica sync on $(@($failed.Server) -join ', ') after upstream/product convergence."
+        $syncRecovered = Wait-WsusSyncCompletion -Label 'Downstream replica recovery' `
+            -MaxAttempts 40 -TriggerFirst
+        if (-not $syncRecovered) {
+            Write-DscStatus "$Tag Downstream WSUS replica synchronization did not recover within the bounded retry window." -Failure
+            return $false
+        }
+
+        $deadline = (Get-Date).AddMinutes(2)
+        do {
+            $remainingFailures = [System.Collections.Generic.List[object]]::new()
+            foreach ($supVm in @($SoftwareUpdatePoints | Sort-Object vmName -Unique)) {
+                $supHost = "$($supVm.vmName)"
+                if ([string]::IsNullOrWhiteSpace($supHost)) { continue }
+                if (-not $supHost.Contains('.')) { $supHost = "$supHost.$DomainFullName" }
+                $state = Invoke-CMWsusReplicaHealthCheck -ServerFQDN $supHost
+                if (-not $state.ProbeSucceeded -or
+                    ($state.LastResult -ne 'Succeeded' -and -not $state.WsusRunning)) {
+                    $remainingFailures.Add($state)
+                }
+            }
+            if ($remainingFailures.Count -eq 0) {
+                Write-DscStatus "$Tag Every downstream WSUS replica is running or has a successful native sync."
+                return $true
+            }
+            if ((Get-Date) -lt $deadline) { Start-Sleep -Seconds 20 }
+        } while ((Get-Date) -lt $deadline)
+
+        $details = @($remainingFailures | ForEach-Object {
+                "$($_.Server): LastResult=$($_.LastResult), Running=$($_.WsusRunning), $($_.Detail)"
+            })
+        Write-DscStatus "$Tag ConfigMgr reported recovery, but downstream WSUS replicas remained unhealthy: $($details -join ' | ')" -Failure
         return $false
     }
 
@@ -4458,6 +4559,9 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             }
         }
         } # end accepted-products block
+    }
+    if ($Sups -and -not $isTopLevel) {
+        $null = Repair-DownstreamWsusReplicaSync -SoftwareUpdatePoints @($Sups)
     }
     if ($Sups) {
         # Define ADR Names
