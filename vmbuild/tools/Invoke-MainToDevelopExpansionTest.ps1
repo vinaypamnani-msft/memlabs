@@ -86,6 +86,7 @@ $script:MutationMutex = $null
 $script:MutationMutexHeld = $false
 $script:MainBaselineFailureCleanupPossible = $false
 $script:HistoryRun = $null
+$script:ExactMainClusterAdapterCompatibilityActive = $false
 
 function Invoke-Git {
     param(
@@ -109,6 +110,76 @@ function Resolve-GitRevision {
         throw "Could not resolve '$Revision' to one commit."
     }
     return $resolved[0]
+}
+
+function Restore-ExactMainClusterAdapterCompatibility {
+    param([switch] $BestEffort)
+
+    $compatAlias = 'MemLabs-HB2-Compat'
+    $clusterV2Alias = 'vEthernet (ClusterV2)'
+    try {
+        $adapters = @(Get-NetAdapter -ErrorAction Stop)
+        $compat = @($adapters | Where-Object { $_.Name -eq $compatAlias })
+        $normal = @($adapters | Where-Object { $_.Name -eq $clusterV2Alias })
+        if ($compat.Count -gt 1 -or $normal.Count -gt 1) {
+            throw "ClusterV2 adapter alias state is ambiguous (compat=$($compat.Count), normal=$($normal.Count))."
+        }
+        if ($compat.Count -eq 0) {
+            $script:ExactMainClusterAdapterCompatibilityActive = $false
+            return $false
+        }
+        if ($normal.Count -gt 0) {
+            throw "Both '$compatAlias' and '$clusterV2Alias' exist; refusing to overwrite either adapter."
+        }
+        Rename-NetAdapter -Name $compatAlias -NewName $clusterV2Alias -ErrorAction Stop
+        $restored = @(Get-NetAdapter -ErrorAction Stop | Where-Object {
+                $_.Name -eq $clusterV2Alias
+            })
+        if ($restored.Count -ne 1) {
+            throw "ClusterV2 adapter alias restore did not produce exactly one '$clusterV2Alias' adapter."
+        }
+        $script:ExactMainClusterAdapterCompatibilityActive = $false
+        Write-Host "COMPAT: restored host adapter alias '$clusterV2Alias'." -ForegroundColor DarkGray
+        return $true
+    }
+    catch {
+        if ($BestEffort) {
+            Write-Host "WARNING: Could not restore exact-main ClusterV2 compatibility alias: $($_.Exception.Message)" -ForegroundColor Yellow
+            return $false
+        }
+        throw
+    }
+}
+
+function Enter-ExactMainClusterAdapterCompatibility {
+    $compatAlias = 'MemLabs-HB2-Compat'
+    $clusterV2Alias = 'vEthernet (ClusterV2)'
+    $legacyClusterAlias = 'vEthernet (Cluster)'
+
+    $null = Restore-ExactMainClusterAdapterCompatibility
+    $adapters = @(Get-NetAdapter -ErrorAction Stop)
+    $clusterV2 = @($adapters | Where-Object { $_.Name -eq $clusterV2Alias })
+    if ($clusterV2.Count -eq 0) { return $false }
+    if ($clusterV2.Count -ne 1) {
+        throw "Expected one '$clusterV2Alias' adapter, found $($clusterV2.Count)."
+    }
+    if (@($adapters | Where-Object { $_.Name -eq $compatAlias }).Count -gt 0) {
+        throw "Compatibility alias '$compatAlias' already exists."
+    }
+
+    Rename-NetAdapter -Name $clusterV2Alias -NewName $compatAlias -ErrorAction Stop
+    $script:ExactMainClusterAdapterCompatibilityActive = $true
+
+    $legacyMatches = @(Get-NetAdapter -ErrorAction Stop | Where-Object {
+            $_.Name -like '*Cluster*'
+        })
+    $unexpected = @($legacyMatches | Where-Object { $_.Name -ne $legacyClusterAlias })
+    if ($unexpected.Count -gt 0 -or $legacyMatches.Count -gt 1) {
+        $names = @($legacyMatches | ForEach-Object { $_.Name }) -join ', '
+        throw "Exact-main would still resolve multiple/prefix Cluster adapters after hiding ClusterV2: $names"
+    }
+    Write-Host "COMPAT: temporarily renamed '$clusterV2Alias' to '$compatAlias' while exact-main runs." -ForegroundColor DarkGray
+    return $true
 }
 
 function Get-ActiveCrossRevisionCheckpoint {
@@ -1662,6 +1733,10 @@ try {
     if (-not (Get-Command Get-VM -ErrorAction SilentlyContinue)) {
         throw 'The Hyper-V PowerShell module is unavailable. Run the live cycle on a LabHost.'
     }
+    # A host/process interruption can occur after ClusterV2 was hidden but before
+    # the exact-main invocation's finally block ran. Restore by alias identity
+    # before any resume path, including one that skips the completed main baseline.
+    $null = Restore-ExactMainClusterAdapterCompatibility
     if (-not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) {
         throw "PowerShell 7 executable not found: $pwshPath"
     }
@@ -1798,7 +1873,16 @@ try {
             Start-Step -Step $baselineStep
             $mainFixturePath = Join-Path $mainWorktree ($familyPlan.Baseline.Path -replace '/', '\')
             $script:MainBaselineFailureCleanupPossible = $true
-            $exitCode = Invoke-NewLabFixture -WorktreePath $mainWorktree -FixturePath $mainFixturePath -Label "$family-main-A"
+            $clusterAliasHidden = $false
+            try {
+                $clusterAliasHidden = Enter-ExactMainClusterAdapterCompatibility
+                $exitCode = Invoke-NewLabFixture -WorktreePath $mainWorktree -FixturePath $mainFixturePath -Label "$family-main-A"
+            }
+            finally {
+                if ($clusterAliasHidden -or $script:ExactMainClusterAdapterCompatibilityActive) {
+                    $null = Restore-ExactMainClusterAdapterCompatibility -BestEffort
+                }
+            }
             if ($exitCode -eq 0) { $script:MainBaselineFailureCleanupPossible = $false }
             if ($exitCode -ne 0) { throw "$family main baseline failed with exit code $exitCode." }
             $baselineNames = @(Get-ExpectedVmNames -Config $familyPlan.BaselineConfig)
@@ -2018,6 +2102,9 @@ catch {
     exit 1
 }
 finally {
+    if ($script:ExactMainClusterAdapterCompatibilityActive) {
+        $null = Restore-ExactMainClusterAdapterCompatibility -BestEffort
+    }
     if ($script:MutationMutexHeld) {
         try { $script:MutationMutex.ReleaseMutex() } catch { }
     }
