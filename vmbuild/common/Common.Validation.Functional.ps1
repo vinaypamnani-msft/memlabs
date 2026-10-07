@@ -5106,17 +5106,46 @@ function Test-MPReplicaFunctionality {
             return $results
         }
 
-        if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
-            try { Import-Module SqlServer -ErrorAction Stop }
-            catch {
-                try { Import-Module SQLPS -DisableNameChecking -ErrorAction Stop }
-                catch { $results.Details.Add('WARN: Invoke-Sqlcmd unavailable; skipping replica route checks'); return $results }
+        $invokeSql = {
+            param(
+                [Parameter(Mandatory = $true)][string] $Instance,
+                [Parameter(Mandatory = $true)][string] $Database,
+                [Parameter(Mandatory = $true)][string] $Query
+            )
+
+            $connection = New-Object System.Data.SqlClient.SqlConnection
+            $connection.ConnectionString =
+                "Server=$Instance;Database=$Database;Integrated Security=SSPI;" +
+                "TrustServerCertificate=True;Connect Timeout=20;" +
+                "Application Name=MemLabs-Phase11-MPReplica"
+            try {
+                $connection.Open()
+                $command = $connection.CreateCommand()
+                $command.CommandText = $Query
+                $command.CommandTimeout = 60
+                $reader = $command.ExecuteReader()
+                try {
+                    $table = New-Object System.Data.DataTable
+                    $table.Load($reader)
+                    foreach ($row in $table.Rows) {
+                        Write-Output -NoEnumerate $row
+                    }
+                }
+                finally {
+                    $reader.Dispose()
+                    $command.Dispose()
+                }
+            }
+            finally {
+                $connection.Dispose()
             }
         }
 
         try {
-            $bgb = Invoke-Sqlcmd -ServerInstance $inst -Database $db -Query "SELECT ServerName, DBID FROM v_BgbMP" -TrustServerCertificate -ErrorAction Stop
-            $routes = Invoke-Sqlcmd -ServerInstance $inst -Database $db -Query "SELECT remote_service_name FROM sys.routes WHERE remote_service_name LIKE 'ConfigMgrBGB%'" -TrustServerCertificate -ErrorAction Stop
+            $bgb = @(& $invokeSql -Instance $inst -Database $db `
+                    -Query "SELECT ServerName, DBID FROM v_BgbMP")
+            $routes = @(& $invokeSql -Instance $inst -Database $db `
+                    -Query "SELECT remote_service_name FROM sys.routes WHERE remote_service_name LIKE 'ConfigMgrBGB%'")
             $routeSvcs = @($routes | ForEach-Object { "$($_.remote_service_name)".ToLower() })
         }
         catch {
@@ -5131,7 +5160,7 @@ function Test-MPReplicaFunctionality {
         # replica DB for the BGB queue check. Matches Test-MPDatabaseReplicaHealth.ps1.
         $mpProps = @()
         try {
-            $mpProps = @(Invoke-Sqlcmd -ServerInstance $inst -Database $db -TrustServerCertificate -ErrorAction Stop -Query @"
+            $mpProps = @(& $invokeSql -Instance $inst -Database $db -Query @"
 SELECT ServerName = dbo.fnGetSiteSystemName(sys_res.NALPath),
        SQLServerName = MAX(CASE WHEN prop.Name = N'SQLServerName' THEN prop.Value2 END),
        DatabaseName  = MAX(CASE WHEN prop.Name = N'DatabaseName'  THEN prop.Value2 END)
@@ -5141,16 +5170,24 @@ WHERE sys_res.RoleTypeID = 6
 GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
 "@)
         }
-        catch { $results.Details.Add("WARN: could not read MP role SQL/DB properties: $($_.Exception.Message)") }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: could not read MP role SQL/DB properties: $($_.Exception.Message)")
+            return $results
+        }
 
         # SQL replication must be ENABLED on the site DB (publisher). syspublications
         # only exists once the DB is a publisher, so guard on OBJECT_ID. The number of
         # distinct subscribers should cover the replica MPs.
         try {
-            $pubRow = Invoke-Sqlcmd -ServerInstance $inst -Database $db -TrustServerCertificate -ErrorAction Stop -Query "IF OBJECT_ID('dbo.syspublications') IS NOT NULL SELECT COUNT(*) AS c FROM dbo.syspublications WHERE name = 'ConfigMgr_MPReplica' ELSE SELECT 0 AS c"
+            $pubRow = @(& $invokeSql -Instance $inst -Database $db `
+                    -Query "IF OBJECT_ID('dbo.syspublications') IS NOT NULL SELECT COUNT(*) AS c FROM dbo.syspublications WHERE name = 'ConfigMgr_MPReplica' ELSE SELECT 0 AS c") |
+                Select-Object -First 1
             if ([int]$pubRow.c -gt 0) {
                 $results.Details.Add("OK: SQL replication enabled (publication ConfigMgr_MPReplica present on site DB)")
-                $subRow = Invoke-Sqlcmd -ServerInstance $inst -Database $db -TrustServerCertificate -ErrorAction Stop -Query "IF OBJECT_ID('dbo.syssubscriptions') IS NOT NULL SELECT COUNT(DISTINCT srvid) AS c FROM dbo.syssubscriptions ELSE SELECT 0 AS c"
+                $subRow = @(& $invokeSql -Instance $inst -Database $db `
+                        -Query "IF OBJECT_ID('dbo.syssubscriptions') IS NOT NULL SELECT COUNT(DISTINCT srvid) AS c FROM dbo.syssubscriptions ELSE SELECT 0 AS c") |
+                    Select-Object -First 1
                 $subCount = [int]$subRow.c
                 if ($subCount -ge $mpList.Count) {
                     $results.Details.Add("OK: $subCount replication subscriber(s) registered (>= $($mpList.Count) replica MP(s))")
@@ -5166,7 +5203,9 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
             }
         }
         catch {
-            $results.Details.Add("WARN: could not verify replication publication/subscriptions: $($_.Exception.Message)")
+            $results.Passed = $false
+            $results.Details.Add("FAIL: could not verify replication publication/subscriptions: $($_.Exception.Message)")
+            return $results
         }
 
         foreach ($mp in $mpList) {
@@ -5220,7 +5259,9 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                     $rPort = $replicaPorts[(($storedSql -split '\.')[0]).ToUpper()]
                     if ($rPort) { $rInst = "$rInst,$rPort" }
                     try {
-                        $qRow = Invoke-Sqlcmd -ServerInstance $rInst -Database $rDb -TrustServerCertificate -ErrorAction Stop -Query "SELECT c = COUNT(*) FROM sys.service_queues WHERE name = 'ConfigMgrBGBQueue'"
+                        $qRow = @(& $invokeSql -Instance $rInst -Database $rDb `
+                                -Query "SELECT c = COUNT(*) FROM sys.service_queues WHERE name = 'ConfigMgrBGBQueue'") |
+                            Select-Object -First 1
                         if ([int]$qRow.c -gt 0) {
                             $results.Details.Add("OK: replica DB '$rDb' on '$rInst' has the BGB queue ConfigMgrBGBQueue (client notification wired)")
                         }
@@ -5229,7 +5270,10 @@ GROUP BY dbo.fnGetSiteSystemName(sys_res.NALPath)
                             $results.Details.Add("FAIL: replica DB '$rDb' on '$rInst' is MISSING the BGB queue ConfigMgrBGBQueue -- BgbServer logs 'The queue for BGB server doesn't exist' and client notification won't work (sp_BgbConfigSSBForReplicaDB did not complete on this replica)")
                         }
                     }
-                    catch { $results.Details.Add("WARN: could not check BGB queue on replica '$rInst' / '$rDb': $($_.Exception.Message)") }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: could not check BGB queue on replica '$rInst' / '$rDb': $($_.Exception.Message)")
+                    }
                 }
             }
             else {
