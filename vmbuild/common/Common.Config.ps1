@@ -122,6 +122,7 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
     )
 
     if (-not $Config.virtualMachines -or -not $Config.vmOptions.domainName) { return }
+    $domainName = "$($Config.vmOptions.domainName)"
     $siteRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
     $existingTopSites = @($ExistingVMs | Where-Object {
             $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.siteCode
@@ -132,12 +133,17 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
     $hierarchies = @()
     $configVmOwners = @{}
     foreach ($topSite in $existingTopSites) {
+        $topSiteDomain = if ($topSite.domain) { "$($topSite.domain)" } else { $domainName }
+        $domainSites = @($allSites | Where-Object {
+                $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $domainName }
+                $candidateDomain -ieq $topSiteDomain
+            })
         $siteCodes = @{}
         $siteCodes["$($topSite.siteCode)".ToLowerInvariant()] = $true
         $added = $true
         while ($added) {
             $added = $false
-            foreach ($site in $allSites) {
+            foreach ($site in $domainSites) {
                 if (-not $site.siteCode -or -not $site.parentSiteCode) { continue }
                 $parentKey = "$($site.parentSiteCode)".ToLowerInvariant()
                 $siteKey = "$($site.siteCode)".ToLowerInvariant()
@@ -149,20 +155,24 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
         }
 
         $matchingConfigVms = @($Config.virtualMachines | Where-Object {
+                $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $domainName }
                 $_.role -in $siteRoles -and $_.siteCode -and
+                $candidateDomain -ieq $topSiteDomain -and
                 $siteCodes.ContainsKey("$($_.siteCode)".ToLowerInvariant())
             })
         if ($matchingConfigVms.Count -eq 0) { continue }
 
+        $ownerIdentity = "$($topSite.siteCode)@$topSiteDomain"
         foreach ($siteVm in $matchingConfigVms) {
             $vmKey = if ($siteVm.vmName) { "$($siteVm.vmName)".ToLowerInvariant() } else { "$($siteVm.role)|$($siteVm.siteCode)".ToLowerInvariant() }
             if ($configVmOwners.ContainsKey($vmKey)) {
-                throw "ConfigMgr hierarchy ownership is ambiguous for '$($siteVm.vmName)' (site '$($siteVm.siteCode)'): both '$($configVmOwners[$vmKey])' and '$($topSite.siteCode)' claim it."
+                throw "ConfigMgr hierarchy ownership is ambiguous for '$($siteVm.vmName)' (site '$($siteVm.siteCode)'): both '$($configVmOwners[$vmKey])' and '$ownerIdentity' claim it."
             }
-            $configVmOwners[$vmKey] = "$($topSite.siteCode)"
+            $configVmOwners[$vmKey] = $ownerIdentity
         }
         $hierarchies += [pscustomobject]@{
             TopSite           = $topSite
+            Domain            = $topSiteDomain
             MatchingConfigVms = $matchingConfigVms
             CmOptions         = $null
         }
@@ -173,11 +183,11 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
         $authoritativeCm = $topSite.cmOptions
         $recoveredFromBackup = $false
         if (-not $authoritativeCm) {
-            $authoritativeCm = Get-CmOptionsFromSiteServerBackup -VmName $topSite.vmName -DomainName $Config.vmOptions.domainName
+            $authoritativeCm = Get-CmOptionsFromSiteServerBackup -VmName $topSite.vmName -DomainName $hierarchy.Domain
             $recoveredFromBackup = $true
         }
         if (-not $authoritativeCm) {
-            throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($Config.vmOptions.domainName)': site server '$($topSite.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
+            throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($hierarchy.Domain)': site server '$($topSite.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
         }
         if ($recoveredFromBackup) {
             Write-Log "Recovered authoritative ConfigMgr options (UsePKI=$($authoritativeCm.UsePKI)) from '$($topSite.vmName)' deployConfig backup and stamped its VM note." -Verbose
@@ -200,7 +210,10 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
         $Config | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $rootClone -Force
 
         if ([bool]$authoritativeCm.UsePKI) {
+            $authoritativeDomain = "$($hierarchies[0].Domain)"
             $existingPki = $ExistingVMs | Where-Object {
+                $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $domainName }
+                $candidateDomain -ieq $authoritativeDomain -and
                 $_.role -eq 'DC' -and $_.pkiOptions -and $_.pkiOptions.EnablePKI
             } | Select-Object -First 1 -ExpandProperty pkiOptions
             if ($existingPki) {
@@ -220,6 +233,8 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
             $pkiClone.EnablePKI = $true
             if (-not $pkiClone.IssuingCAVM) {
                 $issuingCa = @($ExistingVMs) + @($Config.virtualMachines) | Where-Object {
+                    $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $domainName }
+                    $candidateDomain -ieq $authoritativeDomain -and
                     $_.role -eq 'DC' -and $_.InstallCA
                 } | Select-Object -First 1
                 if ($issuingCa) { $pkiClone.IssuingCAVM = $issuingCa.vmName }
@@ -1375,34 +1390,40 @@ function Get-ExistingConfigMgrRoleUpgradePlan {
     $ownerSiteNames = @()
     $existingRoleVmNames = @()
     foreach ($trigger in $roleTriggers) {
+        $triggerDomain = if ($trigger.domain) { "$($trigger.domain)" } else { $domainName }
+        $domainSiteVms = @($allSiteVms | Where-Object {
+                $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $domainName }
+                $candidateDomain -ieq $triggerDomain
+            })
         $ownerSiteCode = "$($trigger.siteCode)"
-        $secondaryRows = @($allSiteVms | Where-Object {
+        $secondaryRows = @($domainSiteVms | Where-Object {
                 $_.role -eq 'Secondary' -and "$($_.siteCode)" -eq $ownerSiteCode
             } | Sort-Object vmName -Unique)
         if ($secondaryRows.Count -gt 1) {
-            throw "Cannot scope ConfigMgr role upgrade for '$($trigger.vmName)': site '$ownerSiteCode' has $($secondaryRows.Count) Secondary owners."
+            throw "Cannot scope ConfigMgr role upgrade for '$($trigger.vmName)': site '$ownerSiteCode' in domain '$triggerDomain' has $($secondaryRows.Count) Secondary owners."
         }
         if ($secondaryRows.Count -eq 1 -and $secondaryRows[0].parentSiteCode) {
             $ownerSiteCode = "$($secondaryRows[0].parentSiteCode)"
         }
 
-        $ownerRows = @($allSiteVms | Where-Object {
+        $ownerRows = @($domainSiteVms | Where-Object {
                 $_.role -in @('CAS', 'Primary') -and "$($_.siteCode)" -eq $ownerSiteCode
             } | Sort-Object vmName -Unique)
         if ($ownerRows.Count -ne 1) {
-            throw "Cannot scope ConfigMgr role upgrade for '$($trigger.vmName)': expected one CAS/Primary owner for site '$ownerSiteCode', found $($ownerRows.Count)."
+            throw "Cannot scope ConfigMgr role upgrade for '$($trigger.vmName)': expected one CAS/Primary owner for site '$ownerSiteCode' in domain '$triggerDomain', found $($ownerRows.Count)."
         }
         $ownerSiteNames += "$($ownerRows[0].vmName)"
 
         $managedSiteCodes = @($ownerSiteCode)
         if ($ownerRows[0].role -eq 'Primary') {
-            $managedSiteCodes += @($allSiteVms | Where-Object {
+            $managedSiteCodes += @($domainSiteVms | Where-Object {
                     $_.role -eq 'Secondary' -and "$($_.parentSiteCode)" -eq $ownerSiteCode
                 } | ForEach-Object { "$($_.siteCode)" })
         }
         $managedSiteCodes = @($managedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
         $existingRoleVmNames += @($ExistingVMs | Where-Object {
-                ($_.domain -eq $domainName -or -not $_.domain) -and
+                $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $domainName }
+                $candidateDomain -ieq $triggerDomain -and
                 "$($_.siteCode)" -in $managedSiteCodes -and
                 ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or
                  $_.installMP -eq $true -or $_.installSUP -eq $true -or $_.installRP -eq $true)

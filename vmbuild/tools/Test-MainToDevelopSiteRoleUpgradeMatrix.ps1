@@ -152,6 +152,10 @@ $existing = @(
     [pscustomobject]@{
         vmName = 'FOREIGNDP'; role = 'SiteSystem'; domain = 'foreign.test'; siteCode = 'PRI'
         network = '10.20.2.0'; installDP = $true; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'FOREIGNPRI'; role = 'Primary'; domain = 'foreign.test'; siteCode = 'PRI'
+        network = '10.40.1.0'; cmOptions = $cmOptions; state = 'Running'
     }
 )
 $script:Inventory = @($existing)
@@ -212,6 +216,21 @@ Assert-Equal 'DP1,MP1,RP1,SUP1' (@($plan.ExistingRoleVmNames | Sort-Object) -joi
     'Role upgrade did not include every existing main-era explicit site role in the owner site.'
 Assert-True ('OTHERDP' -notin $plan.ExistingRoleVmNames) 'Another site leaked into the role repair plan.'
 Assert-True ('FOREIGNDP' -notin $plan.ExistingRoleVmNames) 'Another domain leaked into the role repair plan.'
+
+$foreignConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'upgrade.test'; network = '10.20.1.0' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'FOREIGNNEWROLE'; role = 'SiteSystem'; domain = 'foreign.test'
+            siteCode = 'PRI'; network = '10.40.2.0'; installDP = $true
+        }
+    )
+}
+$foreignPlan = Get-ExistingConfigMgrRoleUpgradePlan -Config $foreignConfig -ExistingVMs $existing
+Assert-Equal 'FOREIGNPRI' (@($foreignPlan.OwnerSiteVmNames) -join ',') `
+    'Explicit cross-domain role trigger did not select its same-domain site owner.'
+Assert-Equal 'FOREIGNDP' (@($foreignPlan.ExistingRoleVmNames) -join ',') `
+    'Explicit cross-domain role trigger did not isolate existing roles to its owner domain.'
 
 $applyConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ domainName = 'upgrade.test'; network = '10.20.1.0' }
