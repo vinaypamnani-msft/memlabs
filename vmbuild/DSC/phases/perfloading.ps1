@@ -1658,6 +1658,62 @@ Write-DscStatus "$Tag Starting perfloading"
     $bootStageDir = Join-Path $folderPath 'boot\x64'
     $stagedBootWim = Join-Path $bootStageDir 'boot.wim'
 
+    function Get-MemLabsLegacyBootImageHealth {
+        param(
+            [Parameter(Mandatory = $true)][object[]] $TaskSequences,
+            [Parameter(Mandatory = $true)][string] $OwningSiteCode
+        )
+
+        $ids = @($TaskSequences | ForEach-Object { "$($_.BootImageID)" } |
+                Where-Object { $_ } | Select-Object -Unique)
+        $problems = [System.Collections.Generic.List[string]]::new()
+        if ($ids.Count -eq 0) {
+            $problems.Add('task sequences expose no readable BootImageID')
+        }
+        $allBootImages = @(Get-CMBootImage)
+        foreach ($id in $ids) {
+            $bootImage = @($allBootImages | Where-Object {
+                    "$($_.PackageID)" -ieq $id
+                }) | Select-Object -First 1
+            if (-not $bootImage) {
+                $problems.Add("boot image object '$id' is missing")
+                continue
+            }
+
+            $wmi = Get-WmiObject -Namespace "root\SMS\site_$OwningSiteCode" `
+                -Class SMS_BootImagePackage -Filter "PackageID='$id'" `
+                -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($wmi) { try { $wmi.Get() } catch { } }
+            $sourcePaths = @("$($wmi.ImagePath)", "$($wmi.PkgSourcePath)") |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+            if ($sourcePaths.Count -eq 0) {
+                $problems.Add("boot image '$id' has no readable ImagePath or PkgSourcePath")
+                continue
+            }
+            $sourcePresent = $false
+            foreach ($path in $sourcePaths) {
+                $probe = if ($path -like '\\*') { "FileSystem::$path" } else { $path }
+                try {
+                    if (Test-Path -LiteralPath $probe) {
+                        $sourcePresent = $true
+                        break
+                    }
+                }
+                catch { }
+            }
+            if (-not $sourcePresent) {
+                $problems.Add("boot image '$id' source is missing ($($sourcePaths -join ', '))")
+            }
+        }
+
+        return [pscustomobject]@{
+            Healthy  = $ids.Count -gt 0 -and $problems.Count -eq 0
+            PackageIds = [string[]]$ids
+            Problems = [string[]]$problems.ToArray()
+        }
+    }
+
     $existingMemlabsTaskSequences = @(Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" })
     $BootImage = @(Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName }) | Select-Object -First 1
 
@@ -1667,8 +1723,20 @@ Write-DscStatus "$Tag Starting perfloading"
         # at would be ~700MB of waste plus another object for Phase 11 to flag. Rebuild the
         # lab rather than converting it: Set-CMTaskSequence -BootImagePackageId across five
         # TSes fails in ways that leave a TS unusable.
-        $legacyBootImageIds = @($existingMemlabsTaskSequences | ForEach-Object { "$($_.BootImageID)" } | Where-Object { $_ } | Select-Object -Unique)
-        Write-DscStatus "$Tag $($existingMemlabsTaskSequences.Count) MEMLABS task sequence(s) already exist and pin boot image(s) $(if ($legacyBootImageIds.Count) { $legacyBootImageIds -join ', ' } else { '<none readable>' }), and '$memlabsBootImageName' does not exist. This lab predates site-owned boot images -- leaving its boot image alone. Rebuild the lab to get one this site owns." -Warning
+        $legacyHealth = Get-MemLabsLegacyBootImageHealth `
+            -TaskSequences $existingMemlabsTaskSequences -OwningSiteCode $SiteCode
+        $legacyIds = if ($legacyHealth.PackageIds.Count) {
+            $legacyHealth.PackageIds -join ', '
+        }
+        else {
+            '<none readable>'
+        }
+        if ($legacyHealth.Healthy) {
+            Write-DscStatus "$Tag $($existingMemlabsTaskSequences.Count) existing MEMLABS task sequence(s) intentionally retain healthy main-era boot image(s) $legacyIds. '$memlabsBootImageName' is not created because nothing references it."
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: $($existingMemlabsTaskSequences.Count) existing MEMLABS task sequence(s) pin legacy boot image(s) $legacyIds, but preservation health failed: $($legacyHealth.Problems -join '; '). '$memlabsBootImageName' is not created because the existing task sequences would still reference the unhealthy image." -Warning
+        }
     }
     elseif ($BootImage) {
         $packageId = "$($BootImage.PackageID)"
