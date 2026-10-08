@@ -3598,10 +3598,15 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
     # Kick off WSUS sync early so it runs in background while we create collections
     $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
     $syncNeeded = $false
+    $manageSupSubscription = [bool]($Sups -and $isTopLevel)
 
     if ($cmo.OfflineSUP) {
         $Sups = $false
+        $manageSupSubscription = $false
         Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"
+    }
+    elseif ($Sups -and -not $isTopLevel) {
+        Write-DscStatus "$Tag Downstream SUP product subscriptions are owned by top-level site '$HierarchySiteCode'; retaining product demand for local ADRs but skipping subscription mutation and forced sync"
     }
 
     if ($Sups) {
@@ -3711,33 +3716,38 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         $catalogHasOurProducts = ($coreProducts.Count -gt 0) -and ($coreInCatalog.Count -eq $coreProducts.Count)
 
         if ($missingproducts.Count -gt 0) {
-            $syncNeeded = $true
             Write-DscStatus "$Tag SUP products missing ($($missingproducts.Count)): $($missingproducts -join ', ')"
-            if ($catalogHasOurProducts) {
-                # Our target products exist in the catalog from a previous sync —
-                # no need to trigger or wait for sync 1. Skip straight to subscribing.
-                Write-DscStatus "$Tag Target products found in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait"
-            }
-            else {
-                # First run: catalog doesn't have our products yet, need sync 1.
-                $missingFromCatalog = @($products | Where-Object { $_ -notin $allCatalogProducts })
-                Write-DscStatus "$Tag Products missing from catalog ($($missingFromCatalog.Count)/$($products.Count)): $($missingFromCatalog -join ', ')"
-                # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
-                # will fail with 'WSUS server not configured' and block WCM from
-                # finishing its subscription setup (deadlock).
-                $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
-                try {
-                    $wcmEarlyState = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
-                } catch { $wcmEarlyState = -1 }
-                if ($wcmEarlyState -eq 2) {
-                    Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
-                    Invoke-FullSync
+            if ($manageSupSubscription) {
+                $syncNeeded = $true
+                if ($catalogHasOurProducts) {
+                    # Our target products exist in the catalog from a previous sync —
+                    # no need to trigger or wait for sync 1. Skip straight to subscribing.
+                    Write-DscStatus "$Tag Target products found in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait"
                 }
                 else {
-                    $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
-                    $wcmName = if ($wcmStateNames.ContainsKey($wcmEarlyState)) { $wcmStateNames[$wcmEarlyState] } else { "UNKNOWN($wcmEarlyState)" }
-                    Write-DscStatus "$Tag WCM state is $wcmName — skipping early sync to avoid blocking WCM"
+                    # First run: catalog doesn't have our products yet, need sync 1.
+                    $missingFromCatalog = @($products | Where-Object { $_ -notin $allCatalogProducts })
+                    Write-DscStatus "$Tag Products missing from catalog ($($missingFromCatalog.Count)/$($products.Count)): $($missingFromCatalog -join ', ')"
+                    # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
+                    # will fail with 'WSUS server not configured' and block WCM from
+                    # finishing its subscription setup (deadlock).
+                    $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+                    try {
+                        $wcmEarlyState = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                    } catch { $wcmEarlyState = -1 }
+                    if ($wcmEarlyState -eq 2) {
+                        Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
+                        Invoke-FullSync
+                    }
+                    else {
+                        $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                        $wcmName = if ($wcmStateNames.ContainsKey($wcmEarlyState)) { $wcmStateNames[$wcmEarlyState] } else { "UNKNOWN($wcmEarlyState)" }
+                        Write-DscStatus "$Tag WCM state is $wcmName — skipping early sync to avoid blocking WCM"
+                    }
                 }
+            }
+            else {
+                Write-DscStatus "$Tag Downstream SUP inherits product subscriptions from '$HierarchySiteCode'; skipping local subscription mutation"
             }
         }
         else {
@@ -4320,7 +4330,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         Write-DscStatus "$Tag No SUP installed for this site, skipping the SUP product check and sync"
     }
 
-    if ($Sups -and $syncNeeded) {
+    if ($manageSupSubscription -and $syncNeeded) {
         # Safety net: InstallRoles owns the cab import (launch +
         # verify+retry). By the time perfloading runs, the state file
         # is normally already removed and this call is a no-op. The
@@ -4342,7 +4352,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         # products immediately without waiting for any current sync.
         $sync1Done = $false
         if ($ThisVM.hidden) {
-            # This Primary is hidden => it's an existing, already-deployed site
+            # This top-level site is hidden => it's an existing, already-deployed site
             # server pulled into the config only so a *new* VM (e.g. a client added
             # to an existing domain) can get PushClients re-run. There is no actual
             # deployment happening to this site server, so blocking here for up to
@@ -4350,14 +4360,11 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             # background sync off (only when the catalog still needs our products) so
             # the catalog refreshes on its own, and proceed without monitoring it.
             if ($catalogHasOurProducts) {
-                Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) and products already in catalog — skipping sync 1 wait"
-            }
-            elseif ($isTopLevel) {
-                Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) — triggering background sync 1 and NOT waiting"
-                Invoke-FullSync
+                Write-DscStatus "$Tag Top-level site is hidden (re-run for a new VM) and products already in catalog — skipping sync 1 wait"
             }
             else {
-                Write-DscStatus "$Tag Hidden downstream Primary (parent=$($ThisVM.parentSiteCode)) - not forcing sync 1 before the upstream subscription/catalog replicates"
+                Write-DscStatus "$Tag Top-level site is hidden (re-run for a new VM) — triggering background sync 1 and NOT waiting"
+                Invoke-FullSync
             }
             $sync1Done = $true
         }
@@ -4515,27 +4522,12 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         # otherwise wsyncmgr sees 'WSUS server not configured' and the sync
         # blocks WCM from setting the subscription (deadlock).
         #
-        # That sync is the wait's ONLY consumer, and a downstream SUP must never
-        # force one (see the $isTopLevel gate further down), so downstream the
-        # wait is pure cost: measured 2026-08-22, CT3-PS1SITE read
-        # ConfigurationState=FAILED on 20/20 polls -- 714s -- on four consecutive
-        # runs, while every top-level SUP in the same log set exited after 4-8
-        # polls and never saw FAILED.
-        #
         # Budget 20 -> 8, sized from the outcome distribution over 181 guest logs:
         # 71 successes across BOTH WCM waits, attempts 1-6, MAX 6. Attempts 7+ have
         # never once produced a success, while a give-up costs ~570s. CS2-CS1SITE
-        # (a CAS, so top-level and not covered by the gate above) burned the full
-        # budget at SUBSCRIPTION_PENDING three times.
+        # burned the full budget at SUBSCRIPTION_PENDING three times.
         $wcmMaxAttempts = 8
-        $wcmSkipReason = ''
-        if (-not $isTopLevel) {
-            $wcmMaxAttempts = 0
-            $wcmSkipReason = "Downstream SUP (parent=$($ThisVM.parentSiteCode)) - skipping the WCM reconfiguration wait and the early sync trigger; WCM reconfigures on its own schedule and the catalog replicates from the upstream SUP."
-        }
-        else {
-            Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
-        }
+        Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
 
         $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
         $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
@@ -4605,10 +4597,6 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             }
         }
         else {
-            if ($wcmSkipReason) {
-                Write-DscStatus "$Tag $wcmSkipReason"
-            }
-            else {
             Write-DscStatus "$Tag WCM did not reach SUCCESS after $wcmMaxAttempts attempts. Skipping sync trigger — wsyncmgr will sync on schedule."
             # Log diagnostics so we can investigate
             $diag = @()
@@ -4626,7 +4614,6 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 }
             }
             Write-DscStatus "$Tag WCM timeout diag: $($diag -join ' | ')"
-            }
         }
         } # end accepted-products block
     }

@@ -126,14 +126,77 @@ Assert-True (@($projected | Where-Object { $_.SqlVersion -eq 'SQL Server 2019' }
     'SQL Server product demand was lost.'
 
 $perfloading = Get-Content -LiteralPath $perfloadingPath -Raw
+$perfTokens = $null
+$perfParseErrors = $null
+$perfAst = [Management.Automation.Language.Parser]::ParseFile(
+    $perfloadingPath,
+    [ref]$perfTokens,
+    [ref]$perfParseErrors
+)
+if ($perfParseErrors.Count) {
+    throw "$perfloadingPath has parse errors: $($perfParseErrors -join '; ')"
+}
 Assert-True ($perfloading -match 'phase8SoftwareUpdateProductInventory') `
     'perfloading does not consume projected existing-client product demand.'
 Assert-True ($perfloading -match '(?s)\$clientByName.+?\$deployConfig\.virtualMachines.+?\$clientVMs') `
     'perfloading does not de-duplicate projected and configured clients.'
 Assert-True ($perfloading -match '(?s)\$products\s*=\s*@\(\$clientVMs\.operatingSystem.+?\+\s*@\(\$clientVMs\.sqlversion') `
     'perfloading can concatenate scalar OS and SQL product names instead of building two arrays.'
-Assert-True ($perfloading -match '(?s)if \(\$ThisVM\.hidden\).+?elseif \(\$isTopLevel\).+?Invoke-FullSync.+?Hidden downstream Primary') `
-    'A hidden downstream Primary can still force a WSUS sync before its upstream subscription replicates.'
+Assert-True ($perfloading -match '\$manageSupSubscription\s*=\s*\[bool\]\(\$Sups -and \$isTopLevel\)') `
+    'perfloading does not assign hierarchy-wide SUP subscription ownership to the top-level site.'
+Assert-True ($perfloading -match '(?s)if \(\$Sups\)\s*\{\s*\$productclassifications.+?\$products\s*=') `
+    'Downstream product demand is no longer retained for local ADR creation.'
+Assert-True ($perfloading -match 'if \(\$manageSupSubscription -and \$syncNeeded\)') `
+    'A hidden or active downstream Primary can still mutate the hierarchy-wide SUP component.'
+Assert-True ($perfloading -match '(?s)if \(\$Sups -and -not \$isTopLevel\).+?Repair-DownstreamWsusReplicaSync') `
+    'Downstream SUP replica repair was lost while top-level subscription mutation was gated.'
+$syncEnableAssignments = @($perfAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -eq '$syncNeeded' -and
+            $node.Right.Extent.Text -eq '$true'
+        }, $true))
+Assert-Equal 1 $syncEnableAssignments.Count `
+    'perfloading should have exactly one path that enables SUP synchronization.'
+foreach ($assignment in $syncEnableAssignments) {
+    $guardedByOwner = $false
+    $ancestor = $assignment.Parent
+    while ($ancestor) {
+        if ($ancestor -is [Management.Automation.Language.IfStatementAst]) {
+            $conditions = @($ancestor.Clauses | ForEach-Object { $_.Item1.Extent.Text })
+            if ($conditions -contains '$manageSupSubscription') {
+                $guardedByOwner = $true
+                break
+            }
+        }
+        $ancestor = $ancestor.Parent
+    }
+    Assert-True $guardedByOwner `
+        "SUP sync enablement at line $($assignment.Extent.StartLineNumber) is not guarded by top-level subscription ownership."
+}
+$supComponentMutations = @($perfAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Set-CMSoftwareUpdatePointComponent'
+        }, $true))
+Assert-True ($supComponentMutations.Count -gt 0) `
+    'perfloading no longer contains SUP component configuration calls.'
+foreach ($mutation in $supComponentMutations) {
+    $guardedByOwner = $false
+    $ancestor = $mutation.Parent
+    while ($ancestor) {
+        if ($ancestor -is [Management.Automation.Language.IfStatementAst]) {
+            $conditions = @($ancestor.Clauses | ForEach-Object { $_.Item1.Extent.Text })
+            if ($conditions -contains '$manageSupSubscription -and $syncNeeded') {
+                $guardedByOwner = $true
+                break
+            }
+        }
+        $ancestor = $ancestor.Parent
+    }
+    Assert-True $guardedByOwner `
+        "SUP component mutation at line $($mutation.Extent.StartLineNumber) is not guarded by top-level subscription ownership."
+}
 
 $externalConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ domainName = 'client.test'; network = '10.30.2.0' }
