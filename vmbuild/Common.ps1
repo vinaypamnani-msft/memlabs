@@ -5638,6 +5638,9 @@ Specifies whether the virtual machine is an OSD client.
 .PARAMETER tpmEnabled
 Specifies whether the virtual machine has TPM enabled.
 
+.PARAMETER DisableAutomaticCheckpoints
+Disables automatic checkpoints before the virtual machine is started.
+
 .PARAMETER Migrate
 Specifies whether to migrate the virtual machine.
 
@@ -6239,6 +6242,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $false)]
         [switch]$tpmEnabled,
         [Parameter(Mandatory = $false)]
+        [switch]$DisableAutomaticCheckpoints,
+        [Parameter(Mandatory = $false)]
         [switch]$Migrate,
         [Parameter(Mandatory = $false, HelpMessage = "MACs already holding a DHCP reservation at phase start; lets the by-MAC purge scan be skipped. Null = unknown, so scan.")]
         [hashtable]$KnownReservedMacs,
@@ -6256,7 +6261,7 @@ function New-VirtualMachine {
     try {
         # WhatIf
         if ($WhatIf) {
-            Write-Log "WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew"
+            Write-Log "WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew, DisableAutomaticCheckpoints: $DisableAutomaticCheckpoints"
             return $true
         }
 
@@ -6355,6 +6360,17 @@ function New-VirtualMachine {
             Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
             Write-Log "$($_.ScriptStackTrace)" -LogOnly
             return $false
+        }
+
+        if ($DisableAutomaticCheckpoints.IsPresent) {
+            try {
+                Set-VM -VM $vm -AutomaticCheckpointsEnabled $false -ErrorAction Stop
+                Write-Log "$VmName`: Disabled automatic checkpoints for deterministic disk capture."
+            }
+            catch {
+                Write-Log "$VmName`: Failed to disable automatic checkpoints. $_" -Failure
+                return $false
+            }
         }
 
         Write-Progress2 $Activity -Status "Hyper-V VM Object created. Waiting for Disk Creation" -percentcomplete 30 -force
@@ -6748,6 +6764,8 @@ function Wait-ForVm {
         [switch]$Quiet,
         [Parameter(Mandatory = $false)]
         [switch]$SkipDiskTest,
+        [Parameter(Mandatory = $false, ParameterSetName = "VmState", HelpMessage = "Return false on a state timeout without forcing the VM into the requested state.")]
+        [switch]$NoForceStateOnTimeout,
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
@@ -6787,7 +6805,7 @@ function Wait-ForVm {
                 $ready = $false
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
-        if (-not $ready -and ($vmState -eq "Off")) {
+        if (-not $ready -and ($vmState -eq "Off") -and -not $NoForceStateOnTimeout.IsPresent) {
             stop-vm2 -name $VMName
         }
     }
@@ -6863,7 +6881,7 @@ function Wait-ForVm {
         # once: re-reading uptime every iteration would put the Get-VM storm back.
         [int]$oobeBootOffset = 0
         try {
-            $vmForUptime = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmForUptime = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
             if ($vmForUptime -and "$($vmForUptime.State)" -eq 'Running') {
                 $oobeBootOffset = [int]$vmForUptime.Uptime.TotalSeconds
             }
@@ -6916,7 +6934,7 @@ function Wait-ForVm {
             if ($oobeLastProbeFailed -and -not $readyOobe -and $failures -lt ($maxFailures / 2)) {
                 $swHbGate = [System.Diagnostics.Stopwatch]::StartNew()
                 while ($swHbGate.Elapsed.TotalSeconds -lt 12) {
-                    $vmHbNow = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmHbNow = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     if ("$($vmHbNow.Heartbeat)" -like 'Ok*' -or "$($vmHbNow.State)" -ne 'Running') { break }
                     Start-Sleep -Seconds 2
                 }
@@ -6957,7 +6975,7 @@ function Wait-ForVm {
                     # Before power-cycling, check if the VM is running but has no heartbeat.
                     # NoContact after 2+ min means no OS loaded (boot failure).
                     # OkApplicationsUnknown/OkApplicationsHealthy = OS is booting normally.
-                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Uptime.TotalMinutes -ge 2 -and $vmCheck.Heartbeat -eq "NoContact") {
                         Write-Log "$VmName`: VM is Running (uptime $([int]$vmCheck.Uptime.TotalMinutes)min) with heartbeat NoContact — possible boot failure. Check VM console: vmconnect localhost $VmName" -Warning
                     }
@@ -7219,7 +7237,7 @@ function Wait-ForVm {
 
             # Log a detailed failure summary so the root cause is visible without scrolling
             $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
-            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
             $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
             $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
             $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
@@ -7264,7 +7282,7 @@ function Wait-ForVm {
                 # admin account is wiped so PSDirect can't authenticate. If the VM
                 # heartbeat is OK, this means OOBE is active (the only time the
                 # VM is running but has no usable local accounts).
-                $hbCheck = (Get-VM2 -Name $VmName -ErrorAction SilentlyContinue).Heartbeat
+                $hbCheck = (Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue).Heartbeat
                 if ($hbCheck -and $hbCheck -match 'Ok') {
                     $ready = $true
                     Write-Log "$VmName`: OOBE detected via auth failure (post-sysprep, heartbeat=$hbCheck). Local accounts wiped — VM is at OOBE." -Verbose
@@ -7284,7 +7302,7 @@ function Wait-ForVm {
                 # After half the timeout has elapsed with NoContact heartbeat,
                 # try one power-cycle as a last resort.
                 if (-not $powerCycleEligible -and $stopWatch.Elapsed.TotalMinutes -ge ($TimeoutMinutes / 2)) {
-                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Heartbeat -eq "NoContact") {
                         $powerCycleEligible = $true
                     }
@@ -7296,7 +7314,7 @@ function Wait-ForVm {
                 if ($powerCycleEligible -and $powerCycles -lt $maxPowerCycles) {
                     $powerCycles++
                     $powerCycleEligible = $false
-                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
                     Write-Log "$VmName`: OOBE not starting after $([int]$stopWatch.Elapsed.TotalMinutes) min with heartbeat NoContact. Power-cycling VM (attempt $powerCycles/$maxPowerCycles). VM state: $vmState" -Warning
                     stop-vm2 -name $VmName -TurnOff | Out-Null
@@ -7313,7 +7331,7 @@ function Wait-ForVm {
 
             # Log a detailed failure summary
             $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
-            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
             $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
             $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
             $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
@@ -7428,7 +7446,7 @@ function Wait-ForVm {
                 else {
                     # VM is not responding to PSDirect at all.
                     # Check heartbeat to decide whether to hard-restart.
-                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     $hb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
 
                     # Detect channel-broken from the actual session diagnostics.
@@ -7510,7 +7528,7 @@ function Wait-ForVm {
 
             # Log a detailed failure summary
             $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
-            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
             $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
             $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
             $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
@@ -9980,7 +9998,10 @@ function Get-VmSession {
         # Skip New-PSSession entirely if the VM is not running.
         # Avoids 30s+ timeout per credential attempt on a dead/rebooting VM.
         $swStateCheck = [System.Diagnostics.Stopwatch]::StartNew()
-        $vmNow = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+        # Fresh staging VMs do not have MemLabs VM notes and therefore are not
+        # represented in Get-List. Allow the targeted Get-VM fallback so
+        # PowerShell Direct can connect before a deployment cache entry exists.
+        $vmNow = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
         $vmState = $vmNow.State
         $swStateCheck.Stop()
         $swStateCheckTotalMs += $swStateCheck.Elapsed.TotalMilliseconds

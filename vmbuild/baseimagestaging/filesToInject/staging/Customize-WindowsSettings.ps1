@@ -9,6 +9,19 @@ param(
     [switch]$RunOptional
 )
 
+$customizationMutex = New-Object Threading.Mutex($false, "Global\MemLabsBaseImageCustomization")
+$customizationLockTaken = $false
+try {
+    $customizationLockTaken = $customizationMutex.WaitOne(0)
+}
+catch [Threading.AbandonedMutexException] {
+    $customizationLockTaken = $true
+}
+if (-not $customizationLockTaken) {
+    Write-Host "MemLabs base-image customization is already running."
+    return
+}
+
 $sb = [System.Text.StringBuilder]::new()
 
 function Update-Log {
@@ -466,8 +479,11 @@ else {
 # Completion
 # ============
 
-# Move uanttend file to avoid future use, since C:\unattend.xml is one of the defautl locations windows looks for
-Move-Item -Path "C:\Unattend.xml" -Destination "C:\staging\Unattend.xml" -Force -ErrorAction SilentlyContinue
+# Preserve a root-level answer file when present. New base images also stage a
+# dedicated copy at this path before first boot.
+if (Test-Path -Path "C:\Unattend.xml" -PathType Leaf) {
+    Move-Item -Path "C:\Unattend.xml" -Destination "C:\staging\Unattend.xml" -Force -ErrorAction Stop
+}
 
 Write-Host
 Update-Log "Done! A reboot is required for settings to take effect. "
@@ -479,19 +495,35 @@ $sb.ToString() | Out-File "C:\staging\Customization.txt" -Force
 # =====================
 
 if ($RunSysprep.IsPresent) {
-    # Run Sysprep to generalize the OS
+    $sysprepUnattendPath = "C:\staging\Unattend.xml"
+    $sysprepCompletePath = "C:\staging\SysprepComplete.txt"
+    $sysprepFailurePath = "C:\staging\SysprepFailed.txt"
+    Remove-Item -Path $sysprepCompletePath, $sysprepFailurePath -Force -ErrorAction SilentlyContinue
+
+    if (-not (Test-Path -Path $sysprepUnattendPath -PathType Leaf)) {
+        $message = "Final Sysprep answer file is missing: $sysprepUnattendPath"
+        Update-Log $message
+        $message | Out-File -FilePath $sysprepFailurePath -Force
+        throw $message
+    }
+
     Write-Host
     Write-Host "Waiting for 30 seconds before starting sysprep..."
-    Start-Sleep -Seconds 30 # Buffer to make sure sysprep GUI has appeared
+    Start-Sleep -Seconds 30
 
-    & taskkill /im sysprep.exe /f | Out-Null # kill sysprep UI pop-up
-    if (Test-Path -Path "C:\staging\Unattend.xml") {
-        & $env:windir\system32\sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:"C:\staging\Unattend.xml"
+    & taskkill /im sysprep.exe /f 2>$null | Out-Null
+    $sysprepArguments = "/generalize /oobe /quit /unattend:`"$sysprepUnattendPath`""
+    $sysprepProcess = Start-Process -FilePath "$env:windir\system32\sysprep\sysprep.exe" -ArgumentList $sysprepArguments -Wait -PassThru
+    $sysprepTagPath = "$env:windir\system32\sysprep\Sysprep_succeeded.tag"
+    if ($sysprepProcess.ExitCode -ne 0 -or -not (Test-Path -Path $sysprepTagPath -PathType Leaf)) {
+        $message = "Final Sysprep failed. ExitCode=$($sysprepProcess.ExitCode), SuccessTagExists=$(Test-Path -Path $sysprepTagPath -PathType Leaf)"
+        Update-Log $message
+        $message | Out-File -FilePath $sysprepFailurePath -Force
+        throw $message
     }
-    else {
-        # File move must have failed, fallback to the default location
-        & $env:windir\system32\sysprep\sysprep.exe /generalize /oobe /shutdown /unattend:"C:\Unattend.xml"
-    }
+
+    "Final Sysprep completed successfully at $(Get-Date -Format o)." | Out-File -FilePath $sysprepCompletePath -Force
+    Stop-Computer -Force
 }
 
 # CopyProfile Changes?
