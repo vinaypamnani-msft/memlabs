@@ -1209,6 +1209,69 @@ function Invoke-CMRoleTargetCommand {
         -ArgumentList $ArgumentList -SessionOption $sessionOption -ErrorAction Stop
 }
 
+function Get-MemLabsProjectedCimRows {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Namespace,
+        [Parameter(Mandatory = $true)]
+        [string] $ClassName,
+        [string] $Filter,
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string[]] $Property,
+        [ValidateRange(1, 10)]
+        [int] $Attempts = 3,
+        [ValidateRange(0, 60)]
+        [int] $RetrySeconds = 5,
+        [ValidateRange(1, 300)]
+        [int] $OperationTimeoutSeconds = 30
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $instances = @()
+        try {
+            $query = @{
+                Namespace           = $Namespace
+                ClassName           = $ClassName
+                Property            = $Property
+                OperationTimeoutSec = $OperationTimeoutSeconds
+                ErrorAction         = 'Stop'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($Filter)) {
+                $query.Filter = $Filter
+            }
+            $instances = @(Get-CimInstance @query | Where-Object { $null -ne $_ })
+            return @($instances | ForEach-Object {
+                    $projected = [ordered]@{}
+                    foreach ($propertyName in $Property) {
+                        $projected[$propertyName] = $_.$propertyName
+                    }
+                    [pscustomobject]$projected
+                })
+        }
+        catch {
+            $isOutOfMemory = $_.Exception -is [System.OutOfMemoryException] -or
+                $_.Exception.Message -match '(?i)OutOfMemory|0x8007000E|not enough (storage|memory)'
+            if (-not $isOutOfMemory -or $attempt -ge $Attempts) {
+                throw
+            }
+            Write-DscStatus "CIM query $Namespace/$ClassName hit an out-of-memory boundary on attempt $attempt/$Attempts. Disposing projected rows, forcing finalizers, and retrying in $RetrySeconds second(s)." -Warning
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            [GC]::Collect()
+            if ($RetrySeconds -gt 0) { Start-Sleep -Seconds $RetrySeconds }
+        }
+        finally {
+            foreach ($instance in @($instances)) {
+                if ($instance -is [System.IDisposable]) {
+                    try { $instance.Dispose() } catch { }
+                }
+            }
+        }
+    }
+}
+
 function Get-CMRoleRequiredWindowsFeatures {
     param(
         [Parameter(Mandatory = $true)]

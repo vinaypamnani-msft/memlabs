@@ -408,14 +408,18 @@ $ensureClientPkgCoverage = {
             $errors = [System.Collections.Generic.List[string]]::new()
             $package = $null
             try {
-                $package = Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction Stop |
+                $package = Get-MemLabsProjectedCimRows -Namespace $ns `
+                    -ClassName SMS_Package -Filter "PackageID='$PackageID'" `
+                    -Property @('SourceSite', 'SourceVersion', 'StoredPkgVersion', 'SourceDate') |
                     Select-Object -First 1
             }
             catch { $errors.Add("SMS_Package: $($_.Exception.Message)") }
 
             $targetingRows = [System.Collections.Generic.List[object]]::new()
             try {
-                foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction Stop)) {
+                foreach ($row in @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                        -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
+                        -Property @('ServerNALPath', 'SiteCode', 'SourceVersion', 'StoredPkgVersion', 'RefreshNow', 'LastRefreshTime'))) {
                     $targetingRows.Add([ordered]@{
                             Server           = & $fqdnOf $row.ServerNALPath
                             SiteCode         = "$($row.SiteCode)"
@@ -430,7 +434,10 @@ $ensureClientPkgCoverage = {
 
             $summarizerRows = [System.Collections.Generic.List[object]]::new()
             try {
-                foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction Stop)) {
+                foreach ($row in @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                        -ClassName SMS_PackageStatusDistPointsSummarizer `
+                        -Filter "PackageID='$PackageID'" `
+                        -Property @('ServerNALPath', 'State', 'SourceVersion', 'LastUpdateDate'))) {
                     $rowState = [int]$row.State
                     $summarizerRows.Add([ordered]@{
                             Server        = & $fqdnOf $row.ServerNALPath
@@ -606,11 +613,25 @@ $ensureClientPkgCoverage = {
     # "already distributed" throw when the summarizer row hasn't appeared yet.
     $redistOrDistribute = {
         param($dpFqdn)
-        $targeting = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
-                Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dpFqdn })
-        if ($targeting.Count -gt 0) {
-            foreach ($t in $targeting) { $t.RefreshNow = $true; [void]$t.Put() }
-            return 'redistributed'
+        $targetingInstances = @()
+        try {
+            $targetingInstances = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint `
+                    -Filter "PackageID='$PackageID'" -ErrorAction Stop |
+                    Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dpFqdn })
+            if ($targetingInstances.Count -gt 0) {
+                foreach ($targetingInstance in $targetingInstances) {
+                    $targetingInstance.RefreshNow = $true
+                    [void]$targetingInstance.Put()
+                }
+                return 'redistributed'
+            }
+        }
+        finally {
+            foreach ($targetingInstance in @($targetingInstances)) {
+                if ($targetingInstance -is [System.IDisposable]) {
+                    try { $targetingInstance.Dispose() } catch { }
+                }
+            }
         }
         Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dpFqdn -ErrorAction Stop
         return 'distributed'
@@ -1436,6 +1457,7 @@ $ensureClientPkgCoverage = {
     $lastWedgeCheck = $null
     $lastCoverageTimelineCapture = $null
     $lastCoverageFingerprint = ''
+    $lastCoverageMemoryReclaim = Get-Date
     $optionalGraceStart = $null
     $coverageExitReason = ''
     $try = 0
@@ -1457,13 +1479,19 @@ $ensureClientPkgCoverage = {
         $storedVer = 0
         $currentPackageSourceVersion = 0
         try {
-            $sp = Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue | Select-Object -First 1
+            $sp = Get-MemLabsProjectedCimRows -Namespace $ns `
+                -ClassName SMS_Package -Filter "PackageID='$PackageID'" `
+                -Property @('StoredPkgVersion', 'SourceVersion') |
+                Select-Object -First 1
             if ($sp) {
                 $storedVer = [int]$sp.StoredPkgVersion
                 $currentPackageSourceVersion = [int]$sp.SourceVersion
             }
         }
-        catch { }
+        catch {
+            Write-DscStatus "Client pkg coverage: provider state for $PackageID is unreadable after memory-safe retries; refusing to infer missing content. $($_.Exception.Message)" -Failure
+            return
+        }
         $contentPendingFromParent = ($storedVer -lt 1)
         if ($contentPendingFromParent -and -not $extendedCoverageWait) {
             $extendedCoverageWait = $true
@@ -1484,12 +1512,21 @@ $ensureClientPkgCoverage = {
         }
         $state = @{}
         $stateVer = @{}
-        foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
-            $f = & $fqdnOf $r.ServerNALPath
-            if ($f) {
-                $state[$f.ToUpper()] = [int]$r.State
-                $stateVer[$f.ToUpper()] = "$($r.SourceVersion)"
+        try {
+            foreach ($r in @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                    -ClassName SMS_PackageStatusDistPointsSummarizer `
+                    -Filter "PackageID='$PackageID'" `
+                    -Property @('ServerNALPath', 'State', 'SourceVersion'))) {
+                $f = & $fqdnOf $r.ServerNALPath
+                if ($f) {
+                    $state[$f.ToUpper()] = [int]$r.State
+                    $stateVer[$f.ToUpper()] = "$($r.SourceVersion)"
+                }
             }
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: DP summarizer state for $PackageID is unreadable after memory-safe retries; refusing remediation from unknown state. $($_.Exception.Message)" -Failure
+            return
         }
         $notInstalled = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
         $coverageFingerprint = "$storedVer|" + (@($bgDpFqdns | Sort-Object | ForEach-Object {
@@ -1515,6 +1552,19 @@ $ensureClientPkgCoverage = {
             $null = & $writeCoverageSnapshot $snapshotTrigger $bgDpFqdns @($secLinkSites.Keys) $coveragePeriodicSnapshotDue
             $lastCoverageTimelineCapture = Get-Date
             $lastCoverageFingerprint = $coverageFingerprint
+        }
+        if (((Get-Date) - $lastCoverageMemoryReclaim).TotalMinutes -ge 15) {
+            $memoryProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+            $beforeManagedMb = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+            $beforeWorkingMb = if ($memoryProcess) { [math]::Round($memoryProcess.WorkingSet64 / 1MB, 1) } else { -1 }
+            $beforePrivateMb = if ($memoryProcess) { [math]::Round($memoryProcess.PrivateMemorySize64 / 1MB, 1) } else { -1 }
+            if ($memoryProcess) { $memoryProcess.Dispose() }
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            [GC]::Collect()
+            $afterManagedMb = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+            Write-DscStatus "Client pkg coverage memory checkpoint: pid=$PID working=${beforeWorkingMb}MB private=${beforePrivateMb}MB managed=${beforeManagedMb}MB->$afterManagedMb MB after disposing CIM rows and forcing finalizers." -NoStatus
+            $lastCoverageMemoryReclaim = Get-Date
         }
         # Waiting on a DP nothing depends on is free while a DP something DOES depend on is
         # still outstanding -- same poll, same wall clock. Only once the required set is done
@@ -1547,8 +1597,16 @@ $ensureClientPkgCoverage = {
             # in the PkgServers table" (STATMSG 2354) -- leaving the content physically on the
             # DP and permanently un-Installed in the site DB. Restore a missing row on EVERY
             # iteration; the summarizer is not consulted because it lags the targeting table.
-            $hasTgt = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
-                    Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }).Count -gt 0
+            try {
+                $hasTgt = @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                        -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
+                        -Property @('ServerNALPath') |
+                        Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }).Count -gt 0
+            }
+            catch {
+                Write-DscStatus "Client pkg coverage: targeting rows for $PackageID are unreadable after memory-safe retries; refusing to create or refresh targeting from unknown state. $($_.Exception.Message)" -Failure
+                return
+            }
             if (-not $hasTgt) {
                 # Distributing to a DP that does not exist yet cannot succeed; hold rather than
                 # throw once per iteration. The DP stays in $notInstalled, so the phase keeps
@@ -1761,11 +1819,33 @@ $ensureClientPkgCoverage = {
     # content-UPDATE/replication problem, not "never distributed" (observed: the
     # pull DP had v3 while the site server processed v1). Capture it to flag skew.
     $pkgSourceVersion = $null
-    try { $pkgSourceVersion = (Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue | Select-Object -First 1).SourceVersion } catch {}
+    try {
+        $pkgSourceVersion = (Get-MemLabsProjectedCimRows -Namespace $ns `
+                -ClassName SMS_Package -Filter "PackageID='$PackageID'" `
+                -Property @('SourceVersion') |
+                Select-Object -First 1).SourceVersion
+    }
+    catch {
+        Write-DscStatus "Client pkg coverage: final package version is unreadable after memory-safe retries. $($_.Exception.Message)" -Failure
+        return
+    }
 
     $state = @{}; $stateVer = @{}
-    foreach ($r in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue)) {
-        $f = & $fqdnOf $r.ServerNALPath; if ($f) { $state[$f.ToUpper()] = [int]$r.State; $stateVer[$f.ToUpper()] = "$($r.SourceVersion)" }
+    try {
+        foreach ($r in @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                -ClassName SMS_PackageStatusDistPointsSummarizer `
+                -Filter "PackageID='$PackageID'" `
+                -Property @('ServerNALPath', 'State', 'SourceVersion'))) {
+            $f = & $fqdnOf $r.ServerNALPath
+            if ($f) {
+                $state[$f.ToUpper()] = [int]$r.State
+                $stateVer[$f.ToUpper()] = "$($r.SourceVersion)"
+            }
+        }
+    }
+    catch {
+        Write-DscStatus "Client pkg coverage: final DP summarizer state is unreadable after memory-safe retries. $($_.Exception.Message)" -Failure
+        return
     }
     if (-not $coverageExitReason) { $coverageExitReason = 'Deadline' }
     $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
@@ -1829,7 +1909,9 @@ $ensureClientPkgCoverage = {
                 # and ccmsetup wedges in GetDPLocations, which is exactly what CS4 did). No row
                 # means the (re)distribute never took and the repair ladder is the problem.
                 try {
-                    $tgt = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint -Filter "PackageID='$PackageID'" -ErrorAction SilentlyContinue |
+                    $tgt = @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                            -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
+                            -Property @('ServerNALPath', 'SiteCode', 'StoredPkgVersion', 'SourceVersion', 'LastRefreshTime') |
                             Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }) | Select-Object -First 1
                     if ($tgt) {
                         $sInfo = "no summarizer row BUT targeting row EXISTS (SMS_DistributionPoint: SiteCode=$($tgt.SiteCode) StoredPkgVersion=$($tgt.StoredPkgVersion) SourceVersion=$($tgt.SourceVersion) LastRefresh=$($tgt.LastRefreshTime)) -> distribution WAS requested; the site DB just never got an Installed status back"

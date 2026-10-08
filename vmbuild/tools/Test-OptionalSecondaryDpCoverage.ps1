@@ -9,6 +9,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $coveragePath = Join-Path $root 'DSC\phases\InstallBoundaryGroups.ps1'
 $validationPath = Join-Path $root 'common\Common.Validation.Functional.ps1'
+$functionsPath = Join-Path $root 'DSC\phases\ScriptFunctions.ps1'
 
 foreach ($path in @($coveragePath, $validationPath)) {
     $tokens = $null
@@ -41,6 +42,59 @@ function Import-TestFunction {
 
 . (Import-TestFunction -Path $coveragePath -Name 'Get-MemLabsDpVmMetadataMap')
 . (Import-TestFunction -Path $coveragePath -Name 'Test-MemLabsLocalComputerName')
+. (Import-TestFunction -Path $functionsPath -Name 'Get-MemLabsProjectedCimRows')
+
+if (-not ('MemLabsDisposableCimFixture' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+
+public sealed class MemLabsDisposableCimFixture : IDisposable
+{
+    public string Name { get; set; }
+    public string GroupID { get; set; }
+    public string SourceSite { get; set; }
+    public bool Disposed { get; private set; }
+    public void Dispose() { Disposed = true; }
+}
+'@
+}
+
+$script:CimProjectionAttempts = 0
+$script:CimProjectionRow = [MemLabsDisposableCimFixture]::new()
+$script:CimProjectionRow.Name = 'ALL DPS'
+$script:CimProjectionRow.GroupID = 'GROUP-1'
+$script:CimProjectionRow.SourceSite = 'PRI'
+function Get-CimInstance {
+    param(
+        [string] $Namespace,
+        [string] $ClassName,
+        [string] $Filter,
+        [string[]] $Property,
+        [int] $OperationTimeoutSec,
+        $ErrorAction
+    )
+    $script:CimProjectionAttempts++
+    if ($script:CimProjectionAttempts -eq 1) {
+        throw [System.OutOfMemoryException]::new('synthetic provider exhaustion')
+    }
+    return $script:CimProjectionRow
+}
+function Start-Sleep { param([int] $Seconds) }
+function Write-DscStatus {
+    param($Status, [switch] $Warning)
+}
+
+$projectedRows = @(Get-MemLabsProjectedCimRows -Namespace 'root\SMS\site_PRI' `
+        -ClassName SMS_DistributionPointGroup -Filter "Name='ALL DPS'" `
+        -Property @('Name', 'GroupID', 'SourceSite') -Attempts 2 -RetrySeconds 0)
+if ($script:CimProjectionAttempts -ne 2 -or $projectedRows.Count -ne 1 -or
+    $projectedRows[0].GroupID -ne 'GROUP-1') {
+    throw 'Projected CIM helper did not recover the synthetic out-of-memory read.'
+}
+if (-not $script:CimProjectionRow.Disposed -or
+    $projectedRows[0] -is [MemLabsDisposableCimFixture]) {
+    throw 'Projected CIM helper retained the disposable provider object.'
+}
 
 $metadataConfig = [pscustomobject]@{
     virtualMachines = @(
@@ -93,6 +147,26 @@ if ($coverageText -notmatch "'optional-grace-complete'") {
 if ($coverageText -notmatch
     '(?s)ContentValidating but physically holds.+?Leaving RefreshNow untouched.+?continue') {
     throw 'Current physical content can still be reset repeatedly while the summarizer validates it.'
+}
+$coverageLoop = [regex]::Match(
+    $coverageText,
+    '(?s)\$coverageStart\s*=\s*Get-Date.+?# Final state \+ rich DP-side diagnostics')
+if (-not $coverageLoop.Success) {
+    throw 'Client package coverage polling loop was not found.'
+}
+foreach ($className in @(
+        'SMS_Package',
+        'SMS_PackageStatusDistPointsSummarizer',
+        'SMS_DistributionPoint'
+    )) {
+    if ($coverageLoop.Value -match
+        "Get-WmiObject[^\r\n]+-Class\s+$className") {
+        throw "Client package polling still retains full WMI objects for $className."
+    }
+}
+if ($coverageLoop.Value -notmatch 'Client pkg coverage memory checkpoint' -or
+    $coverageLoop.Value -notmatch 'Get-MemLabsProjectedCimRows') {
+    throw 'Client package polling lost projected CIM reads or periodic memory telemetry.'
 }
 
 $secondaryCase = [regex]::Match($validationText, "(?s)'Secondary'\s*\{(?:(?!\n\s{8}'\w+'\s*\{).)*?\n\s{8}\}")

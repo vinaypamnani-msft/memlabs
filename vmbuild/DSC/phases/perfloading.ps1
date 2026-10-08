@@ -250,8 +250,9 @@ Write-DscStatus "$Tag Starting perfloading"
         $namespace = "root\SMS\site_$SiteCode"
         if ($GroupId) {
             $escapedGroupId = $GroupId.Replace("'", "''")
-            $idGroups = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPointGroup -Filter "GroupID='$escapedGroupId'" -ErrorAction Stop |
-                Where-Object { $null -ne $_ })
+            $idGroups = @(Get-MemLabsProjectedCimRows -Namespace $namespace `
+                    -ClassName SMS_DistributionPointGroup -Filter "GroupID='$escapedGroupId'" `
+                    -Property @('Name', 'GroupID', 'SourceSite') -Attempts 6 -RetrySeconds 10)
             if ($idGroups.Count -eq 0) {
                 if ($AllowMissing) { return $null }
                 throw "distribution point group ID '$GroupId' was not found"
@@ -265,8 +266,9 @@ Write-DscStatus "$Tag Starting perfloading"
         }
 
         $escapedGroupName = $GroupName.Replace("'", "''")
-        $groups = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" -ErrorAction Stop |
-            Where-Object { $null -ne $_ })
+        $groups = @(Get-MemLabsProjectedCimRows -Namespace $namespace `
+                -ClassName SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" `
+                -Property @('Name', 'GroupID', 'SourceSite') -Attempts 6 -RetrySeconds 10)
         if ($groups.Count -eq 0) {
             if ($AllowMissing) { return $null }
             throw "distribution point group '$GroupName' was not found"

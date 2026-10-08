@@ -57,6 +57,8 @@ function Import-TestFunction {
 
 $perfloadingPath = Join-Path $RootPath 'DSC\phases\perfloading.ps1'
 $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
+$functionsPath = Join-Path $RootPath 'DSC\phases\ScriptFunctions.ps1'
+. (Import-TestFunction -Path $functionsPath -Name 'Get-MemLabsProjectedCimRows')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsManagedDistributionPointNames')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsServerFromNalPath')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Test-MemLabsDistributionPointGroupMember')
@@ -126,6 +128,19 @@ function Get-WmiObject {
             return @($script:GroupPackagesById[$Matches[1]])
         }
     }
+}
+
+function Get-CimInstance {
+    param(
+        [string] $Namespace,
+        [string] $ClassName,
+        [string] $Filter,
+        [string[]] $Property,
+        [int] $OperationTimeoutSec,
+        $ErrorAction
+    )
+    return Get-WmiObject -Namespace $Namespace -Class $ClassName `
+        -Filter $Filter -ErrorAction $ErrorAction
 }
 
 function Get-CMDistributionPoint {

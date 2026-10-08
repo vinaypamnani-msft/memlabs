@@ -12737,6 +12737,54 @@ function Test-CMSiteWideFunctionality {
         # passed as a single CSV string and split inside.
         param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner)
 
+        function Get-MemLabsValidationProjectedCimRows {
+            param(
+                [string]$Namespace,
+                [string]$ClassName,
+                [string]$Filter,
+                [string[]]$Property,
+                [int]$Attempts = 3
+            )
+
+            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+                $instances = @()
+                try {
+                    $query = @{
+                        Namespace = $Namespace
+                        ClassName = $ClassName
+                        Property = $Property
+                        OperationTimeoutSec = 30
+                        ErrorAction = 'Stop'
+                    }
+                    if ($Filter) { $query.Filter = $Filter }
+                    $instances = @(Get-CimInstance @query | Where-Object { $null -ne $_ })
+                    return @($instances | ForEach-Object {
+                            $projected = [ordered]@{}
+                            foreach ($propertyName in $Property) {
+                                $projected[$propertyName] = $_.$propertyName
+                            }
+                            [pscustomobject]$projected
+                        })
+                }
+                catch {
+                    $isOutOfMemory = $_.Exception -is [System.OutOfMemoryException] -or
+                        $_.Exception.Message -match '(?i)OutOfMemory|0x8007000E|not enough (storage|memory)'
+                    if (-not $isOutOfMemory -or $attempt -ge $Attempts) { throw }
+                    [GC]::Collect()
+                    [GC]::WaitForPendingFinalizers()
+                    [GC]::Collect()
+                    Start-Sleep -Seconds 5
+                }
+                finally {
+                    foreach ($instance in @($instances)) {
+                        if ($instance -is [System.IDisposable]) {
+                            try { $instance.Dispose() } catch { }
+                        }
+                    }
+                }
+            }
+        }
+
         function Get-MemLabsDistributionPointGroupValidationState {
             param(
                 [string]$Namespace,
@@ -12745,11 +12793,14 @@ function Test-CMSiteWideFunctionality {
             )
 
             $escapedGroupName = $GroupName.Replace("'", "''")
-            $groups = @(Get-WmiObject -Namespace $Namespace -Class SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" -ErrorAction Stop |
-                Where-Object { $null -ne $_ })
+            $groups = @(Get-MemLabsValidationProjectedCimRows -Namespace $Namespace `
+                    -ClassName SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" `
+                    -Property @('GroupID', 'SourceSite'))
             $memberNames = @(
                 foreach ($group in $groups) {
-                    Get-WmiObject -Namespace $Namespace -Class SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop |
+                    Get-MemLabsValidationProjectedCimRows -Namespace $Namespace `
+                        -ClassName SMS_DPGroupMembers -Filter "GroupID='$($group.GroupID)'" `
+                        -Property @('DPNALPath') |
                         ForEach-Object {
                             if ("$($_.DPNALPath)" -match '\\\\([^\\\"\]]+)') { $Matches[1] }
                         }
