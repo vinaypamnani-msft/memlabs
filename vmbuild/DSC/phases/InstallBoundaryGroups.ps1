@@ -2453,6 +2453,13 @@ else {
 # lab (pushClient=false) returned here without ever distributing the client package
 # to the new DP, failing Phase 11 with the DP stuck at ContentValidating.
 & $ensureChildBgFallbackDps
+try {
+    $null = Invoke-MemLabsGuestMemoryReclaim `
+        -Context 'InstallBoundaryGroups before client package coverage'
+}
+catch {
+    Write-DscStatus "Client pkg coverage: pre-coverage memory reclaim failed: $($_.Exception.Message)" -Warning
+}
 & $ensureClientPkgCoverage
 
 # Push Clients

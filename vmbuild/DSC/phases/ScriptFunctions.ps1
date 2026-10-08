@@ -262,7 +262,9 @@ function Invoke-DotSource {
     catch {
         $__idsOutOfMemory = $_.Exception -is [System.OutOfMemoryException] -or
             $_.Exception.Message -match '(?i)OutOfMemory|0x8007000E|not enough (storage|memory)'
-        Write-DscStatus "WARNING: exception in ${__idsScriptName}: $_"
+        $__idsStack = (($_.ScriptStackTrace -replace '\s+', ' ').Trim())
+        if ($__idsStack.Length -gt 1200) { $__idsStack = $__idsStack.Substring(0, 1200) + '...' }
+        Write-DscStatus "WARNING: exception in ${__idsScriptName}: $($_.Exception.GetType().FullName): $($_.Exception.Message); stack=$__idsStack"
         if ($__idsRethrow) { throw }
     }
     finally {

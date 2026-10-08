@@ -83,5 +83,16 @@ if ($sourceText -notmatch
     '(?s)\$__idsStopwatch\.Elapsed\.TotalMinutes -ge 15.+?Invoke-MemLabsGuestMemoryReclaim') {
     throw 'Long-running guest scripts no longer reclaim their child-scope object graph.'
 }
+if ($sourceText -notmatch
+    '(?s)\$__idsStack.+?ScriptStackTrace.+?Length -gt 1200.+?stack=\$__idsStack') {
+    throw 'Guest script boundary failures no longer preserve a bounded producer stack.'
+}
+
+$coverageText = Get-Content -LiteralPath (
+    Join-Path $RootPath 'DSC\phases\InstallBoundaryGroups.ps1') -Raw
+if ($coverageText -notmatch
+    '(?s)Invoke-CMSystemDiscovery.+?Invoke-MemLabsGuestMemoryReclaim.+?InstallBoundaryGroups before client package coverage.+?& \$ensureClientPkgCoverage') {
+    throw 'Client package coverage no longer reclaims earlier ConfigMgr provider graphs before its first query.'
+}
 
 Write-Host 'PASS -- guest script boundaries reclaim memory after OOM and long-running work.'
