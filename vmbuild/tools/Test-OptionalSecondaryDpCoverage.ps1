@@ -168,6 +168,21 @@ if ($coverageLoop.Value -notmatch 'Client pkg coverage memory checkpoint' -or
     $coverageLoop.Value -notmatch 'Get-MemLabsProjectedCimRows') {
     throw 'Client package polling lost projected CIM reads or periodic memory telemetry.'
 }
+if ($coverageText -match '&\s+\$writeCoverageSnapshot\s+[''"]' -or
+    $coverageText -match '&\s+\$writeCoverageSnapshot\s+\$') {
+    throw 'Client package timeline still uses positional scriptblock arguments that collapse when an array is empty.'
+}
+if ($coverageText -notmatch
+    '(?s)-Trigger\s+''content-installed''.+?-IncludeNodeState\s+\$false' -or
+    $coverageText -notmatch
+    '(?s)-Trigger\s+\$finalSnapshotTrigger.+?-IncludeNodeState:\(\$stillBad\.Count -gt 0\)') {
+    throw 'Successful client package convergence still launches duplicate heavy node snapshots.'
+}
+if ($coverageText -notmatch
+    '\$lastCoverageNodeCapture.+?TotalMinutes -ge 20' -or
+    $coverageText -notmatch '\[IO\.Directory\]::EnumerateFiles') {
+    throw 'Client package diagnostics lost their low-frequency node cadence or streaming queue inventory.'
+}
 
 $secondaryCase = [regex]::Match($validationText, "(?s)'Secondary'\s*\{(?:(?!\n\s{8}'\w+'\s*\{).)*?\n\s{8}\}")
 if (-not $secondaryCase.Success -or

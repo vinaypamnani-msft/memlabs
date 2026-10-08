@@ -316,13 +316,27 @@ $ensureClientPkgCoverage = {
                     $queuePath = Join-Path $smsDir $relativePath
                     if (-not (Test-Path -LiteralPath $queuePath)) { continue }
                     try {
-                        $queueFiles = @(Get-ChildItem -LiteralPath $queuePath -File -ErrorAction Stop)
-                        $oldest = $queueFiles | Sort-Object LastWriteTimeUtc | Select-Object -First 1
+                        $queueFileCount = 0
+                        [long]$queueTotalBytes = 0
+                        $queueOldestUtc = $null
+                        foreach ($queueFilePath in [IO.Directory]::EnumerateFiles(
+                                $queuePath, '*', [IO.SearchOption]::TopDirectoryOnly)) {
+                            try {
+                                $queueFile = [IO.FileInfo]::new($queueFilePath)
+                                $queueFileCount++
+                                $queueTotalBytes += $queueFile.Length
+                                if (-not $queueOldestUtc -or
+                                    $queueFile.LastWriteTimeUtc -lt $queueOldestUtc) {
+                                    $queueOldestUtc = $queueFile.LastWriteTimeUtc
+                                }
+                            }
+                            catch { }
+                        }
                         $node.Queues += [ordered]@{
                             Path          = $relativePath
-                            FileCount     = $queueFiles.Count
-                            TotalBytes    = [long](($queueFiles | Measure-Object -Property Length -Sum).Sum)
-                            OldestFileUtc = if ($oldest) { $oldest.LastWriteTimeUtc.ToString('o') } else { $null }
+                            FileCount     = $queueFileCount
+                            TotalBytes    = $queueTotalBytes
+                            OldestFileUtc = if ($queueOldestUtc) { $queueOldestUtc.ToString('o') } else { $null }
                         }
                     }
                     catch { $node.Errors += "Queue '$relativePath': $($_.Exception.Message)" }
@@ -834,7 +848,9 @@ $ensureClientPkgCoverage = {
         $dpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
         if ($dpVm -and $dpVm.siteCode) { $secLinkSites["$($dpVm.siteCode)"] = $true }
     }
-    $null = & $writeCoverageSnapshot 'scope-resolved' $bgDpFqdns @($secLinkSites.Keys) $false
+    $null = & $writeCoverageSnapshot -Trigger 'scope-resolved' `
+        -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+        -IncludeNodeState $false
     if ($secLinkSites.Count -gt 0) {
         $linkDeadline = (Get-Date).AddMinutes(30)
         $pendingLink = @($secLinkSites.Keys)
@@ -856,7 +872,9 @@ $ensureClientPkgCoverage = {
             if ($pendingLink.Count -gt 0) {
                 if (-not $lastLinkTimelineCapture -or ((Get-Date) - $lastLinkTimelineCapture).TotalMinutes -ge 5) {
                     $lastLinkTimelineCapture = Get-Date
-                    $null = & $writeCoverageSnapshot 'replication-link-wait' $bgDpFqdns $pendingLink $true
+                    $null = & $writeCoverageSnapshot -Trigger 'replication-link-wait' `
+                        -DistributionPoints $bgDpFqdns -ReplicationSites $pendingLink `
+                        -IncludeNodeState $true
                 }
                 $remainMin = [int]((($linkDeadline) - (Get-Date)).TotalMinutes)
                 if ($remainMin -lt 0) { $remainMin = 0 }
@@ -865,11 +883,15 @@ $ensureClientPkgCoverage = {
             }
         }
         if ($pendingLink.Count -gt 0) {
-            $null = & $writeCoverageSnapshot 'replication-link-deadline' $bgDpFqdns $pendingLink $true
+            $null = & $writeCoverageSnapshot -Trigger 'replication-link-deadline' `
+                -DistributionPoints $bgDpFqdns -ReplicationSites $pendingLink `
+                -IncludeNodeState $true
             Write-DscStatus "Client pkg coverage: secondary replication link(s) still NOT Active after 30 min: $($pendingLink -join ', '). Proceeding with the client-package wait anyway (content can't arrive until the link activates; Phase 11 re-checks and collects link diagnostics)." -Warning
         }
         else {
-            $null = & $writeCoverageSnapshot 'replication-link-active' $bgDpFqdns @($secLinkSites.Keys) $true
+            $null = & $writeCoverageSnapshot -Trigger 'replication-link-active' `
+                -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+                -IncludeNodeState $true
         }
     }
 
@@ -1456,6 +1478,7 @@ $ensureClientPkgCoverage = {
     $unownedSendMinutes = 10
     $lastWedgeCheck = $null
     $lastCoverageTimelineCapture = $null
+    $lastCoverageNodeCapture = $null
     $lastCoverageFingerprint = ''
     $lastCoverageMemoryReclaim = Get-Date
     $optionalGraceStart = $null
@@ -1471,7 +1494,9 @@ $ensureClientPkgCoverage = {
             $lastWedgeCheck = Get-Date
             if (& $clearStuckDistmgrWedge "coverage wait, try $try") {
                 $lastWedgeCheck = Get-Date
-                $null = & $writeCoverageSnapshot 'after-distmgr-wedge-repair' $bgDpFqdns @($secLinkSites.Keys) $true
+                $null = & $writeCoverageSnapshot -Trigger 'after-distmgr-wedge-repair' `
+                    -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+                    -IncludeNodeState $true
             }
         }
         # Is the client package content present at THIS site yet? StoredPkgVersion=0
@@ -1535,7 +1560,9 @@ $ensureClientPkgCoverage = {
                 }) -join ';')
         if ($notInstalled.Count -eq 0) {
             $coverageExitReason = 'Installed'
-            $null = & $writeCoverageSnapshot 'content-installed' $bgDpFqdns @($secLinkSites.Keys) $true
+            $null = & $writeCoverageSnapshot -Trigger 'content-installed' `
+                -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+                -IncludeNodeState $false
             Write-DscStatus "Client package is Installed on all $($bgDpFqdns.Count) boundary-group DP(s)."
             break
         }
@@ -1543,13 +1570,21 @@ $ensureClientPkgCoverage = {
             ((Get-Date) - $lastCoverageTimelineCapture).TotalMinutes -ge 5)
         if ($coveragePeriodicSnapshotDue -or
             $coverageFingerprint -ne $lastCoverageFingerprint) {
-            $snapshotTrigger = if ($lastCoverageFingerprint -and $coverageFingerprint -ne $lastCoverageFingerprint) {
+            $coverageStateChanged = $lastCoverageFingerprint -and
+                $coverageFingerprint -ne $lastCoverageFingerprint
+            $snapshotTrigger = if ($coverageStateChanged) {
                 'content-state-change'
             }
             else {
                 'content-wait'
             }
-            $null = & $writeCoverageSnapshot $snapshotTrigger $bgDpFqdns @($secLinkSites.Keys) $coveragePeriodicSnapshotDue
+            $coverageNodeSnapshotDue = -not $lastCoverageNodeCapture -or
+                ((Get-Date) - $lastCoverageNodeCapture).TotalMinutes -ge 20
+            $includeCoverageNodeState = $coverageStateChanged -or $coverageNodeSnapshotDue
+            $null = & $writeCoverageSnapshot -Trigger $snapshotTrigger `
+                -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+                -IncludeNodeState $includeCoverageNodeState
+            if ($includeCoverageNodeState) { $lastCoverageNodeCapture = Get-Date }
             $lastCoverageTimelineCapture = Get-Date
             $lastCoverageFingerprint = $coverageFingerprint
         }
@@ -1625,11 +1660,15 @@ $ensureClientPkgCoverage = {
                     $dpPendingSince.Remove($u)
                 }
                 try {
-                    $null = & $writeCoverageSnapshot "before-targeting-create:$dp" @($dp) @($secLinkSites.Keys) $true
+                    $null = & $writeCoverageSnapshot -Trigger "before-targeting-create:$dp" `
+                        -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                        -IncludeNodeState $true
                     Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
                     $lastArm[$u] = Get-Date
                     Write-DscStatus "Client pkg coverage: DP '$dp' had NO targeting row (PkgServers) -> distributed to re-establish it [try $try]"
-                    $null = & $writeCoverageSnapshot "after-targeting-create:$dp" @($dp) @($secLinkSites.Keys) $true
+                    $null = & $writeCoverageSnapshot -Trigger "after-targeting-create:$dp" `
+                        -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                        -IncludeNodeState $true
                     if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) }; $lastParentPoke = $null }
                 }
                 catch { Write-DscStatus "Client pkg coverage: re-establishing the targeting row for DP '$dp' failed: $($_.Exception.Message)" }
@@ -1686,13 +1725,17 @@ $ensureClientPkgCoverage = {
             $armedAt = if ($lastArm.ContainsKey($u)) { $lastArm[$u] } else { $null }
             if ($armedAt -and ((Get-Date) - $armedAt).TotalMinutes -lt $armMinutes) { continue }
             try {
-                $null = & $writeCoverageSnapshot "before-refresh-now:$dp" @($dp) @($secLinkSites.Keys) $true
+                $null = & $writeCoverageSnapshot -Trigger "before-refresh-now:$dp" `
+                    -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                    -IncludeNodeState $true
                 & $redistOrDistribute $dp | Out-Null
                 $lastArm[$u] = Get-Date
                 if ($contentPendingFromParent) { Write-DscStatus "Client pkg coverage: DP '$dp' is $stName and site $SiteCode still has no content -> re-armed the targeting with RefreshNow so the parent sees a fresh change and sends the package [try $try]" }
                 elseif ($armedAt) { Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> re-armed with RefreshNow so distmgr retries now instead of waiting out its backoff [try $try]" }
                 else { Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [try $try]" }
-                $null = & $writeCoverageSnapshot "after-refresh-now:$dp" @($dp) @($secLinkSites.Keys) $true
+                $null = & $writeCoverageSnapshot -Trigger "after-refresh-now:$dp" `
+                    -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                    -IncludeNodeState $true
                 # The CAS is gated on DistributionPoints, which hman builds from site control data.
                 # Clearing the poke stamp re-wakes the parent on the NEXT iteration (~31s): the wake at
                 # the top of this one fired ~19s BEFORE hman wrote the row, so distmgr looked while the
@@ -1748,7 +1791,9 @@ $ensureClientPkgCoverage = {
                         $bumpRan = $false
                         if ($abortStranded) {
                             Write-DscStatus "Client pkg coverage: [wedge-repair] $PackageID was ABANDONED to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- the content is NOT in that DP's library and the send is not armed. distmgr.cpp:17252 skips its auto-recovery for a 0x800704D3 abort, so StoredPkgPath is never cleared and every later pass exits with nothing to do."
-                            $null = & $writeCoverageSnapshot "before-abort-repair:$dp" @($dp) @($secLinkSites.Keys) $true
+                            $null = & $writeCoverageSnapshot -Trigger "before-abort-repair:$dp" `
+                                -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                                -IncludeNodeState $true
                             if (& $restartExecOnce) {
                                 $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
                                 $bumpRan = $pkgSourceBumped
@@ -1761,7 +1806,9 @@ $ensureClientPkgCoverage = {
                                 $unownedWhy = "the source site recorded this package as SENT to that site at $($strandedWhy['sentAt']) UTC while the DP's content library still does not have it -- those two cannot both be true, so no waiting is needed to tell them apart"
                             }
                             Write-DscStatus "Client pkg coverage: [wedge-repair] nobody owes the send of $PackageID to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- $unownedWhy. The source site's fan-out handed the transfer to the closest site holding a valid PCK without creating a minijob, then recorded the target as SENT anyway, and a SENT row under two days old stops every site from sending. Bumping the source version is what breaks that: it sets PKG_UPDATE_SOURCE, which bypasses the SENT check outright, and it invalidates the closest site's stale PCK so the source site sends it itself." -Warning
-                            $null = & $writeCoverageSnapshot "before-unowned-send-repair:$dp" @($dp) @($secLinkSites.Keys) $true
+                            $null = & $writeCoverageSnapshot -Trigger "before-unowned-send-repair:$dp" `
+                                -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                                -IncludeNodeState $true
                             # No restart here on purpose. $isPkgStrandedToSite just returned false,
                             # which for this DP means there is no abort left un-followed by a send --
                             # the cancel flag is not what is blocking, so a restart would only spend
@@ -1787,7 +1834,9 @@ $ensureClientPkgCoverage = {
                             }
                         }
                         if ($abortStranded -or $sendUnowned) {
-                            $null = & $writeCoverageSnapshot "after-source-version-repair:$dp" @($dp) @($secLinkSites.Keys) $true
+                            $null = & $writeCoverageSnapshot -Trigger "after-source-version-repair:$dp" `
+                                -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                                -IncludeNodeState $true
                         }
                     }
                     # Only now, and only if no repair fired: the bump supersedes the poke, and past
@@ -1858,7 +1907,9 @@ $ensureClientPkgCoverage = {
     else {
         'coverage-deadline'
     }
-    $null = & $writeCoverageSnapshot $finalSnapshotTrigger $bgDpFqdns @($secLinkSites.Keys) $true $true
+    $null = & $writeCoverageSnapshot -Trigger $finalSnapshotTrigger `
+        -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+        -IncludeNodeState:($stillBad.Count -gt 0) -ForceWrite $true
 
     $optionalStatusLag = [System.Collections.Generic.List[string]]::new()
     $needsDiagnostics = [System.Collections.Generic.List[string]]::new()

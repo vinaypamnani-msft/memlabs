@@ -160,6 +160,38 @@ function Get-CmSslStateNote {
     return $note
 }
 
+function Invoke-MemLabsGuestMemoryReclaim {
+    param([string]$Context = 'guest workflow boundary')
+
+    $process = $null
+    $workingBeforeMb = -1
+    $privateBeforeMb = -1
+    $managedBeforeMb = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+    try {
+        $process = Get-Process -Id $PID -ErrorAction Stop
+        $workingBeforeMb = [math]::Round($process.WorkingSet64 / 1MB, 1)
+        $privateBeforeMb = [math]::Round($process.PrivateMemorySize64 / 1MB, 1)
+    }
+    catch { }
+    finally {
+        if ($process) { $process.Dispose() }
+    }
+
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    [GC]::Collect()
+
+    $managedAfterMb = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+    Write-DscStatus "[MemoryReclaim] $Context`: pid=$PID working=${workingBeforeMb}MB private=${privateBeforeMb}MB managed=${managedBeforeMb}MB->$managedAfterMb MB." -NoStatus
+    return [pscustomobject]@{
+        Context         = $Context
+        WorkingBeforeMb = $workingBeforeMb
+        PrivateBeforeMb = $privateBeforeMb
+        ManagedBeforeMb = $managedBeforeMb
+        ManagedAfterMb  = $managedAfterMb
+    }
+}
+
 function Invoke-DotSource {
     # Wrapper for dot-sourcing scripts with error handling.
     # Catches parse errors, execution policy blocks, and other failures
@@ -222,11 +254,14 @@ function Invoke-DotSource {
     # and the scripts have their own retry logic; marking them as JOBFAILURE
     # would abort the phase prematurely.
     $__idsStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $__idsOutOfMemory = $false
     Write-DscStatus "[Invoke-DotSource] START $__idsScriptName$(Get-CmSslStateNote)" -NoStatus
     try {
         & $Script @Arguments
     }
     catch {
+        $__idsOutOfMemory = $_.Exception -is [System.OutOfMemoryException] -or
+            $_.Exception.Message -match '(?i)OutOfMemory|0x8007000E|not enough (storage|memory)'
         Write-DscStatus "WARNING: exception in ${__idsScriptName}: $_"
         if ($__idsRethrow) { throw }
     }
@@ -234,6 +269,13 @@ function Invoke-DotSource {
         $__idsStopwatch.Stop()
         $__idsElapsed = $__idsStopwatch.Elapsed.ToString('hh\:mm\:ss')
         Write-DscStatus "[Invoke-DotSource] END   $__idsScriptName  ($__idsElapsed elapsed)$(Get-CmSslStateNote)" -NoStatus
+        if ($__idsOutOfMemory -or $__idsStopwatch.Elapsed.TotalMinutes -ge 15) {
+            try {
+                $reason = if ($__idsOutOfMemory) { 'out-of-memory recovery' } else { 'long-running script boundary' }
+                $null = Invoke-MemLabsGuestMemoryReclaim -Context "$__idsScriptName $reason"
+            }
+            catch { }
+        }
     }
 }
 

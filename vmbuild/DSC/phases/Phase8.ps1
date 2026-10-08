@@ -352,14 +352,17 @@
                     Status    = "Waiting on $($WaitFor -join ",") to Complete"
                 }
 
-                WaitForAll WaitSCCM {
-                    ResourceName     = '[WaitForEvent]WorkflowComplete'
-                    NodeName         = $WaitFor
-                    RetryIntervalSec = 5
-                    RetryCount       = 7200
-                    DependsOn        = $nextDepend
+                WaitForEvent WaitSCCM {
+                    MachineName             = @($WaitFor)[0]
+                    LogFolder               = $LogFolder
+                    FileName                = 'ScriptWorkflow'
+                    ReadNode                = 'ScriptWorkflow'
+                    ReadNodeValue           = 'Completed'
+                    Ensure                  = 'Present'
+                    PsDscRunAsCredential     = $CMAdmin
+                    DependsOn               = $nextDepend
                 }
-                $nextDepend = '[WaitForAll]WaitSCCM'
+                $nextDepend = '[WaitForEvent]WaitSCCM'
             }
             InstallConsole InstallConsole {
                 SiteServerFQDN = $serverToWait.VmName + "." + $DomainName
@@ -563,14 +566,17 @@
                 Status    = "Waiting on $($WaitFor -join ",") to Complete"
             }
 
-            WaitForAll WaitSCCM {
-                ResourceName     = '[WaitForEvent]WorkflowComplete'
-                NodeName         = $WaitFor
-                RetryIntervalSec = 5
-                RetryCount       = 7200
-                DependsOn        = $nextDepend
+            WaitForEvent WaitSCCM {
+                MachineName             = @($WaitFor)[0]
+                LogFolder               = $LogFolder
+                FileName                = 'ScriptWorkflow'
+                ReadNode                = 'ScriptWorkflow'
+                ReadNodeValue           = 'Completed'
+                Ensure                  = 'Present'
+                PsDscRunAsCredential     = $CMAdmin
+                DependsOn               = $nextDepend
             }
-            $nextDepend = '[WaitForAll]WaitSCCM'
+            $nextDepend = '[WaitForEvent]WaitSCCM'
         }
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Enable-AgentJob-Set.sql"
