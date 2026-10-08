@@ -16,6 +16,7 @@ DscResourcesToExport = @(
     'InstallSqlClient',
     'WriteEvent',
     'WaitForEvent',
+    'WaitForWorkflowReceipt',
     'DelegateControl',
     'AddNtfsPermissions',
     'WaitForDomainReady',

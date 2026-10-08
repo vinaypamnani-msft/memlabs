@@ -352,17 +352,14 @@
                     Status    = "Waiting on $($WaitFor -join ",") to Complete"
                 }
 
-                WaitForEvent WaitSCCM {
-                    MachineName             = @($WaitFor)[0]
-                    LogFolder               = $LogFolder
-                    FileName                = 'ScriptWorkflow'
-                    ReadNode                = 'ScriptWorkflow'
-                    ReadNodeValue           = 'Completed'
-                    Ensure                  = 'Present'
-                    PsDscRunAsCredential     = $CMAdmin
-                    DependsOn               = $nextDepend
+                WaitForWorkflowReceipt WaitSCCM {
+                    MachineName         = @($WaitFor)[0]
+                    LogFolder           = $LogFolder
+                    Ensure              = 'Present'
+                    PsDscRunAsCredential = $CMAdmin
+                    DependsOn           = $nextDepend
                 }
-                $nextDepend = '[WaitForEvent]WaitSCCM'
+                $nextDepend = '[WaitForWorkflowReceipt]WaitSCCM'
             }
             InstallConsole InstallConsole {
                 SiteServerFQDN = $serverToWait.VmName + "." + $DomainName
@@ -566,17 +563,14 @@
                 Status    = "Waiting on $($WaitFor -join ",") to Complete"
             }
 
-            WaitForEvent WaitSCCM {
-                MachineName             = @($WaitFor)[0]
-                LogFolder               = $LogFolder
-                FileName                = 'ScriptWorkflow'
-                ReadNode                = 'ScriptWorkflow'
-                ReadNodeValue           = 'Completed'
-                Ensure                  = 'Present'
-                PsDscRunAsCredential     = $CMAdmin
-                DependsOn               = $nextDepend
+            WaitForWorkflowReceipt WaitSCCM {
+                MachineName         = @($WaitFor)[0]
+                LogFolder           = $LogFolder
+                Ensure              = 'Present'
+                PsDscRunAsCredential = $CMAdmin
+                DependsOn           = $nextDepend
             }
-            $nextDepend = '[WaitForEvent]WaitSCCM'
+            $nextDepend = '[WaitForWorkflowReceipt]WaitSCCM'
         }
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Enable-AgentJob-Set.sql"
@@ -864,14 +858,12 @@
             DependsOn = $nextDepend
         }
 
-        WaitForEvent WaitPrimary {
-            MachineName   = $PSName
-            LogFolder     = $LogFolder
-            FileName      = "ScriptWorkflow"
-            ReadNode      = "ScriptWorkflow"
-            ReadNodeValue = "Completed"
-            Ensure        = "Present"
-            DependsOn     = $nextDepend
+        WaitForWorkflowReceipt WaitPrimary {
+            MachineName         = $PSName
+            LogFolder           = $LogFolder
+            Ensure              = 'Present'
+            PsDscRunAsCredential = $CMAdmin
+            DependsOn           = $nextDepend
         }
 
         # WSUS categories baseline cab import for this Secondary's SUP.
@@ -901,7 +893,7 @@
                 }
                 catch { }
             }
-            DependsOn  = "[WaitForEvent]WaitPrimary"
+            DependsOn  = "[WaitForWorkflowReceipt]WaitPrimary"
         }
 
         WriteEvent WriteConfigFinished {
@@ -1163,17 +1155,14 @@
             DependsOn      = "[WriteFileOnce]CMSvc"
         }
 
-        WaitForEvent WorkflowComplete {
-            MachineName   = $ThisMachineName
-            LogFolder     = $LogFolder
-            FileName      = "ScriptWorkflow"
-            ReadNode      = "ScriptWorkflow"
-            ReadNodeValue = "Completed"
-            Ensure        = "Present"
-            DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
+        WaitForWorkflowReceipt WorkflowComplete {
+            MachineName = $ThisMachineName
+            LogFolder   = $LogFolder
+            Ensure      = 'Present'
+            DependsOn   = "[RegisterTaskScheduler]RunScriptWorkflow"
         }
 
-        $nextDepend = "[WaitForEvent]WorkflowComplete"
+        $nextDepend = "[WaitForWorkflowReceipt]WorkflowComplete"
 
         Script ConfigMgrConsoleShortcut {
             GetScript  = {
@@ -1448,16 +1437,16 @@
             DependsOn = $nextDepend
         }
 
-        WaitForAll ActiveNode {
-            ResourceName     = '[WriteStatus]Complete'
-            NodeName         = $ThisVM.thisParams.ActiveNode
-            RetryIntervalSec = 5
-            RetryCount       = 6500
-            DependsOn        = '[WriteStatus]WaitActive'
+        WaitForWorkflowReceipt ActiveNode {
+            MachineName         = $ThisVM.thisParams.ActiveNode
+            LogFolder           = $LogFolder
+            Ensure              = 'Present'
+            PsDscRunAsCredential = $CMAdmin
+            DependsOn           = '[WriteStatus]WaitActive'
         }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForAll]ActiveNode"
+            DependsOn = "[WaitForWorkflowReceipt]ActiveNode"
             Status    = "Complete!"
         }
 

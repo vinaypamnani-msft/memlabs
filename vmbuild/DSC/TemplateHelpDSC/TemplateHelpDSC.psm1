@@ -2558,6 +2558,83 @@ class WaitForEvent {
 }
 
 [DscResource()]
+class WaitForWorkflowReceipt {
+
+    [DscProperty(Key)]
+    [string] $MachineName
+
+    [DscProperty(Mandatory)]
+    [string] $LogFolder
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [string] GetReceiptRoot() {
+        if ($this.MachineName -eq $env:COMPUTERNAME) {
+            return (Join-Path $env:SystemDrive "staging\$($this.LogFolder)")
+        }
+        return "\\$($this.MachineName)\$($this.LogFolder)"
+    }
+
+    [bool] ReceiptMatches() {
+        try {
+            $root = $this.GetReceiptRoot()
+            $expectedPath = Join-Path $root 'ScriptWorkflow.expected.runid'
+            $completedPath = Join-Path $root 'ScriptWorkflow.completed.runid'
+            if (-not (Test-Path -LiteralPath $expectedPath -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $completedPath -PathType Leaf)) {
+                return $false
+            }
+            $expected = "$(Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop)".Trim()
+            $completed = "$(Get-Content -LiteralPath $completedPath -Raw -ErrorAction Stop)".Trim()
+            return -not [string]::IsNullOrWhiteSpace($expected) -and
+                $expected.Equals($completed, [StringComparison]::OrdinalIgnoreCase)
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [void] Set() {
+        $started = Get-Date
+        while (-not $this.ReceiptMatches()) {
+            $root = $this.GetReceiptRoot()
+            $expected = '<missing>'
+            $completed = '<missing>'
+            try {
+                $expectedPath = Join-Path $root 'ScriptWorkflow.expected.runid'
+                if (Test-Path -LiteralPath $expectedPath -PathType Leaf) {
+                    $expected = "$(Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop)".Trim()
+                }
+            }
+            catch { $expected = "<unreadable: $($_.Exception.Message)>" }
+            try {
+                $completedPath = Join-Path $root 'ScriptWorkflow.completed.runid'
+                if (Test-Path -LiteralPath $completedPath -PathType Leaf) {
+                    $completed = "$(Get-Content -LiteralPath $completedPath -Raw -ErrorAction Stop)".Trim()
+                }
+            }
+            catch { $completed = "<unreadable: $($_.Exception.Message)>" }
+            $elapsedMinutes = [math]::Round(((Get-Date) - $started).TotalMinutes, 1)
+            Write-Status "Waiting for ScriptWorkflow receipt on $($this.MachineName) (elapsed=${elapsedMinutes}m, expected='$expected', completed='$completed')."
+            Start-Sleep -Seconds 30
+        }
+        Write-Status "ScriptWorkflow receipt matched on $($this.MachineName)."
+    }
+
+    [bool] Test() {
+        return $this.ReceiptMatches()
+    }
+
+    [WaitForWorkflowReceipt] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
 class WaitForExtendSchemaFile {
     [DscProperty(Key)]
     [string] $MachineName

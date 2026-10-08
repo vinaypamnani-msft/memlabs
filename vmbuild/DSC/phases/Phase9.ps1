@@ -115,17 +115,14 @@
                 Status    = "Waiting on $($WaitFor -join ",") to Complete"
             }
 
-            WaitForEvent WaitSCCM {
-                MachineName             = @($WaitFor)[0]
-                LogFolder               = $LogFolder
-                FileName                = 'ScriptWorkflow'
-                ReadNode                = 'ScriptWorkflow'
-                ReadNodeValue           = 'Completed'
-                Ensure                  = 'Present'
-                PsDscRunAsCredential     = $CMAdmin
-                DependsOn               = $nextDepend
+            WaitForWorkflowReceipt WaitSCCM {
+                MachineName         = @($WaitFor)[0]
+                LogFolder           = $LogFolder
+                Ensure              = 'Present'
+                PsDscRunAsCredential = $CMAdmin
+                DependsOn           = $nextDepend
             }
-            $nextDepend = '[WaitForEvent]WaitSCCM'
+            $nextDepend = '[WaitForWorkflowReceipt]WaitSCCM'
         }
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Enable-AgentJob-Set.sql"
@@ -264,14 +261,12 @@
             Status = "Waiting for Site Server $PSName to finish configuration."
         }
 
-        WaitForEvent WaitPrimary {
-            MachineName   = $PSName
-            LogFolder     = $LogFolder
-            FileName      = "ScriptWorkflow"
-            ReadNode      = "ScriptWorkflow"
-            ReadNodeValue = "Completed"
-            Ensure        = "Present"
-            DependsOn     = "[WriteStatus]WaitPrimary"
+        WaitForWorkflowReceipt WaitPrimary {
+            MachineName         = $PSName
+            LogFolder           = $LogFolder
+            Ensure              = 'Present'
+            PsDscRunAsCredential = $CMAdmin
+            DependsOn           = "[WriteStatus]WaitPrimary"
         }
 
         WriteEvent WriteConfigFinished {
@@ -279,7 +274,7 @@
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WaitForEvent]WaitPrimary"
+            DependsOn = "[WaitForWorkflowReceipt]WaitPrimary"
         }
 
         WriteStatus ODBCDriverInstall {
@@ -404,18 +399,15 @@
             DependsOn      = "[WriteFileOnce]CMSvc"
         }
 
-        WaitForEvent WorkflowComplete {
-            MachineName   = $ThisMachineName
-            LogFolder     = $LogFolder
-            FileName      = "ScriptWorkflow"
-            ReadNode      = "ScriptWorkflow"
-            ReadNodeValue = "Completed"
-            Ensure        = "Present"
-            DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
+        WaitForWorkflowReceipt WorkflowComplete {
+            MachineName = $ThisMachineName
+            LogFolder   = $LogFolder
+            Ensure      = 'Present'
+            DependsOn   = "[RegisterTaskScheduler]RunScriptWorkflow"
         }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForEvent]WorkflowComplete"
+            DependsOn = "[WaitForWorkflowReceipt]WorkflowComplete"
             Status    = "Complete!"
         }
     }
@@ -450,16 +442,16 @@
             DependsOn = '[InstallADK]ADKInstall'
         }
 
-        WaitForAll ActiveNode {
-            ResourceName     = '[WriteStatus]Complete'
-            NodeName         = $ThisVM.thisParams.ActiveNode
-            RetryIntervalSec = 5
-            RetryCount       = 3600
-            DependsOn        = '[WriteStatus]WaitActive'
+        WaitForWorkflowReceipt ActiveNode {
+            MachineName         = $ThisVM.thisParams.ActiveNode
+            LogFolder           = $LogFolder
+            Ensure              = 'Present'
+            PsDscRunAsCredential = $CMAdmin
+            DependsOn           = '[WriteStatus]WaitActive'
         }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForAll]ActiveNode"
+            DependsOn = "[WaitForWorkflowReceipt]ActiveNode"
             Status    = "Complete!"
         }
 
