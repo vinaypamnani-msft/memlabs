@@ -492,7 +492,12 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
             $errorHistoryNote = if ($ClearErrorHistory) { ", errorsCleared=$clearedErrorRecords" } else { "" }
             Write-Log "Invoke-HostMemoryReclaim: launcher pid $PID after cleanup - managed ${managedBeforeMB}MB -> ${managedAfterMB}MB, private ${beforePrivateMB}MB -> ${afterPrivateMB}MB, WS ${beforeWorkingSetMB}MB -> ${afterWorkingSetMB}MB, heap ${heapBeforeMB}MB -> ${heapAfterMB}MB, committed ${committedBeforeMB}MB -> ${committedAfterMB}MB, fragmented ${fragmentedBeforeMB}MB -> ${fragmentedAfterMB}MB$errorHistoryNote" -LogOnly
             if ($managedAfterMB -ge 1024 -or $afterPrivateMB -ge 2048) {
-                Write-Log "[MemoryGuard] Launcher remains above the safe post-cleanup threshold (managed=${managedAfterMB}MB private=${afterPrivateMB}MB heap=${heapAfterMB}MB fragmented=${fragmentedAfterMB}MB). Restart Start-Test before the next large configuration; capture a managed heap dump if growth repeats." -Warning
+                if ($env:MEMLABS_PINNED_CHILD_PROCESS -eq '1') {
+                    Write-Log "[MemoryGuard] Deployment child remains above the safe post-cleanup threshold (managed=${managedAfterMB}MB private=${afterPrivateMB}MB heap=${heapAfterMB}MB fragmented=${fragmentedAfterMB}MB), but this isolated process is exiting now and will release the entire heap." -LogOnly
+                }
+                else {
+                    Write-Log "[MemoryGuard] Launcher remains above the safe post-cleanup threshold (managed=${managedAfterMB}MB private=${afterPrivateMB}MB heap=${heapAfterMB}MB fragmented=${fragmentedAfterMB}MB). Restart Start-Test before the next large configuration; capture a managed heap dump if growth repeats." -Warning
+                }
             }
         }
         elseif ($null -ne $freedMB) {

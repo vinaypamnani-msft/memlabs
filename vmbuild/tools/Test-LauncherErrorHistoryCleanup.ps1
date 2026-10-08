@@ -82,11 +82,22 @@ Assert-True (-not (Test-MarkerPresent)) 'end-of-run reclaim releases retained Er
 Assert-True ([bool]($script:Messages -match 'errorsCleared=3')) 'cleanup log records the exact ErrorRecord count released'
 Assert-True ([bool]($script:Messages -match 'heap \d+MB -> \d+MB, committed \d+MB -> \d+MB, fragmented \d+MB -> \d+MB')) 'cleanup log records GC heap and fragmentation metrics'
 
+$childLauncherText = Get-Content -LiteralPath (Join-Path $root 'tools\Invoke-PinnedChildScript.ps1') -Raw
+$memorySource = Get-Content -LiteralPath $sourcePath -Raw
+Assert-True ($childLauncherText -match "MEMLABS_PINNED_CHILD_PROCESS\s*=\s*'1'") `
+    'pinned deployment children do not identify their process-lifetime ownership boundary'
+Assert-True ($memorySource -match
+    '(?s)MEMLABS_PINNED_CHILD_PROCESS.+?isolated process is exiting now.+?-LogOnly') `
+    'ephemeral deployment children still tell the operator to restart Start-Test'
+
 $newLabSource = [System.IO.File]::ReadAllText($newLabPath)
 $startTestSource = [System.IO.File]::ReadAllText($startTestPath)
 Assert-True ($newLabSource.Contains('[switch]$ClearErrorHistoryOnExit')) 'New-Lab exposes explicit long-lived-launcher opt-in'
 Assert-True ($newLabSource.Contains('-ClearErrorHistory:$ClearErrorHistoryOnExit')) 'New-Lab preserves interactive error history by default'
-Assert-True (([regex]::Matches($startTestSource, 'New-Lab\.ps1[^\r\n]*-ClearErrorHistoryOnExit')).Count -eq 2) 'Start-Test opts in on initial and DSC-restart deployments'
+Assert-True ($startTestSource -match
+    '(?s)\$newLabParameters\s*=\s*\[ordered\]@\{.+?ClearErrorHistoryOnExit\s*=\s*\$true.+?\}' -and
+    ([regex]::Matches($startTestSource, '\$result\s*=\s*&\s*\$invokeChild')).Count -eq 2) `
+    'Start-Test opts in on initial and DSC-restart child deployments'
 
 $activeLog = 'C:\temp\VMBuild.active.test.log'
 $global:LogBuffers = @{

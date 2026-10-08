@@ -137,6 +137,7 @@ if ($PidPath) {
 $global:LASTEXITCODE = 0
 $global:NewLabResumeCommand = $null
 $global:NewLabResumeInfo = $null
+$env:MEMLABS_PINNED_CHILD_PROCESS = '1'
 & $ScriptPath @parameters
 $childExitCode = [int]$LASTEXITCODE
 

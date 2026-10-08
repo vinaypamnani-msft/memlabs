@@ -265,15 +265,71 @@ Assert-True ($null -eq $mergeConfig.virtualMachines[0].PSObject.Properties['SQLA
 $script:ValidationFailures.Clear()
 Test-ValidSiteRoleFlags -VM ([pscustomobject]@{
         vmName = 'LEG-DOMAINMEMBER'; role = 'DomainMember'; installDP = $true
-    }) -ReturnObject ([pscustomobject]@{})
+    }) -ConfigObject ([pscustomobject]@{ virtualMachines = @() }) `
+    -ReturnObject ([pscustomobject]@{})
 Assert-True ($script:ValidationFailures.Count -eq 1) `
     'A generic DomainMember can still acquire ConfigMgr site-system flags without an explicit role promotion.'
 $script:ValidationFailures.Clear()
 Test-ValidSiteRoleFlags -VM ([pscustomobject]@{
         vmName = 'LEG-SITESYSTEM'; role = 'SiteSystem'; siteCode = 'PRI'; installDP = $true
-    }) -ReturnObject ([pscustomobject]@{})
+    }) -ConfigObject ([pscustomobject]@{ virtualMachines = @() }) `
+    -ReturnObject ([pscustomobject]@{})
 Assert-True ($script:ValidationFailures.Count -eq 0) `
     'A valid existing SiteSystem DP promotion was rejected.'
+
+$remoteSqlRp = [pscustomobject]@{
+    vmName = 'LEG-SQL'; role = 'DomainMember'; sqlVersion = 'SQL Server 2022'
+    installRP = $true
+}
+$remoteSqlRpConfig = [pscustomobject]@{
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'LEG-PRI'; role = 'Primary'; siteCode = 'PRI'
+            remoteSQLVM = 'LEG-SQL'
+        }
+        $remoteSqlRp
+    )
+}
+$script:ValidationFailures.Clear()
+Test-ValidSiteRoleFlags -VM $remoteSqlRp -ConfigObject $remoteSqlRpConfig `
+    -ReturnObject ([pscustomobject]@{})
+Assert-True ($script:ValidationFailures.Count -eq 0) `
+    'A Reporting Point co-located on its owning Primary remote SQL host was rejected.'
+
+$script:ValidationFailures.Clear()
+Test-ValidSiteRoleFlags -VM $remoteSqlRp `
+    -ConfigObject ([pscustomobject]@{ virtualMachines = @($remoteSqlRp) }) `
+    -ReturnObject ([pscustomobject]@{})
+Assert-True ($script:ValidationFailures.Count -eq 1) `
+    'An orphan DomainMember Reporting Point was accepted without a CAS/Primary owner.'
+
+$remoteSqlRp | Add-Member -NotePropertyName installDP -NotePropertyValue $true -Force
+$script:ValidationFailures.Clear()
+Test-ValidSiteRoleFlags -VM $remoteSqlRp -ConfigObject $remoteSqlRpConfig `
+    -ReturnObject ([pscustomobject]@{})
+Assert-True ($script:ValidationFailures.Count -eq 1) `
+    'The remote-SQL Reporting Point exception incorrectly admitted another site-system role.'
+$remoteSqlRp.PSObject.Properties.Remove('installDP')
+
+foreach ($fixtureName in @(
+        'CSTest2-H-PS3-RemoteSQL-PS3HA.json',
+        'CSTest4-A-CSPS-RemoteSQL-CSHA.json',
+        'Offline-A.json',
+        'ReportingTest-A.json'
+    )) {
+    $fixture = Get-Content -LiteralPath (Join-Path $RootPath "config\tests\$fixtureName") -Raw |
+        ConvertFrom-Json
+    $fixtureRpSql = @($fixture.virtualMachines | Where-Object {
+            $_.role -eq 'DomainMember' -and $_.installRP -eq $true
+        })
+    Assert-True ($fixtureRpSql.Count -eq 1) `
+        "$fixtureName no longer has exactly one legacy remote-SQL Reporting Point."
+    $script:ValidationFailures.Clear()
+    Test-ValidSiteRoleFlags -VM $fixtureRpSql[0] -ConfigObject $fixture `
+        -ReturnObject ([pscustomobject]@{})
+    Assert-True ($script:ValidationFailures.Count -eq 0) `
+        "$fixtureName remote-SQL Reporting Point was rejected."
+}
 
 $validationSource = Get-Content -LiteralPath $validationPath -Raw
 foreach ($requiredFailure in @(

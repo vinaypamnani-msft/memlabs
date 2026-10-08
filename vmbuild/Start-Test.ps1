@@ -750,16 +750,11 @@ function Invoke-MainToDevelopExpansionCycle {
 }
 
 function Invoke-NewLab {
-    # Run one deployment and hand back ONLY its exit code. Two things here are load-bearing:
-    #  1. '| Out-Host' -- New-Lab.ps1 leaks objects onto the success stream. Un-piped they
-    #     join Run-Test's own output, so the caller's "$result = Run-Test" gets an ARRAY and
-    #     "-not $result" evaluates FALSE on failure: a failed build silently rolled on.
-    #  2. Zeroing $LASTEXITCODE first -- New-Lab.ps1 only calls exit when it FAILS, so on
-    #     success $LASTEXITCODE is whatever the last native command left (e.g. a preceding
-    #     git pull whose non-zero exit we deliberately tolerate).
-    #  3. -KeepFailedVMs -- without it New-Lab deletes every Phase 1 VM on failure, which
-    #     flatly contradicts the "left intact for investigation" message the harness prints
-    #     next and makes the offered Retry-after-repair impossible.
+    # Run every deployment in a fresh attached process. New-Lab loads thousands of
+    # commands, formats, modules, remoting objects, and job payloads; a long Start-Test
+    # sequence cannot reliably reclaim all of those graphs from one process. Process exit
+    # is the ownership boundary. Invoke-PinnedChildScript supplies kill-on-close cleanup
+    # and a token-verified result sidecar for structured resume metadata.
     param(
         [string]$ConfigFile,
         [int]$StartPhase = 0,
@@ -768,8 +763,6 @@ function Invoke-NewLab {
 
     $script:LastNewLabResumeCommand = $null
     $script:LastNewLabResumeInfo = $null
-    $global:NewLabResumeCommand = $null
-    $global:NewLabResumeInfo = $null
     $newLabParameters = [ordered]@{
         Configuration = $ConfigFile
         NoSnapshot = $true
@@ -779,42 +772,67 @@ function Invoke-NewLab {
     }
     if ($StartPhase -gt 0) { $newLabParameters.StartPhase = $StartPhase }
     if ($Restore.IsPresent) { $newLabParameters.Restore = $true }
-    $global:LASTEXITCODE = 0
-    & ./New-Lab.ps1 @newLabParameters | Out-Host
-    $code = [int]$LASTEXITCODE
-    $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
-    $script:LastNewLabResumeInfo = $global:NewLabResumeInfo
+
+    $childLauncherPath = if ($script:NewLabChildLauncherPath) {
+        $script:NewLabChildLauncherPath
+    }
+    else {
+        Join-Path $PSScriptRoot 'tools\Invoke-PinnedChildScript.ps1'
+    }
+    if (-not (Test-Path -LiteralPath $childLauncherPath -PathType Leaf)) {
+        throw "New-Lab child launcher not found: $childLauncherPath"
+    }
+    $newLabScriptPath = (Resolve-Path -LiteralPath '.\New-Lab.ps1' -ErrorAction Stop).Path
+    $childEngine = (Get-Command pwsh.exe -ErrorAction Stop).Source
+    $childStateRoot = Join-Path ([IO.Path]::GetTempPath()) 'MemLabs\StartTest'
+    $null = New-Item -ItemType Directory -Path $childStateRoot -Force -ErrorAction Stop
+
+    $invokeChild = {
+        $token = [guid]::NewGuid().ToString('N')
+        $parameterPath = Join-Path $childStateRoot ".newlab-parameters-$PID-$token.clixml"
+        $resultPath = Join-Path $childStateRoot ".newlab-result-$PID-$token.json"
+        try {
+            $newLabParameters | Export-Clixml -LiteralPath $parameterPath -Depth 5 -ErrorAction Stop
+            $global:LASTEXITCODE = 0
+            & $childEngine -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
+                -ScriptPath $newLabScriptPath -ParameterPath $parameterPath `
+                -InvocationToken $token -ResultPath $resultPath 2>&1 | Out-Host
+            $processExitCode = [int]$LASTEXITCODE
+            if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                throw "New-Lab child exited $processExitCode without publishing its structured result."
+            }
+            $childResult = Get-Content -LiteralPath $resultPath -Raw -ErrorAction Stop |
+                ConvertFrom-Json -ErrorAction Stop
+            if ("$($childResult.InvocationToken)" -ne $token) {
+                throw "New-Lab child result token does not match invocation '$token'."
+            }
+            if ([int]$childResult.ExitCode -ne $processExitCode) {
+                throw "New-Lab child result exit code $($childResult.ExitCode) does not match process exit code $processExitCode."
+            }
+            return [pscustomobject]@{
+                ExitCode      = $processExitCode
+                ResumeCommand = $childResult.ResumeCommand
+                ResumeInfo    = $childResult.ResumeInfo
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $result = & $invokeChild
+    $code = [int]$result.ExitCode
+    $script:LastNewLabResumeCommand = $result.ResumeCommand
+    $script:LastNewLabResumeInfo = $result.ResumeInfo
 
     # 55 = New-Lab rebuilt DSC.zip and needs a restart to pick it up.
     if ($code -eq 55) {
-        $global:NewLabResumeCommand = $null
-        $global:NewLabResumeInfo = $null
-        $global:LASTEXITCODE = 0
-        & ./New-Lab.ps1 @newLabParameters | Out-Host
-        $code = [int]$LASTEXITCODE
-        $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
-        $script:LastNewLabResumeInfo = $global:NewLabResumeInfo
+        $result = & $invokeChild
+        $code = [int]$result.ExitCode
+        $script:LastNewLabResumeCommand = $result.ResumeCommand
+        $script:LastNewLabResumeInfo = $result.ResumeInfo
     }
-
-    # New-Lab runs INSIDE this process, so its job workers are children of the
-    # harness and survive into the next test. Each is a pwsh.exe holding ~300MB
-    # once it has dot-sourced Common.ps1, so an -All run accumulates them until
-    # Phase 1 of some later test fails its memory pre-flight. Sweep between tests
-    # and report anything that would not die, so the leaking job gets named.
-    try {
-        foreach ($job in @(Get-Job -ErrorAction SilentlyContinue)) {
-            if ($job.State -eq 'Running') { try { $job.StopJobAsync() } catch { } }
-        }
-        $stragglers = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -match '-s\s+-NoLogo' })
-        foreach ($proc in $stragglers) { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue }
-        foreach ($job in @(Get-Job -ErrorAction SilentlyContinue)) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
-        if ($stragglers.Count -gt 0) {
-            Write-Host "  Swept $($stragglers.Count) leftover job worker process(es) after $(Split-Path $ConfigFile -Leaf)." -ForegroundColor DarkYellow
-        }
-        $null = Write-PowerShellJobLeakDiag -Context "Start-Test after $(Split-Path $ConfigFile -Leaf)"
-    }
-    catch { }
 
     return $code
 }

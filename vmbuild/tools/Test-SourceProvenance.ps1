@@ -119,9 +119,14 @@ try {
     Assert-True ($newLabText.Contains('$RequireCleanSource')) 'New-Lab exposes the clean-source release gate'
     $newLabSplatCarriesGate = $startTestText -match
         '(?s)\$newLabParameters\s*=\s*\[ordered\]@\{.+?RequireCleanSource\s*=\s*\$RequireCleanSource.+?\}'
-    $newLabSplatInvocationCount = [regex]::Matches(
-        $startTestText, '&\s+\./New-Lab\.ps1\s+@newLabParameters').Count
-    Assert-True ($newLabSplatCarriesGate -and $newLabSplatInvocationCount -eq 2) `
+    $isolatedChildCarriesParameters =
+        $startTestText.Contains('Invoke-PinnedChildScript.ps1') -and
+        $startTestText -match '\$newLabParameters\s*\|\s*Export-Clixml' -and
+        $startTestText -match '-ParameterPath \$parameterPath'
+    $newLabChildInvocationCount = [regex]::Matches(
+        $startTestText, '\$result\s*=\s*&\s*\$invokeChild').Count
+    Assert-True ($newLabSplatCarriesGate -and $isolatedChildCarriesParameters -and
+        $newLabChildInvocationCount -eq 2) `
         'Start-Test forwards the gate on both deployment paths'
     if ($startTestText.Contains('Invoke-MainToDevelopExpansionCycle')) {
         $expansionRunnerText = [IO.File]::ReadAllText($expansionRunnerPath)

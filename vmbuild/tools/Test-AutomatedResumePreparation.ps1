@@ -58,6 +58,13 @@ if ($startTest -notmatch
     '(?s)\$automatedResumeAttempts\s*=\s*0.+?\$automatedResumeAttempts -lt 1.+?\$automatedResumeAttempts\+\+.+?Automatically resuming at Phase.+?-StartPhase.+?-Restore:') {
     throw 'Unattended Start-Test does not perform exactly one bounded automatic resume.'
 }
+if ($startTest -notmatch
+    '(?s)function Invoke-NewLab.+?Invoke-PinnedChildScript\.ps1.+?Export-Clixml.+?-InvocationToken \$token -ResultPath \$resultPath.+?result token does not match') {
+    throw 'Standard Start-Test deployments are not isolated behind a token-verified child process.'
+}
+if ($startTest -match '&\s+\./New-Lab\.ps1') {
+    throw 'Start-Test still loads New-Lab directly into its long-lived launcher process.'
+}
 if ($startTest -match 'Repair or resume it from another window') {
     throw 'Failure UX still delegates resumable recovery to a human.'
 }
@@ -231,6 +238,7 @@ if ($global:NewLabResumeInfo.Configuration -ne 'fixture.json' -or
 . ([scriptblock]::Create((Get-ResumeTestFunctionText `
             -Path (Join-Path $RootPath 'Start-Test.ps1') `
             -Name 'Invoke-NewLab')))
+$script:NewLabChildLauncherPath = Join-Path $RootPath 'tools\Invoke-PinnedChildScript.ps1'
 function Get-Job { @() }
 function Get-CimInstance { @() }
 function Write-PowerShellJobLeakDiag {}
@@ -259,13 +267,27 @@ param(
     StartPhase = $StartPhase
     Restore = [bool]$Restore
 } | ConvertTo-Json))
+if ($env:MEMLABS_RESUME_PID_LOG) {
+    Add-Content -LiteralPath $env:MEMLABS_RESUME_PID_LOG -Value $PID
+}
 $global:NewLabResumeCommand = "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $StartPhase -restore"
 $global:NewLabResumeInfo = [pscustomobject]@{
     Configuration = $Configuration
     Phase = $StartPhase
     Restore = [bool]$Restore
 }
-$global:LASTEXITCODE = 2
+if ($env:MEMLABS_FAKE_DSC_RESTART -eq '1') {
+    $restartCount = 0
+    if (Test-Path -LiteralPath $env:MEMLABS_RESUME_RESTART_COUNT) {
+        $restartCount = [int](Get-Content -LiteralPath $env:MEMLABS_RESUME_RESTART_COUNT -Raw)
+    }
+    $restartCount++
+    Set-Content -LiteralPath $env:MEMLABS_RESUME_RESTART_COUNT -Value $restartCount
+    $global:LASTEXITCODE = if ($restartCount -eq 1) { 55 } else { 0 }
+}
+else {
+    $global:LASTEXITCODE = 2
+}
 '@)
     $oldCapture = [Environment]::GetEnvironmentVariable('MEMLABS_RESUME_CAPTURE', 'Process')
     [Environment]::SetEnvironmentVariable('MEMLABS_RESUME_CAPTURE', $capturePath, 'Process')
@@ -287,9 +309,34 @@ $global:LASTEXITCODE = 2
         -not [bool]$script:LastNewLabResumeInfo.Restore) {
         throw 'Start-Test Invoke-NewLab did not retain structured resume metadata.'
     }
+
+    $restartCountPath = Join-Path $invokeTestRoot 'restart-count.txt'
+    $pidLogPath = Join-Path $invokeTestRoot 'child-pids.txt'
+    [Environment]::SetEnvironmentVariable('MEMLABS_RESUME_CAPTURE', $capturePath, 'Process')
+    [Environment]::SetEnvironmentVariable('MEMLABS_FAKE_DSC_RESTART', '1', 'Process')
+    [Environment]::SetEnvironmentVariable('MEMLABS_RESUME_RESTART_COUNT', $restartCountPath, 'Process')
+    [Environment]::SetEnvironmentVariable('MEMLABS_RESUME_PID_LOG', $pidLogPath, 'Process')
+    Push-Location $invokeTestRoot
+    try {
+        $restartExit = Invoke-NewLab -ConfigFile 'fixture.json'
+    }
+    finally {
+        Pop-Location
+        [Environment]::SetEnvironmentVariable('MEMLABS_RESUME_CAPTURE', $oldCapture, 'Process')
+        [Environment]::SetEnvironmentVariable('MEMLABS_FAKE_DSC_RESTART', $null, 'Process')
+        [Environment]::SetEnvironmentVariable('MEMLABS_RESUME_RESTART_COUNT', $null, 'Process')
+        [Environment]::SetEnvironmentVariable('MEMLABS_RESUME_PID_LOG', $null, 'Process')
+    }
+    $childPids = @(Get-Content -LiteralPath $pidLogPath | Where-Object { $_ })
+    if ([int]$restartExit -ne 0 -or
+        [int](Get-Content -LiteralPath $restartCountPath -Raw) -ne 2 -or
+        @($childPids | Select-Object -Unique).Count -ne 2) {
+        throw 'DSC rebuild exit 55 did not relaunch New-Lab in a second fresh process.'
+    }
 }
 finally {
     Remove-Item -LiteralPath $invokeTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    $script:NewLabChildLauncherPath = $null
 }
 
 Write-Host 'PASS -- StartPhase retries automatically pass through conditional Phase 0 reboot/readiness preparation.'

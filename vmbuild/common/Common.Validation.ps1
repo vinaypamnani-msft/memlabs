@@ -663,20 +663,38 @@ function Test-ValidUserName {
 function Test-ValidSiteRoleFlags {
     param (
         [object] $VM,
+        [object] $ConfigObject,
         [object] $ReturnObject
     )
 
     $requestedRoles = @(
-        [pscustomobject]@{ Name = 'installMP'; Value = [bool]$VM.installMP },
-        [pscustomobject]@{ Name = 'installDP'; Value = [bool]$VM.installDP },
-        [pscustomobject]@{ Name = 'installSUP'; Value = [bool]$VM.installSUP },
-        [pscustomobject]@{ Name = 'installRP'; Value = [bool]$VM.installRP },
-        [pscustomobject]@{ Name = 'installSMSProv'; Value = [bool]$VM.installSMSProv }
-    ) | Where-Object { $_.Value }
+        @(
+            [pscustomobject]@{ Name = 'installMP'; Value = [bool]$VM.installMP },
+            [pscustomobject]@{ Name = 'installDP'; Value = [bool]$VM.installDP },
+            [pscustomobject]@{ Name = 'installSUP'; Value = [bool]$VM.installSUP },
+            [pscustomobject]@{ Name = 'installRP'; Value = [bool]$VM.installRP },
+            [pscustomobject]@{ Name = 'installSMSProv'; Value = [bool]$VM.installSMSProv }
+        ) | Where-Object { $_.Value }
+    )
     if ($requestedRoles.Count -eq 0) { return }
 
     $siteCapableRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'WSUS')
     if ($VM.role -notin $siteCapableRoles) {
+        $isRemoteSqlReportingPoint = $VM.role -eq 'DomainMember' -and
+            $VM.sqlVersion -and
+            $requestedRoles.Count -eq 1 -and
+            $requestedRoles[0].Name -eq 'installRP'
+        if ($isRemoteSqlReportingPoint) {
+            $owners = @($ConfigObject.virtualMachines | Where-Object {
+                    $_.role -in @('CAS', 'Primary') -and
+                    -not [string]::IsNullOrWhiteSpace("$($_.siteCode)") -and
+                    "$($_.remoteSQLVM)".Equals(
+                        "$($VM.vmName)", [StringComparison]::OrdinalIgnoreCase)
+                })
+            if ($owners.Count -eq 1) { return }
+            Add-ValidationMessage -Message "VM Validation: [$($VM.vmName)] requests installRP as a DomainMember SQL host, but it is not the unambiguous remoteSQLVM of exactly one configured CAS/Primary with a siteCode. Reporting Point on a DomainMember is supported only when co-located with that site's remote SQL/SSRS host." -ReturnObject $ReturnObject -Failure
+            return
+        }
         Add-ValidationMessage -Message "VM Validation: [$($VM.vmName)] role [$($VM.role)] cannot host ConfigMgr site-system flags [$($requestedRoles.Name -join ', ')]. Change the VM to a supported SiteSystem/site-server role and specify its owning siteCode before deploying roles." -ReturnObject $ReturnObject -Failure
     }
 }
@@ -832,7 +850,7 @@ function Test-ValidVmSupported {
         }
     }
 
-    Test-ValidSiteRoleFlags -VM $VM -ReturnObject $ReturnObject
+    Test-ValidSiteRoleFlags -VM $VM -ConfigObject $ConfigObject -ReturnObject $ReturnObject
 }
 
 function Test-ValidVmMemory {
