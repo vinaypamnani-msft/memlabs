@@ -1837,7 +1837,9 @@ function Restart-VM2Smart {
     # recovery screen, so this helper ALWAYS tries a graceful guest-OS shutdown
     # first (bounded by -GracefulTimeoutSeconds so a hung guest can't block the
     # caller forever). It only escalates to a hard power-off when -AllowTurnOff
-    # is set AND the graceful shutdown did not bring the VM down.
+    # is set, the graceful shutdown did not bring the VM down, AND Windows did
+    # not report that it already owns a shutdown. Guest-owned shutdown is
+    # observed with a no-progress watchdog and always fails closed.
     #
     # Returns $true if the VM was restarted (graceful succeeded, or TurnOff was
     # used), $false if the graceful shutdown did not complete and TurnOff was
@@ -1850,6 +1852,12 @@ function Restart-VM2Smart {
         [switch]$AllowTurnOff,
         [Parameter(Mandatory = $false)]
         [int]$GracefulTimeoutSeconds = 180,
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 7200)]
+        [int]$ShutdownNoProgressSeconds = 1800,
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 60)]
+        [int]$ShutdownPollSeconds = 10,
         [Parameter(Mandatory = $false)]
         [string]$Reason = "restart",
         [Parameter(Mandatory = $false)]
@@ -1934,14 +1942,21 @@ function Restart-VM2Smart {
     # The guest is already restarting itself. Forcing power off now is exactly the
     # fragile-window corruption this function's header warns about, it breaks the VMBus
     # under in-flight PSDirect jobs (which kills the phase child process with a disposed-job
-    # exception), and it buys nothing -- the reboot we wanted is already happening. Wait.
+    # exception), and it buys nothing -- the reboot we wanted is already happening.
+    # Monitor observable state/heartbeat changes instead of imposing a total-duration cap.
+    # If that progress stops, leave the VM untouched and let the caller fail closed.
     if ($shutdownInProgress -and -not ($vm -and $vm.State -eq 'Off')) {
-        Write-Log "${Name}: Restart ($Reason): the guest is already shutting down$gracefulNote. Waiting for its own restart instead of forcing a power-off." -Warning
-        $rebootDeadline = (Get-Date).AddSeconds($GracefulTimeoutSeconds)
-        while ((Get-Date) -lt $rebootDeadline) {
-            Start-Sleep -Seconds 10
+        Write-Log "${Name}: Restart ($Reason): the guest is already shutting down$gracefulNote. Monitoring its own restart; hard TurnOff is prohibited while Windows owns shutdown." -Warning
+        $shutdownLastProgress = [DateTime]::UtcNow
+        $shutdownFingerprint = "$($vm.State)|$($vm.Heartbeat)|$($vm.Status)"
+        while ($true) {
+            Start-Sleep -Seconds $ShutdownPollSeconds
             $vm = Get-VM2 -Name $Name -Fallback
-            if (-not $vm -or $vm.State -eq 'Off') { break }
+            if (-not $vm) {
+                Write-Log "${Name}: Restart ($Reason): VM disappeared while Windows owned shutdown; refusing hard TurnOff." -Warning
+                return $false
+            }
+            if ($vm.State -eq 'Off') { break }
             # A guest-initiated RESTART never reports 'Off' in Hyper-V, so the uptime
             # resetting is the only proof it actually came back around.
             if ($uptimeBefore -and $vm.Uptime -lt $uptimeBefore) {
@@ -1953,6 +1968,19 @@ function Restart-VM2Smart {
                     Wait-ForHeartbeat -VmName $Name | Out-Null
                 }
                 return $true
+            }
+
+            $currentFingerprint = "$($vm.State)|$($vm.Heartbeat)|$($vm.Status)"
+            if ($currentFingerprint -ne $shutdownFingerprint) {
+                Write-Log "${Name}: Restart ($Reason): guest-owned shutdown progressed: '$shutdownFingerprint' -> '$currentFingerprint'." -LogOnly
+                $shutdownFingerprint = $currentFingerprint
+                $shutdownLastProgress = [DateTime]::UtcNow
+            }
+            $shutdownNoProgress = [int][Math]::Floor(
+                ([DateTime]::UtcNow - $shutdownLastProgress).TotalSeconds)
+            if ($shutdownNoProgress -ge $ShutdownNoProgressSeconds) {
+                Write-Log "${Name}: Restart ($Reason): guest-owned shutdown made no observable state/heartbeat progress for ${shutdownNoProgress}s. Refusing hard TurnOff while Windows owns shutdown; leaving the VM unchanged for fail-closed diagnostics." -Warning
+                return $false
             }
         }
     }

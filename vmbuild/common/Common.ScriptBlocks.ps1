@@ -1147,7 +1147,7 @@ $global:VM_Create = {
                     $resumeReason = $resumeRebootReasons -join ', '
                     Write-Log "[Phase 0]: $($currentItem.vmName): reboot is required before resume ($resumeReason)."
                     $resumeRestarted = Restart-VM2Smart -Name $currentItem.vmName `
-                        -AllowTurnOff -Reason "Phase 0 resume: $resumeReason"
+                        -Reason "Phase 0 resume: $resumeReason"
                     if (-not $resumeRestarted) {
                         Write-Log "[Phase 0]: $($currentItem.vmName): Could not complete the required resume reboot." -Failure -OutputStream
                         return
@@ -8387,8 +8387,8 @@ $global:VM_Config = {
                             }
                             else {
                                 $staleRestartCount++
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM parked reboot-pending ($lcmState) for ${rebootMins}m with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). The DSC-scheduled reboot never fired -- restarting VM to let the LCM resume (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
-                                Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC reboot-pending stuck" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM parked reboot-pending ($lcmState) for ${rebootMins}m with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Requesting a graceful restart to let the LCM resume (attempt $staleRestartCount/$staleRestartMax); hard TurnOff is prohibited while the guest is responsive." -Warning -OutputStream
+                                Restart-VM2Smart -Name $currentItem.vmName -Reason "DSC reboot-pending stuck" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                                 $lastStatusChangeTime = [DateTime]::UtcNow
                                 $lcmRebootPendingSince = $null
                                 $lcmIdleSince = $null
@@ -8764,8 +8764,8 @@ $global:VM_Config = {
                                 $dscResumeStartedUtc = $null
                                 $dscResumeFromStatus = ''
                                 $staleRestartCount++
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: in-place resume did not clear the stranded PendingConfiguration (${pendingMins}m) -- restarting VM so the boot-resume path re-applies pending.mof (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
-                                Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "DSC stranded PendingConfiguration" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: in-place resume did not clear the stranded PendingConfiguration (${pendingMins}m) -- requesting a graceful restart so the boot-resume path re-applies pending.mof (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                Restart-VM2Smart -Name $currentItem.vmName -Reason "DSC stranded PendingConfiguration" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                                 $lastStatusChangeTime = [DateTime]::UtcNow
                                 $lcmPendingNoRebootSince = $null
                                 $lcmIdleSince = $null
@@ -8793,8 +8793,8 @@ $global:VM_Config = {
                             else {
                                 # Genuinely stuck: LCM idle >= $staleRestartMinutes, status frozen, no task running.
                                 $staleRestartCount++
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM idle for ${idleMins}m with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
-                                Restart-VM2Smart -Name $currentItem.vmName -AllowTurnOff -Reason "stale LCM/status" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: LCM idle for ${idleMins}m with status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Requesting a graceful restart (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                Restart-VM2Smart -Name $currentItem.vmName -Reason "stale LCM/status" -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                                 $lastStatusChangeTime = [DateTime]::UtcNow
                                 $lcmIdleSince = $null
                                 $lastStaleWarningTime = [DateTime]::MinValue
