@@ -34,7 +34,14 @@ process {
                             "$($_.Server)=$($_.StateName)(v$($_.SourceVersion))"
                         })
                     $targets = @($record.Targeting | ForEach-Object {
-                            "$($_.Server)=stored:$($_.StoredPkgVersion)/source:$($_.SourceVersion)/refresh:$($_.RefreshNow)"
+                            $targetState = [System.Collections.Generic.List[string]]::new()
+                            if ($_.PSObject.Properties['StoredPkgVersion'] -and
+                                -not [string]::IsNullOrWhiteSpace("$($_.StoredPkgVersion)")) {
+                                $targetState.Add("stored:$($_.StoredPkgVersion)")
+                            }
+                            $targetState.Add("source:$($_.SourceVersion)")
+                            $targetState.Add("refresh:$($_.RefreshNow)")
+                            "$($_.Server)=$($targetState -join '/')"
                         })
                     $nodes = @($record.Nodes | ForEach-Object {
                             if ($_.Error) {

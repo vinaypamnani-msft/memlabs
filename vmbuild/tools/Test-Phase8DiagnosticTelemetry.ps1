@@ -125,7 +125,16 @@ try {
             SiteCode      = 'PRI'
             PackageId     = 'PRI00004'
             Package       = [ordered]@{ SourceVersion = 3; StoredPkgVersion = 2 }
-            Targeting     = @()
+            Targeting     = @(
+                [ordered]@{
+                    Server = 'LEGACY-DP.test'; StoredPkgVersion = 2
+                    SourceVersion = 3; RefreshNow = $false
+                },
+                [ordered]@{
+                    Server = 'CURRENT-DP.test'; SourceVersion = 3
+                    RefreshNow = $true
+                }
+            )
             Summarizer    = @([ordered]@{ Server = 'LAB-DP.test'; StateName = 'ContentValidating'; SourceVersion = 3 })
             Replication   = @()
             SourceNode    = $null
@@ -138,6 +147,11 @@ try {
     }
     if (@($analysis | Where-Object { $_.TimeUtc.Kind -ne [DateTimeKind]::Utc }).Count -gt 0) {
         throw 'Phase 8 analyzer did not preserve UTC timestamps.'
+    }
+    $packageAnalysis = $analysis | Where-Object { $_.Type -eq 'ClientPackage' }
+    if ($packageAnalysis.Targeting -notmatch 'LEGACY-DP\.test=stored:2/source:3/refresh:False' -or
+        $packageAnalysis.Targeting -notmatch 'CURRENT-DP\.test=source:3/refresh:True') {
+        throw "Phase 8 analyzer did not support both legacy and corrected targeting records: $($packageAnalysis.Targeting)"
     }
 
     $phaseSource = Get-Content -LiteralPath $phasePath -Raw
@@ -155,7 +169,8 @@ try {
             "'content-wait'",
             '"before-refresh-now:$dp"',
             '"after-refresh-now:$dp"',
-            "'coverage-deadline'"
+            "'coverage-deadline'",
+            'SchemaVersion = 2'
         )) {
         if ($boundarySource -notmatch [regex]::Escape($required)) {
             throw "Client-package coverage is missing required telemetry trigger $required."

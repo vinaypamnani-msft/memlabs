@@ -431,16 +431,16 @@ $ensureClientPkgCoverage = {
 
             $targetingRows = [System.Collections.Generic.List[object]]::new()
             try {
+                # ConfigMgr's dynamic SMS provider returns a generic failure when
+                # Get-CimInstance -Property includes a member absent from the class.
                 foreach ($row in @(Get-MemLabsProjectedCimRows -Namespace $ns `
                         -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
-                        -Property @('ServerNALPath', 'SiteCode', 'SourceVersion', 'StoredPkgVersion', 'RefreshNow', 'LastRefreshTime'))) {
+                        -Property @('ServerNALPath', 'SiteCode', 'SourceVersion', 'RefreshNow'))) {
                     $targetingRows.Add([ordered]@{
-                            Server           = & $fqdnOf $row.ServerNALPath
-                            SiteCode         = "$($row.SiteCode)"
-                            SourceVersion    = "$($row.SourceVersion)"
-                            StoredPkgVersion = "$($row.StoredPkgVersion)"
-                            RefreshNow       = $row.RefreshNow
-                            LastRefreshTime  = "$($row.LastRefreshTime)"
+                            Server        = & $fqdnOf $row.ServerNALPath
+                            SiteCode      = "$($row.SiteCode)"
+                            SourceVersion = "$($row.SourceVersion)"
+                            RefreshNow    = $row.RefreshNow
                         })
                 }
             }
@@ -451,14 +451,13 @@ $ensureClientPkgCoverage = {
                 foreach ($row in @(Get-MemLabsProjectedCimRows -Namespace $ns `
                         -ClassName SMS_PackageStatusDistPointsSummarizer `
                         -Filter "PackageID='$PackageID'" `
-                        -Property @('ServerNALPath', 'State', 'SourceVersion', 'LastUpdateDate'))) {
+                        -Property @('ServerNALPath', 'State', 'SourceVersion'))) {
                     $rowState = [int]$row.State
                     $summarizerRows.Add([ordered]@{
                             Server        = & $fqdnOf $row.ServerNALPath
                             State         = $rowState
                             StateName     = if ($stateName.ContainsKey("$rowState")) { $stateName["$rowState"] } else { "State$rowState" }
                             SourceVersion = "$($row.SourceVersion)"
-                            LastUpdate    = "$($row.LastUpdateDate)"
                         })
                 }
             }
@@ -579,7 +578,7 @@ $ensureClientPkgCoverage = {
             }
 
             $record = [ordered]@{
-                SchemaVersion = 1
+                SchemaVersion = 2
                 CapturedAtUtc = $capturedAt.ToString('o')
                 RunId         = $coverageRunId
                 Trigger       = $Trigger
@@ -1962,10 +1961,10 @@ $ensureClientPkgCoverage = {
                 try {
                     $tgt = @(Get-MemLabsProjectedCimRows -Namespace $ns `
                             -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
-                            -Property @('ServerNALPath', 'SiteCode', 'StoredPkgVersion', 'SourceVersion', 'LastRefreshTime') |
+                            -Property @('ServerNALPath', 'SiteCode', 'SourceVersion', 'RefreshNow') |
                             Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }) | Select-Object -First 1
                     if ($tgt) {
-                        $sInfo = "no summarizer row BUT targeting row EXISTS (SMS_DistributionPoint: SiteCode=$($tgt.SiteCode) StoredPkgVersion=$($tgt.StoredPkgVersion) SourceVersion=$($tgt.SourceVersion) LastRefresh=$($tgt.LastRefreshTime)) -> distribution WAS requested; the site DB just never got an Installed status back"
+                        $sInfo = "no summarizer row BUT targeting row EXISTS (SMS_DistributionPoint: SiteCode=$($tgt.SiteCode) SourceVersion=$($tgt.SourceVersion) RefreshNow=$($tgt.RefreshNow)) -> distribution WAS requested; the site DB just never got an Installed status back"
                     }
                     else {
                         $sInfo = 'no summarizer row AND no targeting row (SMS_DistributionPoint) -> the (re)distribute never created a distribution for this DP'

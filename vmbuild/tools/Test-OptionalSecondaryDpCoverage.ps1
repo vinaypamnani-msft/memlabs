@@ -168,6 +168,30 @@ if ($coverageLoop.Value -notmatch 'Client pkg coverage memory checkpoint' -or
     $coverageLoop.Value -notmatch 'Get-MemLabsProjectedCimRows') {
     throw 'Client package polling lost projected CIM reads or periodic memory telemetry.'
 }
+$projectedCalls = [regex]::Matches(
+    $coverageText,
+    '(?s)-ClassName\s+(SMS_DistributionPoint|SMS_PackageStatusDistPointsSummarizer)\b(?:(?!-ClassName).){0,300}?-Property\s+@\(([^)]*)\)')
+if ($projectedCalls.Count -lt 6) {
+    throw "Expected at least six projected client-package provider calls; found $($projectedCalls.Count)."
+}
+foreach ($call in $projectedCalls) {
+    $className = $call.Groups[1].Value
+    $properties = @([regex]::Matches($call.Groups[2].Value, "'([^']+)'") |
+        ForEach-Object { $_.Groups[1].Value })
+    $allowed = if ($className -eq 'SMS_DistributionPoint') {
+        @('ServerNALPath', 'SiteCode', 'SourceVersion', 'RefreshNow')
+    }
+    else {
+        @('ServerNALPath', 'State', 'SourceVersion')
+    }
+    $unsupported = @($properties | Where-Object { $_ -notin $allowed })
+    if ($unsupported.Count -gt 0) {
+        throw "$className projection requests unsupported properties: $($unsupported -join ', ')."
+    }
+}
+if ($coverageText -notmatch 'SchemaVersion\s*=\s*2') {
+    throw 'Client package timeline schema was not advanced for the corrected provider projection.'
+}
 if ($coverageText -match '&\s+\$writeCoverageSnapshot\s+[''"]' -or
     $coverageText -match '&\s+\$writeCoverageSnapshot\s+\$') {
     throw 'Client package timeline still uses positional scriptblock arguments that collapse when an array is empty.'
