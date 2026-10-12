@@ -7,7 +7,7 @@ $parseErrors = $null
 $tokens = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$parseErrors)
 if (@($parseErrors).Count -gt 0) { throw "Maintenance source has $(@($parseErrors).Count) parse errors." }
-foreach ($name in @('Get-VMMaintenanceNote', 'Write-VMMaintenanceNoteSnapshot', 'Write-VMMaintenanceHostDiagnostics', 'Start-VMMaintenance')) {
+foreach ($name in @('Get-VMMaintenanceNote', 'Write-VMMaintenanceNoteSnapshot', 'Write-VMMaintenanceHostDiagnostics', 'Write-VMMaintenanceIdentityDiagnostics', 'Start-VMMaintenance')) {
     $node = $ast.Find({
         param ($item)
         $item -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name
@@ -127,6 +127,8 @@ function Start-VMFixes {
     return $true
 }
 function Get-VM2 { param ([string] $Name, [string] $ErrorAction) [pscustomobject]@{ State = 'Off' } }
+function Get-CimSession { }
+function Get-PSSession { }
 
 Reset-Fixture
 $script:ReadResults = @(New-VMFixture)
@@ -219,6 +221,82 @@ Assert (($script:Logs -join "`n").Contains('worker creation failed')) 'evidence 
 
 Assert ($ast.Extent.Text.Contains('if (-not $vmNote) { $vmNote = Get-VMNote -VMName $vmName }')) 'existing fix callers retain fallback metadata reads'
 
+Reset-Fixture
+Write-VMMaintenanceHostDiagnostics -VMName 'fixture-vm'
+$text = $script:Logs -join "`n"
+Assert ($text.Contains('"notes_domain":"fixture.test"') -and $text.Contains('notesSha256')) 'inventory contains safe Notes identity and fingerprint even when target lookup fails'
+Assert (-not $text.Contains('SECRET_NOT_FOR_LOGS') -and -not $text.Contains('legacy-admin')) 'inventory never exports credential-bearing Notes'
+
+$identityId = [guid]::NewGuid()
+$global:vm_List = @([pscustomobject]@{ vmName = 'CT5-DC1'; vmId = $identityId; domain = 'fixture.test'; role = 'DC'; state = 'Running' })
+$script:IdentityQueries = [Collections.Generic.List[string]]::new()
+function Get-VM {
+    [CmdletBinding()]
+    param ([string] $Name, [guid] $Id)
+    if ($Name) {
+        $script:IdentityQueries.Add("name:$Name")
+        throw 'registered name differs'
+    }
+    $script:IdentityQueries.Add("id:$Id")
+    if ($Id -ne $identityId) { throw 'stale identity' }
+    [pscustomobject]@{
+        Name = 'DC1'; Id = $identityId; ComputerName = 'fixture-host'; State = 'Running'
+        Notes = '{"vmName":"CT5-DC1","role":"DC","domain":"fixture.test","lastUpdate":"today","password":"SECRET_NOT_FOR_LOGS"}'
+    }
+}
+Reset-Fixture
+$target = [pscustomobject]@{ vmName = 'CT5-DC1' }
+$parent = Write-VMMaintenanceIdentityDiagnostics -Target $target -Stage parent
+$text = $script:Logs -join "`n"
+Assert ($parent.resolvedIdentities.Count -eq 1 -and $parent.resolvedIdentities[0].Name -eq 'DC1') 'parent captures the registered identity despite failed name lookup'
+Assert ($text.Contains('registered name differs') -and $text.Contains('"vmName":"CT5-DC1"') -and $text.Contains("registeredName='DC1'")) 'name, GUID and Notes divergence are all visible'
+Assert (-not $text.Contains('SECRET_NOT_FOR_LOGS')) 'identity diagnostics exclude credentials'
+Assert ($script:FixCalls -eq 0 -and $target.vmName -eq 'CT5-DC1' -and $global:vm_List[0].vmName -eq 'CT5-DC1') 'diagnostics do not rename targets, mutate cache or apply fixes'
+$savedDefaults = $PSDefaultParameterValues
+try {
+    $PSDefaultParameterValues = @{
+        'Get-VM:ComputerName' = @('fixture-host', 'second-host')
+        'Get-VM:CimSession' = { throw 'Default must not be evaluated' }
+    }
+    Write-VMMaintenanceHostDiagnostics -VMName 'fixture-vm' -ContextOnly
+    $text = $script:Logs -join "`n"
+    Assert ($text.Contains('"vmCacheCount":1') -and $text.Contains('"vmCache":') -and $text.Contains([string]$identityId)) 'context preserves safe cache name/GUID mapping'
+    Assert ($text.Contains('second-host') -and $text.Contains('unsupported value (not evaluated or logged)') -and -not $text.Contains('Default must not be evaluated')) 'endpoint arrays are recorded without evaluating dynamic defaults'
+}
+finally { $PSDefaultParameterValues = $savedDefaults }
+$global:vm_List = $null
+$script:IdentityQueries.Clear()
+$worker = Write-VMMaintenanceIdentityDiagnostics -Target $target -Stage worker -ParentIdentity $parent
+Assert ($worker.resolvedIdentities.Count -eq 1 -and $script:IdentityQueries.Contains("id:$identityId")) 'worker probes the parent GUID even without a worker cache'
+Assert (($script:Logs -join "`n").Contains('"parentIdentity":')) 'worker records the parent comparison'
+Reset-Fixture
+$staleTarget = [pscustomobject]@{ vmName = 'CT5-DC1'; vmId = [guid]::NewGuid() }
+$stale = Write-VMMaintenanceIdentityDiagnostics -Target $staleTarget -Stage parent
+Assert ($stale.resolvedIdentities.Count -eq 0 -and ($script:Logs -join "`n").Contains('stale identity')) 'stale GUID lookup failure is explicit without fallback success'
+
+function Get-VM {
+    [CmdletBinding()]
+    param ([string] $Name, [guid] $Id)
+    New-VMFixture -Notes '{"vmName": SECRET_NOT_FOR_LOGS}'
+}
+Reset-Fixture
+$null = Write-VMMaintenanceIdentityDiagnostics -Target $target -Stage parent
+Assert (($script:Logs -join "`n").Contains('Notes parse failed') -and -not ($script:Logs -join "`n").Contains('SECRET_NOT_FOR_LOGS')) 'identity parse errors retain metadata without echoing raw Notes'
+
+$scriptBlocksPath = Join-Path $RootPath 'common\Common.ScriptBlocks.ps1'
+$phasePath = Join-Path $RootPath 'common\Common.Phases.ps1'
+foreach ($path in @($scriptBlocksPath, $phasePath)) {
+    $errors = $null
+    $null = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+    Assert (@($errors).Count -eq 0) "$path parses"
+}
+$workerSource = Get-Content -LiteralPath $scriptBlocksPath -Raw
+$phaseSource = Get-Content -LiteralPath $phasePath -Raw
+Assert ($workerSource.Contains('-Target $currentItem -Stage worker -ParentIdentity $MaintenanceIdentity')) 'Phase10 worker receives and logs parent identity'
+Assert (@([regex]::Matches($phaseSource, 'Phase10Job.*-ArgumentList.*\$PSScriptRoot, \$maintenanceIdentity')).Count -eq 2) 'both process and thread job dispatch pass parent identity'
+Assert ($ast.Extent.Text.Contains('-PreferThreadJob -MaintenanceDiagnostics')) 'launcher maintenance also enables parent identity capture'
+Assert (@([regex]::Matches($phaseSource, '-ScriptBlock \$scriptBlock.*-ArgumentList.*\$PSScriptRoot, \$maintenanceIdentity')).Count -eq 2) 'launcher maintenance passes identity in both job modes'
+
 foreach ($name in @('Wait-Job', 'Receive-Job', 'Stop-Job', 'Remove-Job')) {
     Remove-Item -LiteralPath "Function:\$name"
 }
@@ -239,4 +317,59 @@ $text = $script:Logs -join "`n"
 Assert ($text.Contains('"kind":"worker-smoke-test"') -and $text.Contains('"vmId":"fixture-id"')) 'real job output survives serialization into the log'
 Assert (-not $text.Contains('capture failed') -and -not $text.Contains('timed out')) 'real evidence-worker receive and cleanup succeed'
 Assert (@(Get-Job | Where-Object { $_.Id -notin $existingJobIds }).Count -eq 0) 'real evidence worker leaves no job behind'
+
+$identitySource = $ast.Find({ param ($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Write-VMMaintenanceIdentityDiagnostics' }, $true).Extent.Text
+$snapshotSource = $ast.Find({ param ($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Write-VMMaintenanceNoteSnapshot' }, $true).Extent.Text
+$transportProbe = {
+    param ($Target, $Parent, $IdentitySource, $SnapshotSource)
+    . ([scriptblock]::Create($IdentitySource))
+    . ([scriptblock]::Create($SnapshotSource))
+    $script:WorkerLogs = [Collections.Generic.List[string]]::new()
+    function Write-Log {
+        param ([string] $Message, [switch] $Warning, [switch] $LogOnly)
+        $script:WorkerLogs.Add($Message)
+    }
+    function Get-VM {
+        [CmdletBinding()]
+        param ([string] $Name, [guid] $Id)
+        if ($Name) { throw 'registered name differs in worker' }
+        [pscustomobject]@{
+            Name = $Parent.resolvedIdentities[0].Name
+            Id = $Id
+            ComputerName = 'fixture-host'
+            State = 'Running'
+            Notes = '{"vmName":"CT5-DC1","domain":"fixture.test","role":"DC","password":"SECRET_NOT_FOR_LOGS"}'
+        }
+    }
+    $global:vm_List = $null
+    $result = Write-VMMaintenanceIdentityDiagnostics -Target $Target -Stage worker -ParentIdentity $Parent
+    [pscustomobject]@{
+        requestedName = $Target.vmName
+        parentName = $result.resolvedIdentities[0].Name
+        parentId = [string]$result.resolvedIdentities[0].Id
+        log = $script:WorkerLogs -join "`n"
+    }
+}
+foreach ($mode in @('process', 'thread')) {
+    if ($mode -eq 'thread' -and -not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) {
+        Write-Host 'ThreadJob unavailable in this shell; transport covered in PowerShell 7.'
+        continue
+    }
+    $job = $null
+    try {
+        if ($mode -eq 'process') { $job = Microsoft.PowerShell.Core\Start-Job -ScriptBlock $transportProbe -ArgumentList $target, $parent, $identitySource, $snapshotSource }
+        else { $job = Start-ThreadJob -ScriptBlock $transportProbe -ArgumentList $target, $parent, $identitySource, $snapshotSource }
+        $completed = Wait-Job -Job $job -Timeout 20
+        Assert ($null -ne $completed -and $job.State -eq 'Completed') "$mode identity transport completes"
+        $output = @(Receive-Job -Job $job -ErrorAction Stop)
+        Assert ($output.Count -eq 1 -and $output[0].requestedName -eq 'CT5-DC1' -and $output[0].parentName -eq 'DC1' -and $output[0].parentId -eq [string]$identityId) "$mode job preserves requested name and parent live GUID/name"
+        Assert ($output[0].log.Contains('registered name differs in worker') -and $output[0].log.Contains("registeredName='DC1'") -and -not $output[0].log.Contains('SECRET_NOT_FOR_LOGS')) "$mode worker captures GUID/name disagreement without credential leakage"
+    }
+    finally {
+        if ($job) {
+            if ($job.State -eq 'Running') { Stop-Job -Job $job }
+            Remove-Job -Job $job -Force
+        }
+    }
+}
 Write-Host 'ALL VM MAINTENANCE METADATA TESTS PASSED'

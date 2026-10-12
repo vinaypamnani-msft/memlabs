@@ -7,7 +7,8 @@ $global:Phase10Job = {
         [array] $Dummy,
         [boolean] $FreshDeployOnly,
         [boolean] $Dummy2,
-        [string] $ScriptRoot
+        [string] $ScriptRoot,
+        [object] $MaintenanceIdentity
     ) 
     # Suppress CIM cmdlet progress in child process (see VM_Create comment).
     # Safe for ThreadJob too: Write-Progress2 -force overrides when needed.
@@ -66,6 +67,8 @@ $global:Phase10Job = {
         # fail with "returned no data". Recover it (reboot once to clear VMBus)
         # before maintenance. Healthy VMs pass the probe instantly; Linux /
         # OSDClient / AADClient / StandaloneRootCA are skipped inside the helper.
+        $null = Write-VMMaintenanceIdentityDiagnostics -Target $currentItem -Stage worker -ParentIdentity $MaintenanceIdentity
+        Write-VMMaintenanceHostDiagnostics -VMName $currentItem.vmName -ContextOnly
         $null = Repair-VmPSDirectChannel -VmName $currentItem.vmName -VmDomainName $domainNameForLogging -Phase "$Phase"
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -FreshDeployOnly:$FreshDeployOnly
         if (-not $worked) {

@@ -182,7 +182,7 @@ function Start-Maintenance {
     # DhcpServer / module set and skip a fresh powershell.exe per VM.
     # Phase10Job still dot-sources Common.ps1 -InJob -GetLatestHotfixVersion
     # internally; ThreadJob cuts the per-worker init cost meaningfully.
-    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false -PreferThreadJob
+    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false -PreferThreadJob -MaintenanceDiagnostics
 
     $result = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
 
@@ -252,6 +252,69 @@ function Show-FailedDomains {
 
 }
 
+function Write-VMMaintenanceIdentityDiagnostics {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Target,
+        [Parameter(Mandatory = $true)] [ValidateSet('parent', 'worker')] [string] $Stage,
+        [object] $ParentIdentity
+    )
+
+    $cached = @($global:vm_List | Where-Object { $_.vmName -eq $Target.vmName })
+    $identity = [pscustomobject]@{
+        requestedName = [string]$Target.vmName
+        configuredId = [string]$Target.vmId
+        hostName = $env:COMPUTERNAME
+        processId = $PID
+        stage = $Stage
+        cacheLastUpdate = [string]$global:vm_List_LastUpdate
+        cachedIdentities = @($cached | Select-Object vmName, vmId, domain, role, state)
+        parentIdentity = $ParentIdentity
+        resolvedIdentities = @()
+    }
+    Write-Log "$($Target.vmName): Maintenance identity input: $($identity | ConvertTo-Json -Depth 8 -Compress)" -LogOnly
+    $queries = @([pscustomobject]@{ kind = 'name'; value = [string]$Target.vmName })
+    $ids = @($Target.vmId) + @($cached.vmId)
+    if ($ParentIdentity) {
+        $ids += @($ParentIdentity.configuredId) + @($ParentIdentity.cachedIdentities.vmId) + @($ParentIdentity.resolvedIdentities.Id)
+    }
+    foreach ($id in @($ids | Where-Object { $_ } | Select-Object -Unique)) {
+        $queries += [pscustomobject]@{ kind = 'id'; value = [string]$id }
+    }
+    foreach ($query in $queries) {
+        try {
+            $parameters = @{ ErrorAction = 'Stop' }
+            if ($query.kind -eq 'id') { $parameters.Id = [guid]$query.value }
+            else { $parameters.Name = $query.value }
+            $found = @(Get-VM @parameters | Where-Object { $null -ne $_ })
+            $resolved = @($found | Select-Object Name, Id, ComputerName, State)
+            $identity.resolvedIdentities += $resolved
+            Write-Log "$($Target.vmName): Maintenance identity lookup: stage=$Stage kind=$($query.kind) value='$($query.value)' count=$($found.Count) resolved=$($resolved | ConvertTo-Json -Depth 4 -Compress)" -LogOnly
+            foreach ($vm in $found) {
+                $notes = [string]$vm.Notes
+                $hash = [Security.Cryptography.SHA256]::Create()
+                try { $digest = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($notes))).Replace('-', '').ToLowerInvariant() }
+                finally { $hash.Dispose() }
+                $details = "stage=$Stage lookupKind=$($query.kind) registeredName='$($vm.Name)' vmId='$($vm.Id)' vmHost='$($vm.ComputerName)' notesLength=$($notes.Length) notesSha256=$digest"
+                try {
+                    $note = $notes | ConvertFrom-Json -ErrorAction Stop
+                    if ($notes.TrimStart().StartsWith('{') -and $note -is [pscustomobject]) {
+                        Write-VMMaintenanceNoteSnapshot -VMName $Target.vmName -Note $note -Details $details
+                    }
+                    else { Write-Log "$($Target.vmName): Maintenance identity Notes are not a JSON object: $details" -Warning }
+                }
+                catch {
+                    Write-Log "$($Target.vmName): Maintenance identity Notes parse failed: $details errorId='$($_.FullyQualifiedErrorId)' exceptionType='$($_.Exception.GetType().FullName)'." -Warning
+                }
+            }
+        }
+        catch {
+            Write-Log "$($Target.vmName): Maintenance identity lookup failed: stage=$Stage kind=$($query.kind) value='$($query.value)' host='$env:COMPUTERNAME' errorId='$($_.FullyQualifiedErrorId)' exceptionType='$($_.Exception.GetType().FullName)' hresult=$($_.Exception.HResult) category='$($_.CategoryInfo.Category)' message='$($_.Exception.Message -replace '[\r\n]+', ' ')'." -Warning
+        }
+    }
+    return $identity
+}
+
 function Write-VMMaintenanceHostDiagnostics {
     [CmdletBinding()]
     param (
@@ -274,6 +337,23 @@ function Write-VMMaintenanceHostDiagnostics {
             osVersion = [Environment]::OSVersion.VersionString
             processIs64Bit = [Environment]::Is64BitProcess
             inJob = [bool]$Common.InJob
+            runspaceId = [string][Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId
+            connectionDefaults = @($PSDefaultParameterValues.GetEnumerator() | Where-Object { $_.Key -like '*:ComputerName' -or $_.Key -like '*:CimSession' } | ForEach-Object {
+                [pscustomobject]@{
+                    key = [string]$_.Key
+                    value = if ($_.Value -is [string]) { $_.Value }
+                    elseif ($_.Value -is [array] -and @($_.Value | Where-Object { $_ -isnot [string] }).Count -eq 0) { @($_.Value) }
+                    elseif ($_.Key -like '*:CimSession' -and $_.Value -isnot [scriptblock]) { @($_.Value | Select-Object Name, ComputerName, InstanceId) }
+                    else { 'unsupported value (not evaluated or logged)' }
+                }
+            })
+            cimSessions = @(Get-CimSession | Select-Object Name, ComputerName, InstanceId)
+            psSessions = @(Get-PSSession | Select-Object Name, ComputerName, InstanceId, State, ConfigurationName)
+            vmCacheCount = @($global:vm_List | Where-Object { $null -ne $_ }).Count
+            vmCacheTruncated = @($global:vm_List | Where-Object { $null -ne $_ }).Count -gt 100
+            vmCacheLastUpdate = [string]$global:vm_List_LastUpdate
+            vmCacheDirty = [bool]$global:vm_List_Dirty
+            vmCache = @($global:vm_List | Select-Object -First 100 vmName, vmId, domain, role, state)
             vmms = $vmmsStatus
             hyperVModules = @(Get-Module Hyper-V | Select-Object Name, Version, Path)
             getVMCommands = @(Get-Command Get-VM -All -ErrorAction Stop | Select-Object Name, CommandType, Source, Version)
@@ -305,7 +385,29 @@ function Write-VMMaintenanceHostDiagnostics {
                     kind = 'inventory'
                     count = $inventory.Count
                     truncated = $inventory.Count -gt 100
-                    vms = @($inventory | Sort-Object Name | Select-Object -First 100 Name, Id, State, ComputerName)
+                    vms = @($inventory | Sort-Object Name | Select-Object -First 100 | ForEach-Object {
+                        $entry = [ordered]@{ Name = $_.Name; Id = $_.Id; State = [string]$_.State; ComputerName = $_.ComputerName }
+                        $notes = [string]$_.Notes
+                        $entry.notesLength = $notes.Length
+                        $hash = [Security.Cryptography.SHA256]::Create()
+                        try { $entry.notesSha256 = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($notes))).Replace('-', '').ToLowerInvariant() }
+                        finally { $hash.Dispose() }
+                        try {
+                            $note = $notes | ConvertFrom-Json -ErrorAction Stop
+                            if ($notes.TrimStart().StartsWith('{') -and $note -is [pscustomobject]) {
+                                foreach ($field in @('vmName', 'domain', 'role')) {
+                                    $value = $note.$field
+                                    if ($value -is [string]) { $entry["notes_$field"] = $value.Substring(0, [Math]::Min(256, $value.Length)) }
+                                }
+                            }
+                            else { $entry.notesStatus = 'notJsonObject' }
+                        }
+                        catch {
+                            $entry.notesStatus = 'parseFailed'
+                            $entry.notesErrorId = $_.FullyQualifiedErrorId
+                        }
+                        [pscustomobject]$entry
+                    })
                 }
             }
             catch {

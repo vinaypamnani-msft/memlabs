@@ -1741,6 +1741,7 @@ function Start-NormalJobs {
         [Object]$argument1,
         [Object]$argument2,
         [Object]$argument3,
+        [switch]$MaintenanceDiagnostics,
         # When set and Start-ThreadJob is available (PS7+ with ThreadJob
         # module), spawn ThreadJobs instead of Start-Job. ThreadJobs share
         # the parent process and its already-loaded modules/assemblies, so
@@ -1795,6 +1796,7 @@ function Start-NormalJobs {
     $devBranchValue = if ($Common) { $Common.DevBranch } else { $false }
     $azureFileList = if ($Common) { $Common.AzureFileList } else { $null }
     $localAdmin = if ($Common) { $Common.LocalAdmin } else { $null }
+    if ($MaintenanceDiagnostics) { Write-VMMaintenanceHostDiagnostics -VMName 'Maintenance-parent' }
     foreach ($currentItem in $machines) {
         $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
         if ($currentItem.vmName.Length -gt $maxVmNameLength) {
@@ -1805,7 +1807,16 @@ function Start-NormalJobs {
         }
 
         Write-Log -verbose "Starting Job for $jobName $argument2, $argument3"
-        if ($useThreadJob) {
+        if ($MaintenanceDiagnostics) {
+            $maintenanceIdentity = Write-VMMaintenanceIdentityDiagnostics -Target $currentItem -Stage parent
+            if ($useThreadJob) {
+                $job = Start-ThreadJob -ScriptBlock $scriptBlock -Name $jobName -ThrottleLimit $ThreadJobThrottle -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot, $maintenanceIdentity
+            }
+            else {
+                $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot, $maintenanceIdentity
+            }
+        }
+        elseif ($useThreadJob) {
             if ($argument1) {
                 $job = Start-ThreadJob -ScriptBlock $scriptBlock -Name $jobName -ThrottleLimit $ThreadJobThrottle -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
             }
@@ -2728,6 +2739,7 @@ DROP TABLE #memlabs_idxprobe;
     $phase10SkipSet = @{}
     $offByDesignRoles = @('StandaloneRootCA')
     if ($Phase -eq 10) {
+        Write-VMMaintenanceHostDiagnostics -VMName 'Phase10-parent'
         $allFixDefs = Get-VMFixes -ReturnDummyList
         $relevantFixes = @($allFixDefs | Where-Object { $_.AppliesToExisting -eq $true })
         $vmNoteCache = @{}
@@ -3228,11 +3240,12 @@ DROP TABLE #memlabs_idxprobe;
                 # NeededOnFreshDeploy). Per-fix version check inside
                 # Start-VMFixes still no-ops fixes already at version, so this
                 # stays cheap on a fresh deploy.
+                $maintenanceIdentity = Write-VMMaintenanceIdentityDiagnostics -Target $currentItem -Stage parent
                 if ($usePhaseThreadJob) {
-                    $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                    $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot, $maintenanceIdentity -ErrorAction Stop -ErrorVariable Err
                 }
                 else {
-                    $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                    $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot, $maintenanceIdentity -ErrorAction Stop -ErrorVariable Err
                 }
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
