@@ -252,6 +252,214 @@ function Show-FailedDomains {
 
 }
 
+function Write-VMMaintenanceHostDiagnostics {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $VMName,
+        [switch] $ContextOnly
+    )
+
+    $identity = $null
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        $vmmsStatus = try { [string](Get-Service vmms -ErrorAction Stop).Status }
+        catch { "unavailable: $($_.Exception.Message); errorId='$($_.FullyQualifiedErrorId)'" }
+        $context = [ordered]@{
+            hostName = $env:COMPUTERNAME
+            identity = $identity.Name
+            elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            processId = $PID
+            psVersion = [string]$PSVersionTable.PSVersion
+            osVersion = [Environment]::OSVersion.VersionString
+            processIs64Bit = [Environment]::Is64BitProcess
+            inJob = [bool]$Common.InJob
+            vmms = $vmmsStatus
+            hyperVModules = @(Get-Module Hyper-V | Select-Object Name, Version, Path)
+            getVMCommands = @(Get-Command Get-VM -All -ErrorAction Stop | Select-Object Name, CommandType, Source, Version)
+        }
+        Write-Log "$VMName`: Maintenance host context: $($context | ConvertTo-Json -Depth 5 -Compress)" -LogOnly
+    }
+    catch {
+        Write-Log "$VMName`: Maintenance host context capture failed: $($_.Exception.Message); errorId='$($_.FullyQualifiedErrorId)'." -Warning
+    }
+    finally {
+        if ($identity) { $identity.Dispose() }
+    }
+    if ($ContextOnly) { return }
+
+    # Isolate provider/event queries so diagnostic collection cannot hold up a failed phase indefinitely.
+    $job = $null
+    try {
+        $job = Start-Job -ScriptBlock {
+            try {
+                $service = Get-Service vmms -ErrorAction Stop
+                [pscustomobject]@{ kind = 'vmms'; status = [string]$service.Status }
+            }
+            catch {
+                [pscustomobject]@{ kind = 'vmms'; error = $_.Exception.Message; errorId = $_.FullyQualifiedErrorId }
+            }
+            try {
+                $inventory = @(Get-VM -ErrorAction Stop)
+                [pscustomobject]@{
+                    kind = 'inventory'
+                    count = $inventory.Count
+                    truncated = $inventory.Count -gt 100
+                    vms = @($inventory | Sort-Object Name | Select-Object -First 100 Name, Id, State, ComputerName)
+                }
+            }
+            catch {
+                [pscustomobject]@{ kind = 'inventory'; error = $_.Exception.Message; errorId = $_.FullyQualifiedErrorId }
+            }
+            foreach ($channel in @('Microsoft-Windows-Hyper-V-VMMS-Admin', 'Microsoft-Windows-Hyper-V-Worker-Admin', 'System')) {
+                try {
+                    $filter = @{ LogName = $channel; StartTime = (Get-Date).AddMinutes(-15); Level = @(1, 2, 3) }
+                    if ($channel -eq 'System') { $filter.ProviderName = 'Service Control Manager' }
+                    $events = @(Get-WinEvent -FilterHashtable $filter -MaxEvents 20 -ErrorAction Stop)
+                    # Do not export event payloads or rendered messages, which can contain guest data.
+                    [pscustomobject]@{
+                        kind = 'events'
+                        channel = $channel
+                        windowMinutes = 15
+                        limit = 20
+                        limitReached = $events.Count -eq 20
+                        events = @($events | Select-Object TimeCreated, Id, RecordId, ProviderName, LevelDisplayName)
+                    }
+                }
+                catch {
+                    if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') {
+                        [pscustomobject]@{ kind = 'events'; channel = $channel; count = 0 }
+                    }
+                    else {
+                        [pscustomobject]@{ kind = 'events'; channel = $channel; error = $_.Exception.Message; errorId = $_.FullyQualifiedErrorId }
+                    }
+                }
+            }
+        } -ErrorAction Stop
+        $completed = Wait-Job -Job $job -Timeout 20 -ErrorAction Stop
+        Receive-Job -Job $job -ErrorAction Stop | ForEach-Object {
+            Write-Log "$VMName`: Maintenance host evidence: $($_ | Select-Object * -ExcludeProperty PSComputerName, RunspaceId, PSShowComputerName | ConvertTo-Json -Depth 6 -Compress)" -LogOnly
+        }
+        if (-not $completed) {
+            Write-Log "$VMName`: Maintenance host evidence capture timed out after 20 seconds; evidence may be incomplete." -Warning
+        }
+        elseif ($job.State -ne 'Completed') {
+            Write-Log "$VMName`: Maintenance host evidence worker ended in state '$($job.State)'." -Warning
+        }
+    }
+    catch {
+        Write-Log "$VMName`: Maintenance host evidence capture failed: $($_.Exception.Message); errorId='$($_.FullyQualifiedErrorId)'." -Warning
+    }
+    finally {
+        if ($job) {
+            try {
+                if ($job.State -in @('Running', 'NotStarted', 'Blocked')) { Stop-Job -Job $job -ErrorAction Stop }
+                Remove-Job -Job $job -Force -ErrorAction Stop
+            }
+            catch {
+                Write-Log "$VMName`: Maintenance diagnostic worker cleanup failed: $($_.Exception.Message)." -Warning
+            }
+        }
+    }
+}
+
+function Write-VMMaintenanceNoteSnapshot {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $VMName,
+        [Parameter(Mandatory = $true)] [object] $Note,
+        [Parameter(Mandatory = $true)] [string] $Details
+    )
+
+    $snapshot = [ordered]@{}
+    foreach ($field in @('vmName', 'role', 'domain', 'lastUpdate', 'vmBuild', 'inProgress', 'lastPhaseComplete', 'memLabsVersion', 'osFamily', 'operatingSystem', 'deployedOS')) {
+        $property = $Note.PSObject.Properties[$field]
+        if (-not $property) { continue }
+        $value = $property.Value
+        if ($value -is [string]) {
+            $snapshot[$field] = $value.Substring(0, [Math]::Min($value.Length, 256))
+        }
+        elseif ($value -is [bool] -or $value -is [int] -or $value -is [long] -or $null -eq $value) {
+            $snapshot[$field] = $value
+        }
+        else {
+            $snapshot[$field] = [ordered]@{ invalidType = $value.GetType().FullName }
+        }
+    }
+    $snapshot['fieldCount'] = @($Note.PSObject.Properties).Count
+    if ($Note.PSObject.Properties['appliedFixes']) {
+        $snapshot['appliedFixesType'] = if ($null -eq $Note.appliedFixes) { 'null' } else { $Note.appliedFixes.GetType().FullName }
+        $snapshot['appliedFixesCount'] = if ($Note.appliedFixes -is [pscustomobject]) { @($Note.appliedFixes.PSObject.Properties).Count } else { 0 }
+    }
+    Write-Log "$VMName`: Maintenance VM Notes snapshot (allowlisted fields, strings limited to 256 characters): $Details $($snapshot | ConvertTo-Json -Depth 4 -Compress)" -LogOnly
+}
+
+function Get-VMMaintenanceNote {
+    [CmdletBinding()]
+    param ([Parameter(Mandatory = $true)] [string] $VMName)
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $details = "host='$env:COMPUTERNAME' attempt=$attempt/3"
+        $stage = 'lookup'
+        try {
+            $vms = @(Get-VM -Name $VMName -ErrorAction Stop | Where-Object { $null -ne $_ })
+            if ($vms.Count -ne 1) {
+                $reason = "lookupMatchCount=$($vms.Count)"
+            }
+            else {
+                $vm = $vms[0]
+                $stage = 'notes'
+                $notes = [string]$vm.Notes
+                $details += " vmId='$($vm.Id)' state='$($vm.State)' vmHost='$($vm.ComputerName)' notesLength=$($notes.Length)"
+                $hash = [Security.Cryptography.SHA256]::Create()
+                try {
+                    $digest = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($notes))).Replace('-', '').ToLowerInvariant()
+                    $details += " notesSha256=$digest"
+                }
+                finally { $hash.Dispose() }
+                if ([string]::IsNullOrWhiteSpace($notes)) {
+                    $reason = 'notes=empty'
+                }
+                elseif ($notes -notlike '*lastUpdate*' -and -not $notes.TrimStart().StartsWith('{')) {
+                    $reason = 'managedNoteMarker=missing'
+                }
+                else {
+                    $stage = 'parse'
+                    $note = $notes | ConvertFrom-Json -ErrorAction Stop
+                    if ($notes.TrimStart().StartsWith('{') -and $note -is [pscustomobject]) {
+                        Write-VMMaintenanceNoteSnapshot -VMName $VMName -Note $note -Details $details
+                    }
+                    if (-not $notes.TrimStart().StartsWith('{') -or $note -isnot [pscustomobject] -or -not $note.PSObject.Properties['lastUpdate']) {
+                        $reason = 'managedNoteSchema=invalid expectedObjectWithLastUpdate=true'
+                    }
+                    else {
+                        if (-not $note.adminName) {
+                            $note | Add-Member -MemberType NoteProperty -Name adminName -Value $note.domainAdmin -Force
+                        }
+                        Write-Log "$VMName`: Maintenance metadata read succeeded: $details recovered=$($attempt -gt 1)." -LogOnly
+                        return $note
+                    }
+                }
+            }
+        }
+        catch {
+            $reason = "stage=$stage errorId='$($_.FullyQualifiedErrorId)' exceptionType='$($_.Exception.GetType().FullName)' hresult=$($_.Exception.HResult) category='$($_.CategoryInfo.Category)'"
+            # JSON parser messages can echo the Notes payload, including credentials.
+            if ($stage -eq 'lookup') { $reason += " message='$($_.Exception.Message -replace '[\r\n]+', ' ')'" }
+        }
+        Write-Log "$VMName`: Maintenance metadata read failed: $details $reason." -Warning
+        if ($attempt -eq 1) { Write-VMMaintenanceHostDiagnostics -VMName $VMName -ContextOnly }
+        if ($attempt -lt 3) {
+            $delay = 2 * $attempt
+            Write-Log "$VMName`: Retrying maintenance metadata read in $delay seconds." -LogOnly
+            Start-Sleep -Seconds $delay
+        }
+    }
+    Write-Log "$VMName`: Maintenance metadata unavailable after 3 attempts; collecting host evidence. No fixes will be applied." -Warning
+    Write-VMMaintenanceHostDiagnostics -VMName $VMName
+    return $null
+}
+
 function Start-VMMaintenance {
     [CmdletBinding()]
     param (
@@ -263,10 +471,9 @@ function Start-VMMaintenance {
 
     Write-Log "Starting maintenance for VM: $VMName"
 
-    $vmNoteObject = Get-VMNote -VMName $VMName
+    $vmNoteObject = Get-VMMaintenanceNote -VMName $VMName
 
     if (-not $vmNoteObject) {
-        Write-Log "$vmName`: VM Notes property could not be read. Skipping." -Warning
         return $false
     }
 
@@ -293,6 +500,15 @@ function Start-VMMaintenance {
         }
     }
 
+    $missingFields = @('role', 'domain' | Where-Object {
+        $vmNoteObject.$_ -isnot [string] -or [string]::IsNullOrWhiteSpace($vmNoteObject.$_)
+    })
+    if ($missingFields.Count -gt 0) {
+        Write-Log "$VMName`: Maintenance metadata missing or invalid required fields: $($missingFields -join ', '). No fixes will be applied." -Warning
+        Write-VMMaintenanceHostDiagnostics -VMName $VMName
+        return $false
+    }
+
     $global:MaintenanceActivity = $VMName
     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
 
@@ -310,13 +526,13 @@ function Start-VMMaintenance {
     }
 
     if ($FreshDeployOnly.IsPresent) {
-        $vmFixes = Get-VMFixes -newVM $true -VMName $VMName | Where-Object { $_.NeededOnFreshDeploy -eq $true }
+        $vmFixes = Get-VMFixes -newVM $true -VMName $VMName -VMNote $vmNoteObject | Where-Object { $_.NeededOnFreshDeploy -eq $true }
     }
     else {
-        $vmFixes = Get-VMFixes -newVM $false -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
+        $vmFixes = Get-VMFixes -newVM $false -VMName $VMName -VMNote $vmNoteObject | Where-Object { $_.AppliesToExisting -eq $true }
     }
 
-    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -FreshDeployOnly:$FreshDeployOnly
+    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -VMNote $vmNoteObject -FreshDeployOnly:$FreshDeployOnly
 
     if ($worked) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully." -force
@@ -367,6 +583,8 @@ function Start-VMFixes {
         [string] $VMName,
         [Parameter(Mandatory = $true, HelpMessage = "VMFixes")]
         [object] $VMFixes,
+        [Parameter(Mandatory = $false)]
+        [object] $VMNote,
         [Parameter(Mandatory = $false, HelpMessage = "SkipVMShutdown")]
         [switch] $SkipVMShutdown,
         [Parameter(Mandatory = $false, HelpMessage = "Apply only fixes needed on fresh deploy")]
@@ -380,7 +598,7 @@ function Start-VMFixes {
 
     $rootPath = Split-Path $PSScriptRoot -Parent
 
-    $vmNote = Get-VMNote -VMName $vmName
+    if (-not $vmNote) { $vmNote = Get-VMNote -VMName $vmName }
     $vmDomain = $vmNote.domain
 
     if (-not $vmDomain) {
@@ -1485,6 +1703,8 @@ function Get-VMFixes {
         [object] $VMName,
         [Parameter(Mandatory = $true, HelpMessage = "VMName", ParameterSetName = "Dummy")]
         [switch] $ReturnDummyList,
+        [Parameter(Mandatory = $false, ParameterSetName = "Real")]
+        [object] $VMNote,
         [bool] $NewVM = $true
     )
 
@@ -1492,7 +1712,7 @@ function Get-VMFixes {
         $vmNote = $null
     }
     else {
-        $vmNote = Get-VMNote -VMName $VMName
+        if (-not $vmNote) { $vmNote = Get-VMNote -VMName $VMName }
         if ($Common.InJob) {
             # In job workers, skip Get-List (triggers expensive Get-VM +
             # Get-VMNetworkAdapter -All bulk warmup that serializes on vmms.exe
