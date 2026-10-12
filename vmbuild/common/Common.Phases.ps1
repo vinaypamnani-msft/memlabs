@@ -1503,7 +1503,11 @@ function Start-Phase {
             Write-Log "[Phase 1] Memory pre-flight check skipped (non-fatal): $_" -LogOnly
         }
 
-        Set-DeployConfigIPAddresses -DeployConfig $deployConfig
+        $ipAllocationReady = Set-DeployConfigIPAddresses -DeployConfig $deployConfig
+        if (-not $ipAllocationReady) {
+            Write-RedX "[Phase 1] Aborting before VM creation: deterministic IP pre-allocation could not prove unique ownership for every requested address." -WriteLog
+            return $false
+        }
     }
 
     # Linux Proxy Squid install is dispatched as a per-VM job through

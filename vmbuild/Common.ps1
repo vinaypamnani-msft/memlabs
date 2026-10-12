@@ -5780,7 +5780,7 @@ function Set-DeployConfigIPAddresses {
     $defaultNetwork = $DeployConfig.vmOptions.network
     if (-not $defaultNetwork) {
         Write-Log "Set-DeployConfigIPAddresses: No default network in vmOptions. Cannot allocate IPs." -Failure
-        return
+        return $false
     }
 
     # Verify DHCP service is running before we try to allocate
@@ -5790,12 +5790,13 @@ function Set-DeployConfigIPAddresses {
         $dhcp = Start-DHCP
         if (-not $dhcp) {
             Write-Log "Set-DeployConfigIPAddresses: Could not start DHCP service. IP pre-allocation will be skipped." -Failure
-            return
+            return $false
         }
     }
 
     # Track IPs we've allocated to prevent duplicates within this run
     $allocatedIps = [System.Collections.Generic.HashSet[string]]::new()
+    $liveScopeAddresses = [System.Collections.Generic.List[object]]::new()
     $vmCount = 0
     $skipCount = 0
     $reuseCount = 0
@@ -5805,6 +5806,7 @@ function Set-DeployConfigIPAddresses {
 
     # Collect all scopes we'll use and verify they exist
     $scopesNeeded = [System.Collections.Generic.HashSet[string]]::new()
+    $scopeById = @{}
     foreach ($vm in $DeployConfig.virtualMachines) {
         if ($vm.hidden -or $vm.role -eq 'OSDClient') { continue }
         $sid = if ($vm.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($vm.network) { $vm.network } else { $defaultNetwork } }
@@ -5816,6 +5818,7 @@ function Set-DeployConfigIPAddresses {
             Write-Log "Set-DeployConfigIPAddresses: DHCP scope $sid does not exist! VMs on this scope will not get pre-assigned IPs." -Warning
         }
         else {
+            $scopeById["$sid"] = $scope
             $stats = Get-DhcpServerv4ScopeStatistics -ScopeId $sid -ErrorAction SilentlyContinue
             if ($stats) {
                 Write-Log "Set-DeployConfigIPAddresses: Scope $sid ($($scope.Name)): $($stats.Free) free, $($stats.InUse) in use, $($stats.Reserved) reserved" -LogOnly
@@ -5841,6 +5844,7 @@ function Set-DeployConfigIPAddresses {
     if ($domainName) {
         $validMacs = [System.Collections.Generic.HashSet[string]]::new()
         $domainVmNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $allocatingVmNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
         $existingDomainVMs = @()
         try { $existingDomainVMs = @(Get-List -Type VM -DomainName $domainName -SmartUpdate) } catch {}
@@ -5849,20 +5853,55 @@ function Set-DeployConfigIPAddresses {
         }
         foreach ($cvm in $DeployConfig.virtualMachines) {
             if ($cvm.vmName) { $null = $domainVmNames.Add($cvm.vmName) }
+            if ($cvm.vmName -and -not $cvm.hidden -and $cvm.role -ne 'OSDClient') {
+                $null = $allocatingVmNames.Add($cvm.vmName)
+            }
         }
 
-        # Live NIC MACs for VMs that still exist (the only legitimate reservation owners).
-        foreach ($evm in $existingDomainVMs) {
-            try {
-                $liveVm = Get-VM2 -Name $evm.vmName -ErrorAction SilentlyContinue
-                if (-not $liveVm) { continue }
-                foreach ($nic in ($liveVm | Get-VMNetworkAdapter -ErrorAction SilentlyContinue)) {
-                    if ($nic.MacAddress -and $nic.MacAddress -ne '000000000000') {
-                        $null = $validMacs.Add(($nic.MacAddress -replace '-', '').ToUpper())
-                    }
-                }
+        # Live NIC MACs for VMs that still exist (the only legitimate reservation
+        # owners), plus every live address on a scope this deployment will allocate
+        # from. Hidden retained VMs are deliberately absent from the allocation loop
+        # below, but their static addresses still occupy the subnet. Ignoring those
+        # addresses let DHCP return CT5-CS1SQLAO1's live 192.168.50.23 to
+        # CT5-LINUXDESK1: Linux initially won ARP, then SQLAO reclaimed it, producing
+        # the misleading "ping + SMB healthy, SSH refused" failure.
+        $allLiveAdapters = @()
+        try {
+            $allLiveAdapters = @(Get-VM -ErrorAction Stop |
+                Get-VMNetworkAdapter -ErrorAction Stop)
+        }
+        catch {
+            Write-Log "Set-DeployConfigIPAddresses: Could not inventory live Hyper-V NIC addresses before DHCP allocation: $($_.Exception.Message). Refusing to allocate while existing ownership is unknown." -Failure
+            return $false
+        }
+        foreach ($nic in $allLiveAdapters) {
+            $normalizedMac = if ($nic.MacAddress) {
+                ($nic.MacAddress -replace '[-:]', '').ToUpper()
             }
-            catch {}
+            else { '' }
+            if ($normalizedMac -and $normalizedMac -ne '000000000000') {
+                $null = $validMacs.Add($normalizedMac)
+            }
+            if (-not $normalizedMac) { continue }
+            foreach ($liveAddress in @($nic.IPAddresses)) {
+                $liveIp = "$liveAddress"
+                $parsedLiveIp = $null
+                if (-not [System.Net.IPAddress]::TryParse($liveIp, [ref]$parsedLiveIp) -or
+                    $parsedLiveIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
+                    $liveIp -like '127.*' -or $liveIp -like '169.254.*' -or
+                    $liveIp -eq '0.0.0.0') {
+                    continue
+                }
+                $liveScopeId = (($liveIp.Split('.') | Select-Object -First 3) -join '.') + '.0'
+                if (-not $scopesNeeded.Contains($liveScopeId)) { continue }
+                $liveScopeAddresses.Add([pscustomobject]@{
+                        VmName      = "$($nic.VMName)"
+                        ScopeId     = $liveScopeId
+                        IPAddress   = $liveIp
+                        MacAddress  = $normalizedMac
+                        SwitchName  = "$($nic.SwitchName)"
+                    })
+            }
         }
 
         $orphansRemoved = 0
@@ -5921,6 +5960,62 @@ function Set-DeployConfigIPAddresses {
         }
         if ($orphansRemoved -gt 0) {
             Write-Log "Set-DeployConfigIPAddresses: Cleaned up $orphansRemoved orphaned DHCP reservation(s) for domain $domainName"
+        }
+
+        # Protect every live, retained address before asking DHCP for a free one.
+        # Addresses inside the lease pool get a durable reservation tied to the
+        # owning NIC. That is preferable to a temporary exclusion: orphan cleanup
+        # can later reclaim a reservation when the VM/MAC disappears.
+        $liveAddressConflict = $false
+        foreach ($group in @($liveScopeAddresses | Group-Object ScopeId, IPAddress)) {
+            $owners = @($group.Group | ForEach-Object {
+                    "$($_.VmName)|$($_.MacAddress)"
+                } | Select-Object -Unique)
+            if ($owners.Count -gt 1) {
+                $sample = $group.Group[0]
+                Write-Log "Set-DeployConfigIPAddresses: LIVE IP COLLISION on $($sample.IPAddress) in scope $($sample.ScopeId): $($owners -join ', '). Refusing new allocations until the existing collision is resolved." -Failure
+                $liveAddressConflict = $true
+            }
+        }
+        if ($liveAddressConflict) { return $false }
+
+        foreach ($liveAddress in @($liveScopeAddresses |
+                Sort-Object ScopeId, IPAddress, VmName -Unique)) {
+            # A non-hidden VM in this deploy may already exist on a rerun. Its own
+            # live address is reconciled in the per-VM loop below so it can reuse
+            # that address without colliding with this retained-owner seed.
+            if ($allocatingVmNames.Contains($liveAddress.VmName)) { continue }
+            $null = $allocatedIps.Add($liveAddress.IPAddress)
+            $scope = $scopeById["$($liveAddress.ScopeId)"]
+            if (-not $scope) { continue }
+
+            $liveIpNumber = ConvertTo-IpSortable -IPAddress $liveAddress.IPAddress
+            $scopeStartNumber = ConvertTo-IpSortable -IPAddress "$($scope.StartRange)"
+            $scopeEndNumber = ConvertTo-IpSortable -IPAddress "$($scope.EndRange)"
+            if ($null -eq $liveIpNumber -or $null -eq $scopeStartNumber -or
+                $null -eq $scopeEndNumber -or $liveIpNumber -lt $scopeStartNumber -or
+                $liveIpNumber -gt $scopeEndNumber) {
+                Write-Log "Set-DeployConfigIPAddresses: Protected live IP $($liveAddress.IPAddress) for $($liveAddress.VmName) in the in-memory allocation set (outside DHCP pool)." -LogOnly
+                continue
+            }
+
+            Add-DHCPReservationIsolated -ScopeId $liveAddress.ScopeId `
+                -IPAddress $liveAddress.IPAddress -Mac $liveAddress.MacAddress `
+                -Description "Reservation for $($liveAddress.VmName) (existing live IP)" `
+                -LogContext "$($liveAddress.VmName) live-IP protection"
+
+            $protectedReservation = @(Get-DhcpServerv4Reservation `
+                    -ScopeId $liveAddress.ScopeId -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        "$($_.IPAddress)" -eq $liveAddress.IPAddress -and
+                        (("$($_.ClientId)" -replace '[-:]', '').ToUpper()) -eq
+                        $liveAddress.MacAddress
+                    })
+            if ($protectedReservation.Count -ne 1) {
+                Write-Log "Set-DeployConfigIPAddresses: Could not protect live IP $($liveAddress.IPAddress) for $($liveAddress.VmName) (MAC $($liveAddress.MacAddress)) with a DHCP reservation. Refusing new allocations on this potentially unsafe scope." -Failure
+                return $false
+            }
+            Write-Log "Set-DeployConfigIPAddresses: Protected retained VM $($liveAddress.VmName) live IP $($liveAddress.IPAddress) with MAC $($liveAddress.MacAddress) before new allocation." -LogOnly
         }
     }
 
@@ -6119,7 +6214,62 @@ function Set-DeployConfigIPAddresses {
                         $reuseCount++
                     }
                     else {
-                        Write-Log "$($vm.vmName): VM exists (MAC=$($vmnet.MacAddress)) but no DHCP reservation found in scope $scopeId" -LogOnly
+                        # A prior revision may have made this address static without
+                        # leaving a DHCP reservation (the exact SQLAO .23 condition
+                        # that caused CT5's collision). Reuse the one live address
+                        # this VM owns inside the scope's DHCP pool and make its
+                        # ownership durable before allocating anything else.
+                        $scope = $scopeById["$scopeId"]
+                        $scopeStartNumber = if ($scope) {
+                            ConvertTo-IpSortable -IPAddress "$($scope.StartRange)"
+                        }
+                        else { $null }
+                        $scopeEndNumber = if ($scope) {
+                            ConvertTo-IpSortable -IPAddress "$($scope.EndRange)"
+                        }
+                        else { $null }
+                        $liveCandidates = @($liveScopeAddresses | Where-Object {
+                                if ($_.VmName -ine $vm.vmName -or
+                                    $_.ScopeId -ne $scopeId) {
+                                    return $false
+                                }
+                                $candidateNumber = ConvertTo-IpSortable -IPAddress $_.IPAddress
+                                $null -ne $candidateNumber -and
+                                $null -ne $scopeStartNumber -and
+                                $null -ne $scopeEndNumber -and
+                                $candidateNumber -ge $scopeStartNumber -and
+                                $candidateNumber -le $scopeEndNumber
+                            } | Select-Object -ExpandProperty IPAddress -Unique)
+                        if ($liveCandidates.Count -eq 1) {
+                            $ip = $liveCandidates[0]
+                            $ipSource = 'existing-live-ip'
+                            Add-DHCPReservationIsolated -ScopeId $scopeId `
+                                -IPAddress $ip -Mac $vmnet.MacAddress `
+                                -Description "Reservation for $($vm.vmName) (existing live IP)" `
+                                -LogContext "$($vm.vmName) live-IP reuse"
+                            $reservation = @(Get-DhcpServerv4Reservation `
+                                    -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                                    Where-Object {
+                                        "$($_.IPAddress)" -eq $ip -and
+                                        (("$($_.ClientId)" -replace '[-:]', '').ToUpper()) -eq
+                                        (($vmnet.MacAddress -replace '[-:]', '').ToUpper())
+                                    })
+                            if ($reservation.Count -ne 1) {
+                                Write-Log "$($vm.vmName): Could not reserve its existing live IP $ip (MAC=$($vmnet.MacAddress)) in scope $scopeId. Refusing to allocate a replacement while the VM still owns this address." -Failure
+                                $failCount++
+                                continue
+                            }
+                            $reuseCount++
+                            Write-Log "$($vm.vmName): Reusing and reserving existing live IP $ip (MAC=$($vmnet.MacAddress), scope $scopeId)." -LogOnly
+                        }
+                        elseif ($liveCandidates.Count -gt 1) {
+                            Write-Log "$($vm.vmName): VM has multiple live DHCP-pool addresses in scope $scopeId ($($liveCandidates -join ', ')); refusing to guess which address to retain." -Failure
+                            $failCount++
+                            continue
+                        }
+                        else {
+                            Write-Log "$($vm.vmName): VM exists (MAC=$($vmnet.MacAddress)) but has no DHCP reservation or unique live pool address in scope $scopeId" -LogOnly
+                        }
                     }
                 }
                 else {
@@ -6187,7 +6337,14 @@ function Set-DeployConfigIPAddresses {
         }
 
         if (-not $allocatedIps.Add($ip)) {
-            Write-Log "$($vm.vmName): DUPLICATE — IP $ip already allocated to another VM in this deploy! (source=$ipSource)" -Warning
+            Write-Log "$($vm.vmName): DUPLICATE — IP $ip is already owned by a retained VM or another allocation in this deploy (source=$ipSource). Refusing to stamp an ambiguous address." -Failure
+            if ($ipSource -eq 'dhcp-pool') {
+                Remove-DhcpServerv4ExclusionRange -ScopeId $scopeId `
+                    -StartRange $ip -EndRange $ip -ErrorAction SilentlyContinue |
+                    Out-Null
+            }
+            $failCount++
+            continue
         }
 
         $vm | Add-Member -MemberType NoteProperty -Name 'AssignedIP' -Value $ip -Force
@@ -6207,6 +6364,7 @@ function Set-DeployConfigIPAddresses {
     }
 
     Write-Log "Pre-allocated IPs for $vmCount VM(s): $dynamicCount dynamic, $fixedCount fixed-role, $reuseCount reused, $failCount failed, $skipCount skipped. Cleaned $cleanedExclusions temp exclusions."
+    return ($failCount -eq 0)
 }
 
 function New-VirtualMachine {
@@ -9888,6 +10046,39 @@ function Get-VmSession {
     $swVmLookup.Stop()
     if (-not $vm) {
         Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
+        $lookupContext = [ordered]@{
+            ComputerName = $env:COMPUTERNAME
+            JobContext   = [bool]$Common.InJob
+            LookupMs    = $swVmLookup.ElapsedMilliseconds
+            VmmsState    = 'unavailable'
+            GetVmResult  = 'not queried'
+        }
+        try {
+            $vmms = Get-Service -Name vmms -ErrorAction Stop
+            $lookupContext.VmmsState = [string]$vmms.Status
+        }
+        catch {
+            $message = $_.Exception.Message
+            if ($message.Length -gt 400) { $message = $message.Substring(0, 400) + ' ...[truncated]' }
+            $lookupContext.VmmsState = "query failed: $message"
+        }
+        try {
+            $directVm = Get-VM -Name $VmName -ErrorAction Stop
+            if ($directVm) {
+                $lookupContext.GetVmResult = "found by direct name lookup (state=$($directVm.State))"
+            }
+            else {
+                $lookupContext.GetVmResult = 'no VM returned by direct name lookup'
+            }
+        }
+        catch {
+            $message = $_.Exception.Message
+            if ($message.Length -gt 400) { $message = $message.Substring(0, 400) + ' ...[truncated]' }
+            $lookupContext.GetVmResult = "direct name lookup failed: $message"
+        }
+        $lookupText = ($lookupContext.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; '
+        if ($lookupText.Length -gt 1500) { $lookupText = $lookupText.Substring(0, 1500) + ' ...[truncated]' }
+        Write-Log "[Get-VMSession] $VmName`: Hyper-V lookup diagnostics: $lookupText" -Warning
         return $null
     }
 
