@@ -1059,6 +1059,11 @@ try {
     }
     $deployConfig.parameters | Add-Member -MemberType NoteProperty `
         -Name ResumePreparation -Value $resumePreparation -Force
+    $requireExistingVMs = [bool]($StartPhase -gt 1 -or ($Phase -and 1 -notin $Phase) -or 1 -in $SkipPhase)
+    $deployConfig.parameters | Add-Member -MemberType NoteProperty `
+        -Name RequireExistingVMs -Value $requireExistingVMs -Force
+    $deployConfig.parameters | Add-Member -MemberType NoteProperty `
+        -Name AllowAADClientRecovery -Value ([bool]($StartPhase -gt 1 -and (-not $Phase -or 1 -in $Phase) -and 1 -notin $SkipPhase)) -Force
     $prepared = $true
     # Default true like $prepared: if every phase is skipped (-Phase / -SkipPhase /
     # -StartPhase past the end) the loop never assigns it, and the end-of-run gate
@@ -1066,125 +1071,124 @@ try {
     # ran, and nothing failed, as FINISHED WITH FAILURES.
     $configured = $true
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
-    if ($containsHidden -or $resumePreparation) {
+    if ($containsHidden -or $resumePreparation -or $requireExistingVMs) {
         Write-Phase -Phase 0
         $prepared = Resolve-PhaseResult -Raw (Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf) -Phase 0
     }
 
-    # AADClient idempotency: if an AADClient VM exists from a prior interrupted
-    # run but never reached oobeComplete, it is in an unrecoverable state
-    # (partial DSC, half-sysprepped, etc.). Delete it now so Phase 1 can
-    # re-create from a fresh VHDX. If -StartPhase would skip Phase 1, override
-    # it so the AADClient gets rebuilt before Phase 2 runs.
-    $forcePhase1ForAAD = $false
-    $global:ForcePhase1VmNames = @()
-    $needCacheFlush = $false
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.role -ne "AADClient" -or $vm.hidden) { continue }
-        $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
-        if (-not $existingVm) {
-            # VM doesn't exist — force Phase 1 so it gets created even with -StartPhase 2+
+    if ($prepared) {
+        # AADClient idempotency: if an AADClient VM exists from a prior interrupted
+        # run but never reached oobeComplete, it is in an unrecoverable state
+        # (partial DSC, half-sysprepped, etc.). Delete it now so Phase 1 can
+        # re-create from a fresh VHDX. If -StartPhase would skip Phase 1, override
+        # it so the AADClient gets rebuilt before Phase 2 runs.
+        $forcePhase1ForAAD = $false
+        $global:ForcePhase1VmNames = @()
+        $needCacheFlush = $false
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.role -ne "AADClient" -or $vm.hidden) { continue }
+            $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
+            if (-not $existingVm) {
+                # VM doesn't exist — force Phase 1 so it gets created even with -StartPhase 2+
+                $global:ForcePhase1VmNames += $vm.vmName
+                $forcePhase1ForAAD = $true
+                # Only warn if Phase 1 would have been skipped (otherwise it runs naturally)
+                if ($StartPhase -and $StartPhase -gt 1) {
+                    Write-Log "[Phase 0] $($vm.vmName): AADClient does not exist. Forcing Phase 1 to create it." -Warning
+                }
+                continue
+            }
+            $note = Get-VMNote -VMName $vm.vmName
+            if ($note -and $note.oobeComplete) { continue }
+            Write-Log "[Phase 0] $($vm.vmName): AADClient exists but oobeComplete is not set (interrupted prior run). Deleting so Phase 1 can re-create." -Warning
+            Remove-VirtualMachine -VmName $vm.vmName -Force -SkipProxyCleanup
             $global:ForcePhase1VmNames += $vm.vmName
             $forcePhase1ForAAD = $true
-            # Only warn if Phase 1 would have been skipped (otherwise it runs naturally)
-            if ($StartPhase -and $StartPhase -gt 1) {
-                Write-Log "[Phase 0] $($vm.vmName): AADClient does not exist. Forcing Phase 1 to create it." -Warning
-            }
-            continue
+            $needCacheFlush = $true
         }
-        $note = Get-VMNote -VMName $vm.vmName
-        if ($note -and $note.oobeComplete) { continue }
-        Write-Log "[Phase 0] $($vm.vmName): AADClient exists but oobeComplete is not set (interrupted prior run). Deleting so Phase 1 can re-create." -Warning
-        Remove-VirtualMachine -VmName $vm.vmName -Force -SkipProxyCleanup
-        $global:ForcePhase1VmNames += $vm.vmName
-        $forcePhase1ForAAD = $true
-        $needCacheFlush = $true
-    }
-    if ($forcePhase1ForAAD) {
-        $runPhase1 = $true
-        if ($needCacheFlush) {
-            # Flush the VM list cache so Phase 1 sees the deleted VM as missing
+        if ($forcePhase1ForAAD) {
+            $runPhase1 = $true
+            if ($needCacheFlush) {
+                # Flush the VM list cache so Phase 1 sees the deleted VM as missing
+                Get-List -FlushCache
+            }
+        }
+
+        # Same repair for every other role. Phase 1 is skipped entirely when all config VMs
+        # merely EXIST, so a half-built leftover is never re-created -- it is skipped forever
+        # and every later phase fails against a shell. Test-VmPhase1Incomplete only says yes
+        # when the note proves it, so unreadable/legacy/unversioned notes are left alone.
+        $forcePhase1Incomplete = $false
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
+            if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
+            if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
+            $verdict = Test-VmPhase1Incomplete -VmName $vm.vmName
+            if (-not $verdict.Incomplete) { continue }
+            Write-Log "[Phase 0] $($vm.vmName): exists but never completed Phase 1 ($($verdict.Reason)). Deleting so Phase 1 can re-create it." -Warning
+            Remove-VirtualMachine -VmName $vm.vmName -Force
+            if (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue) {
+                Write-Log "[Phase 0] $($vm.vmName): removal reported done but the VM is still present; leaving it for manual cleanup." -Failure
+                continue
+            }
+            $global:ForcePhase1VmNames += $vm.vmName
+            $forcePhase1Incomplete = $true
+        }
+        if ($forcePhase1Incomplete) {
+            $runPhase1 = $true
             Get-List -FlushCache
         }
-    }
 
-    # Same repair for every other role. Phase 1 is skipped entirely when all config VMs
-    # merely EXIST, so a half-built leftover is never re-created -- it is skipped forever
-    # and every later phase fails against a shell. Test-VmPhase1Incomplete only says yes
-    # when the note proves it, so unreadable/legacy/unversioned notes are left alone.
-    $forcePhase1Incomplete = $false
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
-        if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
-        if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
-        $verdict = Test-VmPhase1Incomplete -VmName $vm.vmName
-        if (-not $verdict.Incomplete) { continue }
-        Write-Log "[Phase 0] $($vm.vmName): exists but never completed Phase 1 ($($verdict.Reason)). Deleting so Phase 1 can re-create it." -Warning
-        Remove-VirtualMachine -VmName $vm.vmName -Force
-        if (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue) {
-            Write-Log "[Phase 0] $($vm.vmName): removal reported done but the VM is still present; leaving it for manual cleanup." -Failure
-            continue
+        # Phase 1 is the only thing that creates additionalDisks, and it is skipped for a VM
+        # that already exists -- so a disk added to an existing VM's config never appears, and
+        # Phase 2 InitializeDisks cannot ever succeed. Fail here instead of at the end of the
+        # phase budget. VMs about to be rebuilt are excluded; they get their disks from Phase 1.
+        $diskMismatch = @()
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
+            if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
+            if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
+            $diskState = Get-VmMissingDataDisk -VmName $vm.vmName -AdditionalDisks $vm.additionalDisks
+            if ($diskState.Error) {
+                Write-Log "[Phase 0] $($vm.vmName): $($diskState.Error). Its disks were NOT verified." -Warning
+                continue
+            }
+            if ($diskState.Missing.Count -gt 0) {
+                $detail = (($diskState.Missing | ForEach-Object { "$($_.Letter)=$($_.Size)" }) -join ', ')
+                $found = if ($diskState.Attached.Count -gt 0) { $diskState.Attached -join ', ' } else { 'none' }
+                $diskMismatch += "$($vm.vmName) is missing $($diskState.Missing.Count) configured disk(s): $detail. Data disks actually attached: $found"
+            }
         }
-        $global:ForcePhase1VmNames += $vm.vmName
-        $forcePhase1Incomplete = $true
-    }
-    if ($forcePhase1Incomplete) {
-        $runPhase1 = $true
-        Get-List -FlushCache
-    }
+        if ($diskMismatch.Count -gt 0) {
+            foreach ($m in $diskMismatch) { Write-Log "[Phase 0] $m" -Failure }
+            Write-Log "[Phase 0] These VMs already exist, so Phase 1 will not run for them and the disk(s) above will never be created. Delete the VM(s) so Phase 1 rebuilds them, or remove the added disk(s) from the config." -Failure
+            exit 1
+        }
 
-    # Phase 1 is the only thing that creates additionalDisks, and it is skipped for a VM
-    # that already exists -- so a disk added to an existing VM's config never appears, and
-    # Phase 2 InitializeDisks cannot ever succeed. Fail here instead of at the end of the
-    # phase budget. VMs about to be rebuilt are excluded; they get their disks from Phase 1.
-    $diskMismatch = @()
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
-        if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
-        if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
-        $diskState = Get-VmMissingDataDisk -VmName $vm.vmName -AdditionalDisks $vm.additionalDisks
-        if ($diskState.Error) {
-            Write-Log "[Phase 0] $($vm.vmName): $($diskState.Error). Its disks were NOT verified." -Warning
-            continue
-        }
-        if ($diskState.Missing.Count -gt 0) {
-            $detail = (($diskState.Missing | ForEach-Object { "$($_.Letter)=$($_.Size)" }) -join ', ')
-            $found = if ($diskState.Attached.Count -gt 0) { $diskState.Attached -join ', ' } else { 'none' }
-            $diskMismatch += "$($vm.vmName) is missing $($diskState.Missing.Count) configured disk(s): $detail. Data disks actually attached: $found"
-        }
-    }
-    if ($diskMismatch.Count -gt 0) {
-        foreach ($m in $diskMismatch) { Write-Log "[Phase 0] $m" -Failure }
-        Write-Log "[Phase 0] These VMs already exist, so Phase 1 will not run for them and the disk(s) above will never be created. Delete the VM(s) so Phase 1 rebuilds them, or remove the added disk(s) from the config." -Failure
-        exit 1
-    }
+        # Define phases
+        $start = 1
+        $maxPhase = 11
+        # A script launched with pwsh -File can place its validated parameter in global
+        # scope. Mirroring an omitted [int] value (0) back to the same name then reruns
+        # ValidateRange(2, 11) and fails before Phase 1.
+        $global:MemLabsStartPhase = [int]$StartPhase
 
-    # Define phases
-    $start = 1
-    $maxPhase = 11
-    # A script launched with pwsh -File can place its validated parameter in global
-    # scope. Mirroring an omitted [int] value (0) back to the same name then reruns
-    # ValidateRange(2, 11) and fails before Phase 1.
-    $global:MemLabsStartPhase = [int]$StartPhase
-
-    # Pre-build the host download-cache ISO ONCE, before any phase fans out to
-    # per-VM jobs. Building it here (single host process) instead of lazily inside
-    # each VM's DSC step avoids N separate processes racing to build the same
-    # content-addressed ISO (and leaking per-PID cache-build-* staging dirs on
-    # contention). The per-VM step then just finds the already-built ISO and mounts
-    # it. Pure optimization: any failure is logged and ignored (guests fall back to
-    # direct download). Skipped under -WhatIf and when the cache is disabled.
-    if (-not $WhatIf -and (Test-MemlabsDownloadCacheEnabled)) {
-        try {
-            Write-Log "Pre-building host download-cache ISO before phases..." -LogOnly
-            $null = Get-MemlabsCacheIsoForDeploy -DeployConfig $deployConfig -StartPhase ([int]$StartPhase)
+        # Pre-build the host download-cache ISO ONCE, before any phase fans out to
+        # per-VM jobs. Building it here (single host process) instead of lazily inside
+        # each VM's DSC step avoids N separate processes racing to build the same
+        # content-addressed ISO (and leaking per-PID cache-build-* staging dirs on
+        # contention). The per-VM step then just finds the already-built ISO and mounts
+        # it. Pure optimization: any failure is logged and ignored (guests fall back to
+        # direct download). Skipped under -WhatIf and when the cache is disabled.
+        if (-not $WhatIf -and (Test-MemlabsDownloadCacheEnabled)) {
+            try {
+                Write-Log "Pre-building host download-cache ISO before phases..." -LogOnly
+                $null = Get-MemlabsCacheIsoForDeploy -DeployConfig $deployConfig -StartPhase ([int]$StartPhase)
+            }
+            catch {
+                Write-Log "Download-cache pre-build failed (non-fatal): $($_.Exception.Message)" -LogOnly
+            }
         }
-        catch {
-            Write-Log "Download-cache pre-build failed (non-fatal): $($_.Exception.Message)" -LogOnly
-        }
-    }
-
-    if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
             Write-Phase -Phase $i

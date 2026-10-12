@@ -1283,18 +1283,28 @@ function Resolve-WaitPhaseResult {
     )
 
     $items = @($Raw)
-    if ($items.Count -eq 1) { return $Raw }
-
-    $shape = ($items | ForEach-Object { if ($null -eq $_) { '<null>' } else { $_.GetType().Name } }) -join ', '
-    if ($shape.Length -gt 300) { $shape = $shape.Substring(0, 300) + '...' }
-    Write-Log "[Phase $Phase] Wait-Phase returned $($items.Count) object(s) instead of one tally. Shape: [$shape]. Something in it leaked to the success stream; suppress it with `$null = or drop -OutputStream (that switch is for job scriptblocks only)." -Warning
+    if ($items.Count -ne 1) {
+        $shape = ($items | ForEach-Object { if ($null -eq $_) { '<null>' } else { $_.GetType().Name } }) -join ', '
+        if ($shape.Length -gt 300) { $shape = $shape.Substring(0, 300) + '...' }
+        Write-Log "[Phase $Phase] Wait-Phase returned $($items.Count) object(s) instead of one tally. Shape: [$shape]. Something in it leaked to the success stream; suppress it with `$null = or drop -OutputStream (that switch is for job scriptblocks only)." -Warning
+    }
 
     $tally = @($items | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'Crashed') })
     if ($tally.Count -eq 0) {
-        Write-Log "[Phase $Phase] Wait-Phase returned no tally object at all; the phase result cannot be judged." -Failure
-        return $Raw
+        throw "[Phase $Phase] Wait-Phase returned no tally object; treating the phase as FAILED."
     }
-    return $tally[-1]
+    $result = $tally[-1]
+    foreach ($field in @('Failed', 'Success', 'Warning')) {
+        $count = $result.$field
+        if (($count -isnot [int] -and $count -isnot [long]) -or $count -lt 0) {
+            throw "[Phase $Phase] Wait-Phase returned an invalid '$field' count; treating the phase as FAILED."
+        }
+    }
+    if ($result.Elapsed -isnot [timespan] -or $result.Elapsed -lt [timespan]::Zero -or
+        $null -eq $result.Crashed -or $result.Crashed -isnot [System.Collections.IEnumerable] -or $result.Crashed -is [string]) {
+        throw "[Phase $Phase] Wait-Phase returned an invalid elapsed time or crash list; treating the phase as FAILED."
+    }
+    return $result
 }
 
 function Start-Phase {
@@ -1308,6 +1318,26 @@ function Start-Phase {
     if ($WhatIf) {
         Write-Log "[WhatIf] Will Start Phase $Phase"
         return $true
+    }
+
+    if ($Phase -eq 0) {
+        try {
+            $registeredNames = @((Get-VM -ErrorAction Stop).Name)
+            $missingRequiredVMs = @($deployConfig.virtualMachines | Where-Object {
+                    ($_.hidden -or ($deployConfig.parameters.RequireExistingVMs -and
+                        -not ($_.role -eq 'AADClient' -and $deployConfig.parameters.AllowAADClientRecovery))) -and
+                    $_.vmName -notin $registeredNames
+                })
+            if ($missingRequiredVMs.Count -gt 0) {
+                Write-RedX "[Phase 0] Required VMs do not exist in Hyper-V: $($missingRequiredVMs.vmName -join ', '). Aborting before VM preparation. Re-run from Phase 1 to create missing lab VMs; restore missing hidden/external dependencies separately." -WriteLog
+                return $false
+            }
+        }
+        catch {
+            Write-Exception -ExceptionInfo $_
+            Write-RedX "[Phase 0] Hyper-V inventory could not be verified; aborting before VM preparation." -WriteLog
+            return $false
+        }
     }
 
     # ExistingDCName only means a VM with role DC exists on this host -- not that it is
@@ -1585,9 +1615,6 @@ function Start-Phase {
     # came up letterless -> false "media not visible" -> CMCB share never created
     # -> DC extadsch deadlock) can no longer happen. No-op for URL-download CM
     # versions; idempotent on -StartPhase reruns.
-    if ($Phase -eq 8) {
-        $null = Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
-    }
     if ($Phase -eq 8 -or $Phase -eq 9) {
         # Only mount CM media when this phase actually has DSC work. Phase 9
         # (multi-forest secondary/passive add) is a NO-OP unless there is a hidden
@@ -1602,13 +1629,28 @@ function Start-Phase {
         # returns null when no Windows DSC node needs the phase). Call the builder
         # directly -- NOT Get-ConfigurationData -- to avoid its critical-VM
         # verification side effect running twice.
-        $cmPhaseHasWork = if ($Phase -eq 9) {
-            [bool](Get-Phase9ConfigurationData -deployConfig $deployConfig)
+        try {
+            $cmConfigurationData = if ($Phase -eq 9) {
+                Get-Phase9ConfigurationData -deployConfig $deployConfig
+            }
+            else {
+                Get-Phase8ConfigurationData -deployConfig $deployConfig
+            }
+            $missingCmNodes = @(Get-MissingHyperVNodes -ConfigurationData $cmConfigurationData | Select-Object -Unique)
+            if ($missingCmNodes.Count -gt 0) {
+                Write-RedX "[Phase $Phase] Required DSC VMs do not exist in Hyper-V: $($missingCmNodes -join ', '). Aborting before snapshots, CM media preparation, or job dispatch. Re-run from Phase 1 to re-create them, or remove them from the config." -WriteLog
+                return $false
+            }
         }
-        else {
-            [bool](Get-Phase8ConfigurationData -deployConfig $deployConfig)
+        catch {
+            Write-Exception -ExceptionInfo $_
+            Write-RedX "[Phase $Phase] CM configuration/inventory preflight failed; aborting before snapshots, CM media preparation, or job dispatch." -WriteLog
+            return $false
         }
-        if ($cmPhaseHasWork) {
+        if ($cmConfigurationData) {
+            if ($Phase -eq 8) {
+                $null = Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
+            }
             $null = Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
         }
         else {
@@ -1622,7 +1664,10 @@ function Start-Phase {
     # couldn't remediate. Returning $false here breaks the New-Lab phase loop
     # immediately so other VMs don't sit waiting through CM Setup's own multi-
     # hour internal timeouts on dependencies that we already know are broken.
-    if ($start -and $start.PreflightFailed) {
+    if (-not $start -or $start.Applicable -isnot [bool] -or
+        $start.Failed -isnot [int] -or $start.Failed -lt 0 -or
+        $start.PreflightFailed -or ($start.Applicable -and -not $start.Jobs) -or
+        (-not $start.Applicable -and $start.Failed -gt 0)) {
         Write-RedX "[Phase $Phase] Preflight checks failed; aborting before any per-VM jobs are dispatched. See log for details." -WriteLog
         return $false
     }
@@ -1635,7 +1680,16 @@ function Start-Phase {
     }
     $global:PhaseSkipped = $false
 
-    $result = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
+    try {
+        $result = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
+    }
+    catch {
+        Write-Exception -ExceptionInfo $_
+        Write-RedX "[Phase $Phase] Job waiting or result validation failed; aborting the deployment. $($_.Exception.Message)" -WriteLog
+        return $false
+    }
+
+    $result.Failed += $start.Failed
 
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
     # zips from previous runs that are no longer referenced.
@@ -2062,11 +2116,12 @@ function Start-PhaseJobs {
         if ($missingDispatchNodes.Count -gt 0) {
             Write-Log "[Phase $Phase] ConfigurationData contains DSC node(s) with no dispatchable VM worker: $($missingDispatchNodes -join ', '). Aborting before the DC readiness handshake." -Failure
             return [PSCustomObject]@{
-                Failed         = $missingDispatchNodes.Count
-                Success        = 0
-                Jobs           = 0
-                Applicable     = $true
-                AdditionalData = $null
+                Failed          = $missingDispatchNodes.Count
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
             }
         }
 
@@ -2081,11 +2136,12 @@ function Start-PhaseJobs {
         if ($missingHyperVNodes.Count -gt 0) {
             Write-Log "[Phase $Phase] ConfigurationData contains DSC node(s) that do not exist in Hyper-V: $($missingHyperVNodes -join ', '). They cannot be configured and will fail the compile for every other node. Re-run from Phase 1 to re-create them, or remove them from the config." -Failure
             return [PSCustomObject]@{
-                Failed         = $missingHyperVNodes.Count
-                Success        = 0
-                Jobs           = 0
-                Applicable     = $true
-                AdditionalData = $null
+                Failed          = $missingHyperVNodes.Count
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
             }
         }
     }
@@ -4488,7 +4544,7 @@ function Wait-Phase {
         return $return
     }
     catch {
-        Write-Exception -ExceptionInfo $_
+        throw
     }
     finally {
         $Global:ProgressPreference = $OriginalProgressPreference

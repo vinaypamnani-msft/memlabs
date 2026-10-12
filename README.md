@@ -2,6 +2,22 @@
 
 ARM Template and DSC configurations for deploying an Azure VM with Hyper-V, and for deploying ConfigMgr lab virtual machines on this Hyper-V host.
 
+## Deployment resume preflight
+
+Phase 0 verifies live Hyper-V inventory before preparing VMs. Runs that skip
+Phase 1 (`-StartPhase 2` or later, `-Phase` without 1, or `-SkipPhase 1`) fail
+if required lab VMs are missing. Hidden/external dependencies must exist even
+on a new deployment. The existing AADClient automatic Phase 1 recovery remains
+available. Missing ordinary VMs remain allowed when Phase 1 is scheduled to
+create them. Failed Phase 0 preparation does not run incomplete-VM cleanup.
+
+Phases 8 and 9 also check their DSC targets before snapshots or CM media
+preparation. Missing-node preflight failures stop dispatch. Job-wait exceptions
+and missing or malformed phase tallies fail the phase instead of advancing to
+maintenance. Logs identify the missing targets or result-validation failure.
+
+Validate with `vmbuild\tools\Test-PhaseFailurePropagation.ps1`.
+
 ## VM maintenance failure diagnostics
 
 VMBuild Phase 10 reads each target VM's Hyper-V metadata before applying fixes.
