@@ -720,34 +720,19 @@ function Get-InstalledEntry {
     return $found
 }
 
-function Invoke-RemoteDesktopClientMaintenance {
-    Write-LogMessage 'Starting Remote Desktop client maintenance...'
-
-    # This is the standalone MSRDC MSI, not inbox mstsc.exe or RDCMan. Per-machine
-    # installs only notify users about updates and are not serviced by Windows Update.
-    $entries = @(Get-InstalledEntry -NameLike 'Remote Desktop' | Where-Object {
-            $_.Publisher -eq 'Microsoft Corporation'
-        })
-    if ($entries.Count -eq 0) {
-        Write-LogMessage 'Remote Desktop client (MSI) is not installed. Nothing to update.'
-        return
-    }
-
-    $installedVersions = @($entries | ForEach-Object { "$($_.DisplayVersion)" } | Where-Object { $_ } | Sort-Object -Unique)
-    Write-LogMessage "Remote Desktop client (MSI) is installed at version(s): $($installedVersions -join ', ')."
+function Invoke-WinGetMaintenance {
+    Write-LogMessage 'Starting WinGet package maintenance...'
 
     $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $winget) {
-        Write-LogMessage 'WinGet is unavailable, so the installed Remote Desktop client cannot be updated by maintenance.' -Level 'WARNING'
+        Write-LogMessage 'WinGet is unavailable. Skipping WinGet package upgrades.' -Level 'WARNING'
         return
     }
 
     $arguments = @(
         'upgrade',
-        '--id', 'Microsoft.RemoteDesktopClient',
-        '--exact',
+        '--all',
         '--source', 'winget',
-        '--scope', 'machine',
         '--silent',
         '--accept-package-agreements',
         '--accept-source-agreements',
@@ -758,25 +743,17 @@ function Invoke-RemoteDesktopClientMaintenance {
 
     # WinGet uses this documented HRESULT when the installed build is already current.
     if ($exitCode -eq -1978335189) {
-        Write-LogMessage 'Remote Desktop client is already at the latest version available from WinGet.'
+        Write-LogMessage 'All WinGet-matched packages are already current.'
         return
     }
 
     if ($exitCode -ne 0) {
         $detail = (@($output | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' | ')
-        if ($detail) { throw "winget upgrade Microsoft.RemoteDesktopClient failed with exit code $exitCode`: $detail" }
-        throw "winget upgrade Microsoft.RemoteDesktopClient failed with exit code $exitCode."
+        if ($detail) { throw "winget upgrade --all failed with exit code $exitCode`: $detail" }
+        throw "winget upgrade --all failed with exit code $exitCode."
     }
 
-    $updatedEntries = @(Get-InstalledEntry -NameLike 'Remote Desktop' | Where-Object {
-            $_.Publisher -eq 'Microsoft Corporation'
-        })
-    if ($updatedEntries.Count -eq 0) {
-        throw 'WinGet reported a successful Remote Desktop client upgrade, but the MSI is no longer registered.'
-    }
-
-    $updatedVersions = @($updatedEntries | ForEach-Object { "$($_.DisplayVersion)" } | Where-Object { $_ } | Sort-Object -Unique)
-    Write-LogMessage "Remote Desktop client update completed successfully. Installed version(s): $($updatedVersions -join ', ')."
+    Write-LogMessage 'WinGet package upgrades completed successfully.'
 }
 
 function ConvertTo-QuietUninstallCommand {
@@ -1719,7 +1696,7 @@ $maintenanceRan = Invoke-WithMemLabsMaintenanceMutex -TimeoutSeconds $mutexTimeo
         try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-WindowsAdminCenterRemoval } catch { Write-LogMessage "Windows Admin Center removal threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-        try { Invoke-RemoteDesktopClientMaintenance } catch { Write-LogMessage "Remote Desktop client maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-WinGetMaintenance } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         # Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
         try { Invoke-SevenZipMaintenance } catch { Write-LogMessage "7-Zip maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
