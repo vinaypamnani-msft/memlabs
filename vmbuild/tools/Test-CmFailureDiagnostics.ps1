@@ -16,6 +16,12 @@ $definition = @($ast.FindAll({
         }, $true))
 if ($definition.Count -ne 1) { throw "Expected one Save-CMSetupLogsFromVm function, found $($definition.Count)." }
 . ([scriptblock]::Create($definition[0].Extent.Text))
+$sqlDefinition = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-CMSetupSqlFailureEvidence'
+        }, $true))
+if ($sqlDefinition.Count -ne 1) { throw "Expected one Save-CMSetupSqlFailureEvidence function, found $($sqlDefinition.Count)." }
+. ([scriptblock]::Create($sqlDefinition[0].Extent.Text))
 
 $script:Failures = 0
 function Assert-Equal {
@@ -74,6 +80,14 @@ Assert-Equal $true ($commonText -match 'function Copy-ItemFromVmBounded') 'bound
 Assert-Equal $true ($commonText -match 'Copy-Item -FromSession') 'bounded copy helper uses PSDirect file transfer'
 Assert-Equal $true ($commonText -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)') 'bounded copy helper enforces its process timeout'
 Assert-Equal $true ($commonText -match 'Stop-Process -Id \$process\.Id') 'bounded copy helper terminates only its known worker PID'
+Assert-Equal $true ($commonText -match 'Hyper-V lookup diagnostics: \$lookupText') 'missing VM reports host-side lookup diagnostics'
+Assert-Equal $true ($commonText -match 'ComputerName = \$env:COMPUTERNAME[\s\S]{0,250}VmmsState') 'missing VM diagnostic identifies the host and VMMS state'
+Assert-Equal $false ($collectorText -match '\$selfExplainedErrors\s*=\s*@\([^)]*(?:4060|18456)') 'SQL login/database-open failures are not treated as self-explaining'
+Assert-Equal $true ($collectorText -match '\$collectSqlState\s*=\s*\(\$sqlErrNum -in @\(4060, 18456\)\)') 'SQL login/database-open errors trigger a bounded state snapshot'
+Assert-Equal $true ($collectorText -match 'DatabaseStates\s*=\s*@\(\)') 'SQL evidence result includes database/AG state'
+Assert-Equal $true ($collectorText -match 'synchronization_health_desc') 'SQL state snapshot includes AG synchronization health'
+Assert-Equal $true ($collectorText -match 'site\.\?control') 'post-database site-control failures trigger SQL evidence'
+Assert-Equal $true ($collectorText -match '\\\[\(4060\|18456\)\\\]') 'numbered login/database-open errors trigger SQL evidence'
 
 $workDir = Join-Path ([IO.Path]::GetTempPath()) ('cm-failure-diag-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $workDir
@@ -105,6 +119,41 @@ try {
     function Invoke-VmCommand {
         param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, [switch]$SuppressLog, $DisplayName, [switch]$AsJob, [int]$TimeoutSeconds, [int]$SessionMaxRetries)
         $script:CollectorInvocations.Add([pscustomobject]@{ DisplayName = $DisplayName; AsJob = $AsJob.IsPresent; TimeoutSeconds = $TimeoutSeconds; SessionMaxRetries = $SessionMaxRetries })
+        if ($script:UseSqlFailureEvidence -and $DisplayName -eq 'Read ConfigMgrSetup.log tail for SQL error') {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = $script:SqlFailureTail
+            }
+        }
+        if ($script:UseSqlFailureEvidence -and $DisplayName -eq 'Collect SQL evidence from SQL-A') {
+            $script:SqlEvidenceArguments = $ArgumentList
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = [pscustomobject]@{
+                    ErrorLogPath = $null
+                    ErrorLog = $null
+                    LogScan = @('ERRORLOG | Error: 18456, Severity: 14, State: 38.')
+                    LogScanNote = 'scanned one ERRORLOG generation'
+                    Assertions = @()
+                    DumpFiles = @()
+                    DumpNote = '0 dumps'
+                    SuspectPages = @()
+                    DatabaseStates = @(
+                        [pscustomobject]@{
+                            DbName = 'CM_PRI'
+                            StateDesc = 'ONLINE'
+                            RoleDesc = 'PRIMARY'
+                            SynchronizationState = 'SYNCHRONIZED'
+                            SynchronizationHealth = 'HEALTHY'
+                            IsSuspended = '0'
+                            SuspendReason = ''
+                        }
+                    )
+                    Checks = @()
+                    Error = $null
+                }
+            }
+        }
         if ($DisplayName -eq 'Capture ConfigMgr provider state') {
             if ($script:FailProviderCapture) {
                 return [pscustomobject]@{
@@ -198,6 +247,23 @@ try {
         if ($script:CorruptBundleCopy) { Add-Content -LiteralPath $Destination -Value 'corrupt' -NoNewline }
         return $true
     }
+
+    $script:UseSqlFailureEvidence = $true
+    $script:SqlFailureTail = @(
+        '*** EXEC sp_configure ''show advanced options'', 1'
+        '*** [HY000][18456]Login failed for user cstest5\admin. Cannot open database requested by the login.'
+        'Failed to set Service Broker certificate.'
+    ) -join "`n"
+    $sqlFailureMessageStart = $script:CollectorMessages.Count
+    Save-CMSetupSqlFailureEvidence -VmName 'CM-SITE' -DomainName 'example.test' -Phase 8 -DeployConfig ([pscustomobject]@{
+        virtualMachines = @(
+            [pscustomobject]@{ vmName = 'CM-SITE'; remoteSQLVM = 'SQL-A' },
+            [pscustomobject]@{ vmName = 'SQL-A'; OtherNode = $null }
+        )
+    })
+    $script:UseSqlFailureEvidence = $false
+    Assert-Equal $true ($script:SqlEvidenceArguments.Count -ge 5 -and $script:SqlEvidenceArguments[3] -eq $false -and $script:SqlEvidenceArguments[4] -eq $true) '18456 triggers SQL database/AG state collection without CHECKDB'
+    Assert-Equal $true ((@($script:CollectorMessages | Select-Object -Skip $sqlFailureMessageStart) -join "`n") -match 'CM database state on SQL-A: CM_PRI state=ONLINE, role=PRIMARY, sync=SYNCHRONIZED, health=HEALTHY') 'SQL failure log reports current CM database and AG state'
 
     Save-CMSetupLogsFromVm -VmName 'DIAG-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
     $baseInvocation = @($script:CollectorInvocations | Where-Object DisplayName -like 'Package CM setup logs*')

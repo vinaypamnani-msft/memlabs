@@ -3357,9 +3357,8 @@ function Save-CMSetupLogsFromVm {
 function Save-CMSetupSqlFailureEvidence {
     <#
     .SYNOPSIS
-        Names the SQL Server error that killed ConfigMgr Setup's database
-        initialization, and for corruption-class and connection-loss errors
-        captures the SQL-side evidence needed to decide what actually happened.
+        Names the SQL Server error behind a ConfigMgr Setup failure and captures
+        relevant SQL-side evidence while the lab is still available.
     .DESCRIPTION
         A database-initialization failure ends ConfigMgrSetup.log with
         "Contact your SQL administrator", which is all the orchestrator has
@@ -3446,13 +3445,13 @@ function Save-CMSetupSqlFailureEvidence {
     }
 
     if ($sqlErrUnnamed) {
-        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization died on an UNNAMED SQL error -- Setup logged 'Unknown SQL Error' and an empty 'SQL Server error: <>', i.e. the provider gave it no number and no text." -OutputStream
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup failed on an UNNAMED SQL error -- Setup logged 'Unknown SQL Error' and an empty 'SQL Server error: <>', i.e. the provider gave it no number and no text." -OutputStream
     }
     elseif ($sqlErrNum) {
-        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization was killed by SQL Server error $sqlErrNum -- $sqlErrText" -OutputStream
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup encountered SQL Server error $sqlErrNum -- $sqlErrText" -OutputStream
     }
     else {
-        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup database initialization failed but ConfigMgrSetup.log names no SQL error in its last 400 lines -- nothing narrows the collection, so the SQL host is asked for everything." -Warning -OutputStream
+        Write-Log "[Phase $Phase]: $VmName`: DIAG: ConfigMgr Setup failed but ConfigMgrSetup.log names no SQL error in its last 400 lines -- nothing narrows the collection, so the SQL host is asked for everything." -Warning -OutputStream
     }
     if ($sqlStmt) {
         if ($sqlStmt.Length -gt 300) { $sqlStmt = $sqlStmt.Substring(0, 300) + ' ...[truncated]' }
@@ -3471,13 +3470,15 @@ function Save-CMSetupSqlFailureEvidence {
     # database is not suspected of damage, only the session.
     $connectionLossErrors = @(64, 121, 232, 233, 258, 10053, 10054, 10060)
 
-    # The ONLY errors that do not get collected: the message names the principal or
-    # the object, and SQL Server writes nothing server-side for them. Everything
-    # else -- including numbers memlabs has never seen -- collects, because an
+    # These errors name the principal or object, and SQL Server writes nothing
+    # useful server-side for them. Login/database-open errors are deliberately not
+    # excluded: ERRORLOG plus current CM database/AG state can distinguish an
+    # authorization problem from an unavailable or unhealthy replica.
+    # Everything else -- including numbers memlabs has never seen -- collects, because an
     # unrecognised error is precisely the case with no other evidence. Four separate
     # failures (9100, 10054, an unnamed error, 5243) each landed outside whatever
     # allowlist existed at the time and threw the SQL side away.
-    $selfExplainedErrors = @(208, 229, 262, 300, 916, 2714, 4060, 15247, 18452, 18456)
+    $selfExplainedErrors = @(208, 229, 262, 300, 916, 2714, 15247, 18452)
 
     # The client-side number never appears in the ERRORLOG, so scan for the
     # server-side events that actually explain a dropped session.
@@ -3490,6 +3491,7 @@ function Save-CMSetupSqlFailureEvidence {
     }
 
     $runCheckDb = ($corruptionErrors -contains $sqlErrNum)
+    $collectSqlState = ($sqlErrNum -in @(4060, 18456))
     if ($runCheckDb) {
         $scanNumbers = $corruptionErrors
         $scanPattern = $null
@@ -3521,7 +3523,7 @@ function Save-CMSetupSqlFailureEvidence {
     $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
 
     $collect = {
-        param($errNum, $scanNumberList, $extraScanPattern, $withCheckDb)
+        param($errNum, $scanNumberList, $extraScanPattern, $withCheckDb, $withSqlState)
         $out = [ordered]@{
             ErrorLogPath = $null
             ErrorLog     = $null
@@ -3529,8 +3531,9 @@ function Save-CMSetupSqlFailureEvidence {
             LogScanNote  = $null
             Assertions   = @()
             DumpFiles    = @()
-            DumpNote     = $null
+            DumpNote    = $null
             SuspectPages = @()
+            DatabaseStates = @()
             Checks       = @()
             Error        = $null
         }
@@ -3617,10 +3620,11 @@ function Save-CMSetupSqlFailureEvidence {
                 }
             }
 
-            # Connection-loss class: the ERRORLOG generations above are the whole
-            # answer; the database is not suspected of damage, so stop before the
-            # 15-minutes-per-database CHECKDB.
-            if (-not $withCheckDb) { return [pscustomobject]$out }
+            # For login/database-open failures, current database and AG state helps
+            # distinguish a bad principal from an unavailable replica. Keep this
+            # targeted to those errors; connection-loss collection remains ERRORLOG
+            # only and never incurs a new connection attempt.
+            if (-not $withCheckDb -and -not $withSqlState) { return [pscustomobject]$out }
 
             $server = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
             $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$server;Database=master;Integrated Security=SSPI;TrustServerCertificate=True;Connect Timeout=30"
@@ -3629,7 +3633,11 @@ function Save-CMSetupSqlFailureEvidence {
                 $cmd = $cn.CreateCommand()
                 $cmd.CommandTimeout = 120
                 $cmd.CommandText = @'
-SELECT d.name AS DbName, d.state_desc AS StateDesc, ISNULL(ars.role_desc, '') AS RoleDesc
+SELECT d.name AS DbName, d.state_desc AS StateDesc, ISNULL(ars.role_desc, '') AS RoleDesc,
+       ISNULL(drs.synchronization_state_desc, '') AS SynchronizationState,
+       ISNULL(drs.synchronization_health_desc, '') AS SynchronizationHealth,
+       ISNULL(CONVERT(varchar(5), drs.is_suspended), '') AS IsSuspended,
+       ISNULL(drs.suspend_reason_desc, '') AS SuspendReason
 FROM sys.databases d
 LEFT JOIN sys.dm_hadr_database_replica_states drs ON drs.database_id = d.database_id AND drs.is_local = 1
 LEFT JOIN sys.dm_hadr_availability_replica_states ars ON ars.replica_id = drs.replica_id
@@ -3638,9 +3646,21 @@ WHERE d.name LIKE 'CM[_]%'
                 $targets = @()
                 $rd = $cmd.ExecuteReader()
                 while ($rd.Read()) {
-                    $targets += [pscustomobject]@{ DbName = [string]$rd['DbName']; StateDesc = [string]$rd['StateDesc']; RoleDesc = [string]$rd['RoleDesc'] }
+                    $state = [pscustomobject]@{
+                        DbName = [string]$rd['DbName']
+                        StateDesc = [string]$rd['StateDesc']
+                        RoleDesc = [string]$rd['RoleDesc']
+                        SynchronizationState = [string]$rd['SynchronizationState']
+                        SynchronizationHealth = [string]$rd['SynchronizationHealth']
+                        IsSuspended = [string]$rd['IsSuspended']
+                        SuspendReason = [string]$rd['SuspendReason']
+                    }
+                    $targets += $state
+                    $out.DatabaseStates += $state
                 }
                 $rd.Close()
+
+                if (-not $withCheckDb) { return [pscustomobject]$out }
 
                 # suspect_pages is the engine's own durable record of page-level
                 # faults (823/824/829). CHECKDB only reports what is damaged NOW,
@@ -3710,7 +3730,7 @@ WHERE d.name LIKE 'CM[_]%'
     foreach ($sqlHost in ($sqlHosts | Where-Object { $_ } | Select-Object -Unique)) {
         $res = $null
         try {
-            $res = Invoke-VmCommand -VmName $sqlHost -VmDomainName $DomainName -SuppressLog -DisplayName "Collect SQL evidence from $sqlHost" -ScriptBlock $collect -ArgumentList $sqlErrNum, $scanNumbers, $scanPattern, $runCheckDb
+            $res = Invoke-VmCommand -VmName $sqlHost -VmDomainName $DomainName -SuppressLog -DisplayName "Collect SQL evidence from $sqlHost" -ScriptBlock $collect -ArgumentList $sqlErrNum, $scanNumbers, $scanPattern, $runCheckDb, $collectSqlState
         }
         catch {
             Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: PSDirect call threw: $($_.Exception.Message)" -Warning -OutputStream
@@ -3723,6 +3743,9 @@ WHERE d.name LIKE 'CM[_]%'
         $e = $res.ScriptBlockOutput
         if ($e.Error) {
             Write-Log "[Phase $Phase]: $VmName`: SQL evidence from $sqlHost`: collection error: $($e.Error)" -Warning -OutputStream
+        }
+        foreach ($dbState in @($e.DatabaseStates)) {
+            Write-Log "[Phase $Phase]: $VmName`: CM database state on $sqlHost`: $($dbState.DbName) state=$($dbState.StateDesc), role=$($dbState.RoleDesc), sync=$($dbState.SynchronizationState), health=$($dbState.SynchronizationHealth), suspended=$($dbState.IsSuspended), suspendReason=$($dbState.SuspendReason)" -OutputStream
         }
         if ($e.ErrorLog -and $logDir -and (Test-Path $logDir)) {
             $dest = Join-Path $logDir "$sqlHost-Phase$Phase-$stamp-SQL-ERRORLOG.log"
@@ -9216,7 +9239,11 @@ $global:VM_Config = {
                         if ($failContext -and (
                                 $failContext -match 'fatal errors during database initialization' -or
                                 $failContext -match 'cannot create the required database tables' -or
-                                $failContext -match 'Failed to execute SQL Server script'
+                                $failContext -match 'Failed to execute SQL Server script' -or
+                                $failContext -match 'SQL Server error:\s*(4060|18456)\b' -or
+                                $failContext -match '\[(4060|18456)\]' -or
+                                $failContext -match 'Service Broker' -or
+                                $failContext -match 'site.?control'
                             )) {
                             try {
                                 Save-CMSetupSqlFailureEvidence -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -DeployConfig $deployConfig

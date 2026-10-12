@@ -44,3 +44,18 @@ Missing required Windows maintenance metadata fails the VM rather than treating
 it as successfully maintained. No VM or service is restarted by this retry path.
 
 Validate this path with `vmbuild\tools\Test-VMMaintenanceNoteDiagnostics.ps1`.
+
+## ConfigMgr SQL failure diagnostics
+
+Phase 8 SQL evidence collection also covers login/database-open errors 4060 and
+18456, Service Broker failures, and site-control failures. For errors 4060 and
+18456, it records current CM database state and availability-group role,
+synchronization state/health, and suspension status alongside SQL ERRORLOG
+evidence. These errors do not trigger CHECKDB; existing corruption-error
+CHECKDB collection remains unchanged.
+
+Validate this path with `vmbuild\tools\Test-CmFailureDiagnostics.ps1`.
+
+The `vmbuild\config\tests\CSTest5-A-CSPS-PSHA.json` test configuration allocates
+12 GB to each SQLAO node (CS1SQLAO1 and CS1SQLAO2), up from 7 GB. Updating this
+file alone does not resize existing deployed VMs.
