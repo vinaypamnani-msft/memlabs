@@ -169,6 +169,11 @@ try {
     $childScript = Get-Content -LiteralPath $childScriptPath -Raw
     Assert-Equal $true $childScript.Contains($mutexName) 'interactive child uses the package upgrade mutex'
     Assert-Equal $true $childScript.Contains('winget.exe'' upgrade --all --source winget') 'interactive child runs the same upgrade-all command'
+    Assert-Equal $true $childScript.Contains('list --id Microsoft.VisualStudioCode --exact --source winget --upgrade-available') 'aggregate failure checks whether VS Code remains upgradeable'
+    Assert-Equal $true $childScript.Contains('$process.CloseMainWindow()') 'VS Code receives a graceful window-close request'
+    Assert-Equal $true $childScript.Contains('upgrade --id Microsoft.VisualStudioCode --exact --source winget') 'VS Code is retried after a clean exit'
+    Assert-Equal $false $childScript.Contains('Stop-Process') 'generated maintenance never force-kills VS Code'
+    Assert-Equal $false $childScript.Contains('.Kill(') 'generated maintenance never calls a process kill method'
 
     $childTokens = $null
     $childParseErrors = $null

@@ -757,10 +757,39 @@ function Invoke-WinGetMaintenance {
             '    try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(120)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }'
             "    if (-not `$acquired) { Write-Host 'Another package upgrade is already running. Skipping.' -ForegroundColor Yellow; exit 0 }"
             "    & '$wingetPath' upgrade --all --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity"
-            '    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq -1978335189) {'
+            '    $upgradeExitCode = $LASTEXITCODE'
+            '    if ($upgradeExitCode -eq 0 -or $upgradeExitCode -eq -1978335189) {'
             "        Write-Host 'WinGet package maintenance completed successfully.' -ForegroundColor Green"
             '    } else {'
-            '        Write-Host "WinGet package maintenance failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
+            '        Write-Host "WinGet package maintenance failed (exit code: $upgradeExitCode)." -ForegroundColor Yellow'
+            '        if ($upgradeExitCode -eq -1978335188) {'
+            "            `$vscodeQuery = @(& '$wingetPath' list --id Microsoft.VisualStudioCode --exact --source winget --upgrade-available --accept-source-agreements --disable-interactivity 2>&1)"
+            "            if (`$vscodeQuery -match 'Microsoft\.VisualStudioCode') {"
+            "                Write-Host 'VS Code still has an available update. Requesting a graceful close before retrying...' -ForegroundColor Cyan"
+            '                $codeWindows = @(Get-Process -Name Code -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })'
+            '                if ($codeWindows.Count -eq 0) {'
+            "                    Write-Host 'No VS Code main window can be closed gracefully. The update will remain pending.' -ForegroundColor Yellow"
+            '                } else {'
+            '                    foreach ($process in $codeWindows) { $null = $process.CloseMainWindow() }'
+            '                    $deadline = [DateTime]::UtcNow.AddSeconds(30)'
+            '                    do {'
+            '                        Start-Sleep -Seconds 1'
+            '                        $remainingCode = @(Get-Process -Name Code -ErrorAction SilentlyContinue)'
+            '                    } while ($remainingCode.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)'
+            '                    if ($remainingCode.Count -eq 0) {'
+            "                        Write-Host 'VS Code exited cleanly. Retrying its update...' -ForegroundColor Cyan"
+            "                        & '$wingetPath' upgrade --id Microsoft.VisualStudioCode --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity"
+            '                        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq -1978335189) {'
+            "                            Write-Host 'VS Code update completed successfully.' -ForegroundColor Green"
+            '                        } else {'
+            '                            Write-Host "VS Code update retry failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
+            '                        }'
+            '                    } else {'
+            "                        Write-Host 'VS Code did not exit within 30 seconds, possibly because it is waiting to save work. It will not be force-closed.' -ForegroundColor Yellow"
+            '                    }'
+            '                }'
+            '            }'
+            '        }'
             '    }'
             '} finally {'
             '    if ($mutex) {'
