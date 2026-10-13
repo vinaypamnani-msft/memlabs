@@ -70,7 +70,32 @@ synchronization state/health, and suspension status alongside SQL ERRORLOG
 evidence. These errors do not trigger CHECKDB; existing corruption-error
 CHECKDB collection remains unchanged.
 
-Validate this path with `vmbuild\tools\Test-CmFailureDiagnostics.ps1`.
+Before ConfigMgr setup creates `CM_<sitecode>`, Phase 8 also runs a disposable
+SQL storage-engine canary. It checks `master`, `model`, and `msdb`, creates a
+temporary database, populates a table, creates a clustered primary key, checks
+the table and database, and removes the database. Any DDL, integrity, or cleanup
+failure stops setup before it can leave a partial site database.
+
+The five-minute Phase 8 host timeline includes bounded recent System events
+from disk, storage, NTFS, WHEA, Hyper-V, volume, and resource-exhaustion
+providers. A critical CAS/DC abort writes a final `critical-failure` snapshot so
+events immediately preceding the failure are not lost.
+
+For SQL Always On, Phase 8 additionally uses the Phase 5 `TESTDB` AG member to
+rehearse the risky path: it creates clustered-key DDL before a controlled
+failover, repeats the DDL after the listener moves to the partner, fails back,
+and removes the temporary tables. Any post-failover failure triggers a
+best-effort return to the recorded original primary before each temporary table
+is cleaned independently. The AG must remain connected, healthy, and
+synchronized throughout. For slower hosts, replica session timeout is at least
+30 seconds, AG health-check timeout is at least 60 seconds, and preflight allows
+up to 15 minutes to stabilize. It fails closed instead of launching ConfigMgr
+setup against an unstable AG.
+
+Validate these paths with `vmbuild\tools\Test-CmFailureDiagnostics.ps1`,
+`vmbuild\tools\Test-Phase8PrerequisiteDiagnostics.ps1`, and
+`vmbuild\tools\Test-Phase8DiagnosticTelemetry.ps1`. Failover recovery fault
+injection is covered by `vmbuild\tools\Test-SqlAoSetupCanaryRecovery.ps1`.
 
 Unattended `Start-Test` and mixed-revision deployments request a verified Phase
 8 rollback snapshot without prompting. ConfigMgr setup is not dispatched when

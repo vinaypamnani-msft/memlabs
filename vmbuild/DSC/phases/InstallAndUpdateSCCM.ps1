@@ -38,6 +38,412 @@ function Invoke-CommandWithTimeout {
     }
 }
 
+function Invoke-SqlSetupCanary {
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$SiteCode
+    )
+
+    $safeSiteCode = $SiteCode -replace '[^A-Za-z0-9_]', '_'
+    $databaseName = "MemLabs_Phase8Canary_${safeSiteCode}_$([guid]::NewGuid().ToString('N'))"
+    $connection = $null
+    $failure = $null
+    $cleanupFailure = $null
+
+    try {
+        $connection = New-Object System.Data.Odbc.OdbcConnection $ConnectionString
+        $connection.Open()
+
+        $identityCommand = $connection.CreateCommand()
+        $identityCommand.CommandTimeout = 30
+        $identityCommand.CommandText = @"
+SELECT CAST(SERVERPROPERTY('ServerName') AS nvarchar(128)),
+       CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)),
+       CAST(SERVERPROPERTY('Edition') AS nvarchar(128))
+"@
+        $identityReader = $identityCommand.ExecuteReader()
+        try {
+            if ($identityReader.Read()) {
+                Write-DscStatus "SQL storage-engine canary: server=$($identityReader.GetString(0)); version=$($identityReader.GetString(1)); edition=$($identityReader.GetString(2))"
+            }
+        }
+        finally {
+            $identityReader.Close()
+        }
+
+        foreach ($systemDatabase in @('master', 'model', 'msdb')) {
+            $checkCommand = $connection.CreateCommand()
+            $checkCommand.CommandTimeout = 120
+            $checkCommand.CommandText = "DBCC CHECKDB ([$systemDatabase]) WITH NO_INFOMSGS, ALL_ERRORMSGS"
+            $null = $checkCommand.ExecuteNonQuery()
+            Write-DscStatus "SQL storage-engine canary: DBCC CHECKDB [$systemDatabase] passed."
+        }
+
+        $createCommand = $connection.CreateCommand()
+        $createCommand.CommandTimeout = 120
+        $createCommand.CommandText = "CREATE DATABASE [$databaseName]"
+        $null = $createCommand.ExecuteNonQuery()
+
+        $ddlCommand = $connection.CreateCommand()
+        $ddlCommand.CommandTimeout = 180
+        $ddlCommand.CommandText = @"
+USE [$databaseName];
+CREATE TABLE dbo.MemLabsStorageEngineCanary
+(
+    CanaryId int NOT NULL,
+    Payload char(200) NOT NULL
+);
+WITH E1(N) AS
+(
+    SELECT 1
+    FROM (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS A(N)
+    CROSS JOIN (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS B(N)
+),
+E2(N) AS
+(
+    SELECT 1 FROM E1 AS A CROSS JOIN E1 AS B
+)
+INSERT dbo.MemLabsStorageEngineCanary (CanaryId, Payload)
+SELECT TOP (8192) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), REPLICATE('X', 200)
+FROM E2;
+ALTER TABLE dbo.MemLabsStorageEngineCanary
+    ADD CONSTRAINT PK_MemLabsStorageEngineCanary
+    PRIMARY KEY CLUSTERED (CanaryId);
+DBCC CHECKTABLE (N'dbo.MemLabsStorageEngineCanary') WITH NO_INFOMSGS, ALL_ERRORMSGS;
+DBCC CHECKDB (N'$databaseName') WITH NO_INFOMSGS, ALL_ERRORMSGS;
+"@
+        $null = $ddlCommand.ExecuteNonQuery()
+        Write-DscStatus "SQL storage-engine canary: clustered primary-key creation and integrity checks passed in [$databaseName]."
+    }
+    catch {
+        $failure = $_
+    }
+    finally {
+        if ($connection) {
+            try { $connection.Close() } catch {}
+            $connection.Dispose()
+        }
+
+        $cleanupConnection = $null
+        try {
+            $cleanupConnection = New-Object System.Data.Odbc.OdbcConnection $ConnectionString
+            $cleanupConnection.Open()
+            $cleanupCommand = $cleanupConnection.CreateCommand()
+            $cleanupCommand.CommandTimeout = 120
+            $cleanupCommand.CommandText = @"
+IF DB_ID(N'$databaseName') IS NOT NULL
+BEGIN
+    ALTER DATABASE [$databaseName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE [$databaseName];
+END
+"@
+            $null = $cleanupCommand.ExecuteNonQuery()
+        }
+        catch {
+            $cleanupFailure = $_
+        }
+        finally {
+            if ($cleanupConnection) {
+                try { $cleanupConnection.Close() } catch {}
+                $cleanupConnection.Dispose()
+            }
+        }
+    }
+
+    if ($failure) {
+        Write-DscStatus "SQL storage-engine canary failed before ConfigMgr setup: $($failure.Exception.Message). Refusing to create CM_$SiteCode; inspect the SQL ERRORLOG and dump files." -Failure
+        if ($cleanupFailure) {
+            Write-DscStatus "SQL storage-engine canary cleanup also failed for [$databaseName]: $($cleanupFailure.Exception.Message)"
+        }
+        return $false
+    }
+    if ($cleanupFailure) {
+        Write-DscStatus "SQL storage-engine canary passed but cleanup failed for [$databaseName]: $($cleanupFailure.Exception.Message). Refusing to continue with an unclean SQL instance." -Failure
+        return $false
+    }
+
+    Write-DscStatus "SQL storage-engine canary completed and removed [$databaseName]."
+    return $true
+}
+
+function Invoke-SqlAoSetupCanary {
+    param(
+        [Parameter(Mandatory)][string]$ListenerConnectionString,
+        [Parameter(Mandatory)][string]$ListenerName,
+        [Parameter(Mandatory)][string]$Node1,
+        [Parameter(Mandatory)][string]$Node2,
+        [Parameter(Mandatory)][string]$Port,
+        [Parameter(Mandatory)][string]$AvailabilityGroupName,
+        [hashtable]$TestHooks
+    )
+
+    $databaseName = 'TESTDB'
+    $suffix = [guid]::NewGuid().ToString('N')
+    $beforeTable = "MemLabsAgCanaryBefore_$suffix"
+    $afterTable = "MemLabsAgCanaryAfter_$suffix"
+    $agIdentifier = '[' + ($AvailabilityGroupName -replace ']', ']]') + ']'
+    $tables = @($beforeTable, $afterTable)
+    $failed = $null
+    $listener = $null
+    $primaryNode = $null
+    $secondaryNode = $null
+    $primaryConnectionString = $null
+    $secondaryConnectionString = $null
+    $roleTransitionStarted = $false
+    $returnedToOriginalPrimary = $false
+    $pollAttempts = if ($TestHooks -and $TestHooks.ContainsKey('PollAttempts')) { [int]$TestHooks.PollAttempts } else { 45 }
+    $pollSeconds = if ($TestHooks -and $TestHooks.ContainsKey('PollSeconds')) { [int]$TestHooks.PollSeconds } else { 20 }
+
+    function New-CanaryConnectionString {
+        param([string]$Server)
+        $target = $Server
+        if ($Port -and $Port -ne '1433') { $target = "$Server,$Port" }
+        return "Driver={SQL Server};AutoTranslate=no;Server=$target;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
+    }
+
+    function Invoke-CanaryCommand {
+        param(
+            [Parameter(Mandatory)][string]$ConnectionString,
+            [Parameter(Mandatory)][string]$CommandText,
+            [int]$TimeoutSeconds = 120,
+            [switch]$Scalar
+        )
+        if ($TestHooks -and $TestHooks.Command) {
+            return (& $TestHooks.Command $ConnectionString $CommandText $TimeoutSeconds $Scalar.IsPresent)
+        }
+        $connection = New-Object System.Data.Odbc.OdbcConnection $ConnectionString
+        try {
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            try {
+                $command.CommandTimeout = $TimeoutSeconds
+                $command.CommandText = $CommandText
+                if ($Scalar) { return $command.ExecuteScalar() }
+                $null = $command.ExecuteNonQuery()
+            }
+            finally { $command.Dispose() }
+        }
+        finally {
+            $connection.Close()
+            $connection.Dispose()
+        }
+    }
+
+    function Wait-CanaryReplicaReady {
+        param([string]$ConnectionString, [string]$ExpectedRole)
+        $lastState = ''
+        for ($attempt = 1; $attempt -le $pollAttempts; $attempt++) {
+            try {
+                $state = Invoke-CanaryCommand -ConnectionString $ConnectionString -TimeoutSeconds 30 -Scalar -CommandText @"
+SELECT TOP (1)
+       rs.role_desc + '|' + rs.connected_state_desc + '|' + rs.synchronization_health_desc + '|' +
+       drs.synchronization_state_desc + '|' + drs.synchronization_health_desc
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+JOIN sys.dm_hadr_database_replica_states drs ON drs.group_database_id =
+    (SELECT group_database_id FROM sys.availability_databases_cluster WHERE database_name = N'$databaseName')
+WHERE ag.name = N'$($AvailabilityGroupName.Replace("'", "''"))'
+  AND rs.is_local = 1
+  AND drs.is_local = 1
+  AND drs.database_id = DB_ID(N'$databaseName')
+"@
+                $lastState = "$state"
+                $parts = $lastState -split '\|'
+                if ($parts.Count -ge 5 -and $parts[0] -eq $ExpectedRole -and
+                    $parts[1] -eq 'CONNECTED' -and $parts[2] -eq 'HEALTHY' -and
+                    $parts[3] -eq 'SYNCHRONIZED' -and $parts[4] -eq 'HEALTHY') {
+                    return $true
+                }
+            }
+            catch {
+                $lastState = $_.Exception.Message
+            }
+            if ($attempt -lt $pollAttempts -and $pollSeconds -gt 0) { Start-Sleep -Seconds $pollSeconds }
+        }
+        Write-DscStatus "SQLAO canary: replica did not reach $ExpectedRole/CONNECTED/HEALTHY/SYNCHRONIZED after $pollAttempts attempts. Last state: $lastState"
+        return $false
+    }
+
+    function Wait-CanaryListenerOwner {
+        param([string]$ExpectedNode)
+        $lastOwner = ''
+        for ($attempt = 1; $attempt -le $pollAttempts; $attempt++) {
+            try {
+                $lastOwner = "$(Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 30 -Scalar -CommandText "SELECT CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS nvarchar(128))")"
+                if ($lastOwner.Split('.')[0] -ieq $ExpectedNode.Split('.')[0]) { return $true }
+            }
+            catch {}
+            if ($attempt -lt $pollAttempts -and $pollSeconds -gt 0) { Start-Sleep -Seconds $pollSeconds }
+        }
+        Write-DscStatus "SQLAO canary: listener '$ListenerName' did not move to expected owner '$ExpectedNode' after $pollAttempts attempts. Last owner: $lastOwner"
+        return $false
+    }
+
+    function Restore-CanaryOriginalPrimary {
+        if (-not $roleTransitionStarted -or -not $primaryNode -or -not $primaryConnectionString) {
+            return $true
+        }
+
+        try {
+            $owner = "$(Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 30 -Scalar -CommandText "SELECT CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS nvarchar(128))")"
+            if ($owner.Split('.')[0] -ieq $primaryNode.Split('.')[0]) {
+                Write-DscStatus "SQLAO canary recovery: original primary [$primaryNode] is already restored."
+                return $true
+            }
+        }
+        catch {
+            Write-DscStatus "SQLAO canary recovery: could not confirm the listener owner before failback: $($_.Exception.Message)"
+        }
+
+        try {
+            if (-not (Wait-CanaryReplicaReady -ConnectionString $primaryConnectionString -ExpectedRole 'SECONDARY')) {
+                throw "Original primary [$primaryNode] is not a synchronized secondary."
+            }
+            Write-DscStatus "SQLAO canary recovery: attempting failback to original primary [$primaryNode]."
+            Invoke-CanaryCommand -ConnectionString $primaryConnectionString -TimeoutSeconds 180 `
+                -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
+            if (-not (Wait-CanaryListenerOwner -ExpectedNode $primaryNode) -or
+                -not (Wait-CanaryReplicaReady -ConnectionString $primaryConnectionString -ExpectedRole 'PRIMARY') -or
+                -not (Wait-CanaryReplicaReady -ConnectionString $secondaryConnectionString -ExpectedRole 'SECONDARY')) {
+                throw "Failback to original primary [$primaryNode] did not stabilize."
+            }
+            Write-DscStatus "SQLAO canary recovery: restored original primary [$primaryNode]."
+            return $true
+        }
+        catch {
+            Write-DscStatus "SQLAO canary recovery failed to restore original primary [$primaryNode]: $($_.Exception.Message)"
+            return $false
+        }
+    }
+
+    try {
+        $node1ConnectionString = New-CanaryConnectionString -Server $Node1
+        $node2ConnectionString = New-CanaryConnectionString -Server $Node2
+
+        Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 120 -CommandText @"
+DECLARE @sql nvarchar(max) = N'';
+SELECT @sql = @sql +
+    N'ALTER AVAILABILITY GROUP $agIdentifier MODIFY REPLICA ON N''' +
+    REPLACE(replica_server_name, N'''', N'''''') +
+    N''' WITH (SESSION_TIMEOUT = 30);'
+FROM sys.availability_replicas
+WHERE group_id = (SELECT group_id FROM sys.availability_groups WHERE name = N'$($AvailabilityGroupName.Replace("'", "''"))')
+  AND session_timeout < 30;
+IF @sql <> N'' EXEC sys.sp_executesql @sql;
+ALTER AVAILABILITY GROUP $agIdentifier SET (HEALTH_CHECK_TIMEOUT = 60000);
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.availability_replicas
+    WHERE group_id = (SELECT group_id FROM sys.availability_groups WHERE name = N'$($AvailabilityGroupName.Replace("'", "''"))')
+      AND session_timeout < 30
+)
+    THROW 51000, 'SQLAO replica SESSION_TIMEOUT did not reach 30 seconds.', 1;
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.availability_groups
+    WHERE name = N'$($AvailabilityGroupName.Replace("'", "''"))'
+      AND health_check_timeout < 60000
+)
+    THROW 51001, 'SQLAO HEALTH_CHECK_TIMEOUT did not reach 60000 milliseconds.', 1;
+"@
+        Write-DscStatus "SQLAO canary: slow-host tolerance verified (replica session timeout >=30s; health check timeout >=60s)."
+
+        $currentOwner = "$(Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 30 -Scalar -CommandText "SELECT CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS nvarchar(128))")"
+        $primaryNode = if ($currentOwner.Split('.')[0] -ieq $Node1.Split('.')[0]) { $Node1 } elseif ($currentOwner.Split('.')[0] -ieq $Node2.Split('.')[0]) { $Node2 } else { throw "Listener owner '$currentOwner' is not either configured SQLAO node." }
+        $secondaryNode = if ($primaryNode -ieq $Node1) { $Node2 } else { $Node1 }
+        $secondaryConnectionString = if ($secondaryNode -ieq $Node1) { $node1ConnectionString } else { $node2ConnectionString }
+        $primaryConnectionString = if ($primaryNode -ieq $Node1) { $node1ConnectionString } else { $node2ConnectionString }
+
+        if (-not (Wait-CanaryReplicaReady -ConnectionString $primaryConnectionString -ExpectedRole 'PRIMARY') -or
+            -not (Wait-CanaryReplicaReady -ConnectionString $secondaryConnectionString -ExpectedRole 'SECONDARY')) {
+            throw 'The existing TESTDB AG was not stable before the rehearsal.'
+        }
+
+        Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 180 -CommandText @"
+USE [$databaseName];
+CREATE TABLE dbo.[$beforeTable] (CanaryId int NOT NULL, Payload char(200) NOT NULL);
+WITH E1(N) AS
+(
+    SELECT 1 FROM (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS A(N)
+    CROSS JOIN (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS B(N)
+),
+E2(N) AS (SELECT 1 FROM E1 AS A CROSS JOIN E1 AS B)
+INSERT dbo.[$beforeTable] (CanaryId, Payload)
+SELECT TOP (8192) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), REPLICATE('X', 200) FROM E2;
+ALTER TABLE dbo.[$beforeTable] ADD CONSTRAINT [PK_$beforeTable] PRIMARY KEY CLUSTERED (CanaryId);
+"@
+        Write-DscStatus "SQLAO canary: clustered-key DDL passed on TESTDB before failover."
+
+        $roleTransitionStarted = $true
+        Invoke-CanaryCommand -ConnectionString $secondaryConnectionString -TimeoutSeconds 180 `
+            -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
+        if (-not (Wait-CanaryListenerOwner -ExpectedNode $secondaryNode) -or
+            -not (Wait-CanaryReplicaReady -ConnectionString $secondaryConnectionString -ExpectedRole 'PRIMARY') -or
+            -not (Wait-CanaryReplicaReady -ConnectionString $primaryConnectionString -ExpectedRole 'SECONDARY')) {
+            throw 'The first SQLAO canary failover did not stabilize.'
+        }
+        Write-DscStatus "SQLAO canary: controlled failover to [$secondaryNode] completed."
+
+        Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 180 `
+            -CommandText @"
+USE [$databaseName];
+CREATE TABLE dbo.[$afterTable] (CanaryId int NOT NULL, Payload char(200) NOT NULL);
+INSERT dbo.[$afterTable] (CanaryId, Payload) VALUES (1, REPLICATE('Y', 200));
+ALTER TABLE dbo.[$afterTable] ADD CONSTRAINT [PK_$afterTable] PRIMARY KEY CLUSTERED (CanaryId);
+"@
+        Write-DscStatus "SQLAO canary: clustered-key DDL passed on TESTDB after failover."
+
+        Invoke-CanaryCommand -ConnectionString $primaryConnectionString -TimeoutSeconds 180 `
+            -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
+        if (-not (Wait-CanaryListenerOwner -ExpectedNode $primaryNode) -or
+            -not (Wait-CanaryReplicaReady -ConnectionString $primaryConnectionString -ExpectedRole 'PRIMARY') -or
+            -not (Wait-CanaryReplicaReady -ConnectionString $secondaryConnectionString -ExpectedRole 'SECONDARY')) {
+            throw 'The SQLAO canary failback did not stabilize.'
+        }
+        $returnedToOriginalPrimary = $true
+        Write-DscStatus "SQLAO canary: controlled failback to [$primaryNode] completed."
+    }
+    catch {
+        $failed = $_
+    }
+    finally {
+        if ($listener) {
+            try { $listener.Close() } catch {}
+            $listener.Dispose()
+        }
+        if (-not $returnedToOriginalPrimary) {
+            $returnedToOriginalPrimary = Restore-CanaryOriginalPrimary
+            if (-not $returnedToOriginalPrimary -and -not $failed) {
+                $failed = [System.Management.Automation.ErrorRecord]::new(
+                    [InvalidOperationException]::new("SQLAO canary could not restore original primary [$primaryNode]."),
+                    'SqlAoCanaryFailbackFailed',
+                    [System.Management.Automation.ErrorCategory]::InvalidOperation,
+                    $primaryNode)
+            }
+        }
+        foreach ($table in $tables) {
+            try {
+                Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 180 `
+                    -CommandText "USE [$databaseName]; IF OBJECT_ID(N'dbo.$table', N'U') IS NOT NULL DROP TABLE dbo.[$table];"
+            }
+            catch {
+                if (-not $failed) { $failed = $_ }
+                Write-DscStatus "SQLAO canary cleanup failed for [$table]: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if ($failed) {
+        Write-DscStatus "SQLAO failover/DDL canary failed before ConfigMgr setup: $($failed.Exception.Message). Refusing to launch setup.exe." -Failure
+        return $false
+    }
+    Write-DscStatus "SQLAO failover/DDL canary completed and removed its TESTDB tables."
+    return $true
+}
+
 function Format-CmUpdateErrorRecord {
     param([Parameter(Mandatory)]$ErrorRecord)
 
@@ -1071,9 +1477,9 @@ CurrentBranch=1
         # clean polls (not just one momentary HEALTHY blip) before allowing
         # setup.exe to launch, and resume any suspended AG dbs as we go.
         if ($installToAO -and $sqlPreCheckCs -and $sqlAOGroupName) {
-            $agStableMin     = 3        # consecutive clean polls required (~60s stability)
+            $agStableMin     = 6        # consecutive clean polls required (~2m stability)
             $agPollInterval  = 20       # seconds between polls
-            $agMaxAttempts   = 30       # 30 * 20s = 10 min max wall-clock
+            $agMaxAttempts   = 45       # 45 * 20s = 15 min max wall-clock on slower hosts
             $agCleanStreak   = 0
             $agLastSnapshot  = $null
             $agStable        = $false
@@ -1216,8 +1622,33 @@ WHERE drs.is_suspended = 1
             }
 
             if (-not $agStable) {
-                Write-DscStatus "AG pre-flight: WARNING — AG '$sqlAOGroupName' did not stay HEALTHY for $($agStableMin * $agPollInterval)s within $($agMaxAttempts * $agPollInterval)s. ConfigMgr Init_Database may fail at AGWaitForSynchronizationHealth (the failover/failback CM does to set db_owner needs both replicas HEALTHY+SYNCHRONIZED within ~15 min). Last state: $agLastSnapshot. Proceeding anyway."
+                Write-DscStatus "AG pre-flight: AG '$sqlAOGroupName' did not stay HEALTHY for $($agStableMin * $agPollInterval)s within $($agMaxAttempts * $agPollInterval)s. Refusing to launch ConfigMgr setup because Init_Database performs its own failover/failback and would likely fail. Last state: $agLastSnapshot." -Failure
+                return
             }
+        }
+    }
+
+    $sqlCanaryConnectionString = $sqlPreCheckCs
+    if (-not $sqlCanaryConnectionString) {
+        $localSqlTarget = if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') {
+            "$env:COMPUTERNAME\$sqlInstanceName"
+        }
+        else {
+            $env:COMPUTERNAME
+        }
+        if ($sqlPort -and $sqlPort -ne 1433) {
+            $localSqlTarget = "$env:COMPUTERNAME,$sqlPort"
+        }
+        $sqlCanaryConnectionString = "Driver={SQL Server};AutoTranslate=no;Server=$localSqlTarget;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
+    }
+    if (-not (Invoke-SqlSetupCanary -ConnectionString $sqlCanaryConnectionString -SiteCode $SiteCode)) {
+        return
+    }
+    if ($installToAO) {
+        if (-not (Invoke-SqlAoSetupCanary -ListenerConnectionString $sqlCanaryConnectionString `
+                    -ListenerName $sqlServerName -Node1 $sqlNode1 -Node2 $sqlNode2 `
+                    -Port "$sqlPort" -AvailabilityGroupName $sqlAOGroupName)) {
+            return
         }
     }
 

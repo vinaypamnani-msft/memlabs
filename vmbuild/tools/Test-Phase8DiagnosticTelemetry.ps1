@@ -27,6 +27,7 @@ function Import-TestFunction {
     [scriptblock]::Create($definitions[0].Extent.Text)
 }
 
+. (Import-TestFunction -Path $phasePath -Name 'Get-Phase8HostReliabilityEvents')
 . (Import-TestFunction -Path $phasePath -Name 'Write-Phase8DiagnosticSnapshot')
 . (Import-TestFunction -Path $boundaryPath -Name 'Write-MemLabsClientPackageTimelineRecord')
 
@@ -106,6 +107,27 @@ try {
             Heartbeat      = 'OkApplicationsHealthy'
         }
     }
+    function Get-WinEvent {
+        param([hashtable]$FilterHashtable, $ErrorAction)
+        @(
+            [pscustomobject]@{
+                TimeCreated      = (Get-Date).AddMinutes(-1)
+                ProviderName     = 'disk'
+                Id               = 153
+                LevelDisplayName = 'Warning'
+                RecordId         = 42
+                Message          = "Synthetic disk warning`r`nwith wrapped text."
+            },
+            [pscustomobject]@{
+                TimeCreated      = (Get-Date).AddMinutes(-1)
+                ProviderName     = 'Unrelated-Provider'
+                Id               = 1
+                LevelDisplayName = 'Warning'
+                RecordId         = 43
+                Message          = 'This event must be filtered.'
+            }
+        )
+    }
     $metricsTimeline = Join-Path $tempRoot 'Phase8-Metrics.jsonl'
     Write-Phase8DiagnosticSnapshot -Path $metricsTimeline -Jobs @($job) -PhaseStart (Get-Date).AddMinutes(-8) `
         -Trigger 'periodic' -DeployConfig ([pscustomobject]@{
@@ -115,6 +137,12 @@ try {
     if (-not $metricsRecord.Host -or $metricsRecord.Host.Memory.AvailableMB -ne 8192 -or
         $metricsRecord.Host.CpuLoadPercent -ne 37 -or $metricsRecord.Host.VMs.Count -ne 1) {
         throw 'Phase 8 periodic snapshot did not retain host/VM pressure metrics.'
+    }
+    if ($metricsRecord.Host.RecentReliabilityEvents.Count -ne 1 -or
+        $metricsRecord.Host.RecentReliabilityEvents[0].Provider -ne 'disk' -or
+        $metricsRecord.Host.RecentReliabilityEvents[0].EventId -ne 153 -or
+        $metricsRecord.Host.RecentReliabilityEvents[0].Message -notmatch 'Synthetic disk warning with wrapped text') {
+        throw 'Phase 8 periodic snapshot did not retain bounded host reliability events.'
     }
 
     $packageTimeline = Join-Path $tempRoot 'ClientPackageTimeline.jsonl'
@@ -155,9 +183,14 @@ try {
     }
 
     $phaseSource = Get-Content -LiteralPath $phasePath -Raw
-    foreach ($required in @("'periodic'", "'status-change'", "'phase-complete'", 'AddMinutes(5)', 'TotalSeconds -ge 30', 'phase8SeenJobs')) {
+    foreach ($required in @("'periodic'", "'status-change'", "'phase-complete'", "'critical-failure'", 'AddMinutes(5)', 'TotalSeconds -ge 30', 'phase8SeenJobs')) {
         if ($phaseSource -notmatch [regex]::Escape($required)) {
             throw "Wait-Phase is missing required telemetry trigger $required."
+        }
+    }
+    foreach ($provider in @('WHEA-Logger', 'storport', 'Hyper-V-StorageVSP', 'Resource-Exhaustion-Detector')) {
+        if ($phaseSource -notmatch [regex]::Escape($provider)) {
+            throw "Phase 8 host reliability capture is missing provider $provider."
         }
     }
     if ($phaseSource -match '(?s)\$phase8FingerprintParts\s*=.*?\$phase8History\.Activity') {

@@ -547,7 +547,7 @@
             ConnectionModeInPrimaryRole   = 'AllowAllConnections'
             ConnectionModeInSecondaryRole = 'AllowAllConnections'
             FailoverMode                  = 'Manual'
-            HealthCheckTimeout            = 30000
+            HealthCheckTimeout            = 60000
             ProcessOnlyOnActiveNode       = $true
             BasicAvailabilityGroup        = $false
             DatabaseHealthTrigger         = $false

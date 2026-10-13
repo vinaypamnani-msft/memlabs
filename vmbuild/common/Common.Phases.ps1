@@ -3538,6 +3538,49 @@ function Get-JobWaitTargets {
     return $targets.ToArray()
 }
 
+function Get-Phase8HostReliabilityEvents {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][datetime]$Since,
+        [ValidateRange(1, 100)][int]$MaximumEvents = 50
+    )
+
+    $providers = @(
+        'disk',
+        'Ntfs',
+        'storahci',
+        'stornvme',
+        'storport',
+        'volmgr',
+        'volsnap',
+        'Microsoft-Windows-WHEA-Logger',
+        'Microsoft-Windows-Resource-Exhaustion-Detector',
+        'Microsoft-Windows-Hyper-V-StorageVSP',
+        'Microsoft-Windows-Hyper-V-VMMS',
+        'Microsoft-Windows-Hyper-V-Worker'
+    )
+    $events = @(Get-WinEvent -FilterHashtable @{
+            LogName   = 'System'
+            StartTime = $Since
+            Level     = 1, 2, 3
+        } -ErrorAction Stop |
+        Where-Object { $_.ProviderName -in $providers } |
+        Select-Object -First $MaximumEvents)
+
+    return @($events | Sort-Object TimeCreated | ForEach-Object {
+            $message = "$($_.Message)" -replace '\s+', ' '
+            if ($message.Length -gt 1000) { $message = $message.Substring(0, 1000) }
+            [ordered]@{
+                TimeCreatedUtc = if ($_.TimeCreated) { ([datetime]$_.TimeCreated).ToUniversalTime().ToString('o') } else { $null }
+                Provider       = "$($_.ProviderName)"
+                EventId        = $_.Id
+                Level          = "$($_.LevelDisplayName)"
+                RecordId       = $_.RecordId
+                Message        = $message
+            }
+        })
+}
+
 function Write-Phase8DiagnosticSnapshot {
     [CmdletBinding()]
     param(
@@ -3671,6 +3714,14 @@ function Write-Phase8DiagnosticSnapshot {
             $hostMetrics['VMs'] = $vmRows.ToArray()
         }
         catch { $hostMetrics['VmError'] = $_.Exception.Message }
+        try {
+            $eventWindowStart = $now.AddMinutes(-6)
+            if ($PhaseStart -gt $eventWindowStart) { $eventWindowStart = $PhaseStart }
+            $hostMetrics['RecentReliabilityEvents'] = @(
+                Get-Phase8HostReliabilityEvents -Since $eventWindowStart -MaximumEvents 50
+            )
+        }
+        catch { $hostMetrics['ReliabilityEventError'] = $_.Exception.Message }
 
         $snapshot['Host'] = $hostMetrics
     }
@@ -3769,6 +3820,22 @@ function Wait-Phase {
             catch {
                 Write-Log "[Phase 8] Could not initialize critical-path diagnostics: $($_.Exception.Message)" -LogOnly
                 $phase8TimelinePath = $null
+            }
+        }
+        $writePhase8FinalSnapshot = {
+            param([string]$Trigger)
+            if ($phase8TimelinePath) {
+                try {
+                    foreach ($phase8Job in @($jobs)) {
+                        if ($phase8Job) { $phase8SeenJobs[$phase8Job.Id] = $phase8Job }
+                    }
+                    $null = Write-Phase8DiagnosticSnapshot -Path $phase8TimelinePath -Jobs @($phase8SeenJobs.Values) `
+                        -PhaseStart $StartTime -Trigger $Trigger -DeployConfig $DeployConfig -IncludeHostMetrics
+                    Write-Log "[Phase 8] Critical-path diagnostics captured '$Trigger' -> $phase8TimelinePath" -LogOnly
+                }
+                catch {
+                    Write-Log "[Phase 8] Final critical-path diagnostic snapshot failed: $($_.Exception.Message)" -LogOnly
+                }
             }
         }
 
@@ -4313,6 +4380,7 @@ function Wait-Phase {
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try { $jobs | Stop-Job } catch {}
                             $return.Failed++
+                            & $writePhase8FinalSnapshot 'critical-failure'
                             $return.Elapsed = $(get-date) - $StartTime
                             return $return
                         }
@@ -4329,6 +4397,7 @@ function Wait-Phase {
                             }
                             catch {}
                             $return.Failed++
+                            & $writePhase8FinalSnapshot 'critical-failure'
                             $return.Elapsed = $(get-date) - $StartTime
                             return $return
                         }
@@ -4535,16 +4604,7 @@ function Wait-Phase {
         }
         catch { Write-Log "[Phase $Phase] PSDirect leak diag failed: $_" -LogOnly -Verbose }
 
-        if ($phase8TimelinePath) {
-            try {
-                $null = Write-Phase8DiagnosticSnapshot -Path $phase8TimelinePath -Jobs @($phase8SeenJobs.Values) `
-                    -PhaseStart $StartTime -Trigger 'phase-complete' -DeployConfig $DeployConfig -IncludeHostMetrics
-                Write-Log "[Phase 8] Critical-path diagnostics completed -> $phase8TimelinePath" -LogOnly
-            }
-            catch {
-                Write-Log "[Phase 8] Final critical-path diagnostic snapshot failed: $($_.Exception.Message)" -LogOnly
-            }
-        }
+        & $writePhase8FinalSnapshot 'phase-complete'
 
         $return.Elapsed = $(get-date) - $StartTime
         return $return
