@@ -104,6 +104,21 @@ restore metadata so the bounded automatic retry restores the rollback point
 before relaunching setup. `-NoSnapshot` remains an explicit opt-out for callers
 that accept an unrecoverable partial-install failure.
 
+Phase 8 site-install workflow state is written through a validated atomic
+replacement and cross-VM readers retry transient I/O or JSON failures before
+failing with the source path. Explicit guest `-Failure` reports always terminate
+the owning phase script; critical site-install and role boundaries also propagate
+unhandled exceptions. A CAS update that exhausts its bounded retries persists
+`UpgradeSCCM=Error`, captures `cmupdate.log`, `hman.log`, and
+`dmpdownloader.log` retry evidence, and stops before any primary or dependent
+role can enter an impossible wait. The hierarchy readers treat `Error` as
+terminal and bound dependency waits to four hours.
+
+Validate these contracts with
+`vmbuild\tools\Test-GuestScriptMemoryBoundary.ps1`,
+`vmbuild\tools\Test-ScriptWorkflowStateIo.ps1`, and
+`vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1`.
+
 Critical DC/CAS aborts also finalize the phase elapsed time before returning the
 failure tally, so result validation preserves the guest setup error instead of
 replacing it with a malformed-tally exception.

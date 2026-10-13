@@ -224,13 +224,13 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $firstRun = $true
 
 if (Test-Path -Path $ConfigurationFile) {
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $firstRun = $false
     # Immediately reset status so WaitForEvent won't find stale "Completed" from a previous run
     if ($Configuration.ScriptWorkflow -and $Configuration.ScriptWorkflow.Status -eq "Completed") {
         $Configuration.ScriptWorkflow.Status = "Running"
         $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     }
 
     # Add-to-existing: the deployConfig may contain new SiteSystem VMs that
@@ -266,7 +266,7 @@ if (Test-Path -Path $ConfigurationFile) {
             # feature. Add the step so the dot-source guard runs it.
             Write-DscStatus "Adding ConfigureMPReplica step (new SiteSystem MPs with database replica found)"
             $Configuration | Add-Member -NotePropertyName 'ConfigureMPReplica' -NotePropertyValue ([pscustomobject]@{ Status = 'NotStart'; StartTime = ''; EndTime = '' }) -Force
-            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+            Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
         }
         if ($needsReplica -and $Configuration.ConfigureMPReplica -and $Configuration.ConfigureMPReplica.Status -eq 'Completed') {
             Write-DscStatus "Resetting ConfigureMPReplica status (new SiteSystem MPs with database replica found)"
@@ -434,7 +434,7 @@ if (-not $Configuration.ConfigureCMProxy) {
 
 $Configuration.ScriptWorkflow.Status = "Running"
 $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 # Force AD Replication (only on first run)
 if ($firstRun) {
@@ -466,10 +466,10 @@ if ($scenario -eq "MultiDomain") {
     Set-Location $LogPath
     Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $Configuration.ScriptWorkflow.Status = "Completed"
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     Write-DscStatus "Complete!"
     # Stamp completion RunId for the orchestrator's race-proof completion check
     if ($ScriptWorkflowRunId) {
@@ -484,7 +484,7 @@ if ($scenario -eq "Standalone") {
     Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
     Set-Location $LogPath
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
     # Enable HTTPS/eHTTP early so the site component manager has maximum
     # time to republish the updated OperationalXml (SecurityModeMaskEx) to
@@ -506,7 +506,7 @@ if ($scenario -eq "Standalone") {
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         Set-Location $LogPath
         Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
-        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
         if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
             Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
             return
@@ -551,7 +551,7 @@ if ($scenario -eq "Standalone") {
     Write-DscStatus "$scenario Running InstallRoles.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
     Set-Location $LogPath
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
     # Configure MP database replicas (SQL transactional replication + Service
     # Broker). Runs after InstallRoles so the MP roles exist. Self-skips when no
@@ -588,7 +588,7 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
         Set-Location $LogPath
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         # Enable HTTPS/eHTTP early on CAS too (same reasoning as Standalone).
         $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
@@ -604,7 +604,7 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         # ConfigureCMProxy is cheap and idempotent; always run.
         Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
@@ -620,7 +620,7 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
             Set-Location $LogPath
-            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
         }
 
         # Enable HTTPS/eHTTP early on Primary too (same reasoning as Standalone).
@@ -640,7 +640,7 @@ if ($scenario -eq "Hierarchy") {
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
             Set-Location $LogPath
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
-            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
             if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
                 Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
                 return
@@ -685,7 +685,7 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         # Configure MP database replicas (SQL transactional replication + Service
         # Broker). Runs after InstallRoles so the MP roles exist. Self-skips when no
@@ -795,7 +795,7 @@ if ($containsPassive) {
         $passiveRan = $true
     }
     else {
-        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
         $DomainFullName = $deployConfig.vmOptions.domainName
         $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
         $passiveQueryFailed = $false
@@ -933,10 +933,10 @@ Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
 if ($CurrentRole -eq "CAS") {
     #If we are on the CAS, we can mark this early, to allow the primary to start while we run other tasks.
     # Mark ScriptWorkflow completed for DSC to move on.
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $Configuration.ScriptWorkflow.Status = "Completed"
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 }
 
@@ -1635,10 +1635,10 @@ if ($CurrentRole -in @("Primary", "Secondary")) {
 # Non-CAS: mark completion now that PushClients, EnableBLM, component
 # resets, and component stabilization are done.
 if ($CurrentRole -ne "CAS") {
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $Configuration.ScriptWorkflow.Status = "Completed"
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     Write-DscStatus "Complete!"
 }
 

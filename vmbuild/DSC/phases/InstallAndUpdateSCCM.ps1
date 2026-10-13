@@ -2171,6 +2171,7 @@ if ($UpdateRequired) {
     }
 
     $updateCompleted = $false
+    $upgradeFailureReason = $null
     # Work on update
     while ($updatepack -ne "") {
 
@@ -2181,6 +2182,7 @@ if ($UpdateRequired) {
         # Set failure if retry exhausted
         if ($retrytimes -eq 3) {
             $upgradingfailed = $true
+            $upgradeFailureReason = "Upgrade retry budget was exhausted after 3 attempts."
             break
         }
 
@@ -2304,6 +2306,8 @@ if ($UpdateRequired) {
 
         if ($downloadretrycount -ge 2) {
             Write-DscStatus "Timed out waiting for '$($updatepack.Name)' download to complete."
+            $upgradingfailed = $true
+            $upgradeFailureReason = "Timed out waiting for '$($updatepack.Name)' download after $downloadretrycount bounded retry windows."
             break
         }
 
@@ -2527,6 +2531,7 @@ if ($UpdateRequired) {
                 }
                 Write-DscStatus "Update '$($updatepack.Name)' did not complete within $monitorDeadlineMin min (last state: $($state[$updatepack.State]) [$($updatepack.State)]). cmupdate.log went idle without reaching INSTALL_SUCCESS. See cmupdate.log/hman.log.$diag"
                 $upgradingfailed = $true
+                $upgradeFailureReason = "Update '$($updatepack.Name)' exceeded the ${monitorDeadlineMin}-minute monitor deadline in state $($state[$updatepack.State]) [$($updatepack.State)]."
                 $updateCompleted = $true
                 break
             }
@@ -2586,30 +2591,53 @@ if ($UpdateRequired) {
         }
 
         if ($updatepack.State -eq 196607 -or $updatepack.State -eq 262143 ) {
-            if ($retrytimes -le 3) {
-                $retrytimes++
-                Start-Sleep 300
-                continue
+            $retrytimes++
+            $terminalStateName = "$($state[$updatepack.State])"
+            $terminalStateCode = [int]$updatepack.State
+            if ($retrytimes -ge 3) {
+                $upgradingfailed = $true
+                $upgradeFailureReason = "Update '$($updatepack.Name)' reached terminal state $terminalStateName [$terminalStateCode] on attempt $retrytimes of 3."
+                Write-DscStatus "$upgradeFailureReason No retries remain." -Warning
+                break
             }
+
+            Write-DscStatus "Update '$($updatepack.Name)' reached terminal state $terminalStateName [$terminalStateCode] on attempt $retrytimes of 3. Capturing retry evidence, then retrying in 300 seconds." -Warning
+            try {
+                $cmSetup = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
+                $retryLogDir = Join-Path "$($cmSetup.'Installation Directory')" 'Logs'
+                foreach ($retryLogName in @('cmupdate.log', 'hman.log', 'dmpdownloader.log')) {
+                    $retryLogPath = Join-Path $retryLogDir $retryLogName
+                    if (-not (Test-Path -LiteralPath $retryLogPath -PathType Leaf)) { continue }
+                    foreach ($retryLogLine in @(Get-Content -LiteralPath $retryLogPath -Tail 20 -ErrorAction Stop)) {
+                        if ([string]::IsNullOrWhiteSpace("$retryLogLine")) { continue }
+                        Write-DscStatus "[CMUpdateRetry][$retryLogName][$terminalStateName/$terminalStateCode] $("$retryLogLine".Trim())" -NoStatus -Warning
+                    }
+                }
+            }
+            catch {
+                Write-DscStatus "[CMUpdateRetry] Could not capture product-log tails before retry: $($_.Exception.Message)" -NoStatus -Warning
+            }
+            Start-Sleep 300
+            continue
         }
     }
 
-    # Update Action file
-    if ($downloadretrycount -ge 2) {
-        Write-DscStatus "Failed to download '$($updatepack.Name)'"
-        $Configuration.UpgradeSCCM.Status = 'Error'
-    }
+    if ($upgradingfailed -eq $true -or $downloadretrycount -ge 2) {
+        $failedUpdateName = if ($updatePackageName) { $updatePackageName } elseif ($updatepack.Name) { "$($updatepack.Name)" } else { "Configuration Manager $($cmo.version)" }
+        if (-not $upgradeFailureReason) {
+            $upgradeFailureReason = "Upgrade to '$failedUpdateName' failed after exhausting the bounded retry policy."
+        }
 
-    # Update Action file
-    if ($upgradingfailed -eq $true) {
-        Write-DscStatus "Upgrade to '$($updatepack.Name)' failed."
-
-        if ($($updatepack.Name).ToLower().Contains("hotfix")) {
-            Write-DscStatus "'$($updatepack.Name)' is a hotfix, skip it and continue...."
+        if ($failedUpdateName.ToLowerInvariant().Contains("hotfix")) {
+            Write-DscStatus "$upgradeFailureReason The failed package is a hotfix; recording the failure as a warning and continuing." -Warning
             $Configuration.UpgradeSCCM.Status = 'Completed'
         }
         else {
             $Configuration.UpgradeSCCM.Status = 'Error'
+            $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+            Write-DscStatus "$upgradeFailureReason Stopping before primary-site and dependent-role configuration. Host failure collection will pull cmupdate.log, hman.log, dmpdownloader.log, provider state, and the workflow transcript." -Failure
+            throw $upgradeFailureReason
         }
     }
     else {

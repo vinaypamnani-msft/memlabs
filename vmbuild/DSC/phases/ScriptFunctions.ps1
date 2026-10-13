@@ -204,7 +204,8 @@ function Invoke-DotSource {
         # WARNING and swallowed (see the catch note below). Set -Rethrow when the
         # CALLER owns retry/recovery for that script (e.g. the perfloading retry
         # loop in ScriptWorkFlow.ps1): the exception is still logged, then re-thrown
-        # so the caller's try/catch can act on it.
+        # so the caller's try/catch can act on it. An explicit Write-DscStatus
+        # -Failure is always re-thrown, regardless of this switch.
         [switch]$Rethrow
     )
 
@@ -255,17 +256,34 @@ function Invoke-DotSource {
     # would abort the phase prematurely.
     $__idsStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $__idsOutOfMemory = $false
+    $__idsReportedFailure = $false
+    $__idsFailureSequenceBefore = [int]$global:MemLabsFailureSequence
     Write-DscStatus "[Invoke-DotSource] START $__idsScriptName$(Get-CmSslStateNote)" -NoStatus
     try {
         & $Script @Arguments
+        if ([int]$global:MemLabsFailureSequence -gt $__idsFailureSequenceBefore) {
+            $__idsReportedFailure = $true
+            throw "Critical guest script reported a failure without throwing: $global:MemLabsLastFailureStatus"
+        }
     }
     catch {
+        if ([int]$global:MemLabsFailureSequence -gt $__idsFailureSequenceBefore) {
+            $__idsReportedFailure = $true
+        }
         $__idsOutOfMemory = $_.Exception -is [System.OutOfMemoryException] -or
             $_.Exception.Message -match '(?i)OutOfMemory|0x8007000E|not enough (storage|memory)'
         $__idsStack = (($_.ScriptStackTrace -replace '\s+', ' ').Trim())
         if ($__idsStack.Length -gt 1200) { $__idsStack = $__idsStack.Substring(0, 1200) + '...' }
-        Write-DscStatus "WARNING: exception in ${__idsScriptName}: $($_.Exception.GetType().FullName): $($_.Exception.Message); stack=$__idsStack"
-        if ($__idsRethrow) { throw }
+        $__idsFailure = "exception in ${__idsScriptName}: $($_.Exception.GetType().FullName): $($_.Exception.Message); stack=$__idsStack"
+        if ($__idsReportedFailure) {
+            Write-DscStatus "FAILED: $__idsFailure" -NoStatus -Warning
+            throw
+        }
+        if ($__idsRethrow) {
+            Write-DscStatus "FAILED: $__idsFailure" -Failure
+            throw
+        }
+        Write-DscStatus "WARNING: $__idsFailure" -Warning
     }
     finally {
         $__idsStopwatch.Stop()
@@ -419,6 +437,99 @@ function Invoke-WithScriptWorkflowJsonMutex {
     }
 }
 
+function Write-ScriptWorkflowJsonAtomic {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Configuration,
+        [Parameter(Mandatory)]
+        [string]$ConfigurationFile,
+        [int]$MaximumAttempts = 5,
+        [int]$RetryMilliseconds = 200
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($ConfigurationFile)
+    $directory = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not [System.IO.Directory]::Exists($directory)) {
+        throw "ScriptWorkflow directory does not exist: $directory"
+    }
+
+    $tempPath = Join-Path $directory (".$([System.IO.Path]::GetFileName($fullPath)).$([guid]::NewGuid().ToString('N')).tmp")
+    $backupPath = "$tempPath.bak"
+    try {
+        $json = $Configuration | ConvertTo-Json -Depth 20 -ErrorAction Stop
+        $json | Out-File -LiteralPath $tempPath -Encoding utf8 -ErrorAction Stop
+        $null = Get-Content -LiteralPath $tempPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+
+        $lastError = $null
+        for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+            try {
+                if ([System.IO.File]::Exists($fullPath)) {
+                    [System.IO.File]::Replace($tempPath, $fullPath, $backupPath)
+                }
+                else {
+                    [System.IO.File]::Move($tempPath, $fullPath)
+                }
+                return
+            }
+            catch {
+                $lastError = $_
+                if ($attempt -lt $MaximumAttempts) {
+                    Start-Sleep -Milliseconds ($RetryMilliseconds * $attempt)
+                }
+            }
+        }
+
+        throw "Could not atomically persist ScriptWorkflow state to '$fullPath' after $MaximumAttempts attempts: $($lastError.Exception.Message)"
+    }
+    finally {
+        if ([System.IO.File]::Exists($tempPath)) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+        if ([System.IO.File]::Exists($backupPath)) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Read-ScriptWorkflowData {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigurationFile,
+        [string[]]$RequiredSteps = @(),
+        [int]$MaximumAttempts = 5,
+        [int]$RetryMilliseconds = 500
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            $raw = Get-Content -LiteralPath $ConfigurationFile -Raw -ErrorAction Stop
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                throw "file is empty"
+            }
+            $configuration = $raw | ConvertFrom-Json -ErrorAction Stop
+            foreach ($step in $RequiredSteps) {
+                if ($configuration.PSObject.Properties.Name -notcontains $step) {
+                    throw "required step '$step' is absent"
+                }
+            }
+            return $configuration
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt $MaximumAttempts) {
+                Write-DscStatus "[ScriptWorkflow] Read attempt $attempt/$MaximumAttempts failed for '$ConfigurationFile': $($_.Exception.Message). Retrying." -NoStatus
+                Start-Sleep -Milliseconds ($RetryMilliseconds * $attempt)
+            }
+        }
+    }
+
+    throw "Could not read valid ScriptWorkflow state from '$ConfigurationFile' after $MaximumAttempts attempts: $($lastError.Exception.Message)"
+}
+
 # Atomically update one step's fields in ScriptWorkflow.json under the mutex.
 # This is the safe replacement for the scattered
 #   $c = Get-Content $ConfigurationFile | ConvertFrom-Json
@@ -452,7 +563,7 @@ function Set-ScriptWorkflowStep {
             if ($stampStart) { $cfg.$step.StartTime = $now }
             if ($stampEnd) { $cfg.$step.EndTime = $now }
             elseif ($clearEnd) { $cfg.$step.EndTime = '' }
-            $cfg | ConvertTo-Json | Out-File -FilePath $file -Force
+            Write-ScriptWorkflowJsonAtomic -Configuration $cfg -ConfigurationFile $file
             return $cfg
         })
 }
@@ -740,6 +851,8 @@ function Write-DscStatus {
     }
 
     if ($Failure.IsPresent) {
+        $global:MemLabsFailureSequence = [int]$global:MemLabsFailureSequence + 1
+        $global:MemLabsLastFailureStatus = "$status"
         # Add prefix that host job can use to acknowledge failure
         $status = "JOBFAILURE: $status"
     }
@@ -3190,25 +3303,9 @@ function Write-ScriptWorkFlowData {
         $ConfigurationFile
     )
 
-    $mtx = $null
-    try {
-        $mtx = New-Object System.Threading.Mutex($false, "ScriptWorkflow")
-        [void]$mtx.WaitOne()
-    }
-    catch {
-        # Mutex creation can fail after snapshot restore if a stale kernel
-        # object exists with a different security context.  Proceed without
-        # synchronization — ScriptWorkflow runs sequentially.
-        $mtx = $null
-    }
-    try {
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    }
-    finally {
-        if ($mtx) {
-            [void]$mtx.ReleaseMutex()
-            [void]$mtx.Dispose()
-        }
+    $null = Invoke-WithScriptWorkflowJsonMutex -ArgumentList $Configuration, $ConfigurationFile -ScriptBlock {
+        param($configurationToWrite, $file)
+        Write-ScriptWorkflowJsonAtomic -Configuration $configurationToWrite -ConfigurationFile $file
     }
 }
 

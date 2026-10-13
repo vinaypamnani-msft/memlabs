@@ -24,11 +24,12 @@ if (-not $usePKI) {
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+$Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile `
+    -RequiredSteps @('InstallSUP')
 
 $Configuration.InstallSUP.Status = "Running"
 $Configuration.InstallSUP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 # Wait for CS
 if ($CSName) {
@@ -38,21 +39,24 @@ if ($CSName) {
     $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.json"
 
     # Wait for ScriptWorkflow.json to exist on CAS
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+        -RequiredSteps @('InstallSUP')
     Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)."
     $sumWaitStart = Get-Date
     while ($CSConfiguration.InstallSUP.Status -ne "Completed") {
+        if ("$($CSConfiguration.InstallSUP.Status)" -in @('Error', 'Failed', 'Failure')) {
+            throw "$CSName reported InstallSUP=$($CSConfiguration.InstallSUP.Status) in '$CSConfigurationFile'."
+        }
         # Elapsed goes in the TEXT and the line is logged: with constant text and -NoLog this
         # wait left ONE host record and ONE guest line for 451s (measured cstest2 PS1 08-15).
         $sumWaitMin = [int]((Get-Date) - $sumWaitStart).TotalMinutes
+        if ($sumWaitMin -ge 240) {
+            throw "$CSName did not finish InstallSUP within 240 minutes (last state: $($CSConfiguration.InstallSUP.Status))."
+        }
         Write-DscStatus "Waiting for $CSName to finish SUM Configuration (${sumWaitMin}m elapsed, CAS InstallSUP=$($CSConfiguration.InstallSUP.Status))" -RetrySeconds 30
         Start-Sleep -Seconds 30
-        try {
-            $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Stop | ConvertFrom-Json
-        }
-        catch {
-            Write-DscStatus "Failed to check Status on $CSName from $CSConfigurationFile. $_"
-        }
+        $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+            -RequiredSteps @('InstallSUP')
     }
     Write-DscStatus "$CSName finished SUM Configuration ($([int]((Get-Date) - $sumWaitStart).TotalMinutes)m elapsed)."
 }
@@ -142,7 +146,7 @@ if ($allRolesInstalled) {
     Invoke-VerifiedWsusBaselineImport -SupVms @($supVMs)
     $Configuration.InstallSUP.Status = 'Completed'
     $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     return
 }
 
@@ -271,7 +275,7 @@ if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
     } else {
         Write-DscStatus "Not marking InstallSUP as Completed because Reporting Point failed."
     }
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     return
 }
 if ($SUPs.Count -eq 0) {
@@ -282,7 +286,7 @@ if ($SUPs.Count -eq 0) {
     } else {
         Write-DscStatus "Not marking InstallSUP as Completed because Reporting Point failed."
     }
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     return
 }
 
@@ -488,7 +492,7 @@ if (-not $rpFailed -and -not $supFailed) {
     if ($supFailed) { $failedRoles += 'Software Update Point' }
     Write-DscStatus "Not marking InstallSUP as Completed because role readiness failed: $($failedRoles -join ', ')."
 }
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 # CM site-role proxy is now applied by phases/ConfigureCMProxy.ps1, invoked
 # directly from ScriptWorkflow.ps1 so it runs even when this script returns
