@@ -116,9 +116,10 @@ function Invoke-RecoveryScenario {
         -Node2Port '1433' `
         -AvailabilityGroupName 'Test AG' `
         -TestHooks @{
-            Command      = $commandHook
-            PollAttempts = 2
-            PollSeconds  = 0
+            Command              = $commandHook
+            PollAttempts         = 2
+            PollSeconds          = 0
+            StabilizationSeconds = 60
         }
 
     return [pscustomobject]@{
@@ -149,6 +150,15 @@ foreach ($stage in @(
                 }).Count -eq 1) 'Replica-health failure did not preserve the exact node and final DMV state.'
     }
 }
+
+Assert-True ($definition[0].Extent.Text -match
+    '(?s)\$initialDeadline\s*=\s*New-CanaryStageDeadline.+?PRIMARY.+?-DeadlineUtc \$initialDeadline.+?SECONDARY.+?-DeadlineUtc \$initialDeadline') `
+    'Initial replica checks do not share one bounded stabilization window.'
+Assert-True ($definition[0].Extent.Text -match
+    '(?s)\$failoverDeadline\s*=\s*New-CanaryStageDeadline.+?Wait-CanaryListenerOwner.+?\$failoverDeadline.+?PRIMARY.+?\$failoverDeadline.+?SECONDARY.+?\$failoverDeadline') `
+    'Post-failover listener and replica checks do not share one bounded stabilization window.'
+Assert-True ($definition[0].Extent.Text -match 'listener \[\$ListenerName\] owner attempt') `
+    'Listener stabilization does not emit progress heartbeats.'
 
 $cleanupScenario = Invoke-RecoveryScenario -FailureStage 'Cleanup'
 Assert-True (-not $cleanupScenario.Result) 'Cleanup failures were reported as success.'

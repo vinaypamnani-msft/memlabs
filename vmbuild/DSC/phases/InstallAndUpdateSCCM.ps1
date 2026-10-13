@@ -194,6 +194,16 @@ function Invoke-SqlAoSetupCanary {
     $returnedToOriginalPrimary = $false
     $pollAttempts = if ($TestHooks -and $TestHooks.ContainsKey('PollAttempts')) { [int]$TestHooks.PollAttempts } else { 45 }
     $pollSeconds = if ($TestHooks -and $TestHooks.ContainsKey('PollSeconds')) { [int]$TestHooks.PollSeconds } else { 20 }
+    $stabilizationSeconds = if ($TestHooks -and $TestHooks.ContainsKey('StabilizationSeconds')) {
+        [int]$TestHooks.StabilizationSeconds
+    }
+    else {
+        15 * 60
+    }
+
+    function New-CanaryStageDeadline {
+        return [DateTime]::UtcNow.AddSeconds($stabilizationSeconds)
+    }
 
     function New-CanaryConnectionString {
         param([string]$Server, [string]$Port)
@@ -231,7 +241,12 @@ function Invoke-SqlAoSetupCanary {
     }
 
     function Wait-CanaryReplicaReady {
-        param([string]$NodeName, [string]$ConnectionString, [string]$ExpectedRole)
+        param(
+            [string]$NodeName,
+            [string]$ConnectionString,
+            [string]$ExpectedRole,
+            [DateTime]$DeadlineUtc
+        )
         $lastState = ''
         for ($attempt = 1; $attempt -le $pollAttempts; $attempt++) {
             try {
@@ -263,14 +278,18 @@ WHERE ag.name = N'$($AvailabilityGroupName.Replace("'", "''"))'
             if ($attempt -eq 1 -or $attempt % 5 -eq 0) {
                 Write-DscStatus "SQLAO canary: replica [$NodeName] readiness attempt $attempt/$pollAttempts expected=$ExpectedRole; observed=$lastState"
             }
-            if ($attempt -lt $pollAttempts -and $pollSeconds -gt 0) { Start-Sleep -Seconds $pollSeconds }
+            $remainingSeconds = [int][Math]::Ceiling(($DeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+            if ($remainingSeconds -le 0) { break }
+            if ($attempt -lt $pollAttempts -and $pollSeconds -gt 0) {
+                Start-Sleep -Seconds ([Math]::Min($pollSeconds, $remainingSeconds))
+            }
         }
-        Write-DscStatus "SQLAO canary: replica [$NodeName] did not reach $ExpectedRole/CONNECTED/HEALTHY/SYNCHRONIZED after $pollAttempts attempts. Last state: $lastState"
+        Write-DscStatus "SQLAO canary: replica [$NodeName] did not reach $ExpectedRole/CONNECTED/HEALTHY/SYNCHRONIZED within the shared stabilization window. Last state: $lastState"
         return $false
     }
 
     function Wait-CanaryListenerOwner {
-        param([string]$ExpectedNode)
+        param([string]$ExpectedNode, [DateTime]$DeadlineUtc)
         $lastOwner = ''
         for ($attempt = 1; $attempt -le $pollAttempts; $attempt++) {
             try {
@@ -278,9 +297,16 @@ WHERE ag.name = N'$($AvailabilityGroupName.Replace("'", "''"))'
                 if ($lastOwner.Split('.')[0] -ieq $ExpectedNode.Split('.')[0]) { return $true }
             }
             catch {}
-            if ($attempt -lt $pollAttempts -and $pollSeconds -gt 0) { Start-Sleep -Seconds $pollSeconds }
+            if ($attempt -eq 1 -or $attempt % 5 -eq 0) {
+                Write-DscStatus "SQLAO canary: listener [$ListenerName] owner attempt $attempt/$pollAttempts expected=$ExpectedNode; observed=$lastOwner"
+            }
+            $remainingSeconds = [int][Math]::Ceiling(($DeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+            if ($remainingSeconds -le 0) { break }
+            if ($attempt -lt $pollAttempts -and $pollSeconds -gt 0) {
+                Start-Sleep -Seconds ([Math]::Min($pollSeconds, $remainingSeconds))
+            }
         }
-        Write-DscStatus "SQLAO canary: listener '$ListenerName' did not move to expected owner '$ExpectedNode' after $pollAttempts attempts. Last owner: $lastOwner"
+        Write-DscStatus "SQLAO canary: listener '$ListenerName' did not move to expected owner '$ExpectedNode' within the shared stabilization window. Last owner: $lastOwner"
         return $false
     }
 
@@ -301,15 +327,19 @@ WHERE ag.name = N'$($AvailabilityGroupName.Replace("'", "''"))'
         }
 
         try {
-            if (-not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString -ExpectedRole 'SECONDARY')) {
+            $recoveryDeadline = New-CanaryStageDeadline
+            if (-not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                        -ExpectedRole 'SECONDARY' -DeadlineUtc $recoveryDeadline)) {
                 throw "Original primary [$primaryNode] is not a synchronized secondary."
             }
             Write-DscStatus "SQLAO canary recovery: attempting failback to original primary [$primaryNode]."
             Invoke-CanaryCommand -ConnectionString $primaryConnectionString -TimeoutSeconds 180 `
                 -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
-            if (-not (Wait-CanaryListenerOwner -ExpectedNode $primaryNode) -or
-                -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString -ExpectedRole 'PRIMARY') -or
-                -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString -ExpectedRole 'SECONDARY')) {
+            if (-not (Wait-CanaryListenerOwner -ExpectedNode $primaryNode -DeadlineUtc $recoveryDeadline) -or
+                -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                        -ExpectedRole 'PRIMARY' -DeadlineUtc $recoveryDeadline) -or
+                -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString `
+                        -ExpectedRole 'SECONDARY' -DeadlineUtc $recoveryDeadline)) {
                 throw "Failback to original primary [$primaryNode] did not stabilize."
             }
             Write-DscStatus "SQLAO canary recovery: restored original primary [$primaryNode]."
@@ -362,8 +392,11 @@ IF EXISTS
         $secondaryConnectionString = if ($secondaryNode -ieq $Node1) { $node1ConnectionString } else { $node2ConnectionString }
         $primaryConnectionString = if ($primaryNode -ieq $Node1) { $node1ConnectionString } else { $node2ConnectionString }
 
-        if (-not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString -ExpectedRole 'PRIMARY') -or
-            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString -ExpectedRole 'SECONDARY')) {
+        $initialDeadline = New-CanaryStageDeadline
+        if (-not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                    -ExpectedRole 'PRIMARY' -DeadlineUtc $initialDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString `
+                    -ExpectedRole 'SECONDARY' -DeadlineUtc $initialDeadline)) {
             throw 'The existing TESTDB AG was not stable before the rehearsal.'
         }
 
@@ -385,9 +418,12 @@ ALTER TABLE dbo.[$beforeTable] ADD CONSTRAINT [PK_$beforeTable] PRIMARY KEY CLUS
         $roleTransitionStarted = $true
         Invoke-CanaryCommand -ConnectionString $secondaryConnectionString -TimeoutSeconds 180 `
             -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
-        if (-not (Wait-CanaryListenerOwner -ExpectedNode $secondaryNode) -or
-            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString -ExpectedRole 'PRIMARY') -or
-            -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString -ExpectedRole 'SECONDARY')) {
+        $failoverDeadline = New-CanaryStageDeadline
+        if (-not (Wait-CanaryListenerOwner -ExpectedNode $secondaryNode -DeadlineUtc $failoverDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString `
+                    -ExpectedRole 'PRIMARY' -DeadlineUtc $failoverDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                    -ExpectedRole 'SECONDARY' -DeadlineUtc $failoverDeadline)) {
             throw 'The first SQLAO canary failover did not stabilize.'
         }
         Write-DscStatus "SQLAO canary: controlled failover to [$secondaryNode] completed."
@@ -403,9 +439,12 @@ ALTER TABLE dbo.[$afterTable] ADD CONSTRAINT [PK_$afterTable] PRIMARY KEY CLUSTE
 
         Invoke-CanaryCommand -ConnectionString $primaryConnectionString -TimeoutSeconds 180 `
             -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
-        if (-not (Wait-CanaryListenerOwner -ExpectedNode $primaryNode) -or
-            -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString -ExpectedRole 'PRIMARY') -or
-            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString -ExpectedRole 'SECONDARY')) {
+        $failbackDeadline = New-CanaryStageDeadline
+        if (-not (Wait-CanaryListenerOwner -ExpectedNode $primaryNode -DeadlineUtc $failbackDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                    -ExpectedRole 'PRIMARY' -DeadlineUtc $failbackDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString `
+                    -ExpectedRole 'SECONDARY' -DeadlineUtc $failbackDeadline)) {
             throw 'The SQLAO canary failback did not stabilize.'
         }
         $returnedToOriginalPrimary = $true

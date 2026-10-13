@@ -88,9 +88,11 @@ and removes the temporary tables. Any post-failover failure triggers a
 best-effort return to the recorded original primary before each temporary table
 is cleaned independently. The AG must remain connected, healthy, and
 synchronized throughout. For slower hosts, replica session timeout is at least
-30 seconds, AG health-check timeout is at least 60 seconds, and preflight allows
-up to 15 minutes to stabilize. It fails closed instead of launching ConfigMgr
-setup against an unstable AG. Listener probes use the configured listener port,
+30 seconds, AG health-check timeout is at least 60 seconds, and each preflight
+transition has one shared 15-minute stabilization window instead of multiplying
+that wait across sequential listener and replica checks. It emits periodic
+listener and replica progress messages, then fails closed instead of launching
+ConfigMgr setup against an unstable AG. Listener probes use the configured listener port,
 while direct replica readiness and failover commands use each SQL VM's engine
 port; these ports are intentionally independent.
 
