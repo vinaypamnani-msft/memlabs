@@ -56,6 +56,7 @@ function Invoke-RecoveryScenario {
         DropAttempts             = [System.Collections.Generic.List[string]]::new()
         TuningCommands           = [System.Collections.Generic.List[string]]::new()
         NodePorts                = [System.Collections.Generic.List[string]]::new()
+        MergeCommands            = [System.Collections.Generic.List[string]]::new()
     }
 
     $commandHook = {
@@ -98,6 +99,9 @@ function Invoke-RecoveryScenario {
             $script:Scenario.PostDdlFailuresRemaining -gt 0) {
             $script:Scenario.PostDdlFailuresRemaining--
             throw 'Synthetic post-failover DDL failure.'
+        }
+        if ($CommandText -match 'MERGE dbo\.\[MemLabsAgCanaryBefore_') {
+            [void]$script:Scenario.MergeCommands.Add($CommandText)
         }
         if ($CommandText -match 'DROP TABLE dbo\.\[(MemLabsAgCanary(?:Before|After)_[^\]]+)\]') {
             [void]$script:Scenario.DropAttempts.Add($Matches[1])
@@ -175,5 +179,20 @@ Assert-True ($successScenario.State.TuningCommands.Count -eq 1) 'The healthy SQL
 Assert-True ($successScenario.State.NodePorts.Count -gt 0) 'The healthy SQLAO rehearsal did not connect directly to either physical node.'
 Assert-True (@($successScenario.State.NodePorts | Where-Object { $_ -ne '1433' }).Count -eq 0) `
     "Physical SQLAO node commands did not consistently use node port 1433: $($successScenario.State.NodePorts -join ', ')."
+Assert-True ($successScenario.State.MergeCommands.Count -eq 1) `
+    'The healthy SQLAO rehearsal did not exercise synchronized MERGE DML after failover.'
+Assert-True ($successScenario.State.MergeCommands[0] -match 'TOP \(8192\)') `
+    'The SQLAO MERGE rehearsal no longer uses a substantial source row set.'
+Assert-True ($successScenario.State.MergeCommands[0] -match 'DBCC CHECKTABLE') `
+    'The SQLAO MERGE rehearsal no longer verifies the target table afterward.'
 
-Write-Host 'PASS -- SQLAO canary restores the original primary and independently cleans both tables after every post-failover failure.'
+$cstest5 = Get-Content -LiteralPath (Join-Path $RootPath 'config\tests\CSTest5-A-CSPS-PSHA.json') -Raw |
+    ConvertFrom-Json
+$cstest5SqlAoNodes = @($cstest5.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })
+Assert-True ($cstest5SqlAoNodes.Count -eq 2) 'CSTest5 no longer contains the expected SQLAO pair.'
+Assert-True (@($cstest5SqlAoNodes | Where-Object { $_.sqlVersion -ne 'SQL Server 2022' }).Count -eq 0) `
+    'CSTest5 SQLAO nodes must use SQL Server 2022 after repeated SQL Server 2019 severity-22 engine failures.'
+Assert-True (@($cstest5SqlAoNodes | Where-Object { $_.memory -ne '12GB' }).Count -eq 0) `
+    'CSTest5 SQLAO nodes must retain the 12 GB reliability allocation.'
+
+Write-Host 'PASS -- SQLAO canary covers synchronized MERGE, restores the original primary, and independently cleans both tables after every post-failover failure.'

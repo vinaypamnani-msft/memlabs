@@ -432,10 +432,25 @@ ALTER TABLE dbo.[$beforeTable] ADD CONSTRAINT [PK_$beforeTable] PRIMARY KEY CLUS
             -CommandText @"
 USE [$databaseName];
 CREATE TABLE dbo.[$afterTable] (CanaryId int NOT NULL, Payload char(200) NOT NULL);
-INSERT dbo.[$afterTable] (CanaryId, Payload) VALUES (1, REPLICATE('Y', 200));
+WITH E1(N) AS
+(
+    SELECT 1 FROM (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS A(N)
+    CROSS JOIN (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS B(N)
+),
+E2(N) AS (SELECT 1 FROM E1 AS A CROSS JOIN E1 AS B)
+INSERT dbo.[$afterTable] (CanaryId, Payload)
+SELECT TOP (8192) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) + 4096, REPLICATE('Y', 200) FROM E2;
 ALTER TABLE dbo.[$afterTable] ADD CONSTRAINT [PK_$afterTable] PRIMARY KEY CLUSTERED (CanaryId);
+MERGE dbo.[$beforeTable] AS Target
+USING dbo.[$afterTable] AS Source
+    ON Source.CanaryId = Target.CanaryId
+WHEN MATCHED THEN
+    UPDATE SET Payload = Source.Payload
+WHEN NOT MATCHED BY TARGET THEN
+    INSERT (CanaryId, Payload) VALUES (Source.CanaryId, Source.Payload);
+DBCC CHECKTABLE (N'dbo.$beforeTable') WITH NO_INFOMSGS;
 "@
-        Write-DscStatus "SQLAO canary: clustered-key DDL passed on TESTDB after failover."
+        Write-DscStatus "SQLAO canary: clustered-key DDL and synchronized MERGE passed on TESTDB after failover."
 
         Invoke-CanaryCommand -ConnectionString $primaryConnectionString -TimeoutSeconds 180 `
             -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"

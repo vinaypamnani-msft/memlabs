@@ -83,8 +83,9 @@ events immediately preceding the failure are not lost.
 
 For SQL Always On, Phase 8 additionally uses the Phase 5 `TESTDB` AG member to
 rehearse the risky path: it creates clustered-key DDL before a controlled
-failover, repeats the DDL after the listener moves to the partner, fails back,
-and removes the temporary tables. Any post-failover failure triggers a
+failover, creates and merges substantial synchronized row sets after the
+listener moves to the partner, verifies the merged table, fails back, and
+removes the temporary tables. Any post-failover failure triggers a
 best-effort return to the recorded original primary before each temporary table
 is cleaned independently. The AG must remain connected, healthy, and
 synchronized throughout. For slower hosts, replica session timeout is at least
@@ -130,6 +131,10 @@ replacing it with a malformed-tally exception.
 Validate this path with `vmbuild\tools\Test-AutomatedResumePreparation.ps1` and
 `vmbuild\tools\Test-PhaseFailurePropagation.ps1`.
 
-The `vmbuild\config\tests\CSTest5-A-CSPS-PSHA.json` test configuration allocates
-12 GB to each SQLAO node (CS1SQLAO1 and CS1SQLAO2), up from 7 GB. Updating this
-file alone does not resize existing deployed VMs.
+The `vmbuild\config\tests\CSTest5-A-CSPS-PSHA.json` test configuration uses SQL
+Server 2022 for its SQLAO pair after SQL Server 2019 CU32 repeatedly raised
+severity-22 internal engine errors during ConfigMgr database initialization on
+the test host. The local primary-site SQL instance remains on SQL Server 2019,
+so the same lab still covers both engine generations. Each SQLAO node receives
+12 GB, up from 7 GB. Updating this file alone does not upgrade SQL or resize
+existing deployed VMs; the SQLAO pair must be rebuilt for those changes.
