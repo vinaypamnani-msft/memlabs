@@ -64,7 +64,9 @@ $script:WingetAvailable = $true
 $script:WingetCalls = @()
 $script:WingetExitCode = 0
 $script:WingetOutput = @()
+$script:WingetSource = $null
 $script:Logs = @()
+$script:StartedProcess = $null
 
 function Get-Command {
     param (
@@ -76,11 +78,25 @@ function Get-Command {
     if (-not $script:WingetAvailable) { return $null }
 
     return [pscustomobject]@{
-        Source = {
+        Source = $(if ($null -ne $script:WingetSource) { $script:WingetSource } else { {
             $script:WingetCalls += ,@($args)
             $global:LASTEXITCODE = $script:WingetExitCode
             $script:WingetOutput
-        }
+        } })
+    }
+}
+
+function Start-Process {
+    param (
+        [string] $FilePath,
+        [object[]] $ArgumentList,
+        [string] $WindowStyle
+    )
+
+    $script:StartedProcess = [pscustomobject]@{
+        FilePath = $FilePath
+        ArgumentList = $ArgumentList
+        WindowStyle = $WindowStyle
     }
 }
 
@@ -94,7 +110,9 @@ function Reset-Fixture {
     $script:WingetCalls = @()
     $script:WingetExitCode = 0
     $script:WingetOutput = @()
+    $script:WingetSource = $null
     $script:Logs = @()
+    $script:StartedProcess = $null
 }
 
 Write-Host "engine  : $($PSVersionTable.PSVersion)"
@@ -103,14 +121,14 @@ Write-Host ''
 
 Reset-Fixture
 $script:WingetAvailable = $false
-Invoke-WinGetMaintenance
+Invoke-WinGetMaintenance -WaitForCompletion
 Assert-Equal 0 $script:WingetCalls.Count 'missing WinGet cannot launch an upgrade'
 Assert-Equal 'WARNING' @($script:Logs | Select-Object -Last 1)[0].Level 'missing WinGet is surfaced as a warning'
 
 Reset-Fixture
 $script:WingetExitCode = -1978335189
 $script:WingetOutput = @('No applicable upgrade found.')
-Invoke-WinGetMaintenance
+Invoke-WinGetMaintenance -WaitForCompletion
 Assert-Equal 1 $script:WingetCalls.Count 'available WinGet is invoked once'
 $expectedArguments = 'upgrade --all --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity'
 Assert-Equal $expectedArguments ($script:WingetCalls[0] -join ' ') 'WinGet upgrades all matched packages from the community source unattended'
@@ -118,21 +136,52 @@ Assert-Equal $true ($script:Logs[-1].Message -like '*already current*') 'WinGet 
 
 Reset-Fixture
 $script:WingetOutput = @('Successfully installed')
-Invoke-WinGetMaintenance
+Invoke-WinGetMaintenance -WaitForCompletion
 Assert-Equal $true ($script:Logs[-1].Message -like '*completed successfully*') 'successful WinGet upgrades are logged'
 
 Reset-Fixture
 $script:WingetExitCode = -1978335188
 $script:WingetOutput = @('One or more package upgrades failed.')
-Assert-Throws { Invoke-WinGetMaintenance } 'a partial WinGet upgrade failure is surfaced'
+Assert-Throws { Invoke-WinGetMaintenance -WaitForCompletion } 'a partial WinGet upgrade failure is surfaced'
 
 Reset-Fixture
 $script:WingetExitCode = 42
 $script:WingetOutput = @('simulated failure')
-Assert-Throws { Invoke-WinGetMaintenance } 'an unexpected WinGet failure is surfaced'
+Assert-Throws { Invoke-WinGetMaintenance -WaitForCompletion } 'an unexpected WinGet failure is surfaced'
+
+$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('MemLabs WinGet maintenance test {0}' -f [guid]::NewGuid().ToString('N'))
+$savedTemp = $env:TEMP
+try {
+    $null = New-Item -Path $fixtureRoot -ItemType Directory -Force
+    $env:TEMP = $fixtureRoot
+
+    Reset-Fixture
+    $script:WingetSource = 'C:\Program Files\WindowsApps\winget.exe'
+    $mutexName = 'Global\MemLabs_ChocolateyUpgrade_Test'
+    Invoke-WinGetMaintenance -UpgradeMutexName $mutexName
+
+    Assert-Equal 'powershell' $script:StartedProcess.FilePath 'interactive maintenance launches a separate PowerShell process'
+    Assert-Equal 'Normal' $script:StartedProcess.WindowStyle 'interactive upgrades are visible in their own window'
+    Assert-Equal $true ($script:Logs[-1].Message -like '*non-blocking*') 'interactive launch is logged as non-blocking'
+
+    $childScriptPath = Join-Path $fixtureRoot 'memlabs_winget_upgrade.ps1'
+    Assert-Equal $true (Test-Path -LiteralPath $childScriptPath) 'interactive maintenance writes its child script'
+    $childScript = Get-Content -LiteralPath $childScriptPath -Raw
+    Assert-Equal $true $childScript.Contains($mutexName) 'interactive child uses the package upgrade mutex'
+    Assert-Equal $true $childScript.Contains('winget.exe'' upgrade --all --source winget') 'interactive child runs the same upgrade-all command'
+
+    $childTokens = $null
+    $childParseErrors = $null
+    [void] [System.Management.Automation.Language.Parser]::ParseInput($childScript, [ref] $childTokens, [ref] $childParseErrors)
+    Assert-Equal 0 @($childParseErrors).Count 'generated interactive WinGet script parses successfully'
+}
+finally {
+    $env:TEMP = $savedTemp
+    Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $sourceText = [System.IO.File]::ReadAllText($sourcePath)
-Assert-Equal $true $sourceText.Contains('try { Invoke-WinGetMaintenance }') 'WinGet maintenance is wired into the package phases'
+Assert-Equal $true $sourceText.Contains('Invoke-WinGetMaintenance -WaitForCompletion:$ScheduledTask') 'only scheduled maintenance waits for WinGet completion'
 
 Write-Host ''
 if ($script:Failures -gt 0) {

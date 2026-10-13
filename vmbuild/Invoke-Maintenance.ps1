@@ -721,6 +721,11 @@ function Get-InstalledEntry {
 }
 
 function Invoke-WinGetMaintenance {
+    param (
+        [switch] $WaitForCompletion,
+        [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade'
+    )
+
     Write-LogMessage 'Starting WinGet package maintenance...'
 
     $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -738,6 +743,42 @@ function Invoke-WinGetMaintenance {
         '--accept-source-agreements',
         '--disable-interactivity'
     )
+
+    if (-not $WaitForCompletion) {
+        $wingetScriptPath = Join-Path $env:TEMP 'memlabs_winget_upgrade.ps1'
+        $wingetPath = "$($winget.Source)".Replace("'", "''")
+        $scriptLines = @(
+            '$Host.UI.RawUI.WindowTitle = "MemLabs - WinGet Upgrades"'
+            "Write-Host 'Upgrading all WinGet-matched packages...' -ForegroundColor Cyan"
+            '$mutex = $null'
+            '$acquired = $false'
+            'try {'
+            "    `$mutex = [System.Threading.Mutex]::new(`$false, '$UpgradeMutexName')"
+            '    try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(120)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }'
+            "    if (-not `$acquired) { Write-Host 'Another package upgrade is already running. Skipping.' -ForegroundColor Yellow; exit 0 }"
+            "    & '$wingetPath' upgrade --all --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity"
+            '    if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq -1978335189) {'
+            "        Write-Host 'WinGet package maintenance completed successfully.' -ForegroundColor Green"
+            '    } else {'
+            '        Write-Host "WinGet package maintenance failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
+            '    }'
+            '} finally {'
+            '    if ($mutex) {'
+            '        if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }'
+            '        try { $mutex.Dispose() } catch {}'
+            '    }'
+            '}'
+            "Write-Host ''"
+            "Write-Host 'Done. This window will close in 10 seconds...' -ForegroundColor Cyan"
+            'Start-Sleep -Seconds 10'
+        )
+        $scriptLines -join "`n" | Out-File $wingetScriptPath -Encoding utf8
+
+        Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wingetScriptPath -WindowStyle Normal
+        Write-LogMessage 'WinGet package upgrades launched in a new window (non-blocking).'
+        return
+    }
+
     $output = @(& $winget.Source @arguments 2>&1)
     $exitCode = $LASTEXITCODE
 
@@ -1696,7 +1737,7 @@ $maintenanceRan = Invoke-WithMemLabsMaintenanceMutex -TimeoutSeconds $mutexTimeo
         try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-WindowsAdminCenterRemoval } catch { Write-LogMessage "Windows Admin Center removal threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-        try { Invoke-WinGetMaintenance } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-WinGetMaintenance -WaitForCompletion:$ScheduledTask } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         # Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
         try { Invoke-SevenZipMaintenance } catch { Write-LogMessage "7-Zip maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
