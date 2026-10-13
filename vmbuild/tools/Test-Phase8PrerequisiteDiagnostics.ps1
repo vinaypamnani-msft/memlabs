@@ -96,6 +96,9 @@ foreach ($aoCanaryRequirement in @(
         'Restore-CanaryOriginalPrimary',
         'SQLAO failover/DDL canary failed before ConfigMgr setup',
         'if ($installToAO)',
+        '$sqlNode1Port = $sqlPort',
+        '$sqlNode2Port = if ($SQLNode2VM.sqlPort)',
+        '-Node1Port "$sqlNode1Port" -Node2Port "$sqlNode2Port"',
         '-AvailabilityGroupName $sqlAOGroupName'
     )) {
     Assert-True ($install.Contains($aoCanaryRequirement)) "SQLAO failover canary is missing '$aoCanaryRequirement'."

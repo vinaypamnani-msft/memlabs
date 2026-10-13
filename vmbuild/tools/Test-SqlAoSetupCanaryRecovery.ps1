@@ -35,6 +35,12 @@ function Get-TestServer {
     return 'LISTENER'
 }
 
+function Get-TestPort {
+    param([string]$ConnectionString)
+    if ($ConnectionString -match '(?i)(?:^|;)Server=[^,;]+,([^;]+)') { return $Matches[1] }
+    return '1433'
+}
+
 function Invoke-RecoveryScenario {
     param([Parameter(Mandatory)][string]$FailureStage)
 
@@ -49,12 +55,16 @@ function Invoke-RecoveryScenario {
         FailoverCommands         = [System.Collections.Generic.List[string]]::new()
         DropAttempts             = [System.Collections.Generic.List[string]]::new()
         TuningCommands           = [System.Collections.Generic.List[string]]::new()
+        NodePorts                = [System.Collections.Generic.List[string]]::new()
     }
 
     $commandHook = {
         param($ConnectionString, $CommandText, $TimeoutSeconds, $Scalar)
 
         $server = Get-TestServer -ConnectionString $ConnectionString
+        if ($server -in @('NODE1', 'NODE2')) {
+            [void]$script:Scenario.NodePorts.Add((Get-TestPort -ConnectionString $ConnectionString))
+        }
         if ($CommandText -match 'ComputerNamePhysicalNetBIOS') {
             if ($script:Scenario.Primary -eq 'NODE2' -and $script:Scenario.ListenerFailuresRemaining -gt 0) {
                 $script:Scenario.ListenerFailuresRemaining--
@@ -102,7 +112,8 @@ function Invoke-RecoveryScenario {
         -ListenerName 'LISTENER' `
         -Node1 'NODE1' `
         -Node2 'NODE2' `
-        -Port '1500' `
+        -Node1Port '1433' `
+        -Node2Port '1433' `
         -AvailabilityGroupName 'Test AG' `
         -TestHooks @{
             Command      = $commandHook
@@ -131,6 +142,12 @@ foreach ($stage in @(
     Assert-True ($scenario.State.DropAttempts.Count -eq 2) "$stage failure did not attempt both table cleanups."
     Assert-True (@($scenario.Messages | Where-Object { $_ -match 'recovery:.+restored original primary' }).Count -eq 1) `
         "$stage failure did not report successful original-primary recovery."
+    if ($stage -eq 'ReplicaHealth') {
+        Assert-True (@($scenario.Messages | Where-Object {
+                    $_ -match 'replica \[NODE2\] did not reach PRIMARY/CONNECTED/HEALTHY/SYNCHRONIZED' -and
+                    $_ -match 'Last state: PRIMARY\|DISCONNECTED\|NOT_HEALTHY'
+                }).Count -eq 1) 'Replica-health failure did not preserve the exact node and final DMV state.'
+    }
 }
 
 $cleanupScenario = Invoke-RecoveryScenario -FailureStage 'Cleanup'
@@ -145,5 +162,8 @@ Assert-True $successScenario.Result 'The healthy SQLAO rehearsal did not succeed
 Assert-True ($successScenario.State.Primary -eq 'NODE1') 'The healthy SQLAO rehearsal did not return to the original primary.'
 Assert-True ($successScenario.State.DropAttempts.Count -eq 2) 'The healthy SQLAO rehearsal did not remove both canary tables.'
 Assert-True ($successScenario.State.TuningCommands.Count -eq 1) 'The healthy SQLAO rehearsal did not apply slow-host timeout tuning.'
+Assert-True ($successScenario.State.NodePorts.Count -gt 0) 'The healthy SQLAO rehearsal did not connect directly to either physical node.'
+Assert-True (@($successScenario.State.NodePorts | Where-Object { $_ -ne '1433' }).Count -eq 0) `
+    "Physical SQLAO node commands did not consistently use node port 1433: $($successScenario.State.NodePorts -join ', ')."
 
 Write-Host 'PASS -- SQLAO canary restores the original primary and independently cleans both tables after every post-failover failure.'

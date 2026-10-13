@@ -90,7 +90,9 @@ is cleaned independently. The AG must remain connected, healthy, and
 synchronized throughout. For slower hosts, replica session timeout is at least
 30 seconds, AG health-check timeout is at least 60 seconds, and preflight allows
 up to 15 minutes to stabilize. It fails closed instead of launching ConfigMgr
-setup against an unstable AG.
+setup against an unstable AG. Listener probes use the configured listener port,
+while direct replica readiness and failover commands use each SQL VM's engine
+port; these ports are intentionally independent.
 
 Validate these paths with `vmbuild\tools\Test-CmFailureDiagnostics.ps1`,
 `vmbuild\tools\Test-Phase8PrerequisiteDiagnostics.ps1`, and
