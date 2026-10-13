@@ -236,9 +236,10 @@ if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }
 
-# On re-entry, Status='Running' means the prior runner was killed mid-install
-# (the script never reached the 'Completed' write). What's safe to do next
-# depends on *which* sub-step was running when it got killed:
+# On re-entry, Status='Running' means the prior attempt did not reach the
+# 'Completed' write. The runner may have been interrupted, or setup.exe may
+# have returned a fatal error. What's safe to do next depends on which sub-step
+# was active:
 #
 #   * setupdl.exe (the pre-req downloader) is idempotent -- it has its own
 #     two-successes-in-a-row verification loop and will quickly re-verify
@@ -332,7 +333,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
             $failReason = "setup.exe breadcrumb present but SQL probe failed (tried: $($sqlProbeTargets -join ', ')): $probeError. Cannot confirm whether [$cmDbName] exists; refusing to retry blind. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
         }
         elseif ($probeDbExists) {
-            $failReason = "setup.exe breadcrumb present and [$cmDbName] already exists on [$sqlDataSource] -- prior setup.exe attempt created the site database before being killed. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
+            $failReason = "setup.exe breadcrumb present and [$cmDbName] already exists on [$sqlDataSource] -- the prior setup.exe attempt left a partial site database. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
         }
         else {
             $resetReason = "setup.exe breadcrumb present but [$cmDbName] does not exist on [$sqlDataSource] -- prior setup.exe attempt failed before creating the site database, so no install state was committed. Safe to retry."

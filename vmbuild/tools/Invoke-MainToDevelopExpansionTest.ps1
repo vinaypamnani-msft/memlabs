@@ -1456,8 +1456,23 @@ function Invoke-NewLabFixture {
 
     $parameters = [ordered]@{
         Configuration  = $FixturePath
-        NoSnapshot     = $true
         NoWindowResize = $true
+    }
+    $newLabPath = Join-Path (Join-Path $WorktreePath 'vmbuild') 'New-Lab.ps1'
+    $newLabTokens = $null
+    $newLabErrors = $null
+    $newLabAst = [Management.Automation.Language.Parser]::ParseFile(
+        $newLabPath, [ref]$newLabTokens, [ref]$newLabErrors)
+    if ($newLabErrors.Count -gt 0) {
+        throw "Could not inspect snapshot support in '$newLabPath': $($newLabErrors -join '; ')"
+    }
+    $supportsAutoSnapshot = @($newLabAst.ParamBlock.Parameters |
+        Where-Object { $_.Name.VariablePath.UserPath -eq 'AutoSnapshot' }).Count -eq 1
+    if ($supportsAutoSnapshot) {
+        $parameters.AutoSnapshot = $true
+    }
+    else {
+        Write-Host "$Label uses a revision without -AutoSnapshot; retaining the default Phase 8 snapshot prompt." -ForegroundColor Yellow
     }
     if ($KeepFailedVms.IsPresent) { $parameters.KeepFailedVMs = $true }
     $exitCode = Invoke-ChildScript -WorktreePath $WorktreePath -ScriptName 'New-Lab.ps1' -Parameters $parameters -Label $Label

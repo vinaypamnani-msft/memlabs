@@ -12,6 +12,7 @@ $newLab = Get-Content -LiteralPath (Join-Path $RootPath 'New-Lab.ps1') -Raw
 $startTest = Get-Content -LiteralPath (Join-Path $RootPath 'Start-Test.ps1') -Raw
 $phases = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Phases.ps1') -Raw
 $scriptBlocks = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Raw
+$snapshotsPath = Join-Path $RootPath 'common\Common.Snapshots.ps1'
 $childLauncher = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-PinnedChildScript.ps1') -Raw
 $mixedRunner = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MainToDevelopExpansionTest.ps1') -Raw
 
@@ -20,6 +21,7 @@ foreach ($path in @(
         (Join-Path $RootPath 'Start-Test.ps1'),
         (Join-Path $RootPath 'common\Common.Phases.ps1'),
         (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1'),
+        $snapshotsPath,
         (Join-Path $RootPath 'tools\Invoke-PinnedChildScript.ps1'),
         (Join-Path $RootPath 'tools\Invoke-MainToDevelopExpansionTest.ps1')
     )) {
@@ -55,6 +57,12 @@ if ($startTest -notmatch
     throw 'Start-Test cannot invoke a structured StartPhase/restore retry.'
 }
 if ($startTest -notmatch
+    '(?s)function Invoke-NewLab.+?\$newLabParameters\s*=\s*\[ordered\]@\{.+?AutoSnapshot\s*=\s*\$true' -or
+    $startTest -match
+    '(?s)function Invoke-NewLab.+?\$newLabParameters\s*=\s*\[ordered\]@\{.{0,500}?NoSnapshot\s*=\s*\$true') {
+    throw 'Start-Test does not request an unattended Phase 8 rollback snapshot.'
+}
+if ($startTest -notmatch
     '(?s)\$automatedResumeAttempts\s*=\s*0.+?\$automatedResumeAttempts -lt 1.+?\$automatedResumeAttempts\+\+.+?Automatically resuming at Phase.+?-StartPhase.+?-Restore:') {
     throw 'Unattended Start-Test does not perform exactly one bounded automatic resume.'
 }
@@ -77,12 +85,56 @@ foreach ($mixedRunnerContract in @(
         '-ResultPath $resultPath',
         'result token does not match',
         '$script:LastChildResult = $childResult',
+        '$parameters.AutoSnapshot = $true',
         '$resumeParameters.StartPhase',
         '-resume-phase'
     )) {
     if (-not $mixedRunner.Contains($mixedRunnerContract)) {
         throw "Mixed-revision runner is missing structured resume contract '$mixedRunnerContract'."
     }
+}
+
+$tokens = $null
+$errors = $null
+$snapshotsAst = [Management.Automation.Language.Parser]::ParseFile(
+    $snapshotsPath, [ref]$tokens, [ref]$errors)
+$snapshotFunction = @($snapshotsAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Test-Phase8AutoSnapshotExists'
+        }, $true))
+if ($snapshotFunction.Count -ne 1) {
+    throw "Expected one Test-Phase8AutoSnapshotExists definition, found $($snapshotFunction.Count)."
+}
+. ([scriptblock]::Create($snapshotFunction[0].Extent.Text))
+$script:snapshotFixtures = @{}
+function Get-List {
+    @(
+        [pscustomobject]@{ vmName = 'DC1' }
+        [pscustomobject]@{ vmName = 'SITE1' }
+    )
+}
+function Get-VMCheckpoint {
+    param([string]$VMName, $ErrorAction)
+    @($script:snapshotFixtures[$VMName] | ForEach-Object { [pscustomobject]@{ Name = $_ } })
+}
+$snapshotConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'snapshot.test' }
+}
+$targetSnapshot = '2026-10-12 04.00PM (MemLabs) MemLabs Phase 8 AutoSnapshot CSTest5-A'
+$otherSnapshot = '2026-10-12 03.00PM (MemLabs) MemLabs Phase 8 AutoSnapshot OtherConfig'
+$targetPattern = '*MemLabs Phase 8 AutoSnapshot CSTest5-A*'
+$script:snapshotFixtures = @{ DC1 = @($targetSnapshot); SITE1 = @($targetSnapshot) }
+if (-not (Test-Phase8AutoSnapshotExists -DeployConfig $snapshotConfig -SnapshotNamePattern $targetPattern)) {
+    throw 'A complete matching Phase 8 snapshot set was rejected.'
+}
+$script:snapshotFixtures = @{ DC1 = @($targetSnapshot); SITE1 = @() }
+if (Test-Phase8AutoSnapshotExists -DeployConfig $snapshotConfig -SnapshotNamePattern $targetPattern) {
+    throw 'A partial Phase 8 snapshot set was accepted.'
+}
+$script:snapshotFixtures = @{ DC1 = @($targetSnapshot); SITE1 = @($otherSnapshot) }
+if (Test-Phase8AutoSnapshotExists -DeployConfig $snapshotConfig -SnapshotNamePattern $targetPattern) {
+    throw 'A snapshot from another configuration satisfied Phase 8 recovery.'
 }
 
 $tokens = $null
@@ -253,6 +305,7 @@ try {
 param(
     [string] $Configuration,
     [switch] $NoSnapshot,
+    [switch] $AutoSnapshot,
     [switch] $KeepFailedVMs,
     [switch] $ClearErrorHistoryOnExit,
     [switch] $RequireCleanSource,
@@ -262,6 +315,7 @@ param(
 [IO.File]::WriteAllText($env:MEMLABS_RESUME_CAPTURE, ([ordered]@{
     Configuration = $Configuration
     NoSnapshot = [bool]$NoSnapshot
+    AutoSnapshot = [bool]$AutoSnapshot
     KeepFailedVMs = [bool]$KeepFailedVMs
     ClearErrorHistoryOnExit = [bool]$ClearErrorHistoryOnExit
     StartPhase = $StartPhase
@@ -302,7 +356,8 @@ else {
 
     $captured = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json
     if ([int]$invokeExit -ne 2 -or [int]$captured.StartPhase -ne 7 -or
-        -not [bool]$captured.Restore -or -not [bool]$captured.KeepFailedVMs) {
+        -not [bool]$captured.Restore -or -not [bool]$captured.KeepFailedVMs -or
+        -not [bool]$captured.AutoSnapshot -or [bool]$captured.NoSnapshot) {
         throw 'Start-Test Invoke-NewLab did not forward the structured resume invocation.'
     }
     if ([int]$script:LastNewLabResumeInfo.Phase -ne 7 -or

@@ -1649,7 +1649,11 @@ function Start-Phase {
         }
         if ($cmConfigurationData) {
             if ($Phase -eq 8) {
-                $null = Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
+                $snapshotReady = Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
+                if (-not $snapshotReady) {
+                    Write-RedX "[Phase 8] Required pre-install rollback snapshot failed; aborting before CM media preparation or job dispatch." -WriteLog
+                    return $false
+                }
             }
             $null = Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
         }
@@ -4309,6 +4313,7 @@ function Wait-Phase {
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try { $jobs | Stop-Job } catch {}
                             $return.Failed++
+                            $return.Elapsed = $(get-date) - $StartTime
                             return $return
                         }
                         continue
@@ -4324,6 +4329,7 @@ function Wait-Phase {
                             }
                             catch {}
                             $return.Failed++
+                            $return.Elapsed = $(get-date) - $StartTime
                             return $return
                         }
                     }
@@ -4559,20 +4565,18 @@ function Wait-Phase {
 # left untouched for the whole phase. Gating is unchanged from the old inline
 # block: only snapshot when a CAS/Primary in the Phase 8 set has never finished
 # Phase 8 (the risky first CM install), honoring $global:MemLabsNoSnapshot and an
-# existing snapshot of the same name.
+# existing snapshot of the same name. Returns $false when a requested snapshot
+# cannot be captured consistently across the domain.
 function Invoke-Phase8PreInstallSnapshot {
     param([object]$deployConfig)
 
-    if ($global:MemLabsNoSnapshot) { return }
+    if ($global:MemLabsNoSnapshot) { return $true }
     $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
-    if (-not $cd) { return }
+    if (-not $cd) { return $true }
 
     $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Global:ConfigurationShort
-    $snapshot = $null
-    $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
-    if ($dc) {
-        $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
-    }
+    $snapshotReady = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig `
+        -SnapshotNamePattern "*$autoSnapshotName*"
 
     # Snapshot decision is based ONLY on CAS/Primary site servers in the Phase 8
     # set. They are the ones actually running CM setup; other Phase 8 VMs (DPMP,
@@ -4609,15 +4613,25 @@ function Invoke-Phase8PreInstallSnapshot {
         else {
             Write-Log "[Phase 8] Skipping auto-snapshot: CAS/Primary already completed Phase 8 (re-run)" -LogOnly
         }
+        return $true
     }
-    elseif (-not $snapshot) {
+    if ($snapshotReady) { return $true }
+
+    $takeSnapshot = [bool]$global:MemLabsAutoSnapshot
+    if (-not $takeSnapshot) {
         $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
-        if (-not ($response -eq "n")) {
-            Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
-            write-log -HostOnly ""
-            write-log "Auto Snapshot $autoSnapshotName completed."
-        }
+        $takeSnapshot = $response -ne "n"
     }
+    if (-not $takeSnapshot) { return $true }
+
+    $snapshotSucceeded = Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
+    if (-not $snapshotSucceeded) {
+        Write-Log "[Phase 8] Pre-install rollback snapshot is incomplete. Refusing to launch ConfigMgr setup." -Failure
+        return $false
+    }
+    write-log -HostOnly ""
+    write-log "Auto Snapshot $autoSnapshotName completed."
+    return $true
 }
 
 function Get-ConfigurationData {

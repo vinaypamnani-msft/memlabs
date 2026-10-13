@@ -69,6 +69,22 @@ try { $null = Resolve-WaitPhaseResult -Raw $bad -Phase 8 }
 catch { $rejected = $true }
 Assert-True $rejected 'Negative failure count was accepted.'
 
+$wait = Get-TestFunction 'Wait-Phase'
+$tallyReturns = @($wait.Body.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.ReturnStatementAst] -and
+            $node.Pipeline.Extent.Text -eq '$return'
+        }, $true))
+Assert-True ($tallyReturns.Count -eq 3) 'Wait-Phase tally return count changed unexpectedly.'
+foreach ($tallyReturn in $tallyReturns) {
+    $siblings = @($tallyReturn.Parent.Statements)
+    $returnIndex = [array]::IndexOf($siblings, $tallyReturn)
+    $previous = if ($returnIndex -gt 0) { $siblings[$returnIndex - 1] } else { $null }
+    Assert-True ($previous -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $previous.Left.Extent.Text -eq '$return.Elapsed') `
+        "Wait-Phase returns a tally at line $($tallyReturn.Extent.StartLineNumber) before finalizing Elapsed."
+}
+
 $start = Get-TestFunction 'Start-Phase'
 $phase0Statement = $start.Body.EndBlock.Statements | Where-Object {
     $_ -is [Management.Automation.Language.IfStatementAst] -and
@@ -120,10 +136,15 @@ function Get-MissingHyperVNodes {
     if ($script:cmProbeThrows) { throw 'CM inventory unavailable' }
     if ($ConfigurationData) { $script:missingNodes }
 }
-function Invoke-Phase8PreInstallSnapshot { param($deployConfig) $script:cmCalls += 'snapshot' }
+function Invoke-Phase8PreInstallSnapshot {
+    param($deployConfig)
+    $script:cmCalls += 'snapshot'
+    return $script:snapshotReady
+}
 function Mount-CmIsoForPhase { param($deployConfig, $Phase) $script:cmCalls += 'mount' }
 $script:cmConfig = [pscustomobject]@{ AllNodes = @([pscustomobject]@{ NodeName = 'PRI1' }) }
 $script:cmProbeThrows = $false
+$script:snapshotReady = $true
 foreach ($Phase in @(8, 9)) {
     $script:cmCalls = @()
     $script:missingNodes = @('PRI1')
@@ -133,6 +154,13 @@ foreach ($Phase in @(8, 9)) {
     Assert-True ((& $cmPreflight) -eq $true) "Phase $Phase valid targets failed."
     $expected = if ($Phase -eq 8) { 'snapshot,mount' } else { 'mount' }
     Assert-True (($script:cmCalls -join ',') -eq $expected) "Phase $Phase snapshot/media ordering changed."
+    if ($Phase -eq 8) {
+        $script:cmCalls = @()
+        $script:snapshotReady = $false
+        Assert-True ((& $cmPreflight) -eq $false) 'Phase 8 accepted an incomplete rollback snapshot.'
+        Assert-True (($script:cmCalls -join ',') -eq 'snapshot') 'Phase 8 mounted media after snapshot failure.'
+        $script:snapshotReady = $true
+    }
     $script:cmCalls = @()
     $script:cmProbeThrows = $true
     Assert-True ((& $cmPreflight) -eq $false) "Phase $Phase inventory exception passed."

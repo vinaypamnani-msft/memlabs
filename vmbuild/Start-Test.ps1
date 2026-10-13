@@ -765,7 +765,7 @@ function Invoke-NewLab {
     $script:LastNewLabResumeInfo = $null
     $newLabParameters = [ordered]@{
         Configuration = $ConfigFile
-        NoSnapshot = $true
+        AutoSnapshot = $true
         KeepFailedVMs = $true
         ClearErrorHistoryOnExit = $true
         RequireCleanSource = $RequireCleanSource
@@ -886,6 +886,50 @@ function Get-TestFailureAction {
     }
 }
 
+function Write-TestConfigSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigName
+    )
+
+    $config = Get-Content -LiteralPath $SourcePath -Raw -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ($cmVersion -and $config.cmOptions.version) {
+        if ($config.cmOptions.version -ne $cmVersion) {
+            $config.cmOptions.version = $cmVersion
+            Write-Host "updating cmVersion to $cmVersion"
+        }
+
+        if ($DoNotInstallCM -and $config.cmOptions.Install) {
+            $config.cmOptions.Install = $false
+        }
+    }
+
+    if ($dynamicMemory) {
+        foreach ($vm in $config.virtualMachines) {
+            $dynamicMinRam = if ($vm.sqlVersion) { "4GB" } else { "1GB" }
+            Write-Host "updating dynamicMinRam to $dynamicMinRam on $($vm.VmName)"
+            $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value $dynamicMinRam -Force
+        }
+    }
+    if ($serverVersion) {
+        foreach ($vm in $config.virtualMachines) {
+            if ($vm.operatingSystem -like "*server*") {
+                $vm.operatingSystem = $serverVersion
+            }
+        }
+    }
+
+    $null = Set-FeatureOverrides -Config $config -ConfigName $ConfigName
+    $null = Resolve-TestConfigNetworks -Config $config -ConfigName $ConfigName
+    $config | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $DestinationPath -Force
+    return $config
+}
+
 function Run-Test {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
         Justification = 'Local test-runner helper; not an exported cmdlet.')]
@@ -916,39 +960,12 @@ function Run-Test {
             Invoke-TestGitPull -Context "before $(Split-Path $testjson -Leaf)"
             $outputFile = Split-Path $testjson -leaf
             $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
-            $config = Get-Content $testjson -Force | ConvertFrom-Json
-            if ($cmVersion -and $config.cmOptions.version) {
-                if ($config.cmOptions.version -ne $cmVersion) {
-                    $config.cmOptions.version = $cmVersion
-                    write-host "updating cmVersion to $cmVersion"
-                } 
-
-                if ($DoNotInstallCM -and $config.cmOptions.Install)  {
-                    $config.cmOptions.Install = $false
-                }
-            }
-        
-            if ($dynamicMemory) {
-                foreach ($vm in $config.virtualMachines) {
-                    $dynamicMinRam = if ($vm.sqlVersion) { "4GB" } else { "1GB" }
-                    write-host "updating dynamicMinRam to $dynamicMinRam on $($vm.VmName)"
-                    $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value $dynamicMinRam -Force
-                }       
-            }
-            if ($serverVersion) {
-                foreach ($vm in $config.virtualMachines) {
-                    if ($vm.operatingSystem -like "*server*") {
-                        $vm.operatingSystem = $serverVersion
-                    }
-                }    
-            }
-            Set-FeatureOverrides -Config $config -ConfigName $outputFile
-            Resolve-TestConfigNetworks -Config $config -ConfigName $outputFile
+            $config = Write-TestConfigSnapshot -SourcePath $testjson.FullName `
+                -DestinationPath $ModifiedtestFile -ConfigName $outputFile
             $domainName = $config.vmOptions.domainName
             $global:removedomains += $domainName
             $global:removedomains = @($global:removedomains | Select-Object -Unique)
 
-            $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
             Write-Host "Starting test ($passLabel) for $testjson.  Added $domainName to the cleanup list: $($global:removedomains -join ', ')"
 
             $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
@@ -974,6 +991,11 @@ function Run-Test {
                 if ($action -ne 'Retry') { break }
                 Write-Host "Retrying $testjson ($passLabel)..." -ForegroundColor Cyan
                 Invoke-TestGitPull -Context "before retrying $(Split-Path $testjson -Leaf)"
+                $config = Write-TestConfigSnapshot -SourcePath $testjson.FullName `
+                    -DestinationPath $ModifiedtestFile -ConfigName $outputFile
+                $domainName = $config.vmOptions.domainName
+                $global:removedomains += $domainName
+                $global:removedomains = @($global:removedomains | Select-Object -Unique)
                 if ($resumeInfo -and [int]$resumeInfo.Phase -gt 0) {
                     $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile `
                         -StartPhase ([int]$resumeInfo.Phase) -Restore:([bool]$resumeInfo.Restore)

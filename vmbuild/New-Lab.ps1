@@ -50,8 +50,10 @@ param (
     [switch]$Migrate,
     [Parameter(Mandatory = $false, HelpMessage = "Activate restore menu before deployment")]
     [switch]$Restore,
-    [Parameter(Mandatory = $false, HelpMessage = "No prompt for domain snapshot")]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip the Phase 8 pre-install rollback snapshot")]
     [switch]$NoSnapshot,
+    [Parameter(Mandatory = $false, HelpMessage = "Take the Phase 8 pre-install rollback snapshot without prompting")]
+    [switch]$AutoSnapshot,
     [Parameter(Mandatory = $false, HelpMessage = "Do not auto-remove Phase 1 VMs on failure (keep them around for forensics).")]
     [switch]$KeepFailedVMs,
     [Parameter(Mandatory = $false, HelpMessage = "Release retained ErrorRecords when returning to a long-lived launcher.")]
@@ -65,7 +67,12 @@ param (
 
 )
 
+if ($NoSnapshot.IsPresent -and $AutoSnapshot.IsPresent) {
+    throw '-NoSnapshot and -AutoSnapshot cannot be used together.'
+}
+
 $global:MemLabsNoSnapshot = [bool]$NoSnapshot.IsPresent
+$global:MemLabsAutoSnapshot = [bool]$AutoSnapshot.IsPresent
 $global:NewLabResumeCommand = $null
 $global:NewLabResumeInfo = $null
 
@@ -1353,7 +1360,10 @@ try {
         if ($currentPhase -ge 2) {
             $offerRestore = $false
             if ($currentPhase -eq 8 -and $deployConfig) {
-                try { $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig }
+                try {
+                    $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig `
+                        -SnapshotNamePattern "*MemLabs Phase 8 AutoSnapshot $Global:ConfigurationShort*"
+                }
                 catch { $offerRestore = $false }
             }
             if ($offerRestore) {
@@ -1559,7 +1569,10 @@ finally {
         if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
             $offerRestore = $false
             if ($currentPhase -eq 8 -and $deployConfig) {
-                try { $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig }
+                try {
+                    $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig `
+                        -SnapshotNamePattern "*MemLabs Phase 8 AutoSnapshot $Global:ConfigurationShort*"
+                }
                 catch { $offerRestore = $false }
             }
             if ($offerRestore) {

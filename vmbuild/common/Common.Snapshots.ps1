@@ -114,8 +114,8 @@ function Merge-Phase8AutoSnapshot {
 function Test-Phase8AutoSnapshotExists {
     <#
     .SYNOPSIS
-        Returns $true when a "MemLabs Phase 8 AutoSnapshot" checkpoint still
-        exists on any VM in the domain.
+        Returns $true when one "MemLabs Phase 8 AutoSnapshot" checkpoint name
+        exists on every VM in the domain.
     .DESCRIPTION
         Used to decide whether suggesting -restore after a Phase 8 failure /
         cancel is meaningful. The Phase 8 auto-snapshot is only ever created
@@ -124,28 +124,41 @@ function Test-Phase8AutoSnapshotExists {
         it is merged/removed once Phase 11 validation passes. So its presence
         is a reliable proxy for "a fresh CM setup was attempted this run and a
         pre-install rollback point is available", which is exactly when
-        restoring before retrying makes sense. When it's absent (re-run,
-        -NoSnapshot, snapshot declined, or the run was cancelled before the
-        snapshot was taken) restoring is pointless and should not be offered.
+        restoring before retrying makes sense. Requiring one common checkpoint
+        name prevents a partially captured domain from being offered as a valid
+        rollback point. When it's absent (re-run, -NoSnapshot, snapshot declined,
+        or the run was cancelled before the snapshot was taken) restoring is
+        pointless and should not be offered.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [object]$DeployConfig
+        [object]$DeployConfig,
+        [string]$SnapshotNamePattern = "*MemLabs Phase 8 AutoSnapshot*"
     )
 
     $domain = $DeployConfig.vmOptions.domainName
-    $snapshotPattern = "*MemLabs Phase 8 AutoSnapshot*"
 
     $vms = Get-List -Type VM -DomainName $domain
     if (-not $vms) { return $false }
 
+    $commonSnapshotNames = $null
     foreach ($vm in $vms) {
-        $snaps = @(Get-VMCheckpoint -VMName $vm.vmName -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like $snapshotPattern })
-        if ($snaps.Count -gt 0) { return $true }
+        $snapshotNames = @(Get-VMCheckpoint -VMName $vm.vmName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like $SnapshotNamePattern } |
+            Select-Object -ExpandProperty Name)
+        if ($snapshotNames.Count -eq 0) { return $false }
+
+        if ($null -eq $commonSnapshotNames) {
+            $commonSnapshotNames = @($snapshotNames)
+        }
+        else {
+            $commonSnapshotNames = @($commonSnapshotNames |
+                Where-Object { $_ -in $snapshotNames })
+        }
+        if ($commonSnapshotNames.Count -eq 0) { return $false }
     }
-    return $false
+    return $commonSnapshotNames.Count -gt 0
 }
 
 function Invoke-AutoSnapShotDomain {
@@ -173,7 +186,9 @@ function Invoke-AutoSnapShotDomain {
     $failures = Invoke-SnapshotDomain -domain $domain -comment $comment -quiet:$true
     if ($failures -ne 0) {
         write-log "$failures VM(s) could not be snapshotted" -Failure
+        return $false
     }
+    return $true
 }
 
 function Invoke-SnapshotDomain {

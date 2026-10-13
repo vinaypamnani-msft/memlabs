@@ -72,6 +72,20 @@ CHECKDB collection remains unchanged.
 
 Validate this path with `vmbuild\tools\Test-CmFailureDiagnostics.ps1`.
 
+Unattended `Start-Test` and mixed-revision deployments request a verified Phase
+8 rollback snapshot without prompting. ConfigMgr setup is not dispatched when
+that requested domain snapshot is incomplete, and a failed Phase 8 run exposes
+restore metadata so the bounded automatic retry restores the rollback point
+before relaunching setup. `-NoSnapshot` remains an explicit opt-out for callers
+that accept an unrecoverable partial-install failure.
+
+Critical DC/CAS aborts also finalize the phase elapsed time before returning the
+failure tally, so result validation preserves the guest setup error instead of
+replacing it with a malformed-tally exception.
+
+Validate this path with `vmbuild\tools\Test-AutomatedResumePreparation.ps1` and
+`vmbuild\tools\Test-PhaseFailurePropagation.ps1`.
+
 The `vmbuild\config\tests\CSTest5-A-CSPS-PSHA.json` test configuration allocates
 12 GB to each SQLAO node (CS1SQLAO1 and CS1SQLAO2), up from 7 GB. Updating this
 file alone does not resize existing deployed VMs.
