@@ -664,6 +664,76 @@ function Get-ExistingNamedVms {
     return @($inventory | Where-Object { $VmNames -contains $_.Name })
 }
 
+function Resolve-CrossRevisionVhdBasePath {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $currentPath = ConvertTo-CrossRevisionNormalizedPath -Path $Path
+    $visited = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    while ($true) {
+        if (-not $visited.Add($currentPath)) {
+            throw "VHD parent chain contains a cycle at '$currentPath'."
+        }
+        $vhd = Get-VHD -Path $currentPath -ErrorAction Stop
+        $parentPath = "$($vhd.ParentPath)".Trim()
+        if ([string]::IsNullOrWhiteSpace($parentPath)) {
+            return $currentPath
+        }
+        if (-not [IO.Path]::IsPathRooted($parentPath)) {
+            $parentPath = Join-Path (Split-Path -Parent $currentPath) $parentPath
+        }
+        $currentPath = ConvertTo-CrossRevisionNormalizedPath -Path $parentPath
+    }
+}
+
+function Get-CrossRevisionVmDiskIdentity {
+    param([Parameter(Mandatory = $true)][string] $VmName)
+
+    return @(Get-VMHardDiskDrive -VMName $VmName -ErrorAction Stop |
+        Sort-Object ControllerType, ControllerNumber, ControllerLocation |
+        ForEach-Object {
+            $attachedPath = ConvertTo-CrossRevisionNormalizedPath -Path "$($_.Path)"
+            [ordered]@{
+                ControllerType     = "$($_.ControllerType)"
+                ControllerNumber   = [int]$_.ControllerNumber
+                ControllerLocation = [int]$_.ControllerLocation
+                BasePath           = Resolve-CrossRevisionVhdBasePath -Path $attachedPath
+                AttachedPath       = $attachedPath
+            }
+        })
+}
+
+function Test-CrossRevisionLegacySnapshotDiskMatch {
+    param(
+        [Parameter(Mandatory = $true)][string] $ExpectedPath,
+        [Parameter(Mandatory = $true)] $ActualDisk
+    )
+
+    $expected = ConvertTo-CrossRevisionNormalizedPath -Path $ExpectedPath
+    if ($expected.Equals("$($ActualDisk.AttachedPath)",
+            [StringComparison]::OrdinalIgnoreCase) -or
+        $expected.Equals("$($ActualDisk.BasePath)",
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ([IO.Path]::GetExtension($expected) -ine '.avhdx' -or
+        [IO.Path]::GetExtension("$($ActualDisk.BasePath)") -ine '.vhdx') {
+        return $false
+    }
+
+    # Schema-v1 checkpoints stored the active AVHDX attachment. A successful
+    # develop Phase 11 merges the Phase 8 rollback checkpoint, deletes that
+    # AVHDX, and reattaches its VHDX parent. Recover that one legitimate
+    # transition from Hyper-V's <base>_<guid>.avhdx naming convention.
+    $legacyStem = [IO.Path]::GetFileNameWithoutExtension($expected)
+    $legacyBaseStem = $legacyStem -replace
+        '(?i)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', ''
+    $actualBaseStem = [IO.Path]::GetFileNameWithoutExtension(
+        "$($ActualDisk.BasePath)")
+    return $legacyBaseStem.Equals(
+        $actualBaseStem, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-VmIdentity {
     param([string[]] $VmNames)
 
@@ -671,13 +741,13 @@ function Get-VmIdentity {
     foreach ($vmName in $VmNames) {
         $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
         if (-not $vm) { throw "Expected baseline VM '$vmName' was not found after main deployment." }
-        $paths = @(Get-VMHardDiskDrive -VMName $vmName -ErrorAction Stop |
-                Sort-Object ControllerType, ControllerNumber, ControllerLocation |
-                Select-Object -ExpandProperty Path)
+        $disks = @(Get-CrossRevisionVmDiskIdentity -VmName $vmName)
         $identities += [ordered]@{
-            Name     = $vmName
-            Id       = "$($vm.Id)"
-            VhdPaths = @($paths)
+            Name                = $vmName
+            Id                  = "$($vm.Id)"
+            DiskIdentityVersion = 2
+            Disks               = @($disks)
+            VhdPaths            = @($disks | ForEach-Object { $_.BasePath })
         }
     }
     return @($identities)
@@ -692,11 +762,43 @@ function Assert-BaselineIdentity {
         if ("$($vm.Id)" -ne "$($expected.Id)") {
             throw "Baseline VM '$($expected.Name)' was replaced: expected ID $($expected.Id), found $($vm.Id)."
         }
-        $actualPaths = @(Get-VMHardDiskDrive -VMName $expected.Name -ErrorAction Stop |
-                Sort-Object ControllerType, ControllerNumber, ControllerLocation |
-                Select-Object -ExpandProperty Path)
-        if (($actualPaths -join '|') -ne (@($expected.VhdPaths) -join '|')) {
-            throw "Baseline VM '$($expected.Name)' disk attachment paths changed during expansion."
+        $actualDisks = @(Get-CrossRevisionVmDiskIdentity -VmName $expected.Name)
+        $hasStableDiskSchema = if ($expected -is [Collections.IDictionary]) {
+            $expected.Contains('Disks') -and $null -ne $expected['Disks']
+        }
+        else {
+            $expected.PSObject.Properties['Disks'] -and $null -ne $expected.Disks
+        }
+        $expectedDisks = if ($hasStableDiskSchema) { @($expected.Disks) } else { @() }
+        if ($expectedDisks.Count -gt 0) {
+            $expectedFingerprint = @($expectedDisks | ForEach-Object {
+                    "$($_.ControllerType)|$([int]$_.ControllerNumber)|$([int]$_.ControllerLocation)|$(ConvertTo-CrossRevisionNormalizedPath -Path "$($_.BasePath)")"
+                })
+            $actualFingerprint = @($actualDisks | ForEach-Object {
+                    "$($_.ControllerType)|$([int]$_.ControllerNumber)|$([int]$_.ControllerLocation)|$($_.BasePath)"
+                })
+            if ($expectedFingerprint.Count -ne $actualFingerprint.Count -or
+                -not [string]::Equals(
+                    ($expectedFingerprint -join "`0"),
+                    ($actualFingerprint -join "`0"),
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Baseline VM '$($expected.Name)' disk attachment paths changed during expansion (stable controller/base-VHD lineage differs). Expected: $($expectedFingerprint -join '; '). Actual: $($actualFingerprint -join '; ')."
+            }
+            continue
+        }
+
+        # Schema-v1 state has only ordered attachment paths. Accept the narrow
+        # AVHDX -> matching base VHDX transition caused by successful snapshot
+        # merge, but reject every other path/count change.
+        $legacyPaths = @($expected.VhdPaths)
+        if ($legacyPaths.Count -ne $actualDisks.Count) {
+            throw "Baseline VM '$($expected.Name)' disk attachment paths changed during expansion (disk count $($legacyPaths.Count) -> $($actualDisks.Count))."
+        }
+        for ($i = 0; $i -lt $legacyPaths.Count; $i++) {
+            if (-not (Test-CrossRevisionLegacySnapshotDiskMatch `
+                    -ExpectedPath "$($legacyPaths[$i])" -ActualDisk $actualDisks[$i])) {
+                throw "Baseline VM '$($expected.Name)' disk attachment paths changed during expansion. Legacy expected '$($legacyPaths[$i])'; actual attachment '$($actualDisks[$i].AttachedPath)', base '$($actualDisks[$i].BasePath)'."
+            }
         }
     }
 }

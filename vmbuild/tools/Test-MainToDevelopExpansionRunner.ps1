@@ -15,6 +15,7 @@ $phasesPath = Join-Path $RootPath 'common\Common.Phases.ps1'
 $script:Failures = 0
 $script:MockVms = @{}
 $script:MockDisks = @{}
+$script:MockVhds = @{}
 $script:MockDomainSid = 'S-1-5-21-100-200-300'
 $script:LastCredentialUser = $null
 $script:CredentialAttempts = [System.Collections.Generic.List[string]]::new()
@@ -88,6 +89,14 @@ function Get-VMHardDiskDrive {
     return @($script:MockDisks[$VMName])
 }
 
+function Get-VHD {
+    param([string] $Path, [object] $ErrorAction)
+    if ($script:MockVhds.ContainsKey($Path)) {
+        return $script:MockVhds[$Path]
+    }
+    return [pscustomobject]@{ Path = $Path; ParentPath = $null }
+}
+
 function Invoke-Command {
     param([string] $VMName, [pscredential] $Credential, [scriptblock] $ScriptBlock, [object[]] $ArgumentList, [object] $ErrorAction)
     $script:LastCredentialUser = $Credential.UserName
@@ -131,7 +140,7 @@ if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
 
 $stateRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-plan-$PID"
 Remove-Item -LiteralPath $stateRoot -Recurse -Force -ErrorAction SilentlyContinue
-$pwshPath = Join-Path $PSHOME 'pwsh.exe'
+$pwshPath = (Get-Command pwsh.exe -ErrorAction Stop).Source
 
 $allOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $runnerPath `
         -RepositoryRoot $repoRoot -All -PlanOnly -StateRoot $stateRoot 2>&1 | ForEach-Object { "$_" })
@@ -333,6 +342,9 @@ $invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildS
 . (Import-TestFunction -Path $runnerPath -Name Get-ExpectedVmNames)
 . (Import-TestFunction -Path $runnerPath -Name Get-DomainVms)
 . (Import-TestFunction -Path $runnerPath -Name Get-ExistingNamedVms)
+. (Import-TestFunction -Path $runnerPath -Name Resolve-CrossRevisionVhdBasePath)
+. (Import-TestFunction -Path $runnerPath -Name Get-CrossRevisionVmDiskIdentity)
+. (Import-TestFunction -Path $runnerPath -Name Test-CrossRevisionLegacySnapshotDiskMatch)
 . (Import-TestFunction -Path $runnerPath -Name Get-VmIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-BaselineIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DevelopStageComplete)
@@ -1084,7 +1096,9 @@ $script:MockDisks['NOC-DC1'] = @([pscustomobject]@{
     })
 $identity = @(Get-VmIdentity -VmNames @('NOC-DC1'))
 Assert-Equal "$baselineId" $identity[0].Id 'baseline identity captures the Hyper-V VM ID'
-Assert-Equal 'E:\VirtualMachines\NOC-DC1.vhdx' $identity[0].VhdPaths[0] 'baseline identity captures disk attachment paths'
+Assert-Equal 'E:\VirtualMachines\NOC-DC1.vhdx' $identity[0].VhdPaths[0] 'baseline identity captures stable base-VHD lineage'
+Assert-Equal 2 $identity[0].DiskIdentityVersion 'baseline identity records stable disk schema version'
+Assert-Equal 'SCSI' $identity[0].Disks[0].ControllerType 'baseline identity captures disk controller slot'
 
 try {
     Assert-BaselineIdentity -Identity $identity
@@ -1102,6 +1116,51 @@ $script:MockVms['NOC-DC1'].Id = $originalId
 $script:MockDisks['NOC-DC1'][0].Path = 'E:\VirtualMachines\replacement.vhdx'
 Assert-ThrowsLike -Action { Assert-BaselineIdentity -Identity $identity } -Pattern '*disk attachment paths changed*' -What 'baseline disk replacement fails the cycle'
 $script:MockDisks['NOC-DC1'][0].Path = 'E:\VirtualMachines\NOC-DC1.vhdx'
+$script:MockDisks['NOC-DC1'][0].ControllerLocation = 1
+Assert-ThrowsLike -Action {
+    Assert-BaselineIdentity -Identity $identity
+} -Pattern '*disk attachment paths changed*' `
+    -What 'baseline disk controller-slot replacement fails the cycle'
+$script:MockDisks['NOC-DC1'][0].ControllerLocation = 0
+
+$snapshotPath = 'E:\VirtualMachines\NOC-DC1_11111111-2222-3333-4444-555555555555.avhdx'
+$script:MockDisks['NOC-DC1'][0].Path = $snapshotPath
+$script:MockVhds[$snapshotPath] = [pscustomobject]@{
+    Path = $snapshotPath
+    ParentPath = 'E:\VirtualMachines\NOC-DC1.vhdx'
+}
+$snapshotIdentity = @(Get-VmIdentity -VmNames @('NOC-DC1'))
+Assert-Equal 'E:\VirtualMachines\NOC-DC1.vhdx' $snapshotIdentity[0].VhdPaths[0] `
+    'checkpoint attachment resolves to stable base-VHD lineage'
+$script:MockDisks['NOC-DC1'][0].Path = 'E:\VirtualMachines\NOC-DC1.vhdx'
+try {
+    Assert-BaselineIdentity -Identity $snapshotIdentity
+    Write-TestResult -Passed $true -What 'snapshot merge preserves stable disk identity'
+}
+catch {
+    Write-TestResult -Passed $false -What 'snapshot merge preserves stable disk identity' -Detail $_.Exception.Message
+}
+
+$legacySnapshotIdentity = @([pscustomobject]@{
+        Name = 'NOC-DC1'
+        Id = "$baselineId"
+        VhdPaths = @($snapshotPath)
+    })
+try {
+    Assert-BaselineIdentity -Identity $legacySnapshotIdentity
+    Write-TestResult -Passed $true -What 'legacy AVHDX identity accepts matching snapshot merge'
+}
+catch {
+    Write-TestResult -Passed $false -What 'legacy AVHDX identity accepts matching snapshot merge' -Detail $_.Exception.Message
+}
+$legacySnapshotIdentity[0].VhdPaths = @(
+    'E:\VirtualMachines\replacement_11111111-2222-3333-4444-555555555555.avhdx')
+Assert-ThrowsLike -Action {
+    Assert-BaselineIdentity -Identity $legacySnapshotIdentity
+} -Pattern '*disk attachment paths changed*' `
+    -What 'legacy AVHDX identity still rejects a different base disk'
+$script:MockVhds.Remove($snapshotPath)
+
 Assert-ThrowsLike -Action {
     Assert-DomainsAbsent -Domains @('unrelated.test') -VmNames @('NOC-DC1')
 } -Pattern '*already exist*' -What 'VM-name collision fails even when domain-note matching cannot help'
