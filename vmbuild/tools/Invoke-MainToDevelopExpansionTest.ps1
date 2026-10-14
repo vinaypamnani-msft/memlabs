@@ -932,7 +932,17 @@ function Get-DomainIdentity {
 }
 
 function Assert-DomainJoinedVmHealth {
-    param([object] $Config, [string] $FixtureName, [string] $AdminCachePath)
+    param(
+        [object] $Config,
+        [string] $FixtureName,
+        [string] $AdminCachePath,
+        [ValidateRange(1, 60)]
+        [int] $MaximumAttempts = 20,
+        [ValidateRange(0, 60)]
+        [int] $RetrySeconds = 15,
+        [ValidateRange(1, 5)]
+        [int] $RequiredStableSamples = 2
+    )
 
     $domainJoinedRoles = @('DomainMember', 'FileServer', 'PassiveSite', 'Primary', 'Secondary', 'SiteSystem', 'SQLAO', 'WSUS')
     $domain = [string]$Config.vmOptions.domainName
@@ -944,34 +954,90 @@ function Assert-DomainJoinedVmHealth {
         $vmName = Get-FullVmName -Prefix $prefix -VmName ([string]$vmConfig.vmName)
         $credentials = @(New-DomainCredentials -Domain $domain -AdminName $adminName -AdminCachePath $AdminCachePath `
                 -DomainNetBiosName $domainNetBiosName -VmName $vmName)
-        $health = Invoke-CrossRevisionDomainProbe -VmName $vmName -Credentials $credentials `
-            -ExpectedDomain $domain -ExpectedUser $adminName -ScriptBlock {
-            param($ExpectedDomain)
-            $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-            $computerSystem = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
-            $secureChannel = Test-ComputerSecureChannel -ErrorAction Stop
-            $fqdn = "$env:COMPUTERNAME.$ExpectedDomain"
-            $dnsAddresses = @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop |
-                    Where-Object { $_.IPAddress } |
-                    Select-Object -ExpandProperty IPAddress -Unique)
-            [pscustomobject]@{
-                PartOfDomain              = [bool]$computerSystem.PartOfDomain
-                Domain                    = [string]$computerSystem.Domain
-                SecureChannel             = [bool]$secureChannel
-                DnsAddresses              = @($dnsAddresses)
-                _MemLabsIdentity          = $identity
-                _MemLabsUserDnsDomain     = "$env:USERDNSDOMAIN"
-                _MemLabsUserName          = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { "$env:USERNAME" }
+        $stableSamples = 0
+        $health = $null
+        for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+            $health = Invoke-CrossRevisionDomainProbe -VmName $vmName -Credentials $credentials `
+                -ExpectedDomain $domain -ExpectedUser $adminName -ScriptBlock {
+                param($ExpectedDomain)
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                $computerSystem = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+                $secureChannel = $false
+                $secureChannelError = ''
+                try {
+                    $secureChannel = [bool](Test-ComputerSecureChannel -ErrorAction Stop)
+                }
+                catch {
+                    $secureChannelError = ($_.Exception.Message -replace '\s+', ' ').Trim()
+                }
+                $nltestOutput = (& nltest.exe "/sc_query:$ExpectedDomain" 2>&1 | Out-String).Trim()
+                $nltestExitCode = $LASTEXITCODE
+                $trustedDc = ''
+                if ($nltestOutput -match '(?im)Trusted DC Name\s+\\\\([^\s]+)') {
+                    $trustedDc = $Matches[1]
+                }
+                $fqdn = "$env:COMPUTERNAME.$ExpectedDomain"
+                $dnsAddresses = @()
+                try {
+                    $dnsAddresses = @(Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop |
+                            Where-Object { $_.IPAddress } |
+                            Select-Object -ExpandProperty IPAddress -Unique)
+                }
+                catch { }
+                if (-not $secureChannel -or $nltestExitCode -ne 0) {
+                    & nltest.exe "/dsgetdc:$ExpectedDomain" /force 2>&1 | Out-Null
+                }
+                [pscustomobject]@{
+                    PartOfDomain          = [bool]$computerSystem.PartOfDomain
+                    Domain                = [string]$computerSystem.Domain
+                    SecureChannel         = [bool]$secureChannel
+                    SecureChannelError    = $secureChannelError
+                    NltestHealthy         = ($nltestExitCode -eq 0)
+                    NltestExitCode        = [int]$nltestExitCode
+                    NltestOutput          = $nltestOutput
+                    TrustedDc             = $trustedDc
+                    LogonServer           = "$env:LOGONSERVER"
+                    DnsAddresses          = @($dnsAddresses)
+                    _MemLabsIdentity      = $identity
+                    _MemLabsUserDnsDomain = "$env:USERDNSDOMAIN"
+                    _MemLabsUserName      = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { "$env:USERNAME" }
+                }
+            } -ArgumentList $domain
+
+            $sampleHealthy = $health.PartOfDomain -and
+                $health.Domain -ieq $domain -and
+                $health.SecureChannel -and
+                (-not $health.PSObject.Properties['NltestHealthy'] -or
+                    [bool]$health.NltestHealthy) -and
+                @($health.DnsAddresses | Where-Object { $null -ne $_ }).Count -gt 0
+            if ($sampleHealthy) {
+                $stableSamples++
+                if ($stableSamples -ge $RequiredStableSamples) { break }
             }
-        } -ArgumentList $domain
+            else {
+                $stableSamples = 0
+            }
+            if ($attempt -lt $MaximumAttempts) {
+                $dcDetail = if ($health.TrustedDc) { $health.TrustedDc } else { "$($health.LogonServer)".TrimStart('\') }
+                Write-Host "WAIT: $vmName domain convergence sample $attempt/$MaximumAttempts is not yet stable (joined=$($health.PartOfDomain), Test-ComputerSecureChannel=$($health.SecureChannel), nltest=$($health.NltestHealthy), DC='$dcDetail', DNS=$(@($health.DnsAddresses).Count)); retrying in ${RetrySeconds}s." -ForegroundColor Yellow
+                if ($RetrySeconds -gt 0) { Start-Sleep -Seconds $RetrySeconds }
+            }
+        }
         if (-not $health.PartOfDomain -or $health.Domain -ine $domain) {
             throw "$FixtureName left '$vmName' outside '$domain' (PartOfDomain=$($health.PartOfDomain), Domain=$($health.Domain))."
         }
-        if (-not $health.SecureChannel) {
-            throw "$FixtureName left '$vmName' with a broken secure channel to '$domain'."
+        if ($stableSamples -lt $RequiredStableSamples -and
+            (-not $health.SecureChannel -or
+                ($health.PSObject.Properties['NltestHealthy'] -and
+                    -not $health.NltestHealthy))) {
+            $nltestSummary = ("$($health.NltestOutput)" -replace '\s+', ' ').Trim()
+            throw "$FixtureName left '$vmName' with a broken secure channel to '$domain' after $MaximumAttempts convergence samples (Test-ComputerSecureChannel=$($health.SecureChannel), error='$($health.SecureChannelError)', nltestExit=$($health.NltestExitCode), trustedDC='$($health.TrustedDc)', logonServer='$($health.LogonServer)', nltest='$nltestSummary')."
         }
         if (@($health.DnsAddresses | Where-Object { $null -ne $_ }).Count -eq 0) {
             throw "$FixtureName left '$vmName' without an A record for '$vmName.$domain'."
+        }
+        if ($stableSamples -lt $RequiredStableSamples) {
+            throw "$FixtureName left '$vmName' without $RequiredStableSamples consecutive healthy domain samples after $MaximumAttempts attempts."
         }
     }
 }

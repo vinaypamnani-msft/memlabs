@@ -9914,19 +9914,43 @@ function Test-DomainMemberFunctionality {
         }
 
         # Secure channel
-        # Retry a few times: right after Phase 10 the netlogon service / DC can
-        # be transiently unreachable, especially in parallel runs, and a single
-        # false return would otherwise fail an otherwise-healthy client.
+        # Require consecutive agreement between the cmdlet and nltest. A new
+        # member in a two-DC lab can briefly alternate between the join DC and a
+        # replica that has not received the latest machine-account password yet.
+        # Accepting the first true sample lets New-Lab finish inside that window;
+        # rejecting the first false sample creates the opposite false failure.
         Write-Progress -Activity $progressActivity -Status "Checking secure channel"
         $sc = $false
         $scError = $null
-        for ($i = 1; $i -le 4; $i++) {
+        $scStableSamples = 0
+        $scTrustedDc = ''
+        $scNltestOutput = ''
+        for ($i = 1; $i -le 12; $i++) {
+            $sampleSecure = $false
+            $sampleError = $null
             try {
-                $sc = Test-ComputerSecureChannel -ErrorAction Stop
-                if ($sc) { break }
+                $sampleSecure = [bool](Test-ComputerSecureChannel -ErrorAction Stop)
             }
-            catch { $scError = $_ }
-            if ($i -lt 4) { Start-Sleep -Seconds (5 * $i) }
+            catch { $sampleError = $_ }
+            $scNltestOutput = (& nltest.exe "/sc_query:$expectedDomain" 2>&1 | Out-String).Trim()
+            $nltestHealthy = ($LASTEXITCODE -eq 0)
+            if ($scNltestOutput -match '(?im)Trusted DC Name\s+\\\\([^\s]+)') {
+                $scTrustedDc = $Matches[1]
+            }
+            if ($sampleSecure -and $nltestHealthy) {
+                $scStableSamples++
+                if ($scStableSamples -ge 2) {
+                    $sc = $true
+                    $scError = $null
+                    break
+                }
+            }
+            else {
+                $scStableSamples = 0
+                $scError = $sampleError
+                & nltest.exe "/dsgetdc:$expectedDomain" /force 2>&1 | Out-Null
+            }
+            if ($i -lt 12) { Start-Sleep -Seconds 5 }
         }
         if (-not $sc -and -not $scError) {
             # Attempt repair: resets the machine account password in AD.
@@ -9935,7 +9959,30 @@ function Test-DomainMemberFunctionality {
             try {
                 $sc = Test-ComputerSecureChannel -Repair -ErrorAction Stop
                 if ($sc) {
-                    $results.Details.Add("RECOVERED: Secure channel was broken; repaired successfully")
+                    $repairStableSamples = 0
+                    $sc = $false
+                    for ($verifyAttempt = 1; $verifyAttempt -le 6; $verifyAttempt++) {
+                        Start-Sleep -Seconds 5
+                        $verifyCmdlet = [bool](Test-ComputerSecureChannel -ErrorAction SilentlyContinue)
+                        $verifyNltest = (& nltest.exe "/sc_query:$expectedDomain" 2>&1 | Out-String).Trim()
+                        $verifyNltestHealthy = ($LASTEXITCODE -eq 0)
+                        if ($verifyNltest -match '(?im)Trusted DC Name\s+\\\\([^\s]+)') {
+                            $scTrustedDc = $Matches[1]
+                        }
+                        if ($verifyCmdlet -and $verifyNltestHealthy) {
+                            $repairStableSamples++
+                            if ($repairStableSamples -ge 2) {
+                                $sc = $true
+                                break
+                            }
+                        }
+                        else {
+                            $repairStableSamples = 0
+                        }
+                    }
+                    if ($sc) {
+                        $results.Details.Add("RECOVERED: Secure channel was broken; repaired and verified with 2 consecutive Test-ComputerSecureChannel + nltest samples")
+                    }
                 }
             }
             catch {
@@ -9943,14 +9990,16 @@ function Test-DomainMemberFunctionality {
             }
         }
         if ($sc) {
-            $results.Details.Add("OK: Secure channel to domain is healthy")
+            $dcSuffix = if ($scTrustedDc) { " via '$scTrustedDc'" } else { '' }
+            $results.Details.Add("OK: Secure channel to domain is stable (2 consecutive Test-ComputerSecureChannel + nltest samples)$dcSuffix")
         }
         elseif ($scError) {
             $results.Details.Add("WARN: Test-ComputerSecureChannel threw after retries: $($scError.Exception.Message)")
         }
         else {
             $results.Passed = $false
-            $results.Details.Add("FAIL: Test-ComputerSecureChannel returned False after repair attempt -- machine account may need to be reset in AD (Reset-ComputerMachinePassword)")
+            $nltestSummary = ($scNltestOutput -replace '\s+', ' ').Trim()
+            $results.Details.Add("FAIL: Secure channel did not stabilize after 12 samples and repair attempt (trustedDC='$scTrustedDc', nltest='$nltestSummary')")
         }
 
         # Time sync

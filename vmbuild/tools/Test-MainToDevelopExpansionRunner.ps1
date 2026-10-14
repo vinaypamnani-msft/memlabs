@@ -12,6 +12,7 @@ $startTestPath = Join-Path $RootPath 'Start-Test.ps1'
 $childLauncherPath = Join-Path $PSScriptRoot 'Invoke-PinnedChildScript.ps1'
 $newLabPath = Join-Path $RootPath 'New-Lab.ps1'
 $phasesPath = Join-Path $RootPath 'common\Common.Phases.ps1'
+$functionalValidationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
 $script:Failures = 0
 $script:MockVms = @{}
 $script:MockDisks = @{}
@@ -24,8 +25,11 @@ $script:MockIdentityDnsDomain = 'nocm.com'
 $script:MockIdentityUser = $null
 $script:MockGetVmFailure = $false
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; DnsAddresses = @('10.220.201.20')
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+    NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+    DnsAddresses = @('10.220.201.20')
 }
+$script:MockDomainHealthSequence = [System.Collections.Generic.Queue[object]]::new()
 
 function Write-TestResult {
     param([bool] $Passed, [string] $What, [string] $Detail = '')
@@ -60,6 +64,14 @@ Assert-True ($childLauncherText -match 'Console\.CancelKeyPress' -and
     $childLauncherText -match 'Environment\.Exit\(130\)' -and
     $childLauncherText -match 'InstallImmediateCancelExit') `
     'pinned child launcher converts Ctrl-C into immediate Job Object teardown'
+
+$functionalValidationText = Get-Content -LiteralPath $functionalValidationPath -Raw
+Assert-True ($functionalValidationText -match
+    '(?s)\$scStableSamples\s*=\s*0.+?nltest\.exe\s+"/sc_query:\$expectedDomain".+?\$scStableSamples\s*-ge\s*2') `
+    'Phase 11 requires consecutive cmdlet and nltest secure-channel samples'
+Assert-True ($functionalValidationText -match
+    '(?s)\$repairStableSamples\s*=\s*0.+?\$repairStableSamples\s*-ge\s*2') `
+    'Phase 11 repair is revalidated with consecutive healthy samples'
 
 function Import-TestFunction {
     param([string] $Path, [string] $Name)
@@ -115,11 +127,23 @@ function Invoke-Command {
     }
     if ($script:MockIdentityUser) { $identityUser = $script:MockIdentityUser }
     if ("$ScriptBlock" -like '*Test-ComputerSecureChannel*') {
+        $health = if ($script:MockDomainHealthSequence.Count -gt 0) {
+            $script:MockDomainHealthSequence.Dequeue()
+        }
+        else {
+            $script:MockDomainHealth
+        }
         return [pscustomobject]@{
-            PartOfDomain = $script:MockDomainHealth.PartOfDomain
-            Domain = $script:MockDomainHealth.Domain
-            SecureChannel = $script:MockDomainHealth.SecureChannel
-            DnsAddresses = @($script:MockDomainHealth.DnsAddresses)
+            PartOfDomain = $health.PartOfDomain
+            Domain = $health.Domain
+            SecureChannel = $health.SecureChannel
+            SecureChannelError = "$($health.SecureChannelError)"
+            NltestHealthy = if ($health.PSObject.Properties['NltestHealthy']) { $health.NltestHealthy } else { $true }
+            NltestExitCode = if ($health.PSObject.Properties['NltestExitCode']) { $health.NltestExitCode } else { 0 }
+            NltestOutput = "$($health.NltestOutput)"
+            TrustedDc = "$($health.TrustedDc)"
+            LogonServer = "$($health.LogonServer)"
+            DnsAddresses = @($health.DnsAddresses)
             _MemLabsIdentity = "NOCM\$identityUser"
             _MemLabsUserDnsDomain = $script:MockIdentityDnsDomain
             _MemLabsUserName = $identityUser
@@ -1221,7 +1245,7 @@ Assert-ThrowsLike -Action {
 } -Pattern '*incomplete*' -What 'string-valued false success cannot pass by truthiness'
 $script:MockVms['NOC-W11CLIENT1'].Notes = '{"success":true,"inProgress":false,"lastPhaseComplete":11}'
 try {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -RetrySeconds 0
     Write-TestResult -Passed $true -What 'domain member independently passes join, secure-channel, and DNS checks'
 }
 catch {
@@ -1230,34 +1254,63 @@ catch {
 $script:CredentialAttempts.Clear()
 $script:RejectedCredentialUsers = @('admin2@nocm.com')
 try {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -RetrySeconds 0
     Write-TestResult -Passed $true -What 'Server 2019-style UPN rejection falls back to the exact NetBIOS domain principal'
 }
 catch {
     Write-TestResult -Passed $false -What 'Server 2019-style UPN rejection falls back to the exact NetBIOS domain principal' -Detail $_.Exception.Message
 }
-Assert-Equal 'admin2@nocm.com|NOCM\admin2' ($script:CredentialAttempts -join '|') 'domain probe tries UPN then NetBIOS in order'
+Assert-Equal 'admin2@nocm.com|NOCM\admin2|admin2@nocm.com|NOCM\admin2' ($script:CredentialAttempts -join '|') 'domain probe tries UPN then NetBIOS in order for both stable samples'
 Assert-Equal 'NOCM\admin2' $script:LastCredentialUser 'successful fallback uses the NetBIOS domain principal'
 $script:RejectedCredentialUsers = @()
 $script:MockIdentityDnsDomain = 'fabrikam.com'
 Assert-ThrowsLike -Action {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0
 } -Pattern '*Identity mismatch*' -What 'runner rejects a credential that authenticates into the wrong DNS domain'
 $script:MockIdentityDnsDomain = 'nocm.com'
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $false; DnsAddresses = @('10.220.201.20')
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $false; NltestHealthy = $false
+    NltestExitCode = 5; TrustedDc = 'NOC-DC2.nocm.com'; LogonServer = '\\NOC-DC2'
+    NltestOutput = 'Status = 5 0x5 ERROR_ACCESS_DENIED'; DnsAddresses = @('10.220.201.20')
 }
 Assert-ThrowsLike -Action {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -MaximumAttempts 3 -RetrySeconds 0
 } -Pattern '*broken secure channel*' -What 'independent secure-channel failure stops the cycle'
+$script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
+        PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $false; NltestHealthy = $false
+        NltestExitCode = 1355; TrustedDc = 'NOC-DC2.nocm.com'; LogonServer = '\\NOC-DC2'
+        DnsAddresses = @('10.220.201.20')
+    })
+$script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
+        PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+        NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+        DnsAddresses = @('10.220.201.20')
+    })
+$script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
+        PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+        NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+        DnsAddresses = @('10.220.201.20')
+    })
+try {
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'transient-channel' `
+        -AdminCachePath $credentialPath -MaximumAttempts 4 -RetrySeconds 0
+    Write-TestResult -Passed $true -What 'transient multi-DC secure-channel lag converges before runner failure'
+}
+catch {
+    Write-TestResult -Passed $false -What 'transient multi-DC secure-channel lag converges before runner failure' -Detail $_.Exception.Message
+}
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; DnsAddresses = @()
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+    NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+    DnsAddresses = @()
 }
 Assert-ThrowsLike -Action {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0
 } -Pattern '*without an A record*' -What 'missing DNS registration stops the cycle'
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; DnsAddresses = @('10.220.201.20')
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+    NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+    DnsAddresses = @('10.220.201.20')
 }
 Remove-Item -LiteralPath $credentialPath -Force -ErrorAction SilentlyContinue
 
