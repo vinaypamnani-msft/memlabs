@@ -119,6 +119,12 @@ Write-Host "engine  : $($PSVersionTable.PSVersion)"
 Write-Host "source  : $sourcePath"
 Write-Host ''
 
+$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('MemLabs WinGet maintenance test {0}' -f [guid]::NewGuid().ToString('N'))
+$savedTemp = $env:TEMP
+$null = New-Item -Path $fixtureRoot -ItemType Directory -Force
+$env:TEMP = $fixtureRoot
+$script:logsPath = $fixtureRoot
+
 Reset-Fixture
 $script:WingetAvailable = $false
 Invoke-WinGetMaintenance -WaitForCompletion
@@ -138,6 +144,12 @@ Reset-Fixture
 $script:WingetOutput = @('Successfully installed')
 Invoke-WinGetMaintenance -WaitForCompletion
 Assert-Equal $true ($script:Logs[-1].Message -like '*completed successfully*') 'successful WinGet upgrades are logged'
+$scheduledLog = @(Get-ChildItem -LiteralPath $fixtureRoot -Filter 'WinGetUpgrade_*.log' -File | Sort-Object LastWriteTime -Descending)[0]
+Assert-Equal $true ($null -ne $scheduledLog) 'scheduled maintenance creates a dedicated WinGet log'
+$scheduledLogText = Get-Content -LiteralPath $scheduledLog.FullName -Raw
+Assert-Equal $true $scheduledLogText.Contains('Successfully installed') 'scheduled WinGet output is persisted'
+Assert-Equal $true $scheduledLogText.Contains('Exit code: 0') 'scheduled WinGet exit code is persisted'
+Assert-Equal $true ($script:Logs[-1].Message -like "*$($scheduledLog.FullName)*") 'scheduled maintenance references the dedicated log'
 
 Reset-Fixture
 $script:WingetExitCode = -1978335188
@@ -149,12 +161,7 @@ $script:WingetExitCode = 42
 $script:WingetOutput = @('simulated failure')
 Assert-Throws { Invoke-WinGetMaintenance -WaitForCompletion } 'an unexpected WinGet failure is surfaced'
 
-$fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('MemLabs WinGet maintenance test {0}' -f [guid]::NewGuid().ToString('N'))
-$savedTemp = $env:TEMP
 try {
-    $null = New-Item -Path $fixtureRoot -ItemType Directory -Force
-    $env:TEMP = $fixtureRoot
-
     Reset-Fixture
     $script:WingetSource = 'C:\Program Files\WindowsApps\winget.exe'
     $mutexName = 'Global\MemLabs_ChocolateyUpgrade_Test'
@@ -169,6 +176,9 @@ try {
     $childScript = Get-Content -LiteralPath $childScriptPath -Raw
     Assert-Equal $true $childScript.Contains($mutexName) 'interactive child uses the package upgrade mutex'
     Assert-Equal $true $childScript.Contains('winget.exe'' upgrade --all --source winget') 'interactive child runs the same upgrade-all command'
+    Assert-Equal $true $childScript.Contains('Start-Transcript -LiteralPath $wingetLogFile') 'interactive child transcripts full console output'
+    Assert-Equal $true $childScript.Contains('Stop-Transcript') 'interactive child closes its transcript'
+    Assert-Equal $true ($script:Logs[-1].Message -like '*WinGetUpgrade_*.log*') 'interactive maintenance references the dedicated log'
     Assert-Equal $true $childScript.Contains('list --id Microsoft.VisualStudioCode --exact --source winget --upgrade-available') 'aggregate failure checks whether VS Code remains upgradeable'
     Assert-Equal $true $childScript.Contains('$process.CloseMainWindow()') 'VS Code receives a graceful window-close request'
     Assert-Equal $true $childScript.Contains('upgrade --id Microsoft.VisualStudioCode --exact --source winget') 'VS Code is retried after a clean exit'

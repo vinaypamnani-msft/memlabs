@@ -723,10 +723,26 @@ function Get-InstalledEntry {
 function Invoke-WinGetMaintenance {
     param (
         [switch] $WaitForCompletion,
-        [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade'
+        [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade',
+        [string] $LogDirectory = $logsPath
     )
 
     Write-LogMessage 'Starting WinGet package maintenance...'
+
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        throw 'The WinGet maintenance log directory was not provided.'
+    }
+    if (-not (Test-Path -LiteralPath $LogDirectory)) {
+        New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    $wingetLogs = @(Get-ChildItem -LiteralPath $LogDirectory -Filter 'WinGetUpgrade_*.log' -File -ErrorAction SilentlyContinue |
+        Sort-Object CreationTime -Descending)
+    if ($wingetLogs.Count -gt 3) {
+        $wingetLogs | Select-Object -Skip 3 | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    $wingetLogFile = Join-Path $LogDirectory ('WinGetUpgrade_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 
     $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $winget) {
@@ -747,8 +763,18 @@ function Invoke-WinGetMaintenance {
     if (-not $WaitForCompletion) {
         $wingetScriptPath = Join-Path $env:TEMP 'memlabs_winget_upgrade.ps1'
         $wingetPath = "$($winget.Source)".Replace("'", "''")
+        $escapedWingetLogFile = $wingetLogFile.Replace("'", "''")
         $scriptLines = @(
             '$Host.UI.RawUI.WindowTitle = "MemLabs - WinGet Upgrades"'
+            "`$wingetLogFile = '$escapedWingetLogFile'"
+            '$transcriptStarted = $false'
+            'try {'
+            '    Start-Transcript -LiteralPath $wingetLogFile -Force -ErrorAction Stop | Out-Null'
+            '    $transcriptStarted = $true'
+            '} catch {'
+            '    Write-Host "Could not start WinGet transcript at $wingetLogFile`: $_" -ForegroundColor Yellow'
+            '}'
+            'try {'
             "Write-Host 'Upgrading all WinGet-matched packages...' -ForegroundColor Cyan"
             '$mutex = $null'
             '$acquired = $false'
@@ -800,30 +826,43 @@ function Invoke-WinGetMaintenance {
             "Write-Host ''"
             "Write-Host 'Done. This window will close in 10 seconds...' -ForegroundColor Cyan"
             'Start-Sleep -Seconds 10'
+            '} finally {'
+            '    if ($transcriptStarted) { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null }'
+            '}'
         )
         $scriptLines -join "`n" | Out-File $wingetScriptPath -Encoding utf8
 
         Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wingetScriptPath -WindowStyle Normal
-        Write-LogMessage 'WinGet package upgrades launched in a new window (non-blocking).'
+        Write-LogMessage "WinGet package upgrades launched in a new window (non-blocking). Full output: $wingetLogFile"
         return
     }
 
+    $wingetStarted = Get-Date
     $output = @(& $winget.Source @arguments 2>&1)
     $exitCode = $LASTEXITCODE
+    @(
+        "WinGet package maintenance started: $($wingetStarted.ToString('o'))"
+        "Command: winget $($arguments -join ' ')"
+        ''
+        @($output | ForEach-Object { "$_" })
+        ''
+        "Exit code: $exitCode"
+        "WinGet package maintenance completed: $(Get-Date -Format 'o')"
+    ) | Set-Content -LiteralPath $wingetLogFile -Encoding utf8
 
     # WinGet uses this documented HRESULT when the installed build is already current.
     if ($exitCode -eq -1978335189) {
-        Write-LogMessage 'All WinGet-matched packages are already current.'
+        Write-LogMessage "All WinGet-matched packages are already current. Full output: $wingetLogFile"
         return
     }
 
     if ($exitCode -ne 0) {
         $detail = (@($output | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' | ')
-        if ($detail) { throw "winget upgrade --all failed with exit code $exitCode`: $detail" }
-        throw "winget upgrade --all failed with exit code $exitCode."
+        if ($detail) { throw "winget upgrade --all failed with exit code $exitCode. Full output: $wingetLogFile. $detail" }
+        throw "winget upgrade --all failed with exit code $exitCode. Full output: $wingetLogFile."
     }
 
-    Write-LogMessage 'WinGet package upgrades completed successfully.'
+    Write-LogMessage "WinGet package upgrades completed successfully. Full output: $wingetLogFile"
 }
 
 function ConvertTo-QuietUninstallCommand {
