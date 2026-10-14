@@ -141,7 +141,11 @@ if ($enabled) {
     }
 }
 $CAName = "$DomainShort-$CAVMName-CA"
-$CertPath = "c:\temp\rootca.cer"
+$tempDirectory = 'C:\temp'
+if (-not (Test-Path -LiteralPath $tempDirectory -PathType Container)) {
+    $null = New-Item -ItemType Directory -Path $tempDirectory -Force -ErrorAction Stop
+}
+$CertPath = Join-Path $tempDirectory 'rootca.cer'
 
 if (-not (Test-Path $CertPath)) {
     if ($CAVM.SubordinateCA) {

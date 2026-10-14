@@ -12752,6 +12752,9 @@ Function Install-HostToServer2025 {
         }
 
         $expandLocation = "C:\temp\Upgrade2025"
+        if (-not (Test-Path -LiteralPath $expandLocation -PathType Container)) {
+            $null = New-Item -ItemType Directory -Path $expandLocation -Force -ErrorAction Stop
+        }
 
         powershell.exe -NoProfile -Command "Expand-Archive -Path '$filename' -DestinationPath '$expandLocation' -Force"
     }

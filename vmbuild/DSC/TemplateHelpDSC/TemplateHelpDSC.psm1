@@ -2,6 +2,10 @@
 # WmiPrvSE -> Winmgmt -> WinRM, and block the engine if that client never drains them.
 $ProgressPreference = 'SilentlyContinue'
 
+if (-not (Test-Path -LiteralPath 'C:\temp' -PathType Container)) {
+    $null = New-Item -ItemType Directory -Path 'C:\temp' -Force -ErrorAction Stop
+}
+
 enum Ensure {
     Absent
     Present

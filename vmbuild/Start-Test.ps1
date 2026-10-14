@@ -923,6 +923,11 @@ function Write-TestConfigSnapshot {
         [string]$ConfigName
     )
 
+    $destinationDirectory = Split-Path -Path $DestinationPath -Parent
+    if ($destinationDirectory -and -not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $destinationDirectory -Force -ErrorAction Stop
+    }
+
     $config = Get-Content -LiteralPath $SourcePath -Raw -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     if ($cmVersion -and $config.cmOptions.version) {
         if ($config.cmOptions.version -ne $cmVersion) {
@@ -985,7 +990,7 @@ function Run-Test {
             # merge commit; a pull failure is non-fatal (continue with the current tree).
             Invoke-TestGitPull -Context "before $(Split-Path $testjson -Leaf)"
             $outputFile = Split-Path $testjson -leaf
-            $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
+            $ModifiedtestFile = Join-Path $script:TestWorkingDirectory $outputFile
             $config = Write-TestConfigSnapshot -SourcePath $testjson.FullName `
                 -DestinationPath $ModifiedtestFile -ConfigName $outputFile
             $domainName = $config.vmOptions.domainName
@@ -1220,6 +1225,12 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
 
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
+$script:TestWorkingDirectory = 'C:\temp'
+if (-not (Test-Path -LiteralPath $script:TestWorkingDirectory -PathType Container)) {
+    $null = New-Item -ItemType Directory -Path $script:TestWorkingDirectory -Force -ErrorAction Stop
+}
+$script:CompletedTestsPath = Join-Path $script:TestWorkingDirectory 'CompletedTests.txt'
+
 try {
     $global:history = @()
     $global:removedomains = @()
@@ -1260,7 +1271,7 @@ try {
         Write-Host "Running '$($resolvedTestSuite.Name)' suite: $($Tests -join ', ')" -ForegroundColor Cyan
 
         foreach ($Test in $Tests) {
-            if (Get-Content "c:\temp\CompletedTests.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -eq $Test }) {
+            if (Get-Content -LiteralPath $script:CompletedTestsPath -ErrorAction SilentlyContinue | Where-Object { $_ -eq $Test }) {
                 write-host "$Test already ran skipping"
                 continue
             }
@@ -1282,7 +1293,7 @@ try {
             }else {
                 write-host "global:removedomains was empty"
             }
-            $Test | Out-File "c:\temp\CompletedTests.txt" -Force -Append
+            $Test | Out-File -LiteralPath $script:CompletedTestsPath -Force -Append
         }
     }
 }
@@ -1298,7 +1309,7 @@ finally {
             Write-GreenCheck $historyitem
         }
     }
-    Write-host "Delete C:\temp\CompletedTests.txt to re-run all tests"
+    Write-host "Delete $script:CompletedTestsPath to re-run all tests"
     if ($script:TestMutationMutexHeld) {
         try { $script:TestMutationMutex.ReleaseMutex() } catch { }
     }

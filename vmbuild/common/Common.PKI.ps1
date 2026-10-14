@@ -207,6 +207,10 @@ function Install-PKICertificateTemplates {
             # ldifde -k skips entries that already exist, so re-running is safe.
             $configCtxA = ([ADSI]"LDAP://RootDSE").configurationNamingContext
             $oidContainerDN = "CN=OID,CN=Public Key Services,CN=Services,$configCtxA"
+            $ldfDirectory = 'C:\temp'
+            if (-not (Test-Path -LiteralPath $ldfDirectory -PathType Container)) {
+                $null = New-Item -ItemType Directory -Path $ldfDirectory -Force -ErrorAction Stop
+            }
 
             foreach ($tplName in $TemplateList) {
                 $found = Find-TemplateInAD $tplName
@@ -235,7 +239,7 @@ function Install-PKICertificateTemplates {
                     return @{ Success = $false; Log = $report.ToArray(); Error = "LDF not found: $ldfSource" }
                 }
 
-                $ldfTarget = "C:\temp\$tplName.ldf"
+                $ldfTarget = Join-Path $ldfDirectory "$tplName.ldf"
                 (Get-Content $ldfSource) -replace 'DC=TEMPLATE,DC=com', $dnPath |
                     Set-Content $ldfTarget -Force
 
