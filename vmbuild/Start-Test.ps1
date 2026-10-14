@@ -87,6 +87,12 @@ param (
     [Parameter(Mandatory = $true, HelpMessage = "Continuously run the highest-value test that fits the host", ParameterSetName = 'Continuous')]
     [switch]$Continuous,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Skip one or more test families (for example CSTest5)", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip one or more test families (for example CSTest5)", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip one or more test families (for example CSTest5)", ParameterSetName = 'Suite')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip one or more test families (for example CSTest5)", ParameterSetName = 'Continuous')]
+    [string[]]$SkipTest,
+
     [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
     [switch]$ContinuousPlanOnly,
 
@@ -248,6 +254,20 @@ if ($Suite) {
 elseif ($All.IsPresent) {
     $resolvedTestSuite = Resolve-MemLabsTestSuite -VmbuildRoot $PSScriptRoot -Name 'Core'
 }
+$skipTestNames = @($SkipTest | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+if ($skipTestNames.Count -gt 0) {
+    $knownTestFamilies = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'config\tests') -Filter *.json |
+        ForEach-Object { ($_.BaseName -split '-')[0] } |
+        Where-Object { $_ -and $_ -notmatch 'storageconfig' } |
+        Select-Object -Unique)
+    $unknownSkipTests = @($skipTestNames | Where-Object { $_ -notin $knownTestFamilies })
+    if ($unknownSkipTests.Count -gt 0) {
+        throw "Unknown test family in -SkipTest: $($unknownSkipTests -join ', '). Valid family names include: $($knownTestFamilies -join ', ')."
+    }
+    Write-Host "Skipping test families: $($skipTestNames -join ', ')" -ForegroundColor Yellow
+}
+$skipTestSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($skipTestName in $skipTestNames) { [void]$skipTestSet.Add($skipTestName) }
 $runCrossRevision = $MainToDevelopExpansion.IsPresent -or
     ($resolvedTestSuite -and $resolvedTestSuite.Mode -eq 'CrossRevision')
 
@@ -262,6 +282,7 @@ if ($Continuous.IsPresent) {
         '-RetentionDays', $RetentionDays
     )
     if ($ContinuousPlanOnly.IsPresent) { $continuousArguments += '-PlanOnly' }
+    foreach ($skipTestName in $skipTestNames) { $continuousArguments += @('-SkipTest', $skipTestName) }
     if ($TestHistoryPath) { $continuousArguments += @('-HistoryPath', $TestHistoryPath) }
     if ($TestRetentionPath) { $continuousArguments += @('-RetentionPath', $TestRetentionPath) }
     do {
@@ -271,6 +292,11 @@ if ($Continuous.IsPresent) {
         }
     } while ($continuousExit -eq 57)
     exit $continuousExit
+}
+
+if ($Test -and $skipTestSet.Contains($Test)) {
+    Write-Host "Skipping requested test family '$Test'." -ForegroundColor Yellow
+    exit 0
 }
 
 
@@ -1162,13 +1188,14 @@ if ($runCrossRevision) {
         }
     }
     $crossRevisionFamilies = if ($resolvedTestSuite -and -not $resolvedTestSuite.IncludeAll) {
-        @($resolvedTestSuite.Families)
+        @($resolvedTestSuite.Families | Where-Object { -not $skipTestSet.Contains($_) })
     }
     else {
         @()
     }
-    $crossRevisionRunAll = ($resolvedTestSuite -and $resolvedTestSuite.IncludeAll) -or
+    $crossRevisionRunAll = (($resolvedTestSuite -and $resolvedTestSuite.IncludeAll) -or
         (-not $resolvedTestSuite -and $All.IsPresent)
+    ) -and $skipTestNames.Count -eq 0
     $crossRevisionExit = Invoke-MainToDevelopExpansionCycle `
         -PinnedMainRevision $MainRevision `
         -PinnedDevelopRevision $developRevision `
@@ -1225,7 +1252,11 @@ try {
     }
 
     if ($all -or $Suite) {
-        $Tests = @($resolvedTestSuite.Families)
+        $Tests = @($resolvedTestSuite.Families | Where-Object { -not $skipTestSet.Contains($_) })
+        $skippedSuiteTests = @($resolvedTestSuite.Families | Where-Object { $skipTestSet.Contains($_) })
+        if ($skippedSuiteTests.Count -gt 0) {
+            Write-Host "Skipped from '$($resolvedTestSuite.Name)' suite: $($skippedSuiteTests -join ', ')" -ForegroundColor Yellow
+        }
         Write-Host "Running '$($resolvedTestSuite.Name)' suite: $($Tests -join ', ')" -ForegroundColor Cyan
 
         foreach ($Test in $Tests) {

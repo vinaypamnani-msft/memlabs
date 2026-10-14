@@ -15,7 +15,8 @@ param(
     [double] $MinimumFreeStorageGB = 250,
     [int] $MaximumRetainedLabs = 2,
     [int] $RetentionDays = 7,
-    [int] $WaitSeconds = 60
+    [int] $WaitSeconds = 60,
+    [string[]] $SkipTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,10 @@ $removeLabPath = Join-Path $VmbuildRoot 'Remove-Lab.ps1'
 . (Join-Path $PSScriptRoot 'Common.TestRetention.ps1')
 . (Join-Path $PSScriptRoot 'Common.AttachedProcess.ps1')
 $loadedCommit = Get-MemLabsCurrentCommit -RepositoryRoot $repositoryRoot
+$skipTestNames = @($SkipTest | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+if ($skipTestNames.Count -gt 0) {
+    Write-Host "Continuous scheduler skipping: $($skipTestNames -join ', ')" -ForegroundColor Yellow
+}
 if (-not $HistoryPath) { $HistoryPath = Get-MemLabsTestHistoryPath }
 if (-not $RetentionPath) { $RetentionPath = Get-MemLabsTestRetentionPath }
 
@@ -257,6 +262,9 @@ try {
                 $retentions = @(Read-MemLabsTestRetentions -Path $RetentionPath)
             }
             $ranked = @(Select-MemLabsNextTest -VmbuildRoot $VmbuildRoot -HistoryPath $HistoryPath)
+            if ($skipTestNames.Count -gt 0) {
+                $ranked = @($ranked | Where-Object { $_.Family -notin $skipTestNames })
+            }
             $candidate = $ranked | Where-Object {
                 $_.FitsHost -and $_.CandidateKey -notin @($retentions.CandidateKey)
             } | Select-Object -First 1

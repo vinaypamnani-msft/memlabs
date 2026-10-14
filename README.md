@@ -2,6 +2,20 @@
 
 ARM Template and DSC configurations for deploying an Azure VM with Hyper-V, and for deploying ConfigMgr lab virtual machines on this Hyper-V host.
 
+## Skipping an unreliable test family
+
+Use `-SkipTest` to exclude one or more test families from a curated run:
+
+```powershell
+.\vmbuild\Start-Test.ps1 -All -SkipTest CSTest5
+```
+
+The option also applies to `-Suite` and `-Continuous`. Skipped families are
+reported separately and are not recorded as completed tests. Unknown family
+names fail immediately instead of being silently ignored. CM media mounting
+also suppresses guest-probe noise while a target VM is powering on and starts
+an off target once when attached media needs to be enumerated.
+
 ## Deployment resume preflight
 
 Phase 0 verifies live Hyper-V inventory before preparing VMs. Runs that skip

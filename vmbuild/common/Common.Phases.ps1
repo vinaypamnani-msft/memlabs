@@ -988,6 +988,44 @@ function Set-CmMediaMountAndShare {
             try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { $attached = $false }
         }
 
+        # A VM that is still powering on cannot answer a guest probe. Starting an
+        # attached-media target here is safe and avoids repeated expected
+        # vm-not-running warnings while the normal phase startup catches up.
+        $vmState = $null
+        try { $vmState = [string](Get-VM -Name $vmName -ErrorAction Stop).State } catch { }
+        if ($vmState -and $vmState -ne 'Running') {
+            if ($attempt -eq 1 -or $lastProbeFailure -ne "VM state is $vmState") {
+                Write-Log "[Phase $Phase]: $($vmName): CM media probe deferred while VM state is $vmState." -LogOnly
+            }
+            $lastProbeFailure = "VM state is $vmState"
+            if ($vmState -eq 'Off') {
+                try {
+                    Start-VM -Name $vmName -ErrorAction Stop
+                    Write-Log "[Phase $Phase]: $($vmName): started VM for attached CM media enumeration." -LogOnly
+                }
+                catch {
+                    Write-Log "[Phase $Phase]: $($vmName): could not start VM for CM media enumeration: $($_.Exception.Message)" -Warning
+                }
+            }
+            $null = Wait-ForVm -VmName $vmName -VmDomainName $domain -PathToVerify "C:\Windows\System32\cmd.exe" -TimeoutMinutes 3 -Quiet
+            Start-Sleep -Seconds 5
+            continue
+        }
+        $vmUptimeSeconds = $null
+        try {
+            $vmUptime = (Get-VM -Name $vmName -ErrorAction Stop).Uptime
+            if ($vmUptime -is [TimeSpan]) { $vmUptimeSeconds = $vmUptime.TotalSeconds }
+        }
+        catch { }
+        if ($null -ne $vmUptimeSeconds -and $vmUptimeSeconds -lt 90) {
+            if ($lastProbeFailure -ne 'VM is in post-boot settling interval') {
+                Write-Log "[Phase $Phase]: $($vmName): CM media probe deferred during the first 90 seconds after boot." -LogOnly
+            }
+            $lastProbeFailure = 'VM is in post-boot settling interval'
+            Start-Sleep -Seconds 10
+            continue
+        }
+
         # DETECTION FIX + DIAG: run the media probe on a FRESH PSDirect session.
         # Get-VmSession hands Invoke-VmCommand a LONG-LIVED cached session (one per
         # VM, reused for the whole build). A cached runspace created BEFORE the CM
