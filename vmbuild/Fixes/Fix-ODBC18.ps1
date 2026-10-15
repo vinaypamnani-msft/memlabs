@@ -25,19 +25,75 @@ $Fix_ODBC18 = {
     param([string]$TargetVersion, [string]$DownloadUrl, [string]$VcRedistUrl)
 
     function Get-InstalledOdbc18Version {
-        $value = ''
-        $regPath = 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18'
-        if (Test-Path -LiteralPath $regPath) {
+        param([scriptblock]$RegistryValueReader)
+
+        $values = [System.Collections.Generic.List[string]]::new()
+        if ($RegistryValueReader) {
+            foreach ($value in @(& $RegistryValueReader)) {
+                if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+            }
+        }
+        else {
             try {
-                $state = Get-ItemProperty -LiteralPath $regPath -ErrorAction Stop
+                $state = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18' -ErrorAction Stop
                 $versionProperty = $state.PSObject.Properties['InstalledVersion']
-                if ($versionProperty) { $value = [string]$versionProperty.Value }
+                if ($versionProperty -and -not [string]::IsNullOrWhiteSpace("$($versionProperty.Value)")) {
+                    $values.Add("$($versionProperty.Value)")
+                }
             }
             catch { }
+            foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+                $baseKey = $null
+                $subKey = $null
+                $odbcKey = $null
+                $uninstallKey = $null
+                try {
+                    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                        [Microsoft.Win32.RegistryHive]::LocalMachine,
+                        $view
+                    )
+                    $subKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\MSODBCSQL18')
+                    $value = if ($subKey) { $subKey.GetValue('InstalledVersion', $null) } else { $null }
+                    if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+
+                    $odbcKey = $baseKey.OpenSubKey('SOFTWARE\ODBC\ODBCINST.INI\ODBC Driver 18 for SQL Server')
+                    $value = if ($odbcKey) { $odbcKey.GetValue('Version', $null) } else { $null }
+                    if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+
+                    $uninstallKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+                    if ($uninstallKey) {
+                        foreach ($subKeyName in $uninstallKey.GetSubKeyNames()) {
+                            $productKey = $null
+                            try {
+                                $productKey = $uninstallKey.OpenSubKey($subKeyName)
+                                if ($productKey -and
+                                    "$($productKey.GetValue('DisplayName', ''))" -eq 'Microsoft ODBC Driver 18 for SQL Server') {
+                                    $value = $productKey.GetValue('DisplayVersion', $null)
+                                    if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+                                }
+                            }
+                            catch { }
+                            finally {
+                                if ($productKey) { $productKey.Dispose() }
+                            }
+                        }
+                    }
+                }
+                catch { }
+                finally {
+                    if ($uninstallKey) { $uninstallKey.Dispose() }
+                    if ($odbcKey) { $odbcKey.Dispose() }
+                    if ($subKey) { $subKey.Dispose() }
+                    if ($baseKey) { $baseKey.Dispose() }
+                }
+            }
         }
-        [version]$parsed = $null
-        if ($value -and [version]::TryParse($value.Trim(), [ref]$parsed)) { return $parsed }
-        return $null
+
+        $versions = foreach ($value in $values) {
+            [version]$parsed = $null
+            if ([version]::TryParse($value.Trim(), [ref]$parsed)) { $parsed }
+        }
+        return @($versions | Sort-Object -Descending | Select-Object -First 1)[0]
     }
     function Get-MsiVersion {
         param([string]$Path)
@@ -277,9 +333,15 @@ $Fix_ODBC18 = {
             throw "ODBC MSI exited $($process.ExitCode). $details"
         }
 
-        $installedAfter = Get-InstalledOdbc18Version
+        $verificationDeadline = (Get-Date).AddSeconds(60)
+        do {
+            $installedAfter = Get-InstalledOdbc18Version
+            if ($installedAfter -and $installedAfter -ge $required) { break }
+            Start-Sleep -Seconds 2
+        } while ((Get-Date) -lt $verificationDeadline)
         if (-not $installedAfter -or $installedAfter -lt $required) {
-            throw "ODBC install returned success but InstalledVersion '$installedAfter' is below required $required"
+            $details = Get-OdbcMsiFailureDetails -LogPath $logPath
+            throw "ODBC install returned success but InstalledVersion '$installedAfter' is below required $required after 60 seconds. $details"
         }
         return [pscustomobject]@{
             Success = $true

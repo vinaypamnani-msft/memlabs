@@ -34,6 +34,7 @@ function Import-OdbcFunction {
 }
 . (Import-OdbcFunction -Name 'Get-MemLabsOdbcRequiredVersion')
 . (Import-OdbcFunction -Name 'Get-MemLabsOdbcCatalogState')
+. (Import-OdbcFunction -Name 'Get-MemLabsInstalledOdbc18Version')
 . (Import-OdbcFunction -Name 'Get-MsiProductVersion')
 
 $tempConfig = Join-Path ([IO.Path]::GetTempPath()) "memlabs-odbc-test-$([guid]::NewGuid().ToString('N')).json"
@@ -82,6 +83,10 @@ if ($classText -notmatch 'Invoke-DownloadFile.+-BypassCache') {
 }
 if ($classText -notmatch 'SKIPPENDINGREBOOTCHECK=1') {
     throw 'InstallODBCDriver still lets unrelated pending file renames trigger MSI error 25003.'
+}
+if ($classText -notmatch 'Get-MemLabsInstalledOdbc18Version' -or
+    $classText -notmatch '\.AddSeconds\(60\)') {
+    throw 'InstallODBCDriver does not use architecture-safe detection with a bounded post-install wait.'
 }
 
 $genConfigText = Get-Content -LiteralPath $genConfigPath -Raw
@@ -204,6 +209,19 @@ if ($phase3Text -notmatch '(?s)\$cmServerRoles\s*=\s*@\(''CAS'',\s*''Primary'',\
 $fixTokens = $null
 $fixErrors = $null
 $fixAst = [System.Management.Automation.Language.Parser]::ParseFile($fixPath, [ref]$fixTokens, [ref]$fixErrors)
+$installedVersionFunctions = @($fixAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-InstalledOdbc18Version'
+        }, $true))
+if ($installedVersionFunctions.Count -ne 1) { throw "Expected one Get-InstalledOdbc18Version definition; found $($installedVersionFunctions.Count)." }
+. ([scriptblock]::Create($installedVersionFunctions[0].Extent.Text))
+$crossViewVersion = Get-InstalledOdbc18Version -RegistryValueReader {
+    @('', '18.4.1.1', 'not-a-version', '18.6.2.1')
+}
+if ($crossViewVersion -ne [version]'18.6.2.1') {
+    throw "Architecture-safe ODBC version detection did not select the highest valid registry value: $crossViewVersion"
+}
 $saveFunctions = @($fixAst.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -306,6 +324,12 @@ foreach ($requiredPattern in @(
         "IACCEPTMSODBCSQLLICENSETERMS=YES",
         "ProductVersion",
         "InstalledVersion",
+        "ODBCINST\.INI",
+        "DisplayVersion",
+        "RegistryView\]::Registry64",
+        "RegistryView\]::Registry32",
+        "\.AddSeconds\(60\)",
+        "after 60 seconds",
         "stale after direct retry",
         "Import-Module TemplateHelpDSC",
         "Get-OdbcVcRuntimeState",

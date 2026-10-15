@@ -129,6 +129,68 @@ function Get-MemLabsOdbcRequiredVersion {
     return (Get-MemLabsOdbcCatalogState -DeployConfigPath $DeployConfigPath).Version
 }
 
+function Get-MemLabsInstalledOdbc18Version {
+    $values = [System.Collections.Generic.List[string]]::new()
+    try {
+        $value = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18' `
+            -Name 'InstalledVersion' -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+    }
+    catch { }
+
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+        $baseKey = $null
+        $subKey = $null
+        $odbcKey = $null
+        $uninstallKey = $null
+        try {
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                [Microsoft.Win32.RegistryHive]::LocalMachine,
+                $view
+            )
+            $subKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\MSODBCSQL18')
+            $value = if ($subKey) { $subKey.GetValue('InstalledVersion', $null) } else { $null }
+            if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+
+            $odbcKey = $baseKey.OpenSubKey('SOFTWARE\ODBC\ODBCINST.INI\ODBC Driver 18 for SQL Server')
+            $value = if ($odbcKey) { $odbcKey.GetValue('Version', $null) } else { $null }
+            if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+
+            $uninstallKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+            if ($uninstallKey) {
+                foreach ($subKeyName in $uninstallKey.GetSubKeyNames()) {
+                    $productKey = $null
+                    try {
+                        $productKey = $uninstallKey.OpenSubKey($subKeyName)
+                        if ($productKey -and
+                            "$($productKey.GetValue('DisplayName', ''))" -eq 'Microsoft ODBC Driver 18 for SQL Server') {
+                            $value = $productKey.GetValue('DisplayVersion', $null)
+                            if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+                        }
+                    }
+                    catch { }
+                    finally {
+                        if ($productKey) { $productKey.Dispose() }
+                    }
+                }
+            }
+        }
+        catch { }
+        finally {
+            if ($uninstallKey) { $uninstallKey.Dispose() }
+            if ($odbcKey) { $odbcKey.Dispose() }
+            if ($subKey) { $subKey.Dispose() }
+            if ($baseKey) { $baseKey.Dispose() }
+        }
+    }
+
+    $versions = foreach ($value in $values) {
+        [version]$parsed = $null
+        if ([version]::TryParse($value.Trim(), [ref]$parsed)) { $parsed }
+    }
+    return @($versions | Sort-Object -Descending | Select-Object -First 1)[0]
+}
+
 
 function Copy-MemlabsCachedFile {
     # Cache-first delivery: if the MemLabs download-cache DVD (volume label
@@ -1821,10 +1883,15 @@ class InstallODBCDriver {
             -VerifyRegistryPath "HKLM:\Software\Microsoft\MSODBCSQL18" `
             -VerifyRegistryValueName "InstalledVersion"
 
-        $installedVersionText = [string](Get-ItemPropertyValue -Path 'HKLM:\Software\Microsoft\MSODBCSQL18' -Name 'InstalledVersion' -ErrorAction SilentlyContinue)
         [version]$installedVersion = $null
-        if (-not [version]::TryParse($installedVersionText, [ref]$installedVersion) -or $installedVersion -lt $requiredVersionParsed) {
-            throw "Microsoft ODBC Driver 18 install completed but InstalledVersion '$installedVersionText' is below required $requiredVersionParsed"
+        $verificationDeadline = (Get-Date).AddSeconds(60)
+        do {
+            $installedVersion = Get-MemLabsInstalledOdbc18Version
+            if ($installedVersion -and $installedVersion -ge $requiredVersionParsed) { break }
+            Start-Sleep -Seconds 2
+        } while ((Get-Date) -lt $verificationDeadline)
+        if (-not $installedVersion -or $installedVersion -lt $requiredVersionParsed) {
+            throw "Microsoft ODBC Driver 18 install completed but InstalledVersion '$installedVersion' is below required $requiredVersionParsed after 60 seconds"
         }
         Write-Status "Microsoft ODBC Driver 18 converged to $installedVersion (required $requiredVersionParsed; payload $payloadVersion)"
     }
@@ -1833,33 +1900,15 @@ class InstallODBCDriver {
         Write-Status "Checking ODBC Driver 18 installation status"
 
         try {
-            $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
-
-            if (Test-Path -Path $ODBCRegistryPath) {
-                try {
-                    # Get the InstalledVersion only if the path exists
-                    $ODBCVersion = Get-ItemProperty -Path $ODBCRegistryPath -Name "InstalledVersion" -ErrorAction SilentlyContinue
-                }
-                catch {
-                    $ErrorMessage = $_.Exception.Message
-                    Write-Verbose "Microsoft ODBC Driver 18 for SQL Server Error $($ErrorMessage)!"
-
-                    return $false
-                }
-            }
-            else {
-                return $false
-            }
-
             [version]$requiredVersionParsed = $null
-            [version]$installedVersion = $null
             $requiredVersionParsed = Get-MemLabsOdbcRequiredVersion
-            if ([version]::TryParse([string]$ODBCVersion.InstalledVersion, [ref]$installedVersion) -and $installedVersion -ge $requiredVersionParsed) {
+            $installedVersion = Get-MemLabsInstalledOdbc18Version
+            if ($installedVersion -and $installedVersion -ge $requiredVersionParsed) {
                 Write-Status "Microsoft ODBC Driver 18 $installedVersion is installed (required $requiredVersionParsed)"
                 return $true
             }
 
-            Write-Status "Microsoft ODBC Driver 18 '$($ODBCVersion.InstalledVersion)' is below required $requiredVersionParsed"
+            Write-Status "Microsoft ODBC Driver 18 '$installedVersion' is below required $requiredVersionParsed"
             return $false
         }
         catch {
