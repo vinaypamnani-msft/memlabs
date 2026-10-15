@@ -131,10 +131,14 @@ function Get-MemLabsOdbcRequiredVersion {
 
 function Get-MemLabsInstalledOdbc18Version {
     $values = [System.Collections.Generic.List[string]]::new()
+    $driverRegistered = $false
     try {
         $value = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18' `
             -Name 'InstalledVersion' -ErrorAction Stop
-        if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+        if (-not [string]::IsNullOrWhiteSpace("$value")) {
+            $values.Add("$value")
+            $driverRegistered = $true
+        }
     }
     catch { }
 
@@ -150,11 +154,18 @@ function Get-MemLabsInstalledOdbc18Version {
             )
             $subKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\MSODBCSQL18')
             $value = if ($subKey) { $subKey.GetValue('InstalledVersion', $null) } else { $null }
-            if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+            if (-not [string]::IsNullOrWhiteSpace("$value")) {
+                $values.Add("$value")
+                $driverRegistered = $true
+            }
 
             $odbcKey = $baseKey.OpenSubKey('SOFTWARE\ODBC\ODBCINST.INI\ODBC Driver 18 for SQL Server')
             $value = if ($odbcKey) { $odbcKey.GetValue('Version', $null) } else { $null }
             if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+            $driverPath = if ($odbcKey) { "$($odbcKey.GetValue('Driver', ''))".Trim() } else { '' }
+            if ($driverPath -and (Test-Path -LiteralPath $driverPath -PathType Leaf)) {
+                $driverRegistered = $true
+            }
 
             $uninstallKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
             if ($uninstallKey) {
@@ -184,6 +195,7 @@ function Get-MemLabsInstalledOdbc18Version {
         }
     }
 
+    if (-not $driverRegistered) { return $null }
     $versions = foreach ($value in $values) {
         [version]$parsed = $null
         if ([version]::TryParse($value.Trim(), [ref]$parsed)) { $parsed }
@@ -506,14 +518,15 @@ function Install-MSIPackage {
     }
 
     $msiArgs = @("/i", "`"$MsiPath`"", "/qn", "/norestart") + $AdditionalArguments + @("/l*v", "`"$LogPath`"")
+    $msiArgumentLine = $msiArgs -join ' '
 
     Write-Status "Installing $DisplayName from $MsiPath ..."
-    Write-Verbose ("Commandline: msiexec.exe $($msiArgs -join ' ')")
+    Write-Verbose "Commandline: msiexec.exe $msiArgumentLine"
 
     $installAttempt = 0
     do {
         $installAttempt++
-        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
+        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgumentLine -Wait -PassThru -NoNewWindow
         $exit = $proc.ExitCode
         if ($exit -ne 1618 -or $installAttempt -ge $InstallBusyMaxAttempts) { break }
         Write-Status "Windows Installer is busy installing another package (exit 1618). Retrying $DisplayName in $InstallBusyRetrySeconds seconds (attempt $installAttempt of $InstallBusyMaxAttempts)."
@@ -1879,9 +1892,7 @@ class InstallODBCDriver {
             -MsiPath $_odbcpath `
             -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
             -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1") `
-            -LogPath "C:\temp\odbcinstallation.log" `
-            -VerifyRegistryPath "HKLM:\Software\Microsoft\MSODBCSQL18" `
-            -VerifyRegistryValueName "InstalledVersion"
+            -LogPath "C:\temp\odbcinstallation.log"
 
         [version]$installedVersion = $null
         $verificationDeadline = (Get-Date).AddSeconds(60)
@@ -1891,7 +1902,27 @@ class InstallODBCDriver {
             Start-Sleep -Seconds 2
         } while ((Get-Date) -lt $verificationDeadline)
         if (-not $installedVersion -or $installedVersion -lt $requiredVersionParsed) {
-            throw "Microsoft ODBC Driver 18 install completed but InstalledVersion '$installedVersion' is below required $requiredVersionParsed after 60 seconds"
+            Write-Status "Microsoft ODBC Driver 18 is absent or unregistered after installation. Forcing a repair before reporting failure."
+            Install-MSIPackage `
+                -MsiPath $_odbcpath `
+                -DisplayName "Microsoft ODBC Driver 18 for SQL Server repair" `
+                -AdditionalArguments @(
+                    "IACCEPTMSODBCSQLLICENSETERMS=YES",
+                    "SKIPPENDINGREBOOTCHECK=1",
+                    "REINSTALL=ALL",
+                    "REINSTALLMODE=vomus"
+                ) `
+                -LogPath "C:\temp\odbcinstallation.log"
+
+            $repairDeadline = (Get-Date).AddSeconds(60)
+            do {
+                $installedVersion = Get-MemLabsInstalledOdbc18Version
+                if ($installedVersion -and $installedVersion -ge $requiredVersionParsed) { break }
+                Start-Sleep -Seconds 2
+            } while ((Get-Date) -lt $repairDeadline)
+            if (-not $installedVersion -or $installedVersion -lt $requiredVersionParsed) {
+                throw "Microsoft ODBC Driver 18 remained unavailable after a successful forced repair; detected version '$installedVersion', required $requiredVersionParsed"
+            }
         }
         Write-Status "Microsoft ODBC Driver 18 converged to $installedVersion (required $requiredVersionParsed; payload $payloadVersion)"
     }

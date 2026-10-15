@@ -28,10 +28,12 @@ $Fix_ODBC18 = {
         param([scriptblock]$RegistryValueReader)
 
         $values = [System.Collections.Generic.List[string]]::new()
+        $driverRegistered = $false
         if ($RegistryValueReader) {
             foreach ($value in @(& $RegistryValueReader)) {
                 if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
             }
+            $driverRegistered = $true
         }
         else {
             try {
@@ -39,6 +41,7 @@ $Fix_ODBC18 = {
                 $versionProperty = $state.PSObject.Properties['InstalledVersion']
                 if ($versionProperty -and -not [string]::IsNullOrWhiteSpace("$($versionProperty.Value)")) {
                     $values.Add("$($versionProperty.Value)")
+                    $driverRegistered = $true
                 }
             }
             catch { }
@@ -54,11 +57,18 @@ $Fix_ODBC18 = {
                     )
                     $subKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\MSODBCSQL18')
                     $value = if ($subKey) { $subKey.GetValue('InstalledVersion', $null) } else { $null }
-                    if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+                    if (-not [string]::IsNullOrWhiteSpace("$value")) {
+                        $values.Add("$value")
+                        $driverRegistered = $true
+                    }
 
                     $odbcKey = $baseKey.OpenSubKey('SOFTWARE\ODBC\ODBCINST.INI\ODBC Driver 18 for SQL Server')
                     $value = if ($odbcKey) { $odbcKey.GetValue('Version', $null) } else { $null }
                     if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+                    $driverPath = if ($odbcKey) { "$($odbcKey.GetValue('Driver', ''))".Trim() } else { '' }
+                    if ($driverPath -and (Test-Path -LiteralPath $driverPath -PathType Leaf)) {
+                        $driverRegistered = $true
+                    }
 
                     $uninstallKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
                     if ($uninstallKey) {
@@ -89,6 +99,7 @@ $Fix_ODBC18 = {
             }
         }
 
+        if (-not $driverRegistered) { return $null }
         $versions = foreach ($value in $values) {
             [version]$parsed = $null
             if ([version]::TryParse($value.Trim(), [ref]$parsed)) { $parsed }
@@ -148,7 +159,7 @@ $Fix_ODBC18 = {
         if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) { return 'MSI log not found' }
         $logLines = @(Get-Content -LiteralPath $LogPath -ErrorAction SilentlyContinue)
         $allMarkers = @($logLines | Where-Object {
-                $_ -match '(?i)Return value 3|error 25003|previous installation required a reboot|CA_ErrorPendingReboot|IsPendingRebootKey|error 1723|error 2896|returned actual error code|installation success or error status:\s*1603'
+                $_ -match '(?i)Return value 3|error 25003|previous installation required a reboot|CA_ErrorPendingReboot|IsPendingRebootKey|error 1723|error 2896|returned actual error code|installation success or error status:\s*1603|IACCEPTMSODBCSQLLICENSETERMS|license terms'
             })
         $failureMarkers = @(
             @($allMarkers | Select-Object -First 6)
@@ -322,9 +333,10 @@ $Fix_ODBC18 = {
             'SKIPPENDINGREBOOTCHECK=1',
             '/l*v', "`"$logPath`""
         )
+        $argumentLine = $arguments -join ' '
         $process = $null
         for ($msiAttempt = 1; $msiAttempt -le 3; $msiAttempt++) {
-            $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru -NoNewWindow -ErrorAction Stop
+            $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $argumentLine -Wait -PassThru -NoNewWindow -ErrorAction Stop
             if ($process.ExitCode -ne 1618 -or $msiAttempt -ge 3) { break }
             Start-Sleep -Seconds 30
         }
@@ -340,8 +352,35 @@ $Fix_ODBC18 = {
             Start-Sleep -Seconds 2
         } while ((Get-Date) -lt $verificationDeadline)
         if (-not $installedAfter -or $installedAfter -lt $required) {
-            $details = Get-OdbcMsiFailureDetails -LogPath $logPath
-            throw "ODBC install returned success but InstalledVersion '$installedAfter' is below required $required after 60 seconds. $details"
+            $repairArguments = @(
+                '/i', "`"$installerPath`"", '/qn', '/norestart',
+                'IACCEPTMSODBCSQLLICENSETERMS=YES',
+                'SKIPPENDINGREBOOTCHECK=1',
+                'REINSTALL=ALL',
+                'REINSTALLMODE=vomus',
+                '/l*v', "`"$logPath`""
+            )
+            $repairArgumentLine = $repairArguments -join ' '
+            for ($repairAttempt = 1; $repairAttempt -le 3; $repairAttempt++) {
+                $repairProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList $repairArgumentLine -Wait -PassThru -NoNewWindow -ErrorAction Stop
+                if ($repairProcess.ExitCode -ne 1618 -or $repairAttempt -ge 3) { break }
+                Start-Sleep -Seconds 30
+            }
+            if ($repairProcess.ExitCode -notin @(0, 3010)) {
+                $details = Get-OdbcMsiFailureDetails -LogPath $logPath
+                throw "ODBC Driver 18 disappeared or remained unregistered after install, and forced repair exited $($repairProcess.ExitCode). $details"
+            }
+
+            $repairDeadline = (Get-Date).AddSeconds(60)
+            do {
+                $installedAfter = Get-InstalledOdbc18Version
+                if ($installedAfter -and $installedAfter -ge $required) { break }
+                Start-Sleep -Seconds 2
+            } while ((Get-Date) -lt $repairDeadline)
+            if (-not $installedAfter -or $installedAfter -lt $required) {
+                $details = Get-OdbcMsiFailureDetails -LogPath $logPath
+                throw "ODBC Driver 18 remained unavailable after a successful forced repair; detected version '$installedAfter', required $required. $details"
+            }
         }
         return [pscustomobject]@{
             Success = $true

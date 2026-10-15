@@ -85,8 +85,10 @@ if ($classText -notmatch 'SKIPPENDINGREBOOTCHECK=1') {
     throw 'InstallODBCDriver still lets unrelated pending file renames trigger MSI error 25003.'
 }
 if ($classText -notmatch 'Get-MemLabsInstalledOdbc18Version' -or
-    $classText -notmatch '\.AddSeconds\(60\)') {
-    throw 'InstallODBCDriver does not use architecture-safe detection with a bounded post-install wait.'
+    $classText -notmatch '\.AddSeconds\(60\)' -or
+    $classText -notmatch 'REINSTALL=ALL' -or
+    $classText -notmatch 'REINSTALLMODE=vomus') {
+    throw 'InstallODBCDriver does not use architecture-safe detection with bounded verification and repair.'
 }
 
 $genConfigText = Get-Content -LiteralPath $genConfigPath -Raw
@@ -322,14 +324,19 @@ if (-not $vcInstallProbe.Result.Installed -or
 }
 foreach ($requiredPattern in @(
         "IACCEPTMSODBCSQLLICENSETERMS=YES",
+        '\$argumentLine = \$arguments -join '' ''',
+        '-ArgumentList \$argumentLine',
         "ProductVersion",
         "InstalledVersion",
         "ODBCINST\.INI",
         "DisplayVersion",
+        "GetValue\('Driver'",
+        "REINSTALL=ALL",
+        "REINSTALLMODE=vomus",
+        "remained unavailable after a successful forced repair",
         "RegistryView\]::Registry64",
         "RegistryView\]::Registry32",
         "\.AddSeconds\(60\)",
-        "after 60 seconds",
         "stale after direct retry",
         "Import-Module TemplateHelpDSC",
         "Get-OdbcVcRuntimeState",
@@ -346,6 +353,12 @@ foreach ($requiredPattern in @(
     if ($fixText -notmatch $requiredPattern) {
         throw "Fix-ODBC18 is missing required enforcement pattern '$requiredPattern'."
     }
+}
+if ($fixText -match '[''"]/x[''"]') {
+    throw 'Fix-ODBC18 must never uninstall an existing ODBC driver.'
+}
+if ($classText -match 'VerifyRegistryPath\s+"HKLM:\\Software\\Microsoft\\MSODBCSQL18"') {
+    throw 'InstallODBCDriver still performs the legacy immediate registry assertion before bounded recovery.'
 }
 
 # An old catalog must not combine the 18.6 floor with its 18.4 fwlink.
