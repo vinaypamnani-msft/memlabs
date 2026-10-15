@@ -277,8 +277,7 @@ function Invoke-DotSource {
         if ([int]$global:MemLabsFailureSequence -gt $__idsFailureSequenceBefore) {
             $__idsReportedFailure = $true
         }
-        $__idsOutOfMemory = $_.Exception -is [System.OutOfMemoryException] -or
-            $_.Exception.Message -match '(?i)OutOfMemory|0x8007000E|not enough (storage|memory)'
+        $__idsOutOfMemory = Test-MemLabsOutOfMemoryError -ErrorRecord $_
         $__idsStack = (($_.ScriptStackTrace -replace '\s+', ' ').Trim())
         if ($__idsStack.Length -gt 1200) { $__idsStack = $__idsStack.Substring(0, 1200) + '...' }
         $__idsFailure = "exception in ${__idsScriptName}: $($_.Exception.GetType().FullName): $($_.Exception.Message); stack=$__idsStack"
@@ -1378,6 +1377,70 @@ function Invoke-CMRoleTargetCommand {
         -ArgumentList $ArgumentList -SessionOption $sessionOption -ErrorAction Stop
 }
 
+function Test-MemLabsOutOfMemoryError {
+    param([Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $exception = $ErrorRecord.Exception
+    while ($exception) {
+        if ($exception -is [System.OutOfMemoryException] -or
+            $exception.HResult -in @(-2147024882, -2147217402) -or
+            $exception.Message -match '(?i)out\s*of\s*memory|0x8007000E|0x80041006|not enough (storage|memory)') {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Request-MemLabsGuestMemoryRecovery {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Context,
+        [System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+
+    $root = 'C:\staging\DSC'
+    $expectedPath = Join-Path $root 'ScriptWorkflow.expected.runid'
+    if (-not (Test-Path -LiteralPath $expectedPath)) {
+        Write-DscStatus "Cannot request host memory recovery for ${Context}: no deployment RunId is available." -Warning -NoStatus
+        return
+    }
+    $runId = (Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop).Trim()
+    if (-not $runId) { throw 'Cannot request host memory recovery: deployment RunId is empty.' }
+    $requestPath = Join-Path $root 'ScriptWorkflow.memory-recovery.json'
+    $request = [ordered]@{
+        RunId = $runId
+        Reason = 'OutOfMemory'
+        Context = $Context
+        RequestedAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    $originProcess = $null
+    try {
+        $originProcess = [Diagnostics.Process]::GetCurrentProcess()
+        $request['Origin'] = [ordered]@{
+            ProcessId = $PID
+            Is64BitProcess = [Environment]::Is64BitProcess
+            PrivateMB = [math]::Round($originProcess.PrivateMemorySize64 / 1MB, 1)
+            WorkingSetMB = [math]::Round($originProcess.WorkingSet64 / 1MB, 1)
+            VirtualMB = [math]::Round($originProcess.VirtualMemorySize64 / 1MB, 1)
+            ManagedMB = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+            Handles = $originProcess.HandleCount
+            Error = if ($ErrorRecord) { $ErrorRecord.Exception.Message } else { $null }
+            HResult = if ($ErrorRecord) { $ErrorRecord.Exception.HResult } else { $null }
+        }
+    }
+    catch {
+        $request['OriginCaptureError'] = $_.Exception.Message
+        Write-DscStatus "Memory recovery origin snapshot failed: $($_.Exception.Message)" -Warning -NoStatus
+    }
+    finally {
+        if ($originProcess) { $originProcess.Dispose() }
+    }
+    $request | ConvertTo-Json -Compress |
+        Set-Content -LiteralPath "$requestPath.tmp" -Encoding UTF8 -ErrorAction Stop
+    Move-Item -LiteralPath "$requestPath.tmp" -Destination $requestPath -Force -ErrorAction Stop
+    Write-DscStatus "CIM memory retries exhausted for ${Context}; requested a host-managed reboot and workflow retry (RunId=$runId)." -Failure
+}
+
 function Get-MemLabsProjectedCimRows {
     [CmdletBinding()]
     param(
@@ -1420,11 +1483,18 @@ function Get-MemLabsProjectedCimRows {
                 })
         }
         catch {
-            $isOutOfMemory = $_.Exception -is [System.OutOfMemoryException] -or
-                $_.Exception.Message -match '(?i)OutOfMemory|0x8007000E|not enough (storage|memory)'
-            if (-not $isOutOfMemory -or $attempt -ge $Attempts) {
+            $isOutOfMemory = Test-MemLabsOutOfMemoryError -ErrorRecord $_
+            if (-not $isOutOfMemory) {
                 throw
             }
+            if ($attempt -ge $Attempts) {
+                Request-MemLabsGuestMemoryRecovery -Context "$Namespace/$ClassName" -ErrorRecord $_
+                throw
+            }
+            foreach ($instance in $instances) {
+                if ($instance -is [System.IDisposable]) { $instance.Dispose() }
+            }
+            $instances = @()
             Write-DscStatus "CIM query $Namespace/$ClassName hit an out-of-memory boundary on attempt $attempt/$Attempts. Disposing projected rows, forcing finalizers, and retrying in $RetrySeconds second(s)." -Warning
             [GC]::Collect()
             [GC]::WaitForPendingFinalizers()

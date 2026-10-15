@@ -2211,6 +2211,252 @@ $global:VM_Create = {
     }
 }
 
+function Get-MemLabsMemoryDiagnosticProbe {
+    {
+        $errors = [ordered]@{}
+        $report = [ordered]@{
+            CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+            ComputerName = $env:COMPUTERNAME
+            CollectorProcessId = $PID
+            Memory = $null
+            PageFileConfiguration = $null
+            PageFiles = @()
+            ProviderHostQuotas = @()
+            TopProcesses = @()
+            RelevantProcesses = @()
+            ResourceExhaustionEvents = @()
+            WmiMemoryEvents = @()
+            Indicators = @()
+            Errors = $errors
+        }
+        # Native performance counters and process APIs do not depend on a healthy WMI provider.
+        try {
+            $paths = @('\Memory\Available MBytes', '\Memory\Committed Bytes', '\Memory\Commit Limit',
+                '\Memory\Pool Paged Bytes', '\Memory\Pool Nonpaged Bytes')
+            $samples = @((Get-Counter -Counter $paths -MaxSamples 1 -ErrorAction Stop).CounterSamples)
+            $memory = [ordered]@{ PageFileUsagePercent = $null }
+            $names = @('AvailableMB', 'CommittedMB', 'CommitLimitMB', 'PagedPoolMB', 'NonpagedPoolMB')
+            for ($index = 0; $index -lt $paths.Count; $index++) {
+                $sample = @($samples | Where-Object { $_.Path.EndsWith($paths[$index], [StringComparison]::OrdinalIgnoreCase) })
+                if ($sample.Count -ne 1 -or $sample[0].Status -notin @(0, 1)) {
+                    throw "Memory counter '$($paths[$index])' did not return one valid sample."
+                }
+                $scale = if ($index -eq 0) { 1 } else { 1MB }
+                $memory[$names[$index]] = [math]::Round($sample[0].CookedValue / $scale, 1)
+            }
+            $report.Memory = $memory
+            if ($memory.CommitLimitMB -gt 0 -and $memory.CommittedMB / $memory.CommitLimitMB -ge 0.9) {
+                $report.Indicators += 'System commit is at least 90% of its limit; RAM/pagefile-backed allocation pressure is a possible cause.'
+            }
+            if ($memory.AvailableMB -lt 512) {
+                $report.Indicators += 'Less than 512 MB physical memory is available; the guest may be under RAM pressure.'
+            }
+        }
+        catch { $errors['MemoryCounters'] = $_.Exception.Message }
+        if ($report.Memory) {
+            try {
+                $sample = @((Get-Counter -Counter '\Paging File(_Total)\% Usage' -MaxSamples 1 -ErrorAction Stop).CounterSamples)
+                if ($sample.Count -ne 1 -or $sample[0].Status -notin @(0, 1)) { throw 'No valid pagefile usage counter sample.' }
+                $report.Memory.PageFileUsagePercent = [math]::Round($sample[0].CookedValue, 1)
+            }
+            catch { $errors['PageFileCounter'] = $_.Exception.Message }
+        }
+        $processes = @()
+        try {
+            $processes = @(Get-Process -ErrorAction Stop)
+            $rows = @(foreach ($process in $processes) {
+                try {
+                    [pscustomobject]@{
+                        Name = $process.ProcessName
+                        Id = $process.Id
+                        PrivateMB = [math]::Round($process.PrivateMemorySize64 / 1MB, 1)
+                        WorkingSetMB = [math]::Round($process.WorkingSet64 / 1MB, 1)
+                        VirtualMB = [math]::Round($process.VirtualMemorySize64 / 1MB, 1)
+                        Handles = $process.HandleCount
+                    }
+                }
+                catch { $errors["Process:$($process.Id)"] = $_.Exception.Message }
+            })
+            $report.TopProcesses = @($rows | Sort-Object PrivateMB -Descending | Select-Object -First 25)
+            $report.RelevantProcesses = @($rows | Where-Object {
+                    $_.Name -match '^(WmiPrvSE|sqlservr|powershell|pwsh|wsmprovhost|w3wp|smsexec|cmupdate)$'
+                } | Sort-Object PrivateMB -Descending)
+        }
+        catch { $errors['Processes'] = $_.Exception.Message }
+        finally {
+            foreach ($process in $processes) {
+                if ($process -is [IDisposable]) { $process.Dispose() }
+            }
+        }
+        try {
+            $config = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -ErrorAction Stop
+            $report.PageFileConfiguration = [ordered]@{
+                PagingFiles = @($config.PagingFiles)
+                ExistingPageFiles = @($config.ExistingPageFiles)
+            }
+        }
+        catch { $errors['PageFileConfiguration'] = $_.Exception.Message }
+        foreach ($query in @(
+                @{ Namespace = 'root\cimv2'; Class = 'Win32_PageFileUsage'; Section = 'PageFiles'; Properties = @('Name', 'AllocatedBaseSize', 'CurrentUsage', 'PeakUsage') },
+                @{ Namespace = 'root'; Class = '__ProviderHostQuotaConfiguration'; Section = 'ProviderHostQuotas'; Properties = @('MemoryPerHost', 'MemoryAllHosts', 'HandlesPerHost', 'ThreadsPerHost') }
+            )) {
+            $instances = @()
+            try {
+                $instances = @(Get-CimInstance -Namespace $query.Namespace -ClassName $query.Class -Property $query.Properties -OperationTimeoutSec 10 -ErrorAction Stop)
+                $report[$query.Section] = @($instances | Select-Object -Property $query.Properties)
+            }
+            catch { $errors[$query.Section] = $_.Exception.Message }
+            finally {
+                foreach ($instance in $instances) {
+                    if ($instance -is [IDisposable]) { $instance.Dispose() }
+                }
+            }
+        }
+        foreach ($query in @(
+                @{ Log = 'System'; Id = 2004; Provider = 'Microsoft-Windows-Resource-Exhaustion-Detector'; Section = 'ResourceExhaustionEvents' },
+                @{ Log = 'Microsoft-Windows-WMI-Activity/Operational'; Id = 5858; Provider = 'Microsoft-Windows-WMI-Activity'; Section = 'WmiMemoryEvents' }
+            )) {
+            try {
+                $events = @(Get-WinEvent -FilterHashtable @{
+                        LogName = $query.Log; Id = $query.Id; ProviderName = $query.Provider; StartTime = (Get-Date).AddMinutes(-30)
+                    } -MaxEvents 20 -ErrorAction Stop)
+                $report[$query.Section] = @($events | Where-Object {
+                        $query.Id -eq 2004 -or $_.Message -match '(?i)80041006|8007000e|out.of.memory|quota'
+                    } | Select-Object -First 10 | ForEach-Object {
+                        $message = "$($_.Message)"
+                        if ($message.Length -gt 2000) { $message = $message.Substring(0, 2000) }
+                        [pscustomobject]@{ TimeCreated = $_.TimeCreated; Id = $_.Id; Message = $message }
+                    })
+            }
+            catch {
+                if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
+                    $errors[$query.Section] = $_.Exception.Message
+                }
+            }
+        }
+        [pscustomobject]$report
+    }
+}
+
+function Save-MemLabsGuestMemoryDiagnostics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $DomainName,
+        [Parameter(Mandatory = $true)] [object] $Request,
+        [Parameter(Mandatory = $true)] [string] $Trigger
+    )
+
+    try {
+        $report = [ordered]@{
+            SchemaVersion = 1
+            CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+            VmName = $VmName
+            Trigger = $Trigger
+            Request = $Request
+            Guest = $null
+            Host = $null
+            HyperV = $null
+            Errors = [ordered]@{}
+        }
+        $probe = Get-MemLabsMemoryDiagnosticProbe
+        $result = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 60 -SuppressLog -ScriptBlock $probe
+        if ($result -and -not $result.ScriptBlockFailed -and $result.ScriptBlockOutput) {
+            $report.Guest = $result.ScriptBlockOutput
+        }
+        else {
+            $report.Errors['GuestCapture'] = if ($result) { "$($result.ErrorDetails -join '; '); $($result.ScriptBlockOutput)" } else { 'No guest response.' }
+        }
+        try { $report.Host = & $probe }
+        catch { $report.Errors['HostCapture'] = $_.Exception.Message }
+        try {
+            $vm = Get-VM -Name $VmName -ErrorAction Stop
+            $report.HyperV = [ordered]@{
+                State = "$($vm.State)"
+                MemoryAssignedMB = [math]::Round($vm.MemoryAssigned / 1MB, 1)
+                MemoryDemandMB = [math]::Round($vm.MemoryDemand / 1MB, 1)
+                MemoryStatus = "$($vm.MemoryStatus)"
+                DynamicMemoryEnabled = $vm.DynamicMemoryEnabled
+                MemoryMinimumMB = [math]::Round($vm.MemoryMinimum / 1MB, 1)
+                MemoryMaximumMB = [math]::Round($vm.MemoryMaximum / 1MB, 1)
+            }
+        }
+        catch { $report.Errors['HyperV'] = $_.Exception.Message }
+        if (-not $Common -or -not $Common.LogPath) { throw 'Host deployment log path is unavailable.' }
+        $logDir = Split-Path -Parent $Common.LogPath
+        $path = Join-Path $logDir "$VmName-Phase8-$(Get-Date -Format 'yyyyMMdd-HHmmss-fff')-$Trigger-MemoryDiagnostics.json"
+        $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
+        Write-Log "[Phase 8]: ${VmName}: memory diagnostic report ($Trigger) -> $path" -OutputStream
+        if ($report.Guest) {
+            $top = @($report.Guest.TopProcesses | Select-Object -First 5 | ForEach-Object { "$($_.Name)(pid=$($_.Id),private=$($_.PrivateMB)MB)" }) -join ', '
+            $memorySummary = if ($report.Guest.Memory) { "available=$($report.Guest.Memory.AvailableMB)MB commit=$($report.Guest.Memory.CommittedMB)/$($report.Guest.Memory.CommitLimitMB)MB" } else { 'memory counters unavailable' }
+            Write-Log "[Phase 8]: ${VmName}: OOM evidence: $memorySummary; largest private-memory consumers: $top. Collector errors: $($report.Guest.Errors | ConvertTo-Json -Compress -Depth 3)" -LogOnly
+            foreach ($indicator in $report.Guest.Indicators) { Write-Log "[Phase 8]: ${VmName}: OOM indicator: $indicator" -Warning -OutputStream }
+        }
+        if ($report.Errors.Count) {
+            Write-Log "[Phase 8]: ${VmName}: memory diagnostic report is incomplete: $($report.Errors | ConvertTo-Json -Compress)" -Warning -OutputStream
+        }
+    }
+    catch {
+        Write-Log "[Phase 8]: ${VmName}: memory diagnostic capture failed; recovery/failure handling will continue: $($_.Exception.Message)" -Warning -OutputStream
+    }
+}
+
+function Invoke-MemLabsGuestMemoryRecovery {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $DomainName,
+        [Parameter(Mandatory = $true)] [string] $RunId,
+        [ValidateRange(1, 600)] [int] $ReadyTimeoutSeconds = 600
+    )
+
+    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: requesting the single permitted graceful reboot (RunId=$RunId)." -Warning -OutputStream
+    if (-not (Restart-VM2Smart -Name $VmName -Reason 'Phase 8 CIM out-of-memory recovery')) {
+        throw "${VmName}: memory recovery could not restart the guest gracefully; hard power-off is not permitted."
+    }
+
+    $readyWatch = [Diagnostics.Stopwatch]::StartNew()
+    $lastError = 'guest has not answered'
+    do {
+        $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 30 -SuppressLog -ScriptBlock {
+            $ErrorActionPreference = 'Stop'
+            $null = Get-CimInstance -ClassName Win32_OperatingSystem -OperationTimeoutSec 15
+            $null = Get-DscLocalConfigurationManager
+            $null = Get-ScheduledTask -TaskName 'ScriptWorkflow'
+            return 'Ready'
+        }
+        if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput -eq 'Ready') {
+            break
+        }
+        $lastError = if ($probe) { "$($probe.ErrorDetails -join '; '); $($probe.ScriptBlockOutput)" } else { 'no guest response' }
+        if ($readyWatch.Elapsed.TotalSeconds -ge $ReadyTimeoutSeconds) {
+            throw "${VmName}: memory recovery timed out waiting for PowerShell Direct, WMI, DSC and ScriptWorkflow readiness. $lastError"
+        }
+        Start-Sleep -Seconds 5
+    } while ($true)
+
+    $resume = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 120 -SuppressLog -ScriptBlock {
+        param($expectedRunId)
+        $ErrorActionPreference = 'Stop'
+        $root = 'C:\staging\DSC'
+        $actualRunId = (Get-Content -LiteralPath (Join-Path $root 'ScriptWorkflow.expected.runid') -Raw).Trim()
+        if ($actualRunId -ne $expectedRunId) { throw 'Deployment RunId changed during memory recovery; refusing to resume.' }
+        Stop-DscConfiguration -Force
+        $task = Get-ScheduledTask -TaskName 'ScriptWorkflow'
+        if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName 'ScriptWorkflow' }
+        Remove-Item -LiteralPath (Join-Path $root 'ScriptWorkflow.memory-recovery.json') -Force
+        Set-Content -LiteralPath (Join-Path $root 'DSC_Status.txt') -Value 'Setting up ConfigMgr. Resuming after host-managed memory recovery.'
+        # Re-apply the existing configuration so DSC restarts the task and waits for its receipt.
+        Start-DscConfiguration -UseExisting -Force
+        return 'Resumed'
+    } -ArgumentList $RunId
+    if (-not $resume -or $resume.ScriptBlockFailed -or $resume.ScriptBlockOutput -notcontains 'Resumed') {
+        throw "${VmName}: memory recovery reboot completed, but resuming the existing DSC workflow failed: $($resume.ErrorDetails -join '; ') $($resume.ScriptBlockOutput)"
+    }
+    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: guest readiness verified; existing workflow resumed without snapshot rollback." -OutputStream
+}
+
 function Save-CMSetupLogsFromVm {
     <#
     .SYNOPSIS
@@ -7552,6 +7798,7 @@ $global:VM_Config = {
             if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
             # Delete any stale completion marker from a prior deploy BEFORE writing expected -- guarantees no false positive
             Remove-Item -Path (Join-Path $dir 'ScriptWorkflow.completed.runid') -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path (Join-Path $dir 'ScriptWorkflow.memory-recovery.json') -Force -ErrorAction SilentlyContinue
             Set-Content -Path (Join-Path $dir 'ScriptWorkflow.expected.runid') -Value $runId -Force -Encoding ASCII
         } -ArgumentList $expectedRunId -DisplayName "DSC: Stamp Phase RunId"
         if ($stampResult.ScriptBlockFailed) {
@@ -7599,6 +7846,7 @@ $global:VM_Config = {
         $staleRestartMinutes = 30
         $staleRestartCount = 0
         $staleRestartMax = 2
+        $memoryRecoveryCount = 0
         $lastStaleWarningTime = [DateTime]::MinValue
         $deadWorkflowConfirmations = 0     # consecutive stale checks that proved the ScriptWorkflow task is not running
         $deadWorkflowMax = 3               # after this many, the wait is provably unclearable -- fail instead of warning forever
@@ -8009,7 +8257,13 @@ $global:VM_Config = {
                         $completedRunId = (Get-Content C:\staging\DSC\ScriptWorkflow.completed.runid -ErrorAction SilentlyContinue | Select-Object -First 1)
                     }
                     # Emit status text first (preserves legacy string consumers) then runid as a side property
-                    [pscustomobject]@{ StatusText = $statusText; CompletedRunId = $completedRunId }
+                    $memoryRecovery = $null
+                    $memoryRecoveryPath = 'C:\staging\DSC\ScriptWorkflow.memory-recovery.json'
+                    if (Test-Path -LiteralPath $memoryRecoveryPath) {
+                        $memoryRecovery = Get-Content -LiteralPath $memoryRecoveryPath -Raw -ErrorAction Stop |
+                            ConvertFrom-Json -ErrorAction Stop
+                    }
+                    [pscustomobject]@{ StatusText = $statusText; CompletedRunId = $completedRunId; MemoryRecovery = $memoryRecovery }
                 } -SuppressLog:$suppressNoisyLogging
                 # Unwrap the bundled object into local snapshots WITHOUT mutating
                 # $status. On some failure paths Invoke-VmCommand returns an
@@ -8027,6 +8281,32 @@ $global:VM_Config = {
                     $statusTextSnapshot = $status.ScriptBlockOutput
                 }
                 $stopwatch2.Stop()
+
+                $memoryRequest = if ($status -and -not $status.ScriptBlockFailed) { $status.ScriptBlockOutput.MemoryRecovery } else { $null }
+                if ($Phase -eq 8 -and $expectedRunId -and $memoryRequest -and
+                    $memoryRequest.RunId -eq $expectedRunId -and $memoryRequest.Reason -eq 'OutOfMemory') {
+                    $memoryDiagnosticTrigger = if ($memoryRecoveryCount -ge 1) { 'RecoveryExhausted' } else { 'BeforeRecovery' }
+                    Save-MemLabsGuestMemoryDiagnostics -VmName $currentItem.vmName -DomainName $domainName -Request $memoryRequest -Trigger $memoryDiagnosticTrigger
+                    if ($memoryRecoveryCount -ge 1) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): CIM out-of-memory recovery exhausted: the guest requested another reboot after its single recovery attempt. Context: $($memoryRequest.Context)" -Failure -OutputStream
+                        break
+                    }
+                    $memoryRecoveryCount++
+                    try {
+                        Invoke-MemLabsGuestMemoryRecovery -VmName $currentItem.vmName -DomainName $domainName -RunId $expectedRunId
+                    }
+                    catch {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): CIM memory recovery failed: $($_.Exception.Message)" -Failure -OutputStream
+                        break
+                    }
+                    $previousStatus = ''
+                    $lastStatusChangeTime = [DateTime]::UtcNow
+                    $failedHeartbeats = 0
+                    $lcmIdleSince = $null
+                    $lcmRebootPendingSince = $null
+                    $lcmPendingNoRebootSince = $null
+                    continue
+                }
 
                 if (-not $status -or ($status.ScriptBlockFailed)) {
                     if ($stopwatch2.elapsed.TotalSeconds -gt 10) {

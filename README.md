@@ -142,6 +142,29 @@ Critical DC/CAS aborts also finalize the phase elapsed time before returning the
 failure tally, so result validation preserves the guest setup error instead of
 replacing it with a malformed-tally exception.
 
+Phase 8 projected CIM reads retry recognized out-of-memory failures three times,
+including WMI `0x80041006` and the literal `Out of memory` message. Exhaustion
+leaves an atomic, deployment-RunId-scoped request for the host. The host permits
+one graceful reboot per affected VM per Phase 8 run, verifies PowerShell Direct,
+WMI, DSC and scheduled-task readiness, then resumes the existing DSC configuration
+and workflow step state without restoring a snapshot. A second request, failed
+graceful reboot, readiness timeout, or resume failure fails the VM explicitly.
+Other errors and stale requests never trigger this recovery.
+
+Before that reboot, and again if memory recovery is exhausted, the host saves
+`<VM>-Phase8-<timestamp>-<trigger>-MemoryDiagnostics.json` beside the VMBuild log.
+The report includes the originating workflow process snapshot and error, guest
+and host memory/commit counters, largest private-memory consumers, WMI/SQL/
+PowerShell processes, pagefile configuration and usage, WMI provider-host quotas,
+recent resource-exhaustion/WMI memory events, and Hyper-V assigned/demanded memory.
+Native counters and process enumeration remain independent of WMI. Failed sections
+are recorded explicitly, guest capture is bounded to 60 seconds, and diagnostic
+failures do not prevent recovery or replace the original failure. Pressure
+indicators identify possible causes, not a definitive diagnosis.
+
+Validate this path with `vmbuild\tools\Test-GuestCimMemoryRecovery.ps1` and
+`vmbuild\tools\Test-GuestMemoryDiagnostics.ps1`.
+
 Validate this path with `vmbuild\tools\Test-AutomatedResumePreparation.ps1` and
 `vmbuild\tools\Test-PhaseFailurePropagation.ps1`.
 

@@ -43,6 +43,7 @@ function Import-TestFunction {
 . (Import-TestFunction -Path $coveragePath -Name 'Get-MemLabsDpVmMetadataMap')
 . (Import-TestFunction -Path $coveragePath -Name 'Test-MemLabsLocalComputerName')
 . (Import-TestFunction -Path $functionsPath -Name 'Get-MemLabsProjectedCimRows')
+. (Import-TestFunction -Path $functionsPath -Name 'Test-MemLabsOutOfMemoryError')
 
 if (-not ('MemLabsDisposableCimFixture' -as [type])) {
     Add-Type -TypeDefinition @'

@@ -56,6 +56,7 @@ function Invoke-MemLabsGuestMemoryReclaim {
 }
 function Get-CmSslStateNote { return '' }
 . (Import-TestFunction -Name 'Invoke-DotSource')
+. (Import-TestFunction -Name 'Test-MemLabsOutOfMemoryError')
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-guest-memory-$PID"
 $oomScript = Join-Path $testRoot 'Oom.ps1'
