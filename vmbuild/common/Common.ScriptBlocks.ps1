@@ -3068,6 +3068,22 @@ function Save-CMSetupLogsFromVm {
                 UpdateDiagnostics = $cmEvidenceFallbackJson
             }
         }
+        elseif ($cmEvidence.PSObject.Properties.Name -notcontains 'UpdateDiagnostics' -or
+            [string]::IsNullOrWhiteSpace("$($cmEvidence.UpdateDiagnostics)")) {
+            $returnedArtifactCount = @($cmEvidence.CmArtifacts | Where-Object { $null -ne $_ }).Count
+            $cmEvidenceStatus = [ordered]@{
+                CapturedAtUtc       = (Get-Date).ToUniversalTime().ToString('o')
+                ComputerName        = $VmName
+                CaptureStatus       = 'GuestReturnedNoProductLogInventory'
+                ArtifactsReturned   = $returnedArtifactCount
+                Message             = 'The guest product-log probe returned no structured inventory. The SMS Provider log may have been absent, unreadable, or the probe result may have been truncated.'
+                ProductLogInventory = @()
+            }
+            try { $cmEvidenceStatusJson = $cmEvidenceStatus | ConvertTo-Json -Depth 6 -ErrorAction Stop }
+            catch { $cmEvidenceStatusJson = '{"CaptureStatus":"HostSerializationFailed","Stage":"ConfigMgrProductLogs"}' }
+            Add-Member -InputObject $cmEvidence -NotePropertyName UpdateDiagnostics `
+                -NotePropertyValue $cmEvidenceStatusJson -Force
+        }
     }
 
     if ($cmEvidence -and $cmEvidence.PSObject.Properties.Name -contains 'CmArtifacts') {

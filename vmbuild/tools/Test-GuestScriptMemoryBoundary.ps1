@@ -105,6 +105,23 @@ try {
         throw 'Invoke-DotSource -Rethrow did not publish the critical failure through Write-DscStatus -Failure.'
     }
 
+    $callerOwnedFailurePropagated = $false
+    try {
+        Invoke-DotSource -Script $fatalScript -Rethrow -CallerOwnsRetry
+    }
+    catch {
+        $callerOwnedFailurePropagated = $_.Exception.Message -eq 'synthetic critical failure'
+    }
+    if (-not $callerOwnedFailurePropagated) {
+        throw 'Invoke-DotSource -CallerOwnsRetry swallowed a retryable guest script failure.'
+    }
+    if ($global:TestGuestBoundaryFailureStatuses.Count -ne 1) {
+        throw 'A caller-owned retry published a premature JOBFAILURE.'
+    }
+    if (-not ($global:TestGuestBoundaryStatuses -match 'WARNING: exception in Fatal\.ps1.+synthetic critical failure')) {
+        throw 'A caller-owned retry did not preserve the retryable exception as a warning.'
+    }
+
     $reportedFailurePropagated = $false
     $reportedFailureError = ''
     try {
@@ -147,10 +164,18 @@ foreach ($entry in $criticalBoundaryPatterns.GetEnumerator()) {
     $scriptName = [regex]::Escape($entry.Key)
     $pattern = '(?s)\$ScriptFile\s*=\s*Join-Path.+?"' + $scriptName +
         '".{0,250}?Invoke-DotSource\s+-Script\s+\$ScriptFile\s+-Arguments\s+\$ConfigFilePath,\s*\$LogPath\s+-Rethrow'
-    $matches = [regex]::Matches($workflowText, $pattern)
-    if ($matches.Count -ne $entry.Value) {
-        throw "$($entry.Key) has $($matches.Count) fail-fast workflow boundary call(s); expected $($entry.Value)."
+    $boundaryMatches = [regex]::Matches($workflowText, $pattern)
+    if ($boundaryMatches.Count -ne $entry.Value) {
+        throw "$($entry.Key) has $($boundaryMatches.Count) fail-fast workflow boundary call(s); expected $($entry.Value)."
     }
+}
+if ($workflowText -notmatch
+    '(?s)\$perfMaxAttempts\s*=\s*3.+?Invoke-DotSource\s+-Script\s+\$ScriptFile\s+-Arguments\s+\$ConfigFilePath,\s*\$LogPath\s+-Rethrow\s+-CallerOwnsRetry') {
+    throw 'The perfloading retry loop can publish a premature JOBFAILURE before exhausting its retries.'
+}
+if ($workflowText -notmatch
+    '(?s)Perfloading\.ps1 did not complete after \$perfMaxAttempts attempts.+?-Failure\s+return') {
+    throw 'Perfloading retry exhaustion can report Phase 8 success with incomplete pre-population.'
 }
 
 $coverageText = Get-Content -LiteralPath (

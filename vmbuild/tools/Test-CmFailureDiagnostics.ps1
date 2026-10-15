@@ -98,6 +98,7 @@ try {
     $script:CollectorCopies = New-Object System.Collections.Generic.List[object]
     $script:FailBaselineCapture = $false
     $script:FailProductCapture = $false
+    $script:EmptyProductCapture = $false
     $script:FailProviderCapture = $false
     $script:UseBundleCapture = $false
     $script:FailBundleCopy = $false
@@ -176,6 +177,17 @@ try {
                 ScriptBlockOutput = $null
                 TimedOut          = $true
                 ErrorDetails      = @('synthetic product-log timeout')
+            }
+        }
+        if ($DisplayName -eq 'Pull ConfigMgr failure diagnostics' -and $script:EmptyProductCapture) {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = [pscustomobject]@{
+                    CmArtifacts = @()
+                    UpdateDiagnostics = $null
+                }
+                TimedOut          = $false
+                ErrorDetails      = @()
             }
         }
         if ($DisplayName -like 'Package CM setup logs*' -and $script:FailBaselineCapture) {
@@ -309,6 +321,19 @@ try {
     Assert-Equal $true ($messages -match 'Pulled ConfigMgr diagnostic SMSProv\.log') 'collector reports product-log capture'
     Assert-Equal $true ($messages -match 'Pulled ConfigMgr update/provider state') 'collector reports snapshot capture'
     Assert-Equal $true ($messages -match 'Captured bounded ConfigMgr provider state') 'collector reports independently bounded provider capture'
+
+    $script:CollectorInvocations.Clear()
+    $script:CollectorMessages.Clear()
+    $script:EmptyProductCapture = $true
+    Save-CMSetupLogsFromVm -VmName 'EMPTY-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    $emptySnapshot = @(Get-ChildItem -LiteralPath $workDir -Filter 'EMPTY-PS1SITE-Phase8-*-ConfigMgrUpdateDiagnostics.json' -File)
+    Assert-Equal 1 $emptySnapshot.Count 'empty product probe writes a durable inventory status'
+    if ($emptySnapshot.Count -eq 1) {
+        $emptySnapshotJson = Get-Content -LiteralPath $emptySnapshot[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'GuestReturnedNoProductLogInventory' $emptySnapshotJson.CaptureStatus 'empty product probe records its capture status'
+        Assert-Equal 0 $emptySnapshotJson.ArtifactsReturned 'empty product probe records returned artifact count'
+    }
+    $script:EmptyProductCapture = $false
 
     $bundleWorkDir = Join-Path $workDir 'bundle-success'
     $null = New-Item -ItemType Directory -Path $bundleWorkDir

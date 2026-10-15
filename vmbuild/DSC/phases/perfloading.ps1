@@ -4785,9 +4785,14 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         } # end Primary-only update packages/ADR block
     }
 
-    $collection = Get-CMCollection -Name "All Unknown Computers"
-    if ($Collection -and $Collection.CollectionID) {
-        try { Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID } catch {}
+    try {
+        $collection = Get-CMCollection -Name "All Unknown Computers" -ErrorAction Stop
+        if ($collection -and $collection.CollectionID) {
+            Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Could not refresh All Unknown Computers: $($_.Exception.Message)" -Warning
     }
 
     # Delay approval until the other provider operations have given the

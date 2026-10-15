@@ -202,12 +202,18 @@ function Invoke-DotSource {
         [object[]]$Arguments,
         # By default a runtime exception in the dot-sourced script is logged as a
         # WARNING and swallowed (see the catch note below). Set -Rethrow when the
-        # CALLER owns retry/recovery for that script (e.g. the perfloading retry
-        # loop in ScriptWorkFlow.ps1): the exception is still logged, then re-thrown
-        # so the caller's try/catch can act on it. An explicit Write-DscStatus
-        # -Failure is always re-thrown, regardless of this switch.
-        [switch]$Rethrow
+        # caller must observe the exception. Set -CallerOwnsRetry with -Rethrow
+        # when the caller will retry or downgrade exhaustion: the exception is
+        # logged as a warning before it is re-thrown, rather than publishing a
+        # premature JOBFAILURE. An explicit Write-DscStatus -Failure is always
+        # preserved and re-thrown regardless of these switches.
+        [switch]$Rethrow,
+        [switch]$CallerOwnsRetry
     )
+
+    if ($CallerOwnsRetry -and -not $Rethrow) {
+        throw 'Invoke-DotSource -CallerOwnsRetry requires -Rethrow.'
+    }
 
     # HARDENING: `. $Script` runs the script in THIS function's scope, so any
     # variable the dot-sourced script assigns clobbers a like-named local here.
@@ -222,6 +228,7 @@ function Invoke-DotSource {
     # itself before the script body runs, so they can't be clobbered in flight.)
     $__idsScriptName = Split-Path $Script -Leaf
     $__idsRethrow = [bool]$Rethrow
+    $__idsCallerOwnsRetry = [bool]$CallerOwnsRetry
 
     # Pre-flight: verify the file exists
     if (-not (Test-Path $Script)) {
@@ -280,7 +287,12 @@ function Invoke-DotSource {
             throw
         }
         if ($__idsRethrow) {
-            Write-DscStatus "FAILED: $__idsFailure" -Failure
+            if ($__idsCallerOwnsRetry) {
+                Write-DscStatus "WARNING: $__idsFailure" -Warning
+            }
+            else {
+                Write-DscStatus "FAILED: $__idsFailure" -Failure
+            }
             throw
         }
         Write-DscStatus "WARNING: $__idsFailure" -Warning

@@ -54,7 +54,9 @@ $wantedFunctions = @(
     'Install-MemLabsMaintenanceScheduledTask',
     'Invoke-GitMaintenance',
     'Invoke-WeeklyUpgrades',
+    'Invoke-WeeklyUpgradesCore',
     'Invoke-WithMemLabsMaintenanceMutex',
+    'Invoke-WithMemLabsRuntimeUpgradeLease',
     'Test-ChocoSuccessCode'
 )
 $loadedFunctions = @()
@@ -232,6 +234,7 @@ try {
     (Get-Date).ToString('o') | Out-File (Join-Path $flagDirectory 'ps7_upgrade.timestamp') -Encoding ascii -NoNewline
     $chocoFlag = Join-Path $flagDirectory 'choco_all_upgrade.timestamp'
     $upgradeTestMutexName = 'Global\MemLabs_ChocolateyUpgrade_Test_{0}' -f [guid]::NewGuid().ToString('N')
+    $testMutationMutexName = 'Global\MemLabsTestMutationLock_Test_{0}' -f [guid]::NewGuid().ToString('N')
 
     $mutexName = 'Global\MemLabs_HostMaintenance_Test_{0}' -f [guid]::NewGuid().ToString('N')
     $mutexReady = Join-Path $fixtureRoot 'mutex-ready'
@@ -275,10 +278,17 @@ try {
 
         $script:ChocoCalls = @()
         $script:MaintenanceHadFailure = $false
-        Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $mutexName
+        Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $mutexName -TestMutationMutexName $testMutationMutexName
         Assert-Equal 0 $script:ChocoCalls.Count 'scheduled weekly maintenance skips a concurrent Chocolatey upgrade'
         Assert-Equal $false (Test-Path -LiteralPath $chocoFlag) 'a skipped scheduled upgrade does not stamp completion'
         Assert-Equal $false $script:MaintenanceHadFailure 'a concurrent Chocolatey upgrade is not reported as maintenance failure'
+
+        $script:ChocoCalls = @()
+        $script:MaintenanceHadFailure = $false
+        Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $mutexName
+        Assert-Equal 0 $script:ChocoCalls.Count 'scheduled weekly maintenance defers while a test cycle owns the host mutation lease'
+        Assert-Equal $false (Test-Path -LiteralPath $chocoFlag) 'a deferred runtime upgrade does not stamp completion'
+        Assert-Equal $false $script:MaintenanceHadFailure 'an active test cycle is not reported as maintenance failure'
 
         Set-Content -LiteralPath $mutexRelease -Value 'release' -Encoding ascii
         $null = Wait-Job -Job $holderJob -Timeout 10
@@ -314,7 +324,7 @@ try {
         $script:ChocoCalls = @()
         $script:ChocoExitCode = $successCode
         $script:MaintenanceHadFailure = $false
-        Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName
+        Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
         Assert-Equal 1 $script:ChocoCalls.Count "scheduled weekly maintenance invokes Chocolatey once for success code $successCode"
         Assert-Equal 'upgrade all -y --ignore-checksums' ($script:ChocoCalls[0] -join ' ') "scheduled weekly maintenance runs upgrade all directly for success code $successCode"
         Assert-Equal $true (Test-Path -LiteralPath $chocoFlag -PathType Leaf) "success code $successCode stamps completion time"
@@ -326,7 +336,7 @@ try {
     $script:ChocoCalls = @()
     $script:ChocoExitCode = 9
     $script:MaintenanceHadFailure = $false
-    Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName
+    Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
     Assert-Equal 1 $script:ChocoCalls.Count 'failed scheduled weekly maintenance invokes Chocolatey once'
     Assert-Equal $false (Test-Path -LiteralPath $chocoFlag) 'failed scheduled upgrade does not stamp completion'
     Assert-Equal $true $script:MaintenanceHadFailure 'failed scheduled upgrade fails the maintenance result'
@@ -336,7 +346,7 @@ try {
     $script:ChocoCalls = @()
     $script:ChocoExitCode = 9
     $script:MaintenanceHadFailure = $false
-    Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName
+    Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
     Assert-Equal 1 $script:ChocoCalls.Count 'failed scheduled PowerShell upgrade invokes Chocolatey once'
     Assert-Equal 'upgrade pwsh -y' ($script:ChocoCalls[0] -join ' ') 'scheduled PowerShell upgrade uses the expected command'
     Assert-Equal $true $script:MaintenanceHadFailure 'failed scheduled PowerShell upgrade fails the maintenance result'
@@ -346,7 +356,7 @@ try {
     $script:AllowDetachedUpgrade = $true
     $script:StartedProcess = $null
     try {
-        Invoke-WeeklyUpgrades
+        Invoke-WeeklyUpgrades -TestMutationMutexName $testMutationMutexName
     }
     finally {
         $script:AllowDetachedUpgrade = $false

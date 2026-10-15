@@ -99,6 +99,52 @@ function Invoke-WithMemLabsMaintenanceMutex {
     }
 }
 
+function Invoke-WithMemLabsRuntimeUpgradeLease {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList = @(),
+        [ValidateRange(0, 3600)]
+        [int] $TimeoutSeconds = 0,
+        [string] $Name = 'Global\MemLabsTestMutationLock'
+    )
+
+    $mutex = $null
+    $acquired = $false
+    try {
+        try {
+            $mutex = [System.Threading.Mutex]::new($false, $Name)
+        }
+        catch {
+            Write-LogMessage "The host mutation lease is unavailable; deferring runtime upgrades: $($_.Exception.Message)" -Level 'WARNING'
+            return $false
+        }
+
+        try {
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+
+        if (-not $acquired) {
+            return $false
+        }
+
+        & $ScriptBlock @ArgumentList | Out-Host
+        return $true
+    }
+    finally {
+        if ($mutex) {
+            if ($acquired) {
+                try { $mutex.ReleaseMutex() } catch {}
+            }
+            try { $mutex.Dispose() } catch {}
+        }
+    }
+}
+
 function Install-MemLabsMaintenanceScheduledTask {
     [CmdletBinding()]
     param (
@@ -1569,7 +1615,7 @@ function Invoke-RdcManMaintenance {
     Write-LogMessage 'RDCMan maintenance completed.'
 }
 
-function Invoke-WeeklyUpgrades {
+function Invoke-WeeklyUpgradesCore {
     param (
         [switch] $WaitForCompletion,
         [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade'
@@ -1747,6 +1793,27 @@ function Invoke-WeeklyUpgrades {
     }
 
     Write-LogMessage 'Weekly upgrades maintenance completed.'
+}
+
+function Invoke-WeeklyUpgrades {
+    param (
+        [switch] $WaitForCompletion,
+        [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade',
+        [string] $TestMutationMutexName = 'Global\MemLabsTestMutationLock'
+    )
+
+    $upgradeRan = Invoke-WithMemLabsRuntimeUpgradeLease -Name $TestMutationMutexName -TimeoutSeconds 0 `
+        -ArgumentList $WaitForCompletion.IsPresent, $UpgradeMutexName -ScriptBlock {
+        param (
+            [bool] $Wait,
+            [string] $MutexName
+        )
+
+        Invoke-WeeklyUpgradesCore -WaitForCompletion:$Wait -UpgradeMutexName $MutexName
+    }
+    if (-not $upgradeRan) {
+        Write-LogMessage 'A MemLabs test cycle is active; deferring weekly upgrades so the live PowerShell runtime is not replaced.' -Level 'WARNING'
+    }
 }
 
 if ($WindowsAdminCenterRemovalOnly) {

@@ -995,7 +995,7 @@ if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateOb
             # ask it to re-throw on failure -- otherwise the loop could never see
             # an aborted perfloading run and would 'succeed' on the first pass
             # even when perfloading died partway (e.g. the SMS Provider/WMI crash).
-            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow -CallerOwnsRetry
             break
         }
         catch {
@@ -1004,7 +1004,8 @@ if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateOb
                 Start-Sleep -Seconds 30
             }
             else {
-                Write-DscStatus "Perfloading.ps1 did not complete after $perfMaxAttempts attempts; continuing. Some MEMLABS objects may be missing -- re-run Phase 8 to finish pre-population." -Warning
+                Write-DscStatus "Perfloading.ps1 did not complete after $perfMaxAttempts attempts. Refusing to report Phase 8 success with incomplete MEMLABS pre-population. Last error: $($_.Exception.Message)" -Failure
+                return
             }
         }
     }
