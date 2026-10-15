@@ -61,7 +61,7 @@ function Get-InstalledProducts {
 }
 
 function Get-MsiProductVersion {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [hashtable]$InstallerState)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "MSI not found at $Path"
@@ -70,6 +70,8 @@ function Get-MsiProductVersion {
     $database = $null
     $view = $null
     $record = $null
+    $codeView = $null
+    $codeRecord = $null
     try {
         $installer = New-Object -ComObject WindowsInstaller.Installer
         $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
@@ -77,10 +79,32 @@ function Get-MsiProductVersion {
         $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
         $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
         if (-not $record) { throw "MSI Property table has no ProductVersion row" }
-        return [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+        $versionText = [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+        if ($null -ne $InstallerState) {
+            $InstallerState.Clear()
+            $codeView = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database, @('SELECT `Value` FROM `Property` WHERE `Property`=''ProductCode'''))
+            $null = $codeView.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $codeView, $null)
+            $codeRecord = $codeView.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $codeView, $null)
+            if (-not $codeRecord) { throw 'MSI Property table has no ProductCode row' }
+            $productCode = [string]$codeRecord.GetType().InvokeMember('StringData', 'GetProperty', $null, $codeRecord, @(1))
+            $InstallerState.Installed = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($productCode)) -eq 5
+            $InstallerState.CoreState = -1
+            $InstallerState.PackageName = 'msodbcsql.msi'
+            if ($InstallerState.Installed) {
+                $InstallerState.CoreState = $installer.GetType().InvokeMember('FeatureState', 'GetProperty', $null, $installer, @($productCode, 'SQL_SQLODBC_CORE'))
+                $InstallerState.PackageName = [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($productCode, 'PackageName'))
+            }
+            $packageName = "$($InstallerState.PackageName)"
+            if ([string]::IsNullOrWhiteSpace($packageName) -or
+                $packageName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+                [IO.Path]::GetExtension($packageName) -ine '.msi') {
+                throw "ODBC MSI reports an invalid source package name '$packageName'"
+            }
+        }
+        return $versionText
     }
     finally {
-        foreach ($comObject in @($record, $view, $database, $installer)) {
+        foreach ($comObject in @($codeRecord, $codeView, $record, $view, $database, $installer)) {
             if ($comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
                 try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($comObject) }
                 catch { Write-Verbose "Could not release Windows Installer COM object: $($_.Exception.Message)" }
@@ -137,7 +161,6 @@ function Get-MemLabsInstalledOdbc18Version {
             -Name 'InstalledVersion' -ErrorAction Stop
         if (-not [string]::IsNullOrWhiteSpace("$value")) {
             $values.Add("$value")
-            $driverRegistered = $true
         }
     }
     catch { }
@@ -156,7 +179,6 @@ function Get-MemLabsInstalledOdbc18Version {
             $value = if ($subKey) { $subKey.GetValue('InstalledVersion', $null) } else { $null }
             if (-not [string]::IsNullOrWhiteSpace("$value")) {
                 $values.Add("$value")
-                $driverRegistered = $true
             }
 
             $odbcKey = $baseKey.OpenSubKey('SOFTWARE\ODBC\ODBCINST.INI\ODBC Driver 18 for SQL Server')
@@ -1873,7 +1895,8 @@ class InstallODBCDriver {
 
         [version]$requiredVersionParsed = $catalog.Version
         [version]$payloadVersion = $null
-        $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath
+        $msiState = @{}
+        $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath -InstallerState $msiState
         if (-not [version]::TryParse($payloadVersionText, [ref]$payloadVersion)) {
             throw "Microsoft ODBC Driver 18 MSI at $_odbcpath has invalid ProductVersion '$payloadVersionText'"
         }
@@ -1881,38 +1904,53 @@ class InstallODBCDriver {
             Write-Status "Cached Microsoft ODBC Driver 18 MSI is stale (payload $payloadVersion, required $requiredVersionParsed). Retrying once from $($_URL) without the cache DVD."
             Remove-Item -LiteralPath $_odbcpath -Force -ErrorAction SilentlyContinue
             Invoke-DownloadFile $_URL $_odbcpath -BypassCache
-            $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath
+            $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath -InstallerState $msiState
             $payloadVersion = $null
             if (-not [version]::TryParse($payloadVersionText, [ref]$payloadVersion) -or $payloadVersion -lt $requiredVersionParsed) {
                 throw "Microsoft ODBC Driver 18 network MSI is stale: payload '$payloadVersionText' is below required $requiredVersionParsed"
             }
         }
 
-        Install-MSIPackage `
-            -MsiPath $_odbcpath `
-            -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
-            -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1") `
-            -LogPath "C:\temp\odbcinstallation.log"
+        $sourceDirectory = Join-Path $env:ProgramData "MemLabs\Installers\ODBC18\$payloadVersion"
+        $null = New-Item -Path $sourceDirectory -ItemType Directory -Force -ErrorAction Stop
+        $installerSource = Join-Path $sourceDirectory $msiState.PackageName
+        Copy-Item -LiteralPath $_odbcpath -Destination $installerSource -Force -ErrorAction Stop
+
+        $installFailed = $false
+        try {
+            Install-MSIPackage `
+                -MsiPath $installerSource `
+                -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
+                -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1", "ADDLOCAL=ALL") `
+                -LogPath "C:\temp\odbcinstallation.log"
+        }
+        catch {
+            $installFailed = $true
+            Write-Status "Microsoft ODBC Driver 18 installation failed; attempting feature repair from the validated payload. $($_.Exception.Message)"
+        }
 
         [version]$installedVersion = $null
         $verificationDeadline = (Get-Date).AddSeconds(60)
         do {
             $installedVersion = Get-MemLabsInstalledOdbc18Version
+            if ($installFailed) { break }
             if ($installedVersion -and $installedVersion -ge $requiredVersionParsed) { break }
             Start-Sleep -Seconds 2
         } while ((Get-Date) -lt $verificationDeadline)
-        if (-not $installedVersion -or $installedVersion -lt $requiredVersionParsed) {
+        if ($installFailed -or -not $installedVersion -or $installedVersion -lt $requiredVersionParsed) {
+            $null = Get-MsiProductVersion -Path $installerSource -InstallerState $msiState
             Write-Status "Microsoft ODBC Driver 18 is absent or unregistered after installation. Forcing a repair before reporting failure."
             Install-MSIPackage `
-                -MsiPath $_odbcpath `
+                -MsiPath $installerSource `
                 -DisplayName "Microsoft ODBC Driver 18 for SQL Server repair" `
                 -AdditionalArguments @(
                     "IACCEPTMSODBCSQLLICENSETERMS=YES",
                     "SKIPPENDINGREBOOTCHECK=1",
-                    "REINSTALL=ALL",
-                    "REINSTALLMODE=vomus"
+                    "ADDLOCAL=ALL",
+                    $(if ($msiState.CoreState -eq 3) { "REINSTALL=ALL" }),
+                    $(if ($msiState.Installed) { "REINSTALLMODE=vomus" })
                 ) `
-                -LogPath "C:\temp\odbcinstallation.log"
+                -LogPath "C:\temp\odbcinstallation.repair.log"
 
             $repairDeadline = (Get-Date).AddSeconds(60)
             do {

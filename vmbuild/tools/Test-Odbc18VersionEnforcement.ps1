@@ -183,23 +183,174 @@ if ($futureFix.FixVersion -ne '18.7.1.2' -or $futureFix.ArgumentList[1] -notmatc
     throw 'Fix-ODBC18 does not advance with a future catalog version/fwlink pair.'
 }
 
-$script:MsiStartCalls = 0
-function Test-Path {
-    param($LiteralPath, $Path, $PathType)
-    return $true
+$maintenanceBody = [scriptblock]::Create(
+    $fix.ScriptBlock.Ast.ParamBlock.Extent.Text + "`n" +
+    ((@($fix.ScriptBlock.Ast.EndBlock.Statements | Where-Object {
+                    $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst]
+                }) | ForEach-Object { $_.Extent.Text }) -join "`n")
+)
+$odbcClassAst = $moduleAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.TypeDefinitionAst] -and $node.Name -eq 'InstallODBCDriver'
+    }, $true)
+$dscSet = $odbcClassAst.Members | Where-Object Name -eq 'Set'
+$dscBody = [scriptblock]::Create(
+    ($dscSet.Body.EndBlock.Statements | ForEach-Object { $_.Extent.Text }) -join "`n"
+)
+
+function Invoke-OdbcInstallerFixture {
+    param([scriptblock]$Body, [string]$Mode, [switch]$Dsc)
+
+    & {
+        $script:OdbcFixture = @{
+            Mode = $Mode
+            Version = if ($Mode -eq 'Current') { [version]'18.6.2.1' } elseif ($Mode -eq 'Upgrade') { [version]'18.4.1.1' } else { $null }
+            CoreState = if ($Mode -in @('Repair', 'RepairReboot', 'Current')) { 3 } else { 2 }
+            Clock = [datetime]'2026-10-15T12:00:00'
+            Calls = [System.Collections.Generic.List[object]]::new()
+            Copies = [System.Collections.Generic.List[string]]::new()
+            Removals = [System.Collections.Generic.List[string]]::new()
+        }
+        function Get-InstalledOdbc18Version { return $script:OdbcFixture.Version }
+        function Get-MemLabsInstalledOdbc18Version { return $script:OdbcFixture.Version }
+        function Get-MsiVersion {
+            param($Path, [hashtable]$InstallerState)
+            [void]$Path
+            if ($null -ne $InstallerState) {
+                $InstallerState.Clear()
+                $InstallerState.Installed = $true
+                $InstallerState.CoreState = $script:OdbcFixture.CoreState
+                $InstallerState.PackageName = 'original-driver.msi'
+            }
+            return '18.6.2.1'
+        }
+        function Get-MsiProductVersion {
+            param($Path, [hashtable]$InstallerState)
+            Get-MsiVersion -Path $Path -InstallerState $InstallerState
+        }
+        function Get-MemLabsOdbcCatalogState {
+            [pscustomobject]@{ Version = [version]'18.6.2.1'; Url = 'https://example.invalid/odbc.msi' }
+        }
+        function Install-OdbcVcRuntimePrerequisite {
+            param($Url)
+            [void]$Url
+            [pscustomobject]@{ Message = 'VC++ runtime ready'; ExitCode = 0 }
+        }
+        function Save-OdbcInstaller {
+            param($Url, $Path, [switch]$BypassCache)
+            [void]$Url; [void]$Path; [void]$BypassCache
+        }
+        function Invoke-DownloadFile {
+            param($Url, $Dest, [switch]$BypassCache)
+            [void]$Url; [void]$Dest; [void]$BypassCache
+        }
+        function Test-Path { param($LiteralPath, $Path, $PathType) return $true }
+        function New-Item { param($Path, $ItemType, [switch]$Force, $ErrorAction) }
+        function Copy-Item {
+            param($LiteralPath, $Destination, [switch]$Force, $ErrorAction)
+            [void]$LiteralPath; [void]$Force; [void]$ErrorAction
+            $script:OdbcFixture.Copies.Add("$Destination")
+        }
+        function Remove-Item {
+            param($LiteralPath, [switch]$Force, $ErrorAction)
+            [void]$Force; [void]$ErrorAction
+            $script:OdbcFixture.Removals.Add("$LiteralPath")
+        }
+        function Get-Content { param($LiteralPath, $Path, $Tail, $ErrorAction) 'Feature: SQL_SQLODBC_CORE; Installed: Absent; Request: Null; Action: Null' }
+        function Get-OdbcMsiFailureDetails {
+            param($LogPath)
+            "Feature: SQL_SQLODBC_CORE; Installed: Absent; Log: $LogPath"
+        }
+        function Write-Status { param($Status) [void]$Status }
+        function Get-Date { return $script:OdbcFixture.Clock }
+        function Start-Sleep {
+            param([int]$Seconds)
+            $script:OdbcFixture.Clock = $script:OdbcFixture.Clock.AddSeconds($Seconds)
+        }
+        function Start-Process {
+            param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru, [switch]$NoNewWindow, $ErrorAction)
+            [void]$Wait; [void]$PassThru; [void]$NoNewWindow; [void]$ErrorAction
+            $line = @($ArgumentList) -join ' '
+            $script:OdbcFixture.Calls.Add([pscustomobject]@{ FilePath = $FilePath; Arguments = $line })
+            $attempt = $script:OdbcFixture.Calls.Count
+            if ($script:OdbcFixture.Mode -eq 'PermanentFailure' -or
+                ($script:OdbcFixture.Mode -eq 'InitialFailure' -and $attempt -eq 1)) {
+                return [pscustomobject]@{ ExitCode = 1603 }
+            }
+            $defer = $script:OdbcFixture.Mode -in @('Repair', 'RepairReboot') -and $attempt -eq 1
+            $adding = $line -match '\bADDLOCAL=ALL\b' -and $line -notmatch '\bREINSTALL=ALL\b'
+            $repairing = $line -match '\bREINSTALL=ALL\b' -and $script:OdbcFixture.CoreState -eq 3
+            if (-not $defer -and $script:OdbcFixture.Mode -ne 'NoOp' -and ($adding -or $repairing)) {
+                $script:OdbcFixture.CoreState = 3
+                $script:OdbcFixture.Version = [version]'18.6.2.1'
+            }
+            [pscustomobject]@{ ExitCode = if ($script:OdbcFixture.Mode -eq 'RepairReboot' -and $attempt -eq 2) { 3010 } else { 0 } }
+        }
+        . (Import-OdbcFunction -Name 'Install-MSIPackage')
+        $resource = [pscustomobject]@{ ODBCPath = 'C:\temp\msodbcsql.msi' }
+        $resource | Add-Member -MemberType ScriptMethod -Name SetForTest -Value $Body
+        $output = @()
+        $failure = $null
+        try {
+            if ($Dsc) { $output = @($resource.SetForTest()) }
+            else { $output = @(& $Body '18.6.2.1' 'https://example.invalid/odbc.msi' 'https://example.invalid/vc_redist.x64.exe' 3>$null 6>$null) }
+        }
+        catch { $failure = $_.Exception.Message }
+        [pscustomobject]@{
+            Calls = @($script:OdbcFixture.Calls)
+            Copies = @($script:OdbcFixture.Copies)
+            Removals = @($script:OdbcFixture.Removals)
+            Version = $script:OdbcFixture.Version
+            Failure = $failure
+            Result = $output | Where-Object { $_.PSObject.Properties['Success'] } | Select-Object -Last 1
+        }
+    }
 }
-function Get-ItemProperty {
-    param($LiteralPath, $Path, $ErrorAction)
-    [pscustomobject]@{ InstalledVersion = '18.6.2.1' }
+
+foreach ($surface in @('Maintenance', 'DSC')) {
+    $body = if ($surface -eq 'Maintenance') { $maintenanceBody } else { $dscBody }
+    foreach ($mode in @('AbsentCore', 'Upgrade', 'Repair', 'RepairReboot', 'InitialFailure', 'PermanentFailure', 'NoOp')) {
+        $probe = Invoke-OdbcInstallerFixture -Body $body -Mode $mode -Dsc:($surface -eq 'DSC')
+        $expectedFailure = $mode -in @('PermanentFailure', 'NoOp')
+        if ([bool]$probe.Failure -ne $expectedFailure -or
+            (-not $expectedFailure -and $probe.Version -ne [version]'18.6.2.1')) {
+            throw "$surface $mode did not converge or fail as expected: $($probe.Failure)"
+        }
+        if ($surface -eq 'Maintenance' -and -not $expectedFailure -and -not $probe.Result.Success) {
+            throw "Maintenance $mode did not report explicit success."
+        }
+        if (@($probe.Copies | Where-Object { $_ -like '*\MemLabs\Installers\ODBC18\18.6.2.1\original-driver.msi' }).Count -ne 1 -or
+            @($probe.Removals | Where-Object { $_ -like '*\MemLabs\Installers\ODBC18\*' }).Count) {
+            throw "$surface $mode did not retain the validated MSI under its registered package name."
+        }
+        foreach ($call in $probe.Calls) {
+            if ($call.Arguments -notmatch '\bADDLOCAL=ALL\b' -or
+                $call.Arguments -notmatch '\bIACCEPTMSODBCSQLLICENSETERMS=YES\b' -or
+                $call.Arguments -notmatch 'original-driver\.msi') {
+                throw "$surface $mode lost feature selection, license acceptance, or the registered source filename."
+            }
+        }
+        if ($mode -in @('AbsentCore', 'InitialFailure') -and
+            @($probe.Calls | Where-Object Arguments -match '\bREINSTALL=ALL\b').Count) {
+            throw "$surface $mode incorrectly used REINSTALL to add an absent core feature."
+        }
+        if ($mode -in @('Repair', 'RepairReboot', 'InitialFailure', 'PermanentFailure', 'NoOp')) {
+            if ($probe.Calls.Count -ne 2) { throw "$surface $mode did not use exactly one bounded recovery stage." }
+            $logs = @($probe.Calls | ForEach-Object {
+                    [regex]::Match($_.Arguments, '/l\*v\s+"([^"]+)"').Groups[1].Value
+                })
+            if (-not $logs[0] -or -not $logs[1] -or $logs[0] -eq $logs[1]) {
+                throw "$surface $mode overwrote the initial MSI log with its repair log."
+            }
+        }
+        if ($surface -eq 'Maintenance' -and $mode -eq 'RepairReboot' -and
+            ($probe.Result.Errors -join ' ') -notmatch 'reboot') {
+            throw 'Maintenance did not retain the repair MSI reboot requirement.'
+        }
+    }
 }
-function Start-Process {
-    $script:MsiStartCalls++
-    throw 'Start-Process should not run when ODBC is already current.'
-}
-$fixArgs = @($fix.ArgumentList)
-$alreadyCurrent = & $fix.ScriptBlock @fixArgs
-if (-not $alreadyCurrent.Success -or $script:MsiStartCalls -ne 0 -or
-    $alreadyCurrent.Message -notmatch 'already 18\.6\.2\.1') {
+$alreadyCurrent = Invoke-OdbcInstallerFixture -Body $maintenanceBody -Mode 'Current'
+if (-not $alreadyCurrent.Result.Success -or $alreadyCurrent.Calls.Count -ne 0 -or $alreadyCurrent.Failure) {
     throw 'Fix-ODBC18 is not idempotent for an already-current VM.'
 }
 
@@ -245,6 +396,7 @@ if ($failureDetailFunctions.Count -ne 1) { throw "Expected one Get-OdbcMsiFailur
 $syntheticMsiLog = Join-Path ([IO.Path]::GetTempPath()) "memlabs-odbc-failure-$([guid]::NewGuid().ToString('N')).log"
 try {
     @(
+        'Feature: SQL_SQLODBC_CORE; Installed: Absent; Request: Null; Action: Null',
         'Action start 12:00:00: CA_ErrorPendingReboot.',
         'A previous installation required a reboot of the machine for changes to take effect.',
         'Action ended 12:00:00: CA_ErrorPendingReboot. Return value 3.',
@@ -252,6 +404,7 @@ try {
     ) | Set-Content -LiteralPath $syntheticMsiLog -Encoding UTF8
     $failureDetails = Get-OdbcMsiFailureDetails -LogPath $syntheticMsiLog
     if ($failureDetails -notmatch 'Failure markers:' -or
+        $failureDetails -notmatch 'Feature: SQL_SQLODBC_CORE' -or
         $failureDetails -notmatch 'previous installation required a reboot' -or
         $failureDetails -notmatch 'Return value 3') {
         throw "ODBC MSI failure diagnostics omitted the actionable pending-reboot markers: $failureDetails"
@@ -324,6 +477,7 @@ if (-not $vcInstallProbe.Result.Installed -or
 }
 foreach ($requiredPattern in @(
         "IACCEPTMSODBCSQLLICENSETERMS=YES",
+        "ADDLOCAL=ALL",
         '\$argumentLine = \$arguments -join '' ''',
         '-ArgumentList \$argumentLine',
         "ProductVersion",
@@ -415,12 +569,6 @@ if ((Get-MemlabsCacheUrlForKey -Key ODBC) -notmatch 'linkid=9999999') {
 $cachedMsi = Join-Path $root 'azureFiles\cache\ODBC.dat'
 $cachedMsiSource = "$cachedMsi.src"
 $cacheMatchesTarget = $false
-$hostVcRuntime = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64' -ErrorAction SilentlyContinue
-$hostVcReady = (($hostVcRuntime.Major -gt 14) -or
-    ($hostVcRuntime.Major -eq 14 -and $hostVcRuntime.Minor -gt 34) -or
-    ($hostVcRuntime.Major -eq 14 -and $hostVcRuntime.Minor -eq 34 -and $hostVcRuntime.Bld -ge 33135)) -and
-    (Test-Path -LiteralPath "$env:windir\System32\vcruntime140.dll" -PathType Leaf) -and
-    (Test-Path -LiteralPath "$env:windir\System32\msvcp140.dll" -PathType Leaf)
 if (Test-Path -LiteralPath $cachedMsiSource -PathType Leaf) {
     try {
         $cacheMatchesTarget = (Get-Content -LiteralPath $cachedMsiSource -Raw | ConvertFrom-Json).url -match 'linkid=2358430'
@@ -429,48 +577,16 @@ if (Test-Path -LiteralPath $cachedMsiSource -PathType Leaf) {
         Write-Warning "Could not read ODBC cache source metadata '$cachedMsiSource': $($_.Exception.Message)"
     }
 }
-if ($cacheMatchesTarget -and (Test-Path -LiteralPath $cachedMsi -PathType Leaf) -and $hostVcReady) {
+if ($cacheMatchesTarget -and (Test-Path -LiteralPath $cachedMsi -PathType Leaf)) {
     $cachedVersion = [version](Get-MsiProductVersion -Path $cachedMsi)
     if ($cachedVersion -lt [version]'18.6.2.1') {
         throw "Host ODBC cache is stale: $cachedVersion."
     }
     Write-Host "INFO -- cached ODBC MSI ProductVersion=$cachedVersion"
 
-    $script:InstalledOdbcVersion = '18.4.1.1'
-    $script:MsiStartCalls = 0
-    $script:MsiArguments = @()
-    function Get-ItemPropertyValue {
-        param($Path, $Name, $ErrorAction)
-        $script:InstalledOdbcVersion
-    }
-    function Start-Process {
-        param(
-            $FilePath,
-            $ArgumentList,
-            [switch]$Wait,
-            [switch]$PassThru,
-            [switch]$NoNewWindow,
-            $ErrorAction
-        )
-        $script:MsiStartCalls++
-        $script:MsiArguments = @($ArgumentList)
-        $script:InstalledOdbcVersion = '18.6.2.1'
-        [pscustomobject]@{ ExitCode = 0 }
-    }
-    $sourceUri = ([uri]::new((Resolve-Path -LiteralPath $cachedMsi).Path)).AbsoluteUri
-    $upgradeOutput = @(& $fix.ScriptBlock '18.6.2.1' $sourceUri $fix.ArgumentList[2])
-    $upgradeResult = @($upgradeOutput | Where-Object { $_.PSObject.Properties.Name -contains 'Success' }) | Select-Object -Last 1
-    if (-not $upgradeResult.Success -or $script:MsiStartCalls -ne 1 -or
-        ($script:MsiArguments -join ' ') -notmatch '/qn /norestart IACCEPTMSODBCSQLLICENSETERMS=YES SKIPPENDINGREBOOTCHECK=1' -or
-        $upgradeResult.Message -notmatch "18\.4\.1\.1.+18\.6\.2\.1") {
-        throw 'Fix-ODBC18 did not execute and verify the expected 18.4-to-18.6 upgrade path.'
-    }
-}
-elseif ($cacheMatchesTarget -and (Test-Path -LiteralPath $cachedMsi -PathType Leaf)) {
-    Write-Host 'INFO -- skipping the real cached-MSI upgrade probe because this test host lacks the VC++ runtime; the mocked missing-runtime path was validated above.'
 }
 elseif (Test-Path -LiteralPath $cachedMsi -PathType Leaf) {
     Write-Host 'INFO -- cached ODBC MSI uses an older source URL; the download-cache resolver will refresh it.'
 }
 
-Write-Host 'PASS -- ODBC 18 target is catalog-driven, payload-verified, and enforced by DSC plus maintenance.'
+Write-Host 'PASS -- ODBC 18 feature selection, source identity, bounded recovery, and catalog versions are enforced by DSC plus maintenance.'

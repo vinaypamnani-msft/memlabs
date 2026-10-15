@@ -75,6 +75,25 @@ it as successfully maintained. No VM or service is restarted by this retry path.
 
 Validate this path with `vmbuild\tools\Test-VMMaintenanceNoteDiagnostics.ps1`.
 
+### ODBC Driver 18 maintenance
+
+ODBC Driver 17 is preserved and does not satisfy Driver 18 compliance. Both
+maintenance and DSC explicitly select Driver 18's MSI features with
+`ADDLOCAL=ALL`: `REINSTALL=ALL` alone only repairs previously installed features
+and can return success for an SDK-only product without installing the driver.
+Success requires Driver 18 registration and its DLL, not just an MSI product
+entry or version marker. Install and repair logs are kept separately; failure
+diagnostics include the core feature's selected state. An MSI upgrade can
+internally replace the older Driver 18 product, so exit code zero alone is not
+proof that a usable driver remains.
+The validated MSI is retained under
+`%ProgramData%\MemLabs\Installers\ODBC18\<version>` using Windows Installer's
+registered package filename. This permits repair without the source-name
+mismatch between DSC and maintenance. Recovery selects missing features
+without `REINSTALL`, and only reinstalls an already-local core feature.
+
+Validate with `vmbuild\tools\Test-Odbc18VersionEnforcement.ps1` in Windows PowerShell.
+
 ## ConfigMgr SQL failure diagnostics
 
 Phase 8 SQL evidence collection also covers login/database-open errors 4060 and
