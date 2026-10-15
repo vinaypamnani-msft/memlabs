@@ -10332,6 +10332,9 @@ function Get-VmSession {
     $sessionHeartbeatWaitSec = 12
     [double]$swHeartbeatWaitMs = 0
     $heartbeatAtConnect = 'n/a'
+    $credentialDiagnosticsRun = $false
+    $diagnosticRetryGranted = $false
+    $diagnosticRetryUsed = $false
     while ($true) {
         $ps = $null
         $failCount++
@@ -10340,7 +10343,12 @@ function Get-VmSession {
         }
 
         if ($failCount -gt $MaxRetries) {
-            break
+            if ($diagnosticRetryGranted -and -not $diagnosticRetryUsed) {
+                $diagnosticRetryUsed = $true
+            }
+            else {
+                break
+            }
         }
 
         # Skip New-PSSession entirely if the VM is not running.
@@ -10529,6 +10537,17 @@ function Get-VmSession {
         else {
             Write-Log $sessionFailureMessage -Warning -Verbose
         }
+
+        if ($requireDomain -and -not $credentialDiagnosticsRun -and
+            -not $sawChannelBroken -and $failReasons -contains 'auth-or-other') {
+            $credentialDiagnosticsRun = $true
+            $null = Invoke-VmSessionCredentialDiagnostics -VmName $VmName -VmId $vm.vmID `
+                -VmDomainName $requestedDomainName -RequestedAccount $requestedAccount `
+                -PrimaryUserNames $credentialUserNames
+            $diagnosticRetryGranted = $true
+            Write-Log "$VmName`: Alternate credential diagnostics completed; waiting 60 seconds before retrying the required domain credential." -Warning
+            Start-Sleep -Seconds 60
+        }
     }
     # Populate diagnostics for the caller so it knows WHY we failed
     if ($Diagnostics) {
@@ -10538,11 +10557,6 @@ function Get-VmSession {
         $Diagnostics.VmState = "$vmState"
         $Diagnostics.Heartbeat = "$heartbeatAtConnect"
         $Diagnostics.ConnectMilliseconds = [int]$swConnectTotalMs
-    }
-    if ($requireDomain -and -not $sawChannelBroken -and $failReasons -contains 'auth-or-other') {
-        $null = Invoke-VmSessionCredentialDiagnostics -VmName $VmName -VmId $vm.vmID `
-            -VmDomainName $requestedDomainName -RequestedAccount $requestedAccount `
-            -PrimaryUserNames $credentialUserNames
     }
     # Best-effort probes (e.g. Copy-ItemSafe heartbeat, MaxRetries=1) routinely
     # miss while the guest is still in OOBE; that is expected, not a failure.

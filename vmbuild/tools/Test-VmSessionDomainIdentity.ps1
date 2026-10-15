@@ -303,8 +303,15 @@ $runnerText = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MainTo
 if ($commonText -notmatch 'if \(-not \$requireDomain -and \$localUser -ne \$username\)') {
     throw 'Get-VmSession still offers local fallback during domain-required work.'
 }
-if ($commonText -notmatch '(?s)if \(\$requireDomain -and -not \$sawChannelBroken.+?Invoke-VmSessionCredentialDiagnostics') {
+if ($commonText -notmatch '(?s)if \(\$requireDomain -and -not \$credentialDiagnosticsRun.+?Invoke-VmSessionCredentialDiagnostics') {
     throw 'Domain authentication failure does not invoke the diagnostics-only alternate credential probes.'
+}
+if ($commonText -notmatch '(?s)Invoke-VmSessionCredentialDiagnostics -VmName \$VmName.+?Start-Sleep -Seconds 60') {
+    throw 'Domain authentication failure does not wait one minute after diagnostics before retrying.'
+}
+if ($commonText -notmatch '\$diagnosticRetryGranted\s*=\s*\$true' -or
+    $commonText -notmatch '(?s)if \(\$failCount -gt \$MaxRetries\).+?\$diagnosticRetryGranted.+?\$diagnosticRetryUsed') {
+    throw 'Diagnostic failure handling does not grant exactly one retry after the diagnostics delay.'
 }
 if ($commonText -notmatch 'Rejecting session created with.+guest identity') {
     throw 'Get-VmSession does not verify the actual guest identity after authentication.'
