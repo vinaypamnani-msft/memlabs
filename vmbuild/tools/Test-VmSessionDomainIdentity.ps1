@@ -23,8 +23,17 @@ function Import-FunctionDefinition {
     [scriptblock]::Create($definitions[0].Extent.Text)
 }
 
+function New-TestSecureString {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    $secure = [Security.SecureString]::new()
+    foreach ($character in $Value.ToCharArray()) { $secure.AppendChar($character) }
+    $secure.MakeReadOnly()
+    return $secure
+}
+
 . (Import-FunctionDefinition -Name 'Get-VmSessionCredentialUserName')
 . (Import-FunctionDefinition -Name 'Get-VmSessionCredentialUserNames')
+. (Import-FunctionDefinition -Name 'Invoke-VmSessionCredentialDiagnostics')
 . (Import-FunctionDefinition -Name 'Get-VmSessionGuestIdentity')
 . (Import-FunctionDefinition -Name 'Test-VmSessionIdentityProbeCompatible')
 . (Import-FunctionDefinition -Name 'Test-VmSessionIdentityCompatible')
@@ -40,6 +49,9 @@ if ((Get-VmSessionCredentialUserName -VmName 'CT1-PS2SITE' -VmDomainName 'cstest
 }
 function Get-VMNote {
     param([string]$VMName)
+    if ($VMName -eq 'LEGACY-SRV') {
+        return [pscustomobject]@{ domain = 'contoso.com' }
+    }
     [pscustomobject]@{
         domain = 'cstest1.com'
         domainNetBiosName = 'CSTEST1'
@@ -49,6 +61,11 @@ $domainCredentialNames = @(Get-VmSessionCredentialUserNames -VmName 'CT1-PS2SITE
         -VmDomainName 'cstest1.com' -AccountName 'vmbuildadmin')
 if (($domainCredentialNames -join '|') -ne 'vmbuildadmin@cstest1.com|CSTEST1\vmbuildadmin') {
     throw "Domain credential forms are incomplete or misordered: $($domainCredentialNames -join ', ')."
+}
+$legacyCredentialNames = @(Get-VmSessionCredentialUserNames -VmName 'LEGACY-SRV' `
+        -VmDomainName 'contoso.com' -AccountName 'vmbuildadmin')
+if (($legacyCredentialNames -join '|') -ne 'vmbuildadmin@contoso.com|CONTOSO\vmbuildadmin') {
+    throw "Legacy Notes did not derive the default NetBIOS credential form: $($legacyCredentialNames -join ', ')."
 }
 $disjointCredentialNames = @(Get-VmSessionCredentialUserNames -VmName 'LAB-SRV' `
         -VmDomainName 'ad.example.test' -DomainNetBiosName 'CORP' -AccountName 'admin@ad.example.test')
@@ -60,8 +77,90 @@ $workgroupCredentialNames = @(Get-VmSessionCredentialUserNames -VmName 'LAB-SRV'
 if ($workgroupCredentialNames.Count -ne 1 -or $workgroupCredentialNames[0] -ne 'LAB-SRV\vmbuildadmin') {
     throw 'Workgroup credential candidates included a domain fallback.'
 }
+
+$script:DiagnosticAttempts = [System.Collections.Generic.List[string]]::new()
+$script:DiagnosticRemovals = 0
+$script:DiagnosticLogs = [System.Collections.Generic.List[string]]::new()
+$diagnosticPasswordText = 'DIAGNOSTIC_TEST_SECRET'
+$global:Common = [pscustomobject]@{
+    LocalAdmin = [pscredential]::new(
+        'vmbuildadmin',
+        (New-TestSecureString -Value $diagnosticPasswordText)
+    )
+}
+function Get-VMNote {
+    param([string]$VMName)
+    [pscustomobject]@{
+        domain = 'cstest1.com'
+        domainNetBiosName = 'CSTEST1'
+        adminName = 'cmadmin'
+    }
+}
+function Write-Log {
+    param([string]$Message, [switch]$Warning, [switch]$LogOnly)
+    $script:DiagnosticLogs.Add($Message)
+}
+function Remove-VmSession {
+    param($Session)
+    $script:DiagnosticRemovals++
+}
+$diagnosticResults = @(Invoke-VmSessionCredentialDiagnostics -VmName 'CT1-PS2SITE' `
+        -VmId ([guid]'11111111-1111-1111-1111-111111111111') `
+        -VmDomainName 'cstest1.com' -RequestedAccount 'vmbuildadmin' `
+        -PrimaryUserNames @('vmbuildadmin@cstest1.com', 'CSTEST1\vmbuildadmin') `
+        -ConnectOperation {
+            param($TargetName, $TargetId, $Credential)
+            $script:DiagnosticAttempts.Add($Credential.UserName)
+            if ($Credential.UserName -eq 'cmadmin@cstest1.com') {
+                return [pscustomobject]@{
+                    Session = $null
+                    TimedOut = $false
+                    ErrorMessage = 'The credential is invalid.'
+                }
+            }
+            [pscustomobject]@{
+                Session = [pscustomobject]@{
+                    Availability = 'Available'
+                    CredentialUserName = $Credential.UserName
+                }
+                TimedOut = $false
+                ErrorMessage = $null
+            }
+        } -ProbeOperation {
+            param($Session, $DomainName)
+            [pscustomobject]@{
+                Identity = $Session.CredentialUserName
+                ComputerName = 'CT1-PS2SITE'
+                UserDomain = 'CSTEST1'
+                UserDnsDomain = $DomainName
+                ExpectedDomain = $DomainName
+                PartOfDomain = $true
+                ComputerDomain = $DomainName
+                SecureChannel = $false
+                SecureChannelError = $null
+                LocalVmbuildAdmin = [pscustomobject]@{ Exists = $true; Enabled = $true }
+            }
+        })
+$expectedDiagnosticAttempts = 'cmadmin@cstest1.com|CSTEST1\cmadmin|CT1-PS2SITE\vmbuildadmin'
+if (($script:DiagnosticAttempts -join '|') -ne $expectedDiagnosticAttempts) {
+    throw "Alternate diagnostic credential order is incorrect: $($script:DiagnosticAttempts -join ', ')."
+}
+if ($diagnosticResults.Count -ne 3 -or
+    @($diagnosticResults | Where-Object Status -eq 'authenticated').Count -ne 2 -or
+    $script:DiagnosticRemovals -ne 2) {
+    throw "Alternate diagnostic sessions were not classified and disposed correctly: results=$($diagnosticResults.Count) removals=$script:DiagnosticRemovals."
+}
+$diagnosticLogText = $script:DiagnosticLogs -join "`n"
+if (-not $diagnosticLogText.Contains('"SecureChannel":false') -or
+    -not $diagnosticLogText.Contains('maintenance remains blocked because a domain identity is required')) {
+    throw 'Alternate credential diagnostics did not retain the safe trust evidence or safety boundary.'
+}
+if ($diagnosticLogText.Contains($diagnosticPasswordText)) {
+    throw 'Alternate credential diagnostics logged the credential secret.'
+}
+
 if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue) {
-    $transportPassword = ConvertTo-SecureString 'test-only' -AsPlainText -Force
+    $transportPassword = New-TestSecureString -Value 'test-only'
     $transportSet = [pscustomobject]@{
         Credentials = @($domainCredentialNames | ForEach-Object {
                 [pscredential]::new($_, $transportPassword)
@@ -203,6 +302,9 @@ $jobsText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.ScriptB
 $runnerText = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MainToDevelopExpansionTest.ps1') -Raw
 if ($commonText -notmatch 'if \(-not \$requireDomain -and \$localUser -ne \$username\)') {
     throw 'Get-VmSession still offers local fallback during domain-required work.'
+}
+if ($commonText -notmatch '(?s)if \(\$requireDomain -and -not \$sawChannelBroken.+?Invoke-VmSessionCredentialDiagnostics') {
+    throw 'Domain authentication failure does not invoke the diagnostics-only alternate credential probes.'
 }
 if ($commonText -notmatch 'Rejecting session created with.+guest identity') {
     throw 'Get-VmSession does not verify the actual guest identity after authentication.'

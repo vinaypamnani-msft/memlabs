@@ -9008,6 +9008,16 @@ function Get-VmSessionCredentialUserNames {
         }
         catch { }
     }
+    if ([string]::IsNullOrWhiteSpace($DomainNetBiosName)) {
+        # Older VM Notes predate domainNetBiosName. The default AD NetBIOS name
+        # is the first DNS label; trying that additional principal is safe
+        # because domain-required sessions still validate the guest DNS domain
+        # and requested account before any command can run.
+        $dnsLabel = @("$VmDomainName".Split('.', 2))[0].Trim()
+        if ($dnsLabel -and $dnsLabel.Length -le 15 -and $dnsLabel -notmatch '[\\/:*?"<>|]') {
+            $DomainNetBiosName = $dnsLabel.ToUpperInvariant()
+        }
+    }
     $DomainNetBiosName = "$DomainNetBiosName".Trim()
     if (-not $DomainNetBiosName -or $DomainNetBiosName.Length -gt 15 -or
         $DomainNetBiosName -match '[\\/:*?"<>|]') {
@@ -9019,6 +9029,153 @@ function Get-VmSessionCredentialUserNames {
         $users.Add($netBiosUser)
     }
     return $users.ToArray()
+}
+
+function Invoke-VmSessionCredentialDiagnostics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][guid]$VmId,
+        [Parameter(Mandatory = $true)][string]$VmDomainName,
+        [Parameter(Mandatory = $true)][string]$RequestedAccount,
+        [string[]]$PrimaryUserNames = @(),
+        [scriptblock]$ConnectOperation,
+        [scriptblock]$ProbeOperation
+    )
+
+    if (-not $Common.LocalAdmin -or -not $Common.LocalAdmin.Password) {
+        Write-Log "$VmName`: Alternate credential diagnostics skipped because the MemLabs credential is unavailable." -Warning -LogOnly
+        return @()
+    }
+
+    $candidates = [System.Collections.Generic.List[hashtable]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($primaryName in @($PrimaryUserNames | Where-Object { $_ })) {
+        $null = $seen.Add("$primaryName")
+    }
+
+    $note = $null
+    try { $note = Get-VMNote -VMName $VmName }
+    catch {
+        Write-Log "$VmName`: Could not read VM Notes while preparing alternate credential diagnostics: $($_.Exception.Message)" -Warning -LogOnly
+    }
+    $domainAdmin = if ($note -and $note.adminName) { "$($note.adminName)".Trim() }
+    elseif ($note -and $note.domainAdmin) { "$($note.domainAdmin)".Trim() }
+    else { '' }
+    $domainNetBiosName = if ($note -and $note.domainNetBiosName) { "$($note.domainNetBiosName)".Trim() } else { '' }
+
+    if ($domainAdmin) {
+        $domainAdminNames = @(Get-VmSessionCredentialUserNames -VmName $VmName `
+                -VmDomainName $VmDomainName -AccountName $domainAdmin -DomainNetBiosName $domainNetBiosName)
+        for ($i = 0; $i -lt $domainAdminNames.Count; $i++) {
+            if ($seen.Add($domainAdminNames[$i])) {
+                $tag = if ($i -eq 0) { 'configured-domain-admin' } else { 'configured-domain-admin-netbios' }
+                $candidates.Add(@{ Tag = $tag; Username = $domainAdminNames[$i] })
+            }
+        }
+    }
+
+    $localUser = "$VmName\$($Common.LocalAdmin.UserName)"
+    if ($seen.Add($localUser)) {
+        $candidates.Add(@{ Tag = 'local-vmbuildadmin'; Username = $localUser })
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Log "$VmName`: Alternate credential diagnostics found no identities beyond the failed primary set." -LogOnly
+        return @()
+    }
+
+    if (-not $ConnectOperation) {
+        $ConnectOperation = {
+            param($TargetName, $TargetId, $Credential)
+            New-PSSessionWithTimeout -Name $TargetName -VMId $TargetId -Credential $Credential -TimeoutSec 10
+        }
+    }
+    if (-not $ProbeOperation) {
+        $ProbeOperation = {
+            param($Session, $DomainName)
+            Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+                param($ExpectedDomain)
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+                $secureChannel = $null
+                $secureChannelError = $null
+                try { $secureChannel = Test-ComputerSecureChannel -ErrorAction Stop }
+                catch { $secureChannelError = $_.Exception.Message }
+                $localAccount = $null
+                try {
+                    $local = Get-LocalUser -Name 'vmbuildadmin' -ErrorAction Stop
+                    $localAccount = [ordered]@{
+                        Exists          = $true
+                        Enabled         = [bool]$local.Enabled
+                        PasswordExpires = $local.PasswordExpires
+                    }
+                }
+                catch {
+                    $localAccount = [ordered]@{
+                        Exists = $false
+                        Error  = $_.Exception.Message
+                    }
+                }
+                [pscustomobject]@{
+                    Identity           = $identity
+                    ComputerName       = $env:COMPUTERNAME
+                    UserDomain         = $env:USERDOMAIN
+                    UserDnsDomain      = $env:USERDNSDOMAIN
+                    ExpectedDomain     = $ExpectedDomain
+                    PartOfDomain       = [bool]$computerSystem.PartOfDomain
+                    ComputerDomain     = "$($computerSystem.Domain)"
+                    SecureChannel      = $secureChannel
+                    SecureChannelError = $secureChannelError
+                    LocalVmbuildAdmin  = $localAccount
+                }
+            } -ArgumentList $DomainName
+        }
+    }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in $candidates) {
+        $session = $null
+        $status = 'failed'
+        $detail = $null
+        try {
+            $credential = [pscredential]::new($candidate.Username, $Common.LocalAdmin.Password)
+            $connectResult = & $ConnectOperation $VmName $VmId $credential
+            $session = $connectResult.Session
+            if (-not $session -or "$($session.Availability)" -ne 'Available') {
+                $errorText = "$($connectResult.ErrorMessage)" -replace '\s+', ' '
+                if ($connectResult.TimedOut) { $errorText = 'PowerShell Direct connection timed out after 10 seconds' }
+                if ([string]::IsNullOrWhiteSpace($errorText)) { $errorText = 'PowerShell Direct returned no available session' }
+                if ($errorText.Length -gt 400) { $errorText = $errorText.Substring(0, 400) + '...[truncated]' }
+                $detail = $errorText
+                Write-Log "$VmName`: Alternate credential diagnostic '$($candidate.Tag)' ($($candidate.Username)) could not authenticate: $errorText" -Warning -LogOnly
+                continue
+            }
+
+            $probe = & $ProbeOperation $session $VmDomainName
+            $status = 'authenticated'
+            $detail = $probe
+            $probeJson = $probe | ConvertTo-Json -Depth 5 -Compress
+            if ($probeJson.Length -gt 3000) { $probeJson = $probeJson.Substring(0, 3000) + '...[truncated]' }
+            Write-Log "$VmName`: Alternate credential diagnostic '$($candidate.Tag)' ($($candidate.Username)) authenticated; maintenance remains blocked because a domain identity is required. Guest evidence: $probeJson" -Warning -LogOnly
+        }
+        catch {
+            $errorText = "$($_.Exception.Message)" -replace '\s+', ' '
+            if ($errorText.Length -gt 400) { $errorText = $errorText.Substring(0, 400) + '...[truncated]' }
+            $detail = $errorText
+            Write-Log "$VmName`: Alternate credential diagnostic '$($candidate.Tag)' ($($candidate.Username)) failed: $errorText" -Warning -LogOnly
+        }
+        finally {
+            if ($session) { Remove-VmSession $session }
+            $results.Add([pscustomobject]@{
+                    Tag      = $candidate.Tag
+                    Username = $candidate.Username
+                    Status   = $status
+                    Detail   = $detail
+                })
+        }
+    }
+    return $results.ToArray()
 }
 
 function Get-VmSessionGuestIdentity {
@@ -10381,6 +10538,11 @@ function Get-VmSession {
         $Diagnostics.VmState = "$vmState"
         $Diagnostics.Heartbeat = "$heartbeatAtConnect"
         $Diagnostics.ConnectMilliseconds = [int]$swConnectTotalMs
+    }
+    if ($requireDomain -and -not $sawChannelBroken -and $failReasons -contains 'auth-or-other') {
+        $null = Invoke-VmSessionCredentialDiagnostics -VmName $VmName -VmId $vm.vmID `
+            -VmDomainName $requestedDomainName -RequestedAccount $requestedAccount `
+            -PrimaryUserNames $credentialUserNames
     }
     # Best-effort probes (e.g. Copy-ItemSafe heartbeat, MaxRetries=1) routinely
     # miss while the guest is still in OOBE; that is expected, not a failure.
