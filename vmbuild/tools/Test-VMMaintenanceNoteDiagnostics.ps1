@@ -294,7 +294,7 @@ $workerSource = Get-Content -LiteralPath $scriptBlocksPath -Raw
 $phaseSource = Get-Content -LiteralPath $phasePath -Raw
 Assert ($workerSource.Contains('-Target $currentItem -Stage worker -ParentIdentity $MaintenanceIdentity')) 'Phase10 worker receives and logs parent identity'
 Assert (@([regex]::Matches($phaseSource, 'Phase10Job.*-ArgumentList.*\$PSScriptRoot, \$maintenanceIdentity')).Count -eq 2) 'both process and thread job dispatch pass parent identity'
-Assert ($ast.Extent.Text.Contains('-PreferThreadJob -MaintenanceDiagnostics')) 'launcher maintenance also enables parent identity capture'
+Assert ($ast.Extent.Text.Contains('-argument3 $false -PreferThreadJob -MaintenanceDiagnostics')) 'launcher maintenance supplies the Boolean worker placeholder and enables parent identity capture'
 Assert (@([regex]::Matches($phaseSource, '-ScriptBlock \$scriptBlock.*-ArgumentList.*\$PSScriptRoot, \$maintenanceIdentity')).Count -eq 2) 'launcher maintenance passes identity in both job modes'
 
 foreach ($name in @('Wait-Job', 'Receive-Job', 'Stop-Job', 'Remove-Job')) {

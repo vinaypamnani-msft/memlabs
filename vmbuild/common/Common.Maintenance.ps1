@@ -182,7 +182,7 @@ function Start-Maintenance {
     # DhcpServer / module set and skip a fresh powershell.exe per VM.
     # Phase10Job still dot-sources Common.ps1 -InJob -GetLatestHotfixVersion
     # internally; ThreadJob cuts the per-worker init cost meaningfully.
-    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false -PreferThreadJob -MaintenanceDiagnostics
+    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false -argument3 $false -PreferThreadJob -MaintenanceDiagnostics
 
     $result = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
 
