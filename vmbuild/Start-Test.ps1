@@ -32,14 +32,19 @@
     .\Start-Test.ps1 -Test NOCM -MainToDevelopExpansion
 
     Deploys NOCM-A once with pinned main, then runs develop's NOCM B+ fixtures
-    twice before validating and removing the family.
+    twice before validating and removing the family. Existing-site maintenance,
+    idempotence and independent readiness are required. CM fault recovery is
+    explicitly not applicable to NOCM; include a CM family for that coverage.
 
 .EXAMPLE
     .\Start-Test.ps1 -All -MainToDevelopExpansion
 
     Runs every family that has an A fixture in pinned main and B+ fixtures in
     pinned develop. Completed stages are checkpointed under
-    ProgramData\MemLabs\CrossRevision. If exact-main A is interrupted, remove
+    ProgramData\MemLabs\CrossRevision. Pinned regression/artifact preflight,
+    existing-site maintenance, per-pass readiness and once-per-candidate CM
+    recovery receipts gate completion and cleanup. The recovery matrix alters
+    only scoped disposable test VMs. If exact-main A is interrupted, remove
     that family lab and reset its state; the runner will not replay or adopt an
     uncheckpointed baseline.
 #>

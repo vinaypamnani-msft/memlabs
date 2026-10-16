@@ -16,6 +16,67 @@ names fail immediately instead of being silently ignored. CM media mounting
 also suppresses guest-probe noise while a target VM is powering on and starts
 an off target once when attached media needs to be enumerated.
 
+## Main-to-develop maintenance qualification
+
+`Start-Test.ps1 -MainToDevelopExpansion` (also `-Suite Upgrade`) automatically
+qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
+
+```powershell
+.\vmbuild\Start-Test.ps1 -All -MainToDevelopExpansion -CrossRevisionPlanOnly
+.\vmbuild\Start-Test.ps1 -All -MainToDevelopExpansion
+```
+
+- Before live candidate work, the pinned develop worktree must be clean, its
+  shipped DSC archive must match its source/build receipt, and the focused
+  maintenance, console, ODBC, Phase 11, receipt, and expansion-runner regressions
+  must pass.
+- Before expanding an exact-main baseline, develop runs **existing-site**
+  maintenance without replacing the guest's legacy deployment configuration.
+  Independent checks verify ODBC registration/DLLs in both registry views,
+  installed MSI/cache state, live-site console policy, and the exact
+  domain-qualified Full Administrator. A second maintenance run must add no
+  attempts for the three implicated fixes.
+- Each develop fixture/pass gets independent readiness checks before being
+  checkpointed complete. VM/disk lineage and domain SID checks remain enabled.
+- Once per candidate revision, a scoped CAS or standalone Primary runs the
+  recovery matrix: missing legacy/current MSI source and installer cache,
+  advertised/missing registration, missing console version metadata,
+  preservation of a newer console without launching setup, administrator-role
+  removal/regrant, a real failed attempt followed by the one-minute retry with
+  evidence saved first, signed-package identity rejection without changing
+  MSI/driver state or success stamps, and recovery using the actual shipped
+  DSC resource. Side-by-side ODBC Driver 17 must remain unchanged.
+
+These are **disposable-lab tests**: the matrix deliberately removes ODBC MSI
+sources/cache/registration and temporarily changes guest console/configuration
+and administrator state. Only explicit saved VM names/GUIDs are targeted; it
+does not select unrelated host VMs. It restores the temporary configuration and
+console-version fixtures and creates no qualification checkpoints. Expect
+additional Microsoft MSI downloads/install time and at least one intentional
+60-second retry. The configured setup administrator must be able to manage
+ConfigMgr and must not be the administrator whose role is removed.
+
+Machine-readable JSON receipts are saved as `*.qualification.log` under
+`vmbuild\logs\CrossRevision\Maintenance` for normal log collection. They record
+the pinned revisions, source/module/archive hashes, VM identities, individual
+case results, and recovery evidence. Checkpoint state stores their SHA-256
+checksums. Missing, stale, dirty-source, incomplete, or changed receipts block
+family completion and cleanup; failures retain the VMs.
+
+NOCM families record explicit `NotApplicable` recovery cases and **do not**
+qualify the CM recovery matrix. Include a CM family to claim that coverage.
+Interrupted maintenance resumes its original scoped stage before deployments
+continue; do not advance develop until that stage has completed. Interrupted
+deployments finish before new maintenance faults are injected. Older
+checkpoints that have already expanded or cleaned a family cannot establish
+this coverage: remove the old family lab and use a fresh
+`-CrossRevisionStateRoot`. A rolling multi-revision burn-in remains diagnostic,
+not a substitute for a fresh pinned qualification cycle.
+
+Validate the receipt/gating contract with
+`vmbuild\tools\Test-MaintenanceQualification.ps1` and the existing
+`vmbuild\tools\Test-MainToDevelopExpansionRunner.ps1` regressions.
+
 ## Deployment resume preflight
 
 Phase 0 verifies live Hyper-V inventory before preparing VMs. Runs that skip
