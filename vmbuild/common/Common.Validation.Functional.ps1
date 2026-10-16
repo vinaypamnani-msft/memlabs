@@ -6577,7 +6577,9 @@ function Test-SiteSystemFunctionality {
                 $results.Details.Add("FAIL: Neither 8530 nor 8531 is listening on this SUP")
             }
 
-            # WSUS API last sync result -- non-fatal but loud if last sync failed
+            # A listening SUP is not healthy if its latest native sync failed.
+            $syncMeasured = $false
+            $syncProbeErrors = @()
             try {
                 [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
                 foreach ($port in @(8530, 443, 8531)) {
@@ -6586,17 +6588,41 @@ function Test-SiteSystemFunctionality {
                         $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', $useSSL, $port)
                         $sub = $wsus.GetSubscription()
                         $sync = $sub.GetLastSynchronizationInfo()
-                        $results.Details.Add("OK: WSUS last sync result = $($sync.Result), at $($sync.StartTime)")
-                        if ($sync.Result -eq 'Failed') {
-                            $results.Details.Add("WARN: Last WSUS sync FAILED ($($sync.Error)) -- updates pipeline broken")
+                        $nativeState = "$($sub.GetSynchronizationStatus())"
+                        if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
+                            Start-Sleep -Seconds 5
+                            $sync = $sub.GetLastSynchronizationInfo()
+                            $nativeState = "$($sub.GetSynchronizationStatus())"
+                        }
+                        $syncMeasured = $true
+                        if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Last WSUS sync $($sync.Result) ($($sync.Error)); native state=$nativeState, start=$($sync.StartTime), end=$($sync.EndTime), errorText=$($sync.ErrorText). No newer running sync supersedes this result.")
+                            $sdLog = Join-Path $env:ProgramFiles 'Update Services\LogFiles\SoftwareDistribution.log'
+                            if (Test-Path -LiteralPath $sdLog) {
+                                foreach ($line in @(Get-Content -LiteralPath $sdLog -Tail 80 -ErrorAction Stop |
+                                        Where-Object { $_ -match 'error|fail|cancel|0x8' } | Select-Object -Last 5)) {
+                                    $results.Details.Add("DIAG: $line")
+                                }
+                            }
+                        }
+                        elseif ($nativeState -eq 'Running') {
+                            $results.Details.Add("INFO: WSUS synchronization is running; previous result=$($sync.Result). Completion is pending, not proven.")
+                        }
+                        else {
+                            $results.Details.Add("OK: WSUS last sync result = $($sync.Result), at $($sync.StartTime)")
                         }
                         break
                     }
-                    catch { }
+                    catch { $syncProbeErrors += "${port}: $($_.Exception.Message)" }
                 }
             }
             catch {
-                $results.Details.Add("WARN: WSUS API sync-info query skipped: $($_.Exception.Message)")
+                $syncProbeErrors += $_.Exception.Message
+            }
+            if (-not $syncMeasured) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: WSUS native sync health could not be measured: $($syncProbeErrors -join ' | ')")
             }
 
             return $results
@@ -9695,7 +9721,7 @@ function Test-DomainMemberFunctionality {
     Write-Log "[Phase $Phase] $VMName [DomainMember]: Testing domain join and CCM client (if present)" -LogOnly
 
     $scriptBlock = {
-        param($expectedDomain, $checkPkiCert)
+        param($expectedDomain, $checkPkiCert, $clientCertificateProbeText)
         $checkPki = ($checkPkiCert -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
@@ -10019,91 +10045,20 @@ function Test-DomainMemberFunctionality {
 
         # PKI client authentication certificate (when UsePKI + pushClient)
         if ($checkPki) {
-            # Find the auto-enrolled client-auth cert (non-Microsoft, not self-signed).
-            $findClientCert = {
-                Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
-                    Where-Object {
-                        $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.2' -and   # Client Authentication
-                        $_.Issuer -notmatch 'O=Microsoft' -and
-                        $_.Subject -ne $_.Issuer                                               # Not self-signed
-                    } | Select-Object -First 1
-            }
-            # Build the cert chain to a trusted root; returns @{ Ok; Status }.
-            # Under a 2-tier PKI (offline root + enterprise sub-CA), ccmsetup must be
-            # able to build leaf -> sub-CA -> offline-root locally. The leaf
-            # auto-enrolls fine, but the offline root + sub-CA certs only land in the
-            # local Trusted Root / Intermediate stores on the autoenrollment / GP
-            # cycle. If ccmsetup runs first, chain-building fails (CRYPT_E_NOT_FOUND
-            # 0x80092004) -> 'Unable to find any Certificate based on Certificate
-            # Issuers' -> GetDPLocations 0x87d00454. Revocation is ignored: the
-            # offline root has no reachable CRL in the lab.
-            $testChain = {
-                param($cert)
-                if (-not $cert) { return @{ Ok = $false; Status = 'no-cert' } }
-                try {
-                    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-                    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
-                    $built = $chain.Build($cert)
-                    $flags = (@($chain.ChainStatus) | ForEach-Object { $_.Status }) -join ','
-                    if (-not $flags) { $flags = 'OK' }
-                    return @{ Ok = [bool]$built; Status = $flags }
-                }
-                catch { return @{ Ok = $false; Status = "chain-build-threw: $($_.Exception.Message)" } }
-            }
-            # Pull the AD-published Root/Sub CA certs into the local stores.
-            # certutil -pulse triggers autoenrollment (downloads the AD-published
-            # Trusted Root + Intermediate CAs); gpupdate forces the computer GP
-            # root-cert distribution. Both idempotent and quick.
-            $pullChainCAs = {
-                try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
-                try { & gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
-            }
-
-            $clientCert = & $findClientCert
-            if (-not $clientCert) {
-                $results.Details.Add("REMEDIATE: No PKI client auth cert yet; running certutil -pulse + gpupdate to trigger auto-enrollment...")
-                & $pullChainCAs
-                Start-Sleep -Seconds 15
-                $clientCert = & $findClientCert
-            }
-
-            if ($clientCert) {
-                $results.Details.Add("OK: PKI client auth certificate found (Subject='$($clientCert.Subject)', Issuer='$($clientCert.Issuer)', Expires=$($clientCert.NotAfter.ToString('yyyy-MM-dd')))")
-                if ($clientCert.NotAfter -lt (Get-Date)) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: PKI client auth certificate is expired")
-                }
-                if (-not $clientCert.HasPrivateKey) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: PKI client auth certificate has no private key")
-                }
-                # Validate the trust chain (the offline-root anchor must be present locally).
-                $chainResult = & $testChain $clientCert
-                if ($chainResult.Ok) {
-                    $results.Details.Add("OK: Client cert chains to a trusted root (chain status: $($chainResult.Status))")
+            try {
+                $pkiState = & ([scriptblock]::Create($clientCertificateProbeText))
+                foreach ($diagnostic in $pkiState.Diagnostics) { $results.Details.Add("DIAG: PKI $diagnostic") }
+                if ($pkiState.Ready) {
+                    $results.Details.Add("OK: Valid PKI client-auth certificate with private key chains to a trusted root (thumbprint=$($pkiState.Thumbprint)).")
                 }
                 else {
-                    $results.Details.Add("REMEDIATE: Client cert chain incomplete ($($chainResult.Status)); pulling AD-published root/sub-CA certs (certutil -pulse + gpupdate)...")
-                    & $pullChainCAs
-                    Start-Sleep -Seconds 15
-                    $clientCert = & $findClientCert
-                    $chainResult = & $testChain $clientCert
-                    if ($chainResult.Ok) {
-                        $results.Details.Add("RECOVERED: Client cert chain healthy after pulling CA certs (chain status: $($chainResult.Status))")
-                    }
-                    else {
-                        $rootCount = 0
-                        try { $rootCount = @(Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue | Where-Object { $_.Subject -eq $_.Issuer }).Count } catch {}
-                        # WARN (not FAIL): the chain can still converge on the next GP
-                        # cycle and ccmsetup itself retries. Surface the missing-anchor
-                        # cause so the operator knows it's PKI propagation, not the leaf.
-                        $results.Details.Add("WARN: Client cert still doesn't chain to a trusted root ($($chainResult.Status)) after remediation. The offline root / sub-CA cert hasn't propagated to LocalMachine\Root + \CA yet (roots-in-store=$rootCount). ccmsetup will fail PKI auth (0x80092004 -> GetDPLocations 0x87d00454) until it does; re-run Phase 11 after the next GP cycle.")
-                    }
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: PKI client readiness did not converge after bounded enrollment retries (certFound=$($pkiState.CertFound), chain=$($pkiState.ChainStatus)). Check ConfigMgrClientCertificate Read/Enroll/AutoEnroll and Root/NTAuth publication.")
                 }
             }
-            else {
+            catch {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: No PKI client authentication certificate in LocalMachine\My (even after auto-enrollment remediation). ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT. Check auto-enrollment and the ConfigMgrClientCertificate template.")
+                $results.Details.Add("FAIL: PKI certificate readiness probe failed: $($_.Exception.Message)")
             }
         }
 
@@ -10336,7 +10291,7 @@ function Test-DomainMemberFunctionality {
 
                 if ($pkiCertFailure) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt because the client has no usable PKI client-auth certificate (CCM_E_NO_CLIENT_PKI_CERT / 0x87D00454). The request reached the HTTPS MP but was rejected before content-location evaluation; empty LocationRecords here are a consequence, not evidence of missing DP content. Check ConfigMgrClientCertificate Read+Enroll+AutoEnroll for this domain's Domain Computers, Root/NTAuth publication, then run gpupdate /force + certutil -pulse.")
+                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt after reporting no usable PKI client-auth certificate (CCM_E_NO_CLIENT_PKI_CERT / 0x87D00454). HTTPS client authentication could not complete at that attempt; this is not evidence of missing DP content. The certificate readiness result above shows whether enrollment has since recovered. Check ConfigMgrClientCertificate Read+Enroll+AutoEnroll for this domain's Domain Computers and Root/NTAuth publication. Once readiness passes, allow the existing setup retry to complete and re-run Phase 11; do not launch a competing ccmsetup.")
                 }
                 elseif ($mpUnavailable) {
                     $results.Passed = $false
@@ -10435,10 +10390,11 @@ function Test-DomainMemberFunctionality {
     }
 
     $checkPkiCert = ($usePKI -and $pushExpected)
+    $clientCertificateProbeText = (Get-MemLabsClientCertificateReadinessBlock).ToString()
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $domain, $checkPkiCert `
+        -ScriptBlock $scriptBlock -ArgumentList $domain, $checkPkiCert, $clientCertificateProbeText `
         -DisplayName "Phase11-DomainMember-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 300 -PollProgress
+        -AsJob -TimeoutSeconds 600 -PollProgress
 
     # If the guest reported NeedsPushCheck, enrich with deploy config context.
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.NeedsPushCheck) {
@@ -14591,7 +14547,8 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             $results.Details.Add("INFO: SUP last CM sync record is Failed (6703, $supErrShown)$whenCm but is already stale -- $superseded$supFailDiag")
                         }
                         else {
-                            $results.Details.Add("WARN: SUP last sync FAILED (state 6703, error code $supErrShown)$whenCm$supFailDiag")
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: SUP last sync FAILED (state 6703, error code $supErrShown)$whenCm$supFailDiag")
                         }
                     }
                 }
@@ -14964,28 +14921,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $phaseBit = if ($initialSyncDone) { 'update sync in progress (initial categories sync already completed)' } else { 'initial sync in progress' }
                     $results.Details.Add("OK: WSUS sync running [$phaseBit; SyncState=$syncState; $ucBit]")
                 }
-                elseif ($lastResult -eq 'Failed' -and $initialSyncDone -and ($wStatus.UpdateCount -gt 0)) {
-                    # Catalog is fully populated (taxonomy loaded AND update
-                    # metadata present); a Failed last cycle is a transient blip
-                    # (commonly 0x80131500 -- a generic managed exception from an
-                    # MU timeout / WsusPool recycle / upstream throttle), not a
-                    # broken SUP. Report INFO; the kick-a-sync block below
-                    # re-triggers so it recovers without waiting for the schedule.
-                    $results.Details.Add("INFO: WSUS last sync Result=Failed but catalog is populated - transient [TaxonomyCats=$taxCats; LastSync=$lastSyncTime; $ucBit]; re-triggering a sync")
-                }
-                elseif ($lastResult -eq 'Canceled' -and $initialSyncDone) {
-                    # A 'Canceled' WSUS sync is benign churn, NOT a failure:
-                    # WSUS records Canceled when a NEWER sync request supersedes
-                    # an in-flight one (common in a CAS -> child hierarchy as the
-                    # downstream SUP re-requests while the upstream catalog is
-                    # still moving) or when WsusService cycled mid-sync. With the
-                    # taxonomy already fully populated (initialSyncDone -- the
-                    # initial categories sync demonstrably ran) the canceled cycle
-                    # left a healthy catalog behind, and the CM-side
-                    # SMS_SUPSyncStatus check above is the authoritative sync
-                    # verdict. Report INFO; the kick-a-sync block below re-triggers
-                    # a fresh cycle (UpdateCount=0) so it completes on its own.
-                    $results.Details.Add("INFO: WSUS last sync Result=Canceled but catalog is populated - benign (a newer sync superseded the canceled cycle) [TaxonomyCats=$taxCats; LastSync=$lastSyncTime; $ucBit]")
+                elseif ($lastResult -in @('Failed', 'Canceled')) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: WSUS last sync Result=$lastResult with no running replacement [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]. A populated catalog does not prove recovery.")
                 }
                 elseif ($lastResult) {
                     $results.Details.Add("WARN: WSUS last sync Result=$lastResult [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]")
@@ -15120,7 +15058,8 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 }
             }
             catch {
-                $results.Details.Add("INFO: WSUS-native cross-check skipped (could not reach SUP '$($supServer):$wsusPort'): $($_.Exception.Message)")
+                $results.Passed = $false
+                $results.Details.Add("FAIL: WSUS-native cross-check could not reach SUP '$($supServer):$wsusPort': $($_.Exception.Message)")
             }
         }
 

@@ -792,7 +792,8 @@ function Invoke-WinGetMaintenance {
 
     $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $winget) {
-        Write-LogMessage 'WinGet is unavailable. Skipping WinGet package upgrades.' -Level 'WARNING'
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        Write-LogMessage "WinGet is unavailable for '$identity' (session=$([Diagnostics.Process]::GetCurrentProcess().SessionId), LOCALAPPDATA='$env:LOCALAPPDATA'). Skipping WinGet package upgrades. WinGet/App Installer must be installed and registered for the maintenance task's user, not only an interactive administrator. Verify Get-Command winget.exe and Get-AppxPackage Microsoft.DesktopAppInstaller under that identity." -Level 'WARNING'
         return
     }
 

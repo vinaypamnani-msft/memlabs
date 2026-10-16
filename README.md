@@ -43,6 +43,45 @@ inside the owned scope still fail the workflow for retry.
 Validate with `vmbuild\tools\Test-CmProxySiteScope.ps1` and
 `vmbuild\tools\Test-CmRoleQuerySiteScope.ps1`.
 
+## Upgrade release health and recovery
+
+Phase 8 probes the configured SUP machines, including remote SUPs, rather than
+assuming WSUS runs on the site server. Native running synchronization is preserved
+even when ConfigMgr still reports an older failure. Idle failed/canceled syncs
+receive bounded recovery; unreadable native health and exhausted recovery fail
+the workflow instead of silently advancing. Repair hardens/restarts WsusPool on
+the SUP and captures its WSUS diagnostics. Long-running healthy background syncs
+remain asynchronous and are reported as pending, not as proven completion.
+Phase 11 fails an idle failed/canceled sync or an unreachable WSUS health check;
+a populated catalog alone is not evidence that the latest sync recovered.
+
+For HTTPS client push, the guest requests host certificate pre-staging and waits
+for a receipt matching both the deployment RunId and request ID. The host checks
+each target in its own domain, retries computer policy/autoenrollment, and verifies
+a current client-auth certificate with a private key and trusted chain. Missing
+or failed receipts stop client push. Phase 11 uses the same readiness probe.
+Enrollment command exit codes and recent autoenrollment events are diagnostic
+evidence; a future policy cycle is no longer treated as successful readiness.
+
+Existing provider-error diagnostics, bounded CIM-memory reboot recovery, Primary
+OSD/baseline payload repair, and physical/version-aware DP content checks remain
+enabled. A Pull DP distribution deadline is not cleared by assuming summarizer
+lag: later content/version checks must establish recovery. Scheduled runtime
+upgrades defer while a test cycle holds the host mutation lease.
+Legacy heartbeat-subnet SQLAO addresses are not migrated automatically; warnings
+identify rebuild/connectivity checks rather than implying migration was tested.
+Missing WinGet diagnostics name the maintenance identity and explain that App
+Installer must be registered for that user, not only an interactive administrator.
+
+Focused regression scripts under `vmbuild\tools` include
+`Test-WsusSyncConvergence.ps1`, `Test-WsusReplicaRecovery.ps1`,
+`Test-PkiClientPrestage.ps1`, `Test-GuestCimMemoryRecovery.ps1`,
+`Test-GuestMemoryDiagnostics.ps1`, `Test-PerfloadingProviderResilience.ps1`,
+`Test-PrimaryPrepopulationPayload.ps1`, `Test-OptionalSecondaryDpCoverage.ps1`,
+`Test-MaintenanceScheduledTask.ps1`, and `Test-WinGetMaintenance.ps1`.
+Run the upgrade fixtures again against the exact release commit: earlier
+mixed-revision successes do not validate subsequent recovery changes.
+
 ## VM maintenance failure diagnostics
 
 VMBuild Phase 10 reads each target VM's Hyper-V metadata before applying fixes.

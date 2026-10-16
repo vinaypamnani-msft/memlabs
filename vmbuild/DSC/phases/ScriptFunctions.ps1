@@ -2366,6 +2366,11 @@ function Invoke-CMWsusReplicaHealthCheck {
             LastResult         = 'Unknown'
             LastError          = ''
             LastErrorText      = ''
+            PoolUp             = $false
+            Phase              = ''
+            ProcessedItems     = -1
+            TotalItems         = -1
+            UpdateCount        = -1
             ContractMismatch   = $false
             RepairAttempted    = $false
             RepairSucceeded    = $false
@@ -2378,11 +2383,16 @@ function Invoke-CMWsusReplicaHealthCheck {
                 'Microsoft.UpdateServices.Administration')
             $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
             $subscription = $wsus.GetSubscription()
-            try {
-                $result.WsusRunning =
-                    "$($subscription.GetSynchronizationStatus())" -eq 'Running'
+            $result.WsusRunning =
+                "$($subscription.GetSynchronizationStatus())" -eq 'Running'
+            if ($result.WsusRunning) {
+                $progress = $subscription.GetSynchronizationProgress()
+                $result.Phase = "$($progress.Phase)"
+                $result.ProcessedItems = [int]$progress.ProcessedItems
+                $result.TotalItems = [int]$progress.TotalItems
             }
-            catch { }
+            Import-Module WebAdministration -ErrorAction Stop
+            $result.PoolUp = (Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value -eq 'Started'
 
             $history = @($subscription.GetSynchronizationHistory() |
                 Sort-Object StartTime -Descending | Select-Object -First 1)
@@ -2395,13 +2405,16 @@ function Invoke-CMWsusReplicaHealthCheck {
             $result.ProbeSucceeded = $true
             $result.ContractMismatch = [bool]($result.LastErrorText -match
                 "(?is)spGetUpdatesForBulkHideInReplicaSync.+expects parameter\s+'?@xmlAllUpdateIds'?.+not supplied")
-            if (-not $result.ContractMismatch -or -not $AllowRepair) {
+            if (-not $result.ContractMismatch -or -not $AllowRepair -or $result.WsusRunning) {
                 $result.RepairSucceeded = -not $result.ContractMismatch
-                $result.Detail = if ($result.ContractMismatch) {
+                $result.Detail = if ($result.ContractMismatch -and $result.WsusRunning) {
+                    'Prior sync reported a WSUS replica API/SUSDB contract mismatch; native synchronization is active, so repair is deferred'
+                }
+                elseif ($result.ContractMismatch) {
                     'WSUS replica API/SUSDB contract mismatch detected'
                 }
                 else {
-                    "LastResult=$($result.LastResult), Running=$($result.WsusRunning)"
+                    "LastResult=$($result.LastResult), Running=$($result.WsusRunning), Error=$($result.LastError), ErrorText=$($result.LastErrorText)"
                 }
                 return [pscustomobject]$result
             }
@@ -2468,6 +2481,7 @@ function Invoke-CMWsusReplicaHealthCheck {
                 "progressEvents=$($monitorResult.ProgressEvents))"
         }
         catch {
+            $result.ProbeSucceeded = $false
             $result.Detail = $_.Exception.Message
         }
 
@@ -2507,7 +2521,7 @@ function Invoke-CMWsusReplicaHealthCheck {
     }
 
     $level = if (-not $state.ProbeSucceeded -or
-        ($state.ContractMismatch -and -not $state.RepairSucceeded)) {
+        ($state.ContractMismatch -and -not $state.RepairSucceeded -and -not $state.WsusRunning)) {
         'Failure'
     }
     else {
@@ -2524,6 +2538,38 @@ function Invoke-CMWsusReplicaHealthCheck {
         Write-DscStatus $message
     }
     return $state
+}
+
+function Wait-MemLabsClientCertificatePrestage {
+    param(
+        [Parameter(Mandatory = $true)][string] $RunId,
+        [Parameter(Mandatory = $true)][string[]] $Targets
+    )
+
+    $root = 'C:\staging\DSC'
+    $requestId = [guid]::NewGuid().ToString()
+    $request = [ordered]@{ RunId = $RunId; RequestId = $requestId; Targets = @($Targets) }
+    $requestPath = Join-Path $root 'ScriptWorkflow.pki-request.json'
+    $receiptPath = Join-Path $root 'ScriptWorkflow.pki-result.json'
+    $request | ConvertTo-Json -Depth 4 |
+        Set-Content -LiteralPath "$requestPath.tmp" -Encoding UTF8 -ErrorAction Stop
+    Move-Item -LiteralPath "$requestPath.tmp" -Destination $requestPath -Force -ErrorAction Stop
+    Write-DscStatus "MEMLABS-PULSE-CERTS: Request=$requestId waiting for verified certificates on $($Targets -join ', ')"
+    $deadline = (Get-Date).AddSeconds(120 + 120 * $Targets.Count)
+    do {
+        if (Test-Path -LiteralPath $receiptPath) {
+            $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($receipt.RunId -eq $RunId -and $receipt.RequestId -eq $requestId) {
+                if ($receipt.Success -ne $true) {
+                    throw "PKI client pre-stage failed: $($receipt.Detail). Fix template enrollment, autoenrollment policy and CA trust before retrying Phase 8."
+                }
+                Write-DscStatus "Host verified PKI client readiness for $($Targets.Count) target(s) (Request=$requestId)."
+                return
+            }
+        }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+    throw "PKI client pre-stage timed out without a matching host receipt (RunId=$RunId, Request=$requestId, targets=$($Targets -join ', ')). Client push was not started."
 }
 
 function Get-CMReportingPointReadiness {

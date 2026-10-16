@@ -2995,10 +2995,10 @@ function Get-SQLAOConfig {
     $domainNetwork = if ($PrimaryAO.network) { $PrimaryAO.network } else { $deployConfig.vmOptions.network }
     $domainPrefix = ($domainNetwork -replace '\.\d+$', '.')
     if ($PrimaryAO.ClusterIPAddress -match '^10\.250\.250\.') {
-        write-log "$vmName`: WARNING: ClusterIPAddress $($PrimaryAO.ClusterIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). Cluster steps will be skipped." -Warning
+        write-log "$vmName`: WARNING: ClusterIPAddress $($PrimaryAO.ClusterIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). Cluster steps will be skipped. This is a legacy lab layout; automatic IP migration is not attempted. Rebuild the SQLAO lab to move cluster/listener IPs to the domain subnet." -Warning
     }
     if ($PrimaryAO.AGIPAddress -match '^10\.250\.250\.') {
-        write-log "$vmName`: WARNING: AGIPAddress $($PrimaryAO.AGIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). AG listener may not be reachable." -Warning
+        write-log "$vmName`: WARNING: AGIPAddress $($PrimaryAO.AGIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). AG listener may not be reachable. Verify listener DNS and SQL connectivity; a successful rerun does not prove domain-subnet migration." -Warning
     }
 
     $config = [PSCustomObject]@{

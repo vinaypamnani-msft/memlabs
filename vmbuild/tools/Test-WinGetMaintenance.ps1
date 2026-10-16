@@ -130,6 +130,7 @@ $script:WingetAvailable = $false
 Invoke-WinGetMaintenance -WaitForCompletion
 Assert-Equal 0 $script:WingetCalls.Count 'missing WinGet cannot launch an upgrade'
 Assert-Equal 'WARNING' @($script:Logs | Select-Object -Last 1)[0].Level 'missing WinGet is surfaced as a warning'
+Assert-Equal $true ($script:Logs[-1].Message -match "maintenance task's user.*Get-AppxPackage") 'missing WinGet diagnoses the scheduled-user registration requirement'
 
 Reset-Fixture
 $script:WingetExitCode = -1978335189

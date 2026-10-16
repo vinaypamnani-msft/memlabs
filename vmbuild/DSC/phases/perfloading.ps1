@@ -3087,48 +3087,20 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
     function Write-WsusDiagnostics {
         param([string]$Reason = "WSUS diagnostics")
         Write-DscStatus "$Tag --- $Reason ---"
-        foreach ($l in (Get-WsusDiagnostics)) {
-            Write-DscStatus "$Tag   $l"
-        }
-        Write-DscStatus "$Tag --- end $Reason ---"
-    }
-
-    function Set-WsusPoolHardened {
-        # Uncap WsusPool memory + raise the queue so the pool survives a full
-        # Microsoft Update sync. Mirrors the install-time hardening in
-        # ConfigureWSUS (TemplateHelpDSC.psm1). The reactive repair path MUST
-        # reharden BEFORE restarting — otherwise the pool comes back with the
-        # default ~1.8 GB cap and the next sync dies the same way.
-        try {
-            Import-Module WebAdministration -ErrorAction Stop
-        }
-        catch {
-            Write-DscStatus "$Tag WsusPool hardening skipped — WebAdministration unavailable: $_"
-            return
-        }
-        $poolPath = 'IIS:\AppPools\WsusPool'
-        if (-not (Test-Path $poolPath)) {
-            Write-DscStatus "$Tag WsusPool not found — skipping hardening"
-            return
-        }
-        $settings = @(
-            @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
-            @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
-            @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
-            @{ Name = 'queueLength'; Value = 25000 }
-            @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
-            @{ Name = 'startMode'; Value = 'AlwaysRunning' }
-            @{ Name = 'failure.rapidFailProtection'; Value = $false }
-        )
-        foreach ($s in $settings) {
+        foreach ($supVm in @($Sups)) {
+            $supHost = "$($supVm.vmName).$DomainFullName"
             try {
-                Set-ItemProperty -Path $poolPath -Name $s.Name -Value $s.Value -ErrorAction Stop
+                $lines = Invoke-CMRoleTargetCommand -ComputerName $supHost -ScriptBlock {
+                    param($diagnosticText)
+                    & ([scriptblock]::Create($diagnosticText))
+                } -ArgumentList @(${function:Get-WsusDiagnostics}.ToString())
+                foreach ($line in $lines) { Write-DscStatus "$Tag [$supHost] $line" }
             }
             catch {
-                Write-DscStatus "$Tag WsusPool: failed to set $($s.Name): $_"
+                Write-DscStatus "$Tag WSUS diagnostics on ${supHost} failed: $($_.Exception.Message)" -Warning
             }
         }
-        Write-DscStatus "$Tag WsusPool hardened (privateMemory uncapped, queueLength=25000)"
+        Write-DscStatus "$Tag --- end $Reason ---"
     }
 
     function Repair-WsusSync {
@@ -3140,17 +3112,35 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # SQL, leaving the sync status frozen at 6704 indefinitely.
         # Capture WSUS-native health BEFORE remediation so the log shows WHY.
         Write-WsusDiagnostics -Reason "WSUS health before repair"
-        # Reharden the pool (uncap memory) BEFORE restarting — otherwise it comes
-        # back with the default ~1.8 GB cap and the next sync dies the same way.
-        Set-WsusPoolHardened
-        Write-DscStatus "$Tag Restarting WsusPool app pool..."
-        try {
-            Import-Module WebAdministration -ErrorAction Stop
-            Restart-WebAppPool WsusPool
-            Write-DscStatus "$Tag WsusPool restarted"
-        }
-        catch {
-            Write-DscStatus "$Tag Could not restart WsusPool: $_"
+        foreach ($supVm in @($Sups)) {
+            $supHost = "$($supVm.vmName).$DomainFullName"
+            $repair = Invoke-CMRoleTargetCommand -ComputerName $supHost -ScriptBlock {
+                Import-Module WebAdministration -ErrorAction Stop
+                $poolPath = 'IIS:\AppPools\WsusPool'
+                if ((Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value -eq 'Started') {
+                    [void][Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                    $subscription = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer().GetSubscription()
+                    if ("$($subscription.GetSynchronizationStatus())" -eq 'Running') {
+                        return [pscustomobject]@{ Skipped = $true; Detail = 'Native WSUS sync is running; no service was restarted.' }
+                    }
+                }
+                foreach ($setting in @(
+                    @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
+                    @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
+                    @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
+                    @{ Name = 'queueLength'; Value = 25000 }
+                    @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
+                    @{ Name = 'startMode'; Value = 'AlwaysRunning' }
+                    @{ Name = 'failure.rapidFailProtection'; Value = $false }
+                )) {
+                    Set-ItemProperty -Path $poolPath -Name $setting.Name -Value $setting.Value -ErrorAction Stop
+                }
+                Restart-WebAppPool -Name WsusPool -ErrorAction Stop
+                [pscustomobject]@{ Skipped = $false; Detail = 'WsusPool hardened and restarted on the SUP.' }
+            }
+            if (-not $repair) { throw "WSUS repair on $supHost returned no result." }
+            Write-DscStatus "$Tag WSUS repair on ${supHost}: $($repair.Detail)"
+            if ($repair.Skipped) { return }
         }
         # Give the app pool time to fully initialize before wsyncmgr reconnects
         Start-Sleep -Seconds 15
@@ -3163,7 +3153,7 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             Write-DscStatus "$Tag SMS_EXECUTIVE restarted"
         }
         catch {
-            Write-DscStatus "$Tag Could not restart SMS_EXECUTIVE: $_"
+            throw "Could not restart SMS_EXECUTIVE for WSUS recovery: $($_.Exception.Message)"
         }
         # Now trigger a fresh sync. Force the drop: the pool restart above just
         # aborted any in-flight sync, so CM's lingering 'running' state is stale
@@ -3180,6 +3170,16 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # CM's lingering 'running' state is stale-by-definition and a fresh
         # trigger MUST be dropped regardless of the reported timestamp.
         param([switch]$Force)
+        if (-not $Force) {
+            $native = Get-WsusSyncLiveness
+            if (-not $native.ProbeSucceeded) {
+                throw "Cannot safely trigger WSUS sync: $($native.Detail)"
+            }
+            if ($native.WsusRunning) {
+                Write-DscStatus "$Tag Native WSUS sync is running on the configured SUP; skipping full.syn drop."
+                return
+            }
+        }
         $currentSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $siteCode } | Select-Object -First 1
         if (-not $Force -and $currentSync.LastSyncState -in @(6701, 6704, 6705, 6706)) {
             $syncStateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
@@ -3195,13 +3195,14 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         $syncFile = Join-Path $syncFolder "full.syn"
         if (Test-Path $syncFolder) {
             try {
-                New-Item -Path $syncFile -ItemType File -Force | Out-Null
+                New-Item -Path $syncFile -ItemType File -Force -ErrorAction Stop | Out-Null
                 Write-DscStatus "$Tag Triggered full WSUS sync (dropped full.syn)"
             }
             catch {
-                Write-DscStatus "$Tag Error creating 'full.syn': $_"
+                throw "Error creating '$syncFile': $($_.Exception.Message)"
             }
         }
+        else { throw "WSUS sync inbox '$syncFolder' was not found." }
     }
 
     function Get-WsusSyncLiveness {
@@ -3224,6 +3225,9 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         #   UpdateCount    : SUSDB update count (informational only; 0 until the
         #                    first full sync completes).
         $r = [PSCustomObject]@{
+            ProbeSucceeded = $true
+            Detail         = ''
+            HasFailedIdleSync = $false
             PoolUp         = $false
             WsusRunning    = $false
             Phase          = $null
@@ -3234,47 +3238,31 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             LastErrorText  = ''
             UpdateCount    = -1
         }
-        try {
-            $srv = Get-WsusServer -ErrorAction Stop
-            try { $r.UpdateCount = $srv.GetStatus().UpdateCount } catch { }
-            $sub = $srv.GetSubscription()
-            try {
-                $syncStatus = $sub.GetSynchronizationStatus()
-                $r.WsusRunning = ($syncStatus.ToString() -eq 'Running')
+        $states = @(
+            foreach ($supVm in @($Sups)) {
+                Invoke-CMWsusReplicaHealthCheck -ServerFQDN "$($supVm.vmName).$DomainFullName"
             }
-            catch { }
-            if ($r.WsusRunning) {
-                try {
-                    $prog = $sub.GetSynchronizationProgress()
-                    $r.Phase = $prog.Phase.ToString()
-                    $r.TotalItems = [int]$prog.TotalItems
-                    $r.ProcessedItems = [int]$prog.ProcessedItems
-                }
-                catch { }
-            }
-            try {
-                $lastInfo = @($sub.GetSynchronizationHistory() |
-                    Sort-Object StartTime -Descending | Select-Object -First 1)
-                if ($lastInfo.Count -gt 0) {
-                    $r.LastResult = "$($lastInfo[0].Result)"
-                    $r.LastError = "$($lastInfo[0].Error)"
-                    $r.LastErrorText = "$($lastInfo[0].ErrorText)"
-                }
-            }
-            catch { }
+        )
+        $r.ProbeSucceeded = $states.Count -gt 0 -and @($states | Where-Object { -not $_.ProbeSucceeded }).Count -eq 0
+        $r.PoolUp = $r.ProbeSucceeded -and @($states | Where-Object { -not $_.PoolUp }).Count -eq 0
+        $r.WsusRunning = @($states | Where-Object { $_.WsusRunning }).Count -gt 0
+        $failed = @($states | Where-Object { -not $_.WsusRunning -and $_.LastResult -in @('Failed', 'Canceled') })
+        $r.HasFailedIdleSync = $failed.Count -gt 0
+        if ($failed.Count) {
+            $r.LastResult = $failed[0].LastResult
+            $r.LastError = $failed[0].LastError
+            $r.LastErrorText = $failed[0].LastErrorText
         }
-        catch { }
-
-        # Pool liveness: Started state AND a live w3wp worker for WsusPool.
-        try {
-            Import-Module WebAdministration -ErrorAction Stop
-            $poolState = (Get-WebAppPoolState -Name WsusPool -ErrorAction SilentlyContinue).Value
-            $w3wp = Get-WmiObject Win32_Process -Filter "Name='w3wp.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -match 'WsusPool' } | Select-Object -First 1
-            $r.PoolUp = ($poolState -eq 'Started') -and ($null -ne $w3wp)
+        elseif ($r.ProbeSucceeded -and @($states | Where-Object { $_.LastResult -ne 'Succeeded' }).Count -eq 0) {
+            $r.LastResult = 'Succeeded'
         }
-        catch { }
-
+        $r.Detail = (@($states | ForEach-Object { "$($_.Server): $($_.Detail)" }) -join ' | ')
+        $running = $states | Where-Object { $_.WsusRunning } | Select-Object -First 1
+        if ($running) {
+            $r.Phase = $running.Phase
+            $r.ProcessedItems = $running.ProcessedItems
+            $r.TotalItems = $running.TotalItems
+        }
         return $r
     }
 
@@ -3318,6 +3306,18 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
             Start-Sleep -Seconds 30
             $status = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            $live = Get-WsusSyncLiveness
+            if (-not $live.ProbeSucceeded) {
+                Write-DscStatus "$Tag $Label native SUP health is unreadable (attempt $attempt of $MaxAttempts): $($live.Detail)" -Warning
+                continue
+            }
+            if ($live.WsusRunning) {
+                Write-DscStatus "$Tag $Label native sync is running (phase=$($live.Phase), items=$($live.ProcessedItems)/$($live.TotalItems)); preserving the active sync (CM state=$($status.LastSyncState), attempt $attempt of $MaxAttempts)."
+                $falsePositive6702Streak = 0
+                $poolDownStreak = 0
+                $desyncStreak = 0
+                continue
+            }
 
             if ($status.LastSyncState -eq 6702) {
                 # Cross-check the WSUS-side LastResult before accepting CM's 6702.
@@ -3326,7 +3326,6 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                 # Set-CMSoftwareUpdatePointComponent -AddProduct to silently no-op
                 # against an empty catalog later (every -AddProduct name is dropped
                 # unless it exists in SMS_UpdateCategoryInstance, which mirrors WSUS).
-                $live = Get-WsusSyncLiveness
                 if ($live.LastResult -in @('Canceled', 'Failed')) {
                     $falsePositive6702Streak++
                     if ($falsePositive6702Streak -ge 2) {
@@ -3349,8 +3348,11 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                         continue
                     }
                 }
-                Write-DscStatus "$Tag $Label completed (attempt $attempt, WSUS LastResult=$($live.LastResult))"
-                return $true
+                if ($live.LastResult -eq 'Succeeded') {
+                    Write-DscStatus "$Tag $Label completed (attempt $attempt, WSUS LastResult=$($live.LastResult))"
+                    return $true
+                }
+                Write-DscStatus "$Tag $Label CM reports completion but native result is $($live.LastResult); waiting for measured success." -Warning
             }
             elseif ($status.LastSyncState -eq 6703) {
                 if ($attempt % 3 -eq 0) {
@@ -3367,8 +3369,6 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             }
             elseif ($status.LastSyncState -in @(6701, 6704, 6705, 6706)) {
                 $age = (Get-Date) - $status.LastSyncStateTime
-                $live = Get-WsusSyncLiveness
-
                 if (-not $live.PoolUp) {
                     # CM reports running but the WsusPool worker is gone / pool
                     # stopped -- the pool crashed mid-sync (the classic memory-cap
@@ -3462,7 +3462,7 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
 
         $unreadable = @($initialStates | Where-Object { -not $_.ProbeSucceeded })
         $repairFailed = @($initialStates | Where-Object {
-                $_.ContractMismatch -and -not $_.RepairSucceeded
+                $_.ContractMismatch -and -not $_.RepairSucceeded -and -not $_.WsusRunning
             })
         if ($unreadable.Count -gt 0 -or $repairFailed.Count -gt 0) {
             $bad = @($unreadable + $repairFailed | ForEach-Object {
@@ -3473,7 +3473,7 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
 
         $failed = @($initialStates | Where-Object {
-                $_.LastResult -eq 'Failed' -and -not $_.WsusRunning
+                $_.LastResult -in @('Failed', 'Canceled') -and -not $_.WsusRunning
             })
         if ($failed.Count -eq 0) {
             Write-DscStatus "$Tag Downstream WSUS replicas do not have a failed native sync to recover."
@@ -3502,6 +3502,29 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         if (-not $upstreamReady) {
             Write-DscStatus "$Tag Upstream site $HierarchySiteCode did not complete its SUP sync within 20 minutes; downstream replica retry was not started." -Failure
             return $false
+        }
+
+        function Confirm-MemLabsWsusSyncHealth {
+            if (-not $Sups) { return }
+            $live = Get-WsusSyncLiveness
+            if (-not $live.ProbeSucceeded) {
+                throw "Cannot verify the configured SUP(s): $($live.Detail)"
+            }
+            if ($live.WsusRunning -and -not $live.HasFailedIdleSync) {
+                Write-DscStatus "$Tag WSUS sync remains in progress on the configured SUP(s); preserving background synchronization. $($live.Detail)"
+                return
+            }
+            $status = Get-CMSoftwareUpdateSyncStatus |
+                Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            if ($live.LastResult -ne 'Succeeded' -or $status.LastSyncState -eq 6703) {
+                Write-WsusDiagnostics -Reason 'Final WSUS health requires recovery'
+                if (-not (Wait-WsusSyncCompletion -Label 'Final WSUS recovery' -MaxAttempts 40 -TriggerFirst)) {
+                    throw "WSUS synchronization did not recover within the bounded final health check. $($live.Detail)"
+                }
+            }
+            else {
+                Write-DscStatus "$Tag Final WSUS native result=$($live.LastResult), CM state=$($status.LastSyncState). $($live.Detail)"
+            }
         }
 
         Write-DscStatus "$Tag Recovering failed downstream WSUS replica sync on $(@($failed.Server) -join ', ') after upstream/product convergence."
@@ -4618,7 +4641,9 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         } # end accepted-products block
     }
     if ($Sups -and -not $isTopLevel) {
-        $null = Repair-DownstreamWsusReplicaSync -SoftwareUpdatePoints @($Sups)
+        if (-not (Repair-DownstreamWsusReplicaSync -SoftwareUpdatePoints @($Sups))) {
+            throw 'Downstream WSUS replica recovery did not converge.'
+        }
     }
     if ($Sups) {
         # Define ADR Names
@@ -4784,6 +4809,8 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
 
         } # end Primary-only update packages/ADR block
     }
+
+    Confirm-MemLabsWsusSyncHealth
 
     try {
         $collection = Get-CMCollection -Name "All Unknown Computers" -ErrorAction Stop
