@@ -980,6 +980,13 @@ else {
 if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateObjects -eq $true) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
+    try {
+        Assert-MemLabsPerfloadingContract -Script $ScriptFile
+    }
+    catch {
+        Write-DscStatus "Perfloading preflight failed before object creation: $($_.Exception.Message)" -Failure
+        return
+    }
     Set-Location $LogPath
     # Retry the whole perfloading run: it is idempotent (every create is guarded
     # by a Get-CM* existence check / already-subscribed check), so a re-run picks

@@ -18,10 +18,10 @@ function Assert-True {
 $perfAst = Read-TestAst (Join-Path $root 'DSC\phases\perfloading.ps1')
 foreach ($name in @('Get-WsusSyncLiveness', 'Wait-WsusSyncCompletion', 'Invoke-FullSync',
         'Repair-WsusSync', 'Confirm-MemLabsWsusSyncHealth')) {
-    $node = $perfAst.Find({
-        param($n)
-        $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name
-    }, $true)
+    $node = $perfAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq $name
+    }
+    Assert-True ($null -ne $node) "$name must be defined at perfloading script scope, independently of downstream replica recovery."
     . ([scriptblock]::Create($node.Extent.Text))
 }
 $DomainFullName = 'lab.test'; $SiteCode = 'CAS'; $Tag = '[test]'
@@ -63,6 +63,7 @@ $state = Get-WsusSyncLiveness
 Assert-True ($state.ProbeSucceeded -and $state.LastResult -eq 'Succeeded') 'Successful native health was lost.'
 Assert-True ($script:ProbeTargets[0] -eq 'REMOTE-SUP.lab.test') 'Native health did not target the configured SUP.'
 Assert-True (Wait-WsusSyncCompletion -MaxAttempts 1) 'CM 6702 plus native success was rejected.'
+Confirm-MemLabsWsusSyncHealth
 
 $script:NativeResult = 'Unknown'
 Assert-True (-not (Wait-WsusSyncCompletion -MaxAttempts 2)) 'Unknown native health was accepted as completed.'
@@ -108,6 +109,9 @@ Assert-True ($script:FinalWaitCalls -eq 3) 'Mixed active/failed SUP health bypas
 $Sups = @()
 $empty = Get-WsusSyncLiveness
 Assert-True (-not $empty.ProbeSucceeded) 'An empty SUP scope was treated as measured success.'
+$probeCount = $script:ProbeTargets.Count
+Confirm-MemLabsWsusSyncHealth
+Assert-True ($script:ProbeTargets.Count -eq $probeCount -and $script:FinalWaitCalls -eq 3) 'An unconfigured SUP triggered final WSUS health recovery.'
 
 $validationPath = Join-Path $root 'common\Common.Validation.Functional.ps1'
 $validationAst = Read-TestAst $validationPath

@@ -192,6 +192,44 @@ function Invoke-MemLabsGuestMemoryReclaim {
     }
 }
 
+function Assert-MemLabsPerfloadingContract {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Script)
+
+    $hash = (Get-FileHash -LiteralPath $Script -Algorithm SHA256 -ErrorAction Stop).Hash
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $Script, [ref]$tokens, [ref]$parseErrors)
+    $identity = "path=$Script; sha256=$hash; PowerShell=$($PSVersionTable.PSVersion)"
+    if ($parseErrors.Count -gt 0) {
+        throw "Perfloading contract invalid: $identity; parse errors=$($parseErrors -join '; ')"
+    }
+
+    $required = @('Get-WsusDiagnostics', 'Write-WsusDiagnostics', 'Repair-WsusSync',
+        'Invoke-FullSync', 'Get-WsusSyncLiveness', 'Wait-WsusSyncCompletion',
+        'Confirm-MemLabsWsusSyncHealth', 'Repair-DownstreamWsusReplicaSync')
+    $definitions = @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true))
+    $invalid = @()
+    $locations = foreach ($name in $required) {
+        $helperDefinitions = @($definitions | Where-Object Name -eq $name)
+        $atScriptScope = @($helperDefinitions | Where-Object { $_.Parent -eq $ast.EndBlock })
+        if ($helperDefinitions.Count -ne 1 -or $atScriptScope.Count -ne 1) {
+            $invalid += $name
+        }
+        $lines = @($helperDefinitions | ForEach-Object { $_.Extent.StartLineNumber }) -join ','
+        "$name(lines=$lines,scriptScope=$($atScriptScope.Count),total=$($helperDefinitions.Count))"
+    }
+    $evidence = "$identity; helpers=$($locations -join '; ')"
+    if ($invalid.Count -gt 0) {
+        throw "Perfloading contract invalid: required helpers must each have exactly one script-scope definition: $($invalid -join ', '); $evidence"
+    }
+    Write-DscStatus "[PerfloadingContract] PASS: $evidence" -NoStatus
+}
+
 function Invoke-DotSource {
     # Wrapper for dot-sourcing scripts with error handling.
     # Catches parse errors, execution policy blocks, and other failures

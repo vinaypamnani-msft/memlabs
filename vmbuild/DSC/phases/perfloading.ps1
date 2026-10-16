@@ -3445,6 +3445,29 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         return $false
     }
 
+    function Confirm-MemLabsWsusSyncHealth {
+        if (-not $Sups) { return }
+        $live = Get-WsusSyncLiveness
+        if (-not $live.ProbeSucceeded) {
+            throw "Cannot verify the configured SUP(s): $($live.Detail)"
+        }
+        if ($live.WsusRunning -and -not $live.HasFailedIdleSync) {
+            Write-DscStatus "$Tag WSUS sync remains in progress on the configured SUP(s); preserving background synchronization. $($live.Detail)"
+            return
+        }
+        $status = Get-CMSoftwareUpdateSyncStatus |
+            Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+        if ($live.LastResult -ne 'Succeeded' -or $status.LastSyncState -eq 6703) {
+            Write-WsusDiagnostics -Reason 'Final WSUS health requires recovery'
+            if (-not (Wait-WsusSyncCompletion -Label 'Final WSUS recovery' -MaxAttempts 40 -TriggerFirst)) {
+                throw "WSUS synchronization did not recover within the bounded final health check. $($live.Detail)"
+            }
+        }
+        else {
+            Write-DscStatus "$Tag Final WSUS native result=$($live.LastResult), CM state=$($status.LastSyncState). $($live.Detail)"
+        }
+    }
+
     function Repair-DownstreamWsusReplicaSync {
         param([object[]] $SoftwareUpdatePoints)
 
@@ -3502,29 +3525,6 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         if (-not $upstreamReady) {
             Write-DscStatus "$Tag Upstream site $HierarchySiteCode did not complete its SUP sync within 20 minutes; downstream replica retry was not started." -Failure
             return $false
-        }
-
-        function Confirm-MemLabsWsusSyncHealth {
-            if (-not $Sups) { return }
-            $live = Get-WsusSyncLiveness
-            if (-not $live.ProbeSucceeded) {
-                throw "Cannot verify the configured SUP(s): $($live.Detail)"
-            }
-            if ($live.WsusRunning -and -not $live.HasFailedIdleSync) {
-                Write-DscStatus "$Tag WSUS sync remains in progress on the configured SUP(s); preserving background synchronization. $($live.Detail)"
-                return
-            }
-            $status = Get-CMSoftwareUpdateSyncStatus |
-                Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-            if ($live.LastResult -ne 'Succeeded' -or $status.LastSyncState -eq 6703) {
-                Write-WsusDiagnostics -Reason 'Final WSUS health requires recovery'
-                if (-not (Wait-WsusSyncCompletion -Label 'Final WSUS recovery' -MaxAttempts 40 -TriggerFirst)) {
-                    throw "WSUS synchronization did not recover within the bounded final health check. $($live.Detail)"
-                }
-            }
-            else {
-                Write-DscStatus "$Tag Final WSUS native result=$($live.LastResult), CM state=$($status.LastSyncState). $($live.Detail)"
-            }
         }
 
         Write-DscStatus "$Tag Recovering failed downstream WSUS replica sync on $(@($failed.Server) -join ', ') after upstream/product convergence."

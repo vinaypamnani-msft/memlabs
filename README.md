@@ -113,6 +113,16 @@ receive bounded recovery; unreadable native health and exhausted recovery fail
 the workflow instead of silently advancing. Repair hardens/restarts WsusPool on
 the SUP and captures its WSUS diagnostics. Long-running healthy background syncs
 remain asynchronous and are reported as pending, not as proven completion.
+The final WSUS health-check helper is defined at script scope, independently of
+downstream replica repair, so CAS, standalone primary, and child primary runs
+can all call it. Sites without a configured SUP skip this check.
+Before prepopulation, Phase 8 checks that every required WSUS helper has exactly
+one script-scope definition. Missing, nested, duplicate, or unparseable definitions
+fail immediately without retrying object creation. The collected full
+`InstallCMLog.log` records the guest script path, SHA-256, PowerShell version,
+and helper line/scope inventory, including on contract failure. Validate this
+guard with `vmbuild\tools\Test-PerfloadingContract.ps1`; log transport is covered
+by `vmbuild\tools\Test-CmFailureDiagnostics.ps1`.
 Phase 11 fails an idle failed/canceled sync or an unreachable WSUS health check;
 a populated catalog alone is not evidence that the latest sync recovered.
 

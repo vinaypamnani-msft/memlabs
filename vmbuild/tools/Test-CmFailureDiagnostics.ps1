@@ -106,7 +106,9 @@ try {
     $bundleSourceDir = Join-Path $workDir 'bundle-source'
     $null = New-Item -ItemType Directory -Path $bundleSourceDir
     [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'ConfigMgrSetup.log'), 'synthetic setup evidence')
-    [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'InstallCMLog.log'), 'synthetic wrapper evidence')
+    $contractEvidence = 'Perfloading preflight failed before object creation: Perfloading contract invalid: path=C:\Windows\temp\ProvisionScript\Perfloading.ps1; sha256=FIXTURE; PowerShell=5.1; helpers=Confirm-MemLabsWsusSyncHealth(lines=3507,scriptScope=0,total=1)'
+    $wrapperEvidence = "synthetic wrapper evidence`r`n$contractEvidence"
+    [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'InstallCMLog.log'), $wrapperEvidence)
     [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'DSC_Log.log'), 'synthetic DSC evidence')
     [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'ClientPackageTimeline.jsonl'), '{"Classification":"Installed"}')
     $script:BundleTemplate = Join-Path $workDir 'synthetic-cm-logs.zip'
@@ -349,7 +351,7 @@ try {
     }
     foreach ($expected in @(
             @{ Name = 'ConfigMgrSetup.log'; Text = 'synthetic setup evidence' },
-            @{ Name = 'InstallCMLog.log'; Text = 'synthetic wrapper evidence' },
+            @{ Name = 'InstallCMLog.log'; Text = $wrapperEvidence },
             @{ Name = 'DSC_Log.log'; Text = 'synthetic DSC evidence' },
             @{ Name = 'ClientPackageTimeline.jsonl'; Text = '{"Classification":"Installed"}' }
         )) {
@@ -360,6 +362,14 @@ try {
         }
     }
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $bundleWorkDir -Filter '*-BaselineCaptureStatus.json' -File).Count 'successful bundle writes no fallback status'
+
+    $script:Common.LogPath = Join-Path $bundleWorkDir 'VMBuild.test.log'
+    Save-CMSetupLogsFromVm -VmName 'CONTRACTFAIL-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    $contractLogs = @(Get-ChildItem -LiteralPath $bundleWorkDir -Filter 'CONTRACTFAIL-PS1SITE-Phase8-*-InstallCMLog.log' -File)
+    Assert-Equal 1 $contractLogs.Count 'Phase 8 contract failure collects the full guest install log'
+    if ($contractLogs.Count -eq 1) {
+        Assert-Equal $wrapperEvidence ([IO.File]::ReadAllText($contractLogs[0].FullName).Trim()) 'contract failure source hash, engine, helper location and scope survive ZIP transport'
+    }
 
     $bundleMismatchWorkDir = Join-Path $workDir 'bundle-size-mismatch'
     $null = New-Item -ItemType Directory -Path $bundleMismatchWorkDir
