@@ -95,6 +95,7 @@ function Get-MsiProductVersion {
             $InstallerState.ProductCode = ([guid]$productCode).ToString('B')
             $InstallerState.PackageCode = ([guid]$summaryInfo.GetType().InvokeMember('Property', 'GetProperty', $null, $summaryInfo, @(9))).ToString('B')
             $productState = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($productCode))
+            $InstallerState.State = [int]$productState
             $InstallerState.Installed = $productState -eq 5
             $InstallerState.CoreState = -1
             $InstallerState.PackageName = 'msodbcsql.msi'
@@ -181,14 +182,14 @@ function Save-MemLabsOdbcRecoveryPackage {
     $null = Invoke-DownloadFile -url $url -dest $path -BypassCache
     $signature = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
-        throw "Legacy ODBC recovery MSI has no valid Microsoft signature: $path"
+        throw "Legacy ODBC recovery MSI has no valid Microsoft signature: $path; status=$($signature.Status); signer='$($signature.SignerCertificate.Subject)'; guestUtc=$([datetime]::UtcNow.ToString('o'))"
     }
     $identity = @{}
     $null = Get-MsiProductVersion -Path $path -InstallerState $identity
     if ($identity.ProductCode -ine $Product.ProductCode -or
         $identity.PackageCode -ine $Product.PackageCode -or
         $identity.UpgradeCode -ine $Product.UpgradeCode) {
-        throw "Legacy ODBC recovery MSI identity mismatch for $($Product.ProductCode); the package was not installed. Download: $path"
+        throw "Legacy ODBC recovery MSI identity mismatch; expected product/package/family '$($Product.ProductCode)'/'$($Product.PackageCode)'/'$($Product.UpgradeCode)', downloaded '$($identity.ProductCode)'/'$($identity.PackageCode)'/'$($identity.UpgradeCode)'. The package was not installed. Download: $path"
     }
     return $path
 }
@@ -1998,6 +1999,7 @@ class InstallODBCDriver {
         $null = New-Item -Path $sourceDirectory -ItemType Directory -Force -ErrorAction Stop
         $installerSource = Join-Path $sourceDirectory $msiState.PackageName
         Copy-Item -LiteralPath $_odbcpath -Destination $installerSource -Force -ErrorAction Stop
+        Write-Status "ODBC before install: required=$requiredVersionParsed payload=$payloadVersion SHA256=$((Get-FileHash -LiteralPath $installerSource -Algorithm SHA256 -ErrorAction Stop).Hash); MSI state=$($msiState | ConvertTo-Json -Depth 6 -Compress)"
 
         $payloadMsiVersion = [version]::new($payloadVersion.Major, $payloadVersion.Minor, $payloadVersion.Build)
         foreach ($legacyProduct in @($msiState.RelatedProducts | Where-Object {
@@ -2042,7 +2044,10 @@ class InstallODBCDriver {
             Install-MSIPackage `
                 -MsiPath $installerSource `
                 -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
-                -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1", "ADDLOCAL=ALL") `
+                -AdditionalArguments @(
+                    "IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1", "ADDLOCAL=ALL",
+                    $(if ($msiState.State -in @(1, 5)) { "REINSTALLMODE=vomus" })
+                ) `
                 -LogPath "C:\temp\odbcinstallation.log"
         }
         catch {
@@ -2069,7 +2074,7 @@ class InstallODBCDriver {
                     "SKIPPENDINGREBOOTCHECK=1",
                     "ADDLOCAL=ALL",
                     $(if ($msiState.CoreState -eq 3) { "REINSTALL=ALL" }),
-                    $(if ($msiState.Installed) { "REINSTALLMODE=vomus" })
+                    $(if ($msiState.State -in @(1, 5) -or $msiState.Installed) { "REINSTALLMODE=vomus" })
                 ) `
                 -LogPath "C:\temp\odbcinstallation.repair.log"
 

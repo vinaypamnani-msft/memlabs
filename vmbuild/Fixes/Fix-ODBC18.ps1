@@ -135,6 +135,7 @@ $Fix_ODBC18 = {
                 $InstallerState.ProductCode = ([guid]$productCode).ToString('B')
                 $InstallerState.PackageCode = ([guid]$summaryInfo.GetType().InvokeMember('Property', 'GetProperty', $null, $summaryInfo, @(9))).ToString('B')
                 $productState = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($productCode))
+                $InstallerState.State = [int]$productState
                 $InstallerState.Installed = $productState -eq 5
                 $InstallerState.CoreState = -1
                 $InstallerState.PackageName = 'msodbcsql.msi'
@@ -220,14 +221,14 @@ $Fix_ODBC18 = {
         $null = Save-OdbcInstaller -Url $url -Path $path -BypassCache -Label 'Legacy ODBC recovery MSI'
         $signature = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
         if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
-            throw "Legacy ODBC recovery MSI has no valid Microsoft signature: $path"
+            throw "Legacy ODBC recovery MSI has no valid Microsoft signature: $path; status=$($signature.Status); signer='$($signature.SignerCertificate.Subject)'; guestUtc=$([datetime]::UtcNow.ToString('o'))"
         }
         $identity = @{}
         $null = Get-MsiVersion -Path $path -InstallerState $identity
         if ($identity.ProductCode -ine $Product.ProductCode -or
             $identity.PackageCode -ine $Product.PackageCode -or
             $identity.UpgradeCode -ine $Product.UpgradeCode) {
-            throw "Legacy ODBC recovery MSI identity mismatch for $($Product.ProductCode); the package was not installed. Download: $path"
+            throw "Legacy ODBC recovery MSI identity mismatch; expected product/package/family '$($Product.ProductCode)'/'$($Product.PackageCode)'/'$($Product.UpgradeCode)', downloaded '$($identity.ProductCode)'/'$($identity.PackageCode)'/'$($identity.UpgradeCode)'. The package was not installed. Download: $path"
         }
         return $path
     }
@@ -435,6 +436,7 @@ $Fix_ODBC18 = {
         $null = New-Item -Path $sourceDirectory -ItemType Directory -Force -ErrorAction Stop
         $installerPath = Join-Path $sourceDirectory $msiState.PackageName
         Copy-Item -LiteralPath $downloadPath -Destination $installerPath -Force -ErrorAction Stop
+        Write-Host "[Fix-ODBC18] Before install: required=$required detected=$installedBefore payload=$payloadVersion SHA256=$((Get-FileHash -LiteralPath $installerPath -Algorithm SHA256 -ErrorAction Stop).Hash); MSI state=$($msiState | ConvertTo-Json -Depth 6 -Compress)"
 
         $odbcRebootRequired = $false
         $payloadMsiVersion = [version]::new($payloadVersion.Major, $payloadVersion.Minor, $payloadVersion.Build)
@@ -495,13 +497,17 @@ $Fix_ODBC18 = {
             # REINSTALL=ALL does not select absent features. Explicitly add them
             # so an SDK-only product cannot return success without the driver.
             'ADDLOCAL=ALL',
+            $(if ($msiState.State -in @(1, 5)) { 'REINSTALLMODE=vomus' }),
             '/l*v', "`"$logPath`""
         )
         $argumentLine = $arguments -join ' '
         Write-Host "[Fix-ODBC18] Installing driver features: msiexec.exe $argumentLine"
         $process = $null
         for ($msiAttempt = 1; $msiAttempt -le 3; $msiAttempt++) {
+            $attemptClock = [Diagnostics.Stopwatch]::StartNew()
             $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $argumentLine -Wait -PassThru -NoNewWindow -ErrorAction Stop
+            $attemptClock.Stop()
+            Write-Host "[Fix-ODBC18] Install attempt $msiAttempt/3 exit=$($process.ExitCode) elapsed=$([math]::Round($attemptClock.Elapsed.TotalSeconds,2))s log=$logPath"
             if ($process.ExitCode -ne 1618 -or $msiAttempt -ge 3) { break }
             Start-Sleep -Seconds 30
         }
@@ -530,13 +536,14 @@ $Fix_ODBC18 = {
                 # REINSTALL overrides ADDLOCAL for absent features. Only use it
                 # when the core is already local and needs its files repaired.
                 $(if ($msiState.CoreState -eq 3) { 'REINSTALL=ALL' }),
-                $(if ($msiState.Installed) { 'REINSTALLMODE=vomus' }),
+                $(if ($msiState.State -in @(1, 5) -or $msiState.Installed) { 'REINSTALLMODE=vomus' }),
                 '/l*v', "`"$repairLogPath`""
             )
             $repairArgumentLine = $repairArguments -join ' '
             Write-Host "[Fix-ODBC18] Repairing driver features: msiexec.exe $repairArgumentLine"
             for ($repairAttempt = 1; $repairAttempt -le 3; $repairAttempt++) {
                 $repairProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList $repairArgumentLine -Wait -PassThru -NoNewWindow -ErrorAction Stop
+                Write-Host "[Fix-ODBC18] Repair attempt $repairAttempt/3 exit=$($repairProcess.ExitCode) log=$repairLogPath"
                 if ($repairProcess.ExitCode -ne 1618 -or $repairAttempt -ge 3) { break }
                 Start-Sleep -Seconds 30
             }

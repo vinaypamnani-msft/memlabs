@@ -1070,7 +1070,26 @@ function Start-VMFixesBatched {
             $continueOnFailure = ($groupAttempt -ge $maxGroupAttempts)
 
             try {
-                $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson, $continueOnFailure -ErrorVariable batchErr -ErrorAction SilentlyContinue
+                $timeouts = @($groupFixes | ForEach-Object { Get-VMFixExecutionTimeout -FixName $_.FixName })
+                if (@($timeouts | Where-Object { $_ -gt 0 }).Count) {
+                    $timeout = ($timeouts | ForEach-Object { if ($_ -gt 0) { $_ } else { 300 } } | Measure-Object -Sum).Sum
+                    $commandArguments = @{
+                        VmName = $VMName; VmDomainName = $VMDomain
+                        ScriptBlock = $batchRunner; ArgumentList = @($fixDefsJson, $continueOnFailure)
+                        DisplayName = "Maintenance batch (attempt $groupAttempt)"
+                        AsJob = $true; TimeoutSeconds = [int]$timeout; FailOnRemoteError = $true
+                    }
+                    if ($key -ne '__default__') { $commandArguments.VmDomainAccount = $key }
+                    $commandResult = Invoke-VmCommand @commandArguments
+                    if (-not $commandResult -or $commandResult.ScriptBlockFailed) {
+                        Write-Log "$VMName`: Maintenance batch failed or timed out: $(Protect-VMFixDiagnosticText $commandResult.ErrorDetails)" -Warning
+                        $rawOutput = $null
+                    }
+                    else { $rawOutput = $commandResult.ScriptBlockOutput }
+                }
+                else {
+                    $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson, $continueOnFailure -ErrorVariable batchErr -ErrorAction SilentlyContinue
+                }
             }
             catch {
                 Write-Log "$VMName`: Batched fix execution failed with exception (attempt $groupAttempt): $_" -Warning
@@ -1101,12 +1120,34 @@ function Start-VMFixesBatched {
 
             $failedNames = @($results | Where-Object { -not $_.Success } | ForEach-Object { $_.FixName }) -join ', '
             if (-not $failedNames) { $failedNames = '(no/partial results)' }
-            Write-Log "$VMName`: Fix(es) did not report explicit success on attempt $groupAttempt [$failedNames]; retrying batch once." -Warning
-            Start-Sleep -Seconds 5
+            $retryDelay = 5
+            foreach ($failedFix in @($results | Where-Object { -not $_.Success })) {
+                if ((Get-VMFixExecutionTimeout -FixName $failedFix.FixName) -gt 0) {
+                    $retryDelay = 60
+                    Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName `
+                        -VMDomainAccount $(if ($key -eq '__default__') { $null } else { $key }) `
+                        -CollectDiagnostics -Stage "before-batch-retry-$groupAttempt"
+                }
+                if (-not $results.Count) {
+                    foreach ($fix in $groupFixes) {
+                        if ((Get-VMFixExecutionTimeout -FixName $fix.FixName) -gt 0) {
+                            $retryDelay = 60
+                            Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName $fix.FixName `
+                                -VMDomainAccount $(if ($key -eq '__default__') { $null } else { $key }) -Stage 'before-empty-batch-retry'
+                        }
+                    }
+                }
+            }
+            Write-Log "$VMName`: Fix(es) did not report explicit success on attempt $groupAttempt [$failedNames]; retrying batch once in $retryDelay seconds." -Warning
+            Start-Sleep -Seconds $retryDelay
         }
 
         if (-not $results -or $results.Count -eq 0) {
             Write-Log "$VMName`: Batched fixes produced no usable results after $groupAttempt attempt(s)." -Warning
+            foreach ($fix in $groupFixes) {
+                Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName $fix.FixName `
+                    -VMDomainAccount $(if ($key -eq '__default__') { $null } else { $key }) -Stage 'missing-batch-results'
+            }
             return $return
         }
 
@@ -1120,7 +1161,7 @@ function Start-VMFixesBatched {
 
             # Log structured fields
             if ($r.PSObject.Properties.Name -contains 'Message' -and $r.Message) {
-                Write-Log "$VMName`: [$fixDisplayName] $($r.Message)"
+                Write-Log "$VMName`: [$fixDisplayName] $(Protect-VMFixDiagnosticText $r.Message 12000)" -Warning:([bool]$r.PreservedNewer)
             }
             if ($r.PSObject.Properties.Name -contains 'Errors' -and $r.Errors -and $r.Errors.Count -gt 0) {
                 foreach ($e in @($r.Errors)) { Write-Log "$VMName`: [$fixDisplayName] ERROR: $e" -Warning }
@@ -1136,7 +1177,8 @@ function Start-VMFixesBatched {
             }
 
             # Always pull transcript (LogOnly) so failures + slow fixes are diagnosable
-            Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript
+            Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript `
+                -CollectDiagnostics:(!$r.Success) -Stage "batch-result-$groupAttempt"
 
             if ($r.Success) {
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied." -force
@@ -1365,6 +1407,12 @@ function Start-VMFix {
 
     # Wrap the fix body so we get a structured return + transcript on the VM
     $HashArguments.ScriptBlock = New-VMFixScriptBlock -FixName $fixName -Body $vmFix.ScriptBlock
+    $executionTimeout = Get-VMFixExecutionTimeout -FixName $fixName
+    if ($executionTimeout -gt 0) {
+        $HashArguments.AsJob = $true
+        $HashArguments.TimeoutSeconds = $executionTimeout
+        $HashArguments.FailOnRemoteError = $true
+    }
 
     # Output is a structured PSCustomObject, but the AUTHORITATIVE success signal
     # is the marker file the wrapper writes (read below in a separate call), not
@@ -1385,17 +1433,8 @@ function Start-VMFix {
             $isStructured = $true
         }
         else {
-            # Fall back to the pipeline ONLY if it is itself an explicit structured
-            # record; a bare/array value is NOT accepted as success.
-            $pipe = $result.ScriptBlockOutput
-            if (($null -ne $pipe) -and ($pipe -is [pscustomobject]) -and ($pipe.PSObject.Properties.Name -contains 'IsStructured')) {
-                $rawOut = $pipe
-                $isStructured = $true
-            }
-            else {
-                $rawOut = $null
-                $isStructured = $false
-            }
+            $rawOut = $null
+            $isStructured = $false
         }
 
         if ($result.ScriptBlockFailed) {
@@ -1405,7 +1444,7 @@ function Start-VMFix {
         elseif ($isStructured) {
             $fixSucceeded = [bool]$rawOut.Success
             if ($rawOut.Message) {
-                Write-Log "$VMName`: [$fixName] $($rawOut.Message)"
+                Write-Log "$VMName`: [$fixName] $(Protect-VMFixDiagnosticText $rawOut.Message 12000)" -Warning:([bool]$rawOut.PreservedNewer)
             }
             if ($rawOut.Errors -and $rawOut.Errors.Count -gt 0) {
                 foreach ($e in $rawOut.Errors) {
@@ -1425,11 +1464,13 @@ function Start-VMFix {
         }
 
         # Always pull the on-VM transcript for this attempt (LogOnly).
-        Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount
+        Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount `
+            -CollectDiagnostics:(!$fixSucceeded) -Stage "attempt-$fixAttempt"
 
         if ($fixSucceeded -or ($fixAttempt -ge $maxFixAttempts)) { break }
-        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) did not report success on attempt $fixAttempt; retrying once." -Warning
-        Start-Sleep -Seconds 5
+        $retryDelay = if ($executionTimeout -gt 0) { 60 } else { 5 }
+        Write-Log "$VMName`: Fix '$fixName' ($fixVersion) did not report success on attempt $fixAttempt; retrying once in $retryDelay seconds." -Warning
+        Start-Sleep -Seconds $retryDelay
     }
 
     if (-not $fixSucceeded) {
@@ -1505,6 +1546,285 @@ function Start-VMIfNotRunning {
     return $return
 }
 
+function Protect-VMFixDiagnosticText {
+    param([AllowNull()][string]$Text, [int]$MaximumLength = 2000)
+
+    $safe = "$Text" -replace '(?i)(-Token\s+)(?:"[^"]*"|\S+)', '$1[REDACTED]'
+    $safe = $safe -replace '(?i)([?&](?:sig|token|password|secret|access_token)=)[^&\s"]+', '$1[REDACTED]'
+    $safe = $safe -replace '(?i)(\b(?:password|pwd|access_token|client_secret)\s*[:=]\s*)(?:"[^"]*"|''[^'']*''|[^;\s,]+)', '$1[REDACTED]'
+    $safe = $safe -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@', '$1[REDACTED]@'
+    if ($safe.Length -gt $MaximumLength) { return $safe.Substring(0, $MaximumLength) + ' [truncated]' }
+    return $safe
+}
+
+function Get-VMFixExecutionTimeout {
+    param([string]$FixName)
+    switch ($FixName) {
+        'Fix-ODBC18' { return 1800 }
+        'Fix-Upgrade-Console' { return 3600 }
+        'Fix-CMFullAdmin' { return 600 }
+        default { return 0 }
+    }
+}
+
+function Get-VMFixDiagnosticScriptBlock {
+    $redactor = ${function:Protect-VMFixDiagnosticText}.ToString()
+    $collector = {
+        $ErrorActionPreference = 'Stop'
+        $errors = [System.Collections.Generic.List[string]]::new()
+        function Read-DiagnosticRegistry {
+            param([string]$Path, [string[]]$Names)
+            $values = [ordered]@{}
+            try {
+                if (-not (Test-Path -LiteralPath $Path)) {
+                    return [pscustomobject]@{ Path = $Path; Exists = $false; Values = $values }
+                }
+                $item = Get-ItemProperty -LiteralPath $Path -ErrorAction Stop
+                foreach ($name in $Names) {
+                    if ($item.PSObject.Properties[$name]) {
+                        $values[$name] = Protect-VMFixDiagnosticText -Text "$($item.$name)" -MaximumLength 500
+                    }
+                }
+            }
+            catch { $errors.Add("Registry $Path`: $($_.Exception.Message)") }
+            [pscustomobject]@{ Path = $Path; Exists = $true; Values = $values }
+        }
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        $snapshot = [ordered]@{
+            SchemaVersion = 1
+            CapturedUtc = [datetime]::UtcNow.ToString('o')
+            FixName = $FixName
+            Stage = $Stage
+            ComputerName = $env:COMPUTERNAME
+            Identity = $identity.Name
+            Elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            UserDomain = $env:USERDOMAIN
+            UserDnsDomain = $env:USERDNSDOMAIN
+            PowerShellVersion = "$($PSVersionTable.PSVersion)"
+            Is64BitProcess = [Environment]::Is64BitProcess
+            TempPath = [IO.Path]::GetTempPath()
+            FreeDisk = @()
+            Services = @()
+            Processes = @()
+            Registry = @()
+            OdbcProducts = @()
+            Modules = @()
+            InstallerEvents = @()
+            Logs = @()
+        }
+        try {
+            $snapshot.FreeDisk = @(Get-PSDrive -PSProvider FileSystem | Select-Object -First 8 Name, Free, Used)
+            $snapshot.Services = @(Get-Service | Where-Object {
+                    $_.Name -in @('msiserver', 'Winmgmt', 'SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER', 'MSSQLSERVER') -or
+                    $_.Name -like 'MSSQL$*'
+                } | Select-Object -First 15 Name, @{ Name = 'Status'; Expression = { "$($_.Status)" } })
+            $snapshot.Processes = @(Get-Process | Where-Object {
+                    $_.ProcessName -in @('msiexec', 'ConsoleSetup', 'mmc', 'SMS_EXECUTIVE')
+                } | Select-Object -First 20 Id, ProcessName, CPU)
+            $snapshot.Modules = @(Get-Module -ListAvailable TemplateHelpDSC, ConfigurationManager |
+                Select-Object -First 5 Name, @{ Name = 'Version'; Expression = { "$($_.Version)" } }, Path)
+        }
+        catch { $errors.Add("Host state: $($_.Exception.Message)") }
+        foreach ($root in @('HKLM:\SOFTWARE', 'HKLM:\SOFTWARE\WOW6432Node')) {
+            foreach ($major in @(17, 18)) {
+                $snapshot.Registry += Read-DiagnosticRegistry "$root\Microsoft\MSODBCSQL$major" @('InstalledVersion')
+                $driver = Read-DiagnosticRegistry "$root\ODBC\ODBCINST.INI\ODBC Driver $major for SQL Server" @('Driver', 'Setup', 'Version')
+                $snapshot.Registry += $driver
+                if ($driver.Values.Driver) {
+                    try {
+                        $file = Get-Item -LiteralPath $driver.Values.Driver -ErrorAction Stop
+                        $snapshot.Registry += [pscustomobject]@{
+                            Path = $file.FullName; Exists = $true
+                            Values = @{ FileVersion = "$($file.VersionInfo.FileVersion)"; Bytes = $file.Length }
+                        }
+                    }
+                    catch { $errors.Add("Driver DLL $($driver.Values.Driver): $($_.Exception.Message)") }
+                }
+            }
+        }
+        $snapshot.Registry += Read-DiagnosticRegistry 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' @('Site Code', 'Site Name', 'Version')
+        $siteSetup = Read-DiagnosticRegistry 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' @('Installation Directory', 'UI Installation Directory', 'Version', 'Full Version')
+        $snapshot.Registry += $siteSetup
+        $snapshot.Registry += Read-DiagnosticRegistry 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\ConfigMgr10\Setup' @('UI Installation Directory', 'AdminConsoleVersion', 'RequiredExtensionVersion')
+        $snapshot.Registry += Read-DiagnosticRegistry 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64' @('Installed', 'Major', 'Minor', 'Bld', 'Version')
+        $snapshot.Registry += Read-DiagnosticRegistry 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' @('PendingFileRenameOperations')
+        try {
+            $configPath = 'C:\staging\DSC\deployConfig.json'
+            if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+                $config = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $configuredMachine = "$($config.Parameters.ThisMachineName)"
+                $matches = @($config.virtualMachines | Where-Object { $_.vmName -ieq $configuredMachine -or $_.vmName -ieq $env:COMPUTERNAME })
+                $snapshot.Config = [ordered]@{
+                    Sha256 = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
+                    ConfiguredMachine = $configuredMachine
+                    GlobalVersion = "$($config.cmOptions.Version)"
+                    LocalEntries = @($matches | Select-Object -First 3 | ForEach-Object {
+                            [pscustomobject]@{
+                                VmName = $_.vmName; Role = $_.role; SiteCode = $_.siteCode
+                                ParentSiteCode = $_.parentSiteCode; Version = "$($_.cmOptions.Version)"
+                                MediaBaseline = "$($_.thisParams.cmDownloadVersion.baselineVersion)"
+                                MediaVersions = @($_.thisParams.cmDownloadVersion.versions | Select-Object -First 10)
+                            }
+                        })
+                }
+            }
+            else { $errors.Add("Deployment metadata missing: $configPath") }
+        }
+        catch { $errors.Add("Deployment metadata: $($_.Exception.Message)") }
+        $installer = $null
+        $related = $null
+        try {
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+            $related = $installer.GetType().InvokeMember('RelatedProducts', 'GetProperty', $null, $installer, @('{ADA68B65-BFF8-4E6A-B082-CC6682D425B8}'))
+            $productCount = 0
+            foreach ($code in $related) {
+                if ($productCount++ -ge 16) { $errors.Add('ODBC product inventory limited to 16 entries'); break }
+                $entry = [ordered]@{ ProductCode = "$code" }
+                foreach ($property in @('ProductState', 'FeatureState', 'PackageCode', 'PackageName', 'Language', 'Version', 'LocalPackage')) {
+                    try {
+                        $entry[$property] = switch ($property) {
+                            'ProductState' { $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($code)) }
+                            'FeatureState' { $installer.GetType().InvokeMember('FeatureState', 'GetProperty', $null, $installer, @($code, 'SQL_SQLODBC_CORE')) }
+                            default { $installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($code, $property)) }
+                        }
+                    }
+                    catch { $entry["${property}Error"] = Protect-VMFixDiagnosticText $_.Exception.Message 300 }
+                }
+                if ($entry.LocalPackage) { $entry.CacheExists = Test-Path -LiteralPath "$($entry.LocalPackage)" -PathType Leaf }
+                $snapshot.OdbcProducts += [pscustomobject]$entry
+            }
+        }
+        catch { $errors.Add("Windows Installer inventory: $($_.Exception.Message)") }
+        finally {
+            foreach ($item in @($related, $installer)) {
+                if ($item -and [Runtime.InteropServices.Marshal]::IsComObject($item)) {
+                    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($item)
+                }
+            }
+        }
+        try {
+            $snapshot.InstallerEvents = @(Get-WinEvent -FilterHashtable @{
+                    LogName = 'Application'; ProviderName = 'MsiInstaller'; StartTime = (Get-Date).AddMinutes(-30)
+                } -MaxEvents 10 -ErrorAction Stop | ForEach-Object {
+                    [pscustomobject]@{ TimeCreated = "$($_.TimeCreated)"; Id = $_.Id; Message = Protect-VMFixDiagnosticText $_.Message 800 }
+                })
+        }
+        catch {
+            if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
+                $errors.Add("Installer events: $($_.Exception.Message)")
+            }
+        }
+        $paths = [System.Collections.Generic.List[string]]::new()
+        $fixedLogs = @("C:\staging\Fix\$FixName.result.json", 'C:\staging\DSC\DSC_Log.log')
+        if ($FixName -ne 'Fix-ODBC18') { $fixedLogs += @('C:\ConfigMgrAdminUISetup.log', 'C:\ConfigMgrAdminUISetupVerbose.log') }
+        foreach ($path in $fixedLogs) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) { $paths.Add($path) }
+        }
+        $tempPaths = @([IO.Path]::GetTempPath(), 'C:\Windows\Temp')
+        $tempPaths += @(Get-ChildItem -LiteralPath 'C:\Users' -Directory -Filter 'vmbuildadmin*' -ErrorAction SilentlyContinue |
+            Select-Object -First 4 | ForEach-Object { Join-Path $_.FullName 'AppData\Local\Temp' })
+        $msiLogs = @(foreach ($tempPath in @($tempPaths | Select-Object -Unique)) {
+                if (Test-Path -LiteralPath $tempPath) {
+                    Get-ChildItem -LiteralPath $tempPath -File -Filter 'memlabs-msodbcsql-*.log' -ErrorAction SilentlyContinue
+                }
+            })
+        if ($FixName -eq 'Fix-ODBC18') {
+            foreach ($file in @($msiLogs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 7)) { $paths.Add($file.FullName) }
+        }
+        $installDirectory = $siteSetup.Values.'Installation Directory'
+        if ($installDirectory -and $FixName -ne 'Fix-ODBC18') {
+            foreach ($name in @('SMSProv.log', 'hman.log', 'sitecomp.log')) {
+                $path = Join-Path $installDirectory "Logs\$name"
+                if (Test-Path -LiteralPath $path -PathType Leaf) { $paths.Add($path) }
+            }
+        }
+        foreach ($path in @($paths | Select-Object -Unique | Select-Object -First 10)) {
+            try {
+                $file = Get-Item -LiteralPath $path -ErrorAction Stop
+                $lines = @(Get-Content -LiteralPath $path -Tail 60 -ErrorAction Stop |
+                    ForEach-Object { Protect-VMFixDiagnosticText -Text "$_" -MaximumLength 500 })
+                $snapshot.Logs += [pscustomobject]@{
+                    Path = $file.FullName; Bytes = $file.Length; LastWriteTimeUtc = "$($file.LastWriteTimeUtc)"
+                    Tail = $lines; TailLimit = 60
+                }
+            }
+            catch { $errors.Add("Log $path`: $($_.Exception.Message)") }
+        }
+        $snapshot.CollectionErrors = @($errors | Select-Object -First 30 |
+            ForEach-Object { Protect-VMFixDiagnosticText $_ 600 })
+        $json = $snapshot | ConvertTo-Json -Depth 9 -Compress
+        if ($json.Length -gt 512KB) {
+            foreach ($log in $snapshot.Logs) {
+                $log.Tail = @($log.Tail | Select-Object -Last 10 | ForEach-Object { Protect-VMFixDiagnosticText $_ 200 })
+                $log.TailLimit = 10
+            }
+            $snapshot.TransferTruncated = $true
+            $snapshot.CollectionErrors += 'Log tails reduced to fit the 512 KB transfer limit.'
+            $json = $snapshot | ConvertTo-Json -Depth 9 -Compress
+            if ($json.Length -gt 512KB) { throw 'Maintenance diagnostic context exceeded the 512 KB transfer limit.' }
+        }
+        return $json
+    }
+    return [scriptblock]::Create("param([string]`$FixName, [string]`$Stage)`nfunction Protect-VMFixDiagnosticText {`n$redactor`n}`n$($collector.ToString())")
+}
+
+function Save-VMFixFailureEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$VMDomain,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_-]{1,80}$')][string]$FixName,
+        [string]$VMDomainAccount,
+        [string]$Stage = 'failure'
+    )
+    if ((Get-VMFixExecutionTimeout -FixName $FixName) -eq 0) { return }
+    $arguments = @{
+        VmName = $VMName; VmDomainName = $VMDomain
+        ScriptBlock = Get-VMFixDiagnosticScriptBlock
+        ArgumentList = @($FixName, $Stage)
+        DisplayName = "Maintenance evidence: $FixName ($Stage)"
+        AsJob = $true; TimeoutSeconds = 60; SessionMaxRetries = 1
+        SuppressLog = $true; FailOnRemoteError = $true
+    }
+    if ($VMDomainAccount) { $arguments.VmDomainAccount = $VMDomainAccount }
+    try {
+        $result = Invoke-VmCommand @arguments
+        if (-not $result -or $result.ScriptBlockFailed -or -not $result.ScriptBlockOutput) {
+            throw "Guest evidence unavailable or timed out: $($result.ErrorDetails)"
+        }
+        $raw = @($result.ScriptBlockOutput) -join "`n"
+        if ($raw.Length -gt 512KB) { throw 'Guest evidence exceeds the 512 KB limit.' }
+        $snapshot = $raw | ConvertFrom-Json -ErrorAction Stop
+        $root = Split-Path $PSScriptRoot -Parent
+        $source = [ordered]@{ ActiveVersion = "$($Common.MemLabsVersion)"; ActiveHotfixVersion = "$($Common.LatestHotfixVersion)" }
+        foreach ($name in @('version.json', 'DSC\DSC.build.json')) {
+            $file = Join-Path $root $name
+            if (Test-Path -LiteralPath $file -PathType Leaf) {
+                $source[$name] = Get-Content -LiteralPath $file -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            }
+        }
+        $fixFile = Join-Path $root "Fixes\$FixName.ps1"
+        if (Test-Path -LiteralPath $fixFile -PathType Leaf) { $source.FixSha256 = (Get-FileHash -LiteralPath $fixFile -Algorithm SHA256).Hash }
+        $snapshot | Add-Member -NotePropertyName HostSource -NotePropertyValue $source -Force
+        $raw = $snapshot | ConvertTo-Json -Depth 10 -Compress
+        $directory = Split-Path $Common.LogPath -Parent
+        if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) {
+            throw 'The host log directory is unavailable.'
+        }
+        $path = Join-Path $directory "$VMName-$FixName-$([datetime]::UtcNow.ToString('yyyyMMddTHHmmssfff'))-$([guid]::NewGuid().ToString('N').Substring(0,8)).diagnostics.log"
+        $raw | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
+        $context = $snapshot | Select-Object -Property * -ExcludeProperty Logs, InstallerEvents
+        Write-Log "$VMName`: [$FixName] $Stage evidence saved to $path. Context: $(Protect-VMFixDiagnosticText ($context | ConvertTo-Json -Depth 8 -Compress) 12000)" -Warning -LogOnly
+        foreach ($log in @($snapshot.Logs)) {
+            Write-Log "$VMName`: [$FixName] Evidence log '$($log.Path)' ($($log.Bytes) bytes); tail: $(Protect-VMFixDiagnosticText (@($log.Tail | Select-Object -Last 8) -join ' | ') 3000)" -LogOnly
+        }
+    }
+    catch {
+        Write-Log "$VMName`: [$FixName] $Stage evidence collection failed: $(Protect-VMFixDiagnosticText $_.Exception.Message)" -Warning
+    }
+}
+
 function New-VMFixScriptBlock {
     <#
     .SYNOPSIS
@@ -1528,11 +1848,12 @@ function New-VMFixScriptBlock {
     #>
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)][string]$FixName,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9_-]{1,80}$')][string]$FixName,
         [Parameter(Mandatory = $true)][scriptblock]$Body
     )
 
     $bodyText = $Body.ToString()
+    $redactor = ${function:Protect-VMFixDiagnosticText}.ToString()
     # Escape any backticks/$ in the FixName for safe embedding in a here-string.
     $safeName = $FixName -replace "'", "''"
 
@@ -1544,6 +1865,8 @@ if (-not (Test-Path 'C:\staging\Fix')) {
 }
 `$__transcriptPath = "C:\staging\Fix\`$__FixName.txt"
 `$__resultPath = "C:\staging\Fix\`$__FixName.result.json"
+`$__attemptId = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfff') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+`$__historyPath = "C:\staging\Fix\history\`$__FixName"
 # Clear any stale result marker up front. A catastrophic failure that prevents
 # the finally{} write then leaves NO marker, and the host treats 'no marker' as
 # 'the fix did NOT succeed' -- an explicit success marker is REQUIRED to stamp a
@@ -1559,9 +1882,21 @@ try { if (Test-Path `$__resultPath) { Remove-Item `$__resultPath -Force -ErrorAc
     StartedAt     = (Get-Date).ToString('o')
     DurationSec   = 0
     IsStructured  = `$true
+    AttemptId     = `$__attemptId
+    Identity      = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    HistoryPath   = `$__historyPath
+    DiagnosticWarnings = @()
 }
 `$__sw = [System.Diagnostics.Stopwatch]::StartNew()
-try { Start-Transcript -Path `$__transcriptPath -Force -ErrorAction Stop | Out-Null } catch { }
+function Protect-VMFixDiagnosticText {
+$redactor
+}
+try { Start-Transcript -Path `$__transcriptPath -Force -ErrorAction Stop | Out-Null }
+catch {
+    `$__warning = "Could not start transcript: `$(Protect-VMFixDiagnosticText `$_.Exception.Message)"
+    `$__result.DiagnosticWarnings += `$__warning
+    Write-Warning `$__warning
+}
 try {
     Write-Host "[`$__FixName] Starting on `$env:COMPUTERNAME at `$(Get-Date -Format 'u')"
     function Write-FixLog {
@@ -1572,7 +1907,7 @@ try {
         )
         process {
             `$ts = (Get-Date).ToString('HH:mm:ss.fff')
-            Write-Host "[`$ts][`$Level] `$Message"
+            Write-Host "[`$ts][`$Level] `$(Protect-VMFixDiagnosticText -Text `$Message -MaximumLength 8000)"
         }
     }
     # --- BEGIN FIX BODY ---
@@ -1580,13 +1915,25 @@ try {
 $bodyText
     } @args
     # --- END FIX BODY ---
-    if (`$null -eq `$__bodyOut) {
-        `$__result.Success = `$true
+    `$__records = @(`$__bodyOut | Where-Object { `$null -ne `$_ -and `$_.PSObject.Properties['Success'] })
+    if (`$__records.Count -gt 1) {
+        throw "Fix body returned multiple explicit success records; refusing an ambiguous maintenance verdict."
     }
-    elseif (`$__bodyOut -is [pscustomobject] -and (`$__bodyOut.PSObject.Properties.Name -contains 'Success')) {
-        `$__result.Success = [bool]`$__bodyOut.Success
-        if (`$__bodyOut.PSObject.Properties.Name -contains 'Message') { `$__result.Message = `$__bodyOut.Message }
-        if (`$__bodyOut.PSObject.Properties.Name -contains 'Errors')  { `$__result.Errors  = @(`$__bodyOut.Errors) }
+    if (`$__records.Count -eq 1) {
+        `$__record = `$__records[0]
+        if (`$__record.Success -isnot [bool]) { throw "Fix body returned a non-Boolean Success property." }
+        `$__terminal = @(`$__bodyOut) | Select-Object -Last 1
+        `$__result.Success = `$__record.Success -and -not (`$__terminal -is [bool] -and -not `$__terminal)
+        if (`$__record.PSObject.Properties['Message']) { `$__result.Message = `$__record.Message }
+        if (`$__record.PSObject.Properties['Errors']) { `$__result.Errors = @(`$__record.Errors) }
+        foreach (`$__property in @('State', 'PreservedNewer', 'Attempts', 'VersionSource')) {
+            if (`$__record.PSObject.Properties[`$__property]) {
+                `$__result | Add-Member -NotePropertyName `$__property -NotePropertyValue `$__record.`$__property -Force
+            }
+        }
+    }
+    elseif (`$null -eq `$__bodyOut) {
+        `$__result.Success = `$true
     }
     else {
         # Take last emitted value (back-compat with fixes that return `$true/`$false at the end)
@@ -1597,20 +1944,37 @@ $bodyText
 catch {
     `$__result.Success = `$false
     `$__result.ExceptionInfo = "`$(`$_.Exception.Message)``n`$(`$_.ScriptStackTrace)"
-    Write-Host "[`$__FixName] EXCEPTION: `$(`$_.Exception.Message)"
-    Write-Host "[`$__FixName] `$(`$_.ScriptStackTrace)"
+    `$__result | Add-Member -NotePropertyName FailureCategory -NotePropertyValue (Protect-VMFixDiagnosticText `$_.FullyQualifiedErrorId 1200) -Force
+    Write-Host "[`$__FixName] EXCEPTION: `$(Protect-VMFixDiagnosticText `$_.Exception.Message 12000)"
+    Write-Host "[`$__FixName] `$(Protect-VMFixDiagnosticText `$_.ScriptStackTrace 12000)"
 }
 finally {
     `$__sw.Stop()
     `$__result.DurationSec = [math]::Round(`$__sw.Elapsed.TotalSeconds, 2)
-    try { Stop-Transcript | Out-Null } catch { }
+    try { Stop-Transcript | Out-Null }
+    catch {
+        `$__warning = "Could not stop transcript: `$(Protect-VMFixDiagnosticText `$_.Exception.Message)"
+        `$__result.DiagnosticWarnings += `$__warning
+        Write-Warning `$__warning
+    }
+    if (`$__result.Message) { `$__result.Message = Protect-VMFixDiagnosticText `$__result.Message 12000 }
+    if (`$__result.ExceptionInfo) { `$__result.ExceptionInfo = Protect-VMFixDiagnosticText `$__result.ExceptionInfo 12000 }
+    `$__result.Errors = @(`$__result.Errors | ForEach-Object { Protect-VMFixDiagnosticText "`$_" 8000 })
     # Authoritative result marker: the batch runner / host read THIS file (in a
     # separate step), not the scriptblock's pipeline return value. Written last so
     # it reflects the final Success/Message/Errors after the body + catch ran.
     try {
         if (-not (Test-Path 'C:\staging\Fix')) { New-Item -Path 'C:\staging\Fix' -ItemType Directory -Force | Out-Null }
         `$__result | ConvertTo-Json -Depth 6 -Compress | Set-Content -Path `$__resultPath -Encoding UTF8 -Force
-    } catch { }
+        New-Item -Path `$__historyPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        `$__result | ConvertTo-Json -Depth 6 -Compress | Set-Content -LiteralPath (Join-Path `$__historyPath "`$__attemptId.result.json") -Encoding UTF8 -ErrorAction Stop
+        if (Test-Path -LiteralPath `$__transcriptPath) {
+            `$__lines = @(Get-Content -LiteralPath `$__transcriptPath -ErrorAction Stop |
+                ForEach-Object { Protect-VMFixDiagnosticText "`$_" 8000 })
+            `$__lines | Set-Content -LiteralPath `$__transcriptPath -Encoding UTF8 -ErrorAction Stop
+            `$__lines | Set-Content -LiteralPath (Join-Path `$__historyPath "`$__attemptId.txt") -Encoding UTF8 -ErrorAction Stop
+        }
+    } catch { Write-Warning "Could not persist fix result/history: `$(`$_.Exception.Message)" }
 }
 `$__result
 "@
@@ -1629,12 +1993,15 @@ function Get-VMFixTranscript {
         [Parameter(Mandatory = $true)][string]$VMName,
         [Parameter(Mandatory = $true)][string]$VMDomain,
         [Parameter(Mandatory = $true)][string]$FixName,
-        [string]$VMDomainAccount
+        [string]$VMDomainAccount,
+        [switch]$CollectDiagnostics,
+        [string]$Stage = 'failure'
     )
     $sb = {
         param($name)
         $p = "C:\staging\Fix\$name.txt"
-        if (Test-Path $p) { Get-Content -Path $p -ErrorAction SilentlyContinue }
+        if (Test-Path $p) { Get-Content -Path $p -Tail 400 -ErrorAction Stop }
+        else { throw "Transcript not found: $p" }
     }
     $args = @{
         VmName       = $VMName
@@ -1643,6 +2010,10 @@ function Get-VMFixTranscript {
         ArgumentList = @($FixName)
         DisplayName  = "Pull transcript: $FixName"
         SuppressLog  = $true
+        AsJob        = $true
+        TimeoutSeconds = 30
+        SessionMaxRetries = 1
+        FailOnRemoteError = $true
     }
     if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
     try {
@@ -1651,10 +2022,16 @@ function Get-VMFixTranscript {
             Write-Log "$VMName`: ===== Transcript [$FixName] BEGIN =====" -LogOnly
             foreach ($line in @($r.ScriptBlockOutput)) {
                 if ($null -ne $line -and "$line" -ne "") {
-                    Write-Log -LogOnly "$VMName`: [$FixName] $line"
+                    Write-Log -LogOnly "$VMName`: [$FixName] $(Protect-VMFixDiagnosticText -Text "$line")"
+                }
+                else {
+                    Write-Log "$VMName`: [$FixName] Transcript unavailable, empty, or timed out: $($r.ErrorDetails)" -LogOnly -Warning
                 }
             }
             Write-Log "$VMName`: ===== Transcript [$FixName] END =====" -LogOnly
+        }
+        if ($CollectDiagnostics) {
+            Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName $FixName -VMDomainAccount $VMDomainAccount -Stage $Stage
         }
     }
     catch {
@@ -1694,6 +2071,10 @@ function Get-VMFixResultMarker {
         ArgumentList = @($FixName)
         DisplayName  = "Pull result marker: $FixName"
         SuppressLog  = $true
+        AsJob = $true
+        TimeoutSeconds = 30
+        SessionMaxRetries = 1
+        FailOnRemoteError = $true
     }
     if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
     try {

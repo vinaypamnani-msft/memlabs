@@ -2,6 +2,25 @@
 # ConfigMgr site so admin console + sqlcmd-via-CM provider both work.
 
 $Fix_CMFullAdmin = {
+    param(
+        [ValidateRange(1, 6)][int]$MaximumAttempts = 3,
+        [ValidateRange(0, 600)][int]$RetrySeconds = 60
+    )
+
+    function Get-CmAdminDirectoryEvidence {
+        param([string]$AccountName)
+        $searcher = [ADSISearcher]"(&(objectCategory=person)(objectClass=user)(sAMAccountName=$AccountName))"
+        try {
+            $searcher.ClientTimeout = [timespan]::FromSeconds(10)
+            $searcher.ServerTimeLimit = [timespan]::FromSeconds(10)
+            $searcher.SizeLimit = 1
+            $null = $searcher.PropertiesToLoad.Add('distinguishedname')
+            $hit = $searcher.FindOne()
+            return "DIAG AD resolves account '$AccountName': $([bool]$hit)$(if ($hit) { " ($($hit.Properties['distinguishedname'][0]))" })"
+        }
+        finally { $searcher.Dispose() }
+    }
+
     $SiteCode = $null
     $identificationPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
     if (Test-Path -LiteralPath $identificationPath) {
@@ -10,7 +29,7 @@ $Fix_CMFullAdmin = {
             $siteCodeProperty = $identification.PSObject.Properties['Site Code']
             if ($siteCodeProperty) { $SiteCode = $siteCodeProperty.Value }
         }
-        catch { }
+        catch { throw "Could not read ConfigMgr site identification: $($_.Exception.Message)" }
     }
     if ([string]::IsNullOrWhiteSpace($SiteCode)) {
         return [pscustomobject]@{ Success = $true; Message = 'No site code; CM not installed or uninstalled - skipping' }
@@ -24,82 +43,86 @@ $Fix_CMFullAdmin = {
     $ProviderMachineName = "$env:COMPUTERNAME.$dnsDomain"
     Write-FixLog "SiteCode=$SiteCode Provider=$ProviderMachineName"
 
-    # Get CM module path
-    $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-    $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-    if (-not $subKey) {
+    $consoleRegistry = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\ConfigMgr10\Setup'
+    if (-not (Test-Path -LiteralPath $consoleRegistry)) {
         return [pscustomobject]@{ Success = $true; Message = 'CM admin console not installed - skipping' }
     }
-    $uiInstallPath = $subKey.GetValue("UI Installation Directory")
-    $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-    $initParams = @{}
+    $uiInstallPath = (Get-ItemProperty -LiteralPath $consoleRegistry -ErrorAction Stop).'UI Installation Directory'
+    if (-not $uiInstallPath) { throw 'ConfigMgr console registration has no UI Installation Directory' }
+    $modulePath = Join-Path $uiInstallPath 'bin\ConfigurationManager.psd1'
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) { throw "ConfigMgr module is missing: $modulePath" }
 
     $userName = "vmbuildadmin"
     $userDomain = $env:USERDOMAIN
     $domainUserName = "$userDomain\$userName"
     $errs = @()
 
-    $i = 0
-    do {
-        $i++
-        # The entire provider interaction is wrapped in try/catch because the CM
-        # cmdlets here (New-PSDrive CMSite, Get-/New-CMAdministrativeUser) raise
-        # TERMINATING errors that -ErrorAction Continue does NOT suppress. The most
-        # common one, "No object corresponds to the specified parameters.", is thrown
-        # by New-CMAdministrativeUser while the SMS Provider is still warming up (the
-        # existence check on the first attempt can take minutes against a cold
-        # provider). Without this try/catch that terminating error escapes the whole
-        # do/until loop, so the fix body aborts on attempt 1 and the intended 5-attempt
-        # /15s-backoff retry NEVER runs -- and because this fix runs on the CAS, that
-        # single failure aborts the entire maintenance phase ("CAS failed. Stopping
-        # Phase."). Catching it lets the loop actually retry and give the provider time
-        # to settle.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    Write-FixLog "SiteCode=$SiteCode Target=$domainUserName AuthenticatedIdentity=$identity Module=$modulePath"
+    $exists = @()
+    for ($i = 1; $i -le $MaximumAttempts; $i++) {
+        $createdDrive = $false
+        $pushed = $false
         try {
+            try {
+                $providers = @(Get-CimInstance -Namespace 'root\SMS' -ClassName SMS_ProviderLocation `
+                    -OperationTimeoutSec 10 -ErrorAction Stop |
+                    Where-Object { $_.SiteCode -ieq $SiteCode -and $_.ProviderForLocalSite -and $_.Machine })
+                if ($providers.Count) { $ProviderMachineName = "$($providers[0].Machine)".Trim() }
+                Write-FixLog "Attempt $i/$MaximumAttempts provider discovery: $(@($providers | Select-Object -First 5 SiteCode, Machine, ProviderForLocalSite) | ConvertTo-Json -Compress)"
+            }
+            catch { Write-FixLog "Provider discovery failed; trying $ProviderMachineName`: $($_.Exception.Message)" -Level Warning }
             if ($null -eq (Get-Module ConfigurationManager)) {
-                Import-Module $modulePath -ErrorAction SilentlyContinue | Out-Null
+                Import-Module $modulePath -ErrorAction Stop | Out-Null
             }
-            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | Out-Null
-            $waits = 0
-            while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-                $waits++
-                if ($waits -gt 6) {
-                    $errs += "Could not create CMSite PSDrive '$SiteCode' against '$ProviderMachineName' after 60s"
-                    return [pscustomobject]@{ Success = $false; Message = 'CMSite PSDrive never came online'; Errors = $errs }
-                }
-                Start-Sleep -Seconds 10
-                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | Out-Null
+            $drive = Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue
+            if (-not $drive) {
+                $drive = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName -ErrorAction Stop
+                $createdDrive = $true
             }
-            Set-Location "$($SiteCode):\" @initParams | Out-Null
+            if ($drive.Root -ine $ProviderMachineName) { throw "CMSite drive '$SiteCode' points to '$($drive.Root)', not '$ProviderMachineName'" }
+            Push-Location "$($SiteCode):\" -ErrorAction Stop
+            $pushed = $true
 
-            $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" -ErrorAction SilentlyContinue |
-                      Where-Object { $_.LogonName -like "*$userName*" }
-            if ($exists) { break }
-
-            Write-FixLog "Attempt $i`: Adding $domainUserName as Full Administrator"
-            $newOut = New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-                -SecurityScopeName "All", "All Systems", "All Users and User Groups" `
-                -ErrorAction Stop 2>&1
-            if ($newOut) { Write-FixLog ($newOut | Out-String).Trim() }
+            $administrators = @(Get-CMAdministrativeUser -RoleName 'Full Administrator' -ErrorAction Stop)
+            $exists = @($administrators | Where-Object { $_.LogonName -ieq $domainUserName })
+            Write-FixLog "Attempt $i/${MaximumAttempts}: exact principal present=$([bool]$exists); observed administrators: $(@($administrators | Select-Object -First 10 -ExpandProperty LogonName) -join ', ')"
+            if (-not $exists) {
+                Write-FixLog "Attempt $i/${MaximumAttempts}: adding $domainUserName as Full Administrator"
+                $null = New-CMAdministrativeUser -Name $domainUserName -RoleName 'Full Administrator' `
+                    -SecurityScopeName 'All' -CollectionName 'All Systems', 'All Users and User Groups' -ErrorAction Stop
+                $exists = @(Get-CMAdministrativeUser -RoleName 'Full Administrator' -ErrorAction Stop |
+                    Where-Object { $_.LogonName -ieq $domainUserName })
+            }
+            if (-not $exists) { throw "SMS Provider did not return the exact principal '$domainUserName' after assignment" }
         }
         catch {
-            $msg = "New-CMAdministrativeUser attempt $i error (will retry): $($_.Exception.Message)"
+            $msg = "Full Administrator attempt $i/$MaximumAttempts failed: $($_.Exception.Message) [id=$($_.FullyQualifiedErrorId) hresult=$($_.Exception.HResult)]"
             Write-FixLog $msg -Level Warning
             $errs += $msg
         }
-
-        Start-Sleep -Seconds 15
-        try {
-            $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" -ErrorAction SilentlyContinue |
-                      Where-Object { $_.LogonName -like "*$userName*" }
+        finally {
+            if ($pushed) { Pop-Location }
+            if ($createdDrive) {
+                try { Remove-PSDrive -Name $SiteCode -Force -ErrorAction Stop }
+                catch { Write-FixLog "Could not remove the attempt-owned CMSite drive: $($_.Exception.Message)" -Level Warning }
+            }
         }
-        catch {
-            $exists = $null
+        if ($exists) { break }
+        if ($i -lt $MaximumAttempts) {
+            Write-FixLog "Provider/account readiness will be retried in $RetrySeconds seconds." -Level Warning
+            if ($RetrySeconds -gt 0) { Start-Sleep -Seconds $RetrySeconds }
         }
     }
-    until ($exists -or $i -gt 5)
 
+    $attemptCount = [math]::Min($i, $MaximumAttempts)
     if ($exists) {
-        [pscustomobject]@{ Success = $true; Message = "Full Administrator '$domainUserName' is present (verified after $i attempt(s))" }
+        [pscustomobject]@{
+            Success = $true
+            Message = "Full Administrator '$domainUserName' is present (verified after $attemptCount attempt(s))"
+            Attempts = $attemptCount
+            State = [pscustomobject]@{ SiteCode = $SiteCode; Provider = $ProviderMachineName; TargetAccount = $domainUserName; Identity = $identity }
+        }
     }
     else {
         # Final-failure diagnostics: capture everything needed to tell "SMS Provider
@@ -117,7 +140,7 @@ $Fix_CMFullAdmin = {
         catch { $diag += "DIAG CMSite PSDrive probe threw: $($_.Exception.Message)" }
         try {
             $current = @(Get-CMAdministrativeUser -ErrorAction SilentlyContinue |
-                Select-Object -ExpandProperty LogonName -ErrorAction SilentlyContinue)
+                Select-Object -First 10 -ExpandProperty LogonName -ErrorAction SilentlyContinue)
             if ($current.Count -gt 0) {
                 $diag += "DIAG SMS Provider answered; existing administrative users ($($current.Count)): $($current -join ', ')"
             }
@@ -127,16 +150,15 @@ $Fix_CMFullAdmin = {
         }
         catch { $diag += "DIAG Get-CMAdministrativeUser threw: $($_.Exception.Message)" }
         try {
-            $searcher = [ADSISearcher]"(&(objectCategory=person)(objectClass=user)(sAMAccountName=$userName))"
-            $adHit = $searcher.FindOne()
-            $diag += "DIAG AD resolves account '$userName': $([bool]$adHit)$(if ($adHit) { " ($($adHit.Properties['distinguishedname'][0]))" })"
+            $diag += Get-CmAdminDirectoryEvidence -AccountName $userName
         }
         catch { $diag += "DIAG AD lookup of '$userName' threw: $($_.Exception.Message)" }
         foreach ($d in $diag) { Write-FixLog $d -Level Warning }
 
         [pscustomobject]@{
             Success = $false
-            Message = "Failed to verify '$domainUserName' as Full Administrator after $i attempts"
+            Message = "Failed to verify '$domainUserName' as Full Administrator after $attemptCount attempts"
+            Attempts = $attemptCount
             Errors  = @($errs + $diag)
         }
     }
@@ -144,11 +166,12 @@ $Fix_CMFullAdmin = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-CMFullAdmin"
-    FixVersion        = "260630"
+    FixVersion        = "261016.0"
     NeededOnFreshDeploy = $false
     AppliesToExisting   = $true
     AppliesToRoles    = @("CASorStandalonePrimary")
     NotAppliesToRoles = @("OSDClient", "AADClient")
     DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
     ScriptBlock       = $Fix_CMFullAdmin
+    RunAsAccount      = $vmNote.adminName
 }

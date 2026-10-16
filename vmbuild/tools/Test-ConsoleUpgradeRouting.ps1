@@ -46,12 +46,13 @@ $validationText = Get-Content -LiteralPath $validationPath -Raw
 $phaseJobsText = Get-Content -LiteralPath $phaseJobsPath -Raw
 
 Assert-ConsoleUpgrade ($fixText -match 'NeededOnFreshDeploy\s*=\s*\$true' -and $fixText -match 'AppliesToExisting\s*=\s*\$true') 'console fix is reachable from Phase 10 and fresh-deploy maintenance'
-Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"261002\.1"') 'console fix version forces deployment of the hierarchy-release repair'
+Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"261016\.1"') 'console fix version deploys live-site targeting and retry hardening'
 Assert-ConsoleUpgrade ($fixText -match 'returned no result' -and $fixText -match "Properties\['Success'\]") 'maintenance wrapper requires an explicit result'
 Assert-ConsoleUpgrade ($fixText -match 'ToBase64String.+ReadAllBytes' -and
     $fixText -match 'WriteAllBytes\(\$script.+FromBase64String') 'maintenance carries the current console script into Phase 10-only reruns'
 Assert-ConsoleUpgrade ($upgradeText -match 'Get-ConsoleVersionState' -and $upgradeText -match 'ConsoleRelease\s*=') 'upgrader compares the installed console release'
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Get-ConsoleSetupFailureDetail')))
+. ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Get-ConsolePayloadState')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Invoke-ConsoleSetupProcess')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Uninstall-Console')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Install-Console')))
@@ -67,6 +68,15 @@ Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobje
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = 'tech-preview' }) -VM $symbolicVM) -eq '2603') 'tech-preview resolves through deployed media metadata'
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2603'; OfflineSCP = $true }) -VM $offlineVM) -eq '2509') 'OfflineSCP pins console expectation to deployed baseline media'
 Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2509'; OfflineSCP = $true }) -VM $numericVM) -eq '2509') 'OfflineSCP with no per-VM media metadata preserves a concrete baseline target'
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ UsePKI = $true }) -VM $numericVM `
+        -DeployConfig ([pscustomobject]@{ cmOptions = [pscustomobject]@{ Version = '2509' } })) -eq '2509') `
+    'partial per-VM options do not hide the global version'
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{}) -VM $symbolicVM) -eq '2603') `
+    'legacy metadata with no configured version can resolve the deployed media'
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{}) -VM $numericVM -LiveRelease '2603') -eq '2603') `
+    'the live site release does not require cmOptions.Version'
+Assert-ConsoleUpgrade ((Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = '2509' }) `
+        -VM $offlineVM -LiveRelease '2603') -eq '2603') 'external site upgrades override stale deployment targets for console maintenance'
 $childOfflineVM = [pscustomobject]@{ parentSiteCode = 'CAS' }
 $offlineHierarchy = [pscustomobject]@{
     virtualMachines = @(
@@ -164,11 +174,11 @@ Remove-Item Function:\Resolve-CmVersionAlias -ErrorAction SilentlyContinue
 Remove-Item Function:\Get-CMBaselineVersion -ErrorAction SilentlyContinue
 $unresolvedFailed = $false
 try { $null = Resolve-ExpectedConsoleRelease -CmOptions ([pscustomobject]@{ Version = 'tech-preview' }) -VM $numericVM }
-catch { $unresolvedFailed = $_.Exception.Message -match 'could not resolve symbolic' }
+catch { $unresolvedFailed = $_.Exception.Message -match 'no live payload release' }
 Assert-ConsoleUpgrade $unresolvedFailed 'unresolved symbolic console release fails explicitly'
 Assert-ConsoleUpgrade ($upgradeText -match 'RequiredExtensionSiteVersion' -and $upgradeText -match 'RequiredExtensionVersion') 'upgrader compares the site-required extension version'
 Assert-ConsoleUpgrade ($upgradeText -match 'expected release.+ReleaseMatches' -and $upgradeText -match 'ExtensionMatches') 'upgrade failure names release and extension comparisons independently'
-Assert-ConsoleUpgrade ($upgradeText -match 'MaximumAttempts = 2' -and $upgradeText -match 'for \(\$attempt = 1; \$attempt -le \$MaximumAttempts; \$attempt\+\+\)') 'upgrader makes at most two install attempts'
+Assert-ConsoleUpgrade ($upgradeText -match 'MaximumAttempts = 3' -and $upgradeText -match 'for \(\$attempt = 1; \$attempt -le \$MaximumAttempts; \$attempt\+\+\)') 'upgrader makes at most three install attempts'
 Assert-ConsoleUpgrade ($upgradeText -match "Tools\\ConsoleSetup" -and $upgradeText -notmatch "Join-Path \$CMInstallDir 'bin\\I386\\Consolesetup\.exe'") 'upgrader uses the site-maintained console payload instead of baseline media'
 Assert-ConsoleUpgrade ($upgradeText -match 'AdminConsole\.msi' -and $upgradeText -match 'ConfigMgr\.AC_Extension\.i386\.cab' -and $upgradeText -match 'ConfigMgr\.AC_Extension\.amd64\.cab') 'upgrader requires the complete console payload'
 Assert-ConsoleUpgrade (@([regex]::Matches($upgradeText, 'Start-Process -FilePath \$ConsoleUIExe')).Count -eq 1 -and $upgradeText -match '-PassThru -ErrorAction Stop') 'console setup captures the launched process object'
@@ -177,7 +187,7 @@ Assert-ConsoleUpgrade ($upgradeText -match 'LangPackDir=\$LangPackDir' -and $upg
 Assert-ConsoleUpgrade ($upgradeText -match 'C:\\ConfigMgrAdminUISetup\.log' -and $upgradeText -match 'C:\\ConfigMgrAdminUISetupVerbose\.log') 'console process failures include product setup-log evidence'
 Assert-ConsoleUpgrade ($upgradeText -match 'Stop-Process -Id \$ownedProcess\.Id' -and $upgradeText -match '\$preExistingIds') 'timed-out attempts stop only ConsoleSetup processes owned by that attempt'
 Assert-ConsoleUpgrade ($upgradeText -match 'Console upgrade did not converge' -and $upgradeText -match 'throw "Upgrade-Console: CM install directory' -and $upgradeText -match 'site-maintained console source.+is incomplete') 'missing prerequisites and retry exhaustion are terminating failures'
-Assert-ConsoleUpgrade ($validationText -match 'ConfigMgr admin console is release' -and $validationText -match 'ConfigMgr admin console extension is' -and $validationText -match '\$results\.Passed = \$false') 'Phase 11 fails stale console release and extension versions'
+Assert-ConsoleUpgrade ($validationText -match 'does not match live payload' -and $validationText -match 'preserved without downgrade' -and $validationText -match '\$results\.Passed = \$false') 'Phase 11 uses the same live-payload and no-downgrade policy'
 Assert-ConsoleUpgrade ($validationText -match 'OfflineSCP pins the effective ConfigMgr release to deployed baseline' -and
     $validationText -match 'Get-CMBaselineVersion -CMVersion \$configuredVersion') 'Phase 11 derives missing OfflineSCP metadata from the baseline catalog'
 Assert-ConsoleUpgrade ($validationText -match 'Child site inherits ConfigMgr release.+from parent site') 'Phase 11 reports inherited parent hierarchy release'
@@ -206,14 +216,25 @@ function Get-ItemProperty {
     param($Path, $ErrorAction)
     $script:ConsoleSetupState
 }
-function Get-WmiObject {
-    param($Namespace, $Query, $ErrorAction)
+function Get-CimInstance {
+    param($Namespace, $Query, $OperationTimeoutSec, $ErrorAction)
     [pscustomobject]@{ FileVersion = ' 5.0.9141.1002 ' }
 }
 $currentState = Get-ConsoleVersionState -SiteCode 'SPC' -ExpectedRelease '2509'
 Assert-ConsoleUpgrade ($currentState.Current -and $currentState.ReleaseMatches -and $currentState.ExtensionMatches) 'console state normalizes provider and registry version strings before comparison'
+$script:ConsoleSetupState.AdminConsoleVersion = '5.2603.1000.1000'
+$newerState = Get-ConsoleVersionState -SiteCode 'SPC' -ExpectedRelease '2509' -ExpectedConsoleVersion ([version]'5.2509.1036.1200')
+Assert-ConsoleUpgrade ($newerState.NewerThanSite -and -not $newerState.Current) 'a newer console is classified as preserved, not falsely reported as an exact match'
+$script:ConsoleSetupState.AdminConsoleVersion = '5.2509.1036.1000'
+$olderState = Get-ConsoleVersionState -SiteCode 'SPC' -ExpectedRelease '2509' -ExpectedConsoleVersion ([version]'5.2509.1036.1200')
+Assert-ConsoleUpgrade (-not $olderState.Current -and -not $olderState.NewerThanSite) 'an older revision in the same release still requires the live console update'
+$script:ConsoleSetupState.AdminConsoleVersion = '5.2509.1036.1200'
+$aheadState = Get-ConsoleVersionState -SiteCode 'SPC' -ExpectedRelease '2509' -ExpectedConsoleVersion ([version]'5.2509.1036.1200') `
+    -LiveSiteBuild 9141 -PayloadSiteBuild 9145
+Assert-ConsoleUpgrade ($aheadState.NewerThanSite -and -not $aheadState.Current -and -not $aheadState.SourceMatchesSite) `
+    'a console matching setup media newer than the live site is preserved, not declared an exact site match'
 Remove-Item Function:\Get-ItemProperty -ErrorAction SilentlyContinue
-Remove-Item Function:\Get-WmiObject -ErrorAction SilentlyContinue
+Remove-Item Function:\Get-CimInstance -ErrorAction SilentlyContinue
 
 $script:ProcessExitCodes = New-Object System.Collections.Generic.Queue[object]
 $script:ProcessCalls = New-Object System.Collections.Generic.List[object]
@@ -337,6 +358,37 @@ Assert-ConsoleUpgrade ($retryState.Current -and $script:ProcessCalls.Count -eq 3
 Assert-ConsoleUpgrade (@($script:ProcessCalls | Where-Object ArgumentList -eq '/uninstall /q').Count -eq 1) 'successful uninstall is not repeated after an install failure'
 Assert-ConsoleUpgrade (@($script:ProcessCalls | Where-Object ArgumentList -ne '/uninstall /q').Count -eq 2) 'failed installation is retried exactly once'
 Assert-ConsoleUpgrade (@($script:UpgradeSleeps | Where-Object { $_ -eq 7 }).Count -eq 1) 'process-failure retry uses the configured delay once'
+
+$script:ProcessExitCodes.Clear()
+foreach ($code in @(1603, 0, 0)) { $script:ProcessExitCodes.Enqueue($code) }
+$script:ProcessCalls.Clear()
+$script:WaitCalls.Clear()
+$script:ProcessInventories.Clear()
+for ($i = 0; $i -lt 6; $i++) { $script:ProcessInventories.Enqueue(@()) }
+$script:UpgradeSleeps = @()
+$retryState = Invoke-ConsoleUpgrade -ConsoleUIExe 'E:\ConfigMgr\Tools\ConsoleSetup\ConsoleSetup.exe' `
+    -LangPackDir 'E:\ConfigMgr\Tools\ConsoleSetup' -UIInstallDir 'E:\ConfigMgr\AdminConsole' `
+    -LocalSiteServer 'site.example.test' -SiteCode 'PS1' -ExpectedRelease '2503' -MaximumAttempts 2 -RetrySeconds 7
+Assert-ConsoleUpgrade ($retryState.Current -and $script:ProcessCalls.Count -eq 3) 'a transient uninstall failure is inside the bounded retry loop'
+Assert-ConsoleUpgrade (@($script:ProcessCalls | Where-Object ArgumentList -eq '/uninstall /q').Count -eq 2) 'only the failed uninstall is retried before installation'
+
+$script:ProcessExitCodes.Clear()
+foreach ($code in @(0, 1603, 1603, 1603)) { $script:ProcessExitCodes.Enqueue($code) }
+$script:ProcessCalls.Clear()
+$script:WaitCalls.Clear()
+$script:ProcessInventories.Clear()
+for ($i = 0; $i -lt 8; $i++) { $script:ProcessInventories.Enqueue(@()) }
+$script:UpgradeSleeps = @()
+$caught = $null
+try {
+    $null = Invoke-ConsoleUpgrade -ConsoleUIExe 'E:\ConfigMgr\Tools\ConsoleSetup\ConsoleSetup.exe' `
+        -LangPackDir 'E:\ConfigMgr\Tools\ConsoleSetup' -UIInstallDir 'E:\ConfigMgr\AdminConsole' `
+        -LocalSiteServer 'site.example.test' -SiteCode 'PS1' -ExpectedRelease '2503' -MaximumAttempts 3 -RetrySeconds 7
+}
+catch { $caught = $_ }
+Assert-ConsoleUpgrade ($caught -and $caught.Exception.Message -match 'after 3 attempts' -and $script:ProcessCalls.Count -eq 4) `
+    'permanent setup failure exhausts exactly three install attempts after one uninstall'
+Assert-ConsoleUpgrade (@($script:UpgradeSleeps | Where-Object { $_ -eq 7 }).Count -eq 2) 'retry exhaustion never sleeps after the final attempt'
 
 if ($failures -gt 0) { throw "$failures console-upgrade regression assertion(s) failed" }
 Write-Host 'PASS  console-upgrade routing and validation regression suite'

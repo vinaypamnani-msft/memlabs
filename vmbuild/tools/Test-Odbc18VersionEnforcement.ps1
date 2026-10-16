@@ -231,6 +231,7 @@ function Invoke-OdbcInstallerFixture {
             if ($null -ne $InstallerState) {
                 $InstallerState.Clear()
                 $InstallerState.Installed = $true
+                $InstallerState.State = if ($script:OdbcFixture.Mode -eq 'CurrentAdvertisedCacheMissing') { 1 } else { 5 }
                 $InstallerState.CoreState = $script:OdbcFixture.CoreState
                 $InstallerState.PackageName = 'original-driver.msi'
                 $InstallerState.RelatedProducts = @($script:OdbcFixture.LegacyProducts)
@@ -240,6 +241,11 @@ function Invoke-OdbcInstallerFixture {
         function Get-MsiProductVersion {
             param($Path, [hashtable]$InstallerState)
             Get-MsiVersion -Path $Path -InstallerState $InstallerState
+        }
+        function Get-FileHash {
+            param($LiteralPath, $Algorithm, $ErrorAction)
+            [void]$LiteralPath; [void]$Algorithm; [void]$ErrorAction
+            [pscustomobject]@{ Hash = ('A' * 64) }
         }
         function Get-MemLabsOdbcCatalogState {
             [pscustomobject]@{ Version = [version]'18.6.2.1'; Url = 'https://example.invalid/odbc.msi' }
@@ -313,6 +319,9 @@ function Invoke-OdbcInstallerFixture {
                 return [pscustomobject]@{ ExitCode = if ($script:OdbcFixture.Mode -in @('LegacyReboot', 'LegacySourceReboot')) { 3010 } else { 0 } }
             }
             $attempt = $script:OdbcFixture.Calls.Count
+            if ($script:OdbcFixture.Mode -eq 'CurrentAdvertisedCacheMissing' -and $line -notmatch '\bREINSTALLMODE=vomus\b') {
+                return [pscustomobject]@{ ExitCode = 1612 }
+            }
             if ($script:OdbcFixture.Mode -eq 'PermanentFailure' -or
                 ($script:OdbcFixture.Mode -eq 'InitialFailure' -and $attempt -eq 1)) {
                 return [pscustomobject]@{ ExitCode = 1603 }
@@ -350,7 +359,7 @@ function Invoke-OdbcInstallerFixture {
 foreach ($surface in @('Maintenance', 'DSC')) {
     $body = if ($surface -eq 'Maintenance') { $maintenanceBody } else { $dscBody }
     foreach ($mode in @(
-            'AbsentCore', 'Upgrade', 'Repair', 'RepairReboot', 'InitialFailure', 'PermanentFailure', 'NoOp',
+            'AbsentCore', 'Upgrade', 'Repair', 'RepairReboot', 'InitialFailure', 'PermanentFailure', 'NoOp', 'CurrentAdvertisedCacheMissing',
             'LegacyAdvertised', 'LegacyHealthy', 'LegacyNewer', 'LegacySameBuild', 'LegacyReboot', 'LegacyRecoveryFailure', 'LegacyRecoveryNoOp'
             'LegacyOriginalMissing', 'LegacyCacheMissing', 'LegacySourceReboot', 'LegacySourceMismatch', 'LegacyCacheNoOp'
         )) {

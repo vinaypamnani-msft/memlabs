@@ -1,10 +1,81 @@
 ﻿# Upgrade-Console.ps1
 param(
     [string]$ConfigFilePath,
-    [string]$LogPath
+    [string]$LogPath,
+    [switch]$CheckOnly
 )
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
+
+function Get-ConsolePayloadState {
+    param([Parameter(Mandatory)][string]$SiteInstallDirectory)
+
+    $directory = Join-Path $SiteInstallDirectory 'Tools\ConsoleSetup'
+    $requiredFiles = @('ConsoleSetup.exe', 'AdminConsole.msi', 'ConfigMgr.AC_Extension.i386.cab', 'ConfigMgr.AC_Extension.amd64.cab')
+    $missing = @($requiredFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $directory $_) -PathType Leaf) })
+    if ($missing.Count) {
+        throw "Upgrade-Console: site-maintained console source '$directory' is incomplete; missing: $($missing -join ', ')"
+    }
+    [string]$path = Join-Path $directory 'AdminConsole.msi'
+    $installer = $null; $database = $null
+    $versionText = ''
+    try {
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($path, 0))
+        foreach ($property in @('AdminConsoleVersion', 'ProductVersion')) {
+            $view = $null; $record = $null
+            try {
+                $query = "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$property'"
+                $view = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database, @($query))
+                $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+                $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+                if ($record) {
+                    $versionText = [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+                    if ($versionText) { break }
+                }
+            }
+            finally {
+                foreach ($item in @($record, $view)) { if ($item) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($item) } }
+            }
+        }
+    }
+    finally {
+        foreach ($item in @($database, $installer)) { if ($item) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($item) } }
+    }
+    [version]$version = $null
+    if (-not [version]::TryParse($versionText.Trim(), [ref]$version) -or $version.Minor -lt 1000 -or $version.Minor -gt 9999) {
+        throw "Upgrade-Console: source '$path' does not expose a valid console release version ('$versionText')"
+    }
+    $setupPath = Join-Path $directory 'ConsoleSetup.exe'
+    $setupVersionText = (Get-Item -LiteralPath $setupPath -ErrorAction Stop).VersionInfo.FileVersion
+    $siteSetup = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
+    [version]$siteVersion = $null
+    [version]$setupVersion = $null
+    $identification = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop
+    $siteCode = "$($identification.'Site Code')"
+    if (-not $siteCode) { throw 'Upgrade-Console: installed site identification has no Site Code' }
+    $liveSite = Get-CimInstance -Namespace "root\SMS\site_$siteCode" -ClassName SMS_Site `
+        -Filter "SiteCode='$siteCode'" -OperationTimeoutSec 15 -ErrorAction Stop | Select-Object -First 1
+    if (-not [version]::TryParse("$($liveSite.Version)".Trim(), [ref]$siteVersion)) {
+        throw "Upgrade-Console: the SMS Provider returned no valid live site version for '$siteCode'"
+    }
+    if (-not [version]::TryParse("$setupVersionText".Trim(), [ref]$setupVersion)) {
+        throw "Upgrade-Console: console setup exposes no valid site-build version ('$setupVersionText')"
+    }
+    [pscustomobject]@{
+        SourceDirectory = $directory
+        ConsoleUIExe = $setupPath
+        ConsoleVersion = $version
+        Release = "$($version.Minor)"
+        SiteVersion = "$siteVersion"
+        RegistrySiteVersion = "$($siteSetup.'Full Version')"
+        SetupVersion = "$setupVersionText"
+        LiveSiteBuild = $siteVersion.Build
+        PayloadSiteBuild = $setupVersion.Build
+        SourceMatchesSite = $siteVersion.Build -eq $setupVersion.Build
+        VersionSource = 'live-site-console-payload'
+    }
+}
 
 function Get-ConsoleSetupFailureDetail {
     $details = New-Object System.Collections.Generic.List[string]
@@ -21,7 +92,9 @@ function Get-ConsoleSetupFailureDetail {
             $details.Add("$setupLog unreadable: $($_.Exception.Message)")
         }
     }
-    return ($details -join '; ')
+    $text = $details -join '; '
+    if ($text.Length -gt 12000) { $text = $text.Substring(0, 12000) + ' [truncated]' }
+    return $text
 }
 
 function Invoke-ConsoleSetupProcess {
@@ -67,9 +140,10 @@ function Invoke-ConsoleSetupProcess {
     if ($null -eq $process.ExitCode) {
         throw "Console $Operation returned no process exit code from '$ConsoleUIExe'. $(Get-ConsoleSetupFailureDetail)"
     }
-    if ($process.ExitCode -notin @(0, 3010)) {
+    if ($process.ExitCode -notin @(0, 3010) -and -not ($Operation -eq 'uninstall' -and $process.ExitCode -eq 1605)) {
         throw "Console $Operation failed with exit $($process.ExitCode) from '$ConsoleUIExe'. $(Get-ConsoleSetupFailureDetail)"
     }
+    Write-DscStatus -NoStatus "Upgrade-Console: $Operation process $($process.Id) completed; exit=$($process.ExitCode) elapsed=$([math]::Round($stopwatch.Elapsed.TotalSeconds, 2))s rebootRequired=$($process.ExitCode -eq 3010)"
     return $process.ExitCode
 }
 
@@ -104,24 +178,47 @@ function Invoke-ConsoleUpgrade {
         [Parameter(Mandatory)][string]$LocalSiteServer,
         [Parameter(Mandatory)][string]$SiteCode,
         [Parameter(Mandatory)][string]$ExpectedRelease,
-        [ValidateRange(1, 5)][int]$MaximumAttempts = 2,
-        [ValidateRange(0, 600)][int]$RetrySeconds = 60
+        [ValidateRange(1, 5)][int]$MaximumAttempts = 3,
+        [ValidateRange(0, 600)][int]$RetrySeconds = 60,
+        [version]$ExpectedConsoleVersion,
+        [switch]$ConsoleMissing,
+        [int]$LiveSiteBuild,
+        [int]$PayloadSiteBuild
     )
 
     $lastState = $null
     $lastError = ''
-    Uninstall-Console -ConsoleUIExe $ConsoleUIExe
+    $uninstalled = $ConsoleMissing.IsPresent
     for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
         try {
+            Write-DscStatus -NoStatus "Upgrade-Console: attempt $attempt/$MaximumAttempts; expected console '$ExpectedConsoleVersion' release '$ExpectedRelease'; uninstall completed=$uninstalled"
+            if ($ExpectedConsoleVersion) {
+                $before = Get-ConsoleVersionState -SiteCode $SiteCode -ExpectedRelease $ExpectedRelease -ExpectedConsoleVersion $ExpectedConsoleVersion `
+                    -LiveSiteBuild $LiveSiteBuild -PayloadSiteBuild $PayloadSiteBuild
+                if ($before.Current -or $before.NewerThanSite) { return $before }
+                if (-not $before.SourceMatchesSite) { throw 'Console source and live site builds disagree; no console was uninstalled.' }
+                if ($before.ProviderError) { throw "SMS Provider unavailable before setup: $($before.ProviderError)" }
+                if (-not $before.AdminConsoleVersion) { $uninstalled = $true }
+            }
+            if (-not $uninstalled) {
+                Uninstall-Console -ConsoleUIExe $ConsoleUIExe
+                $uninstalled = $true
+            }
             Install-Console -ConsoleUIExe $ConsoleUIExe -LangPackDir $LangPackDir -UIInstallDir $UIInstallDir -LocalSiteServer $LocalSiteServer
             Write-DscStatus -NoStatus "Upgrade-Console: Checking if the console installed successfully"
-            $lastState = Get-ConsoleVersionState -SiteCode $SiteCode -ExpectedRelease $ExpectedRelease
-            if ($lastState.Current) { return $lastState }
+            for ($verification = 1; $verification -le 3; $verification++) {
+                $lastState = Get-ConsoleVersionState -SiteCode $SiteCode -ExpectedRelease $ExpectedRelease -ExpectedConsoleVersion $ExpectedConsoleVersion `
+                    -LiveSiteBuild $LiveSiteBuild -PayloadSiteBuild $PayloadSiteBuild
+                Write-DscStatus -NoStatus "Upgrade-Console: verification $verification/3: $($lastState | ConvertTo-Json -Compress)"
+                if ($lastState.Current -or $lastState.NewerThanSite) { return $lastState }
+                if ($verification -lt 3) { Start-Sleep -Seconds 10 }
+            }
             $lastError = "installed '$($lastState.AdminConsoleVersion)' release '$($lastState.ConsoleRelease)' expected release '$($lastState.ExpectedRelease)' (match=$($lastState.ReleaseMatches)); extension '$($lastState.RequiredExtensionVersion)' expected '$($lastState.RequiredExtensionSiteVersion)' (match=$($lastState.ExtensionMatches))"
         }
         catch {
             $lastError = $_.Exception.Message
         }
+        Write-DscStatus -NoStatus "Upgrade-Console: attempt $attempt/$MaximumAttempts failed: $lastError. $(Get-ConsoleSetupFailureDetail)"
 
         if ($attempt -lt $MaximumAttempts) {
             Write-DscStatus "Upgrade-Console: attempt $attempt/$MaximumAttempts failed: $lastError. Retrying in $RetrySeconds seconds."
@@ -135,18 +232,24 @@ function Invoke-ConsoleUpgrade {
 function Get-ConsoleVersionState {
     param(
         [string]$SiteCode,
-        [string]$ExpectedRelease
+        [string]$ExpectedRelease,
+        [version]$ExpectedConsoleVersion,
+        [int]$LiveSiteBuild,
+        [int]$PayloadSiteBuild
     )
 
     $setup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup' -ErrorAction SilentlyContinue
     $adminConsoleVersion = ([string]$setup.AdminConsoleVersion).Trim()
     $requiredExtensionVersion = ([string]$setup.RequiredExtensionVersion).Trim()
-    $consoleSetupInfo = Get-WmiObject -Namespace "root\sms\Site_$SiteCode" -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' -ErrorAction Stop |
-        Select-Object -First 1
-    $requiredExtensionSiteVersion = ([string]$consoleSetupInfo.FileVersion).Trim()
-    if (-not $requiredExtensionSiteVersion) {
-        throw "SMS_ConsoleSetupInfo returned no required extension version for site $SiteCode"
+    $requiredExtensionSiteVersion = ''
+    $providerError = ''
+    try {
+        $consoleSetupInfo = Get-CimInstance -Namespace "root\sms\Site_$SiteCode" -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' -OperationTimeoutSec 15 -ErrorAction Stop |
+            Select-Object -First 1
+        $requiredExtensionSiteVersion = ([string]$consoleSetupInfo.FileVersion).Trim()
+        if (-not $requiredExtensionSiteVersion) { throw "SMS_ConsoleSetupInfo returned no required extension version for site $SiteCode" }
     }
+    catch { $providerError = $_.Exception.Message }
     $expectedReleaseNormalized = ([string]$ExpectedRelease).Trim()
 
     $consoleRelease = ''
@@ -157,6 +260,16 @@ function Get-ConsoleVersionState {
 
     $releaseMatches = $consoleRelease -eq $expectedReleaseNormalized
     $extensionMatches = $requiredExtensionVersion -eq $requiredExtensionSiteVersion
+    $newerThanSite = if ($ExpectedConsoleVersion -and $parsedConsoleVersion) {
+        $parsedConsoleVersion -gt $ExpectedConsoleVersion -or
+            ($LiveSiteBuild -gt 0 -and $PayloadSiteBuild -gt $LiveSiteBuild -and $parsedConsoleVersion -ge $ExpectedConsoleVersion)
+    } else { $false }
+    $versionMatches = if ($ExpectedConsoleVersion) { $parsedConsoleVersion -eq $ExpectedConsoleVersion } else { $releaseMatches }
+    $sourceMatchesSite = $LiveSiteBuild -le 0 -or $PayloadSiteBuild -le 0 -or $LiveSiteBuild -eq $PayloadSiteBuild
+    $preservationReason = if ($newerThanSite) {
+        if ($parsedConsoleVersion -gt $ExpectedConsoleVersion) { 'installed-console-newer-than-available-payload' }
+        else { 'installed-console-matches-payload-ahead-of-live-site' }
+    } else { '' }
     [pscustomobject]@{
         AdminConsoleVersion          = $adminConsoleVersion
         ConsoleRelease               = $consoleRelease
@@ -165,7 +278,14 @@ function Get-ConsoleVersionState {
         RequiredExtensionSiteVersion = $requiredExtensionSiteVersion
         ReleaseMatches               = $releaseMatches
         ExtensionMatches             = $extensionMatches
-        Current                      = $releaseMatches -and $extensionMatches
+        ExpectedConsoleVersion       = "$ExpectedConsoleVersion"
+        NewerThanSite                 = $newerThanSite
+        PreservationReason           = $preservationReason
+        ProviderError                = $providerError
+        LiveSiteBuild                = $LiveSiteBuild
+        PayloadSiteBuild             = $PayloadSiteBuild
+        SourceMatchesSite            = $sourceMatchesSite
+        Current                      = $versionMatches -and $extensionMatches -and -not $providerError -and $sourceMatchesSite
     }
 }
 
@@ -173,9 +293,14 @@ function Resolve-ExpectedConsoleRelease {
     param(
         [object]$CmOptions,
         [object]$VM,
-        [object]$DeployConfig
+        [object]$DeployConfig,
+        [string]$LiveRelease
     )
 
+    if ($LiveRelease) {
+        if ($LiveRelease -notmatch '^\d{4}$') { throw "Upgrade-Console: invalid live console release '$LiveRelease'" }
+        return $LiveRelease
+    }
     $releaseOptions = $CmOptions
     $releaseVm = $VM
     if ($VM.parentSiteCode) {
@@ -193,7 +318,7 @@ function Resolve-ExpectedConsoleRelease {
     }
 
     $configuredRelease = "$($releaseOptions.Version)".Trim()
-    if (-not $configuredRelease) { throw 'Upgrade-Console: cmOptions.Version is missing from deployConfig' }
+    if (-not $configuredRelease) { $configuredRelease = "$($DeployConfig.cmOptions.Version)".Trim() }
 
     $deployedRelease = "$($releaseVm.thisParams.cmDownloadVersion.baselineVersion)".Trim()
     if ([bool]$releaseOptions.OfflineSCP -and $deployedRelease -and
@@ -201,7 +326,7 @@ function Resolve-ExpectedConsoleRelease {
         return $deployedRelease
     }
 
-    if ($configuredRelease -notin @('current-branch', 'tech-preview')) { return $configuredRelease }
+    if ($configuredRelease -and $configuredRelease -notin @('current-branch', 'tech-preview')) { return $configuredRelease }
 
     $deployedVersions = @($releaseVm.thisParams.cmDownloadVersion.versions |
             ForEach-Object { "$_".Trim() } |
@@ -209,7 +334,7 @@ function Resolve-ExpectedConsoleRelease {
     if ($deployedVersions.Count -gt 0) { return $deployedVersions[-1] }
 
     if (-not $deployedRelease -or $deployedRelease -in @('current-branch', 'tech-preview')) {
-        throw "Upgrade-Console: could not resolve symbolic cmOptions.Version '$configuredRelease' to the deployed media release"
+        throw "Upgrade-Console: no live payload release, configured cmOptions.Version, or deployed media release could resolve '$configuredRelease'"
     }
     return $deployedRelease
 }
@@ -220,19 +345,17 @@ if ( -not $ConfigFilePath) {
 }
 
 # Read config json
-$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
-$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
-$sitecode = $ThisVM.SiteCode
+$deployConfig = $null
+try { $deployConfig = Get-Content -LiteralPath $ConfigFilePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+catch { Write-DscStatus -NoStatus "Upgrade-Console: deployment metadata unavailable; using the live site's console source. $($_.Exception.Message)" }
+$machineName = if ($deployConfig.Parameters.ThisMachineName) { $deployConfig.Parameters.ThisMachineName } else { $env:COMPUTERNAME }
+$matches = @($deployConfig.virtualMachines | Where-Object { $_.vmName -ieq $machineName })
+if ($matches.Count -gt 1) { throw "Upgrade-Console: deployment metadata has multiple entries for '$machineName'" }
+$ThisVM = $matches | Select-Object -First 1
+$identification = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop
+$sitecode = if ($identification.'Site Code') { $identification.'Site Code' } else { $ThisVM.SiteCode }
 $cmOptions = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
-if (-not $sitecode) { throw 'Upgrade-Console: this machine has no SiteCode in deployConfig' }
-$expectedRelease = Resolve-ExpectedConsoleRelease -CmOptions $cmOptions -VM $ThisVM -DeployConfig $deployConfig
-
-$state = Get-ConsoleVersionState -SiteCode $sitecode -ExpectedRelease $expectedRelease
-if ($state.Current) {
-    Write-DscStatus "Upgrade-Console: Console is already current ($($state.AdminConsoleVersion)); extension $($state.RequiredExtensionVersion)"
-    return [pscustomobject]@{ Success = $true; Message = "Console is current at $($state.AdminConsoleVersion)" }
-}
-Write-DscStatus "Upgrade-Console: Upgrading console release '$($state.ConsoleRelease)' to '$expectedRelease'; extension '$($state.RequiredExtensionVersion)' to '$($state.RequiredExtensionSiteVersion)'"
+if (-not $sitecode) { throw 'Upgrade-Console: this machine has no live or configured SiteCode' }
 
 $CMInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
 if (-not $CMInstallDir) {
@@ -243,6 +366,40 @@ Write-DscStatus -NoStatus "Upgrade-Console: CMInstallDir: $CMInstallDir"
 if (-not (Test-Path $CMInstallDir)) {
     throw "Upgrade-Console: CM install directory '$CMInstallDir' does not exist"
 }
+$payload = $null
+for ($sourceAttempt = 1; $sourceAttempt -le 3; $sourceAttempt++) {
+    try { $payload = Get-ConsolePayloadState -SiteInstallDirectory $CMInstallDir; break }
+    catch {
+        Write-DscStatus -NoStatus "Upgrade-Console: live console source probe $sourceAttempt/3 failed: $($_.Exception.Message)"
+        if ($sourceAttempt -ge 3) { throw }
+        Start-Sleep -Seconds 15
+    }
+}
+$expectedRelease = Resolve-ExpectedConsoleRelease -CmOptions $cmOptions -VM $ThisVM -DeployConfig $deployConfig -LiveRelease $payload.Release
+Write-DscStatus -NoStatus "Upgrade-Console: authoritative target: $($payload | ConvertTo-Json -Compress); configured version='$($cmOptions.Version)'"
+$state = $null
+for ($probeAttempt = 1; $probeAttempt -le 3; $probeAttempt++) {
+    $state = Get-ConsoleVersionState -SiteCode $sitecode -ExpectedRelease $expectedRelease -ExpectedConsoleVersion $payload.ConsoleVersion `
+        -LiveSiteBuild $payload.LiveSiteBuild -PayloadSiteBuild $payload.PayloadSiteBuild
+    Write-DscStatus -NoStatus "Upgrade-Console: readiness probe $probeAttempt/3: $($state | ConvertTo-Json -Compress)"
+    if (-not $state.ProviderError -or $state.NewerThanSite) { break }
+    if ($probeAttempt -lt 3) { Start-Sleep -Seconds 10 }
+}
+if ($state.Current -or $state.NewerThanSite) {
+    $message = if ($state.NewerThanSite) {
+        "Console $($state.AdminConsoleVersion) preserved without downgrade: $($state.PreservationReason) (live site build $($payload.LiveSiteBuild), payload $($payload.ConsoleVersion)/build $($payload.PayloadSiteBuild)); exact compatibility not asserted."
+    } else { "Console is current at $($state.AdminConsoleVersion); verified against the live site payload." }
+    Write-DscStatus -NoStatus "Upgrade-Console: $message"
+    return [pscustomobject]@{ Success = $true; Message = $message; PreservedNewer = [bool]$state.NewerThanSite; State = $state }
+}
+if ($CheckOnly) {
+    return [pscustomobject]@{ Success = $false; Message = 'Console does not match the live site payload'; State = $state }
+}
+if (-not $state.SourceMatchesSite) {
+    throw "Upgrade-Console: live site build $($payload.LiveSiteBuild) and console payload build $($payload.PayloadSiteBuild) disagree; no console was uninstalled."
+}
+if ($state.ProviderError) { throw "Upgrade-Console: SMS Provider readiness failed; no console was uninstalled. $($state.ProviderError)" }
+Write-DscStatus -NoStatus "Upgrade-Console: installed '$($state.AdminConsoleVersion)' will be upgraded to live payload '$($payload.ConsoleVersion)'"
 
 $ConsoleSetupDir = Join-Path $CMInstallDir 'Tools\ConsoleSetup'
 $ConsoleUIExe = Join-Path $ConsoleSetupDir 'ConsoleSetup.exe'
@@ -254,7 +411,7 @@ if (-not $UIInstallDir) {
 
 Write-DscStatus -NoStatus "Upgrade-Console: UIInstallDir: $UIInstallDir"
 if (-not (Test-Path $UIInstallDir)) {
-    throw "Upgrade-Console: UI install directory '$UIInstallDir' does not exist"
+    Write-DscStatus -NoStatus "Upgrade-Console: UI install directory '$UIInstallDir' is absent; setup will restore it."
 }   
 
 Write-DscStatus -NoStatus "Upgrade-Console: ConsoleUIExe: $ConsoleUIExe"
@@ -271,7 +428,14 @@ if (-not $localSiteServer) {
 
 
 $state = Invoke-ConsoleUpgrade -ConsoleUIExe $ConsoleUIExe -LangPackDir $LangPackDir -UIInstallDir $UIInstallDir `
-    -LocalSiteServer $localsiteserver -SiteCode $sitecode -ExpectedRelease $expectedRelease
+    -LocalSiteServer $localsiteserver -SiteCode $sitecode -ExpectedRelease $expectedRelease `
+    -ExpectedConsoleVersion $payload.ConsoleVersion -ConsoleMissing:([string]::IsNullOrWhiteSpace($state.AdminConsoleVersion)) `
+    -LiveSiteBuild $payload.LiveSiteBuild -PayloadSiteBuild $payload.PayloadSiteBuild
 
+if ($state.NewerThanSite) {
+    $message = "Console $($state.AdminConsoleVersion) preserved without downgrade: $($state.PreservationReason) (live site build $($payload.LiveSiteBuild), payload $($payload.ConsoleVersion)/build $($payload.PayloadSiteBuild)); exact compatibility not asserted."
+    Write-DscStatus -NoStatus "Upgrade-Console: $message"
+    return [pscustomobject]@{ Success = $true; Message = $message; PreservedNewer = $true; State = $state }
+}
 Write-DscStatus "Console installed successfully Console: $($state.AdminConsoleVersion) Extensions: $($state.RequiredExtensionVersion)"
-[pscustomobject]@{ Success = $true; Message = "Console upgraded to $($state.AdminConsoleVersion)" }
+[pscustomobject]@{ Success = $true; Message = "Console upgraded to $($state.AdminConsoleVersion) from the live site payload"; State = $state }

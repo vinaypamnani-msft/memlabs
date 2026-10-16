@@ -157,6 +157,52 @@ separate verbose MSI logs.
 
 Validate with `vmbuild\tools\Test-Odbc18VersionEnforcement.ps1` in Windows PowerShell.
 
+### Maintenance retries and evidence
+
+ODBC, console upgrade, and ConfigMgr Full Administrator fixes retain the existing
+two host execution attempts, but collect evidence before retrying and wait 60
+seconds between attempts. Remote execution is bounded to 30 minutes for ODBC,
+60 minutes for console setup, and 10 minutes for administrator/provider work.
+Batches containing these fixes use the combined execution budget; unrelated
+fixes keep their existing retry policy. No recovery path automatically reboots a VM.
+
+Every fix execution retains its transcript and structured result under
+`C:\staging\Fix\history\<FixName>`, with a unique attempt ID. Explicit failed
+results cannot become successful because another command leaked pipeline output.
+These three fixes also save timestamped `*.diagnostics.log` JSON files alongside
+the host VMBuild logs. Collection has a 60-second remote-command budget and a
+512 KB transfer limit. It captures identity/elevation, active and on-disk source
+versions, fix hashes, allowlisted deployment version metadata, both ODBC registry
+views and DLL state, MSI product/cache identities, services/processes, ten recent
+installer events, and bounded tails of up to ten relevant logs (60 lines each).
+Collection failures and limits are explicit; tokens, passwords, SAS signatures,
+and URL credentials are redacted.
+
+Console maintenance takes its version from the **installed site's maintained
+console payload**, not stale or missing `cmOptions.Version`. It verifies the
+payload's console version and the site's required extension version. An external
+site upgrade therefore does not trigger a downgrade to the old deployment target.
+A console newer than the live payload is preserved with a warning; exact
+compatibility is not claimed. Phase 11 uses the same live-target/no-downgrade
+policy. `Upgrade-Console.ps1 -CheckOnly` performs the read-only check.
+
+Console setup retries uninstall/install failures up to three times, does not
+repeat a successful uninstall, and polls verification before reinstalling.
+Incomplete or mismatched site/source builds stop before uninstall. Missing UI
+directories can be restored instead of blocking recovery.
+
+Full Administrator maintenance uses the configured setup administrator, checks
+the exact domain-qualified `vmbuildadmin` principal, separates collection names
+from security scopes, and retries provider readiness three times with 60-second
+backoff. Attempt-owned PSDrives and directory-search resources are released.
+ODBC diagnostics record attempted commands, exit codes, durations, payload hashes,
+and expected/actual recovery identities. Existing advertised target products also
+request cache restoration, not only older-product upgrades.
+
+Validate with `vmbuild\tools\Test-MaintenanceFixRobustness.ps1`,
+`vmbuild\tools\Test-ConsoleUpgradeRouting.ps1`, and
+`vmbuild\tools\Test-Odbc18VersionEnforcement.ps1`.
+
 ## ConfigMgr SQL failure diagnostics
 
 Phase 8 SQL evidence collection also covers login/database-open errors 4060 and

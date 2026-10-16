@@ -12617,6 +12617,24 @@ function Test-CMSiteWideFunctionality {
             Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: OfflineSCP is enabled but deployed baseline metadata is missing or symbolic ('$($releaseResolution.BaselineVersion)'); falling back to configured release $effectiveCmVersion for validation." -Warning
         }
     }
+    $consoleHelpersPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'DSC\phases\Upgrade-Console.ps1'
+    $consoleHelperSource = ''
+    try {
+        $parseErrors = $null
+        $consoleAst = [Management.Automation.Language.Parser]::ParseFile($consoleHelpersPath, [ref]$null, [ref]$parseErrors)
+        if ($parseErrors.Count) { throw "Console helper source does not parse: $($parseErrors -join '; ')" }
+        foreach ($name in @('Get-ConsolePayloadState', 'Get-ConsoleVersionState')) {
+            $definitions = @($consoleAst.FindAll({
+                        param($node)
+                        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+                    }, $true))
+            if ($definitions.Count -ne 1) { throw "Expected one $name definition in $consoleHelpersPath" }
+            $consoleHelperSource += $definitions[0].Extent.Text + "`n"
+        }
+    }
+    catch {
+        Write-Log "[Phase $Phase] $VMName`: Live-console validation helpers unavailable: $($_.Exception.Message)" -Warning
+    }
     $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
 
     # OfflineSUP deployments deliberately skip subscribing any products /
@@ -12740,7 +12758,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner)
+        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner, $consoleHelperSourceInner)
 
         function Get-MemLabsValidationProjectedCimRows {
             param(
@@ -13103,39 +13121,24 @@ function Test-CMSiteWideFunctionality {
             }
         }
 
-        # 3b. The local admin console must match the effective expected release and the
-        # extension version published by this site. Site upgrade success does
-        # not update an already-installed console by itself.
-        if ($vmRole -in @('Primary', 'CAS') -and $cmVersionInner) {
+        # Console maintenance follows the live site, including external upgrades.
+        if ($vmRole -in @('Primary', 'CAS')) {
             try {
-                $consoleSetup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup' -ErrorAction Stop
-                $adminConsoleVersion = [string]$consoleSetup.AdminConsoleVersion
-                $requiredExtensionVersion = [string]$consoleSetup.RequiredExtensionVersion
-                $requiredExtensionSiteVersion = [string](Get-WmiObject -Namespace $ns -Class SMS_ConsoleSetupInfo -Filter "FileName='ConfigMgr.AC_Extension.i386.cab'" -ErrorAction Stop | Select-Object -First 1).FileVersion
-                $parsedConsoleVersion = $null
-                $consoleRelease = ''
-                if ($adminConsoleVersion -and [version]::TryParse($adminConsoleVersion, [ref]$parsedConsoleVersion)) {
-                    $consoleRelease = "$($parsedConsoleVersion.Minor)"
+                if (-not $consoleHelperSourceInner) { throw 'The live-console validation helpers were not supplied by the host.' }
+                . ([scriptblock]::Create($consoleHelperSourceInner))
+                $siteDirectory = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop).'Installation Directory'
+                $payload = Get-ConsolePayloadState -SiteInstallDirectory $siteDirectory
+                $consoleState = Get-ConsoleVersionState -SiteCode $sc -ExpectedRelease $payload.Release -ExpectedConsoleVersion $payload.ConsoleVersion `
+                    -LiveSiteBuild $payload.LiveSiteBuild -PayloadSiteBuild $payload.PayloadSiteBuild
+                if ($consoleState.NewerThanSite) {
+                    $results.Details.Add("WARN: ConfigMgr admin console $($consoleState.AdminConsoleVersion) preserved without downgrade: $($consoleState.PreservationReason) (live site build $($payload.LiveSiteBuild), payload $($payload.ConsoleVersion)/build $($payload.PayloadSiteBuild)). Exact compatibility was not asserted.")
                 }
-
-                if (-not $adminConsoleVersion -or -not $consoleRelease) {
-                    $results.Passed = $false
-                    $results.Details.Add('FAIL: ConfigMgr admin console version is missing or invalid in HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup')
-                }
-                elseif ($consoleRelease -ne "$cmVersionInner") {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: ConfigMgr admin console is release $consoleRelease ($adminConsoleVersion), but the effective expected release is $cmVersionInner. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
-                }
-                elseif (-not $requiredExtensionSiteVersion) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: SMS_ConsoleSetupInfo returned no required console extension version for site $sc; console currency was not verified")
-                }
-                elseif ($requiredExtensionVersion -ne $requiredExtensionSiteVersion) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: ConfigMgr admin console extension is $requiredExtensionVersion, but site $sc requires $requiredExtensionSiteVersion. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
+                elseif ($consoleState.Current) {
+                    $results.Details.Add("OK: ConfigMgr admin console $($consoleState.AdminConsoleVersion) and extension $($consoleState.RequiredExtensionVersion) match live site $sc payload; deployment configuration target '$cmVersionInner' is not the console authority.")
                 }
                 else {
-                    $results.Details.Add("OK: ConfigMgr admin console $adminConsoleVersion is release $consoleRelease and extension $requiredExtensionVersion matches site $sc")
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: ConfigMgr admin console $($consoleState.AdminConsoleVersion) does not match live payload $($payload.ConsoleVersion); extension $($consoleState.RequiredExtensionVersion) requires $($consoleState.RequiredExtensionSiteVersion); provider error '$($consoleState.ProviderError)'. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
                 }
             }
             catch {
@@ -15071,7 +15074,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     # braced form -- $function:Invoke-TftpReadProbe is a parse error.
     $tftpProbeText = "function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }"
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600 -PollProgress
 
