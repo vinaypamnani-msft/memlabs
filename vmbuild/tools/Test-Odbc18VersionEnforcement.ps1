@@ -210,6 +210,17 @@ function Invoke-OdbcInstallerFixture {
             Calls = [System.Collections.Generic.List[object]]::new()
             Copies = [System.Collections.Generic.List[string]]::new()
             Removals = [System.Collections.Generic.List[string]]::new()
+            LegacyProducts = @(
+                if ($Mode -like 'Legacy*') {
+                    [pscustomobject]@{
+                        ProductCode = '{11111111-1111-1111-1111-111111111111}'
+                        Version = if ($Mode -eq 'LegacyNewer') { [version]'18.7.1' }
+                        elseif ($Mode -eq 'LegacySameBuild') { [version]'18.6.2' }
+                        else { [version]'18.1.2' }
+                        State = if ($Mode -eq 'LegacyHealthy') { 5 } else { 1 }
+                    }
+                }
+            )
         }
         function Get-InstalledOdbc18Version { return $script:OdbcFixture.Version }
         function Get-MemLabsInstalledOdbc18Version { return $script:OdbcFixture.Version }
@@ -221,6 +232,7 @@ function Invoke-OdbcInstallerFixture {
                 $InstallerState.Installed = $true
                 $InstallerState.CoreState = $script:OdbcFixture.CoreState
                 $InstallerState.PackageName = 'original-driver.msi'
+                $InstallerState.RelatedProducts = @($script:OdbcFixture.LegacyProducts)
             }
             return '18.6.2.1'
         }
@@ -272,6 +284,15 @@ function Invoke-OdbcInstallerFixture {
             [void]$Wait; [void]$PassThru; [void]$NoNewWindow; [void]$ErrorAction
             $line = @($ArgumentList) -join ' '
             $script:OdbcFixture.Calls.Add([pscustomobject]@{ FilePath = $FilePath; Arguments = $line })
+            if ($line -match '/i\s+"?\{11111111-1111-1111-1111-111111111111\}') {
+                if ($script:OdbcFixture.Mode -eq 'LegacyRecoveryFailure') {
+                    return [pscustomobject]@{ ExitCode = 1603 }
+                }
+                if ($script:OdbcFixture.Mode -ne 'LegacyRecoveryNoOp') {
+                    $script:OdbcFixture.LegacyProducts[0].State = 5
+                }
+                return [pscustomobject]@{ ExitCode = if ($script:OdbcFixture.Mode -eq 'LegacyReboot') { 3010 } else { 0 } }
+            }
             $attempt = $script:OdbcFixture.Calls.Count
             if ($script:OdbcFixture.Mode -eq 'PermanentFailure' -or
                 ($script:OdbcFixture.Mode -eq 'InitialFailure' -and $attempt -eq 1)) {
@@ -309,9 +330,12 @@ function Invoke-OdbcInstallerFixture {
 
 foreach ($surface in @('Maintenance', 'DSC')) {
     $body = if ($surface -eq 'Maintenance') { $maintenanceBody } else { $dscBody }
-    foreach ($mode in @('AbsentCore', 'Upgrade', 'Repair', 'RepairReboot', 'InitialFailure', 'PermanentFailure', 'NoOp')) {
+    foreach ($mode in @(
+            'AbsentCore', 'Upgrade', 'Repair', 'RepairReboot', 'InitialFailure', 'PermanentFailure', 'NoOp',
+            'LegacyAdvertised', 'LegacyHealthy', 'LegacyNewer', 'LegacySameBuild', 'LegacyReboot', 'LegacyRecoveryFailure', 'LegacyRecoveryNoOp'
+        )) {
         $probe = Invoke-OdbcInstallerFixture -Body $body -Mode $mode -Dsc:($surface -eq 'DSC')
-        $expectedFailure = $mode -in @('PermanentFailure', 'NoOp')
+        $expectedFailure = $mode -in @('PermanentFailure', 'NoOp', 'LegacyRecoveryFailure', 'LegacyRecoveryNoOp')
         if ([bool]$probe.Failure -ne $expectedFailure -or
             (-not $expectedFailure -and $probe.Version -ne [version]'18.6.2.1')) {
             throw "$surface $mode did not converge or fail as expected: $($probe.Failure)"
@@ -326,8 +350,26 @@ foreach ($surface in @('Maintenance', 'DSC')) {
         foreach ($call in $probe.Calls) {
             if ($call.Arguments -notmatch '\bADDLOCAL=ALL\b' -or
                 $call.Arguments -notmatch '\bIACCEPTMSODBCSQLLICENSETERMS=YES\b' -or
-                $call.Arguments -notmatch 'original-driver\.msi') {
+                ($call.Arguments -notmatch 'original-driver\.msi' -and
+                    $call.Arguments -notmatch '/i\s+"?\{11111111-1111-1111-1111-111111111111\}')) {
                 throw "$surface $mode lost feature selection, license acceptance, or the registered source filename."
+            }
+            $legacyCalls = @($probe.Calls | Where-Object Arguments -match '\{11111111-1111-1111-1111-111111111111\}')
+            if ($mode -in @('LegacyAdvertised', 'LegacyReboot')) {
+                if ($probe.Calls.Count -ne 2 -or $legacyCalls.Count -ne 1 -or
+                    $probe.Calls[0] -ne $legacyCalls[0]) {
+                    throw "$surface $mode did not restore legacy registration before starting the new MSI."
+                }
+            }
+            if ($mode -in @('LegacyHealthy', 'LegacyNewer', 'LegacySameBuild') -and $legacyCalls.Count) {
+                throw "$surface $mode must not repair a healthy, same-build, or newer related product."
+            }
+            if ($mode -in @('LegacyRecoveryFailure', 'LegacyRecoveryNoOp') -and
+                ($probe.Calls.Count -ne 1 -or $legacyCalls.Count -ne 1 -or $probe.Failure -notmatch 'upgrade was not started')) {
+                throw "$surface $mode started an upgrade after unsuccessful legacy registration recovery."
+            }
+            if (@($probe.Calls | Where-Object Arguments -match '(?i)(?:^|\s)/(?:x|uninstall)\b').Count) {
+                throw "$surface $mode explicitly uninstalled a driver."
             }
         }
         if ($mode -in @('AbsentCore', 'InitialFailure') -and
@@ -343,7 +385,7 @@ foreach ($surface in @('Maintenance', 'DSC')) {
                 throw "$surface $mode overwrote the initial MSI log with its repair log."
             }
         }
-        if ($surface -eq 'Maintenance' -and $mode -eq 'RepairReboot' -and
+        if ($surface -eq 'Maintenance' -and $mode -in @('RepairReboot', 'LegacyReboot') -and
             ($probe.Result.Errors -join ' ') -notmatch 'reboot') {
             throw 'Maintenance did not retain the repair MSI reboot requirement.'
         }
@@ -589,4 +631,4 @@ elseif (Test-Path -LiteralPath $cachedMsi -PathType Leaf) {
     Write-Host 'INFO -- cached ODBC MSI uses an older source URL; the download-cache resolver will refresh it.'
 }
 
-Write-Host 'PASS -- ODBC 18 feature selection, source identity, bounded recovery, and catalog versions are enforced by DSC plus maintenance.'
+Write-Host 'PASS -- ODBC 18 legacy registration, feature selection, source identity, bounded recovery, and catalog versions are enforced by DSC plus maintenance.'

@@ -112,6 +112,9 @@ $Fix_ODBC18 = {
         $record = $null
         $codeView = $null
         $codeRecord = $null
+        $upgradeView = $null
+        $upgradeRecord = $null
+        $relatedCodes = $null
         try {
             $installer = New-Object -ComObject WindowsInstaller.Installer
             $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
@@ -127,11 +130,14 @@ $Fix_ODBC18 = {
                 $codeRecord = $codeView.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $codeView, $null)
                 if (-not $codeRecord) { throw 'MSI Property table has no ProductCode row' }
                 $productCode = [string]$codeRecord.GetType().InvokeMember('StringData', 'GetProperty', $null, $codeRecord, @(1))
-                $InstallerState.Installed = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($productCode)) -eq 5
+                $productState = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($productCode))
+                $InstallerState.Installed = $productState -eq 5
                 $InstallerState.CoreState = -1
                 $InstallerState.PackageName = 'msodbcsql.msi'
                 if ($InstallerState.Installed) {
                     $InstallerState.CoreState = $installer.GetType().InvokeMember('FeatureState', 'GetProperty', $null, $installer, @($productCode, 'SQL_SQLODBC_CORE'))
+                }
+                if ($productState -in @(1, 5)) {
                     $InstallerState.PackageName = [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($productCode, 'PackageName'))
                 }
                 $packageName = "$($InstallerState.PackageName)"
@@ -140,11 +146,32 @@ $Fix_ODBC18 = {
                     [IO.Path]::GetExtension($packageName) -ine '.msi') {
                     throw "ODBC MSI reports an invalid source package name '$packageName'"
                 }
+                $upgradeView = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database, @('SELECT `Value` FROM `Property` WHERE `Property`=''UpgradeCode'''))
+                $null = $upgradeView.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $upgradeView, $null)
+                $upgradeRecord = $upgradeView.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $upgradeView, $null)
+                if (-not $upgradeRecord) { throw 'MSI Property table has no UpgradeCode row' }
+                $upgradeCode = [string]$upgradeRecord.GetType().InvokeMember('StringData', 'GetProperty', $null, $upgradeRecord, @(1))
+                $relatedCodes = $installer.GetType().InvokeMember('RelatedProducts', 'GetProperty', $null, $installer, @($upgradeCode))
+                $relatedProducts = [System.Collections.Generic.List[object]]::new()
+                foreach ($relatedCode in $relatedCodes) {
+                    if ($relatedCode -ieq $productCode) { continue }
+                    $relatedState = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($relatedCode))
+                    # VersionString is unavailable for advertised products.
+                    [uint32]$packedVersion = $installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'Version'))
+                    $relatedVersion = [version]::new(
+                        [int]($packedVersion -shr 24), [int](($packedVersion -shr 16) -band 255), [int]($packedVersion -band 65535))
+                    $relatedProducts.Add([pscustomobject]@{
+                            ProductCode = ([guid]$relatedCode).ToString('B')
+                            Version = $relatedVersion
+                            State = [int]$relatedState
+                        })
+                }
+                $InstallerState.RelatedProducts = $relatedProducts.ToArray()
             }
             return $versionText
         }
         finally {
-            foreach ($comObject in @($codeRecord, $codeView, $record, $view, $database, $installer)) {
+            foreach ($comObject in @($relatedCodes, $upgradeRecord, $upgradeView, $codeRecord, $codeView, $record, $view, $database, $installer)) {
                 if ($comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
                     try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($comObject) }
                     catch { Write-Verbose "Could not release Windows Installer COM object: $($_.Exception.Message)" }
@@ -208,12 +235,14 @@ $Fix_ODBC18 = {
         if (-not $BypassCache) {
             try {
                 Import-Module TemplateHelpDSC -Force -ErrorAction Stop
-                $downloadCommand = Get-Command Invoke-DownloadFile -ErrorAction Stop
+                $downloadCommand = Get-Command Invoke-DownloadFile -ErrorAction SilentlyContinue
+                if (-not $downloadCommand) { throw 'Installed TemplateHelpDSC does not expose Invoke-DownloadFile' }
                 $null = & $downloadCommand -url $Url -dest $Path
                 if ((Get-Item -LiteralPath $Path -ErrorAction Stop).Length -gt 0) { return }
             }
             catch {
                 $cacheFailure = $_.Exception.Message
+                Write-Warning "$Label cache download unavailable; trying the source URL directly. $cacheFailure"
                 if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
             }
         }
@@ -355,6 +384,36 @@ $Fix_ODBC18 = {
         $installerPath = Join-Path $sourceDirectory $msiState.PackageName
         Copy-Item -LiteralPath $downloadPath -Destination $installerPath -Force -ErrorAction Stop
 
+        $odbcRebootRequired = $false
+        $payloadMsiVersion = [version]::new($payloadVersion.Major, $payloadVersion.Minor, $payloadVersion.Build)
+        # An advertised/orphaned old MSI sees NOT Installed during nested
+        # removal and rejects the license property, which is not inherited.
+        # Restore its registration with an explicit, non-uninstall operation.
+        foreach ($legacyProduct in @($msiState.RelatedProducts | Where-Object {
+                    $_.State -eq 1 -and $_.Version -lt $payloadMsiVersion
+                })) {
+            $legacyLogPath = Join-Path ([IO.Path]::GetTempPath()) "memlabs-msodbcsql-$TargetVersion.legacy-$($legacyProduct.ProductCode.Trim('{}')).log"
+            Write-Warning "Restoring advertised ODBC Driver 18 $($legacyProduct.Version) registration ($($legacyProduct.ProductCode)) before upgrade. Log: $legacyLogPath"
+            $legacyArguments = "/i $($legacyProduct.ProductCode) /qn /norestart IACCEPTMSODBCSQLLICENSETERMS=YES SKIPPENDINGREBOOTCHECK=1 ADDLOCAL=ALL /l*v `"$legacyLogPath`""
+            for ($legacyAttempt = 1; $legacyAttempt -le 3; $legacyAttempt++) {
+                $legacyProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList $legacyArguments -Wait -PassThru -NoNewWindow -ErrorAction Stop
+                if ($legacyProcess.ExitCode -ne 1618 -or $legacyAttempt -ge 3) { break }
+                Start-Sleep -Seconds 30
+            }
+            if ($legacyProcess.ExitCode -notin @(0, 3010)) {
+                $details = Get-OdbcMsiFailureDetails -LogPath $legacyLogPath
+                throw "Legacy ODBC registration recovery exited $($legacyProcess.ExitCode); upgrade was not started and no driver was explicitly uninstalled. Log: $legacyLogPath. $details"
+            }
+            $recoveredState = @{}
+            $null = Get-MsiVersion -Path $installerPath -InstallerState $recoveredState
+            if (-not @($recoveredState.RelatedProducts | Where-Object {
+                        $_.ProductCode -eq $legacyProduct.ProductCode -and $_.State -eq 5
+                    }).Count) {
+                throw "Legacy ODBC product $($legacyProduct.ProductCode) did not become installed after recovery; upgrade was not started. Log: $legacyLogPath"
+            }
+            $odbcRebootRequired = $odbcRebootRequired -or $legacyProcess.ExitCode -eq 3010
+        }
+
         $arguments = @(
             '/i', "`"$installerPath`"", '/qn', '/norestart',
             'IACCEPTMSODBCSQLLICENSETERMS=YES',
@@ -381,7 +440,7 @@ $Fix_ODBC18 = {
             $details = Get-OdbcMsiFailureDetails -LogPath $logPath
             Write-Warning "ODBC MSI exited $($process.ExitCode); attempting feature repair from the validated payload. Log: $logPath. $details"
         }
-        $odbcRebootRequired = $process.ExitCode -eq 3010
+        $odbcRebootRequired = $odbcRebootRequired -or $process.ExitCode -eq 3010
 
         $verificationDeadline = (Get-Date).AddSeconds(60)
         do {

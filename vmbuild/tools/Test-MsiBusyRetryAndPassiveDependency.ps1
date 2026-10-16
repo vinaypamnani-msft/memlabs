@@ -39,6 +39,7 @@ $script:ExitCodes = [System.Collections.Queue]::new()
 $script:ProcessCalls = 0
 $script:Sleeps = [System.Collections.Generic.List[int]]::new()
 $script:Statuses = [System.Collections.Generic.List[string]]::new()
+$script:Arguments = [System.Collections.Generic.List[string]]::new()
 
 function Start-Process {
     param(
@@ -49,6 +50,7 @@ function Start-Process {
         [switch]$NoNewWindow
     )
     $script:ProcessCalls++
+    $script:Arguments.Add(@($ArgumentList) -join ' ')
     [pscustomobject]@{ ExitCode = [int]$script:ExitCodes.Dequeue() }
 }
 
@@ -93,6 +95,17 @@ try {
     Assert-True $threw 'Exhausted MSI 1618 retries should remain fatal.'
     Assert-True ($script:ProcessCalls -eq 2 -and $script:Sleeps.Count -eq 1) `
         'MSI retry budget should not sleep after its final attempt.'
+
+    $script:ExitCodes.Clear()
+    $script:Arguments.Clear()
+    $script:ExitCodes.Enqueue(0)
+    Install-MSIPackage -ProductCode ([guid]'11111111-1111-1111-1111-111111111111') `
+        -DisplayName 'Legacy registration recovery' -LogPath (Join-Path $tempRoot 'legacy.log') `
+        -AdditionalArguments @('IACCEPTMSODBCSQLLICENSETERMS=YES', 'ADDLOCAL=ALL')
+    Assert-True ($script:Arguments.Count -eq 1 -and
+        $script:Arguments[0] -match '/i\s+"\{11111111-1111-1111-1111-111111111111\}"' -and
+        $script:Arguments[0] -match 'IACCEPTMSODBCSQLLICENSETERMS=YES ADDLOCAL=ALL') `
+        'Product-code recovery must use /i with explicit license and feature selection, not uninstall.'
 
     $phase8Source = Get-Content -LiteralPath $phase8Path -Raw
     $reportBuilderResources = @([regex]::Matches(

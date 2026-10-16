@@ -102,6 +102,14 @@ The validated MSI is retained under
 registered package filename. This permits repair without the source-name
 mismatch between DSC and maintenance. Recovery selects missing features
 without `REINSTALL`, and only reinstalls an already-local core feature.
+Before upgrading, advertised or orphaned older Driver 18 MSI registrations
+in the same upgrade family are restored using `/i {ProductCode}` with explicit
+license acceptance. Otherwise, their nested `RemoveExistingProducts` action
+can fail its license check even when the new MSI received the property.
+Registration recovery does not explicitly uninstall a driver, does not target
+Driver 17 or newer versions, and must succeed before the upgrade is started.
+Each legacy recovery has its own verbose MSI log; unavailable original MSI
+sources fail the preflight instead of triggering destructive cleanup.
 
 Validate with `vmbuild\tools\Test-Odbc18VersionEnforcement.ps1` in Windows PowerShell.
 
