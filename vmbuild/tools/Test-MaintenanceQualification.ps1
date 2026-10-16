@@ -91,6 +91,10 @@ try {
     Write-MaintenanceQualificationReceipt $path $receipt
     $reference = New-MaintenanceQualificationReference $path $receipt
     $null = Assert-MaintenanceQualificationReference $reference -RequireCmCoverage
+    $checksum = $reference.Sha256
+    $reference.Sha256 = ''
+    Assert-QualificationThrows { Assert-MaintenanceQualificationReference $reference } '*no valid receipt checksum*'
+    $reference.Sha256 = $checksum
     Add-Content -LiteralPath $path -Value ' '
     Assert-QualificationThrows { Assert-MaintenanceQualificationReference $reference } '*checksum changed*'
 
@@ -184,6 +188,16 @@ try {
     $beforeCalls = $script:ChildCalls
     Resume-CrossRevisionMaintenanceGate -WorktreePath 'C:\pinned' -AdminCachePath 'C:\cache\admin.txt'
     Assert-Qualification ($script:ChildCalls -eq $beforeCalls + 1 -and -not $script:State.CurrentStep) 'An interrupted matrix was not resumed with its original scoped identity before deployment.'
+    $refreshKey = "lab|maintenance|post|2|refresh.json|$developCommit"
+    $null = Invoke-CrossRevisionMaintenanceGate -Key $refreshKey -Mode Postconditions -Family 'lab' -Identity @($target) -WorktreePath 'C:\pinned'
+    $script:BadChildReceipt = $true
+    Assert-QualificationThrows {
+        Invoke-CrossRevisionMaintenanceGate -Key $refreshKey -Mode Postconditions -Family 'lab' -Identity @($target) -WorktreePath 'C:\pinned' -AlwaysRun
+    } '*missing or duplicate*'
+    Assert-Qualification (-not $script:State.MaintenanceReceipts.Contains($refreshKey)) 'A failed refreshed postcondition retained a stale successful receipt reference.'
+    $script:BadChildReceipt = $false
+    Resume-CrossRevisionMaintenanceGate -WorktreePath 'C:\pinned'
+    Assert-Qualification ($script:State.MaintenanceReceipts.Contains($refreshKey) -and -not $script:State.CurrentStep) 'An interrupted refreshed readiness check cannot resume after its receipt is replaced.'
 
     $runner = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-MainToDevelopExpansionTest.ps1') -Raw
     Assert-Qualification ($runner -match '(?s)Assert-CrossRevisionMaintenanceFamilyGate -Family \$family\s+foreach \(\$domain in \$familyPlan.Domains\)') 'Cleanup is not guarded by maintenance qualification.'

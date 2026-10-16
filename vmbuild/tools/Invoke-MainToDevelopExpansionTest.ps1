@@ -1504,6 +1504,7 @@ function Invoke-CrossRevisionMaintenanceGate {
         if ($reference.SourceDigest -cne $script:MaintenanceCandidateSource.Digest -or $reference.DevelopRevision -cne $developCommit) {
             throw "Maintenance gate '$Key' references stale candidate code."
         }
+        $null = Assert-MaintenanceQualificationReference -Reference $reference -RequireCmCoverage:$RequireCmCoverage
         $null = Assert-MaintenanceQualificationReceipt -Path $reference.Path -Mode $Mode -MainRevision $mainCommit `
             -DevelopRevision $developCommit -SourceDigest $script:MaintenanceCandidateSource.Digest -Targets $targets `
             -ExpectedSha256 $reference.Sha256 -RequireCmCoverage:$RequireCmCoverage
@@ -1516,6 +1517,9 @@ function Invoke-CrossRevisionMaintenanceGate {
     $null = New-Item -Path $inputDirectory -ItemType Directory -Force
     $targetsPath = Join-Path $inputDirectory "$safe.targets.json"
     ConvertTo-Json -InputObject @($targets) -Depth 6 | Set-Content -LiteralPath $targetsPath -Encoding UTF8
+    if ($AlwaysRun -and $script:State.MaintenanceReceipts.Contains($Key)) {
+        $script:State.MaintenanceReceipts.Remove($Key)
+    }
     if ($Mode -ne 'Preflight') { Start-Step -Step $Key }
     $parameters = [ordered]@{
         Mode = $Mode; ReceiptPath = $receiptPath; MainRevision = $mainCommit; DevelopRevision = $developCommit
@@ -2496,6 +2500,7 @@ try {
             if ($remaining.Count -gt 0) { throw "Cleanup of $domain left VM(s): $($remaining.Name -join ', ')." }
             Complete-Step -Step $cleanupStep
         }
+        Assert-CrossRevisionMaintenanceFamilyGate -Family $family
         Complete-Step -Step $completeKey
         $familyCompletedUtc = [DateTime]::UtcNow
         Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{

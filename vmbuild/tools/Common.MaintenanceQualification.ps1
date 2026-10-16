@@ -149,6 +149,9 @@ function New-MaintenanceQualificationReference {
 
 function Assert-MaintenanceQualificationReference {
     param([Parameter(Mandatory)]$Reference, [switch]$RequireCmCoverage)
+    if ("$($Reference.Sha256)" -notmatch '^[A-Fa-f0-9]{64}$') {
+        throw 'Maintenance qualification reference has no valid receipt checksum.'
+    }
     return Assert-MaintenanceQualificationReceipt -Path $Reference.Path -Mode $Reference.Mode `
         -MainRevision $Reference.MainRevision -DevelopRevision $Reference.DevelopRevision `
         -SourceDigest $Reference.SourceDigest -Targets @($Reference.Targets) -ExpectedSha256 $Reference.Sha256 `
