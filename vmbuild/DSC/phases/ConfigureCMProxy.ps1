@@ -67,6 +67,17 @@ try {
         # Connect to the CM site PS drive (sets $SiteCode and cd's into <SiteCode>:\)
         . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[ConfigureCMProxy]"
 
+        # Each provider owns its own site; a primary also manages its secondaries.
+        # Other primaries (including CAS children) run their own workflow.
+        $proxySiteCodes = @($SiteCode)
+        $proxySiteCodes += @($deployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'Secondary' -and $_.parentSiteCode -eq $SiteCode
+        } | Select-Object -ExpandProperty siteCode)
+        $proxyClients = @($proxyClients | Where-Object { $_.siteCode -in $proxySiteCodes })
+        $proxyRemoveClients = @($proxyRemoveClients | Where-Object { $_.siteCode -in $proxySiteCodes })
+        $hasEnableWork = $proxyVm -and $proxyClients.Count -gt 0
+        $hasDisableWork = $proxyRemoveClients.Count -gt 0
+
         # --- Enable proxy on opted-in site systems ---
         if ($hasEnableWork) {
             $proxyFqdn = "$($proxyVm.vmName).$DomainFullName"

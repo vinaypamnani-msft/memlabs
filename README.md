@@ -32,6 +32,17 @@ maintenance. Logs identify the missing targets or result-validation failure.
 
 Validate with `vmbuild\tools\Test-PhaseFailurePropagation.ps1`.
 
+### Phase 8 ConfigMgr proxy scope
+
+ConfigMgr proxy enable/disable runs against the connected site's systems only.
+A primary also manages its configured secondary sites; other primaries run their
+own workflow, including in CAS hierarchies. Unrelated sites in the same deployment
+are not treated as missing systems. Missing systems or failed proxy changes
+inside the owned scope still fail the workflow for retry.
+
+Validate with `vmbuild\tools\Test-CmProxySiteScope.ps1` and
+`vmbuild\tools\Test-CmRoleQuerySiteScope.ps1`.
+
 ## VM maintenance failure diagnostics
 
 VMBuild Phase 10 reads each target VM's Hyper-V metadata before applying fixes.
