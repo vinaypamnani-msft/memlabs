@@ -75,6 +75,7 @@ function Get-MsiProductVersion {
     $upgradeView = $null
     $upgradeRecord = $null
     $relatedCodes = $null
+    $summaryInfo = $null
     try {
         $installer = New-Object -ComObject WindowsInstaller.Installer
         $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
@@ -90,6 +91,9 @@ function Get-MsiProductVersion {
             $codeRecord = $codeView.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $codeView, $null)
             if (-not $codeRecord) { throw 'MSI Property table has no ProductCode row' }
             $productCode = [string]$codeRecord.GetType().InvokeMember('StringData', 'GetProperty', $null, $codeRecord, @(1))
+            $summaryInfo = $database.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null, $database, @(0))
+            $InstallerState.ProductCode = ([guid]$productCode).ToString('B')
+            $InstallerState.PackageCode = ([guid]$summaryInfo.GetType().InvokeMember('Property', 'GetProperty', $null, $summaryInfo, @(9))).ToString('B')
             $productState = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($productCode))
             $InstallerState.Installed = $productState -eq 5
             $InstallerState.CoreState = -1
@@ -111,6 +115,7 @@ function Get-MsiProductVersion {
             $upgradeRecord = $upgradeView.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $upgradeView, $null)
             if (-not $upgradeRecord) { throw 'MSI Property table has no UpgradeCode row' }
             $upgradeCode = [string]$upgradeRecord.GetType().InvokeMember('StringData', 'GetProperty', $null, $upgradeRecord, @(1))
+            $InstallerState.UpgradeCode = ([guid]$upgradeCode).ToString('B')
             $relatedCodes = $installer.GetType().InvokeMember('RelatedProducts', 'GetProperty', $null, $installer, @($upgradeCode))
             $relatedProducts = [System.Collections.Generic.List[object]]::new()
             foreach ($relatedCode in $relatedCodes) {
@@ -120,10 +125,18 @@ function Get-MsiProductVersion {
                 [uint32]$packedVersion = $installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'Version'))
                 $relatedVersion = [version]::new(
                     [int]($packedVersion -shr 24), [int](($packedVersion -shr 16) -band 255), [int]($packedVersion -band 65535))
+                $cachedPackage = if ($relatedState -eq 5) {
+                    [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'LocalPackage'))
+                } else { '' }
                 $relatedProducts.Add([pscustomobject]@{
                         ProductCode = ([guid]$relatedCode).ToString('B')
                         Version = $relatedVersion
                         State = [int]$relatedState
+                        PackageCode = ([guid]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'PackageCode'))).ToString('B')
+                        UpgradeCode = $InstallerState.UpgradeCode
+                        PackageName = [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'PackageName'))
+                        Language = [int]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'Language'))
+                        CachedPackagePresent = [bool]($cachedPackage -and (Test-Path -LiteralPath $cachedPackage -PathType Leaf))
                     })
             }
             $InstallerState.RelatedProducts = $relatedProducts.ToArray()
@@ -131,13 +144,53 @@ function Get-MsiProductVersion {
         return $versionText
     }
     finally {
-        foreach ($comObject in @($relatedCodes, $upgradeRecord, $upgradeView, $codeRecord, $codeView, $record, $view, $database, $installer)) {
+        foreach ($comObject in @($summaryInfo, $relatedCodes, $upgradeRecord, $upgradeView, $codeRecord, $codeView, $record, $view, $database, $installer)) {
             if ($comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
                 try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($comObject) }
                 catch { Write-Verbose "Could not release Windows Installer COM object: $($_.Exception.Message)" }
             }
         }
     }
+}
+
+function Save-MemLabsOdbcRecoveryPackage {
+    param([Parameter(Mandatory)]$Product)
+
+    $releaseLinks = @{
+        '18.0.1' = 2186919; '18.1.1' = 2202930; '18.1.2' = 2214634
+        '18.2.1' = 2223270; '18.2.2' = 2239549; '18.3.1' = 2242886
+        '18.3.2' = 2249006; '18.3.3' = 2266640; '18.4.1' = 2280794
+        '18.5.1' = 2307162; '18.5.2' = 2335671; '18.6.1' = 2345415
+        '18.6.2' = 2358430
+    }
+    $release = $Product.Version.ToString(3)
+    if (-not $releaseLinks.ContainsKey($release)) {
+        throw "No verified Microsoft recovery source is known for legacy ODBC $release ($($Product.ProductCode))"
+    }
+    $packageName = "$($Product.PackageName)"
+    if ([string]::IsNullOrWhiteSpace($packageName) -or
+        $packageName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+        [IO.Path]::GetExtension($packageName) -ine '.msi') {
+        throw "Legacy ODBC reports an invalid source package name '$packageName'"
+    }
+    $directory = Join-Path $env:ProgramData "MemLabs\Installers\ODBC18\$release\$($Product.ProductCode.Trim('{}'))"
+    $null = New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop
+    $path = Join-Path $directory $packageName
+    $language = '0x{0:X}' -f $Product.Language
+    $url = "https://go.microsoft.com/fwlink/?linkid=$($releaseLinks[$release])&clcid=$language"
+    $null = Invoke-DownloadFile -url $url -dest $path -BypassCache
+    $signature = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
+        throw "Legacy ODBC recovery MSI has no valid Microsoft signature: $path"
+    }
+    $identity = @{}
+    $null = Get-MsiProductVersion -Path $path -InstallerState $identity
+    if ($identity.ProductCode -ine $Product.ProductCode -or
+        $identity.PackageCode -ine $Product.PackageCode -or
+        $identity.UpgradeCode -ine $Product.UpgradeCode) {
+        throw "Legacy ODBC recovery MSI identity mismatch for $($Product.ProductCode); the package was not installed. Download: $path"
+    }
+    return $path
 }
 
 function Get-MemLabsOdbcCatalogState {
@@ -1948,10 +2001,11 @@ class InstallODBCDriver {
 
         $payloadMsiVersion = [version]::new($payloadVersion.Major, $payloadVersion.Minor, $payloadVersion.Build)
         foreach ($legacyProduct in @($msiState.RelatedProducts | Where-Object {
-                    $_.State -eq 1 -and $_.Version -lt $payloadMsiVersion
+                    $_.State -in @(1, 5) -and ($_.State -eq 1 -or -not $_.CachedPackagePresent) -and
+                        $_.Version -lt $payloadMsiVersion
                 })) {
             $legacyLogPath = "C:\temp\odbcinstallation.legacy-$($legacyProduct.ProductCode.Trim('{}')).log"
-            Write-Status "Restoring advertised ODBC Driver 18 $($legacyProduct.Version) registration ($($legacyProduct.ProductCode)) before upgrade. Log: $legacyLogPath"
+            Write-Status "Restoring ODBC Driver 18 $($legacyProduct.Version) registration/cache ($($legacyProduct.ProductCode)) before upgrade. Log: $legacyLogPath"
             try {
                 Install-MSIPackage `
                     -ProductCode $legacyProduct.ProductCode `
@@ -1960,14 +2014,26 @@ class InstallODBCDriver {
                     -LogPath $legacyLogPath -InstallBusyMaxAttempts 3
             }
             catch {
-                throw "Legacy ODBC registration recovery failed; upgrade was not started and no driver was explicitly uninstalled. Log: $legacyLogPath. $($_.Exception.Message)"
+                Write-Status "Legacy registration recovery failed; obtaining the exact original Microsoft MSI before retrying. Log: $legacyLogPath. $($_.Exception.Message)"
+                $sourceLogPath = "$legacyLogPath.source.log"
+                try {
+                    $legacySource = Save-MemLabsOdbcRecoveryPackage -Product $legacyProduct
+                    Install-MSIPackage `
+                        -MsiPath $legacySource `
+                        -DisplayName "Microsoft ODBC Driver 18 original-source recovery" `
+                        -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1", "ADDLOCAL=ALL", "REINSTALLMODE=vomus") `
+                        -LogPath $sourceLogPath -InstallBusyMaxAttempts 3
+                }
+                catch {
+                    throw "Legacy ODBC registration/source recovery failed; upgrade was not started and no driver was explicitly uninstalled. Initial log: $legacyLogPath; source recovery log: $sourceLogPath. $($_.Exception.Message)"
+                }
             }
             $recoveredState = @{}
             $null = Get-MsiProductVersion -Path $installerSource -InstallerState $recoveredState
             if (-not @($recoveredState.RelatedProducts | Where-Object {
-                        $_.ProductCode -eq $legacyProduct.ProductCode -and $_.State -eq 5
+                        $_.ProductCode -eq $legacyProduct.ProductCode -and $_.State -eq 5 -and $_.CachedPackagePresent
                     }).Count) {
-                throw "Legacy ODBC product $($legacyProduct.ProductCode) did not become installed after recovery; upgrade was not started. Log: $legacyLogPath"
+                throw "Legacy ODBC product $($legacyProduct.ProductCode) registration/cache did not recover; upgrade was not started. Log: $legacyLogPath"
             }
         }
 

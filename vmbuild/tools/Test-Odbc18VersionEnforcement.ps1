@@ -217,7 +217,8 @@ function Invoke-OdbcInstallerFixture {
                         Version = if ($Mode -eq 'LegacyNewer') { [version]'18.7.1' }
                         elseif ($Mode -eq 'LegacySameBuild') { [version]'18.6.2' }
                         else { [version]'18.1.2' }
-                        State = if ($Mode -eq 'LegacyHealthy') { 5 } else { 1 }
+                        State = if ($Mode -in @('LegacyHealthy', 'LegacyCacheMissing', 'LegacyCacheNoOp')) { 5 } else { 1 }
+                        CachedPackagePresent = $Mode -eq 'LegacyHealthy'
                     }
                 }
             )
@@ -252,6 +253,18 @@ function Invoke-OdbcInstallerFixture {
             param($Url, $Path, [switch]$BypassCache)
             [void]$Url; [void]$Path; [void]$BypassCache
         }
+        function Save-OdbcRecoveryInstaller {
+            param($Product)
+            [void]$Product
+            if ($script:OdbcFixture.Mode -in @('LegacyRecoveryFailure', 'LegacySourceMismatch')) {
+                throw 'Original MSI is unavailable or its identity cannot be verified.'
+            }
+            return 'C:\ProgramData\MemLabs\Installers\ODBC18\18.1.2\original-legacy.msi'
+        }
+        function Save-MemLabsOdbcRecoveryPackage {
+            param($Product)
+            Save-OdbcRecoveryInstaller -Product $Product
+        }
         function Invoke-DownloadFile {
             param($Url, $Dest, [switch]$BypassCache)
             [void]$Url; [void]$Dest; [void]$BypassCache
@@ -284,14 +297,20 @@ function Invoke-OdbcInstallerFixture {
             [void]$Wait; [void]$PassThru; [void]$NoNewWindow; [void]$ErrorAction
             $line = @($ArgumentList) -join ' '
             $script:OdbcFixture.Calls.Add([pscustomobject]@{ FilePath = $FilePath; Arguments = $line })
-            if ($line -match '/i\s+"?\{11111111-1111-1111-1111-111111111111\}') {
+            $legacyCode = $line -match '/i\s+"?\{11111111-1111-1111-1111-111111111111\}'
+            if ($legacyCode -or $line -match 'original-legacy\.msi') {
                 if ($script:OdbcFixture.Mode -eq 'LegacyRecoveryFailure') {
                     return [pscustomobject]@{ ExitCode = 1603 }
                 }
-                if ($script:OdbcFixture.Mode -ne 'LegacyRecoveryNoOp') {
-                    $script:OdbcFixture.LegacyProducts[0].State = 5
+                if ($legacyCode -and $script:OdbcFixture.Mode -in @(
+                        'LegacyOriginalMissing', 'LegacyCacheMissing', 'LegacySourceReboot', 'LegacySourceMismatch', 'LegacyCacheNoOp')) {
+                    return [pscustomobject]@{ ExitCode = 1612 }
                 }
-                return [pscustomobject]@{ ExitCode = if ($script:OdbcFixture.Mode -eq 'LegacyReboot') { 3010 } else { 0 } }
+                if ($script:OdbcFixture.Mode -notin @('LegacyRecoveryNoOp', 'LegacyCacheNoOp')) {
+                    $script:OdbcFixture.LegacyProducts[0].State = 5
+                    $script:OdbcFixture.LegacyProducts[0].CachedPackagePresent = $true
+                }
+                return [pscustomobject]@{ ExitCode = if ($script:OdbcFixture.Mode -in @('LegacyReboot', 'LegacySourceReboot')) { 3010 } else { 0 } }
             }
             $attempt = $script:OdbcFixture.Calls.Count
             if ($script:OdbcFixture.Mode -eq 'PermanentFailure' -or
@@ -333,9 +352,10 @@ foreach ($surface in @('Maintenance', 'DSC')) {
     foreach ($mode in @(
             'AbsentCore', 'Upgrade', 'Repair', 'RepairReboot', 'InitialFailure', 'PermanentFailure', 'NoOp',
             'LegacyAdvertised', 'LegacyHealthy', 'LegacyNewer', 'LegacySameBuild', 'LegacyReboot', 'LegacyRecoveryFailure', 'LegacyRecoveryNoOp'
+            'LegacyOriginalMissing', 'LegacyCacheMissing', 'LegacySourceReboot', 'LegacySourceMismatch', 'LegacyCacheNoOp'
         )) {
         $probe = Invoke-OdbcInstallerFixture -Body $body -Mode $mode -Dsc:($surface -eq 'DSC')
-        $expectedFailure = $mode -in @('PermanentFailure', 'NoOp', 'LegacyRecoveryFailure', 'LegacyRecoveryNoOp')
+        $expectedFailure = $mode -in @('PermanentFailure', 'NoOp', 'LegacyRecoveryFailure', 'LegacyRecoveryNoOp', 'LegacySourceMismatch', 'LegacyCacheNoOp')
         if ([bool]$probe.Failure -ne $expectedFailure -or
             (-not $expectedFailure -and $probe.Version -ne [version]'18.6.2.1')) {
             throw "$surface $mode did not converge or fail as expected: $($probe.Failure)"
@@ -350,7 +370,7 @@ foreach ($surface in @('Maintenance', 'DSC')) {
         foreach ($call in $probe.Calls) {
             if ($call.Arguments -notmatch '\bADDLOCAL=ALL\b' -or
                 $call.Arguments -notmatch '\bIACCEPTMSODBCSQLLICENSETERMS=YES\b' -or
-                ($call.Arguments -notmatch 'original-driver\.msi' -and
+                ($call.Arguments -notmatch 'original-(driver|legacy)\.msi' -and
                     $call.Arguments -notmatch '/i\s+"?\{11111111-1111-1111-1111-111111111111\}')) {
                 throw "$surface $mode lost feature selection, license acceptance, or the registered source filename."
             }
@@ -364,9 +384,20 @@ foreach ($surface in @('Maintenance', 'DSC')) {
             if ($mode -in @('LegacyHealthy', 'LegacyNewer', 'LegacySameBuild') -and $legacyCalls.Count) {
                 throw "$surface $mode must not repair a healthy, same-build, or newer related product."
             }
-            if ($mode -in @('LegacyRecoveryFailure', 'LegacyRecoveryNoOp') -and
+            if ($mode -in @('LegacyRecoveryFailure', 'LegacyRecoveryNoOp', 'LegacySourceMismatch') -and
                 ($probe.Calls.Count -ne 1 -or $legacyCalls.Count -ne 1 -or $probe.Failure -notmatch 'upgrade was not started')) {
                 throw "$surface $mode started an upgrade after unsuccessful legacy registration recovery."
+            }
+            if ($mode -in @('LegacyOriginalMissing', 'LegacyCacheMissing', 'LegacySourceReboot')) {
+                if ($probe.Calls.Count -ne 3 -or $legacyCalls.Count -ne 1 -or
+                    $probe.Calls[1].Arguments -notmatch 'original-legacy\.msi.+REINSTALLMODE=vomus') {
+                    throw "$surface $mode did not restore a verified original MSI before starting the new installer."
+                }
+                if ($mode -eq 'LegacyCacheNoOp' -and
+                    ($probe.Calls.Count -ne 2 -or $probe.Calls[-1].Arguments -notmatch 'original-legacy\.msi' -or
+                        $probe.Failure -notmatch 'upgrade was not started')) {
+                    throw "$surface $mode accepted success without a restored Windows Installer cache."
+                }
             }
             if (@($probe.Calls | Where-Object Arguments -match '(?i)(?:^|\s)/(?:x|uninstall)\b').Count) {
                 throw "$surface $mode explicitly uninstalled a driver."
@@ -385,7 +416,7 @@ foreach ($surface in @('Maintenance', 'DSC')) {
                 throw "$surface $mode overwrote the initial MSI log with its repair log."
             }
         }
-        if ($surface -eq 'Maintenance' -and $mode -in @('RepairReboot', 'LegacyReboot') -and
+        if ($surface -eq 'Maintenance' -and $mode -in @('RepairReboot', 'LegacyReboot', 'LegacySourceReboot') -and
             ($probe.Result.Errors -join ' ') -notmatch 'reboot') {
             throw 'Maintenance did not retain the repair MSI reboot requirement.'
         }
@@ -404,6 +435,107 @@ if ($phase3Text -notmatch '(?s)\$cmServerRoles\s*=\s*@\(''CAS'',\s*''Primary'',\
 $fixTokens = $null
 $fixErrors = $null
 $fixAst = [System.Management.Automation.Language.Parser]::ParseFile($fixPath, [ref]$fixTokens, [ref]$fixErrors)
+function Invoke-OdbcRecoveryPackageFixture {
+    param([scriptblock]$Definition, [string]$Name, [string]$Mode)
+
+    & {
+        $script:RecoveryFixture = @{
+            Mode = $Mode
+            Downloads = [System.Collections.Generic.List[object]]::new()
+            SignatureReads = 0
+            IdentityReads = 0
+        }
+        $product = [pscustomobject]@{
+            ProductCode = '{11111111-1111-1111-1111-111111111111}'
+            PackageCode = '{22222222-2222-2222-2222-222222222222}'
+            UpgradeCode = '{33333333-3333-3333-3333-333333333333}'
+            PackageName = if ($Mode -eq 'InvalidName') { '..\untrusted.msi' } else { 'original-legacy.msi' }
+            Version = if ($Mode -eq 'UnknownRelease') { [version]'18.99.1' } else { [version]'18.1.2' }
+            Language = 1033
+        }
+        function New-Item { param($Path, $ItemType, [switch]$Force, $ErrorAction) }
+        function Save-OdbcInstaller {
+            param($Url, $Path, [switch]$BypassCache, $Label)
+            [void]$Label
+            $script:RecoveryFixture.Downloads.Add([pscustomobject]@{ Url = $Url; Path = $Path; BypassCache = [bool]$BypassCache })
+            if ($script:RecoveryFixture.Mode -eq 'DownloadFailure') { throw 'Test download failed.' }
+        }
+        function Invoke-DownloadFile {
+            param($Url, $Dest, [switch]$BypassCache)
+            Save-OdbcInstaller -Url $Url -Path $Dest -BypassCache:$BypassCache
+            return $true
+        }
+        function Get-AuthenticodeSignature {
+            param($LiteralPath, $ErrorAction)
+            [void]$LiteralPath; [void]$ErrorAction
+            $script:RecoveryFixture.SignatureReads++
+            [pscustomobject]@{
+                Status = if ($script:RecoveryFixture.Mode -eq 'BadSignature') { 'NotSigned' } else { 'Valid' }
+                SignerCertificate = [pscustomobject]@{
+                    Subject = if ($script:RecoveryFixture.Mode -eq 'WrongPublisher') {
+                        'CN=Microsoft Corporation, O=Unrelated Corporation'
+                    } else { 'CN=Microsoft Corporation, O=Microsoft Corporation' }
+                }
+            }
+        }
+        function Get-MsiVersion {
+            param($Path, [hashtable]$InstallerState)
+            [void]$Path
+            $script:RecoveryFixture.IdentityReads++
+            $InstallerState.ProductCode = if ($script:RecoveryFixture.Mode -eq 'WrongProduct') { '{44444444-4444-4444-4444-444444444444}' } else { $product.ProductCode }
+            $InstallerState.PackageCode = if ($script:RecoveryFixture.Mode -eq 'WrongPackage') { '{44444444-4444-4444-4444-444444444444}' } else { $product.PackageCode }
+            $InstallerState.UpgradeCode = if ($script:RecoveryFixture.Mode -eq 'WrongUpgrade') { '{44444444-4444-4444-4444-444444444444}' } else { $product.UpgradeCode }
+            return '18.1.2.1'
+        }
+        function Get-MsiProductVersion {
+            param($Path, [hashtable]$InstallerState)
+            Get-MsiVersion -Path $Path -InstallerState $InstallerState
+        }
+        . $Definition
+        $path = $null
+        $failure = $null
+        try { $path = & $Name -Product $product }
+        catch { $failure = $_.Exception.Message }
+        [pscustomobject]@{
+            Path = $path
+            Failure = $failure
+            Downloads = @($script:RecoveryFixture.Downloads)
+            SignatureReads = $script:RecoveryFixture.SignatureReads
+            IdentityReads = $script:RecoveryFixture.IdentityReads
+        }
+    }
+}
+$fixRecoveryFunctions = @($fixAst.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Save-OdbcRecoveryInstaller'
+        }, $true))
+if ($fixRecoveryFunctions.Count -ne 1) { throw 'Expected one maintenance original-MSI recovery helper.' }
+$recoveryDefinitions = @(
+    @{ Name = 'Save-OdbcRecoveryInstaller'; Definition = [scriptblock]::Create($fixRecoveryFunctions[0].Extent.Text) },
+    @{ Name = 'Save-MemLabsOdbcRecoveryPackage'; Definition = (Import-OdbcFunction -Name 'Save-MemLabsOdbcRecoveryPackage') }
+)
+foreach ($helper in $recoveryDefinitions) {
+    foreach ($mode in @('Valid', 'BadSignature', 'WrongPublisher', 'WrongProduct', 'WrongPackage', 'WrongUpgrade', 'UnknownRelease', 'InvalidName', 'DownloadFailure')) {
+        $probe = Invoke-OdbcRecoveryPackageFixture -Definition $helper.Definition -Name $helper.Name -Mode $mode
+        if ($mode -eq 'Valid') {
+            if ($probe.Failure -or $probe.Path -isnot [string] -or -not $probe.Path -or $probe.SignatureReads -ne 1 -or $probe.IdentityReads -ne 1 -or
+                $probe.Downloads.Count -ne 1 -or -not $probe.Downloads[0].BypassCache -or
+                $probe.Downloads[0].Url -ne 'https://go.microsoft.com/fwlink/?linkid=2214634&clcid=0x409') {
+                throw "$($helper.Name) did not validate the exact signed original package: $($probe.Failure)"
+            }
+        }
+        elseif (-not $probe.Failure -or $probe.Path) {
+            throw "$($helper.Name) accepted an unverifiable recovery MSI ($mode)."
+        }
+        if ($mode -in @('BadSignature', 'WrongPublisher') -and $probe.IdentityReads -ne 0) {
+            throw "$($helper.Name) opened an untrusted MSI ($mode)."
+        }
+        if ($mode -in @('UnknownRelease', 'InvalidName') -and $probe.Downloads.Count -ne 0) {
+            throw "$($helper.Name) attempted an unsafe or unknown recovery download ($mode)."
+        }
+    }
+}
 $installedVersionFunctions = @($fixAst.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
