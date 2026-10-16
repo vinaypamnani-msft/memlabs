@@ -5679,7 +5679,7 @@ $global:VM_Config = {
 
         Write-Progress2 $Activity -Status "Checking DSC modules" -percentcomplete 30 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Detect if modules need to be updated."
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+        $dscModuleProbe = {
             New-Item -Path "C:\staging\DSC" -ItemType Directory -Force | Out-Null
             $flagPath = "C:\staging\DSC\DSC.zip.Installed"
             $sigPath  = "C:\staging\DSC\DSC.SourceSignature"
@@ -5689,7 +5689,43 @@ $global:VM_Config = {
                 InstalledHash   = if (Test-Path $flagPath) { $c = Get-Content $flagPath -First 1 -ErrorAction SilentlyContinue; if ($c) { $c.Trim() } } else { $null }
                 SourceSignature = if (Test-Path $sigPath) { $s = Get-Content $sigPath -First 1 -ErrorAction SilentlyContinue; if ($s) { $s.Trim() } } else { $null }
             }
-        } -DisplayName "DSC: Detect modules and ensure staging directory."
+        }
+        for ($dscProbeAttempt = 1; $dscProbeAttempt -le 2; $dscProbeAttempt++) {
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $dscModuleProbe `
+                -DisplayName "DSC: Detect modules and ensure staging directory." -SuppressLog
+            $dscStateFields = @()
+            if ($result -and $result.ScriptBlockOutput) {
+                $dscStateFields = @($result.ScriptBlockOutput.PSObject.Properties.Name)
+            }
+            $missingDscStateFields = @('Hash', 'FlagExists', 'InstalledHash', 'SourceSignature' | Where-Object { $dscStateFields -notcontains $_ })
+            if ($result -and $result.CommandResult -eq $true -and -not $result.ScriptBlockFailed -and $missingDscStateFields.Count -eq 0) {
+                if ($dscProbeAttempt -gt 1) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC staging inspection recovered after guarded guest recovery." -OutputStream
+                }
+                break
+            }
+
+            $dscProbeError = if ($result -and $result.ErrorDetails) {
+                @($result.ErrorDetails) -join '; '
+            }
+            else {
+                "No valid DSC module state was returned (missing fields: $($missingDscStateFields -join ', '))."
+            }
+            # A failed connection is not evidence of a missing payload. Only Phase 2
+            # uses the guarded reboot ladder here, before any DSC configuration starts.
+            if ($Phase -eq 2 -and $dscProbeAttempt -eq 1 -and $result -and ($result.ChannelBroken -or $result.TimedOut)) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC staging inspection could not reach the guest; starting guarded guest recovery. $dscProbeError" -LogOnly
+                Write-Progress2 $Activity -Status "Waiting for guarded guest recovery before DSC staging" -percentcomplete 31 -force
+                $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest -TimeoutMinutes 10
+                if ($connected) { continue }
+
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Guest did not become ready during the guarded 10-minute DSC staging recovery window. Initial inspection: $dscProbeError" -Failure -OutputStream
+                return
+            }
+
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to inspect modules and staging directory. $dscProbeError" -Failure -OutputStream
+            return
+        }
         $guestZipHash = $result.ScriptBlockOutput.Hash
         $guestFlagExists = $result.ScriptBlockOutput.FlagExists
         $guestInstalledHash = $result.ScriptBlockOutput.InstalledHash

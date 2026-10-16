@@ -93,6 +93,24 @@ maintenance. Logs identify the missing targets or result-validation failure.
 
 Validate with `vmbuild\tools\Test-PhaseFailurePropagation.ps1`.
 
+### Phase 2 DSC staging recovery
+
+A healthy Hyper-V heartbeat does not guarantee that PowerShell Direct can open
+a session. Phase 2 checks that DSC module inspection actually succeeded before
+treating an absent archive or signature as a payload that needs copying. A broken
+channel or timeout enters the existing guarded guest-readiness recovery once,
+with a 10-minute window, then retries the inspection. That shared recovery waits
+through ordinary reboots and requires repeated broken-channel evidence before
+rebooting a guest with a healthy heartbeat; authentication errors do not trigger
+this recovery.
+
+Failed recovery, failed inspection, and incomplete inspection output stop staging
+with the connection or inspection diagnostic instead of repeatedly attempting
+copies to an unreachable guest. This automatic recovery is limited to Phase 2.
+Resume the retained deployment with `-StartPhase 2` after updating the runner.
+
+Validate with `vmbuild\tools\Test-DscPayloadReadiness.ps1`.
+
 ### Phase 8 ConfigMgr proxy scope
 
 ConfigMgr proxy enable/disable runs against the connected site's systems only.
