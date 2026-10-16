@@ -111,6 +111,26 @@ Resume the retained deployment with `-StartPhase 2` after updating the runner.
 
 Validate with `vmbuild\tools\Test-DscPayloadReadiness.ps1`.
 
+### Shutdown cleanup after PowerShell Direct timeouts
+
+A timed-out connection can remain in `Stopping` while blocked inside a Hyper-V
+socket call, even after all PowerShell jobs have been removed. Disposing that
+PowerShell instance synchronously waits for the connection and can hang shutdown
+after the console's final dynamic-memory-restoration header.
+
+Orphan cleanup, including worker and end-of-run `-Force` passes, leaves active
+PowerShell invocations, nonterminal jobs, and busy runspaces untouched. `-Force`
+only bypasses the minimum age. Deferred resources remain parked for a later safe
+cleanup or process exit, and their count is logged. Terminal resources are still
+reclaimed in the normal order.
+
+The dedicated pinned-child launcher publishes the structured result, runs normal
+PowerShell exit actions (including buffered-log flushing), then exits its owned
+process without waiting for abandoned runspaces. The original exit code is
+preserved. This does not terminate the parent test harness or any lab VM.
+
+Validate with `vmbuild\tools\Test-OrphanRunspaceCleanup.ps1`.
+
 ### Phase 8 ConfigMgr proxy scope
 
 ConfigMgr proxy enable/disable runs against the connected site's systems only.

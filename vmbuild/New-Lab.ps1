@@ -1686,9 +1686,9 @@ finally {
     }
     $global:ps_cache = @{}
 
-    # Reclaim runspaces parked by an abandon path (connect timeout, or a session
-    # evicted with -LeakSession). -Force because every job is gone by now, so the
-    # late-transport-callback hazard that made immediate disposal unsafe is over.
+    # Reclaim terminal runspaces parked by an abandon path. -Force bypasses age,
+    # not active-work guards: a timed-out connect can still be blocked inside
+    # VMBus even after every PowerShell job has been removed.
     try { $null = Clear-OrphanRunspaces -Force } catch { }
 
     # Runspaces are the launcher's dominant memory cost (~8MB each, and the reason a

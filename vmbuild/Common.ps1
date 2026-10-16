@@ -8826,8 +8826,9 @@ function New-PSSessionWithTimeout {
     # 120s later instead -- disposing a session with a still-running abandoned job riding
     # it, which is the disposed-object crash those paths were written to avoid. Its only
     # guard, RunspaceAvailability -ne 'Busy', is documented in this same file as a
-    # false-ready signal. Reaping happens where it is safe: Clear-VmSessionCache in each
-    # worker's finally (that VM's phase work is over) and the -Force pass at end of run.
+    # false-ready signal. Cleanup in each worker's finally and at end of run must
+    # still verify that parked work is terminal; removing jobs does not finish a
+    # New-PSSession call that remains blocked inside VMBus.
 
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $rs.Open()
@@ -8898,7 +8899,7 @@ function New-PSSessionWithTimeout {
 # open runspaces against just 18 cached sessions.
 # Deferring rather than never disposing: the reason these are abandoned is that a
 # late transport callback on an already-disposed object crashes the phase process,
-# so give them a settle window and only then reclaim.
+# so keep them alive until their associated work is terminal before reclaiming.
 $global:ps_orphanRunspaces = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 
 # Create-vs-dispose ledger for PSDirect sessions. Held on the APPDOMAIN, not in
@@ -9506,34 +9507,41 @@ function Clear-OrphanRunspaces {
     .SYNOPSIS
     Dispose parked runspaces once they are safe to touch.
     .PARAMETER Force
-    End-of-run: reclaim regardless of age. Jobs have already been removed by then,
-    so the late-callback hazard that made these unsafe is gone.
+    Reclaim regardless of age, but never bypass active-work safety checks.
     #>
     [CmdletBinding()]
     param([switch]$Force, [int]$MinAgeSeconds = 120)
 
     $reclaimed = 0
+    $deferred = 0
     try {
         foreach ($entry in @($global:ps_orphanRunspaces)) {
             if (-not $entry) { continue }
             $age = ((Get-Date) - $entry.At).TotalSeconds
             if (-not $Force -and $age -lt $MinAgeSeconds) { continue }
-            # Still executing: leave it. A Dispose() here is the documented crash.
-            if (-not $Force) {
-                # An ABANDONED JOB is still riding this session. Invoke-VmCommand's timeout /
-                # channel-broken paths StopJobAsync the job and leak the session precisely so a
-                # later transport break finds a LIVE object; disposing here re-creates the crash
-                # they were avoiding, and turns "leaked, reaped at process exit" into "disposed
-                # 120s later". RunspaceAvailability cannot see this -- it is a documented
-                # false-ready signal that reads Available while the server-side pipeline lives.
-                if ($entry.Job) {
-                    $jobState = $null
-                    try { $jobState = "$($entry.Job.State)" } catch { }
-                    if ($jobState -notin @('Completed', 'Failed', 'Stopped')) { continue }
+            # Force bypasses age, not liveness. Dispose() synchronously calls Stop()
+            # even in Stopping state, so a timed-out VMBus connect can hang cleanup.
+            # Availability alone can also report Available while work is still live.
+            try {
+                $invocationState = if ($entry.Ps) { "$($entry.Ps.InvocationStateInfo.State)" } else { '' }
+                $jobState = if ($entry.Job) { "$($entry.Job.State)" } else { '' }
+                $availability = if ($entry.Rs) { "$($entry.Rs.RunspaceAvailability)" } else { '' }
+            }
+            catch {
+                $deferred++
+                Write-Log "Could not verify orphaned work for '$($entry.VmName)'; leaving it parked: $($_.Exception.Message)" -Warning
+                continue
+            }
+            if ($entry.Ps -and $invocationState -notin @('NotStarted', 'Completed', 'Failed', 'Stopped')) {
+                if ($invocationState -notin @('Running', 'Stopping', 'Disconnected')) {
+                    Write-Log "Could not verify orphaned work for '$($entry.VmName)' with invocation state '$invocationState'; leaving it parked." -Warning
                 }
-                $avail = $null
-                try { $avail = $entry.Rs.RunspaceAvailability } catch { }
-                if ("$avail" -eq 'Busy') { continue }
+                $deferred++
+                continue
+            }
+            if (($entry.Job -and $jobState -notin @('Completed', 'Failed', 'Stopped')) -or $availability -eq 'Busy') {
+                $deferred++
+                continue
             }
             try { if ($entry.Ps) { $entry.Ps.Dispose() } } catch { }
             # Release the PSSession BEFORE its owner runspace -- the session's
@@ -9576,6 +9584,9 @@ function Clear-OrphanRunspaces {
     catch { }
     if ($reclaimed -gt 0) {
         try { Write-Log "Reclaimed $reclaimed orphaned runspace(s); $($global:ps_orphanRunspaces.Count) still parked." -LogOnly } catch { }
+    }
+    if ($deferred -gt 0) {
+        Write-Log "Deferred $deferred orphaned runspace(s) with active or unverified work (force=$($Force.IsPresent)); leaving them parked until terminal or process exit." -LogOnly
     }
     return $reclaimed
 }

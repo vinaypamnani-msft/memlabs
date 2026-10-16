@@ -152,4 +152,9 @@ if ($ResultPath) {
     [IO.File]::WriteAllText($ResultPath, $resultJson, (New-Object Text.UTF8Encoding($false)))
 }
 
-exit $childExitCode
+# This launcher owns its process. Preserve normal exit actions (including the
+# buffered-log flush), then bypass ConsoleHost's synchronous runspace teardown:
+# a parked connection can still be blocked in native I/O after its script returns.
+$null = $ExecutionContext.Events.GenerateEvent(
+    [System.Management.Automation.PsEngineEvent]::Exiting, $null, @(), $null, $true, $true)
+[Environment]::Exit($childExitCode)
