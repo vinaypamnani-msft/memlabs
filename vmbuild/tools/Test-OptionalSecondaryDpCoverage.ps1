@@ -180,7 +180,7 @@ foreach ($call in $projectedCalls) {
     $properties = @([regex]::Matches($call.Groups[2].Value, "'([^']+)'") |
         ForEach-Object { $_.Groups[1].Value })
     $allowed = if ($className -eq 'SMS_DistributionPoint') {
-        @('ServerNALPath', 'SiteCode', 'SourceVersion', 'RefreshNow')
+        @('ServerNALPath', 'SiteCode', 'RefreshNow')
     }
     else {
         @('ServerNALPath', 'State', 'SourceVersion')

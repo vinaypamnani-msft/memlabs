@@ -4,6 +4,8 @@ param(
     [string]$LogPath
 )
 
+. (Join-Path $PSScriptRoot 'ProcessFunctions.ps1')
+
 function Write-MemLabsClientPackageTimelineRecord {
     [CmdletBinding()]
     param(
@@ -17,6 +19,137 @@ function Write-MemLabsClientPackageTimelineRecord {
     }
     $line = $Record | ConvertTo-Json -Depth 10 -Compress -ErrorAction Stop -WarningAction SilentlyContinue
     [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Invoke-MemLabsClientPackageDiagnosticProbe {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][scriptblock]$ProbeScript,
+        [hashtable]$Variables = @{},
+        [hashtable]$Parameters = @{},
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 60
+    )
+
+    Invoke-MemLabsBoundedPowerShell -ProbeScript $ProbeScript -Variables $Variables `
+        -Parameters $Parameters -TimeoutSeconds $TimeoutSeconds
+}
+
+function Set-MemLabsClientPackageProgress {
+    param(
+        [string]$Stage,
+        [datetime]$DeadlineUtc,
+        [string]$Message,
+        [string]$Outcome,
+        [string]$PackageId,
+        [string[]]$RequiredDistributionPoints
+    )
+
+    $state = $script:MemLabsCoverageProgressState
+    if (-not $state -or -not $script:MemLabsCoverageProgressPath) {
+        throw 'Client-package progress was not initialized.'
+    }
+    foreach ($name in @('Stage', 'Message', 'Outcome', 'PackageId', 'RequiredDistributionPoints')) {
+        if ($PSBoundParameters.ContainsKey($name)) { $state[$name] = $PSBoundParameters[$name] }
+    }
+    if ($PSBoundParameters.ContainsKey('DeadlineUtc')) { $state.DeadlineUtc = $DeadlineUtc.ToUniversalTime().ToString('o') }
+    $state.UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+    Write-MemLabsProcessProgress -Path $script:MemLabsCoverageProgressPath -Record $state
+}
+
+function Invoke-MemLabsClientPackageCoverage {
+    param(
+        [Parameter(Mandatory)][scriptblock]$CoverageScript,
+        [Parameter(Mandatory)][hashtable]$Variables,
+        [Parameter(Mandatory)][string]$ScriptRoot,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+
+    $progressPath = Join-Path $LogPath 'ClientPackageCoverage.progress.json'
+    $expectedRunIdPath = Join-Path $LogPath 'ScriptWorkflow.expected.runid'
+    $workflowRunId = if ([IO.File]::Exists($expectedRunIdPath)) { [IO.File]::ReadAllText($expectedRunIdPath).Trim() } else { '' }
+    $state = @{
+        Id = [guid]::NewGuid().ToString('N')
+        WorkflowRunId = $workflowRunId
+        UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        Stage = 'initialize'
+        DeadlineUtc = [DateTime]::UtcNow.AddMinutes(5).ToString('o')
+        Message = 'Initializing isolated client-package coverage'
+        Status = 'Running'
+        Outcome = 'Unverified'
+        PackageId = ''
+        RequiredDistributionPoints = @()
+    }
+    Write-MemLabsProcessProgress -Path $progressPath -Record $state
+    $definitions = @{}
+    foreach ($name in @(
+            'Write-MemLabsClientPackageTimelineRecord', 'Invoke-MemLabsClientPackageDiagnosticProbe',
+            'Get-MemLabsDpVmMetadataMap', 'Test-MemLabsLocalComputerName',
+            'Set-MemLabsClientPackageProgress'
+        )) {
+        $definitions[$name] = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).Definition
+    }
+    $Variables.MemLabsCoverageProgressPath = $progressPath
+    $Variables.MemLabsCoverageProgressState = $state
+    $Variables.coverageFunctionDefinitions = $definitions
+    $Variables.coverageScriptText = $CoverageScript.ToString()
+    $Variables.guestScriptRoot = $ScriptRoot
+    $worker = {
+        . (Join-Path $guestScriptRoot 'ProcessFunctions.ps1')
+        . (Join-Path $guestScriptRoot 'ScriptFunctions.ps1')
+        foreach ($entry in $coverageFunctionDefinitions.GetEnumerator()) {
+            Set-Item -Path "Function:\$($entry.Key)" -Value ([scriptblock]::Create($entry.Value))
+        }
+        Set-MemLabsClientPackageProgress -Message 'Connecting the coverage worker to the SMS Provider'
+        Import-Module -Name $configurationManagerModulePath -ErrorAction Stop
+        if (-not (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+            $null = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $siteProviderHost -ErrorAction Stop
+        }
+        Set-Location "$($SiteCode):"
+        $clearStuckDistmgrWedge = [scriptblock]::Create($clearStuckDistmgrWedge)
+        $failureSequence = [int]$global:MemLabsFailureSequence
+        $null = & ([scriptblock]::Create($coverageScriptText))
+        if ([int]$global:MemLabsFailureSequence -gt $failureSequence) {
+            throw "Client-package coverage reported failure: $global:MemLabsLastFailureStatus"
+        }
+        return [pscustomobject]$script:MemLabsCoverageProgressState
+    }
+    $reportProgress = {
+        param($Report)
+        $checkpoint = $Report.Progress
+        if ($checkpoint.Message -like 'JOBFAILURE:*') { return }
+        $remaining = if ($checkpoint.DeadlineUtc) {
+            [math]::Max(0, [math]::Round((([datetime]$checkpoint.DeadlineUtc).ToUniversalTime() - [DateTime]::UtcNow).TotalSeconds))
+        }
+        else { 'unknown' }
+        Write-DscStatus "Client pkg coverage: worker PID $($Report.ProcessId), stage=$($checkpoint.Stage), elapsed=$($Report.ElapsedSeconds)s, checkpointAge=$($Report.IdleSeconds)s, stageRemaining=${remaining}s; $($checkpoint.Message)"
+    }
+    $result = Invoke-MemLabsBoundedPowerShell -ProbeScript $worker -Variables $Variables `
+        -TimeoutSeconds 7200 -ProgressPath $progressPath -ProgressId $state.Id `
+        -StallTimeoutSeconds 300 -ProgressIntervalSeconds 30 -OnProgress $reportProgress
+    $lastState = if ($result.Output) { $result.Output } elseif ($result.Progress) { $result.Progress } else { [pscustomobject]$state }
+    $lastState.Status = if ($result.TimedOut) { 'TimedOut' } elseif ($result.Error) { 'Failed' } else { 'Completed' }
+    $lastState | Add-Member -NotePropertyName Error -NotePropertyValue $result.Error -Force
+    Write-MemLabsProcessProgress -Path $progressPath -Record $lastState
+    $classification = if ($result.TimedOut) { 'CoverageTimedOut' } elseif ($result.Error) { 'CoverageWorkerFailed' } else { "$($lastState.Outcome)" }
+    Write-MemLabsClientPackageTimelineRecord -Path (Join-Path $LogPath 'ClientPackageTimeline.jsonl') -Record ([ordered]@{
+            SchemaVersion = 2; Type = 'ClientPackageCoverage'; CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+            RunId = $state.Id; Trigger = 'coverage-worker-finished'; Classification = $classification
+            SiteCode = $Variables.SiteCode; PackageId = $lastState.PackageId
+            Stage = $lastState.Stage; ElapsedSeconds = $result.ElapsedSeconds
+            RequiredDistributionPoints = @($lastState.RequiredDistributionPoints)
+            Package = $null; Targeting = @(); Summarizer = @(); Replication = @()
+            NodeStateIncluded = $false; SourceNode = $null; Nodes = @()
+            Errors = @($result.Error | Where-Object { $_ })
+        })
+    if ($result.TimedOut) {
+        Write-DscStatus "Client pkg coverage: stopped bounded worker at stage '$($lastState.Stage)'; coverage outcome=$($lastState.Outcome). $($result.Error) Continuing Phase 8 with a warning; Phase 11 must verify required DP coverage." -Warning
+    }
+    elseif ($result.Error) {
+        Write-DscStatus "Client pkg coverage worker failed: $($result.Error)" -Failure
+    }
+    elseif ($lastState.Outcome -notin @('Covered', 'NotRequired')) {
+        Write-DscStatus "Client pkg coverage: required coverage remains unverified. Continuing Phase 8 with a warning; Phase 11 must verify it." -Warning
+    }
 }
 
 function Get-MemLabsDpVmMetadataMap {
@@ -245,13 +378,14 @@ $getMissingBoundaryGroupSiteSystems = {
 # fresh-deploy path AND the "BGs already exist" early-return path below -- i.e. a
 # Phase 8 re-run self-heals a stuck DP, not just a first deploy. Phase 8 is the right
 # home for this (content-distribution context + a generous wait budget).
-$ensureClientPkgCoverage = {
+$ensureClientPkgCoverageCore = {
     # Get-CMPackage returns one client package PER SITE in a hierarchy, so an unfiltered
     # read makes $PackageID an array and every WQL filter built from it matches nothing.
     $allClientPkgs = @(Get-CMPackage -Fast -Name 'Configuration Manager Client Package')
     if ($allClientPkgs.Count -eq 0) { Write-DscStatus "Client pkg coverage: client package not found."; return }
     $localClientPkgs = @($allClientPkgs | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
     $PackageID = if ($localClientPkgs.Count -gt 0) { "$($localClientPkgs[0].PackageID)" } else { "$($allClientPkgs[0].PackageID)" }
+    Set-MemLabsClientPackageProgress -PackageId $PackageID -Message "Resolved client package $PackageID"
     if ($allClientPkgs.Count -gt 1) {
         Write-DscStatus "Client pkg coverage: chose $PackageID from $($allClientPkgs.Count) same-named packages ($(if ($localClientPkgs.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
     }
@@ -259,7 +393,7 @@ $ensureClientPkgCoverage = {
     $fqdnOf = { param($nal) if ("$nal" -match '\\([^\\"\]]+)') { $Matches[1] } else { $null } }
     $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
     $coverageTimelinePath = Join-Path $LogPath 'ClientPackageTimeline.jsonl'
-    $coverageRunId = [guid]::NewGuid().ToString('N')
+    $coverageRunId = $script:MemLabsCoverageProgressState.Id
     $coverageTimelineState = @{ Disabled = $false }
 
     $collectNodeContentState = {
@@ -376,8 +510,6 @@ $ensureClientPkgCoverage = {
                             [ordered]@{
                                 ServerNALPath   = "$($_.ServerNALPath)"
                                 SiteCode        = "$($_.SiteCode)"
-                                SourceVersion   = "$($_.SourceVersion)"
-                                StoredPkgVersion = "$($_.StoredPkgVersion)"
                                 RefreshNow      = $_.RefreshNow
                                 LastRefreshTime = "$($_.LastRefreshTime)"
                             }
@@ -407,51 +539,68 @@ $ensureClientPkgCoverage = {
         return [pscustomobject]$node
     }
 
-    $writeCoverageSnapshot = {
+    $collectCoverageSnapshot = {
         param(
             [Parameter(Mandatory)][string]$Trigger,
             [string[]]$DistributionPoints = @(),
             [string[]]$ReplicationSites = @(),
-            [bool]$IncludeNodeState = $false,
-            [bool]$ForceWrite = $false
+            [bool]$IncludeNodeState = $false
         )
 
-        if ($coverageTimelineState.Disabled -and -not $ForceWrite) { return }
+        $collectNodeContentState = [scriptblock]::Create($collectNodeContentState)
+        $fqdnOf = [scriptblock]::Create($fqdnOf)
+        Set-Item -Path Function:\Test-MemLabsLocalComputerName `
+            -Value ([scriptblock]::Create($localComputerNameFunction))
+        if ($ReplicationSites.Count -gt 0) {
+            Import-Module -Name $configurationManagerModulePath -ErrorAction Stop
+            if (-not (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                $null = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $siteProviderHost -ErrorAction Stop
+            }
+            Set-Location "$($SiteCode):"
+        }
         try {
             $capturedAt = [DateTime]::UtcNow
             $errors = [System.Collections.Generic.List[string]]::new()
+            $providerStateReadable = $true
             $package = $null
             try {
-                $package = Get-MemLabsProjectedCimRows -Namespace $ns `
+                # Optional probes must not request the workflow's CIM reboot recovery.
+                $package = Get-CimInstance -Namespace $ns `
                     -ClassName SMS_Package -Filter "PackageID='$PackageID'" `
-                    -Property @('SourceSite', 'SourceVersion', 'StoredPkgVersion', 'SourceDate') |
+                    -Property @('SourceSite', 'SourceVersion', 'StoredPkgVersion', 'SourceDate') `
+                    -OperationTimeoutSec 15 -ErrorAction Stop |
                     Select-Object -First 1
             }
-            catch { $errors.Add("SMS_Package: $($_.Exception.Message)") }
+            catch {
+                $providerStateReadable = $false
+                $errors.Add("SMS_Package: $($_.Exception.Message)")
+            }
 
             $targetingRows = [System.Collections.Generic.List[object]]::new()
             try {
-                # ConfigMgr's dynamic SMS provider returns a generic failure when
-                # Get-CimInstance -Property includes a member absent from the class.
-                foreach ($row in @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                foreach ($row in @(Get-CimInstance -Namespace $ns `
                         -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
-                        -Property @('ServerNALPath', 'SiteCode', 'SourceVersion', 'RefreshNow'))) {
+                        -Property @('ServerNALPath', 'SiteCode', 'RefreshNow') `
+                        -OperationTimeoutSec 15 -ErrorAction Stop)) {
                     $targetingRows.Add([ordered]@{
                             Server        = & $fqdnOf $row.ServerNALPath
                             SiteCode      = "$($row.SiteCode)"
-                            SourceVersion = "$($row.SourceVersion)"
                             RefreshNow    = $row.RefreshNow
                         })
                 }
             }
-            catch { $errors.Add("SMS_DistributionPoint: $($_.Exception.Message)") }
+            catch {
+                $providerStateReadable = $false
+                $errors.Add("SMS_DistributionPoint: $($_.Exception.Message)")
+            }
 
             $summarizerRows = [System.Collections.Generic.List[object]]::new()
             try {
-                foreach ($row in @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                foreach ($row in @(Get-CimInstance -Namespace $ns `
                         -ClassName SMS_PackageStatusDistPointsSummarizer `
                         -Filter "PackageID='$PackageID'" `
-                        -Property @('ServerNALPath', 'State', 'SourceVersion'))) {
+                        -Property @('ServerNALPath', 'State', 'SourceVersion') `
+                        -OperationTimeoutSec 15 -ErrorAction Stop)) {
                     $rowState = [int]$row.State
                     $summarizerRows.Add([ordered]@{
                             Server        = & $fqdnOf $row.ServerNALPath
@@ -461,7 +610,10 @@ $ensureClientPkgCoverage = {
                         })
                 }
             }
-            catch { $errors.Add("SMS_PackageStatusDistPointsSummarizer: $($_.Exception.Message)") }
+            catch {
+                $providerStateReadable = $false
+                $errors.Add("SMS_PackageStatusDistPointsSummarizer: $($_.Exception.Message)")
+            }
 
             $linkRows = [System.Collections.Generic.List[object]]::new()
             foreach ($site in @($ReplicationSites | Where-Object { $_ } | Select-Object -Unique)) {
@@ -476,7 +628,10 @@ $ensureClientPkgCoverage = {
                             Site2ToSite1SiteState     = $link.Site2ToSite1SiteState
                         })
                 }
-                catch { $errors.Add("Replication link '$site': $($_.Exception.Message)") }
+                catch {
+                    $providerStateReadable = $false
+                    $errors.Add("Replication link '$site': $($_.Exception.Message)")
+                }
             }
 
             $nodeRows = [System.Collections.Generic.List[object]]::new()
@@ -547,7 +702,13 @@ $ensureClientPkgCoverage = {
 
             $validatingServers = @($summarizerRows | Where-Object { $_.StateName -eq 'ContentValidating' } | ForEach-Object { "$($_.Server)" })
             $classification = 'AwaitingStateTransition'
-            if ($linkRows.Count -gt 0 -and @($linkRows | Where-Object {
+            if (-not $providerStateReadable) {
+                $classification = 'ProviderStateUnreadable'
+            }
+            elseif (-not $package) {
+                $classification = 'PackageUnavailable'
+            }
+            elseif ($linkRows.Count -gt 0 -and @($linkRows | Where-Object {
                         [int]$_.LinkStatus -ne 2 -or [int]$_.Site1ToSite2GlobalState -ne 2 -or [int]$_.Site2ToSite1GlobalState -ne 2
                     }).Count -gt 0) {
                 $classification = 'ReplicationLinkInactive'
@@ -602,11 +763,90 @@ $ensureClientPkgCoverage = {
                 Nodes          = $nodeRows.ToArray()
                 Errors         = $errors.ToArray()
             }
-            Write-MemLabsClientPackageTimelineRecord -Path $coverageTimelinePath -Record $record
-            $coverageTimelineState.Disabled = $false
+            return [pscustomobject]$record
         }
         catch {
-            Write-DscStatus "Client pkg coverage diagnostics: snapshot '$Trigger' failed: $($_.Exception.Message)"
+            throw "Snapshot '$Trigger' failed: $($_.Exception.Message)"
+        }
+    }
+
+    $writeCoverageSnapshot = {
+        param(
+            [Parameter(Mandatory)][string]$Trigger,
+            [string[]]$DistributionPoints = @(),
+            [string[]]$ReplicationSites = @(),
+            [bool]$IncludeNodeState = $false,
+            [bool]$ForceWrite = $false
+        )
+
+        if ($coverageTimelineState.Disabled -and -not $ForceWrite) { return }
+        $capturedAt = [DateTime]::UtcNow
+        try {
+            $variables = @{
+                ns                        = $ns
+                SiteCode                  = $SiteCode
+                PackageID                 = $PackageID
+                coverageRunId             = $coverageRunId
+                stateName                 = $stateName
+                collectNodeContentState   = $collectNodeContentState.ToString()
+                fqdnOf                    = $fqdnOf.ToString()
+                localComputerNameFunction = ${function:Test-MemLabsLocalComputerName}.ToString()
+                deployConfig              = $deployConfig
+                ThisVM                    = $ThisVM
+                DomainFullName            = $DomainFullName
+                clientPackageDiagCredential = $clientPackageDiagCredential
+            }
+            if ($ReplicationSites.Count -gt 0) {
+                $module = Get-Module -Name ConfigurationManager | Select-Object -First 1
+                if (-not $module) { throw 'The ConfigurationManager module is not loaded for replication diagnostics.' }
+                $variables.configurationManagerModulePath = $module.Path
+                $variables.siteProviderHost = (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Stop).Root
+            }
+            $parameters = @{
+                Trigger            = $Trigger
+                DistributionPoints = $DistributionPoints
+                ReplicationSites   = $ReplicationSites
+                IncludeNodeState   = $IncludeNodeState
+            }
+            Write-DscStatus "Client pkg coverage diagnostics: collecting '$Trigger' (60s wall-clock limit)." -NoStatus
+            $probe = Invoke-MemLabsClientPackageDiagnosticProbe -ProbeScript $collectCoverageSnapshot `
+                -Variables $variables -Parameters $parameters -TimeoutSeconds 60
+            if ($probe.Error) {
+                $diagnosticStatus = if ($probe.TimedOut) { 'TimedOut' } else { 'Failed' }
+                Write-DscStatus "Client pkg coverage diagnostics: snapshot '$Trigger' ${diagnosticStatus}: $($probe.Error)" -NoStatus -Warning
+                $record = [ordered]@{
+                    SchemaVersion     = 2
+                    CapturedAtUtc     = $capturedAt.ToString('o')
+                    RunId             = $coverageRunId
+                    Trigger           = $Trigger
+                    Classification    = "Diagnostic$diagnosticStatus"
+                    DiagnosticStatus  = $diagnosticStatus
+                    SiteCode          = $SiteCode
+                    PackageId         = $PackageID
+                    Package           = $null
+                    Targeting         = @()
+                    Summarizer        = @()
+                    Replication       = @()
+                    NodeStateIncluded = $false
+                    SourceNode        = $null
+                    Nodes             = @()
+                    Errors            = @($probe.Error)
+                }
+                $coverageTimelineState.Disabled = $true
+            }
+            else {
+                if (@($probe.Output).Count -ne 1 -or $probe.Output.SchemaVersion -ne 2 -or
+                    $probe.Output.PackageId -ne $PackageID -or $probe.Output.Trigger -ne $Trigger) {
+                    throw "Snapshot '$Trigger' returned an invalid diagnostic record."
+                }
+                $record = $probe.Output
+                $record | Add-Member -NotePropertyName DiagnosticStatus -NotePropertyValue 'Completed' -Force
+                $coverageTimelineState.Disabled = $false
+            }
+            Write-MemLabsClientPackageTimelineRecord -Path $coverageTimelinePath -Record $record
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage diagnostics: snapshot '$Trigger' failed: $($_.Exception.Message)" -NoStatus -Warning
             $coverageTimelineState.Disabled = $true
         }
     }
@@ -674,6 +914,7 @@ $ensureClientPkgCoverage = {
     }
 
     $resolveDeadline = (Get-Date).AddMinutes(10)
+    Set-MemLabsClientPackageProgress -Stage 'resolve-DPs' -DeadlineUtc $resolveDeadline -Message 'Resolving boundary-group distribution points'
     $bgDpFqdns = @()
     $bgLinks = @()
     $expectedBgObjects = @()
@@ -825,10 +1066,15 @@ $ensureClientPkgCoverage = {
     }
     $bgDpFqdns = @($keptDpFqdns)
     $optionalDpFqdns = @($secOptionalDps)
+    Set-MemLabsClientPackageProgress -RequiredDistributionPoints @($bgDpFqdns | Where-Object { $_ -notin $optionalDpFqdns })
     if ($optionalDpFqdns.Count -gt 0) {
         Write-DscStatus "Client pkg coverage: $($optionalDpFqdns.Count) secondary-site DP(s) have NO push clients assigned, so nothing is blocked if they lag: $($optionalDpFqdns -join ', '). They are still waited on -- for free while any other DP is outstanding -- and only get ${optionalGraceMinutes} extra minute(s) once every other DP is Installed."
     }
-    if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems require client-package coverage."; return }
+    if ($bgDpFqdns.Count -eq 0) {
+        Set-MemLabsClientPackageProgress -Outcome 'NotRequired'
+        Write-DscStatus "Client pkg coverage: no DP site systems require client-package coverage."
+        return
+    }
 
     # We ARE covering one or more secondary-site DPs (clients depend on them).
     # Content can't land on a secondary DP until that secondary's replication link
@@ -852,6 +1098,7 @@ $ensureClientPkgCoverage = {
         -IncludeNodeState $false
     if ($secLinkSites.Count -gt 0) {
         $linkDeadline = (Get-Date).AddMinutes(30)
+        Set-MemLabsClientPackageProgress -Stage 'replication-links' -DeadlineUtc $linkDeadline -Message 'Waiting for secondary replication links'
         $pendingLink = @($secLinkSites.Keys)
         $lastLinkTimelineCapture = $null
         while ($pendingLink.Count -gt 0 -and (Get-Date) -lt $linkDeadline) {
@@ -1466,6 +1713,7 @@ $ensureClientPkgCoverage = {
     }
     $coverageStart = Get-Date
     $coverageDeadline = $coverageStart.AddMinutes($(if ($extendedCoverageWait) { $contentPendingWaitMinutes } else { $normalWaitMinutes }))
+    Set-MemLabsClientPackageProgress -Stage 'coverage' -DeadlineUtc $coverageDeadline -Message 'Polling client-package coverage'
     $pkgSourceBumped = $false
     $coverageExtendedForRepair = $false
     $repairExtraMinutes = 25
@@ -1523,6 +1771,7 @@ $ensureClientPkgCoverage = {
             # slow WMI call must not silently turn a 45-minute promise into a
             # try-count whose wall-clock duration is unknowable.
             $coverageDeadline = $coverageStart.AddMinutes($contentPendingWaitMinutes)
+            Set-MemLabsClientPackageProgress -DeadlineUtc $coverageDeadline
             Write-DscStatus "Client pkg coverage: client package content has not replicated down to site $SiteCode yet (StoredPkgVersion=0; source is a parent/CAS site). Waiting for the parent to send content until the ${contentPendingWaitMinutes}-minute deadline and NOT tearing down the DP targeting that signals it."
         }
         # Only the parent can start this send, and only after something wakes its distmgr.
@@ -1826,6 +2075,7 @@ $ensureClientPkgCoverage = {
                             $repairDeadline = (Get-Date).AddMinutes($repairExtraMinutes)
                             if ($repairDeadline -gt $coverageDeadline) {
                                 $coverageDeadline = $repairDeadline
+                                Set-MemLabsClientPackageProgress -DeadlineUtc $coverageDeadline
                                 Write-DscStatus "Client pkg coverage: [wedge-repair] extended the coverage deadline to $repairExtraMinutes min from now (once) so the re-armed send has time to land."
                             }
                             else {
@@ -1866,6 +2116,7 @@ $ensureClientPkgCoverage = {
     # Package's CURRENT source version: a DP pinned at an OLDER version is a
     # content-UPDATE/replication problem, not "never distributed" (observed: the
     # pull DP had v3 while the site server processed v1). Capture it to flag skew.
+    Set-MemLabsClientPackageProgress -Stage 'final-state' -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(3)) -Message 'Verifying final coverage and collecting its snapshot'
     $pkgSourceVersion = $null
     try {
         $pkgSourceVersion = (Get-MemLabsProjectedCimRows -Namespace $ns `
@@ -1897,6 +2148,8 @@ $ensureClientPkgCoverage = {
     }
     if (-not $coverageExitReason) { $coverageExitReason = 'Deadline' }
     $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
+    $requiredBad = @($stillBad | Where-Object { $_ -notin $optionalDpFqdns })
+    Set-MemLabsClientPackageProgress -Outcome $(if ($requiredBad.Count -eq 0) { 'Covered' } else { 'Incomplete' })
     $finalSnapshotTrigger = if ($stillBad.Count -eq 0) {
         'coverage-complete'
     }
@@ -1941,6 +2194,7 @@ $ensureClientPkgCoverage = {
         else {
             Write-DscStatus "Client pkg coverage: STILL not Installed at the wall-clock deadline after ${coverageElapsedSec}s and $try attempt(s) on: $($diagnosticTargets -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics..." -Warning
         }
+        Set-MemLabsClientPackageProgress -Stage 'legacy-diagnostics' -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(60)) -Message 'Collecting bounded post-deadline DP diagnostics'
         foreach ($dp in $diagnosticTargets) {
             $dpHost = ("$dp" -split '\.')[0]
             $u = $dp.ToUpper()
@@ -1961,10 +2215,10 @@ $ensureClientPkgCoverage = {
                 try {
                     $tgt = @(Get-MemLabsProjectedCimRows -Namespace $ns `
                             -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
-                            -Property @('ServerNALPath', 'SiteCode', 'SourceVersion', 'RefreshNow') |
+                            -Property @('ServerNALPath', 'SiteCode', 'RefreshNow') |
                             Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }) | Select-Object -First 1
                     if ($tgt) {
-                        $sInfo = "no summarizer row BUT targeting row EXISTS (SMS_DistributionPoint: SiteCode=$($tgt.SiteCode) SourceVersion=$($tgt.SourceVersion) RefreshNow=$($tgt.RefreshNow)) -> distribution WAS requested; the site DB just never got an Installed status back"
+                        $sInfo = "no summarizer row BUT targeting row EXISTS (SMS_DistributionPoint: SiteCode=$($tgt.SiteCode) RefreshNow=$($tgt.RefreshNow)) -> distribution WAS requested; the site DB just never got an Installed status back"
                     }
                     else {
                         $sInfo = 'no summarizer row AND no targeting row (SMS_DistributionPoint) -> the (re)distribute never created a distribution for this DP'
@@ -2106,6 +2360,7 @@ $ensureClientPkgCoverage = {
         }
     }
 
+    Set-MemLabsClientPackageProgress -Stage 'discovery-refresh' -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(60)) -Message 'Finishing coverage discovery refresh'
     if ($pushClients) {
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name "All Systems"
@@ -2113,6 +2368,28 @@ $ensureClientPkgCoverage = {
     else {
         Write-DscStatus "Client pkg coverage: skipping post-coverage discovery refresh because there are no client-push targets."
     }
+}
+
+$ensureClientPkgCoverage = {
+    $module = Get-Module -Name ConfigurationManager | Select-Object -First 1
+    if (-not $module) { throw 'The ConfigurationManager module is not loaded for client-package coverage.' }
+    $variables = @{
+        SiteCode = $SiteCode
+        deployConfig = $deployConfig
+        ThisVM = $ThisVM
+        bgs = @($bgs)
+        DomainFullName = $DomainFullName
+        NetbiosDomainName = $NetbiosDomainName
+        LogPath = $LogPath
+        ConfigFilePath = $ConfigFilePath
+        pushClients = $pushClients
+        clientPackageDiagCredential = $clientPackageDiagCredential
+        clearStuckDistmgrWedge = $clearStuckDistmgrWedge.ToString()
+        configurationManagerModulePath = $module.Path
+        siteProviderHost = (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Stop).Root
+    }
+    Invoke-MemLabsClientPackageCoverage -CoverageScript $ensureClientPkgCoverageCore `
+        -Variables $variables -ScriptRoot $PSScriptRoot -LogPath $LogPath
 }
 
 # Ensure every CHILD (secondary) boundary group also lists the parent primary's

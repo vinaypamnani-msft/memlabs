@@ -8404,7 +8404,22 @@ $global:VM_Config = {
                 $stopwatch2.Start()
                 # Single round-trip: fetch DSC_Status.txt AND the completion-runid sentinel
                 $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock {
+                    param($workflowRunId)
                     $statusText = Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue
+                    $coveragePath = 'C:\staging\DSC\ClientPackageCoverage.progress.json'
+                    if ($workflowRunId -and "$statusText" -notmatch 'JOBFAILURE' -and
+                        [IO.File]::Exists($coveragePath)) {
+                        try {
+                            $coverage = [IO.File]::ReadAllText($coveragePath) | ConvertFrom-Json -ErrorAction Stop
+                            if ($coverage.WorkflowRunId -eq $workflowRunId -and $coverage.Status -eq 'Running') {
+                                $age = [math]::Max(0, [math]::Round(([DateTime]::UtcNow - ([datetime]$coverage.UpdatedAtUtc).ToUniversalTime()).TotalSeconds))
+                                $statusText = "Setting up ConfigMgr. Client pkg coverage: stage=$($coverage.Stage), checkpointAge=${age}s; $($coverage.Message)"
+                            }
+                        }
+                        catch {
+                            $statusText = "Setting up ConfigMgr. Client pkg coverage progress is unreadable: $($_.Exception.Message)"
+                        }
+                    }
                     $completedRunId = $null
                     if (Test-Path C:\staging\DSC\ScriptWorkflow.completed.runid) {
                         $completedRunId = (Get-Content C:\staging\DSC\ScriptWorkflow.completed.runid -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -8417,7 +8432,7 @@ $global:VM_Config = {
                             ConvertFrom-Json -ErrorAction Stop
                     }
                     [pscustomobject]@{ StatusText = $statusText; CompletedRunId = $completedRunId; MemoryRecovery = $memoryRecovery }
-                } -SuppressLog:$suppressNoisyLogging
+                } -ArgumentList $expectedRunId -SuppressLog:$suppressNoisyLogging
                 # Unwrap the bundled object into local snapshots WITHOUT mutating
                 # $status. On some failure paths Invoke-VmCommand returns an
                 # object whose ScriptBlockOutput is read-only/non-settable, and

@@ -29,7 +29,7 @@ process {
                     throw "Invalid JSON in '$($file.FullName)' at line $lineNumber`: $($_.Exception.Message)"
                 }
 
-                if ($record.PackageId) {
+                if ($record.PackageId -or $record.Type -eq 'ClientPackageCoverage') {
                     $summaries = @($record.Summarizer | ForEach-Object {
                             "$($_.Server)=$($_.StateName)(v$($_.SourceVersion))"
                         })
@@ -39,7 +39,14 @@ process {
                                 -not [string]::IsNullOrWhiteSpace("$($_.StoredPkgVersion)")) {
                                 $targetState.Add("stored:$($_.StoredPkgVersion)")
                             }
-                            $targetState.Add("source:$($_.SourceVersion)")
+                            if ($_.PSObject.Properties['SourceVersion'] -and
+                                -not [string]::IsNullOrWhiteSpace("$($_.SourceVersion)")) {
+                                $targetState.Add("source:$($_.SourceVersion)")
+                            }
+                            if ($_.PSObject.Properties['SiteCode'] -and
+                                -not [string]::IsNullOrWhiteSpace("$($_.SiteCode)")) {
+                                $targetState.Add("site:$($_.SiteCode)")
+                            }
                             $targetState.Add("refresh:$($_.RefreshNow)")
                             "$($_.Server)=$($targetState -join '/')"
                         })

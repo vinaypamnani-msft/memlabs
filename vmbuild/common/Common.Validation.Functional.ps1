@@ -11516,18 +11516,44 @@ function Get-ClientPackageValidationScope {
             } | Select-Object -ExpandProperty siteCode)
     }
     catch {}
+    $scopeRecords = @($DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+            "$($_.PrimarySiteCode)" -eq "$siteCode"
+        } | ForEach-Object { @($_.DistributionPoints) })
+    $ownedSiteCodes += @($scopeRecords | Where-Object { $_.Role -eq 'Secondary' } | ForEach-Object { "$($_.SiteCode)" })
     $ownedSiteCodes = @($ownedSiteCodes | Where-Object { $_ } | Select-Object -Unique)
     $ownedSiteUpper = @($ownedSiteCodes | ForEach-Object { "$($_)".ToUpper() })
 
-    $ownedDpNames = @($DeployConfig.virtualMachines | Where-Object {
+    $dpVms = @($DeployConfig.virtualMachines | Where-Object {
             if (-not $_.vmName -or -not $_.siteCode) { return $false }
             $isDp = ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or $_.role -eq 'Secondary')
             return $isDp -and ($ownedSiteUpper -contains "$($_.siteCode)".ToUpper())
+        })
+    foreach ($record in $scopeRecords) {
+        $name = "$($record.VmName)"
+        if (-not $name) { $name = ("$($record.Fqdn)" -split '\.')[0] }
+        if (-not $name -or @($dpVms | Where-Object { $_.vmName -ieq $name }).Count -gt 0) { continue }
+        $dpVms += [pscustomobject]@{
+            vmName = $name; role = "$($record.Role)"
+            siteCode = "$($record.SiteCode)"; network = "$($record.Network)"
+        }
+    }
+    $ownedDpNames = @($dpVms | Select-Object -ExpandProperty vmName | Select-Object -Unique)
+    $requiredDpNames = @($dpVms | Where-Object {
+            $dp = $_
+            if ($dp.role -ne 'Secondary') { return $true }
+            $targets = @($DeployConfig.virtualMachines | Where-Object {
+                    (Test-PushClientRequested -VM $_) -and (
+                        "$($_.pushClient)" -eq "$($dp.siteCode)" -or
+                        ($_.pushClient -eq $true -and $dp.network -and "$($_.network)" -eq "$($dp.network)")
+                    )
+                })
+            return $targets.Count -gt 0
         } | Select-Object -ExpandProperty vmName | Select-Object -Unique)
 
     return [pscustomobject]@{
         SiteCodes = $ownedSiteCodes
         DpNames   = $ownedDpNames
+        RequiredDpNames = $requiredDpNames
     }
 }
 
@@ -11565,11 +11591,12 @@ function Test-CMClientPackageDistribution {
     $ownedDpNames = @($validationScope.DpNames)
     $ownedSiteCsv = ($ownedSiteCodes -join ',')
     $ownedDpCsv = ($ownedDpNames -join ',')
+    $requiredDpCsv = (@($validationScope.RequiredDpNames) -join ',')
 
     Write-Log "[Phase $Phase] $VMName [ClientPkg]: Verifying client package distribution for site '$siteCode' (owned sites: $ownedSiteCsv; owned DPs: $ownedDpCsv)" -LogOnly
 
     $scriptBlock = {
-        param($sc, $ownedSitesCsv, $ownedDpCsv)
+        param($sc, $ownedSitesCsv, $ownedDpCsv, $requiredDpCsv)
         $results = @{ Passed = $true; ContentPendingFromParent = $false; ClientPkgSourceSite = ''; Details = [System.Collections.Generic.List[string]]::new() }
         $ns = "root\SMS\site_$sc"
         $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
@@ -11585,6 +11612,7 @@ function Test-CMClientPackageDistribution {
         # owns. Everything else is reported for context and never judged.
         $ownedSites = @("$ownedSitesCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpper() })
         $ownedDps = @("$ownedDpCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpper() })
+        $requiredDps = @("$requiredDpCsv" -split ',' | Where-Object { $_ } | ForEach-Object { $_.Trim().ToUpper() })
         $isOwnedDp = {
             param($DpNameOrFqdn, $DpSiteCode)
             $short = ("$DpNameOrFqdn" -split '\.')[0].ToUpper()
@@ -11647,24 +11675,52 @@ function Test-CMClientPackageDistribution {
             $results.Details.Add("FAIL: could not query SMS_Package for the client package: $($_.Exception.Message)")
             return $results
         }
-        if ($clientPkgs.Count -eq 0) {
+        $productionClientPackages = @($clientPkgs | Where-Object { $_.Name -eq 'Configuration Manager Client Package' })
+        $localProductionPackages = @($productionClientPackages | Where-Object { "$($_.PackageID)" -like "$sc*" })
+        $requiredClientPackageId = if ($localProductionPackages.Count -gt 0) {
+            "$($localProductionPackages[0].PackageID)"
+        }
+        elseif ($productionClientPackages.Count -gt 0) {
+            "$($productionClientPackages[0].PackageID)"
+        }
+        else { '' }
+        if ($requiredDps.Count -gt 0 -and $productionClientPackages.Count -eq 0) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: no production client package found in site $sc; required DP coverage cannot be verified ($($requiredDps -join ', ')).")
+        }
+        elseif ($clientPkgs.Count -eq 0) {
             $results.Details.Add("WARN: no 'Configuration Manager Client%' package found in site $sc -- cannot verify client package distribution")
         }
 
         foreach ($pkg in $clientPkgs) {
             $pkgId = $pkg.PackageID
-            $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction SilentlyContinue)
+            $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction Stop)
             # Convergence: allow in-progress (1/2/7) to settle before judging.
             for ($t = 1; $t -le 3; $t++) {
                 $pending = @($dpRows | Where-Object { $_.State -in 1, 2, 7 })
                 if ($pending.Count -eq 0) { break }
                 Start-Sleep -Seconds 30
-                $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction SilentlyContinue)
+                $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction Stop)
             }
             if ($dpRows.Count -eq 0) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: client package '$($pkg.Name)' ($pkgId) is NOT distributed to ANY DP -- clients can't get client content (ccmsetup loops on GetDPLocations / 0x87d00215). Distribute it to a DP in the clients' boundary group.")
                 continue
+            }
+            if ($requiredClientPackageId -and $pkg.PackageID -eq $requiredClientPackageId) {
+                foreach ($requiredDp in $requiredDps) {
+                    $requiredRows = @($dpRows | Where-Object {
+                            (("$(& $dpNameOf $_.ServerNALPath)" -split '\.')[0]).ToUpper() -eq $requiredDp
+                        })
+                    if (@($requiredRows | Where-Object {
+                                [int]$_.State -eq 0 -and [int]$pkg.SourceVersion -gt 0 -and
+                                "$($_.SourceVersion)" -eq "$($pkg.SourceVersion)"
+                            }).Count -eq 0) {
+                        $results.Passed = $false
+                        [void]$failingDps.Add($requiredDp)
+                        $results.Details.Add("FAIL: required DP '$requiredDp' does not have client package '$pkgId' Installed at SourceVersion=$($pkg.SourceVersion). A healthy fallback DP does not satisfy this DP's required coverage.")
+                    }
+                }
             }
             $foreignRows = @($dpRows | Where-Object { -not (& $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode) })
             $dpRows = @($dpRows | Where-Object { & $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode })
@@ -11781,11 +11837,11 @@ function Test-CMClientPackageDistribution {
         # the check that maps directly to the client symptom.
         try {
             $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
-            $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction SilentlyContinue)
+            $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop)
             foreach ($pkg in $clientPkgs) {
                 $dpState = @{}
                 $dpSite = @{}
-                foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($pkg.PackageID)'" -ErrorAction SilentlyContinue)) {
+                foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($pkg.PackageID)'" -ErrorAction Stop)) {
                     $rowName = (& $dpNameOf $row.ServerNALPath).ToUpper()
                     $dpState[$rowName] = [int]$row.State
                     $dpSite[$rowName] = "$($row.SiteCode)"
@@ -11813,7 +11869,8 @@ function Test-CMClientPackageDistribution {
             }
         }
         catch {
-            $results.Details.Add("WARN: boundary-group coverage check failed: $($_.Exception.Message)")
+            $results.Passed = $false
+            $results.Details.Add("FAIL: boundary-group coverage could not be verified: $($_.Exception.Message)")
         }
 
         # --- Site-wide sweep: any package stuck in a TERMINAL failed state -----
@@ -11915,7 +11972,7 @@ function Test-CMClientPackageDistribution {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $ownedSiteCsv, $ownedDpCsv `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $ownedSiteCsv, $ownedDpCsv, $requiredDpCsv `
         -DisplayName "Phase11-ClientPkg-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 

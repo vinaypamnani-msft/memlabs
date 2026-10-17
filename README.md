@@ -411,6 +411,49 @@ indicators identify possible causes, not a definitive diagnosis.
 Validate this path with `vmbuild\tools\Test-GuestCimMemoryRecovery.ps1` and
 `vmbuild\tools\Test-GuestMemoryDiagnostics.ps1`.
 
+Client-package diagnostic snapshots run in a disposable PowerShell process with
+a 60-second wall-clock limit, including local provider reads and remote node
+probes. A timeout terminates only that diagnostic process, records
+`DiagnosticTimedOut` and the error in `ClientPackageTimeline.jsonl`, and leaves
+the authoritative coverage checks and remediation running. Failed captures are
+disabled until a forced deadline capture. An unreadable provider query is
+classified as `ProviderStateUnreadable`, never as a missing targeting row.
+Targeting records use the supported `SMS_DistributionPoint` properties; package
+versions remain on the package and summarizer records, not targeting records.
+The analyzer also accepts older targeting records that contain version fields.
+Validate this path with `vmbuild\tools\Test-Phase8DiagnosticTelemetry.ps1`.
+
+The coverage work itself also runs in an owned worker process. The parent reports
+progress every 30 seconds even while a provider or WinRM call is blocked, stops a
+worker with no checkpoint for five minutes, and enforces the worker's stage
+deadlines independently of its polling loop. Existing 10-minute DP resolution,
+30-minute replication-link, and 12/45-minute content budgets remain; the existing
+one-time repair extension is preserved. Final-state collection is bounded to
+three minutes, legacy post-deadline DP diagnostics share a 60-second budget, and
+the discovery refresh has a 60-second limit. An independent two-hour ceiling
+guards the entire worker. The Windows Job Object also cancels nested diagnostic
+workers, including when their owning process exits unexpectedly.
+
+Coverage deadline/stall exhaustion records `CoverageTimedOut`, retains the last
+checkpoint and required DP set, and **warns rather than failing Phase 8**. Existing
+CIM memory retries and distribution re-arm cadences are retained; a killed
+worker is not blindly replayed, since it may have already changed distribution
+state. Non-timeout script/provider errors remain failures. Live host progress is
+scoped to the current workflow RunId so an older worker cannot mask current work.
+
+Phase 11 is authoritative after that warning. Every required regular DP, and any
+Secondary DP with assigned push clients, must report the current production client
+package version Installed even when a fallback DP is healthy. Missing packages/rows and
+unreadable boundary coverage fail validation. Unassigned Secondary DPs retain
+their optional grace/fallback behavior; foreign-site DPs are not judged from a
+non-authoritative provider. Projected managed DPs remain in the validation scope
+even when omitted from the current VM list.
+
+Validate these contracts with `vmbuild\tools\Test-ClientPackageCoverageBounds.ps1`,
+`vmbuild\tools\Test-Phase11ClientPackageCoverage.ps1`,
+`vmbuild\tools\Test-OptionalSecondaryDpCoverage.ps1`, and
+`vmbuild\tools\Test-StartTestHistory.ps1`.
+
 Validate this path with `vmbuild\tools\Test-AutomatedResumePreparation.ps1` and
 `vmbuild\tools\Test-PhaseFailurePropagation.ps1`.
 

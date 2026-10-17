@@ -906,6 +906,10 @@ function Write-DscStatus {
         $status = "JOBFAILURE: $status"
     }
 
+    if ($script:MemLabsCoverageProgressPath -and $script:MemLabsCoverageProgressState) {
+        Set-MemLabsClientPackageProgress -Message "$status"
+    }
+
     if (-not $NoStatus.IsPresent) {
         $StatusPrefix = "Setting up ConfigMgr."
         try {
