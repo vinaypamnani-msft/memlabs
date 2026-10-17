@@ -63,6 +63,10 @@ case results, and recovery evidence. Checkpoint state stores their SHA-256
 checksums. Missing, stale, dirty-source, incomplete, or changed receipts block
 family completion and cleanup; failures retain the VMs.
 
+Receipts use short, unique temporary names in the same directory for atomic
+replacement. Full revision and receipt names stay intact without appending a
+second GUID that can exceed Windows PowerShell's legacy path limit.
+
 NOCM families record explicit `NotApplicable` recovery cases and **do not**
 qualify the CM recovery matrix. Include a CM family to claim that coverage.
 Interrupted maintenance resumes its original scoped stage before deployments

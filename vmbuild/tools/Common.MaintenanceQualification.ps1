@@ -65,7 +65,8 @@ function Write-MaintenanceQualificationReceipt {
     if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
         $null = New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop
     }
-    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    # Do not extend a valid receipt path past Windows PowerShell's path limit.
+    $temporary = Join-Path $directory ".$([guid]::NewGuid().ToString('N')).tmp"
     try {
         $Receipt | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop
         Move-Item -LiteralPath $temporary -Destination $Path -Force -ErrorAction Stop

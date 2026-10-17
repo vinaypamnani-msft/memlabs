@@ -56,6 +56,56 @@ function New-TestQualificationReceipt {
     }
 }
 try {
+    $receiptName = "lab_maintenance_baseline_$developCommit.qualification.log"
+    $longPrefix = Join-Path $tempRoot 'path-budget'
+    $paddingLength = 227 - $longPrefix.Length - $receiptName.Length - 2
+    Assert-Qualification ($paddingLength -gt 0 -and $paddingLength -lt 248) 'TEMP prefix cannot accommodate the qualification path-budget fixture.'
+    $script:QualificationReceiptDirectory = Join-Path $longPrefix ('p' * $paddingLength)
+    $longReceiptPath = Join-Path $script:QualificationReceiptDirectory $receiptName
+    Assert-Qualification ($longReceiptPath.Length -eq 227 -and
+        "$longReceiptPath.$('0' * 32).tmp".Length -eq 264) 'The receipt fixture does not reproduce the reported path-length boundary.'
+    $script:QualificationTemporaryPaths = [Collections.Generic.List[string]]::new()
+    $script:QualificationMoveFailure = $false
+    function Set-Content {
+        [CmdletBinding()]
+        param([Parameter(ValueFromPipeline)]$Value, [string]$LiteralPath, [string]$Encoding)
+        process {
+            Assert-Qualification ($LiteralPath.Length -lt 260) "Atomic qualification temporary path is $($LiteralPath.Length) characters; legacy Windows requires fewer than 260."
+            Assert-Qualification ((Split-Path $LiteralPath -Parent) -eq $script:QualificationReceiptDirectory -and
+                $LiteralPath -ne $longReceiptPath) 'The receipt was not staged separately in its destination directory.'
+            $script:QualificationTemporaryPaths.Add($LiteralPath)
+            Microsoft.PowerShell.Management\Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding $Encoding -ErrorAction Stop
+        }
+    }
+    function Move-Item {
+        [CmdletBinding()]
+        param([string]$LiteralPath, [string]$Destination, [switch]$Force)
+        if ($script:QualificationMoveFailure) { throw 'Synthetic atomic receipt move failure.' }
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force -ErrorAction Stop
+    }
+    try {
+        $longReceipt = New-TestQualificationReceipt
+        Write-MaintenanceQualificationReceipt $longReceiptPath $longReceipt
+        $null = Assert-MaintenanceQualificationReceipt -Path $longReceiptPath -Mode Recovery -MainRevision $mainCommit `
+            -DevelopRevision $developCommit -SourceDigest $digest -Targets @($target) -RequireCmCoverage
+        $longReceipt.RunId = 'e' * 32
+        Write-MaintenanceQualificationReceipt $longReceiptPath $longReceipt
+        Assert-Qualification ((Get-Content -LiteralPath $longReceiptPath -Raw | ConvertFrom-Json).RunId -eq ('e' * 32)) 'Atomic replacement did not update the long-path receipt.'
+        $beforeFailure = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $longReceiptPath -Algorithm SHA256).Hash
+        $script:QualificationMoveFailure = $true
+        $longReceipt.RunId = '0' * 32
+        Assert-QualificationThrows { Write-MaintenanceQualificationReceipt $longReceiptPath $longReceipt } '*Synthetic atomic receipt move failure*'
+        Assert-Qualification ((Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $longReceiptPath -Algorithm SHA256).Hash -eq $beforeFailure) 'A failed atomic replacement changed the previous receipt.'
+        Assert-Qualification ($script:QualificationTemporaryPaths.Count -eq 3 -and
+            @($script:QualificationTemporaryPaths | Select-Object -Unique).Count -eq 3) 'Receipt writes reused a staging path.'
+        $remaining = @(Get-ChildItem -LiteralPath $script:QualificationReceiptDirectory -File -Force)
+        Assert-Qualification ($remaining.Count -eq 1 -and $remaining[0].FullName -eq $longReceiptPath) 'Receipt staging files survived success or failure cleanup.'
+    }
+    finally {
+        Remove-Item -LiteralPath Function:\Set-Content -Force
+        Remove-Item -LiteralPath Function:\Move-Item -Force
+    }
+
     $path = Join-Path $tempRoot 'receipt.json'
     $receipt = New-TestQualificationReceipt
     Write-MaintenanceQualificationReceipt $path $receipt
