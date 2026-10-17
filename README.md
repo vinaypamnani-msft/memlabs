@@ -81,6 +81,11 @@ Validate the receipt/gating contract with
 `vmbuild\tools\Test-MaintenanceQualification.ps1` and the existing
 `vmbuild\tools\Test-MainToDevelopExpansionRunner.ps1` regressions.
 
+Runner regressions also account for the real harness holding the host mutation
+lock during preflight. The log-recovery CLI must reject that concurrent context
+and leave evidence untouched; when the lock is available, its normal log
+migration is verified. Preflight never releases or weakens the production lock.
+
 ## Deployment resume preflight
 
 Phase 0 verifies live Hyper-V inventory before preparing VMs. Runs that skip

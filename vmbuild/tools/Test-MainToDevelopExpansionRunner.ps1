@@ -992,20 +992,52 @@ try {
     $null = New-Item -ItemType Directory -Path (Join-Path $recoverCliSource 'vmbuild\logs') -Force
     $null = New-Item -ItemType Directory -Path $recoverCliLogs -Force
     [IO.File]::WriteAllText((Join-Path $recoverCliLogs 'VMBuild.recover.log'), 'recover-only')
+    # Qualification runs in a child of the real host-lock owner. Recovery must
+    # refuse that context rather than moving evidence during an active cycle.
+    $recoverLockProbe = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+    $recoverLockAvailable = $false
+    try {
+        try { $recoverLockAvailable = $recoverLockProbe.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $recoverLockAvailable = $true }
+    }
+    finally {
+        if ($recoverLockAvailable) { $recoverLockProbe.ReleaseMutex() }
+        $recoverLockProbe.Dispose()
+    }
     $recoverOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $runnerPath `
             -RecoverLogsOnly -RepositoryRoot $recoverCliSource -StateRoot $recoverCliState 2>&1 |
             ForEach-Object { "$_" })
-    Assert-Equal 0 $LASTEXITCODE 'recover-logs-only mode exits successfully without a test selection'
-    Assert-True (($recoverOutput -join "`n") -like '*PASS: cross-revision logs now write under*') `
-        'recover-logs-only mode reports the normal log destination'
-    Assert-Equal 'Junction' (Get-Item -LiteralPath $recoverCliLogs -Force).LinkType `
-        'recover-logs-only mode links an existing pinned worktree'
-    Assert-Equal 'recover-only' (Get-Content -LiteralPath (Join-Path $recoverCliSource `
-                'vmbuild\logs\CrossRevision\develop-recover\VMBuild.recover.log') -Raw) `
-        'recover-logs-only mode moves stranded evidence under normal logs'
+    $recoverExitCode = $LASTEXITCODE
+    $recoverText = $recoverOutput -join "`n"
+    $recoveredEvidence = Join-Path $recoverCliSource 'vmbuild\logs\CrossRevision\develop-recover\VMBuild.recover.log'
+    if ($recoverLockAvailable) {
+        Assert-True ($recoverExitCode -eq 0) 'recover-logs-only mode exits successfully without a test selection' `
+            -Detail "exit=[$recoverExitCode] output=[$recoverText]"
+        Assert-True ($recoverText -like '*PASS: cross-revision logs now write under*') `
+            'recover-logs-only mode reports the normal log destination' -Detail $recoverText
+        Assert-Equal 'Junction' (Get-Item -LiteralPath $recoverCliLogs -Force).LinkType `
+            'recover-logs-only mode links an existing pinned worktree'
+        Assert-Equal 'recover-only' (Get-Content -LiteralPath $recoveredEvidence -Raw) `
+            'recover-logs-only mode moves stranded evidence under normal logs'
+    }
+    else {
+        Assert-Equal 1 $recoverExitCode 'recover-logs-only mode refuses a parent-held host mutation lock'
+        Assert-True ($recoverText -like '*Another MemLabs test cycle owns the host mutation lock; recover logs after it stops.*') `
+            'recover-logs-only mode reports host-lock contention explicitly' -Detail $recoverText
+        Assert-True (-not ((Get-Item -LiteralPath $recoverCliLogs -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) `
+            'blocked log recovery does not replace the original log directory'
+        Assert-Equal 'recover-only' (Get-Content -LiteralPath (Join-Path $recoverCliLogs 'VMBuild.recover.log') -Raw) `
+            'blocked log recovery preserves stranded evidence in place'
+        Assert-True (-not (Test-Path -LiteralPath $recoveredEvidence)) 'blocked log recovery does not publish moved evidence'
+    }
 }
 finally {
-    if (Test-Path -LiteralPath $recoverCliLogs) { Remove-Item -LiteralPath $recoverCliLogs -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $recoverCliLogs) {
+        $recoverLogItem = Get-Item -LiteralPath $recoverCliLogs -Force
+        if ($recoverLogItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Remove-Item -LiteralPath $recoverCliLogs -Force -ErrorAction Stop
+        }
+    }
     Remove-Item -LiteralPath $recoverCliRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
