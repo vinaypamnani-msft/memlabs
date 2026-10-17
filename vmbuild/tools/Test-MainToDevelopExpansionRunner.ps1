@@ -371,6 +371,8 @@ $invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildS
 . (Import-TestFunction -Path $runnerPath -Name Test-CrossRevisionLegacySnapshotDiskMatch)
 . (Import-TestFunction -Path $runnerPath -Name Get-VmIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-BaselineIdentity)
+. (Import-TestFunction -Path $runnerPath -Name Save-CrossRevisionExpansionIdentity)
+. (Import-TestFunction -Path $runnerPath -Name Get-CrossRevisionMaintenanceTargets)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DevelopStageComplete)
 . (Import-TestFunction -Path $runnerPath -Name Resolve-CrossRevisionDomainNetBiosName)
 . (Import-TestFunction -Path $runnerPath -Name New-DomainCredentials)
@@ -1151,6 +1153,67 @@ $script:MockDisks['NOC-DC1'] = @([pscustomobject]@{
         ControllerType = 'SCSI'; ControllerNumber = 0; ControllerLocation = 0; Path = 'E:\VirtualMachines\NOC-DC1.vhdx'
     })
 $identity = @(Get-VmIdentity -VmNames @('NOC-DC1'))
+foreach ($invalidIdentity in @(@(), @($null), @(@{ Id = 'id-only' }), @(@{ Name = 'name-only' }))) {
+    Assert-ThrowsLike -Action { Assert-BaselineIdentity -Identity $invalidIdentity } `
+        -Pattern '*identity checkpoint*' -What 'invalid saved identity fails explicitly before Hyper-V parameter binding'
+    Assert-ThrowsLike -Action { Get-CrossRevisionMaintenanceTargets -Identity $invalidIdentity } `
+        -Pattern '*Maintenance scope*' -What 'invalid maintenance scope fails explicitly before Hyper-V parameter binding'
+}
+$savedTestState = $script:State
+try {
+    & {
+        $script:State = @{ DevelopIdentities = @{}; DevelopDomainIdentities = @{} }
+        $script:ExpansionIdentitySaves = 0
+        function Save-State { $script:ExpansionIdentitySaves++ }
+        function Get-DomainIdentity { param($Config, $AdminCachePath) return @{ Sid = 'first-domain-sid' } }
+        function Assert-DomainIdentity {
+            param($Identity, $AdminCachePath)
+            if ($Identity.Sid -ne 'first-domain-sid') { throw 'Domain SID changed.' }
+        }
+        $config = [pscustomobject]@{ virtualMachines = @([pscustomobject]@{ role = 'DC' }) }
+        $key = 'nocm|followon.json'
+        Save-CrossRevisionExpansionIdentity -IdentityKey $key -VmNames @('NOC-DC1') -Config $config
+        Assert-Equal "$baselineId" $script:State.DevelopIdentities[$key][0].Id 'fresh first pass persists VM identity before marking the stage complete'
+        Assert-Equal 'first-domain-sid' $script:State.DevelopDomainIdentities[$key].Sid 'fresh first pass persists domain identity'
+        $persisted = $script:State | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+        Assert-BaselineIdentity -Identity @($persisted.DevelopIdentities.$key)
+        Assert-Equal "$baselineId" $persisted.DevelopIdentities.$key[0].Id 'first-pass identity survives checkpoint JSON round trip for pass two'
+        Save-CrossRevisionExpansionIdentity -IdentityKey $key -VmNames @('NOC-DC1') -Config $config
+        Assert-Equal 2 $script:ExpansionIdentitySaves 'unchanged resumed stage revalidates the original saved identity'
+        $script:MockVms['NOC-DC1'].Id = [guid]::NewGuid()
+        Assert-ThrowsLike -Action {
+            Save-CrossRevisionExpansionIdentity -IdentityKey $key -VmNames @('NOC-DC1') -Config $config
+        } -Pattern '*was replaced*' -What 'resume never overwrites first-pass identity with a replacement VM'
+        Assert-Equal "$baselineId" $script:State.DevelopIdentities[$key][0].Id 'failed resume preserves first-pass identity'
+        $script:MockVms['NOC-DC1'].Id = $baselineId
+    }
+}
+finally {
+    $script:State = $savedTestState
+    $script:MockVms['NOC-DC1'].Id = $baselineId
+}
+$runnerTokens = $null
+$runnerErrors = $null
+$runnerAst = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$runnerTokens, [ref]$runnerErrors)
+$captureCalls = @($runnerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Save-CrossRevisionExpansionIdentity'
+        }, $true))
+Assert-Equal 2 $captureCalls.Count 'fresh and resumed expansion paths both checkpoint first-pass identity'
+$freshCapture = $captureCalls | Select-Object -Last 1
+$captureGuard = $freshCapture.Parent
+while ($captureGuard -and $captureGuard -isnot [Management.Automation.Language.IfStatementAst]) {
+    $captureGuard = $captureGuard.Parent
+}
+Assert-Equal '$pass -eq 1' $captureGuard.Clauses[0].Item1.Extent.Text 'fresh identity is recorded only on the first pass'
+$stageStatements = @($captureGuard.Parent.Statements)
+$captureIndex = [array]::IndexOf($stageStatements, $captureGuard)
+Assert-True ($captureIndex -gt 0 -and
+    $stageStatements[$captureIndex - 1].Extent.Text -like 'Assert-DomainJoinedVmHealth*' -and
+    $stageStatements[$captureIndex + 1].Extent.Text -like '*Invoke-CrossRevisionMaintenanceGate*' -and
+    $stageStatements[-1].Extent.Text -like 'Complete-Step*') `
+    'fresh identity is persisted after guest validation and before maintenance gates and stage completion'
 Assert-Equal "$baselineId" $identity[0].Id 'baseline identity captures the Hyper-V VM ID'
 Assert-Equal 'E:\VirtualMachines\NOC-DC1.vhdx' $identity[0].VhdPaths[0] 'baseline identity captures stable base-VHD lineage'
 Assert-Equal 2 $identity[0].DiskIdentityVersion 'baseline identity records stable disk schema version'

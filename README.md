@@ -38,6 +38,12 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   attempts for the three implicated fixes.
 - Each develop fixture/pass gets independent readiness checks before being
   checkpointed complete. VM/disk lineage and domain SID checks remain enabled.
+  First-pass expansion VM/disk and applicable domain identities are persisted
+  before maintenance gates and stage completion, so the second pass can verify
+  the same machines. Resume validates saved identities instead of replacing
+  them with the current inventory. Completed first-pass stages from older
+  checkpoints that lack these identities capture them only after live stage
+  and domain-health validation; this does not prove pre-capture continuity.
 - Once per candidate revision, a scoped CAS or standalone Primary runs the
   recovery matrix: missing legacy/current MSI source and installer cache,
   advertised/missing registration, missing console version metadata,
@@ -62,6 +68,10 @@ the pinned revisions, source/module/archive hashes, VM identities, individual
 case results, and recovery evidence. Checkpoint state stores their SHA-256
 checksums. Missing, stale, dirty-source, incomplete, or changed receipts block
 family completion and cleanup; failures retain the VMs.
+Runner failures also record the error ID, source position, script stack, and
+current step in checkpoint `LastErrorDetails`, and print the source/stack beside
+the failure. Missing VM identity entries fail explicitly before Hyper-V calls
+rather than surfacing an empty `Get-VM -Name` argument.
 
 Receipts use short, unique temporary names in the same directory for atomic
 replacement. Full revision and receipt names stay intact without appending a

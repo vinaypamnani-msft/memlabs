@@ -776,7 +776,12 @@ function Get-VmIdentity {
 function Assert-BaselineIdentity {
     param([object[]] $Identity)
 
+    if ($Identity.Count -eq 0) { throw 'VM identity checkpoint is empty; cannot verify expansion identity.' }
     foreach ($expected in $Identity) {
+        if (-not $expected -or [string]::IsNullOrWhiteSpace("$($expected.Name)") -or
+            [string]::IsNullOrWhiteSpace("$($expected.Id)")) {
+            throw 'VM identity checkpoint contains a missing entry, Name, or Id; cannot verify expansion identity.'
+        }
         $vm = Get-VM -Name $expected.Name -ErrorAction SilentlyContinue
         if (-not $vm) { throw "Baseline VM '$($expected.Name)' disappeared during expansion." }
         if ("$($vm.Id)" -ne "$($expected.Id)") {
@@ -1439,6 +1444,7 @@ function Start-Step {
     $script:State.Status = 'Running'
     $script:State.CurrentStep = $Step
     $script:State.LastError = $null
+    $script:State['LastErrorDetails'] = $null
     $script:State['Interrupted'] = $false
     Save-State
 }
@@ -1448,6 +1454,33 @@ function Complete-Step {
     $script:State.CompletedSteps = @($script:State.CompletedSteps) + $Step
     $script:State.CompletedSteps = @($script:State.CompletedSteps | Select-Object -Unique)
     $script:State.CurrentStep = $null
+    Save-State
+}
+
+function Save-CrossRevisionExpansionIdentity {
+    param(
+        [string]$IdentityKey,
+        [string[]]$VmNames,
+        [object]$Config,
+        [string]$AdminCachePath
+    )
+
+    if ($script:State.DevelopIdentities.Contains($IdentityKey)) {
+        Assert-BaselineIdentity -Identity @($script:State.DevelopIdentities[$IdentityKey])
+    }
+    else {
+        $identity = @(Get-VmIdentity -VmNames $VmNames)
+        Assert-BaselineIdentity -Identity $identity
+        $script:State.DevelopIdentities[$IdentityKey] = $identity
+    }
+    if (@($Config.virtualMachines | Where-Object { $_.role -eq 'DC' }).Count -gt 0) {
+        if ($script:State.DevelopDomainIdentities.Contains($IdentityKey)) {
+            Assert-DomainIdentity -Identity $script:State.DevelopDomainIdentities[$IdentityKey] -AdminCachePath $AdminCachePath
+        }
+        else {
+            $script:State.DevelopDomainIdentities[$IdentityKey] = Get-DomainIdentity -Config $Config -AdminCachePath $AdminCachePath
+        }
+    }
     Save-State
 }
 
@@ -1471,6 +1504,13 @@ function Initialize-CrossRevisionMaintenanceState {
 function Get-CrossRevisionMaintenanceTargets {
     param([object[]]$Identity)
     $targets = @()
+    if ($Identity.Count -eq 0) { throw 'Maintenance scope has an empty VM identity checkpoint.' }
+    foreach ($expected in $Identity) {
+        if (-not $expected -or [string]::IsNullOrWhiteSpace("$($expected.Name)") -or
+            [string]::IsNullOrWhiteSpace("$($expected.Id)")) {
+            throw 'Maintenance scope has a missing VM identity entry, Name, or Id.'
+        }
+    }
     foreach ($expected in @($Identity | Sort-Object Name -Unique)) {
         $vm = Get-VM -Name $expected.Name -ErrorAction Stop
         if ("$($vm.Id)" -ne "$($expected.Id)") { throw "Maintenance scope VM '$($expected.Name)' was replaced." }
@@ -2363,11 +2403,8 @@ try {
                         Assert-DevelopStageComplete -Config $followOnConfig -FixtureName $followOn.Name
                         Assert-DomainJoinedVmHealth -Config $followOnConfig -FixtureName $followOn.Name -AdminCachePath $credentialPath
                         if ($pass -eq 1) {
-                            $script:State.DevelopIdentities[$identityKey] = @(Get-VmIdentity -VmNames $followOnVmNames)
-                            if ($followOnHasDc) {
-                                $script:State.DevelopDomainIdentities[$identityKey] = Get-DomainIdentity -Config $followOnConfig -AdminCachePath $credentialPath
-                            }
-                            Save-State
+                            Save-CrossRevisionExpansionIdentity -IdentityKey $identityKey -VmNames $followOnVmNames `
+                                -Config $followOnConfig -AdminCachePath $credentialPath
                         }
                         $savedDevelopIdentity = @($script:State.DevelopIdentities[$identityKey])
                         if ($savedDevelopIdentity.Count -eq 0) {
@@ -2425,6 +2462,10 @@ try {
                 Assert-DomainIdentity -Identity $domainIdentity -AdminCachePath $credentialPath
                 Assert-DevelopStageComplete -Config $followOnConfig -FixtureName $followOn.Name
                 Assert-DomainJoinedVmHealth -Config $followOnConfig -FixtureName $followOn.Name -AdminCachePath $credentialPath
+                if ($pass -eq 1) {
+                    Save-CrossRevisionExpansionIdentity -IdentityKey $identityKey -VmNames $followOnVmNames `
+                        -Config $followOnConfig -AdminCachePath $credentialPath
+                }
                 $null = Invoke-CrossRevisionMaintenanceGate -Key $maintenanceBaselineKey -Mode Baseline -Family $family `
                     -Identity $baselineIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath
                 $maintenanceDeferred = $false
@@ -2538,6 +2579,7 @@ try {
     $script:State.Status = 'Passed'
     $script:State.CurrentStep = $null
     $script:State.LastError = $null
+    $script:State['LastErrorDetails'] = $null
     Save-State
     Write-Host "`nPASS: all selected main-to-develop expansion cycles completed." -ForegroundColor Green
     if ($script:State.QualificationMode -eq 'RollingDevelop') {
@@ -2577,10 +2619,17 @@ catch {
     if ($script:State -and $script:StatePath) {
         $script:State.Status = 'Failed'
         $script:State.LastError = $runError.Exception.Message
+        $script:State['LastErrorDetails'] = [ordered]@{
+            FullyQualifiedErrorId = $runError.FullyQualifiedErrorId
+            ScriptStackTrace = $runError.ScriptStackTrace
+            PositionMessage = $runError.InvocationInfo.PositionMessage
+            Step = $script:State.CurrentStep
+        }
         $script:State['Interrupted'] = $runInterrupted
         Save-State
     }
     Write-Host "FAIL: $($runError.Exception.Message)" -ForegroundColor Red
+    Write-Host "$($runError.InvocationInfo.PositionMessage)`n$($runError.ScriptStackTrace)" -ForegroundColor DarkGray
     if ($script:MainBaselineFailureCleanupPossible) {
         Write-Host 'Exact-main may have removed failed Phase 1 VMs using its historical cleanup behavior.' -ForegroundColor Yellow
     }
