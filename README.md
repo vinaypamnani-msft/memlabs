@@ -407,6 +407,20 @@ and workflow step state without restoring a snapshot. A second request, failed
 graceful reboot, readiness timeout, or resume failure fails the VM explicitly.
 Other errors and stale requests never trigger this recovery.
 
+Graceful resume/DSC restarts close only idle cached PowerShell Direct sessions
+for the target VM before requesting shutdown. Busy or unverifiable cached
+pipelines fail closed without disposal or shutdown. A Hyper-V shutdown job still
+running after the initial 180-second wait is observed, not cancelled or treated
+as proof of failure. The existing 30-minute no-progress watchdog watches VM
+state/heartbeat/status; an uptime reset proves a guest restart and an `Off` state
+permits a normal start. In-progress or stalled shutdown never permits hard
+power-off, including when `AllowTurnOff` was requested. Timeout diagnostics in
+the normal VMBuild log/JSONL include VM state, heartbeat, status, uptime, shutdown
+job state, and the original shutdown result; late job errors are also retained.
+These signals do not prove that Windows servicing itself is making progress.
+Validate with `vmbuild\tools\Test-SmartVmRestartSafety.ps1` and
+`vmbuild\tools\Test-AutomatedResumePreparation.ps1`.
+
 Before that reboot, and again if memory recovery is exhausted, the host saves
 `<VM>-Phase8-<timestamp>-<trigger>-MemoryDiagnostics.json` beside the VMBuild log.
 The report includes the originating workflow process snapshot and error, guest

@@ -45,6 +45,16 @@ $script:StopVm2Calls = 0
 $script:StartVm2Calls = 0
 $script:HeartbeatCalls = 0
 $script:VmScenario = 'StalledShutdown'
+$global:ps_cache = @{}
+$script:Evictions = 0
+$script:ShutdownCalls = 0
+function Remove-VmSessionFromCache {
+    param([string]$VmName)
+    $script:Evictions++
+    foreach ($key in @($global:ps_cache.Keys | Where-Object { $_ -like "$VmName-*" })) {
+        $global:ps_cache.Remove($key)
+    }
+}
 
 function Write-Log {
     param(
@@ -88,7 +98,11 @@ function Stop-VM {
         $WarningAction,
         [switch] $AsJob
     )
-    $script:ShutdownJob
+        $script:ShutdownCalls++
+        if ($global:ps_cache.ContainsKey('LAB-VM-lab.test-admin')) {
+            throw 'Idle PSDirect session was not closed before shutdown.'
+        }
+        $script:ShutdownJob
 }
 
 function Stop-VM2 {
@@ -117,7 +131,7 @@ function Write-VmJobLedgerCensus {
 
 function Start-Sleep {
     param([int] $Seconds)
-    if ($script:VmScenario -eq 'StalledShutdown') {
+    if ($script:VmScenario -in @('StalledShutdown', 'RunningShutdownStalled')) {
         [Threading.Thread]::Sleep(1100)
     }
 }
@@ -161,6 +175,69 @@ try {
     Assert-True $poweredOff 'guest-owned shutdown reaching Off is restarted normally'
     Assert-True ($script:StopVm2Calls -eq 0) 'powered-off guest does not call hard TurnOff'
     Assert-True ($script:StartVm2Calls -eq 1) 'powered-off guest is started exactly once'
+
+    $failedJob = $script:ShutdownJob
+    $runningJob = Start-Job { Start-Sleep -Seconds 120 }
+    try {
+        $script:ShutdownJob = $runningJob
+        $script:VmScenario = 'SelfRestarted'
+        $script:GetVmCalls = 0
+        $script:StopVm2Calls = 0
+        $script:StartVm2Calls = 0
+        $script:HeartbeatCalls = 0
+        $global:ps_cache['LAB-VM-lab.test-admin'] = [pscustomobject]@{ Availability = 'Available' }
+        $global:ps_cache['OTHER-VM-lab.test-admin'] = [pscustomobject]@{ Availability = 'Available' }
+        $recovered = Restart-VM2Smart -Name 'LAB-VM' -AllowTurnOff `
+            -GracefulTimeoutSeconds 1 -ShutdownNoProgressSeconds 1 -ShutdownPollSeconds 1
+        Assert-True $recovered 'a still-running graceful shutdown job is observed until uptime proves reboot'
+        Assert-True ($script:Evictions -eq 1 -and $global:ps_cache.ContainsKey('OTHER-VM-lab.test-admin')) 'only the target VM idle session is closed before shutdown'
+        Assert-True ($script:StopVm2Calls -eq 0 -and $script:StartVm2Calls -eq 0) 'a running shutdown job cannot trigger hard power-off or duplicate start'
+        Assert-True ($runningJob.State -eq 'Running') 'the live shutdown job is not cancelled or disposed during observation'
+
+        $script:VmScenario = 'PoweredOff'
+        $script:GetVmCalls = 0
+        $poweredOff = Restart-VM2Smart -Name 'LAB-VM' -AllowTurnOff `
+            -GracefulTimeoutSeconds 1 -ShutdownNoProgressSeconds 1 -ShutdownPollSeconds 1
+        Assert-True ($poweredOff -and $script:StartVm2Calls -eq 1 -and $script:StopVm2Calls -eq 0) 'a running shutdown job reaching Off starts the guest once without hard power-off'
+        $script:StartVm2Calls = 0
+        $script:VmScenario = 'RunningShutdownStalled'
+        $script:GetVmCalls = 0
+        $stalled = Restart-VM2Smart -Name 'LAB-VM' -AllowTurnOff `
+            -GracefulTimeoutSeconds 1 -ShutdownNoProgressSeconds 1 -ShutdownPollSeconds 1
+        Assert-True (-not $stalled -and $script:StopVm2Calls -eq 0) 'a stalled Running shutdown job fails closed without hard TurnOff'
+        Assert-True ([bool]($script:Logs | Where-Object {
+                    $_.Message -like '*shutdownJob=Running*state=*' -or
+                    $_.Message -like '*state=Running*shutdownJob=Running*'
+                })) 'stalled shutdown diagnostics include VM state and live job state'
+
+        $global:ps_cache['LAB-VM-lab.test-admin'] = [pscustomobject]@{ Availability = 'Busy' }
+        $beforeShutdown = $script:ShutdownCalls
+        $blocked = Restart-VM2Smart -Name 'LAB-VM' -GracefulTimeoutSeconds 1
+        Assert-True (-not $blocked -and $script:ShutdownCalls -eq $beforeShutdown -and $script:Evictions -eq 1) 'busy cached PSDirect pipeline is neither disposed nor shut down underneath'
+        $global:ps_cache.Remove('LAB-VM-lab.test-admin')
+        $lateFailureJob = Start-Job { Start-Sleep -Seconds 2; throw 'FIXTURE_INTEGRATION_SHUTDOWN_FAILURE' }
+        try {
+            $script:ShutdownJob = $lateFailureJob
+            $script:VmScenario = 'LateFailure'
+            $script:GetVmCalls = 0
+            $lateFailed = Restart-VM2Smart -Name 'LAB-VM' -AllowTurnOff `
+                -GracefulTimeoutSeconds 1 -ShutdownNoProgressSeconds 10 -ShutdownPollSeconds 1
+            Assert-True (-not $lateFailed -and $script:StopVm2Calls -eq 0) 'late integration-service failure fails closed without escalation'
+            Assert-True ([bool]($script:Logs | Where-Object {
+                        $_.Message -like '*shutdown job failed while being observed*FIXTURE_INTEGRATION_SHUTDOWN_FAILURE*'
+                    })) 'late shutdown-job error is retained in diagnostics'
+        }
+        finally {
+            Stop-Job -Job $lateFailureJob
+            Remove-Job -Job $lateFailureJob -Force
+        }
+    }
+    finally {
+        Stop-Job -Job $runningJob
+        Remove-Job -Job $runningJob -Force
+        $script:ShutdownJob = $failedJob
+        $global:ps_cache.Clear()
+    }
 
     $scriptBlocks = Get-Content -LiteralPath $scriptBlocksPath -Raw
     foreach ($reason in @(

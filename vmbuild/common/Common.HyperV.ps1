@@ -1841,9 +1841,9 @@ function Restart-VM2Smart {
     # not report that it already owns a shutdown. Guest-owned shutdown is
     # observed with a no-progress watchdog and always fails closed.
     #
-    # Returns $true if the VM was restarted (graceful succeeded, or TurnOff was
-    # used), $false if the graceful shutdown did not complete and TurnOff was
-    # not permitted (the VM is left running for the caller to keep waiting on).
+    # Returns $true if the VM was restarted. A still-running shutdown job is
+    # observed with the same watchdog as ERROR_SHUTDOWN_IN_PROGRESS. A stalled
+    # shutdown returns $false without hard power-off, even with -AllowTurnOff.
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
@@ -1876,6 +1876,8 @@ function Restart-VM2Smart {
     $gracefulNote = ''
     $shutdownInProgress = $false
     $uptimeBefore = $null
+    $gracefulJob = $null
+    $jobError = ''
     if ($vm.State -eq 'Running') {
         try { $uptimeBefore = $vm.Uptime } catch { }
         # Let just-reaped PSDirect jobs finish tearing down server-side before power is
@@ -1885,6 +1887,25 @@ function Restart-VM2Smart {
         # disposed job on a threadpool thread -> unhandled PSObjectDisposedException that
         # kills the whole phase child process.
         Start-Sleep -Seconds 5
+        # Completed probes leave an idle PSDirect connection cached. Close only
+        # idle connections before shutdown; never dispose a live pipeline.
+        $cachedSessions = @($global:ps_cache.Keys | Where-Object { $_ -like "$Name-*" } |
+            ForEach-Object { $global:ps_cache[$_] })
+        $busySessions = @($cachedSessions | Where-Object { "$($_.Availability)" -ne 'Available' })
+        if ($busySessions.Count -gt 0) {
+            Write-Log "${Name}: Restart ($Reason): cached PSDirect session is not idle; refusing shutdown over an active or unverifiable pipeline." -Warning
+            return $false
+        }
+        if ($cachedSessions.Count -gt 0) {
+            try {
+                Remove-VmSessionFromCache -VmName $Name
+                Write-Log "${Name}: Restart ($Reason): closed $($cachedSessions.Count) idle cached PSDirect session(s) before shutdown." -LogOnly
+            }
+            catch {
+                Write-Log "${Name}: Restart ($Reason): could not close cached PSDirect sessions: $($_.Exception.Message)" -Warning
+                return $false
+            }
+        }
         Write-Log "${Name}: Restart ($Reason): attempting graceful shutdown (up to ${GracefulTimeoutSeconds}s)..." -LogOnly
         try {
             if (Get-Command Write-VmJobLedgerCensus -ErrorAction SilentlyContinue) {
@@ -1923,12 +1944,17 @@ function Restart-VM2Smart {
             # ALREADY going down -- on the DSC reboot-pending path, that is the very reboot
             # this call exists to force.
             $shutdownInProgress = [bool]($jobError -match '0x8007045B|shutdown is in progress')
+            if ($jobState -eq 'Running') {
+                $shutdownInProgress = $true
+            }
             $gracefulSeconds = [int][Math]::Floor(([DateTime]::UtcNow - $gracefulStart).TotalSeconds)
             $gracefulNote = " (job=$jobState after ${gracefulSeconds}s"
             if ($jobError) { $gracefulNote += "; error: $jobError" }
             $gracefulNote += ')'
-            if ($gracefulJob.State -eq 'Running') { Stop-Job $gracefulJob -ErrorAction SilentlyContinue }
+            # A live shutdown job may be Windows servicing, not a failed request.
+            # Leave it alive while observing VM progress; never power-cycle it.
             Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: Restart ($Reason) graceful shutdown"
+            if ($jobState -in @('Completed', 'Failed')) { $gracefulJob = $null }
         }
         catch {
             $gracefulNote = " (Stop-VM threw: $($_.Exception.Message))"
@@ -1946,7 +1972,7 @@ function Restart-VM2Smart {
     # Monitor observable state/heartbeat changes instead of imposing a total-duration cap.
     # If that progress stops, leave the VM untouched and let the caller fail closed.
     if ($shutdownInProgress -and -not ($vm -and $vm.State -eq 'Off')) {
-        Write-Log "${Name}: Restart ($Reason): the guest is already shutting down$gracefulNote. Monitoring its own restart; hard TurnOff is prohibited while Windows owns shutdown." -Warning
+        Write-Log "${Name}: Restart ($Reason): shutdown is still in progress$gracefulNote. Monitoring state/heartbeat/uptime with a ${ShutdownNoProgressSeconds}s no-progress budget; hard TurnOff is prohibited while Windows owns shutdown." -Warning
         $shutdownLastProgress = [DateTime]::UtcNow
         $shutdownFingerprint = "$($vm.State)|$($vm.Heartbeat)|$($vm.Status)"
         while ($true) {
@@ -1961,6 +1987,7 @@ function Restart-VM2Smart {
             # resetting is the only proof it actually came back around.
             if ($uptimeBefore -and $vm.Uptime -lt $uptimeBefore) {
                 Write-Log "${Name}: Restart ($Reason): guest completed its own restart (uptime reset)." -LogOnly
+                Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: observed guest restart"
                 if ($Stopwatch -and $Timespan) {
                     Wait-ForHeartbeat -VmName $Name -Stopwatch $Stopwatch -Timespan $Timespan | Out-Null
                 }
@@ -1968,6 +1995,20 @@ function Restart-VM2Smart {
                     Wait-ForHeartbeat -VmName $Name | Out-Null
                 }
                 return $true
+            }
+            if ($gracefulJob -and "$($gracefulJob.State)" -eq 'Failed' -and
+                -not ($jobError -match '0x8007045B|shutdown is in progress')) {
+                $lateErrors = @($gracefulJob.JobStateInfo.Reason.Message)
+                foreach ($child in @($gracefulJob.ChildJobs)) {
+                    $lateErrors += @($child.JobStateInfo.Reason.Message)
+                    $lateErrors += @($child.Error | ForEach-Object { "$_" })
+                }
+                $lateError = ($lateErrors | Where-Object { $_ } | Select-Object -Unique) -join ' | '
+                if ($lateError -notmatch '0x8007045B|shutdown is in progress') {
+                    Write-Log "${Name}: Restart ($Reason): shutdown job failed while being observed: $lateError; state=$($vm.State), heartbeat=$($vm.Heartbeat), status=$($vm.Status), uptime=$($vm.Uptime). Refusing hard TurnOff." -Warning
+                    Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: observed shutdown failure"
+                    return $false
+                }
             }
 
             $currentFingerprint = "$($vm.State)|$($vm.Heartbeat)|$($vm.Status)"
@@ -1979,7 +2020,7 @@ function Restart-VM2Smart {
             $shutdownNoProgress = [int][Math]::Floor(
                 ([DateTime]::UtcNow - $shutdownLastProgress).TotalSeconds)
             if ($shutdownNoProgress -ge $ShutdownNoProgressSeconds) {
-                Write-Log "${Name}: Restart ($Reason): guest-owned shutdown made no observable state/heartbeat progress for ${shutdownNoProgress}s. Refusing hard TurnOff while Windows owns shutdown; leaving the VM unchanged for fail-closed diagnostics." -Warning
+                Write-Log "${Name}: Restart ($Reason): guest-owned shutdown made no observable state/heartbeat progress for ${shutdownNoProgress}s; state=$($vm.State), heartbeat=$($vm.Heartbeat), status=$($vm.Status), uptime=$($vm.Uptime), shutdownJob=$($gracefulJob.State)$gracefulNote. Refusing hard TurnOff while Windows owns shutdown; leaving the VM unchanged for fail-closed diagnostics." -Warning
                 return $false
             }
         }
@@ -1997,6 +2038,7 @@ function Restart-VM2Smart {
     }
 
     # 3) Start it back up and wait for it to respond.
+    Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: observed guest shutdown"
     Start-Sleep -Seconds 10
     Start-VM2 -Name $Name
     if ($Stopwatch -and $Timespan) {
