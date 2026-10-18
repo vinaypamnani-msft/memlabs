@@ -3459,7 +3459,16 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
         if ($live.LastResult -ne 'Succeeded' -or $status.LastSyncState -eq 6703) {
             Write-WsusDiagnostics -Reason 'Final WSUS health requires recovery'
-            if (-not (Wait-WsusSyncCompletion -Label 'Final WSUS recovery' -MaxAttempts 40 -TriggerFirst)) {
+            $completed = Wait-WsusSyncCompletion -Label 'Final WSUS recovery' -MaxAttempts 40 -TriggerFirst
+            $live = Get-WsusSyncLiveness
+            if (-not $live.ProbeSucceeded) {
+                throw "Cannot verify the configured SUP(s) after final WSUS recovery: $($live.Detail)"
+            }
+            if ($live.WsusRunning -and -not $live.HasFailedIdleSync) {
+                Write-DscStatus "$Tag Final WSUS recovery started a native sync that remains in progress; preserving background synchronization. Completion is pending, not proven. $($live.Detail)"
+                return
+            }
+            if (-not $completed -or $live.LastResult -ne 'Succeeded') {
                 throw "WSUS synchronization did not recover within the bounded final health check. $($live.Detail)"
             }
         }

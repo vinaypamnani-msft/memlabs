@@ -6655,6 +6655,13 @@ function Test-SiteSystemFunctionality {
 
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'SUP' -Result $supResult)) {
             $allPassed = $false
+            try {
+                $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain `
+                    -RoleLabel 'SUP-SyncFailure' -Collector $Phase11WsusStallCollector -TimeoutSeconds 240
+            }
+            catch {
+                Write-Log "[Phase $Phase] $VMName [SUP]: WSUS diagnostic capture failed: $($_.Exception.Message)" -Warning -LogOnly
+            }
         }
     }
 
@@ -9381,9 +9388,8 @@ $Phase11DpContentLogCollector = {
 }
 
 $Phase11WsusStallCollector = {
-    # Runs ON the SUP when its sync reports Running with ProcessedItems frozen.
-    # The WSUS API (queried from the site server) can only say THAT progress
-    # stopped; everything that says WHY is local to this machine.
+    # Runs on the SUP for failed, unreachable, or uncorroborated native health.
+    # Server-side evidence is needed to explain SOAP faults seen downstream.
     $out = @{}
     $diag = @()
     $lines = @()
@@ -9437,16 +9443,38 @@ $Phase11WsusStallCollector = {
 
     $out['WsusStall.txt'] = ($lines -join "`r`n")
 
-    # SoftwareDistribution.log is WSUS's own sync log and names the actual fault.
+    # The upstream SOAP fault may have rolled out of the current WSUS log.
     $wsusDir = $null
-    try { $wsusDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Update Services\Server\Setup' -Name 'TargetDir' -ErrorAction Stop).TargetDir } catch { }
-    if (-not $wsusDir) { $wsusDir = 'C:\Program Files\Update Services' }
-    $sdLog = Join-Path $wsusDir 'LogFiles\SoftwareDistribution.log'
-    if (Test-Path $sdLog) {
-        try { $out['SoftwareDistribution.log'] = ((Get-Content -LiteralPath $sdLog -Tail 3000 -ErrorAction SilentlyContinue) -join "`r`n") }
-        catch { $diag += "SoftwareDistribution.log read threw: $($_.Exception.Message)" }
+    try {
+        $wsusDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Update Services\Server\Setup' -Name 'TargetDir' -ErrorAction Stop).TargetDir
     }
-    else { $diag += "SoftwareDistribution.log not found at $sdLog (WSUS TargetDir='$wsusDir')" }
+    catch { $diag += "WSUS TargetDir lookup failed: $($_.Exception.Message)" }
+    if (-not $wsusDir) {
+        $wsusDir = 'C:\Program Files\Update Services'
+        $diag += "WSUS TargetDir unavailable; using default '$wsusDir'"
+    }
+    try {
+        $sdLogDir = Join-Path $wsusDir 'LogFiles'
+        $sdLogs = @(Get-ChildItem -LiteralPath $sdLogDir -Filter 'SoftwareDistribution.log*' -File -ErrorAction Stop |
+                Sort-Object @{ Expression = { $_.Name -eq 'SoftwareDistribution.log' }; Descending = $true },
+                    @{ Expression = 'LastWriteTimeUtc'; Descending = $true })
+        $diag += "WSUS log inventory: directory='$sdLogDir'; found=$($sdLogs.Count); maxFiles=3; tailLines=3000"
+        if (@($sdLogs | Where-Object Name -eq 'SoftwareDistribution.log').Count -eq 0) {
+            $diag += "SoftwareDistribution.log not found in '$sdLogDir'; retaining available rolled logs"
+        }
+        foreach ($sdLog in @($sdLogs | Select-Object -First 3)) {
+            try {
+                $content = @(Get-Content -LiteralPath $sdLog.FullName -Tail 3000 -ErrorAction Stop)
+                $out[$sdLog.Name] = $content -join "`r`n"
+                $diag += "WSUS log captured: source='$($sdLog.FullName)'; bytes=$($sdLog.Length); lastWriteUtc=$($sdLog.LastWriteTimeUtc.ToString('o')); capturedLines=$($content.Count)"
+            }
+            catch { $diag += "WSUS log '$($sdLog.FullName)' read failed: $($_.Exception.Message)" }
+        }
+        if ($sdLogs.Count -gt 3) {
+            $diag += "WSUS log capture omitted $($sdLogs.Count - 3) older file(s) to bound guest-to-host transfer"
+        }
+    }
+    catch { $diag += "WSUS log enumeration failed: $($_.Exception.Message)" }
 
     $out['_collector-diag.txt'] = ($diag -join "`r`n")
     return $out
@@ -14836,16 +14864,17 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             # legitimately stays at 0 when the subscription is narrow.
             #
             # Targets this site's SUP with the protocol it requires ($wsusPort /
-            # $wsusUseSsl: 8531+SSL on PKI, else 8530). The SUP is often a remote
-            # site system; the outer catch reports an INFO and skips on any failure.
+            # $wsusUseSsl: 8531+SSL on PKI, else 8530). Unreadable native sync health
+            # fails validation; aggregate catalog statistics are informational only.
             try {
+                $results.WsusDiagnosticsRequired = $false
+                $results.WsusUpstreamServer = $null
                 if ($supServer) {
                     $wsusSrv = Get-WsusServer -Name $supServer -PortNumber $wsusPort -UseSsl:$wsusUseSsl -ErrorAction Stop
                 }
                 else {
                     $wsusSrv = Get-WsusServer -ErrorAction Stop
                 }
-                $wStatus = $wsusSrv.GetStatus()
 
                 # Is this SUP a DOWNSTREAM/replica (syncs from an upstream WSUS,
                 # not Microsoft Update)? A downstream SUP intentionally does NOT
@@ -14871,6 +14900,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     if ((-not $wsusCfgChk.SyncFromMicrosoftUpdate) -and $wsusCfgChk.UpstreamWsusServerName) {
                         $isDownstreamSup = $true
                         $upstreamSupName = $wsusCfgChk.UpstreamWsusServerName
+                        $results.WsusUpstreamServer = "$upstreamSupName"
                     }
                 }
                 catch { $supTopoDiag = "WSUS GetConfiguration failed: $($_.Exception.Message)" }
@@ -14881,18 +14911,36 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 try { $taxClas = ($wsusSrv.GetUpdateClassifications()).Count } catch {}
 
                 $subCats = $null; $subClas = $null
-                $lastResult = $null; $syncState = $null; $lastSyncTime = $null
+                $sub = $wsusSrv.GetSubscription()
+                try { $subCats = ($sub.GetUpdateCategories()).Count } catch {}
+                try { $subClas = ($sub.GetUpdateClassifications()).Count } catch {}
+                $lastSync = $sub.GetLastSynchronizationInfo()
+                $syncState = "$($sub.GetSynchronizationStatus())"
+                if ("$($lastSync.Result)" -in @('Failed', 'Canceled') -and $syncState -ne 'Running') {
+                    Start-Sleep -Seconds 5
+                    $lastSync = $sub.GetLastSynchronizationInfo()
+                    $syncState = "$($sub.GetSynchronizationStatus())"
+                }
+                $lastResult = "$($lastSync.Result)"
+                $lastSyncTime = $lastSync.StartTime
+                if (-not $lastResult -or -not $syncState) {
+                    throw 'WSUS returned an empty native synchronization result or state.'
+                }
+
+                $updateCount = $null
                 try {
-                    $sub = $wsusSrv.GetSubscription()
-                    try { $syncState = $sub.GetSynchronizationStatus().ToString() } catch {}
-                    try { $subCats = ($sub.GetUpdateCategories()).Count } catch {}
-                    try { $subClas = ($sub.GetUpdateClassifications()).Count } catch {}
-                    $history = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
-                    if ($history.Count -gt 0) {
-                        $lastResult = $history[0].Result.ToString()
-                        $lastSyncTime = $history[0].StartTime
+                    # GetStatus also aggregates client/compliance statistics and can
+                    # time out while the native subscription API is responsive.
+                    $updateCount = $wsusSrv.GetUpdateCount([Microsoft.UpdateServices.Administration.UpdateScope]::new())
+                    if ($null -eq $updateCount -or $updateCount -lt 0) {
+                        throw 'WSUS returned an invalid update count.'
                     }
-                } catch {}
+                }
+                catch {
+                    $updateCount = $null
+                    $results.WsusDiagnosticsRequired = $true
+                    $results.Details.Add("WARN: WSUS update count could not be measured: $($_.Exception.Message). Native synchronization health is checked independently.")
+                }
 
                 # CM-side subscription = what we EXPECT WSUS to have. WCM
                 # reads this from CM and pushes it to WSUS; a mismatch
@@ -14989,7 +15037,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 # SyncState of Running means a sync is actively progressing
                 # right now, which is healthy, not a failure. Only treat a
                 # genuinely-never-synced, idle WSUS as a WARN.
-                $ucBit = "UpdateCount=$($wStatus.UpdateCount)"
+                $ucBit = if ($null -ne $updateCount) { "UpdateCount=$updateCount" } else { 'UpdateCount=<unavailable>' }
                 $initialSyncDone = ($taxCats -is [int] -and $taxCats -ge 100)
                 $syncRunning = ($syncState -eq 'Running')
                 if ($lastResult -eq 'Succeeded') {
@@ -15004,7 +15052,8 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 }
                 elseif ($lastResult -in @('Failed', 'Canceled')) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: WSUS last sync Result=$lastResult with no running replacement [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]. A populated catalog does not prove recovery.")
+                    $results.WsusDiagnosticsRequired = $true
+                    $results.Details.Add("FAIL: WSUS last sync Result=$lastResult with no running replacement [LastSync=$lastSyncTime; EndSync=$($lastSync.EndTime); SyncState=$syncState; Error=$($lastSync.Error); $ucBit; ErrorText=$($lastSync.ErrorText)]. A populated catalog does not prove recovery.")
                 }
                 elseif ($lastResult) {
                     $results.Details.Add("WARN: WSUS last sync Result=$lastResult [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]")
@@ -15042,7 +15091,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 # last sync ended Failed (transient cycle on an otherwise-populated
                 # catalog -- recover it now instead of waiting for the schedule).
                 $lastSyncFailed = ($lastResult -eq 'Failed')
-                $kickReason = if ($wStatus.UpdateCount -eq 0) { 'subscribed but UpdateCount=0 and idle' } else { 'last sync Failed (transient) and idle' }
+                $kickReason = if ($updateCount -eq 0) { 'subscribed but UpdateCount=0 and idle' } else { 'last sync Failed (transient) and idle' }
                 # Do NOT kick a sync on a DOWNSTREAM SUP. A downstream replica
                 # WSUS pulls its update metadata from the upstream SUP (the CAS),
                 # not from a locally-forced sync. Forcing one here while the
@@ -15052,10 +15101,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 # finishes, WCM's scheduled downstream sync replicates the catalog
                 # on its own. So on a downstream SUP, report INFO and let
                 # replication drive it instead of manufacturing a canceled cycle.
-                if ($isDownstreamSup -and $haveSubscription -and (-not $syncRunning) -and (($wStatus.UpdateCount -eq 0) -or $lastSyncFailed)) {
+                if ($isDownstreamSup -and $haveSubscription -and (-not $syncRunning) -and (($updateCount -eq 0) -or $lastSyncFailed)) {
                     $results.Details.Add("INFO: $kickReason on a downstream SUP - not forcing a sync; catalog replicates from upstream '$upstreamSupName' once its sync completes")
                 }
-                elseif ($haveSubscription -and (-not $syncRunning) -and (($wStatus.UpdateCount -eq 0) -or $lastSyncFailed)) {
+                elseif ($haveSubscription -and (-not $syncRunning) -and (($updateCount -eq 0) -or $lastSyncFailed)) {
                     $kicked = $false
                     # Prefer the CM cmdlet so WCM stays the source of truth;
                     # fall back to the WSUS subscription API if unavailable.
@@ -15140,6 +15189,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             }
             catch {
                 $results.Passed = $false
+                $results.WsusDiagnosticsRequired = $true
                 $results.Details.Add("FAIL: WSUS-native cross-check could not reach SUP '$($supServer):$wsusPort': $($_.Exception.Message)")
             }
         }
@@ -15156,9 +15206,8 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600 -PollProgress
 
-    # Capture both sides when CM reports a long-running sync that native WSUS
-    # cannot confirm. SUP-side evidence explains the native sync; site-server
-    # WCM/wsyncmgr evidence explains who stopped it and why CM stayed stale.
+    # Failed/unreachable native health needs both sides of the WSUS exchange,
+    # not just CM's projection. Include the configured upstream SUP for SOAP faults.
     try {
         $stallLine = $null
         if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Details) {
@@ -15166,16 +15215,37 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $_ -match 'WARN: CM/WSUS desync:' -or $_ -match 'WARN: SUP sync at .* may be slow or stuck'
                 }) | Select-Object -First 1
         }
-        if ($stallLine) {
-            Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: SUP sync state is not corroborated -- collecting WCM/wsyncmgr evidence from the site server"
+        $needsWsusDiagnostics = $hasSUP -and (
+            -not $result -or $result.ScriptBlockFailed -or $result.ScriptBlockOutput.WsusDiagnosticsRequired)
+        if ($stallLine -or $needsWsusDiagnostics) {
+            Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: SUP health requires diagnostics -- collecting WCM/wsyncmgr evidence from the site server"
             $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'SUP-CMState' -Collector $Phase11CmWsusSyncCollector -TimeoutSeconds 240
-            if ($supVmObj -and $supVmObj.vmName) {
-                Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: collecting WsusPool/IIS/SoftwareDistribution evidence from SUP '$($supVmObj.vmName)'"
-                $null = Save-Phase11GuestLogs -VMName $supVmObj.vmName -DomainName $domain -RoleLabel 'SUP-SyncStall' -Collector $Phase11WsusStallCollector -TimeoutSeconds 240
+            $diagnosticSups = @($supVmObj)
+            $upstreamName = "$($result.ScriptBlockOutput.WsusUpstreamServer)"
+            if ($upstreamName -or $hierarchySiteCode -ne $siteCode) {
+                $upstreamSups = @($DeployConfig.virtualMachines | Where-Object {
+                        $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $domain }
+                        ($_.installSUP -or $_.InstallSUP) -and (
+                            ($upstreamName -and ("$($_.vmName)" -ieq $upstreamName -or "$($_.vmName).$candidateDomain" -ieq $upstreamName)) -or
+                            (-not $upstreamName -and "$($_.siteCode)" -ieq $hierarchySiteCode))
+                    })
+                if ($upstreamSups.Count -gt 0) {
+                    $diagnosticSups += $upstreamSups
+                }
+                else {
+                    Write-Log "[Phase $Phase] $VMName [$siteRoleLabel]: upstream SUP '$upstreamName' (site $hierarchySiteCode) is outside the deployment config; guest evidence cannot be collected." -Warning -LogOnly
+                }
+            }
+            foreach ($diagnosticSup in @($diagnosticSups | Where-Object { $_ -and $_.vmName } | Sort-Object vmName -Unique)) {
+                $supDomain = if ($diagnosticSup.domain) { "$($diagnosticSup.domain)" } else { $domain }
+                Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: collecting WsusPool/IIS/SoftwareDistribution evidence from SUP '$($diagnosticSup.vmName)'"
+                $null = Save-Phase11GuestLogs -VMName $diagnosticSup.vmName -DomainName $supDomain -RoleLabel 'SUP-SyncHealth' -Collector $Phase11WsusStallCollector -TimeoutSeconds 240
             }
         }
     }
-    catch { }
+    catch {
+        Write-Log "[Phase $Phase] $VMName [$siteRoleLabel]: WSUS diagnostic capture failed: $($_.Exception.Message)" -Warning -LogOnly
+    }
 
     return (Format-TestResult -VMName $VMName -RoleLabel $siteRoleLabel -Result $result)
 }

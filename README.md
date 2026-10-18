@@ -234,6 +234,10 @@ receive bounded recovery; unreadable native health and exhausted recovery fail
 the workflow instead of silently advancing. Repair hardens/restarts WsusPool on
 the SUP and captures its WSUS diagnostics. Long-running healthy background syncs
 remain asynchronous and are reported as pending, not as proven completion.
+After a bounded final-recovery wait, Phase 8 re-probes every configured SUP. A
+replacement sync that is still running is preserved as pending rather than
+failing and replaying prepopulation; an idle failed replica or unreadable
+post-recovery health still fails the workflow.
 The final WSUS health-check helper is defined at script scope, independently of
 downstream replica repair, so CAS, standalone primary, and child primary runs
 can all call it. Sites without a configured SUP skip this check.
@@ -246,6 +250,19 @@ guard with `vmbuild\tools\Test-PerfloadingContract.ps1`; log transport is covere
 by `vmbuild\tools\Test-CmFailureDiagnostics.ps1`.
 Phase 11 fails an idle failed/canceled sync or an unreachable WSUS health check;
 a populated catalog alone is not evidence that the latest sync recovered.
+Native results/state are read directly from the subscription API, without the
+heavyweight `GetStatus()` client/compliance aggregation. A separate scoped update
+count is informational: an unavailable count warns, is never treated as zero,
+and cannot mask a failed or unreadable native sync. Failed/unreachable checks and
+unavailable counts trigger bounded WCM/wsyncmgr and SUP SoftwareDistribution/IIS
+evidence capture, including the configured upstream SUP for downstream faults.
+The WSUS collector pulls the current `SoftwareDistribution.log` and up to two
+newest rolled copies (`SoftwareDistribution.log*`), retaining at most 3,000 lines
+per file. Capture diagnostics record source paths, sizes, timestamps, captured
+line counts, omitted older files, and read errors, so a rolled SOAP fault is not
+lost merely because it is absent from the current log.
+An upstream outside the deployment config or a failed capture is reported
+explicitly. Validate these paths with `vmbuild\tools\Test-WsusSyncConvergence.ps1`.
 
 For HTTPS client push, the guest requests host certificate pre-staging and waits
 for a receipt matching both the deployment RunId and request ID. The host checks
