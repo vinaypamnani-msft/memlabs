@@ -2,6 +2,20 @@
 
 ARM Template and DSC configurations for deploying an Azure VM with Hyper-V, and for deploying ConfigMgr lab virtual machines on this Hyper-V host.
 
+## Windows Terminal settings safety
+
+Host appearance updates validate the existing Terminal settings, write and
+flush a separate file in the same directory, validate that staged JSON, then
+atomically replace `settings.json`. The previous file is retained byte-for-byte
+as `settings.json.memlabs.bak` beside it. MemLabs writers coordinate through
+`settings.json.memlabs.lock`; a detected intervening external edit is not
+overwritten. Failed staging or replacement leaves the live settings untouched
+and reports a warning without blocking lab deployment. Invalid existing JSON
+is not automatically reset or repaired. An interrupted staging write can leave
+an unused `settings.json.memlabs-<id>.tmp`, but does not truncate the live file.
+These protections do not cover unrelated programs writing settings directly
+or filesystem/storage corruption.
+
 ## Skipping an unreliable test family
 
 Use `-SkipTest` to exclude one or more test families from a curated run:
