@@ -135,12 +135,46 @@ on a new deployment. The existing AADClient automatic Phase 1 recovery remains
 available. Missing ordinary VMs remain allowed when Phase 1 is scheduled to
 create them. Failed Phase 0 preparation does not run incomplete-VM cleanup.
 
+Existing `OSDClient` VMs are PXE targets, not Windows guest-readiness dependencies.
+Phase 0 applies requested CPU/RAM changes without starting powered-off targets
+or probing Windows heartbeat, PowerShell Direct, or guest paths. A running
+target stopped for hardware changes is restarted without Windows readiness
+checks, including when an update fails. Live Hyper-V reads verify the VM identity,
+CPU/RAM settings, and original power state before success is reported. An ignored
+hardware write cannot pass preparation. Saved/paused targets remain untouched
+unless hardware changes are requested, in which case preparation fails with
+instructions rather than discarding their state. Already-dynamic running targets
+defer deployment-floor adjustments until they are off; those pin-only changes
+neither interrupt PXE nor enter the potentially blocking live `Set-VMMemory`
+path. Enabling a newly requested dynamic-memory policy still uses a controlled
+stop/update/start.
+
+Recognized transient Hyper-V/RPC errors and empty VM reads retry at most three
+times, five seconds apart; permanent errors fail immediately. Power transitions
+receive at most six observations, five seconds apart, and hardware readback
+mismatches receive at most three observations. Stop/start use the existing bounded
+power-control recovery helpers, not Windows boot probes or repeated guest resets.
+Graceful-stop waits are 30 seconds per attempt; start retains the shared helper's
+memory-pressure backoff, mount recovery, and diagnostics.
+Logs include the operation, retry/observation count, VM identity/state, heartbeat
+(diagnostic only), requested/actual hardware, recovery errors, and elapsed time.
+Exception HRESULT chains support transient-error classification on localized
+hosts. A failed update remains a failure even if power recovery succeeds; any
+partially applied hardware is reported and can be reconciled by an idempotent
+retry rather than an automatic rollback.
+Missing/replaced VMs, failed writes, and failed power recovery never become
+success. Resuming Phase 0 cannot recreate a VM after a failed inventory lookup.
+Ordinary Windows VMs retain their guest-readiness checks. Initial OSD VM creation
+remains in Phase 1.
+
 Phases 8 and 9 also check their DSC targets before snapshots or CM media
 preparation. Missing-node preflight failures stop dispatch. Job-wait exceptions
 and missing or malformed phase tallies fail the phase instead of advancing to
 maintenance. Logs identify the missing targets or result-validation failure.
 
-Validate with `vmbuild\tools\Test-PhaseFailurePropagation.ps1`.
+Validate with `vmbuild\tools\Test-PhaseFailurePropagation.ps1`,
+`vmbuild\tools\Test-AutomatedResumePreparation.ps1`, and
+`vmbuild\tools\Test-OsdClientResumePreparation.ps1`.
 
 ### Phase 2 DSC staging recovery
 

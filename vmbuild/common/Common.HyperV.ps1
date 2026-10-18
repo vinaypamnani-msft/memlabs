@@ -177,6 +177,232 @@ function Get-VM2 {
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
 
+function Initialize-OsdClientHost {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][long]$MemoryBytes,
+        [Parameter(Mandatory)][int]$ProcessorCount,
+        [long]$DynamicMinRam = 0,
+        [int]$Phase = 0
+    )
+
+    $prefix = "[Phase $Phase]: ${VmName}: OSD host preparation"
+    $observed = @{ Vm = $null; Id = $null }
+    $originalState = $null
+    $updateError = $null
+    $updateStage = $null
+    $restoreError = $null
+    $restorePower = $false
+    $memoryUpdated = $false
+    $stage = 'validate request'
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+
+    function Format-OsdHostVm {
+        param($Vm)
+        if ($null -eq $Vm) { return '<not observed>' }
+        return (@('Id', 'State', 'Status', 'Generation', 'Heartbeat', 'MemoryStartup',
+                'DynamicMemoryEnabled', 'MemoryMinimum', 'MemoryMaximum', 'ProcessorCount') |
+            ForEach-Object {
+                $property = $Vm.PSObject.Properties[$_]
+                "$_=$(if ($property) { $property.Value } else { '<missing>' })"
+            }) -join '; '
+    }
+
+    function Format-OsdHostError {
+        param([Management.Automation.ErrorRecord]$ErrorRecord)
+        $codes = [Collections.Generic.List[string]]::new()
+        $exception = $ErrorRecord.Exception
+        while ($exception) {
+            $codes.Add(('0x{0:X8}' -f $exception.HResult))
+            $exception = $exception.InnerException
+        }
+        return "type=$($ErrorRecord.Exception.GetType().Name); errorId=$($ErrorRecord.FullyQualifiedErrorId); hresults=$($codes -join ','); $($ErrorRecord.Exception.Message -replace '\s+', ' ')"
+    }
+
+    function Invoke-OsdHostCommand {
+        param([string]$Operation, [scriptblock]$Action)
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try { return (& $Action) }
+            catch {
+                $errorText = Format-OsdHostError $_
+                $transient = $errorText -match '0x80010001|0x80010002|0x8001010A|0x800706BA|0x800706BB|message filter|server is (too )?busy|RPC server is unavailable|call was rejected|empty VM record'
+                if (-not $transient -or $attempt -eq 3) { throw }
+                Write-Log "$prefix`: $Operation transient failure, attempt $attempt/3; retrying in 5s. $errorText" -LogOnly
+                Start-Sleep -Seconds 5
+            }
+        }
+    }
+
+    function Get-OsdHostVm {
+        param([string]$ExpectedState)
+        for ($poll = 1; $poll -le 6; $poll++) {
+            $liveVm = Invoke-OsdHostCommand -Operation 'read live VM' -Action {
+                $records = @(Get-VM -Name $VmName -ErrorAction Stop)
+                if ($records.Count -eq 0 -or ($records.Count -eq 1 -and $null -eq $records[0])) {
+                    throw "Hyper-V returned an empty VM record for '$VmName'."
+                }
+                if ($records.Count -ne 1 -or $records[0].Name -ine $VmName) {
+                    throw "Hyper-V did not return exactly the requested VM '$VmName'."
+                }
+                return $records[0]
+            }
+            $observed.Vm = $liveVm
+            if (-not $liveVm.Id -or $liveVm.Id -eq [guid]::Empty -or
+                $liveVm.MemoryStartup -le 0 -or $liveVm.ProcessorCount -le 0) {
+                throw "Hyper-V returned an invalid host configuration for '$VmName'."
+            }
+            if ($observed.Id -and $liveVm.Id -ne $observed.Id) {
+                throw "VM identity changed from '$($observed.Id)' to '$($liveVm.Id)'; refusing to modify or start a replacement VM."
+            }
+            if (-not $observed.Id) { $observed.Id = $liveVm.Id }
+            $state = "$($liveVm.State)"
+            if (($ExpectedState -and $state -eq $ExpectedState) -or
+                (-not $ExpectedState -and $state -in @('Off', 'Running', 'Saved', 'Paused'))) {
+                return $liveVm
+            }
+            if (-not $ExpectedState -and $state -notin @('Starting', 'Stopping', 'Saving',
+                    'Restoring', 'Pausing', 'Resuming', 'Reset', 'Resetting', 'FastSaving')) {
+                throw "Unsupported Hyper-V state '$state'; no automatic reset or saved-state removal will be attempted."
+            }
+            $wanted = if ($ExpectedState) { $ExpectedState } else { 'a stable power state' }
+            if ($poll -eq 6) {
+                throw "VM did not reach $wanted after 6 observations; last state='$state'."
+            }
+            Write-Log "$prefix`: state observation $poll/6, expected=$wanted, actual=$state; checking again in 5s." -LogOnly
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    try {
+        if ($MemoryBytes -le 0 -or $ProcessorCount -le 0 -or
+            $DynamicMinRam -lt 0 -or $DynamicMinRam -gt $MemoryBytes) {
+            throw "Invalid requested host configuration: startupBytes=$MemoryBytes; processors=$ProcessorCount; dynamicMinBytes=$DynamicMinRam."
+        }
+        $stage = 'inspect live VM'
+        $vm = Get-OsdHostVm
+        $originalState = "$($vm.State)"
+        Write-Log "$prefix`: preflight: $(Format-OsdHostVm $vm); requestedStartupBytes=$MemoryBytes; requestedProcessors=$ProcessorCount; requestedDynamicMinBytes=$DynamicMinRam; WindowsGuestChecks=Skipped (PXE target)." -LogOnly
+
+        $pinnedMin = [long][math]::Floor($MemoryBytes * 0.99)
+        $pinnedMin -= $pinnedMin % 2MB
+        if ($pinnedMin -lt 40MB) { $pinnedMin = $MemoryBytes }
+        $memoryChanged = $vm.MemoryStartup -ne $MemoryBytes
+        $processorsChanged = $vm.ProcessorCount -ne $ProcessorCount
+        $pinChanged = $DynamicMinRam -gt 0 -and
+            (-not $vm.DynamicMemoryEnabled -or $vm.MemoryMinimum -ne $pinnedMin)
+        if ($originalState -in @('Saved', 'Paused') -and
+            ($memoryChanged -or $processorsChanged -or $pinChanged)) {
+            throw "Cannot change hardware while the PXE target is '$originalState'. Resume or shut down the VM before retrying; its saved/paused state will not be discarded."
+        }
+
+        try {
+            if ($originalState -eq 'Running' -and
+                ($memoryChanged -or $processorsChanged -or ($pinChanged -and -not $vm.DynamicMemoryEnabled))) {
+                $stage = 'stop for hardware update'
+                $restorePower = $true
+                $stopped = Stop-VM2 -Name $VmName -Passthru -RetryCount 1 -RetrySeconds 5 -GracefulTimeoutSeconds 30
+                if ($stopped -isnot [bool] -or -not $stopped) {
+                    throw 'Stop-VM2 did not return Boolean true; hardware was not changed.'
+                }
+                $vm = Get-OsdHostVm -ExpectedState Off
+            }
+
+            $memoryChanged = $vm.MemoryStartup -ne $MemoryBytes
+            $pinChanged = $DynamicMinRam -gt 0 -and
+                (-not $vm.DynamicMemoryEnabled -or $vm.MemoryMinimum -ne $pinnedMin)
+            if ($pinChanged -and -not $memoryChanged -and $vm.State -eq 'Running' -and
+                $vm.DynamicMemoryEnabled) {
+                Write-Log "$prefix`: retaining live dynamic-memory floor $($vm.MemoryMinimum) instead of $pinnedMin; deployment pin adjustments alone will not interrupt a running PXE target or issue a potentially blocking live Set-VMMemory call." -LogOnly
+                $pinChanged = $false
+            }
+            if ($memoryChanged -or $pinChanged) {
+                $stage = 'update memory'
+                $memoryParams = @{
+                    DynamicMemoryEnabled = $true
+                    MinimumBytes = $pinnedMin
+                    MaximumBytes = $MemoryBytes
+                    StartupBytes = $MemoryBytes
+                }
+                Invoke-OsdHostCommand -Operation $stage -Action {
+                    $vm | Set-VMMemory @memoryParams -ErrorAction Stop | Out-Null
+                }
+                $memoryUpdated = $true
+            }
+            if ($processorsChanged) {
+                $stage = 'update processors'
+                Invoke-OsdHostCommand -Operation $stage -Action {
+                    $vm | Set-VM -ProcessorCount $ProcessorCount -ErrorAction Stop | Out-Null
+                }
+            }
+        }
+        catch {
+            $updateError = $_
+            $updateStage = $stage
+        }
+        finally {
+            if ($restorePower) {
+                try {
+                    $stage = 'restore original Running state'
+                    $vm = Get-OsdHostVm
+                    if ($vm.State -eq 'Off') {
+                        $started = Start-VM2 -Name $VmName -Passthru -RetryCount 1 -RetrySeconds 5
+                        if ($started -isnot [bool] -or -not $started) {
+                            throw 'Start-VM2 did not return Boolean true.'
+                        }
+                    }
+                    elseif ($vm.State -ne 'Running') {
+                        throw "VM is '$($vm.State)'; refusing to discard saved/paused state during power recovery."
+                    }
+                    $vm = Get-OsdHostVm -ExpectedState Running
+                    Write-Log "$prefix`: restored original power state Running; Windows guest checks were not required." -LogOnly
+                }
+                catch {
+                    $restoreError = $_
+                    $primaryError = if ($updateError) { $updateError.Exception.Message -replace '\s+', ' ' } else { '<none>' }
+                    Write-Log "$prefix`: power recovery failed: $(Format-OsdHostError $_); updateError=$primaryError; lastHostState=$(Format-OsdHostVm $observed.Vm)." -Failure -LogOnly
+                }
+            }
+        }
+        if ($updateError) {
+            $stage = $updateStage
+            throw $updateError
+        }
+        if ($restoreError) { throw $restoreError }
+
+        $stage = 'verify host configuration'
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $vm = Get-OsdHostVm -ExpectedState $originalState
+            $mismatches = [Collections.Generic.List[string]]::new()
+            if ($vm.MemoryStartup -ne $MemoryBytes) {
+                $mismatches.Add("startupBytes=$($vm.MemoryStartup), expected=$MemoryBytes")
+            }
+            if ($vm.ProcessorCount -ne $ProcessorCount) {
+                $mismatches.Add("processors=$($vm.ProcessorCount), expected=$ProcessorCount")
+            }
+            if ($memoryUpdated -and (-not $vm.DynamicMemoryEnabled -or
+                    $vm.MemoryMinimum -ne $pinnedMin -or $vm.MemoryMaximum -ne $MemoryBytes)) {
+                $mismatches.Add("dynamicMemory=$($vm.DynamicMemoryEnabled), minimum=$($vm.MemoryMinimum), maximum=$($vm.MemoryMaximum); expected=True/$pinnedMin/$MemoryBytes")
+            }
+            if ($mismatches.Count -eq 0) { break }
+            if ($attempt -eq 3) {
+                throw "Host verification failed after 3 observations: $($mismatches -join '; ')."
+            }
+            Write-Log "$prefix`: verification mismatch, attempt $attempt/3: $($mismatches -join '; '); reading again in 5s." -LogOnly
+            Start-Sleep -Seconds 5
+        }
+        Write-Log "$prefix`: verified: $(Format-OsdHostVm $vm); originalState=$originalState; elapsedSeconds=$([math]::Round($timer.Elapsed.TotalSeconds, 1)); WindowsGuestChecks=Skipped." -LogOnly
+        return $true
+    }
+    catch {
+        Write-Log "$prefix failed at '$stage': $(Format-OsdHostError $_); requestedStartupBytes=$MemoryBytes; requestedProcessors=$ProcessorCount; originalState=$originalState; lastHostState=$(Format-OsdHostVm $observed.Vm); elapsedSeconds=$([math]::Round($timer.Elapsed.TotalSeconds, 1))." -Failure -LogOnly
+        return $false
+    }
+    finally {
+        $timer.Stop()
+    }
+}
+
 function Get-VMSwitch2 {
     param (
         [Parameter(Mandatory = $true)]

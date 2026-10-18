@@ -463,8 +463,7 @@ $global:VM_Create = {
             $deployConfig.parameters -and
             $deployConfig.parameters.ResumePreparation -eq $true
         )
-        if ($resumePreparation -and
-            (Get-VM2 -Fallback -Name $currentItem.vmName -ErrorAction SilentlyContinue)) {
+        if ($resumePreparation) {
             $createVM = $false
         }
 
@@ -517,6 +516,19 @@ $global:VM_Create = {
         }
 
         if (-not $CreateVM) {
+            if ($currentItem.role -eq "OSDClient") {
+                $prepared = Initialize-OsdClientHost -VmName $currentItem.vmName `
+                    -MemoryBytes ($currentItem.Memory / 1) -ProcessorCount $currentItem.VirtualProcs `
+                    -DynamicMinRam ($dynamicMinRam / 1) -Phase $Phase
+                if ($prepared -is [bool] -and $prepared) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (PXE target; live host configuration and power state verified; Windows guest preparation is not required)." -OutputStream -Success
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing OSD host preparation failed. See the preceding host-state, operation, and retry diagnostics." -OutputStream -Failure
+                }
+                return
+            }
+
             # Check if memory amount or processor count changed; skip dynamic memory toggle for existing VMs
             $restart = $false
 
@@ -577,6 +589,10 @@ $global:VM_Create = {
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if memory has changed."
             $vm = Get-VM2 -name $currentItem.VmName
+            if (-not $vm) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM no longer exists. Cannot prepare the existing VM. Exiting." -Failure -OutputStream
+                return
+            }
             # VM vs Config
             $memory = ($currentItem.Memory / 1)            
             $currentMemory = $vm.MemoryStartup
@@ -706,7 +722,11 @@ $global:VM_Create = {
                 if ($vm.Role -ne "DC") {
                     start-sleep -seconds 15
                 }
-                start-vm2 -name $vm.VmName
+                $started = Start-VM2 -Name $vm.VmName -Passthru
+                if (-not $started) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not start the VM after updating its hardware. Exiting." -Failure -OutputStream
+                    return
+                }
                 Wait-ForHeartbeat -VmName $vm.VmName | Out-Null
             }
         }
