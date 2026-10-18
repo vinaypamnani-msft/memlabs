@@ -543,7 +543,6 @@
         }
         $nextDepend = '[SqlScript]DisableAgentJob'
 
-
         $WaitFor = @()
         $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $node.NodeName -and $_.role -in "CAS", "Primary" }
         if ($serverToWait) {
@@ -571,6 +570,20 @@
                 DependsOn           = $nextDepend
             }
             $nextDepend = '[WaitForWorkflowReceipt]WaitSCCM'
+        }
+
+        if ($ThisVM.role -eq 'SQLAO') {
+            $sqlAoInstanceName = if ($ThisVM.sqlInstanceName) { $ThisVM.sqlInstanceName } else { 'MSSQLSERVER' }
+            SqlMaxDop SetSqlAoMaxDop {
+                Ensure                  = 'Present'
+                DynamicAlloc            = $false
+                MaxDop                  = 1
+                InstanceName            = $sqlAoInstanceName
+                ProcessOnlyOnActiveNode = $false
+                PsDscRunAsCredential    = $Admincreds
+                DependsOn               = $nextDepend
+            }
+            $nextDepend = '[SqlMaxDop]SetSqlAoMaxDop'
         }
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Enable-AgentJob-Set.sql"

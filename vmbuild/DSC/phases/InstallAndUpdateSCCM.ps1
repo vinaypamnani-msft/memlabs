@@ -205,13 +205,6 @@ function Invoke-SqlAoSetupCanary {
         return [DateTime]::UtcNow.AddSeconds($stabilizationSeconds)
     }
 
-    function New-CanaryConnectionString {
-        param([string]$Server, [string]$Port)
-        $target = $Server
-        if ($Port -and $Port -ne '1433') { $target = "$Server,$Port" }
-        return "Driver={SQL Server};AutoTranslate=no;Server=$target;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;Connection Timeout=10"
-    }
-
     function Invoke-CanaryCommand {
         param(
             [Parameter(Mandatory)][string]$ConnectionString,
@@ -219,25 +212,7 @@ function Invoke-SqlAoSetupCanary {
             [int]$TimeoutSeconds = 120,
             [switch]$Scalar
         )
-        if ($TestHooks -and $TestHooks.Command) {
-            return (& $TestHooks.Command $ConnectionString $CommandText $TimeoutSeconds $Scalar.IsPresent)
-        }
-        $connection = New-Object System.Data.Odbc.OdbcConnection $ConnectionString
-        try {
-            $connection.Open()
-            $command = $connection.CreateCommand()
-            try {
-                $command.CommandTimeout = $TimeoutSeconds
-                $command.CommandText = $CommandText
-                if ($Scalar) { return $command.ExecuteScalar() }
-                $null = $command.ExecuteNonQuery()
-            }
-            finally { $command.Dispose() }
-        }
-        finally {
-            $connection.Close()
-            $connection.Dispose()
-        }
+        Invoke-SqlAoCommand @PSBoundParameters -TestHooks $TestHooks
     }
 
     function Wait-CanaryReplicaReady {
@@ -352,8 +327,8 @@ WHERE ag.name = N'$($AvailabilityGroupName.Replace("'", "''"))'
     }
 
     try {
-        $node1ConnectionString = New-CanaryConnectionString -Server $Node1 -Port $Node1Port
-        $node2ConnectionString = New-CanaryConnectionString -Server $Node2 -Port $Node2Port
+        $node1ConnectionString = New-SqlAoNodeConnectionString -Server $Node1 -Port $Node1Port
+        $node2ConnectionString = New-SqlAoNodeConnectionString -Server $Node2 -Port $Node2Port
         Write-DscStatus "SQLAO canary: listener checks use [$ListenerName]; physical replica checks and failover commands use [$Node1,$Node1Port] and [$Node2,$Node2Port]."
 
         Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 120 -CommandText @"
@@ -647,6 +622,7 @@ if ($ThisVM.cmInstallDir) {
 }
 
 # SQL FQDN
+$installToAO = $false
 
 if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
@@ -696,6 +672,15 @@ if (!(Test-Path C:\$CM\Redist)) {
 
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+
+$sqlAoMaxDopParameters = $null
+if ($installToAO) {
+    $sqlAoMaxDopParameters = @{
+        Node1 = $sqlNode1; Node2 = $sqlNode2
+        Node1Port = "$sqlNode1Port"; Node2Port = "$sqlNode2Port"
+    }
+    if (-not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+}
 
 # Reset upgrade action (in case called again in add to existing scenario), but not if already completed
 if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
@@ -1773,6 +1758,7 @@ WHERE drs.is_suspended = 1
     }
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+    if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
     # Check if setup.exe failed the prerequisite check. If so, rename the
     # log, re-run the SQL pre-flight (Kerberos may have settled since our
@@ -1844,6 +1830,7 @@ WHERE drs.is_suspended = 1
 
             Write-DscStatus "Re-launching setup.exe (attempt 2)"
             Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+            if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
             # Check if the retry also failed prereq
             if (Test-Path 'C:\ConfigMgrSetup.log') {

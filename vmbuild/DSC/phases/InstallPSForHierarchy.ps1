@@ -21,6 +21,8 @@ if ($ThisVM.cmInstallDir) {
 }
 
 # SQL FQDN
+$installToAO = $false
+$sqlAoMaxDopParameters = $null
 if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
@@ -33,6 +35,13 @@ if ($ThisVM.remoteSQLVM) {
     }
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
+        $sqlNode2Vm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $SQLVM.OtherNode }
+        $sqlAoMaxDopParameters = @{
+            Node1 = $SQLVM.vmName
+            Node2 = $SQLVM.OtherNode
+            Node1Port = "$sqlPort"
+            Node2Port = $(if ($sqlNode2Vm.sqlPort) { "$($sqlNode2Vm.sqlPort)" } else { "$sqlPort" })
+        }
         $sqlServerName = $SQLVM.AlwaysOnListenerName
         $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
         $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
@@ -59,6 +68,8 @@ if ($ThisVM.siteCode) {
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile `
     -RequiredSteps @('WaitingForCASFinishedInstall', 'InstallSCCM')
+
+if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
 # Set Install action as Running
 $Configuration.WaitingForCASFinishedInstall.Status = 'Running'
@@ -295,6 +306,7 @@ CurrentBranch=1
     Write-DscStatusSetup
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+    if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
     Write-DscStatus "Installation finished."
     Start-Sleep -Seconds 5

@@ -10,6 +10,19 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($installPath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "$installPath has parse errors: $($errors -join '; ')" }
+$helperTokens = $null
+$helperErrors = $null
+$helperAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $RootPath 'DSC\phases\ScriptFunctions.ps1'), [ref]$helperTokens, [ref]$helperErrors)
+if ($helperErrors.Count) { throw "ScriptFunctions.ps1 has parse errors: $($helperErrors -join '; ')" }
+foreach ($name in @('New-SqlAoNodeConnectionString', 'Invoke-SqlAoCommand')) {
+    $helper = @($helperAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+            }, $true))
+    if ($helper.Count -ne 1) { throw "Expected one $name definition." }
+    . ([scriptblock]::Create($helper[0].Extent.Text))
+}
 $definition = @($ast.FindAll({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and

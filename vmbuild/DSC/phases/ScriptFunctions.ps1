@@ -2,6 +2,131 @@
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 
+function New-SqlAoNodeConnectionString {
+    param([string]$Server, [string]$Port)
+
+    $target = $Server
+    if ($Port -and $Port -ne '1433') { $target = "$Server,$Port" }
+    return "Driver={SQL Server};AutoTranslate=no;Server=$target;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;Connection Timeout=10"
+}
+
+function Invoke-SqlAoCommand {
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$CommandText,
+        [int]$TimeoutSeconds = 120,
+        [switch]$Scalar,
+        [hashtable]$TestHooks
+    )
+
+    if ($TestHooks -and $TestHooks.Command) {
+        return (& $TestHooks.Command $ConnectionString $CommandText $TimeoutSeconds $Scalar.IsPresent)
+    }
+    $connection = New-Object System.Data.Odbc.OdbcConnection $ConnectionString
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        try {
+            $command.CommandTimeout = $TimeoutSeconds
+            $command.CommandText = $CommandText
+            if ($Scalar) { return $command.ExecuteScalar() }
+            $null = $command.ExecuteNonQuery()
+        }
+        finally { $command.Dispose() }
+    }
+    finally {
+        $connection.Close()
+        $connection.Dispose()
+    }
+}
+
+function Set-SqlAoLabMaxDop {
+    param(
+        [Parameter(Mandatory)][string]$Node1,
+        [string]$Node2,
+        [Parameter(Mandatory)][string]$Node1Port,
+        [string]$Node2Port,
+        [hashtable]$TestHooks
+    )
+
+    if ($Node2 -and -not $Node2Port) {
+        Write-DscStatus "SQLAO MAXDOP policy failed: physical SQL port is missing for [$Node2]." -Failure
+        return $false
+    }
+    $replicas = @(@{ Name = $Node1; Port = $Node1Port })
+    if ($Node2) { $replicas += @{ Name = $Node2; Port = $Node2Port } }
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($replica in $replicas) {
+        try {
+            $connectionString = New-SqlAoNodeConnectionString -Server $replica.Name -Port $replica.Port
+            $effectiveMaxDop = Invoke-SqlAoCommand -ConnectionString $connectionString -TimeoutSeconds 60 `
+                -Scalar -TestHooks $TestHooks -CommandText @"
+SET NOCOUNT ON;
+IF NOT EXISTS
+(
+    SELECT 1 FROM sys.configurations
+    WHERE name = N'max degree of parallelism'
+      AND CONVERT(int, value) = 1 AND CONVERT(int, value_in_use) = 1
+)
+BEGIN
+    DECLARE @advanced int =
+        (SELECT CONVERT(int, value_in_use) FROM sys.configurations WHERE name = N'show advanced options');
+    BEGIN TRY
+        IF @advanced = 0
+        BEGIN
+            EXEC sys.sp_configure N'show advanced options', 1;
+            RECONFIGURE;
+        END;
+        EXEC sys.sp_configure N'max degree of parallelism', 1;
+        RECONFIGURE;
+    END TRY
+    BEGIN CATCH
+        DECLARE @originalError nvarchar(2048) = ERROR_MESSAGE();
+        IF @advanced = 0
+        BEGIN
+            BEGIN TRY
+                EXEC sys.sp_configure N'show advanced options', 0;
+                RECONFIGURE;
+            END TRY
+            BEGIN CATCH
+                DECLARE @combinedError nvarchar(2048) =
+                    LEFT(@originalError + N'; restoring show advanced options also failed: ' + ERROR_MESSAGE(), 2048);
+                THROW 51002, @combinedError, 1;
+            END CATCH;
+        END;
+        THROW;
+    END CATCH;
+    IF @advanced = 0
+    BEGIN
+        EXEC sys.sp_configure N'show advanced options', 0;
+        RECONFIGURE;
+    END;
+END;
+IF NOT EXISTS
+(
+    SELECT 1 FROM sys.configurations
+    WHERE name = N'max degree of parallelism'
+      AND CONVERT(int, value) = 1 AND CONVERT(int, value_in_use) = 1
+)
+    THROW 51003, 'SQLAO lab policy requires configured and effective MAXDOP = 1.', 1;
+SELECT CONVERT(int, value_in_use) FROM sys.configurations WHERE name = N'max degree of parallelism';
+"@
+            if ($null -eq $effectiveMaxDop -or [int]$effectiveMaxDop -ne 1) {
+                throw "MAXDOP verification returned '$effectiveMaxDop', expected 1."
+            }
+            Write-DscStatus "SQLAO MAXDOP: [$($replica.Name),$($replica.Port)] configured=1; effective=1."
+        }
+        catch {
+            $failures.Add("[$($replica.Name),$($replica.Port)]: $($_.Exception.Message)")
+        }
+    }
+    if ($failures.Count -gt 0) {
+        Write-DscStatus "SQLAO MAXDOP policy failed: $($failures -join ' | '). Refusing to continue without serial execution on all configured replicas." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Test-PushClientRequested {
     param([object]$VM)
 

@@ -661,13 +661,26 @@ throw "SQL instance '$cvSqlInstance' service '$cvSqlSvc' exists (Status=`$(`$svc
             InstanceName = $SQLInstanceName
         }
 
+        $sqlPostMemoryDependency = '[SqlMemory]SetSqlMemory'
+        if ($ThisVM.role -eq 'SQLAO') {
+            SqlMaxDop SetSqlAoMaxDop {
+                Ensure                  = 'Present'
+                DynamicAlloc            = $false
+                MaxDop                  = 1
+                InstanceName            = $SQLInstanceName
+                ProcessOnlyOnActiveNode = $false
+                DependsOn               = '[SqlMemory]SetSqlMemory'
+            }
+            $sqlPostMemoryDependency = '[SqlMaxDop]SetSqlAoMaxDop'
+        }
+
         # Instant File Initialization. Without SeManageVolumePrivilege SQL zero-writes
         # every byte of a new or growing DATA file, which is most of the cost of CM
         # Setup creating the site database with large preallocation. Grant only -- the
         # engine reads the privilege at service start, and SQL is restarted after this
         # phase anyway; restarting here would blip an AG on a re-run.
         Script GrantSqlInstantFileInit {
-            DependsOn  = '[SqlMemory]SetSqlMemory'
+            DependsOn  = $sqlPostMemoryDependency
             GetScript  = { @{ Result = '' } }
             TestScript = {
                 $svcName = $using:cvSqlSvc

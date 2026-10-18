@@ -1605,6 +1605,27 @@ function Test-SQLFunctionality {
             $results.Details.Add("FAIL: SQL connection to '$connStr' as '$identity' failed: $($_.Exception.Message)")
         }
 
+        if ($checkAgent -eq '1' -and $results.Passed) {
+            try {
+                $maxDop = @(Invoke-Sqlcmd -ServerInstance $connStr -Query @"
+SELECT CONVERT(int, value) AS ConfiguredMaxDop,
+       CONVERT(int, value_in_use) AS EffectiveMaxDop
+FROM sys.configurations WHERE name = N'max degree of parallelism';
+"@ -QueryTimeout 30 @sqlParams -ErrorAction Stop)
+                if ($maxDop.Count -ne 1 -or $maxDop[0].ConfiguredMaxDop -ne 1 -or $maxDop[0].EffectiveMaxDop -ne 1) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SQLAO MAXDOP must be configured=1 and effective=1 on '$connStr'; observed: $($maxDop | ConvertTo-Json -Compress)")
+                }
+                else {
+                    $results.Details.Add("OK: SQLAO MAXDOP configured=1 and effective=1 on '$connStr'")
+                }
+            }
+            catch {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SQLAO MAXDOP could not be verified on '$connStr': $($_.Exception.Message)")
+            }
+        }
+
         # Generic SQL Agent job health: any enabled job whose most-recent run
         # was NOT Succeeded is a real signal (CM site maintenance, WSUS reindex,
         # AG backup jobs, operator-added jobs). Never-run jobs are skipped.

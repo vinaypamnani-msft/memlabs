@@ -552,3 +552,18 @@ the test host. The local primary-site SQL instance remains on SQL Server 2019,
 so the same lab still covers both engine generations. Each SQLAO node receives
 12 GB, up from 7 GB. Updating this file alone does not upgrade SQL or resize
 existing deployed VMs; the SQLAO pair must be rebuilt for those changes.
+
+All SQLAO instances use the lab policy `MAXDOP = 1`, on both the primary and
+secondary replica. Phases 4 and 8 configure this through `SqlMaxDop` without dynamic
+allocation or an active-node-only restriction. Site setup also reapplies and verifies
+the configured and effective values through each physical node's SQL port before
+canaries, including checkpoint retries and already-installed site paths, and
+again after each ConfigMgr setup attempt, including hierarchy primaries. Retained
+single-node SQLAO instances are reconciled without requiring an absent partner.
+This is an online instance setting;
+the previous `show advanced options` state is restored after changing it.
+Phase 11 fails SQLAO validation if either value has drifted from 1 or cannot be
+read. Standalone and other non-SQLAO SQL instances retain their existing settings.
+Serial execution is a lab policy, not a guaranteed fix for SQL engine error 5243.
+Validate with `vmbuild\tools\Test-SqlAoMaxDop.ps1` and
+`vmbuild\tools\Test-SqlAoSetupCanaryRecovery.ps1`.
