@@ -846,6 +846,25 @@ function Resolve-CrossRevisionDomainNetBiosName {
         }
         catch { }
     }
+    if (-not $candidate) {
+        $stateVariable = Get-Variable -Name State -Scope Script -ErrorAction SilentlyContinue
+        $savedNames = @(
+            foreach ($mapName in @('DomainIdentities', 'DevelopDomainIdentities')) {
+                if ($stateVariable -and $stateVariable.Value -is [Collections.IDictionary] -and
+                    $stateVariable.Value[$mapName] -is [Collections.IDictionary]) {
+                    foreach ($saved in $stateVariable.Value[$mapName].Values) {
+                        if ($saved.Domain -ieq $Domain -and -not [string]::IsNullOrWhiteSpace("$($saved.DomainNetBiosName)")) {
+                            "$($saved.DomainNetBiosName)".Trim()
+                        }
+                    }
+                }
+            }
+        ) | Sort-Object -Unique
+        if (@($savedNames).Count -gt 1) {
+            throw "Conflicting saved NetBIOS domain names for '$Domain': $($savedNames -join ', ')."
+        }
+        if (@($savedNames).Count -eq 1) { $candidate = "$savedNames" }
+    }
     if (-not $candidate) { return $null }
     if ($candidate.Length -gt 15 -or $candidate -match '[\\/:*?"<>|]') {
         throw "Invalid NetBIOS domain name '$candidate' for '$Domain'."
@@ -961,6 +980,7 @@ function Wait-CrossRevisionRetainedVmReady {
             }
             $credentials = @(New-DomainCredentials -Domain $note.domain -AdminName $account `
                     -DomainNetBiosName $note.domainNetBiosName -VmName $Target.Name -AdminCachePath $AdminCachePath)
+            $probeErrors = [Collections.Generic.List[string]]::new()
             foreach ($credential in $credentials) {
                 $remaining = [int][Math]::Ceiling($TimeoutSeconds - $timer.Elapsed.TotalSeconds)
                 if ($remaining -lt 1) { break }
@@ -981,14 +1001,14 @@ function Wait-CrossRevisionRetainedVmReady {
                     }
                     elseif ("$($probeJob.State)" -eq 'Failed') {
                         $null = Receive-Job -Job $probeJob -ErrorAction Stop
-                        $lastProbeDetail = "PSDirect probe failed using $($credential.UserName)"
+                        $probeErrors.Add("PSDirect probe failed using $($credential.UserName)")
                     }
                     else {
-                        $lastProbeDetail = "PSDirect probe timed out using $($credential.UserName)"
+                        $probeErrors.Add("PSDirect probe timed out using $($credential.UserName)")
                     }
                 }
                 catch {
-                    $lastProbeDetail = "PSDirect readiness using $($credential.UserName): $($_.Exception.Message -replace '\s+', ' ')"
+                    $probeErrors.Add("PSDirect readiness using $($credential.UserName): $($_.Exception.Message -replace '\s+', ' ') [errorId=$($_.FullyQualifiedErrorId)]")
                 }
                 finally {
                     if ($probeJob) {
@@ -1010,6 +1030,7 @@ function Wait-CrossRevisionRetainedVmReady {
                     return
                 }
             }
+            if ($probeErrors.Count) { $lastProbeDetail = $probeErrors -join '; ' }
             if ($lastProbeDetail) { $lastDetail = "$lastDetail; $lastProbeDetail" }
         }
         elseif ($state -notin @('Starting', 'Stopping')) {

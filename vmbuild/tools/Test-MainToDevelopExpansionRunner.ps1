@@ -1162,13 +1162,16 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     $script:ReadyRemovals = 0
     $script:ReadyTransientFailures = 0
     $script:ReadyEmptyProbe = $false
+    $script:ReadyNotes = '{"domain":"ready.test","adminName":"admin","domainNetBiosName":"READY"}'
+    $script:ReadyRejectedUsers = @()
+    $script:ReadyCredentialAttempts = @()
     function Get-VM {
         param($Name, $ErrorAction)
         if ($script:ReadyStates.Count) { $script:ReadyState = $script:ReadyStates.Dequeue() }
         [pscustomobject]@{
             Name = $Name; Id = $script:ReadyId; State = $script:ReadyState
             Heartbeat = 'OkApplicationsHealthy'; Status = 'fixture'; Uptime = [timespan]::FromSeconds(15)
-            Notes = '{"domain":"ready.test","adminName":"admin","domainNetBiosName":"READY"}'
+            Notes = $script:ReadyNotes
         }
     }
     function Start-VM {
@@ -1185,6 +1188,10 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
         param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
         Assert-True ($AsJob -and "$VMId" -eq "$vmId") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
         $script:ReadyProbes++
+        $script:ReadyCredentialAttempts += $Credential.UserName
+        if ($Credential.UserName -in $script:ReadyRejectedUsers) {
+            throw 'An error has occurred which PowerShell cannot handle. A remote session might have ended.'
+        }
         if ($script:ReadyTransientFailures -gt 0) {
             $script:ReadyTransientFailures--
             throw 'fixture: guest transport is still starting'
@@ -1261,6 +1268,50 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     Assert-ThrowsLike {
         Wait-CrossRevisionRetainedVmReady -Target ([pscustomobject]@{ Name = 'OTHER'; Id = '' })
     } '*saved VM name and GUID*' 'missing saved identity cannot select an unrelated VM to start'
+
+    & {
+        . (Import-TestFunction -Path $runnerPath -Name New-DomainCredentials)
+        $savedState = $script:State
+        $credentialFile = Join-Path ([IO.Path]::GetTempPath()) "memlabs-readiness-credential-$PID.txt"
+        try {
+            'fixture-not-a-real-password' | Set-Content -LiteralPath $credentialFile
+            $script:State = @{
+                DomainIdentities = @{ baseline = @{ Domain = 'ready.test'; DomainNetBiosName = 'EXACT-NB' } }
+                DevelopDomainIdentities = @{ other = @{ Domain = 'other.test'; DomainNetBiosName = 'OTHER' } }
+            }
+            $script:ReadyNotes = '{"domain":"ready.test","adminName":"admin"}'
+            $script:ReadyState = 'Running'
+            $script:ReadyOutcome = 'Completed'
+            $script:ReadyRejectedUsers = @('admin@ready.test')
+            $script:ReadyCredentialAttempts = @()
+            $startsBefore = $script:ReadyStarts
+            Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 0 -TimeoutSeconds 5
+            Assert-Equal 'admin@ready.test|EXACT-NB\admin' ($script:ReadyCredentialAttempts -join '|') `
+                'missing legacy VM-note NetBIOS name uses the saved exact domain name after UPN transport rejection'
+            Assert-Equal $startsBefore $script:ReadyStarts 'credential fallback never reboots the healthy retained VM'
+            $script:State.DevelopDomainIdentities.expansion = $script:State.DomainIdentities.baseline
+            $script:State.DomainIdentities.Clear()
+            Assert-Equal 'EXACT-NB' (Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name) `
+                'expansion-domain checkpoint also supplies the exact legacy credential fallback'
+            $script:State.DomainIdentities.conflict = @{ Domain = 'ready.test'; DomainNetBiosName = 'CONFLICT' }
+            Assert-ThrowsLike {
+                Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name
+            } '*Conflicting saved NetBIOS*' 'conflicting saved domain names fail instead of guessing credentials'
+            $script:State.DomainIdentities.Clear()
+            $script:ReadyRejectedUsers = @('admin@ready.test', 'EXACT-NB\admin')
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+            } '*admin@ready.test*errorId=*EXACT-NB\admin*errorId=*' `
+                'readiness timeout preserves every credential transport error and error ID'
+            $script:State.DevelopDomainIdentities.Clear()
+            Assert-True ($null -eq (Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name)) `
+                'missing saved NetBIOS metadata does not guess from the DNS label'
+        }
+        finally {
+            $script:State = $savedState
+            Remove-Item -LiteralPath $credentialFile -Force
+        }
+    }
 }
 
 $baselineId = [guid]::NewGuid()
