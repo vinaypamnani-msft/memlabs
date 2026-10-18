@@ -44,6 +44,17 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   them with the current inventory. Completed first-pass stages from older
   checkpoints that lack these identities capture them only after live stage
   and domain-health validation; this does not prove pre-capture continuity.
+- Before retained-VM validation or live maintenance, the runner verifies saved
+  VM identity and prepares domain-joined targets even when a deployment stage
+  is skipped. An `Off` VM is started once by its verified Hyper-V object;
+  `Starting`/`Stopping` transitions are observed without reset or hard power-off.
+  Each target has a ten-minute readiness budget, including bounded PowerShell
+  Direct probes by VM GUID that verify computer, user, and DNS-domain identity.
+  Saved, paused, critical, replaced, or persistently unready VMs fail explicitly.
+  START/WAIT/PASS output records the target GUID and power/transport evidence;
+  existing domain SID, secure-channel, DNS, disk, and maintenance checks still
+  run afterward. This also handles a graceful shutdown finishing after an
+  earlier runner has exited. It does not certify the original reboot cause.
 - Once per candidate revision, a scoped CAS or standalone Primary runs the
   recovery matrix: missing legacy/current MSI source and installer cache,
   advertised/missing registration, missing console version metadata,

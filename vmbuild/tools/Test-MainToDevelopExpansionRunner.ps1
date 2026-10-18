@@ -378,6 +378,7 @@ $invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildS
 . (Import-TestFunction -Path $runnerPath -Name New-DomainCredentials)
 . (Import-TestFunction -Path $runnerPath -Name New-DomainCredential)
 . (Import-TestFunction -Path $runnerPath -Name Invoke-CrossRevisionDomainProbe)
+. (Import-TestFunction -Path $runnerPath -Name Wait-CrossRevisionRetainedVmReady)
 . (Import-TestFunction -Path $runnerPath -Name Get-DomainIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainJoinedVmHealth)
@@ -1145,6 +1146,123 @@ Assert-Equal 'resume|main|A' $failedRecoveryState.CurrentStep `
 Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     'failed automatic cleanup preserves completed family progress'
 
+& {
+    $vmId = [guid]::NewGuid()
+    $target = [pscustomobject]@{ Name = 'READY-SITE'; Id = "$vmId"; Domain = 'ready.test' }
+    $script:ReadyStates = [Collections.Generic.Queue[string]]::new()
+    $script:ReadyState = 'Off'
+    $script:ReadyStarts = 0
+    $script:ReadyProbes = 0
+    $script:ReadyOutcome = 'Completed'
+    $script:ReadyId = $vmId
+    $script:ReadyComputer = 'READY-SITE'
+    $script:ReadyDomain = 'ready.test'
+    $script:ReadyTimeouts = @()
+    $script:ReadyStops = 0
+    $script:ReadyRemovals = 0
+    $script:ReadyTransientFailures = 0
+    $script:ReadyEmptyProbe = $false
+    function Get-VM {
+        param($Name, $ErrorAction)
+        if ($script:ReadyStates.Count) { $script:ReadyState = $script:ReadyStates.Dequeue() }
+        [pscustomobject]@{
+            Name = $Name; Id = $script:ReadyId; State = $script:ReadyState
+            Heartbeat = 'OkApplicationsHealthy'; Status = 'fixture'; Uptime = [timespan]::FromSeconds(15)
+            Notes = '{"domain":"ready.test","adminName":"admin","domainNetBiosName":"READY"}'
+        }
+    }
+    function Start-VM {
+        param($VM, $ErrorAction)
+        Assert-Equal "$vmId" "$($VM.Id)" 'retained VM start uses the verified Hyper-V object'
+        $script:ReadyStarts++
+        $script:ReadyState = 'Running'
+    }
+    function New-DomainCredentials {
+        param($Domain, $AdminName, $DomainNetBiosName, $VmName, $AdminCachePath)
+        [pscredential]::new('READY\admin', [securestring]::new())
+    }
+    function Invoke-Command {
+        param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
+        Assert-True ($AsJob -and "$VMId" -eq "$vmId") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
+        $script:ReadyProbes++
+        if ($script:ReadyTransientFailures -gt 0) {
+            $script:ReadyTransientFailures--
+            throw 'fixture: guest transport is still starting'
+        }
+        $job = [pscustomobject]@{ State = $script:ReadyOutcome }
+        $job | Add-Member ScriptMethod StopJobAsync { $script:ReadyStops++ }
+        return $job
+    }
+    function Wait-Job { param($Job, $Timeout) $script:ReadyTimeouts += $Timeout }
+    function Receive-Job {
+        param($Job, $ErrorAction)
+        if ($script:ReadyEmptyProbe) { return }
+        [pscustomobject]@{ ComputerName = $script:ReadyComputer; Domain = $script:ReadyDomain; UserName = 'admin' }
+    }
+    function Remove-Job { param($Job, [switch]$Force, $ErrorAction) $script:ReadyRemovals++ }
+    function Start-Sleep { param($Seconds) [Threading.Thread]::Sleep(20) }
+
+    Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    Assert-True ($script:ReadyStarts -eq 1 -and $script:ReadyProbes -eq 1) 'retained Off VM starts once and proves PSDirect identity before validation'
+    Assert-True ($script:ReadyRemovals -eq 1 -and $script:ReadyTimeouts[0] -le 5) 'readiness probe cleanup and timeout stay within the overall budget'
+    Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    Assert-Equal 1 $script:ReadyStarts 'already Running retained VM is not started or rebooted again'
+    Assert-Equal 2 $script:ReadyProbes 'already Running retained VM still proves PSDirect identity before domain validation'
+    foreach ($state in @('Stopping', 'Off', 'Starting', 'Running')) { $script:ReadyStates.Enqueue($state) }
+    Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    Assert-Equal 2 $script:ReadyStarts 'late completion of the previous shutdown is observed and the Off VM is started once'
+    $script:ReadyTransientFailures = 1
+    $previousProbes = $script:ReadyProbes
+    Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    Assert-True ($script:ReadyProbes -eq $previousProbes + 2 -and $script:ReadyStarts -eq 2) 'transient guest boot transport failure retries without restarting the VM'
+    foreach ($state in @('Off', 'Off')) { $script:ReadyStates.Enqueue($state) }
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    } '*returned to Off after its one start request*' 'a guest that powers off again is not restarted in a loop'
+    $script:ReadyId = [guid]::NewGuid()
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } '*replaced*No power action permitted*' 'replacement VM is rejected before power action'
+    $script:ReadyId = $vmId
+    foreach ($state in @('Saved', 'Paused', 'RunningCritical', 'OffCritical', '')) {
+        $script:ReadyState = $state
+        Assert-ThrowsLike {
+            Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+        } '*cannot be prepared automatically*' "retained '$state' VM is not silently resumed or reset"
+    }
+    $script:ReadyState = 'Stopping'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } '*readiness timed out*state=Stopping*' 'stuck shutdown times out with state evidence without power-off'
+    $script:ReadyState = 'Off'
+    $script:ReadyComputer = 'WRONG-VM'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } '*readiness identity mismatch*' 'boot readiness rejects a different guest computer identity'
+    $script:ReadyComputer = 'READY-SITE'
+    $script:ReadyState = 'Off'
+    $script:ReadyDomain = 'wrong.test'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } '*readiness identity mismatch*' 'boot readiness rejects a different authenticated domain'
+    $script:ReadyDomain = 'ready.test'
+    $script:ReadyState = 'Running'
+    $script:ReadyEmptyProbe = $true
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } '*readiness timed out*returned no identity*' 'an empty completed probe fails with an explicit diagnostic'
+    $script:ReadyEmptyProbe = $false
+    $script:ReadyState = 'Off'
+    $script:ReadyOutcome = 'Running'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } '*readiness timed out*PSDirect probe timed out*' 'a hung boot probe is bounded and fails with transport evidence'
+    Assert-True ($script:ReadyStops -gt 0) 'timed-out boot jobs are stopped asynchronously without disposing active callbacks'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target ([pscustomobject]@{ Name = 'OTHER'; Id = '' })
+    } '*saved VM name and GUID*' 'missing saved identity cannot select an unrelated VM to start'
+}
+
 $baselineId = [guid]::NewGuid()
 $script:MockVms['NOC-DC1'] = [pscustomobject]@{
     Name = 'NOC-DC1'; Id = $baselineId; Notes = '{"success":true,"inProgress":false,"lastPhaseComplete":11}'
@@ -1201,6 +1319,20 @@ $captureCalls = @($runnerAst.FindAll({
             $node.GetCommandName() -eq 'Save-CrossRevisionExpansionIdentity'
         }, $true))
 Assert-Equal 2 $captureCalls.Count 'fresh and resumed expansion paths both checkpoint first-pass identity'
+$readinessCalls = @($runnerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Wait-CrossRevisionRetainedVmReady'
+        }, $true))
+Assert-Equal 4 $readinessCalls.Count 'baseline, skipped-stage, pass-two and maintenance paths all prepare retained VM power readiness'
+$skipCheck = $runnerText.IndexOf('Write-Host "SKIP: completed $step"')
+$skipEnd = $runnerText.IndexOf('if ($cleanupStarted)', $skipCheck)
+$skipText = $runnerText.Substring($skipCheck, $skipEnd - $skipCheck)
+Assert-True ($skipText.IndexOf('Assert-BaselineIdentity -Identity $readinessIdentity') -lt
+    $skipText.IndexOf('Wait-CrossRevisionRetainedVmReady') -and
+    $skipText.IndexOf('Wait-CrossRevisionRetainedVmReady') -lt
+    $skipText.IndexOf('Assert-DomainJoinedVmHealth')) `
+    'skipped-stage resume verifies saved disk/VM identity and readies power before the domain probe'
 $freshCapture = $captureCalls | Select-Object -Last 1
 $captureGuard = $freshCapture.Parent
 while ($captureGuard -and $captureGuard -isnot [Management.Automation.Language.IfStatementAst]) {

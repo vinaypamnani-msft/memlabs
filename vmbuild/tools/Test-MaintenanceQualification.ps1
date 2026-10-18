@@ -164,16 +164,22 @@ try {
     $script:MaintenanceCandidateSource = [pscustomobject]@{ Digest = $digest }
     $script:State = [ordered]@{ CompletedSteps = @(); CurrentStep = $null; MaintenanceReceipts = @{}; MaintenanceFamilyGates = @{} }
     $script:ChildCalls = 0
+    $script:ReadiedTargets = 0
     $script:BadChildReceipt = $false
     $script:MockRole = 'Primary'
     function Save-State {}
     function Start-Step { param($Step) $script:State.CurrentStep = $Step }
     function Complete-Step { param($Step) $script:State.CompletedSteps += $Step; $script:State.CurrentStep = $null }
+    function Wait-CrossRevisionRetainedVmReady {
+        param($Target, $AdminCachePath)
+        Assert-Qualification ($Target.Name -eq 'LAB-PRI' -and $Target.Id -eq '11111111-1111-1111-1111-111111111111') 'Maintenance readiness selected a VM outside the validated target scope.'
+        $script:ReadiedTargets++
+    }
     function Get-VM {
         param($Name, $ErrorAction)
         [void]$ErrorAction
         [pscustomobject]@{
-            Name = $Name; Id = $target.Id
+            Name = $Name; Id = $target.Id; State = 'Running'
             Notes = (@{ domain = 'lab.test'; role = $script:MockRole; parentSiteCode = '' } | ConvertTo-Json -Compress)
         }
     }
@@ -183,6 +189,8 @@ try {
         Assert-Qualification ($ScriptName -eq 'tools\Invoke-MaintenanceQualification.ps1' -and $Parameters.RequireCleanSource) 'The gate did not invoke the pinned clean-source qualifier.'
         $script:ChildCalls++
         $targets = Get-Content -LiteralPath $Parameters.TargetsPath -Raw | ConvertFrom-Json
+        Assert-Qualification ($script:ReadiedTargets -eq @($targets).Count) 'Maintenance invoked the child before preparing every scoped target.'
+        $script:ReadiedTargets = 0
         $receipt = New-TestQualificationReceipt -Mode $Parameters.Mode -Targets @($targets) -HasCm ($script:MockRole -eq 'Primary')
         if ($Parameters.Mode -eq 'Recovery' -and $script:MockRole -ne 'Primary') {
             foreach ($case in $receipt.Cases) { $case.Status = 'NotApplicable'; $case.Reason = 'No CM target.' }

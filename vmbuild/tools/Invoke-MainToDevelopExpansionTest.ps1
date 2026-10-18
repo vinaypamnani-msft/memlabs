@@ -921,6 +921,107 @@ function Invoke-CrossRevisionDomainProbe {
     throw "PowerShell Direct domain probe failed for '$VmName' using [$(@($Credentials.UserName) -join ', ')]: $($errors -join '; ')"
 }
 
+function Wait-CrossRevisionRetainedVmReady {
+    param(
+        [Parameter(Mandatory)]$Target,
+        [string]$AdminCachePath,
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 600,
+        [ValidateRange(0, 30)][int]$RetrySeconds = 10
+    )
+
+    $expectedId = [guid]::Empty
+    if (-not $Target -or [string]::IsNullOrWhiteSpace("$($Target.Name)") -or
+        -not [guid]::TryParse("$($Target.Id)", [ref]$expectedId) -or $expectedId -eq [guid]::Empty) {
+        throw 'Retained VM readiness requires an explicit saved VM name and GUID.'
+    }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $startRequested = $false
+    $lastDetail = 'no readiness sample'
+    $lastProbeDetail = ''
+    while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $vm = Get-VM -Name $Target.Name -ErrorAction Stop
+        if (-not $vm -or "$($vm.Id)" -ne "$expectedId") {
+            throw "Retained VM '$($Target.Name)' disappeared or was replaced; expected ID $expectedId. No power action permitted."
+        }
+        $state = "$($vm.State)"
+        $lastDetail = "state=$state, heartbeat=$($vm.Heartbeat), status=$($vm.Status), uptime=$($vm.Uptime)"
+        if ($state -eq 'Off') {
+            if ($startRequested) {
+                throw "Retained VM '$($Target.Name)' returned to Off after its one start request; $lastDetail."
+            }
+            Write-Host "START: retained VM '$($Target.Name)' ($expectedId) is Off; starting without reset or checkpoint restore." -ForegroundColor Yellow
+            Start-VM -VM $vm -ErrorAction Stop | Out-Null
+            $startRequested = $true
+        }
+        elseif ($state -eq 'Running') {
+            $note = $vm.Notes | ConvertFrom-Json -ErrorAction Stop
+            $account = if ($note.adminName) { "$($note.adminName)" } else { "$($note.domainAdmin)" }
+            if (-not $account -or -not $note.domain -or ($Target.Domain -and $Target.Domain -ine $note.domain)) {
+                throw "Retained VM '$($Target.Name)' has missing or mismatched domain/administrator metadata; refusing readiness probe."
+            }
+            $credentials = @(New-DomainCredentials -Domain $note.domain -AdminName $account `
+                    -DomainNetBiosName $note.domainNetBiosName -VmName $Target.Name -AdminCachePath $AdminCachePath)
+            foreach ($credential in $credentials) {
+                $remaining = [int][Math]::Ceiling($TimeoutSeconds - $timer.Elapsed.TotalSeconds)
+                if ($remaining -lt 1) { break }
+                $probeJob = $null
+                $probe = @()
+                try {
+                    $probeJob = Invoke-Command -VMId $expectedId -Credential $credential -AsJob -ErrorAction Stop -ScriptBlock {
+                        [pscustomobject]@{
+                            ComputerName = $env:COMPUTERNAME
+                            UserName = $env:USERNAME
+                            Domain = $env:USERDNSDOMAIN
+                        }
+                    }
+                    $null = Wait-Job -Job $probeJob -Timeout ([Math]::Min(15, $remaining))
+                    if ("$($probeJob.State)" -eq 'Completed') {
+                        $probe = @(Receive-Job -Job $probeJob -ErrorAction Stop)
+                        if ($probe.Count -eq 0) { throw 'PSDirect readiness probe returned no identity.' }
+                    }
+                    elseif ("$($probeJob.State)" -eq 'Failed') {
+                        $null = Receive-Job -Job $probeJob -ErrorAction Stop
+                        $lastProbeDetail = "PSDirect probe failed using $($credential.UserName)"
+                    }
+                    else {
+                        $lastProbeDetail = "PSDirect probe timed out using $($credential.UserName)"
+                    }
+                }
+                catch {
+                    $lastProbeDetail = "PSDirect readiness using $($credential.UserName): $($_.Exception.Message -replace '\s+', ' ')"
+                }
+                finally {
+                    if ($probeJob) {
+                        if ("$($probeJob.State)" -in @('Completed', 'Failed')) {
+                            Remove-Job -Job $probeJob -Force -ErrorAction Stop
+                        }
+                        else {
+                            # Preserve the object for late transport callbacks.
+                            $probeJob.StopJobAsync()
+                        }
+                    }
+                }
+                if ($probe.Count -gt 0) {
+                    if ($probe.Count -ne 1 -or $probe[0].ComputerName -ine $Target.Name -or
+                        $probe[0].Domain -ine $note.domain -or $probe[0].UserName -ine $account) {
+                        throw "Retained VM '$($Target.Name)' readiness identity mismatch; refusing validation."
+                    }
+                    Write-Host "PASS: retained VM '$($Target.Name)' ($expectedId) is Running and PowerShell Direct domain identity is ready." -ForegroundColor Green
+                    return
+                }
+            }
+            if ($lastProbeDetail) { $lastDetail = "$lastDetail; $lastProbeDetail" }
+        }
+        elseif ($state -notin @('Starting', 'Stopping')) {
+            throw "Retained VM '$($Target.Name)' cannot be prepared automatically: $lastDetail. No resume, reset, or hard power-off attempted."
+        }
+        Write-Host "WAIT: retained VM '$($Target.Name)' ($expectedId) readiness: $lastDetail; elapsed=$([int]$timer.Elapsed.TotalSeconds)/${TimeoutSeconds}s." -ForegroundColor Yellow
+        $delay = [Math]::Min($RetrySeconds, [Math]::Max(0, $TimeoutSeconds - $timer.Elapsed.TotalSeconds))
+        if ($delay -gt 0) { Start-Sleep -Seconds $delay }
+    }
+    throw "Retained VM '$($Target.Name)' ($expectedId) readiness timed out after ${TimeoutSeconds}s: $lastDetail. No reset or hard power-off attempted."
+}
+
 function Get-DomainIdentity {
     param([object] $Config, [string] $AdminCachePath)
 
@@ -1561,6 +1662,9 @@ function Invoke-CrossRevisionMaintenanceGate {
         $script:State.MaintenanceReceipts.Remove($Key)
     }
     if ($Mode -ne 'Preflight') { Start-Step -Step $Key }
+    foreach ($target in $targets) {
+        Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $AdminCachePath
+    }
     $parameters = [ordered]@{
         Mode = $Mode; ReceiptPath = $receiptPath; MainRevision = $mainCommit; DevelopRevision = $developCommit
         TargetsPath = $targetsPath; AdminCachePath = $AdminCachePath; Family = $Family; RequireCleanSource = $true
@@ -2356,6 +2460,9 @@ try {
             @($script:State.CompletedSteps | Where-Object { $_ -like "$familyKey|cleanup|*" }).Count -gt 0
         if (-not $cleanupStarted) {
             Assert-BaselineIdentity -Identity $baselineIdentity
+            foreach ($target in @(Get-CrossRevisionMaintenanceTargets -Identity $baselineIdentity)) {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialPath
+            }
             Assert-DomainIdentity -Identity $domainIdentity -AdminCachePath $credentialPath
         }
         else { Assert-CrossRevisionMaintenanceFamilyGate -Family $family }
@@ -2401,6 +2508,16 @@ try {
                     Write-Host "SKIP: completed $step" -ForegroundColor DarkGray
                     if (-not $cleanupStarted) {
                         Assert-DevelopStageComplete -Config $followOnConfig -FixtureName $followOn.Name
+                        $readinessIdentity = if ($script:State.DevelopIdentities.Contains($identityKey)) {
+                            @($script:State.DevelopIdentities[$identityKey])
+                        }
+                        else {
+                            @(Get-VmIdentity -VmNames $followOnVmNames)
+                        }
+                        Assert-BaselineIdentity -Identity $readinessIdentity
+                        foreach ($target in @(Get-CrossRevisionMaintenanceTargets -Identity $readinessIdentity)) {
+                            Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialPath
+                        }
                         Assert-DomainJoinedVmHealth -Config $followOnConfig -FixtureName $followOn.Name -AdminCachePath $credentialPath
                         if ($pass -eq 1) {
                             Save-CrossRevisionExpansionIdentity -IdentityKey $identityKey -VmNames $followOnVmNames `
@@ -2411,6 +2528,9 @@ try {
                             throw "$($followOn.Name) is checkpointed complete without saved first-pass VM identity."
                         }
                         Assert-BaselineIdentity -Identity $savedDevelopIdentity
+                        foreach ($target in @(Get-CrossRevisionMaintenanceTargets -Identity $savedDevelopIdentity)) {
+                            Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialPath
+                        }
                         if ($followOnHasDc) {
                             $savedDevelopDomainIdentity = $script:State.DevelopDomainIdentities[$identityKey]
                             if (-not $savedDevelopDomainIdentity) {
