@@ -24,7 +24,13 @@ $guestPath = Join-Path $root 'DSC\phases\ScriptFunctions.ps1'
 foreach ($name in @('Get-MemLabsClientCertificateReadinessBlock', 'Invoke-MemLabsClientCertificatePrestage')) {
     . (Import-TestFunction $hostPath $name)
 }
-. (Import-TestFunction $guestPath 'Wait-MemLabsClientCertificatePrestage')
+foreach ($name in @(
+        'Write-ScriptWorkflowJsonAtomic', 'Read-ScriptWorkflowData',
+        'New-MemLabsClientCertificateMutex', 'Invoke-MemLabsClientCertificateStateLock', 'Assert-MemLabsClientCertificateReceipt',
+        'Wait-MemLabsClientCertificatePrestage'
+    )) {
+    . (Import-TestFunction $guestPath $name)
+}
 function Write-Log {
     param($Message, [switch] $OutputStream, [switch] $Warning, [switch] $Failure)
     if ($OutputStream) {
@@ -42,6 +48,7 @@ $null = New-Item -ItemType Directory -Path $script:TestRoot
 $script:Now = [datetime]'2026-10-16T12:00:00'
 $script:AutoReceipt = $true
 $script:AutoSuccess = $true
+$script:ReceiptMode = 'Normal'
 $script:NativeCalls = 0
 function Get-Date { $script:Now }
 function Join-Path {
@@ -50,16 +57,46 @@ function Join-Path {
     Microsoft.PowerShell.Management\Join-Path $Path $ChildPath
 }
 function Start-Sleep {
-    param($Seconds)
-    $script:Now = $script:Now.AddSeconds($Seconds)
+    param($Seconds, $Milliseconds)
+    $script:Now = $script:Now.AddSeconds($Seconds).AddMilliseconds($Milliseconds)
     if ($script:AutoReceipt) {
         $request = Get-Content (Join-Path $script:TestRoot 'ScriptWorkflow.pki-request.json') -Raw | ConvertFrom-Json
-        @{ RunId = $request.RunId; RequestId = $request.RequestId; Success = $script:AutoSuccess; Detail = 'fixture' } |
-            ConvertTo-Json | Set-Content (Join-Path $script:TestRoot 'ScriptWorkflow.pki-result.json')
+        $receipt = @{
+            RunId = $request.RunId; RequestId = $request.RequestId
+            Success = $script:AutoSuccess; Detail = 'fixture'
+            Results = @($request.Targets | ForEach-Object {
+                    [pscustomobject]@{ Target = "$_"; Ready = [bool]$script:AutoSuccess; Detail = 'fixture' }
+                })
+        }
+        switch ($script:ReceiptMode) {
+            'StringSuccess' { $receipt.Success = 'true' }
+            'MissingResults' { $receipt.Remove('Results') }
+            'PartialResults' { $receipt.Results = @($receipt.Results[0]) }
+            'DuplicateResults' { $receipt.Results = @($receipt.Results[0], $receipt.Results[0]) }
+            'WrongTarget' { $receipt.Results[0].Target = 'UNREQUESTED' }
+            'FalseReady' { $receipt.Results[0].Ready = $false }
+            'StringReady' { $receipt.Results[0].Ready = 'true' }
+            'FalseSummary' { $receipt.Success = $false }
+        }
+        $receipt | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $script:TestRoot 'ScriptWorkflow.pki-result.json')
     }
 }
 try {
     Wait-MemLabsClientCertificatePrestage -RunId 'test-run' -Targets @('CLIENT1', 'CLIENT2')
+    Wait-MemLabsClientCertificatePrestage -RunId 'test-run' -Targets @('CLIENT1', 'client1')
+    $normalizedRequest = Get-Content (Join-Path $script:TestRoot 'ScriptWorkflow.pki-request.json') -Raw | ConvertFrom-Json
+    Assert-True (@($normalizedRequest.Targets).Count -eq 1) 'Case-only duplicate targets were probed and budgeted multiple times.'
+    foreach ($mode in @('StringSuccess', 'MissingResults', 'PartialResults', 'DuplicateResults', 'WrongTarget', 'FalseReady', 'StringReady', 'FalseSummary')) {
+        $script:ReceiptMode = $mode
+        $failure = $null
+        try { Wait-MemLabsClientCertificatePrestage -RunId 'test-run' -Targets @('CLIENT1', 'CLIENT2') }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ([bool]$failure) "Malformed successful PKI receipt ($mode) allowed client push."
+        if ($mode -eq 'FalseSummary') {
+            Assert-True ($failure -match 'failure summary contradicts') 'Contradictory failure evidence was misreported as a certificate fault.'
+        }
+    }
+    $script:ReceiptMode = 'Normal'
     $script:AutoSuccess = $false
     $failure = $null
     try { Wait-MemLabsClientCertificatePrestage -RunId 'test-run' -Targets CLIENT1 }
@@ -89,30 +126,44 @@ try {
     $script:RequestRunId = 'test-run'
     $script:WriteFailed = $false
     $script:WriteMissing = $false
+    $script:WriteSuperseded = $false
+    $script:WriteAckMissing = $false
+    $script:ReadMode = 'Normal'
     $script:ProbeMode = 'Normal'
     function Invoke-VmCommand {
         param($VmName, $VmDomainName, [switch] $AsJob, $TimeoutSeconds, [switch] $SuppressLog,
             $ScriptBlock, $DisplayName, $ArgumentList)
         if ($DisplayName -eq 'Read PKI pre-stage request') {
+            $request = [pscustomobject]@{ RunId = $script:RequestRunId; RequestId = 'request'; Targets = @('CLIENT1', 'CLIENT2') }
+            if ($script:ReadMode -eq 'Multiple') { $request = @($request, $request) }
+            if ($script:ReadMode -eq 'EmptyId') { $request.RequestId = ' ' }
+            if ($script:ReadMode -eq 'InvalidTarget') { $request.Targets = @(1, 'CLIENT2') }
+            if ($script:ReadMode -eq 'DuplicateTarget') { $request.Targets = @('CLIENT1', 'client1', 'CLIENT2') }
             return [pscustomobject]@{
                 ScriptBlockFailed = $false
-                ScriptBlockOutput = [pscustomobject]@{ RunId = $script:RequestRunId; RequestId = 'request'; Targets = @('CLIENT1', 'CLIENT2') }
+                ScriptBlockOutput = $request
             }
         }
         if ($DisplayName -eq 'Write PKI pre-stage receipt') {
-            $script:ReceiptWritten = $true
             $script:Receipt = $ArgumentList[0] | ConvertFrom-Json
             if ($script:WriteMissing) { return $null }
-            return [pscustomobject]@{ ScriptBlockFailed = $script:WriteFailed }
+            $script:ReceiptWritten = -not $script:WriteSuperseded
+            $ack = [pscustomobject]@{
+                Status = $(if ($script:WriteSuperseded) { 'Superseded' } else { 'Written' })
+                RunId = $ArgumentList[1]; RequestId = $ArgumentList[2]
+            }
+            if ($script:WriteAckMissing) { $ack = $null }
+            return [pscustomobject]@{ ScriptBlockFailed = $script:WriteFailed; ScriptBlockOutput = $ack }
         }
         $script:RequestedDomains += "$VmName=$VmDomainName"
         $state = [pscustomobject]@{
             Ready = -not ($script:Unready -and $VmName -eq 'CLIENT2')
-            CertFound = $true; ChainStatus = 'fixture'; Diagnostics = @()
+            CertFound = $true; ChainOk = $true; ChainStatus = 'fixture'; Diagnostics = @(); Thumbprint = "fixture-$VmName"
         }
         if ($script:ProbeMode -eq 'Multiple') { $state = @($state, $state) }
         if ($script:ProbeMode -eq 'StringReady') { $state.Ready = 'false' }
         if ($script:ProbeMode -eq 'Missing') { $state = $null }
+        if ($script:ProbeMode -eq 'Inconsistent') { $state.ChainOk = $false }
         [pscustomobject]@{
             ScriptBlockFailed = ($script:ProbeMode -eq 'Transport')
             ScriptBlockOutput = $state
@@ -173,6 +224,17 @@ try {
     catch { $failure = $_.Exception.Message }
     Assert-True ([bool]$failure) 'Host accepted a request from a different deployment.'
     $script:RequestRunId = 'test-run'
+    $script:ReadMode = 'DuplicateTarget'
+    $duplicateResults = @(Invoke-MemLabsClientCertificatePrestage -CurrentItem $item -DeployConfig $config -DomainName 'site.test' -RunId 'test-run')
+    Assert-True ($duplicateResults.Count -eq 2 -and $script:Receipt.Results.Count -eq 2) 'Case-only request duplicates escaped host normalization.'
+    foreach ($mode in @('Multiple', 'EmptyId', 'InvalidTarget')) {
+        $script:ReadMode = $mode
+        $failure = $null
+        try { $null = Invoke-MemLabsClientCertificatePrestage -CurrentItem $item -DeployConfig $config -DomainName 'site.test' -RunId 'test-run' }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ([bool]$failure) "$mode malformed request was accepted."
+    }
+    $script:ReadMode = 'Normal'
     $script:WriteFailed = $true
     $failure = $null
     try { $null = Invoke-MemLabsClientCertificatePrestage -CurrentItem $item -DeployConfig $config -DomainName 'site.test' -RunId 'test-run' }
@@ -185,7 +247,19 @@ try {
     catch { $failure = $_.Exception.Message }
     Assert-True ($failure -match 'persist') 'A missing receipt-write response was silently accepted.'
     $script:WriteMissing = $false
-    foreach ($mode in @('Multiple', 'StringReady', 'Missing', 'Transport')) {
+    $script:WriteAckMissing = $true
+    $failure = $null
+    try { $null = Invoke-MemLabsClientCertificatePrestage -CurrentItem $item -DeployConfig $config -DomainName 'site.test' -RunId 'test-run' }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'acknowledgement') 'An unacknowledged receipt write was accepted.'
+    $script:WriteAckMissing = $false
+    $script:WriteSuperseded = $true
+    $staleConsole = @(& $monitor $item $config 'site.test' 'test-run')
+    Assert-True (@($staleConsole | Where-Object LogLevel -eq 3).Count -eq 0 -and
+        @($staleConsole | Where-Object { $_.LogLevel -eq 2 -and $_.Message -match 'superseded' }).Count -eq 1) `
+        'A replaced request caused a false deployment failure instead of a warning.'
+    $script:WriteSuperseded = $false
+    foreach ($mode in @('Multiple', 'StringReady', 'Missing', 'Transport', 'Inconsistent')) {
         $script:ProbeMode = $mode
         $invalidResults = @(Invoke-MemLabsClientCertificatePrestage -CurrentItem $item -DeployConfig $config -DomainName 'site.test' -RunId 'test-run')
         Assert-True (-not $script:Receipt.Success -and $script:Receipt.Results.Count -eq 2 -and
@@ -208,10 +282,15 @@ try {
     Add-Type @'
 namespace MemLabs {
     public class ClientChainTest : System.IDisposable {
+        public static bool ThrowForUntrusted = false;
         public System.Security.Cryptography.X509Certificates.X509ChainPolicy ChainPolicy =
             new System.Security.Cryptography.X509Certificates.X509ChainPolicy();
         public object[] ChainStatus = new object[0];
-        public bool Build(bool trusted) { return trusted; }
+        public bool Build(bool trusted) {
+            if (!trusted && ThrowForUntrusted)
+                throw new System.Security.Cryptography.CryptographicException("Synthetic invalid certificate");
+            return trusted;
+        }
         public void Dispose() {}
     }
 }
@@ -229,9 +308,21 @@ namespace MemLabs {
         if ($script:EnrollAfter -and $script:CertificateReads -lt $script:EnrollAfter) { return @() }
         return $script:Candidates
     }
-    function gpupdate.exe { $global:LASTEXITCODE = 0; $script:NativeCalls++; 'GP refreshed' }
-    function certutil.exe { $global:LASTEXITCODE = 5; $script:NativeCalls++; 'enrollment not ready' }
-    function Get-WinEvent { param($FilterHashtable, $MaxEvents, $ErrorAction) @() }
+    $script:NativeThrows = $false
+    $script:EventsFail = $false
+    function gpupdate.exe {
+        if ($script:NativeThrows) { throw 'Synthetic gpupdate invocation error' }
+        $global:LASTEXITCODE = 0; $script:NativeCalls++; 'GP refreshed'
+    }
+    function certutil.exe {
+        if ($script:NativeThrows) { throw 'Synthetic certutil invocation error' }
+        $global:LASTEXITCODE = 5; $script:NativeCalls++; 'enrollment not ready'
+    }
+    function Get-WinEvent {
+        param($FilterHashtable, $MaxEvents, $ErrorAction)
+        if ($script:EventsFail) { throw 'Synthetic event-log access error' }
+        @()
+    }
     $script:Candidates = @(
         [pscustomobject]@{
             EnhancedKeyUsageList = @{ ObjectId = @('1.3.6.1.5.5.7.3.2') }
@@ -256,6 +347,28 @@ namespace MemLabs {
     $script:Candidates[0].NotAfter = $script:Now.AddSeconds(-1)
     $state = & $readiness
     Assert-True (-not $state.Ready) 'An expired certificate passed readiness.'
+    Assert-True (($state.Diagnostics -join ' ') -match 'No recent AutoEnrollment events found') `
+        'An empty autoenrollment event query was not distinguished from a failed query.'
+    $script:Candidates[0].NotAfter = $script:Now.AddDays(30)
+    $badCert = $script:Candidates[0].PSObject.Copy()
+    $badCert.Trusted = $false; $badCert.Thumbprint = 'broken'; $badCert.NotAfter = $script:Now.AddDays(60)
+    $script:Candidates = @($badCert, $script:Candidates[0])
+    [MemLabs.ClientChainTest]::ThrowForUntrusted = $true
+    $state = & $readiness
+    Assert-True ($state.Ready -and $state.Thumbprint -eq 'usable' -and
+        ($state.Diagnostics -join ' ') -match 'broken.*Synthetic invalid certificate') `
+        'A broken first certificate prevented selection of another usable client-auth certificate.'
+    [MemLabs.ClientChainTest]::ThrowForUntrusted = $false
+    $script:Candidates = @()
+    $script:NativeThrows = $true
+    $script:EventsFail = $true
+    $state = & $readiness
+    Assert-True (-not $state.Ready -and ($state.Diagnostics -join ' ') -match 'gpupdate invocation failed' -and
+        ($state.Diagnostics -join ' ') -match 'certutil.*invocation failed' -and
+        ($state.Diagnostics -join ' ') -match 'event query failed') `
+        'Enrollment or event-log execution failures lost their diagnostic context.'
+    Assert-True ($readinessText -match 'UrlRetrievalTimeout = \[TimeSpan\]::FromSeconds\(10\)') `
+        'Certificate-chain URL retrieval has no bounded timeout.'
 }
 finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $script:TestRoot -Recurse -Force

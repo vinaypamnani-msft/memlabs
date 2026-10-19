@@ -2442,6 +2442,8 @@ function Get-MemLabsClientCertificateReadinessBlock {
                 $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
                 try {
                     $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+                    $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(10)
+                    $result.Thumbprint = $cert.Thumbprint
                     $result.ChainOk = $chain.Build($cert)
                     $result.ChainStatus = (@($chain.ChainStatus | ForEach-Object { "$($_.Status)" }) -join ',')
                     if ($result.ChainOk) {
@@ -2450,25 +2452,46 @@ function Get-MemLabsClientCertificateReadinessBlock {
                         $result.ChainStatus = 'OK'
                         return [pscustomobject]$result
                     }
+                    $result.Diagnostics += "Certificate $($cert.Thumbprint) chain status: $($result.ChainStatus)"
+                }
+                catch [Security.Cryptography.CryptographicException] {
+                    $result.ChainOk = $false
+                    $result.ChainStatus = "Chain build failed: $($_.Exception.Message)"
+                    $result.Diagnostics += "Certificate $($cert.Thumbprint): $($result.ChainStatus)"
                 }
                 finally { $chain.Dispose() }
             }
             if ($attempt -lt 4) {
                 if ($attempt -eq 1) {
-                    $gpOutput = @(& gpupdate.exe /target:computer /force /wait:30 2>&1)
-                    $result.Diagnostics += "gpupdate exit=$LASTEXITCODE; $($gpOutput -join ' ')"
+                    try {
+                        $gpOutput = @(& gpupdate.exe /target:computer /force /wait:30 2>&1)
+                        $result.Diagnostics += "gpupdate exit=$LASTEXITCODE; $($gpOutput -join ' ')"
+                    }
+                    catch { $result.Diagnostics += "gpupdate invocation failed: $($_.Exception.Message)" }
                 }
-                $pulseOutput = @(& certutil.exe -pulse 2>&1)
-                $result.Diagnostics += "certutil -pulse attempt=$attempt exit=$LASTEXITCODE; $($pulseOutput -join ' ')"
+                try {
+                    $pulseOutput = @(& certutil.exe -pulse 2>&1)
+                    $result.Diagnostics += "certutil -pulse attempt=$attempt exit=$LASTEXITCODE; $($pulseOutput -join ' ')"
+                }
+                catch { $result.Diagnostics += "certutil -pulse attempt=$attempt invocation failed: $($_.Exception.Message)" }
                 Start-Sleep -Seconds 10
             }
         }
-        $events = @(Get-WinEvent -FilterHashtable @{
-                LogName = 'Application'; ProviderName = 'Microsoft-Windows-CertificateServicesClient-AutoEnrollment'
-                StartTime = (Get-Date).AddHours(-1)
-            } -MaxEvents 3 -ErrorAction SilentlyContinue)
-        foreach ($event in $events) {
-            $result.Diagnostics += "AutoEnrollment event=$($event.Id) at=$($event.TimeCreated): $($event.Message)"
+        try {
+            $events = @(Get-WinEvent -FilterHashtable @{
+                    LogName = 'Application'; ProviderName = 'Microsoft-Windows-CertificateServicesClient-AutoEnrollment'
+                    StartTime = (Get-Date).AddHours(-1)
+                } -MaxEvents 3 -ErrorAction Stop)
+            foreach ($event in $events) {
+                $result.Diagnostics += "AutoEnrollment event=$($event.Id) at=$($event.TimeCreated): $($event.Message)"
+            }
+            if ($events.Count -eq 0) { $result.Diagnostics += 'No recent AutoEnrollment events found.' }
+        }
+        catch {
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') {
+                $result.Diagnostics += 'No recent AutoEnrollment events found.'
+            }
+            else { $result.Diagnostics += "AutoEnrollment event query failed: $($_.Exception.Message)" }
         }
         return [pscustomobject]$result
     }
@@ -2486,18 +2509,28 @@ function Invoke-MemLabsClientCertificatePrestage {
         Get-Content -LiteralPath 'C:\staging\DSC\ScriptWorkflow.pki-request.json' -Raw -ErrorAction Stop |
             ConvertFrom-Json -ErrorAction Stop
     } -DisplayName 'Read PKI pre-stage request'
-    if ($read.ScriptBlockFailed -or -not $read.ScriptBlockOutput) {
-        throw "Cannot read PKI pre-stage request on $($CurrentItem.vmName)."
+    if (-not $read -or $read.ScriptBlockFailed) {
+        throw "Cannot read PKI pre-stage request on $($CurrentItem.vmName). $($read.ErrorDetails)"
     }
-    $request = $read.ScriptBlockOutput
-    if ($request.RunId -ne $RunId -or -not $request.RequestId) {
+    $requests = @($read.ScriptBlockOutput)
+    if ($requests.Count -ne 1 -or $requests[0].RunId -isnot [string] -or
+        $requests[0].RequestId -isnot [string] -or [string]::IsNullOrWhiteSpace($requests[0].RequestId)) {
+        throw 'PKI pre-stage request must contain one structured request with string RunId and RequestId values.'
+    }
+    $request = $requests[0]
+    if ($request.RunId -ne $RunId) {
         throw 'PKI pre-stage request does not belong to this deployment.'
     }
     $siteVm = if ($CurrentItem.thisParams.ClientPush) { $CurrentItem } else {
         $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $CurrentItem.vmName } | Select-Object -First 1
     }
     $allowed = @($siteVm.thisParams.ClientPush | Where-Object { $_ -and $_ -ne $CurrentItem.vmName })
-    $targets = @($request.Targets | Select-Object -Unique)
+    $requestedTargets = @($request.Targets)
+    if (@($requestedTargets | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count) {
+        throw 'PKI pre-stage request contains invalid target names.'
+    }
+    $seenTargets = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $targets = @(foreach ($target in $requestedTargets) { if ($seenTargets.Add($target)) { $target } })
     if (-not $targets.Count -or @($targets | Where-Object { $_ -notin $allowed }).Count) {
         throw 'PKI pre-stage request contains empty or unconfigured push targets.'
     }
@@ -2516,7 +2549,14 @@ function Invoke-MemLabsClientCertificatePrestage {
                 throw 'Certificate readiness probe must return exactly one result with a Boolean Ready value.'
             }
             $state = $states[0]
-            $detail = "certFound=$($state.CertFound), chain=$($state.ChainStatus); $($state.Diagnostics -join ' | ')"
+            if ($state.Ready -and ($state.CertFound -isnot [bool] -or -not $state.CertFound -or
+                    $state.ChainOk -isnot [bool] -or -not $state.ChainOk -or
+                    $state.Thumbprint -isnot [string] -or [string]::IsNullOrWhiteSpace($state.Thumbprint))) {
+                throw 'Certificate readiness probe returned inconsistent success evidence.'
+            }
+            $detail = "certFound=$($state.CertFound), chain=$($state.ChainStatus)"
+            if ($state.Thumbprint) { $detail += ", thumbprint=$($state.Thumbprint)" }
+            if ($state.Diagnostics) { $detail += "; $($state.Diagnostics -join ' | ')" }
             $targetResult = [pscustomobject]@{ Target = $target; Ready = [bool]$state.Ready; Detail = $detail }
         }
         catch {
@@ -2532,16 +2572,24 @@ function Invoke-MemLabsClientCertificatePrestage {
         Results = $results.ToArray()
     }
     $write = Invoke-VmCommand -VmName $CurrentItem.vmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 30 -SuppressLog -ScriptBlock {
-        param($json, $expectedRunId)
+        param($json, $expectedRunId, $expectedRequestId)
         $root = 'C:\staging\DSC'
-        if ((Get-Content -LiteralPath (Join-Path $root 'ScriptWorkflow.expected.runid') -Raw -ErrorAction Stop).Trim() -ne $expectedRunId) {
-            throw 'Deployment changed before PKI pre-stage receipt could be written.'
-        }
-        $path = Join-Path $root 'ScriptWorkflow.pki-result.json'
-        Set-Content -LiteralPath "$path.tmp" -Value $json -Encoding UTF8 -ErrorAction Stop
-        Move-Item -LiteralPath "$path.tmp" -Destination $path -Force -ErrorAction Stop
-    } -ArgumentList @(($receipt | ConvertTo-Json -Depth 6 -Compress), $RunId) -DisplayName 'Write PKI pre-stage receipt'
-    if (-not $write -or $write.ScriptBlockFailed) { throw "Could not persist PKI pre-stage receipt on $($CurrentItem.vmName)." }
+        . (Join-Path $root 'phases\ScriptFunctions.ps1')
+        Publish-MemLabsClientCertificateReceipt -Root $root -Json $json `
+            -ExpectedRunId $expectedRunId -ExpectedRequestId $expectedRequestId
+    } -ArgumentList @(($receipt | ConvertTo-Json -Depth 6 -Compress), $RunId, $request.RequestId) -DisplayName 'Write PKI pre-stage receipt'
+    if (-not $write -or $write.ScriptBlockFailed) { throw "Could not persist PKI pre-stage receipt on $($CurrentItem.vmName). $($write.ErrorDetails)" }
+    $acknowledgements = @($write.ScriptBlockOutput)
+    if ($acknowledgements.Count -ne 1 -or $acknowledgements[0].RunId -isnot [string] -or
+        $acknowledgements[0].RequestId -isnot [string] -or $acknowledgements[0].Status -isnot [string] -or
+        $acknowledgements[0].RunId -ne $RunId -or
+        $acknowledgements[0].RequestId -ne $request.RequestId -or
+        $acknowledgements[0].Status -notin @('Written', 'Superseded')) {
+        throw "Invalid PKI pre-stage receipt acknowledgement from $($CurrentItem.vmName)."
+    }
+    if ($acknowledgements[0].Status -eq 'Superseded') {
+        throw [OperationCanceledException]::new("PKI pre-stage request $($request.RequestId) was superseded by a newer request; its receipt was not written.")
+    }
 }
 
 function Invoke-MemLabsGuestMemoryRecovery {
@@ -8701,6 +8749,10 @@ $global:VM_Config = {
                                             -OutputStream -Warning:(!$_.Ready)
                                     }
                                 $certPulseDone = $currentStatusTrimmed
+                            }
+                            catch [OperationCanceledException] {
+                                $certPulseDone = $currentStatusTrimmed
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): $($_.Exception.Message)" -Warning -OutputStream
                             }
                             catch {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): PKI pre-stage handshake failed: $($_.Exception.Message)" -Failure -OutputStream

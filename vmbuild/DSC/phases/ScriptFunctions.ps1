@@ -2752,6 +2752,126 @@ function Invoke-CMWsusReplicaHealthCheck {
     return $state
 }
 
+function New-MemLabsClientCertificateMutex {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $security = [Security.AccessControl.MutexSecurity]::new()
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $callerSid = $identity.User }
+    finally { $identity.Dispose() }
+    foreach ($sid in @(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            $callerSid
+        )) {
+        $rule = [Security.AccessControl.MutexAccessRule]::new(
+            $sid, [Security.AccessControl.MutexRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)
+        $security.AddAccessRule($rule)
+    }
+    $created = $false
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        return [Threading.MutexAcl]::Create($false, $Name, [ref]$created, $security)
+    }
+    return [Threading.Mutex]::new($false, $Name, [ref]$created, $security)
+}
+
+function Invoke-MemLabsClientCertificateStateLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StateDirectory,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList,
+        [ValidateRange(0, 30)][int]$TimeoutSeconds = 10
+    )
+
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $pathBytes = [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($StateDirectory).ToUpperInvariant())
+        $key = [BitConverter]::ToString($hash.ComputeHash($pathBytes)).Replace('-', '')
+    }
+    finally { $hash.Dispose() }
+    $mutex = $null
+    $owned = $false
+    try {
+        $mutex = New-MemLabsClientCertificateMutex -Name "Global\MemLabs_PkiPrestage_$key"
+        try { $owned = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds)) }
+        catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw "Timed out acquiring PKI pre-stage state lock for '$StateDirectory'." }
+        & $ScriptBlock @ArgumentList
+    }
+    finally {
+        if ($mutex) {
+            try { if ($owned) { $mutex.ReleaseMutex() } }
+            finally { $mutex.Dispose() }
+        }
+    }
+}
+
+function Assert-MemLabsClientCertificateReceipt {
+    param(
+        [Parameter(Mandatory)]$Receipt,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$RequestId,
+        [Parameter(Mandatory)][string[]]$Targets
+    )
+
+    if ($Receipt.RunId -isnot [string] -or $Receipt.RequestId -isnot [string] -or
+        $Receipt.RunId -ne $RunId -or $Receipt.RequestId -ne $RequestId -or
+        $Receipt.Success -isnot [bool]) {
+        throw 'Invalid PKI pre-stage receipt identity or Boolean Success value.'
+    }
+    $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($target in $Targets) {
+        if ([string]::IsNullOrWhiteSpace($target)) { throw 'PKI pre-stage target names must not be empty.' }
+        [void]$expected.Add($target)
+    }
+    $rows = @($Receipt.Results)
+    if ($rows.Count -ne $expected.Count) {
+        throw "Invalid PKI pre-stage receipt: expected $($expected.Count) target result(s), received $($rows.Count)."
+    }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($row in $rows) {
+        if ($row.Target -isnot [string] -or -not $expected.Contains($row.Target) -or
+            -not $seen.Add($row.Target) -or $row.Ready -isnot [bool]) {
+            throw 'Invalid PKI pre-stage receipt: missing, duplicate, unrequested, or untyped target result.'
+        }
+        if ($Receipt.Success -and -not $row.Ready) {
+            throw "Invalid PKI pre-stage receipt: success claimed while '$($row.Target)' is not ready."
+        }
+    }
+    if (-not $Receipt.Success -and @($rows | Where-Object { -not $_.Ready }).Count -eq 0) {
+        throw 'Invalid PKI pre-stage receipt: failure summary contradicts all-ready target results.'
+    }
+}
+
+function Publish-MemLabsClientCertificateReceipt {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Json,
+        [Parameter(Mandatory)][string]$ExpectedRunId,
+        [Parameter(Mandatory)][string]$ExpectedRequestId
+    )
+
+    $receipt = $Json | ConvertFrom-Json -ErrorAction Stop
+    # Request publication and receipt commit share this lock, not just an atomic rename.
+    Invoke-MemLabsClientCertificateStateLock -StateDirectory $Root -ScriptBlock {
+        param($directory, $value, $runId, $requestId)
+        $expected = (Get-Content -LiteralPath (Join-Path $directory 'ScriptWorkflow.expected.runid') -Raw -ErrorAction Stop).Trim()
+        if ($expected -ne $runId) { throw 'Deployment changed before PKI pre-stage receipt could be written.' }
+        $current = Read-ScriptWorkflowData -ConfigurationFile (Join-Path $directory 'ScriptWorkflow.pki-request.json') `
+            -RequiredSteps @('RunId', 'RequestId', 'Targets')
+        if ($current.RunId -ne $runId -or $current.RequestId -ne $requestId) {
+            return [pscustomobject]@{
+                Status = 'Superseded'; RunId = $runId; RequestId = $requestId
+                CurrentRequestId = $current.RequestId
+            }
+        }
+        Assert-MemLabsClientCertificateReceipt -Receipt $value -RunId $runId -RequestId $requestId -Targets @($current.Targets)
+        Write-ScriptWorkflowJsonAtomic -Configuration $value -ConfigurationFile (Join-Path $directory 'ScriptWorkflow.pki-result.json')
+        [pscustomobject]@{ Status = 'Written'; RunId = $runId; RequestId = $requestId }
+    } -ArgumentList @($Root, $receipt, $ExpectedRunId, $ExpectedRequestId)
+}
+
 function Wait-MemLabsClientCertificatePrestage {
     param(
         [Parameter(Mandatory = $true)][string] $RunId,
@@ -2759,19 +2879,28 @@ function Wait-MemLabsClientCertificatePrestage {
     )
 
     $root = 'C:\staging\DSC'
+    $seenTargets = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $normalizedTargets = [Collections.Generic.List[string]]::new()
+    foreach ($target in $Targets) {
+        if ([string]::IsNullOrWhiteSpace($target)) { throw 'PKI pre-stage target names must not be empty.' }
+        if ($seenTargets.Add($target)) { $normalizedTargets.Add($target) }
+    }
+    $Targets = $normalizedTargets.ToArray()
     $requestId = [guid]::NewGuid().ToString()
     $request = [ordered]@{ RunId = $RunId; RequestId = $requestId; Targets = @($Targets) }
     $requestPath = Join-Path $root 'ScriptWorkflow.pki-request.json'
     $receiptPath = Join-Path $root 'ScriptWorkflow.pki-result.json'
-    $request | ConvertTo-Json -Depth 4 |
-        Set-Content -LiteralPath "$requestPath.tmp" -Encoding UTF8 -ErrorAction Stop
-    Move-Item -LiteralPath "$requestPath.tmp" -Destination $requestPath -Force -ErrorAction Stop
+    Invoke-MemLabsClientCertificateStateLock -StateDirectory (Split-Path -Parent $requestPath) -ScriptBlock {
+        param($value, $path)
+        Write-ScriptWorkflowJsonAtomic -Configuration $value -ConfigurationFile $path
+    } -ArgumentList @($request, $requestPath)
     Write-DscStatus "MEMLABS-PULSE-CERTS: Request=$requestId waiting for verified certificates on $($Targets -join ', ')"
     $deadline = (Get-Date).AddSeconds(120 + 120 * $Targets.Count)
     do {
         if (Test-Path -LiteralPath $receiptPath) {
-            $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $receipt = Read-ScriptWorkflowData -ConfigurationFile $receiptPath -RequiredSteps @('RunId', 'RequestId', 'Success')
             if ($receipt.RunId -eq $RunId -and $receipt.RequestId -eq $requestId) {
+                Assert-MemLabsClientCertificateReceipt -Receipt $receipt -RunId $RunId -RequestId $requestId -Targets $Targets
                 if ($receipt.Success -ne $true) {
                     throw "PKI client pre-stage failed: $($receipt.Detail). See host per-target PKI readiness diagnostics before retrying Phase 8."
                 }

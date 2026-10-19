@@ -282,6 +282,16 @@ The receipt contains exactly one structured result per target. Per-target consol
 logging is emitted separately by the host monitor, so log objects cannot become
 false certificate failures. Missing, malformed, or failed probe responses still
 fail closed, and transport errors remain visible in the per-target diagnostics.
+Successful receipts must contain Boolean success/readiness fields and complete,
+unique coverage of the requested target set. Request publication and receipt
+commit use the same state lock and atomic JSON writer; a replaced request cannot
+overwrite a newer receipt and is reported as superseded rather than failing the
+replacement workflow. Native enrollment invocation failures and unreadable event
+logs remain diagnostic evidence. Chain URL retrieval is limited to ten seconds,
+and a cryptographic error on one candidate does not hide another usable certificate.
+The existing certificate validity/private-key/trust policy and lab revocation
+behavior are unchanged. Validate with `vmbuild\tools\Test-PkiClientPrestage.ps1`
+and `vmbuild\tools\Test-PkiPrestageState.ps1`.
 
 Existing provider-error diagnostics, bounded CIM-memory reboot recovery, Primary
 OSD/baseline payload repair, and physical/version-aware DP content checks remain
