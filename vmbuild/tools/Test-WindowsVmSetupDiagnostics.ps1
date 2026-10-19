@@ -33,6 +33,43 @@ namespace MemLabs {
     public static class SetupDiagnosticTestSupport {
         [DllImport("advapi32.dll", CharSet=CharSet.Unicode)]
         private static extern int RegLoadAppKey(string path, out IntPtr key, int access, int options, int reserved);
+        [DllImport("offreg.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int OROpenHive(string path, out IntPtr key);
+        [DllImport("offreg.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int OROpenKey(IntPtr key, string name, out IntPtr result);
+        [DllImport("offreg.dll", ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int ORSetKeySecurity(IntPtr key, uint information, byte[] descriptor);
+        [DllImport("offreg.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int ORSaveHive(IntPtr key, string path, uint major, uint minor);
+        [DllImport("offreg.dll", ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int ORCloseKey(IntPtr key);
+        [DllImport("offreg.dll", ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int ORCloseHive(IntPtr key);
+
+        public static void CreateMixedSecurityFixture(string source, string destination, byte[] descriptor) {
+            IntPtr root;
+            int error = OROpenHive(source, out root);
+            if (error != 0) throw new Win32Exception(error);
+            try {
+                IntPtr key;
+                error = OROpenKey(root, "Setup", out key);
+                if (error != 0) throw new Win32Exception(error);
+                try {
+                    error = ORSetKeySecurity(key, 4, descriptor);
+                    if (error != 0) throw new Win32Exception(error);
+                }
+                finally { ORCloseKey(key); }
+                error = ORSaveHive(root, destination, 10, 0);
+                if (error != 0) throw new Win32Exception(error);
+            }
+            finally { ORCloseHive(root); }
+        }
         public static RegistryKey OpenWritableFixture(string path) {
             IntPtr value;
             int error = RegLoadAppKey(path, out value, 0xF003F, 1, 0);
@@ -121,6 +158,7 @@ try {
         }
     }
     finally { $fixtureHive.Dispose() }
+    $originalHiveHash = (Get-FileHash -LiteralPath $fixtureHivePath -Algorithm SHA256).Hash
     $systemState = Read-MemLabsOfflineWindowsSetupHive -Path $fixtureHivePath -Kind SYSTEM
     $softwareState = Read-MemLabsOfflineWindowsSetupHive -Path $fixtureHivePath -Kind SOFTWARE
     Assert-True ($systemState.ControlSet.Values.Current -eq 1 -and $systemState.Setup.Values.OOBEInProgress -eq 1 -and
@@ -131,14 +169,27 @@ try {
         $softwareState.WindowsVersion.Values.UBR -eq 9457) 'Native offline image/version extraction is incorrect.'
     Assert-True (-not (($systemState | ConvertTo-Json -Depth 10).Contains('DO-NOT-EXPORT-THIS-SYNTHETIC-VALUE'))) `
         'Offline registry extraction escaped its value allowlist.'
-    $readOnlyHive = [MemLabs.OfflineSetupHive]::OpenReadOnly($fixtureHivePath)
+    $readOnlyHive = [MemLabs.OfflineSetupHiveReader]::OpenReadOnly($fixtureHivePath)
     try {
         $writeBlocked = $false
-        try { $readOnlyHive.SetValue('UnexpectedWrite', 1) }
+        try { $null = $readOnlyHive.OpenSubKey('Setup', $true) }
         catch { $writeBlocked = $true }
         Assert-True $writeBlocked 'The native offline registry handle permits writes.'
     }
     finally { $readOnlyHive.Dispose() }
+    Assert-True ((Get-FileHash -LiteralPath $fixtureHivePath -Algorithm SHA256).Hash -eq $originalHiveHash) `
+        'Read-only offline inspection changed its input hive.'
+    $mixedHivePath = Join-Path $aclPath 'MixedSecurity.hiv'
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new('D:P(A;;KA;;;SY)(A;;KR;;;WD)')
+    $descriptorBytes = [byte[]]::new($descriptor.BinaryLength)
+    $descriptor.GetBinaryForm($descriptorBytes, 0)
+    [MemLabs.SetupDiagnosticTestSupport]::CreateMixedSecurityFixture($fixtureHivePath, $mixedHivePath, $descriptorBytes)
+    $mixedHash = (Get-FileHash -LiteralPath $mixedHivePath -Algorithm SHA256).Hash
+    $mixedState = Read-MemLabsOfflineWindowsSetupHive -Path $mixedHivePath -Kind SYSTEM
+    Assert-True ($mixedState.Setup.Values.OOBEInProgress -eq 1 -and
+        $mixedState.ActiveName.Values.ComputerName -eq 'DESKTOP-FIXTURE' -and
+        (Get-FileHash -LiteralPath $mixedHivePath -Algorithm SHA256).Hash -eq $mixedHash) `
+        'OS-style mixed key security descriptors prevent read-only offline extraction.'
 
     $script:GuestRoot = Join-Path $testRoot 'guest'
     $script:EmptyRoot = Join-Path $testRoot 'empty'
@@ -303,6 +354,9 @@ try {
         $script:StopCalls -eq 1 -and $script:ForceCalls -eq 0 -and $script:MountCalls -eq 1 -and
         $script:DismountCalls -eq 1 -and (Test-Path -LiteralPath $report.ArchivePath)) 'The normal offline collection did not finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
+    $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
+    Assert-True ($manifestRecord.CollectorVersion -eq 2 -and $manifestRecord.RegistryReader -eq 'offreg.dll') `
+        'The archive does not identify the corrected offline registry reader.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'
     $zip = [IO.Compression.ZipFile]::OpenRead($report.ArchivePath)
     try {

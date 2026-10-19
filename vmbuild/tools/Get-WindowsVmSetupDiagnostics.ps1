@@ -111,24 +111,75 @@ function Stop-MemLabsVmForSetupDiagnostics {
 }
 
 function Initialize-MemLabsOfflineSetupHiveType {
-    if ('MemLabs.OfflineSetupHive' -as [type]) { return }
+    if ('MemLabs.OfflineSetupHiveReader' -as [type]) { return }
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 namespace MemLabs {
-    public static class OfflineSetupHive {
-        [DllImport("advapi32.dll", CharSet=CharSet.Unicode)]
-        private static extern int RegLoadAppKey(string path, out IntPtr key, int access, int options, int reserved);
-        public static RegistryKey OpenReadOnly(string path) {
+    public static class OfflineSetupHiveReader {
+        [DllImport("offreg.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int OROpenHive(string path, out IntPtr key);
+        [DllImport("offreg.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int OROpenKey(OfflineHandle key, string subKey, out IntPtr result);
+        [DllImport("offreg.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int ORGetValue(OfflineHandle key, string subKey, string name, out uint type, byte[] data, ref uint size);
+        [DllImport("offreg.dll", ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int ORCloseHive(IntPtr key);
+        [DllImport("offreg.dll", ExactSpelling=true)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int ORCloseKey(IntPtr key);
+
+        internal sealed class OfflineHandle : SafeHandleZeroOrMinusOneIsInvalid {
+            private readonly bool root;
+            internal OfflineHandle(IntPtr value, bool isRoot) : base(true) { SetHandle(value); root = isRoot; }
+            protected override bool ReleaseHandle() { return (root ? ORCloseHive(handle) : ORCloseKey(handle)) == 0; }
+        }
+        public sealed class Key : IDisposable {
+            private readonly OfflineHandle handle;
+            internal Key(OfflineHandle value) { handle = value; }
+            public Key OpenSubKey(string subKey, bool writable) {
+                if (writable) throw new UnauthorizedAccessException("Offline setup keys are read-only.");
+                IntPtr value;
+                int error = OROpenKey(handle, subKey, out value);
+                if (error == 2) return null;
+                if (error != 0) throw new Win32Exception(error, "OROpenKey failed for " + subKey + " (native error " + error + ").");
+                return new Key(new OfflineHandle(value, false));
+            }
+            public object GetValue(string name, object defaultValue, RegistryValueOptions options) {
+                uint type;
+                uint size = 0;
+                int error = ORGetValue(handle, null, name, out type, null, ref size);
+                if (error == 2) return defaultValue;
+                if (error != 0 && error != 234) throw new Win32Exception(error, "ORGetValue sizing failed for " + name + ".");
+                if (size > 1048576) throw new InvalidDataException("Offline setup value exceeds the 1 MiB metadata limit: " + name);
+                byte[] data = new byte[size];
+                error = ORGetValue(handle, null, name, out type, data, ref size);
+                if (error != 0) throw new Win32Exception(error, "ORGetValue failed for " + name + ".");
+                if (type == 1 || type == 2) return Encoding.Unicode.GetString(data, 0, (int)size).TrimEnd('\0');
+                if (type == 4 && size == 4) return BitConverter.ToInt32(data, 0);
+                if (type == 11 && size == 8) return BitConverter.ToInt64(data, 0);
+                if (type == 7) {
+                    string text = Encoding.Unicode.GetString(data, 0, (int)size).TrimEnd('\0');
+                    return text.Length == 0 ? new string[0] : text.Split('\0');
+                }
+                throw new InvalidDataException("Unsupported offline setup value type/size for " + name + ": " + type + "/" + size);
+            }
+            public void Dispose() { handle.Dispose(); }
+        }
+        public static Key OpenReadOnly(string path) {
             IntPtr value;
-            int error = RegLoadAppKey(path, out value, 0x20019, 1, 0);
-            if (error != 0) throw new Win32Exception(error);
-            SafeRegistryHandle handle = new SafeRegistryHandle(value, true);
-            try { return RegistryKey.FromHandle(handle); }
-            catch { handle.Dispose(); throw; }
+            int error = OROpenHive(path, out value);
+            if (error != 0) throw new Win32Exception(error, "OROpenHive failed (native error " + error + "). The private copy could not be inspected; this does not establish guest registry corruption.");
+            return new Key(new OfflineHandle(value, true));
         }
     }
 }
@@ -161,7 +212,7 @@ function Read-MemLabsOfflineWindowsSetupHive {
     )
 
     Initialize-MemLabsOfflineSetupHiveType
-    $hive = [MemLabs.OfflineSetupHive]::OpenReadOnly($Path)
+    $hive = [MemLabs.OfflineSetupHiveReader]::OpenReadOnly($Path)
     try {
         if ($Kind -eq 'SOFTWARE') {
             return [ordered]@{
@@ -283,7 +334,7 @@ function Copy-MemLabsWindowsSetupEvidence {
                     Copy-Item -LiteralPath $transactionLog -Destination "$copy$suffix" -ErrorAction Stop
                 }
             }
-            # App-key handles unload automatically; no hive is attached to HKLM/HKU.
+            # The offline library reads private copies without a host registry mount.
             $registryState[$kind] = Read-MemLabsOfflineWindowsSetupHive -Path $copy -Kind $kind
         }
         catch { $Manifest.Errors.Add("Read offline $kind setup state: $($_.Exception.Message)") }
@@ -366,7 +417,8 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $privateRoot = Join-Path $collectionRoot 'PrivateState'
     $null = New-Item -Path $bundle, $privateRoot -ItemType Directory
     $manifest = @{
-        SchemaVersion = 1; CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+        SchemaVersion = 1; CollectorVersion = 2; RegistryReader = 'offreg.dll'
+        CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Host = $env:COMPUTERNAME; VMName = $vm.Name; VMId = "$($vm.Id)"
         OriginalState = "$($vm.State)"; FinalState = ''; Status = 'Collecting'
         Files = [Collections.Generic.List[object]]::new()

@@ -44,6 +44,20 @@
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
 
+    $clientSetupGet = { @{ Result = 'Read-only Windows client setup guard' } }
+    $clientSetupTest = {
+        . 'C:\staging\DSC\phases\WindowsSetupReadiness.ps1'
+        $state = Get-MemLabsWindowsClientSetupState
+        return ($state.Ready -is [bool] -and $state.Ready)
+    }
+    $clientSetupSet = {
+        . 'C:\staging\DSC\phases\WindowsSetupReadiness.ps1'
+        $state = Get-MemLabsWindowsClientSetupState
+        if ($state.Ready -isnot [bool] -or -not $state.Ready) {
+            throw "Windows client setup is not complete; refusing rename/domain join. $($state.Detail)"
+        }
+    }
+
     Node localhost
     {
         LocalConfigurationManager {
@@ -51,7 +65,14 @@
             RebootNodeIfNeeded = $true
         }
 
+        Script ClientSetupBeforeRename {
+            GetScript = $clientSetupGet
+            TestScript = $clientSetupTest
+            SetScript = $clientSetupSet
+        }
+
         WriteStatus Rename {
+            DependsOn = '[Script]ClientSetupBeforeRename'
             Status = "Renaming the computer to $ThisMachineName"
         }
 
@@ -171,8 +192,8 @@
         # Confirm the rename actually applied to the ACTIVE computer name before
         # we join the domain. The stock 'Computer NewName' resource's Test trusts
         # the PENDING-rename registry value, so if Windows re-ran its specialize
-        # pass on a reboot (observed under heavy host disk I/O, which re-randomizes
-        # the computer name) the ACTIVE name can still be the random DESKTOP-* even
+        # pass or its OOBE watchdog re-arms setup, the ACTIVE name can still be
+        # the random DESKTOP-* even
         # though Computer.Test reported success. Joining the domain under that
         # transient name permanently breaks the rename ("the specified computer
         # account could not be found") and strands the config. Gate here: if the
@@ -183,11 +204,29 @@
         # instead of silently joining under the wrong name and bricking the VM.
         Script ConfirmComputerName {
             DependsOn  = "[Registry]DisableUACRemoteRestrictions"
-            GetScript  = { return @{ Result = $env:COMPUTERNAME } }
-            TestScript = [string]"return (`$env:COMPUTERNAME -eq '$ThisMachineName')"
+            GetScript  = {
+                return @{ Result = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' `
+                            -Name ComputerName -ErrorAction Stop).ComputerName }
+            }
+            TestScript = [string]"
+                `$activeName = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction Stop).ComputerName
+                return (`$activeName -eq '$ThisMachineName')
+            "
             SetScript  = [string]"
-                if (`$env:COMPUTERNAME -ne '$ThisMachineName') {
-                    try { Rename-Computer -NewName '$ThisMachineName' -Force -ErrorAction Stop } catch { }
+                `$activeName = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction Stop).ComputerName
+                `$pendingPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName'
+                `$pendingName = (Get-ItemProperty -LiteralPath `$pendingPath -Name ComputerName -ErrorAction Stop).ComputerName
+                if ([string]::IsNullOrWhiteSpace(`$activeName) -or [string]::IsNullOrWhiteSpace(`$pendingName)) {
+                    throw 'Active or pending computer name could not be verified before domain join.'
+                }
+                if (`$activeName -ne '$ThisMachineName') {
+                    if (`$pendingName -ne '$ThisMachineName') {
+                        Rename-Computer -NewName '$ThisMachineName' -Force -ErrorAction Stop
+                        `$pendingName = (Get-ItemProperty -LiteralPath `$pendingPath -Name ComputerName -ErrorAction Stop).ComputerName
+                        if (`$pendingName -ne '$ThisMachineName') {
+                            throw 'The requested computer rename was not reflected in the pending-name registry value.'
+                        }
+                    }
                     `$global:DSCMachineStatus = 1
                 }
             "
@@ -210,10 +249,17 @@
             Status    = "Joining computer to the domain"
         }
 
+        Script ClientSetupBeforeJoin {
+            GetScript = $clientSetupGet
+            TestScript = $clientSetupTest
+            SetScript = $clientSetupSet
+            DependsOn = '[WriteStatus]DomainJoin'
+        }
+
         JoinDomain JoinDomain {
             DomainName = $DomainName
             Credential = $DomainCreds
-            DependsOn  = "[WriteStatus]DomainJoin"
+            DependsOn  = '[Script]ClientSetupBeforeJoin'
         }
 
         # Validate secure channel after the post-JoinDomain reboot. If the machine

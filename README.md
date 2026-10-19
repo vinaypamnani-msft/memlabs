@@ -178,6 +178,33 @@ Validate with `vmbuild\tools\Test-PhaseFailurePropagation.ps1`,
 `vmbuild\tools\Test-AutomatedResumePreparation.ps1`, and
 `vmbuild\tools\Test-OsdClientResumePreparation.ps1`.
 
+### Windows client setup readiness
+
+Ordinary Windows-client deployments require both complete machine-setup state
+and the supported native `OOBEComplete` Windows Welcome signal before advancing.
+`IMAGE_STATE_COMPLETE` alone is insufficient: user OOBE can still fail and
+re-arm setup, changing the computer name after a successful domain join.
+
+The mandatory client gate runs after fresh-VM machine readiness, before
+retained-VM resume reboot checks, and again after any required resume reboot.
+It uses a 30-minute polling deadline, bounded guest-command probes, and reports
+the setup flags, native completion result, active/pending names, and read errors.
+Late replies cannot pass after the readiness deadline. Unknown, missing,
+malformed, or incomplete client state never passes because
+a settle timer expired. A failure retains the VM for offline diagnostics;
+the gate itself never reboots, deletes, rejoins, or changes setup registry values.
+The legacy machine-OOBE wait cannot bypass this additional client gate.
+
+Phase 2 adds read-only backstops before client rename and domain join, including
+workgroup-client rename. Servers do not require the native client gate;
+intentional AAD OOBE, PXE/OSD, Linux, and migration preparation retain their
+existing behavior. Domain-member rename verification reads the active registry
+name, recognizes an already-staged pending rename, and requests a reboot only
+after verifying the pending name. Failed or ignored rename writes fail explicitly.
+
+Validate with `vmbuild\tools\Test-WindowsClientSetupReadiness.ps1` plus the existing
+resume, OSD/PXE, and base-image staging regressions.
+
 ### Windows setup failure diagnostics
 
 A running VM and healthy Hyper-V heartbeat do not prove that Windows setup
@@ -210,14 +237,20 @@ Volume-GUID paths are passed literally to the event reader. A query that
 silently returns no records without an explicit empty-log status is reported
 as missing/unverified evidence, not as a clean empty event log.
 Raw registry hives and unattend XML are excluded; private hive copies are
-removed after inspection. Setup logs can still contain sensitive details:
+read using the system `offreg.dll` offline-registry library and removed after
+inspection. No hive is mounted into the host registry. This supports OS hives
+with different key security descriptors, which `RegLoadAppKey` does not.
+The manifest identifies this implementation as `CollectorVersion=2` and
+`RegistryReader=offreg.dll`.
+An unavailable library or unreadable copy is reported as a collection error,
+not proof of guest registry corruption. Setup logs can still contain sensitive details:
 review the archive before sharing it. Partial or failed collections are
 explicitly identified; unresolved disk-detach failures require manual cleanup
 before restarting the VM. `-WhatIf` previews without stopping or mounting.
 
 Validate the collector's mocked Hyper-V/storage safety contracts with
 `vmbuild\tools\Test-WindowsVmSetupDiagnostics.ps1`. It also exercises disposable
-application-hive fixtures and isolated mutex contention; it does not operate
+uniform/mixed-security hive fixtures and isolated mutex contention; it does not operate
 on real VMs or load host registry hives.
 
 ### Phase 2 DSC staging recovery

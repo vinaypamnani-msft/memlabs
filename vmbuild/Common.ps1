@@ -6899,6 +6899,107 @@ function Get-AvailableMemoryGB {
     return $availableMemory
 }
 
+function Get-MemLabsWindowsClientSetupStateBlock {
+    $path = Join-Path $PSScriptRoot 'DSC\phases\WindowsSetupReadiness.ps1'
+    $source = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+    return [scriptblock]::Create("$source`nGet-MemLabsWindowsClientSetupState")
+}
+
+function Wait-MemLabsWindowsClientSetup {
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [string]$VmDomainName = 'WORKGROUP',
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 1800
+    )
+
+    $probeBlock = Get-MemLabsWindowsClientSetupStateBlock
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $budget = [TimeSpan]::FromSeconds($TimeoutSeconds)
+    $lastDetail = 'No setup state has been received.'
+    $lastLoggedDetail = ''
+    $lastLoggedAt = -30
+    try {
+        do {
+            $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
+            if ($remaining -le 0) { break }
+            Write-ProgressElapsed -showTimeout -stopwatch $watch -timespan $budget `
+                -text "$VmName`: verifying Windows client setup completion"
+            $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob `
+                -TimeoutSeconds ([Math]::Max(1, [Math]::Min(30, [int][Math]::Floor($remaining)))) `
+                -SessionMaxRetries 1 -SuppressLog -ScriptBlock $probeBlock
+            if ($watch.Elapsed -ge $budget) {
+                $lastDetail = 'The guest probe exceeded the remaining readiness deadline; a late reply cannot establish readiness.'
+                break
+            }
+            $states = @()
+            $failedProperty = $null
+            if ($probe) {
+                $failedProperty = $probe.PSObject.Properties['ScriptBlockFailed']
+                $outputProperty = $probe.PSObject.Properties['ScriptBlockOutput']
+                if ($outputProperty) { $states = @($outputProperty.Value) }
+            }
+            $hasFields = $states.Count -eq 1 -and $null -ne $states[0]
+            if ($hasFields) {
+                foreach ($name in @('Version', 'Required', 'Ready', 'Reason', 'Detail')) {
+                    if (-not $states[0].PSObject.Properties[$name]) { $hasFields = $false }
+                }
+            }
+            $valid = $failedProperty -and $failedProperty.Value -is [bool] -and -not $failedProperty.Value -and
+                $hasFields -and $states[0].Version -is [int] -and $states[0].Version -eq 1 -and
+                $states[0].Required -is [bool] -and $states[0].Ready -is [bool] -and
+                $states[0].Reason -is [string] -and -not [string]::IsNullOrWhiteSpace($states[0].Reason) -and
+                $states[0].Detail -is [string] -and -not [string]::IsNullOrWhiteSpace($states[0].Detail)
+            if ($valid) {
+                $state = $states[0]
+                if (-not $state.Required) {
+                    $valid = $state.Ready -and $state.PSObject.Properties['ProductType'] -and
+                        $state.ProductType -is [int] -and $state.ProductType -in @(2, 3) -and
+                        $state.Reason -eq 'NotWindowsClient'
+                }
+                elseif ($state.Ready) {
+                    foreach ($name in @('ProductType', 'NativeOobeComplete', 'ImageState', 'ActiveName', 'PendingName',
+                            'SetupType', 'SystemSetupInProgress', 'OOBEInProgress')) {
+                        if (-not $state.PSObject.Properties[$name]) { $valid = $false }
+                    }
+                    $valid = $valid -and $state.ProductType -is [int] -and $state.ProductType -eq 1 -and
+                        $state.NativeOobeComplete -is [bool] -and $state.NativeOobeComplete -and
+                        $state.ImageState -is [string] -and $state.ImageState -eq 'IMAGE_STATE_COMPLETE' -and
+                        $state.Reason -eq 'Complete' -and
+                        $state.ActiveName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.ActiveName) -and
+                        $state.PendingName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.PendingName)
+                    if ($valid) {
+                        foreach ($name in @('SetupType', 'SystemSetupInProgress', 'OOBEInProgress')) {
+                            $valid = $valid -and ($state.$name -is [int] -or $state.$name -is [uint32]) -and $state.$name -eq 0
+                        }
+                    }
+                }
+                if ($valid) {
+                    $lastDetail = $state.Detail
+                    if ($state.Ready) {
+                        Write-Log "$VmName`: Windows client setup gate passed. $lastDetail"
+                        return $true
+                    }
+                }
+            }
+            if (-not $valid) {
+                $errorProperty = if ($probe) { $probe.PSObject.Properties['ErrorDetails'] } else { $null }
+                $errors = if ($errorProperty) { @($errorProperty.Value) -join '; ' } else { 'No readable guest response.' }
+                $lastDetail = "Windows client setup state is unreadable or malformed. $errors"
+            }
+            if ($lastDetail -ne $lastLoggedDetail -or $watch.Elapsed.TotalSeconds - $lastLoggedAt -ge 30) {
+                Write-Log "$VmName`: waiting for Windows client setup. $lastDetail" -Warning
+                $lastLoggedDetail = $lastDetail
+                $lastLoggedAt = $watch.Elapsed.TotalSeconds
+            }
+            $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
+            if ($remaining -gt 0) { Start-Sleep -Seconds ([Math]::Min(5, [int][Math]::Ceiling($remaining))) }
+        } while ($watch.Elapsed -lt $budget)
+    }
+    finally { $watch.Stop() }
+    Write-Log "$VmName`: Windows client setup did not become ready within ${TimeoutSeconds}s. $lastDetail Collect offline setup diagnostics before retrying; no setup repair or reboot was requested by this gate." -Warning
+    return $false
+}
+
 function Wait-ForVm {
 
     param (

@@ -1008,6 +1008,11 @@ $global:VM_Create = {
                 }
                 break  # OOBE succeeded, exit retry loop
             }
+            if (-not $Migrate -and $currentItem.role -ne 'AADClient' -and
+                -not (Wait-MemLabsWindowsClientSetup -VmName $currentItem.vmName -VmDomainName $domainName)) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows client setup is not ready; retaining the VM for diagnostics." -Failure -OutputStream
+                return
+            }
         }
         else {
             # Check if VM is connectable
@@ -1073,6 +1078,12 @@ $global:VM_Create = {
             $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
             if (-not $connected) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
+                return
+            }
+
+            if (-not $Migrate -and $currentItem.role -ne 'AADClient' -and
+                -not (Wait-MemLabsWindowsClientSetup -VmName $currentItem.vmName -VmDomainName $domainName)) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows client setup is not ready; resume preparation will not reboot or reconfigure it." -Failure -OutputStream
                 return
             }
 
@@ -1179,6 +1190,11 @@ $global:VM_Create = {
                         -PathToVerify "C:\Users" -VmDomainName $domainName
                     if (-not $connectedAfterResumeRestart) {
                         Write-Log "[Phase 0]: $($currentItem.vmName): VM did not become connectable after its required resume reboot." -Failure -OutputStream
+                        return
+                    }
+                    if (-not $Migrate -and $currentItem.role -ne 'AADClient' -and
+                        -not (Wait-MemLabsWindowsClientSetup -VmName $currentItem.vmName -VmDomainName $domainName)) {
+                        Write-Log "[Phase 0]: $($currentItem.vmName): Windows client setup is not ready after the resume reboot." -Failure -OutputStream
                         return
                     }
                 }
