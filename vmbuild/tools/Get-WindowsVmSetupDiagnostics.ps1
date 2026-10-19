@@ -4,26 +4,46 @@
 .SYNOPSIS
     Collects offline Windows setup diagnostics from one Hyper-V VM.
 .DESCRIPTION
-    Gracefully stops the selected VM, mounts only its disks read-only without
+    By default, gracefully stops the selected VM, mounts only its disks read-only without
     drive letters, and collects setup logs plus allowlisted registry state.
     The VM is left off. No guest rename, rejoin, registry repair, or restart runs.
     Raw registry hives and unattend files are never included in the archive.
     Stop deployment/test retry loops before collection. The collector refuses
     to run while another process holds the MemLabs host mutation lease.
+.PARAMETER RepairOobe
+    Explicitly opts into an OOBE-only Windows Update access trial after a verified
+    full VM export. Requires BackupPath and an administrator GuestCredential.
+    No rename, domain repair, setup-completion override, or ACL reset is performed.
 .PARAMETER AllowTurnOff
     Permits a hard power-off if graceful shutdown fails or the VM is saved/paused.
 .EXAMPLE
     .\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -AllowTurnOff
 #>
-[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+[CmdletBinding(DefaultParameterSetName = 'Collect', SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
-    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$VmName,
+    [Parameter(Mandatory, ParameterSetName = 'Collect')]
+    [Parameter(Mandatory, ParameterSetName = 'Repair')]
+    [ValidateNotNullOrEmpty()][string]$VmName,
     [string]$Destination = (Join-Path $PSScriptRoot '..\logs\setup-diagnostics'),
     [ValidateRange(5, 600)][int]$StopTimeoutSeconds = 90,
-    [switch]$AllowTurnOff
+    [switch]$AllowTurnOff,
+    [Parameter(Mandatory, ParameterSetName = 'Repair')][switch]$RepairOobe,
+    [Parameter(Mandatory, ParameterSetName = 'Repair')][ValidateNotNullOrEmpty()][string]$BackupPath,
+    [Parameter(Mandatory, ParameterSetName = 'Repair')][ValidateNotNull()][pscredential]$GuestCredential,
+    [Parameter(ParameterSetName = 'Repair')][ValidateRange(60, 3600)][int]$RepairTimeoutSeconds = 900,
+    [Parameter(ParameterSetName = 'Repair')][ValidateRange(60, 7200)][int]$BackupTimeoutSeconds = 3600
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Resolve-MemLabsSetupDiagnosticPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $provider = $null
+    $drive = $null
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path, [ref]$provider, [ref]$drive)
+    if ($provider.Name -ne 'FileSystem') { throw 'Destination must be a filesystem path.' }
+    return $resolved
+}
 
 function New-MemLabsPrivateDiagnosticDirectory {
     param([Parameter(Mandatory)][string]$Path)
@@ -404,11 +424,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     if ($vms.Count -ne 1 -or $vms[0].Name -ine $VmName) { throw 'Exactly one matching VM is required.' }
     $vm = $vms[0]
     if (-not $PSCmdlet.ShouldProcess($vm.Name, 'Stop if necessary, collect read-only Windows setup evidence, and leave the VM off')) { return }
-    $destinationProvider = $null
-    $destinationDrive = $null
-    $destinationPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
-        $Destination, [ref]$destinationProvider, [ref]$destinationDrive)
-    if ($destinationProvider.Name -ne 'FileSystem') { throw 'Destination must be a filesystem path.' }
+    $destinationPath = Resolve-MemLabsSetupDiagnosticPath -Path $Destination
     $safeName = $vm.Name -replace '[\\/:*?"<>|]', '_'
     $name = "$safeName-SetupFailure-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     $collectionRoot = Join-Path $destinationPath $name
@@ -526,7 +542,16 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
 $collectorParameters = @{} + $PSBoundParameters
 $collectorParameters.Destination = $Destination
 $collectorParameters.StopTimeoutSeconds = $StopTimeoutSeconds
-if ($WhatIfPreference) { Invoke-MemLabsWindowsSetupDiagnostics @collectorParameters; return }
+$operation = 'Invoke-MemLabsWindowsSetupDiagnostics'
+if ($RepairOobe) {
+    . (Join-Path $PSScriptRoot 'Common.WindowsVmOobeRepair.ps1')
+    $null = $collectorParameters.Remove('RepairOobe')
+    $collectorParameters.RepairTimeoutSeconds = $RepairTimeoutSeconds
+    $collectorParameters.BackupTimeoutSeconds = $BackupTimeoutSeconds
+    $operation = 'Invoke-MemLabsWindowsOobeRepair'
+}
+elseif ($PSCmdlet.ParameterSetName -eq 'Repair') { throw 'Repair parameters require -RepairOobe to be explicitly enabled.' }
+if ($WhatIfPreference) { & $operation @collectorParameters; return }
 $mutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
 $leaseHeld = $false
 try {
@@ -536,7 +561,7 @@ try {
         Write-Warning 'The previous host mutation lease owner exited unexpectedly; acquiring the abandoned lease for collection.'
     }
     if (-not $leaseHeld) { throw 'Another MemLabs operation owns the host mutation lease. Stop the active deployment/test retry loop before collecting setup diagnostics.' }
-    Invoke-MemLabsWindowsSetupDiagnostics @collectorParameters
+    & $operation @collectorParameters
 }
 finally {
     try { if ($leaseHeld) { $mutationMutex.ReleaseMutex() } }

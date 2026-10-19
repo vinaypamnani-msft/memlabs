@@ -253,6 +253,61 @@ Validate the collector's mocked Hyper-V/storage safety contracts with
 uniform/mixed-security hive fixtures and isolated mutex contention; it does not operate
 on real VMs or load host registry hives.
 
+### Explicit OOBE-only recovery trial
+
+Repair is **not** the normal deployment strategy. The client setup gates above
+prevent rename/domain join from starting before Windows Welcome is complete.
+For an already-stranded client, the collector additionally exposes an explicit
+`-RepairOobe` trial. Ordinary collection remains read-only.
+
+Run on the Hyper-V host, from the repository root in elevated PowerShell, with
+deployment/test retry loops stopped:
+
+```powershell
+$guest = Get-Credential -UserName 'vmbuildadmin' -Message 'Local administrator inside the affected VM'
+.\vmbuild\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 `
+    -RepairOobe -BackupPath 'E:\VMBackups' -GuestCredential $guest
+```
+
+Use a backup location outside the VM's configuration and disk directories,
+with enough free space for a complete export. The script captures offline
+evidence, exports the stopped VM, validates its configuration/disks and
+self-contained parent chains, and restricts the backup ACLs before starting
+the selected VM. **The full export contains guest data and must not be shared
+as a diagnostic archive.** No repair starts if the backup cannot be verified.
+
+The trial supports the post-setup OOBE failure pattern, not arbitrary Windows
+damage. It stops if PowerShell Direct cannot authenticate with the supplied
+credential or cannot obtain an elevated, readable Windows-client state.
+It temporarily removes only the three known lab Windows Update blocking
+values when they are DWORD `1`, and enables/starts `wuauserv` if necessary.
+If no known blocker exists, it refuses speculative repair. It never forces
+setup-completion flags, resets ACLs, re-registers apps, renames the computer,
+resets its machine password, or unjoins/rejoins the domain.
+
+If instructed while the script waits, click **Next** on the failure page in
+VMConnect so Windows can retry; no console command block needs pasting.
+The default native-OOBE completion window is 15 minutes
+(`-RepairTimeoutSeconds`, 60–3600 seconds). After completion, the script restores
+the original policy/service configuration and verifies **two graceful reboot
+cycles**, each with at least **190 seconds** of stable native/setup/name state.
+It also confirms the shutdown hive state is complete. Verification never
+uses forced power-off.
+
+A successful result is `OobeRecoveredIdentityUnchanged`, not a claim that AD
+identity or the whole deployment is repaired. Before/after diagnostics,
+original settings, backup location, and stage outcomes are written to a
+protected report ZIP; credentials and the VM export are excluded.
+Known failures restore settings where safe and leave the VM off when graceful
+shutdown succeeds. A timed-out remote action or failed restoration is
+`Indeterminate`: the VM may remain running, and the script does **not** blindly
+retry, reboot, or overwrite later policy changes. Keep the backup and inspect
+the original-settings receipt before taking further action.
+
+Validate with `vmbuild\tools\Test-WindowsOobeRecovery.ps1`. It uses mocked
+Hyper-V/guest operations and disposable files; live recovery viability must
+still be confirmed on the affected host.
+
 ### Phase 2 DSC staging recovery
 
 A healthy Hyper-V heartbeat does not guarantee that PowerShell Direct can open
