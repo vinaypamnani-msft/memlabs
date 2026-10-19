@@ -304,7 +304,10 @@ function Copy-MemLabsWindowsSetupEvidence {
             $source = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $WindowsRoot -RelativePath "System32\winevt\Logs\$($eventSource.File)"
             if (-not $source) { $Manifest.Missing.Add($eventSource.File); continue }
             Write-Host "Summarizing offline $log events."
-            $events = @(Get-WinEvent -Path $source -MaxEvents 1000 -ErrorAction Stop |
+            $sourceRecordCount = 0
+            # Get-WinEvent treats the literal '?' in volume-GUID paths as a wildcard.
+            $events = @(Get-WinEvent -Path ([Management.Automation.WildcardPattern]::Escape($source)) -MaxEvents 1000 -ErrorAction Stop |
+                ForEach-Object { $sourceRecordCount++; $_ } |
                 Where-Object { $log -in @('Setup', 'DSC-Operational') -or
                     $_.ProviderName -match 'Setup|OOBE|Netlogon|Kernel-Boot|Kernel-Power|User32|Application Error|Windows Error Reporting|AppModel|CloudExperienceHost' -or
                     $_.Id -in @(6005, 6006, 6008) } |
@@ -319,6 +322,7 @@ function Copy-MemLabsWindowsSetupEvidence {
                         Level = $eventRecord.Level; Message = $message; Xml = $eventRecord.ToXml()
                     }
                 })
+            if ($sourceRecordCount -eq 0) { throw 'The offline event query returned no records without an empty-log status; evidence could not be verified.' }
             ConvertTo-Json -InputObject $events -Depth 5 |
                 Set-Content -LiteralPath (Join-Path $Bundle "$log-events.json") -Encoding UTF8 -ErrorAction Stop
             $Manifest.Files.Add([ordered]@{ Path = "$log-events.json"; Truncated = $true })

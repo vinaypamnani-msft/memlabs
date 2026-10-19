@@ -257,6 +257,10 @@ try {
         param($Path, $MaxEvents, $ErrorAction)
         Assert-True ($MaxEvents -eq 1000) 'Offline event scanning lost its record bound.'
         if ($script:EventMode -eq 'NoMatching') { Write-Error -Message 'No events' -ErrorId NoMatchingEventsFound -ErrorAction Stop }
+        if ($script:EventMode -eq 'SilentEmpty') { return }
+        if ($script:EventMode -eq 'LiteralVolume') {
+            Assert-True ($Path.StartsWith('\\`?\Volume{')) 'The literal volume-GUID question mark reached Get-WinEvent as a wildcard.'
+        }
         $eventRecord = [pscustomobject]@{
             TimeCreated = [DateTime]::UtcNow; Id = 41
             ProviderName = 'Microsoft-Windows-Kernel-Power'; Level = 1; Message = 'fixture'
@@ -568,6 +572,35 @@ try {
         Assert-True ($abandonedReport.Status -eq 'Complete') 'An abandoned mutation lease prevented safe collection.'
     }
     finally { $leaseKeepAlive.Dispose() }
+
+    Reset-Fixture
+    $script:EventMode = 'SilentEmpty'
+    $emptyQueryReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
+    $emptyManifest = Get-Content -LiteralPath (Join-Path (Split-Path $emptyQueryReport.ArchivePath -Parent) 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
+    Assert-True ($emptyQueryReport.Status -eq 'Partial' -and
+        ($emptyManifest.Errors -join ' ') -match 'without an empty-log status') 'A silent zero-record event query became false clean evidence.'
+
+    $savedSourceResolver = ${function:Get-MemLabsOfflineSetupSourcePath}
+    try {
+        function Get-MemLabsOfflineSetupSourcePath {
+            param($WindowsRoot, $RelativePath)
+            if ($RelativePath.EndsWith('.evtx')) { return "$WindowsRoot\$RelativePath" }
+        }
+        Reset-Fixture
+        $script:EventMode = 'LiteralVolume'
+        $volumeBundle = Join-Path $testRoot 'volume-events'
+        $null = New-Item -Path $volumeBundle -ItemType Directory
+        $volumeManifest = @{
+            Files = [Collections.Generic.List[object]]::new()
+            Missing = [Collections.Generic.List[string]]::new()
+            Errors = [Collections.Generic.List[string]]::new()
+        }
+        Copy-MemLabsWindowsSetupEvidence -WindowsRoot '\\?\Volume{11111111-1111-1111-1111-111111111111}\Windows' `
+            -Bundle $volumeBundle -PrivateRoot $aclPath -Manifest $volumeManifest
+        Assert-True ($volumeManifest.Files.Count -eq 4 -and $volumeManifest.Errors.Count -eq 2 -and
+            ($volumeManifest.Errors -join ' ') -notmatch 'wildcard') 'Literal volume-GUID event paths failed their production evidence pipeline.'
+    }
+    finally { Set-Item -Path Function:\Get-MemLabsOfflineSetupSourcePath -Value $savedSourceResolver }
 }
 finally {
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop

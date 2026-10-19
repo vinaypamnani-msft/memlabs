@@ -206,6 +206,9 @@ setup/name/domain registry values, and a manifest of missing evidence/errors.
 Setup, System, Application, and DSC event summaries contain at most 80 selected
 records from the latest 1,000 records per log. Raw event XML is retained even
 when the host cannot format a guest event's message.
+Volume-GUID paths are passed literally to the event reader. A query that
+silently returns no records without an explicit empty-log status is reported
+as missing/unverified evidence, not as a clean empty event log.
 Raw registry hives and unattend XML are excluded; private hive copies are
 removed after inspection. Setup logs can still contain sensitive details:
 review the archive before sharing it. Partial or failed collections are
