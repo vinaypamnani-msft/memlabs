@@ -263,6 +263,11 @@ line counts, omitted older files, and read errors, so a rolled SOAP fault is not
 lost merely because it is absent from the current log.
 An upstream outside the deployment config or a failed capture is reported
 explicitly. Validate these paths with `vmbuild\tools\Test-WsusSyncConvergence.ps1`.
+CM failure diagnostics include the properties of up to three WSUS per-update
+errors, limited to 1,200 characters per sample, rather than only their type names.
+A `Canceled`/`UserCanceled` outcome is not proof of a service restart: SQL or
+transport failures can precede cancellation. Idle failures still fail validation;
+only a running replacement or a newer successful cycle supersedes the old failure.
 
 For HTTPS client push, the guest requests host certificate pre-staging and waits
 for a receipt matching both the deployment RunId and request ID. The host checks
@@ -394,6 +399,10 @@ site upgrade therefore does not trigger a downgrade to the old deployment target
 A console newer than the live payload is preserved with a warning; exact
 compatibility is not claimed. Phase 11 uses the same live-target/no-downgrade
 policy. `Upgrade-Console.ps1 -CheckOnly` performs the read-only check.
+The payload's site build comes from the site-published console extension metadata.
+`ConsoleSetup.exe` is a bootstrapper that can retain an older baseline build;
+its file version is diagnostic only, not evidence of a stale console payload.
+Phase 11 reports console, extension, and source-build comparisons separately.
 
 Console setup retries uninstall/install failures up to three times, does not
 repeat a successful uninstall, and polls verification before reinstalling.

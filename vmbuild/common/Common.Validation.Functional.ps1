@@ -13244,7 +13244,7 @@ function Test-CMSiteWideFunctionality {
                 }
                 else {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: ConfigMgr admin console $($consoleState.AdminConsoleVersion) does not match live payload $($payload.ConsoleVersion); extension $($consoleState.RequiredExtensionVersion) requires $($consoleState.RequiredExtensionSiteVersion); provider error '$($consoleState.ProviderError)'. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
+                    $results.Details.Add("FAIL: ConfigMgr admin console $($consoleState.AdminConsoleVersion) does not match live payload $($payload.ConsoleVersion) (version match=$($consoleState.VersionMatches)); extension $($consoleState.RequiredExtensionVersion) requires $($consoleState.RequiredExtensionSiteVersion) (match=$($consoleState.ExtensionMatches)); live site build $($payload.LiveSiteBuild), payload extension build $($payload.PayloadSiteBuild) (source match=$($consoleState.SourceMatchesSite); ConsoleSetup.exe=$($payload.SetupVersion)); provider error '$($consoleState.ProviderError)'. Phase 10 must run Fix-Upgrade-Console on this $vmRole.")
                 }
             }
             catch {
@@ -14618,18 +14618,20 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                     }
                                     catch { }
                                     try {
-                                        $ue = @($h.UpdateErrors)
-                                        if ($ue.Count -gt 0) { $parts += "updateErrors=$($ue.Count) first='$(("$($ue[0])" -replace '\s+', ' ').Trim())'" }
+                                        $ue = @($h.UpdateErrors | Where-Object { $null -ne $_ })
+                                        if ($ue.Count -gt 0) {
+                                            $errorSamples = @($ue | Select-Object -First 3 | ForEach-Object {
+                                                $sample = ($_ | ConvertTo-Json -Depth 4 -Compress -ErrorAction Stop) -replace '\s+', ' '
+                                                if ($sample.Length -gt 1200) { $sample = $sample.Substring(0, 1200) + '...[truncated]' }
+                                                $sample
+                                            })
+                                            $parts += "updateErrors=$($ue.Count) shown=$($errorSamples.Count) details=[$($errorSamples -join '; ')]"
+                                        }
                                     }
-                                    catch { }
-                                    # A cancelled sync is not a broken sync -- something STOPPED
-                                    # it, and in a memlabs build that is usually memlabs itself:
-                                    # perfloading's Repair-WsusSync restarts WsusPool and
-                                    # SMS_EXECUTIVE before re-triggering, and InstallRoles notes
-                                    # that starting a sync on top of a running one cancels it.
-                                    # Either way the NEXT cycle is the one worth judging.
+                                    catch { $parts += "updateErrors unavailable='$($_.Exception.Message)'" }
+                                    # SQL/transport failures can also end a sync as UserCanceled.
                                     if ("$($h.Result)" -match 'Cancel' -or "$($h.Error)" -match 'Cancel') {
-                                        $parts += 'cause=the sync was CANCELLED, not failed -- WsusPool/WsusService/SMS_EXECUTIVE restarted mid-cycle (perfloading Repair-WsusSync does exactly that), the SUP rebooted, or a second sync was started on top of it'
+                                        $parts += 'outcome=sync was canceled; cancellation alone does not identify the initiating fault -- inspect updateErrors and WCM/wsyncmgr/SoftwareDistribution evidence before attributing it to a service restart, reboot, or overlapping sync'
                                     }
                                     $supFailDiag = " [WSUS history: $($parts -join ' ')]"
 

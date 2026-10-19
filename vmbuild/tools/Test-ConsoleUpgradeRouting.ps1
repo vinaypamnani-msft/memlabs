@@ -7,6 +7,7 @@ param (
     [string] $RootPath
 )
 
+$ErrorActionPreference = 'Stop'
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $failures = 0
 
@@ -46,7 +47,7 @@ $validationText = Get-Content -LiteralPath $validationPath -Raw
 $phaseJobsText = Get-Content -LiteralPath $phaseJobsPath -Raw
 
 Assert-ConsoleUpgrade ($fixText -match 'NeededOnFreshDeploy\s*=\s*\$true' -and $fixText -match 'AppliesToExisting\s*=\s*\$true') 'console fix is reachable from Phase 10 and fresh-deploy maintenance'
-Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"261016\.1"') 'console fix version deploys live-site targeting and retry hardening'
+Assert-ConsoleUpgrade ($fixText -match 'FixVersion\s*=\s*"261019\.1"') 'console fix version deploys payload-extension build validation'
 Assert-ConsoleUpgrade ($fixText -match 'returned no result' -and $fixText -match "Properties\['Success'\]") 'maintenance wrapper requires an explicit result'
 Assert-ConsoleUpgrade ($fixText -match 'ToBase64String.+ReadAllBytes' -and
     $fixText -match 'WriteAllBytes\(\$script.+FromBase64String') 'maintenance carries the current console script into Phase 10-only reruns'
@@ -212,13 +213,24 @@ $script:ConsoleSetupState = [pscustomobject]@{
     AdminConsoleVersion      = ' 5.2509.1036.1200 '
     RequiredExtensionVersion = ' 5.0.9141.1002 '
 }
+$script:ConsoleExtensionSiteVersion = ' 5.0.9141.1002 '
+$script:ConsoleLiveSiteVersion = '5.00.9141.1002'
 function Get-ItemProperty {
-    param($Path, $ErrorAction)
+    param($Path, $LiteralPath, $ErrorAction)
+    if ($LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\SMS\Setup') {
+        return [pscustomobject]@{ 'Full Version' = $script:ConsoleLiveSiteVersion }
+    }
+    if ($LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\SMS\Identification') {
+        return [pscustomobject]@{ 'Site Code' = 'CS1' }
+    }
     $script:ConsoleSetupState
 }
 function Get-CimInstance {
-    param($Namespace, $Query, $OperationTimeoutSec, $ErrorAction)
-    [pscustomobject]@{ FileVersion = ' 5.0.9141.1002 ' }
+    param($Namespace, $Query, $ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
+    if ($ClassName -eq 'SMS_Site') {
+        return [pscustomobject]@{ Version = $script:ConsoleLiveSiteVersion }
+    }
+    [pscustomobject]@{ FileVersion = $script:ConsoleExtensionSiteVersion }
 }
 $currentState = Get-ConsoleVersionState -SiteCode 'SPC' -ExpectedRelease '2509'
 Assert-ConsoleUpgrade ($currentState.Current -and $currentState.ReleaseMatches -and $currentState.ExtensionMatches) 'console state normalizes provider and registry version strings before comparison'
@@ -233,6 +245,79 @@ $aheadState = Get-ConsoleVersionState -SiteCode 'SPC' -ExpectedRelease '2509' -E
     -LiveSiteBuild 9141 -PayloadSiteBuild 9145
 Assert-ConsoleUpgrade ($aheadState.NewerThanSite -and -not $aheadState.Current -and -not $aheadState.SourceMatchesSite) `
     'a console matching setup media newer than the live site is preserved, not declared an exact site match'
+
+$payloadRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-console-payload-$([guid]::NewGuid().ToString('N'))"
+$payloadDirectory = Join-Path $payloadRoot 'Tools\ConsoleSetup'
+$installer = $null
+$database = $null
+try {
+    $null = New-Item -Path $payloadDirectory -ItemType Directory -Force
+    foreach ($name in @('ConsoleSetup.exe', 'ConfigMgr.AC_Extension.i386.cab', 'ConfigMgr.AC_Extension.amd64.cab')) {
+        $null = New-Item -Path (Join-Path $payloadDirectory $name) -ItemType File
+    }
+    try {
+        [string]$msiPath = Join-Path $payloadDirectory 'AdminConsole.msi'
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer,
+            @($msiPath, 3))
+        foreach ($query in @(
+                'CREATE TABLE `Property` (`Property` CHAR(72) NOT NULL, `Value` CHAR(0) LOCALIZABLE PRIMARY KEY `Property`)'
+                'INSERT INTO `Property` (`Property`, `Value`) VALUES (''AdminConsoleVersion'', ''5.2309.1113.1000'')'
+            )) {
+            $view = $null
+            try {
+                $view = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database, @($query))
+                $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+            }
+            finally {
+                if ($view) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($view) }
+            }
+        }
+        $null = $database.GetType().InvokeMember('Commit', 'InvokeMethod', $null, $database, $null)
+    }
+    finally {
+        foreach ($item in @($database, $installer)) {
+            if ($item) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($item) }
+        }
+    }
+    $script:ConsoleLiveSiteVersion = '5.00.9122.1000'
+    $script:ConsoleExtensionSiteVersion = '5.0.9122.1000'
+    $script:ConsoleSetupState.AdminConsoleVersion = '5.2309.1113.1000'
+    $script:ConsoleSetupState.RequiredExtensionVersion = '5.0.9122.1000'
+    $script:ConsoleBootstrapperVersion = '5.0.9106.1000'
+    function Get-Item {
+        param($LiteralPath, $ErrorAction)
+        [pscustomobject]@{ VersionInfo = [pscustomobject]@{ FileVersion = $script:ConsoleBootstrapperVersion } }
+    }
+    $payload = Get-ConsolePayloadState -SiteInstallDirectory $payloadRoot
+    $payloadState = Get-ConsoleVersionState -SiteCode 'CS1' -ExpectedRelease $payload.Release `
+        -ExpectedConsoleVersion $payload.ConsoleVersion -LiveSiteBuild $payload.LiveSiteBuild -PayloadSiteBuild $payload.PayloadSiteBuild
+    Assert-ConsoleUpgrade ($payload.LiveSiteBuild -eq 9122 -and $payload.PayloadSiteBuild -eq 9122 -and
+        $payload.SourceMatchesSite -and $payload.SetupVersion -eq '5.0.9106.1000') `
+        'payload build comes from the site-published extension, not an older ConsoleSetup bootstrapper'
+    Assert-ConsoleUpgrade ($payloadState.Current -and $payloadState.VersionMatches -and $payloadState.ExtensionMatches) `
+        'CT5 matching 2309 console and 9122 extension pass despite an older bootstrapper build'
+
+    $script:ConsoleExtensionSiteVersion = '5.0.9106.1000'
+    $script:ConsoleSetupState.RequiredExtensionVersion = '5.0.9106.1000'
+    $mismatchedPayload = Get-ConsolePayloadState -SiteInstallDirectory $payloadRoot
+    $mismatchedState = Get-ConsoleVersionState -SiteCode 'CS1' -ExpectedRelease $mismatchedPayload.Release `
+        -ExpectedConsoleVersion $mismatchedPayload.ConsoleVersion -LiveSiteBuild $mismatchedPayload.LiveSiteBuild `
+        -PayloadSiteBuild $mismatchedPayload.PayloadSiteBuild
+    Assert-ConsoleUpgrade (-not $mismatchedPayload.SourceMatchesSite -and $mismatchedState.VersionMatches -and
+        $mismatchedState.ExtensionMatches -and -not $mismatchedState.Current -and -not $mismatchedState.NewerThanSite) `
+        'an actual extension/live-site build mismatch still blocks otherwise matching console and extension versions'
+
+    $script:ConsoleExtensionSiteVersion = ''
+    $missingExtensionFailed = $false
+    try { $null = Get-ConsolePayloadState -SiteInstallDirectory $payloadRoot }
+    catch { $missingExtensionFailed = $_.Exception.Message -match 'extension.*version' }
+    Assert-ConsoleUpgrade $missingExtensionFailed 'missing site-published extension metadata fails explicitly'
+}
+finally {
+    Remove-Item Function:\Get-Item -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $payloadRoot) { Remove-Item -LiteralPath $payloadRoot -Recurse -Force }
+}
 Remove-Item Function:\Get-ItemProperty -ErrorAction SilentlyContinue
 Remove-Item Function:\Get-CimInstance -ErrorAction SilentlyContinue
 

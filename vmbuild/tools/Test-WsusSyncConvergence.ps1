@@ -291,6 +291,70 @@ $server.Configuration.UpstreamWsusServerName = ''
 $result = Invoke-WsusValidationFixture
 Assert-True ($result.Passed -and $script:NativeStarts -eq 1) 'A measured empty, subscribed top-level catalog no longer starts its first update sync.'
 
+$cmFailureBranch = @($validationAst.FindAll({
+    param($n)
+    $n -is [Management.Automation.Language.IfStatementAst] -and
+        $n.Clauses[0].Item1.Extent.Text -match '\$supErrHex -in \$transientSyncErrors'
+}, $true))
+Assert-True ($cmFailureBranch.Count -eq 1) 'Expected one CM sync error classification branch.'
+$cmFailureCheck = [scriptblock]::Create('param($supErr, $supErrHex, $syncStatus)' + "`n" +
+    ($cmFailureBranch[0].ElseClause.Statements.Extent.Text -join "`n"))
+$updateErrors = @(
+    foreach ($revision in 1..9) {
+        $updateError = [pscustomobject]@{
+            UpdateId = [pscustomobject]@{
+                UpdateId = [guid]'fcd98fa1-a6b0-4613-8efd-ea8019bdd6e3'; RevisionNumber = $revision
+            }
+            Error = 'InvalidUpdate'
+            ErrorText = "Cannot insert the value NULL into column 'RevisionID', table '@BundleAll'; fixture revision $revision."
+        }
+        if ($revision -eq 1) { $updateError.ErrorText += 'x' * 2000 }
+        $updateError | Add-Member ScriptMethod ToString { 'Microsoft.UpdateServices.Administration.SynchronizationUpdateErrorInfo' } -Force
+        $updateError
+    }
+)
+$history = [pscustomobject]@{
+    StartTime = [datetime]::UtcNow.AddMinutes(-7); EndTime = [datetime]::UtcNow.AddMinutes(-1)
+    Result = 'Canceled'; Error = 'UserCanceled'; ErrorText = ''; UpdateErrors = $updateErrors
+}
+$subscription | Add-Member NoteProperty History @($history)
+$subscription | Add-Member NoteProperty ThrowHistory $false
+$subscription | Add-Member ScriptMethod GetSynchronizationHistory {
+    if ($this.ThrowHistory) { throw 'fixture history unavailable' }
+    return $this.History
+}
+function Invoke-WsusCmFailureFixture {
+    $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+    $syncStatus = [pscustomobject]@{
+        LastSyncStateTime = [Management.ManagementDateTimeConverter]::ToDmtfDateTime((Get-Date).AddMinutes(-1))
+    }
+    & $cmFailureCheck -supErr 2148735236L -supErrHex '0x80131904' -syncStatus $syncStatus
+    return $results
+}
+$subscription.State = 'NotProcessing'
+$result = Invoke-WsusCmFailureFixture
+$historyDetail = $result.Details -join ' '
+Assert-True (-not $result.Passed -and $historyDetail -match 'updateErrors=9 shown=3') 'Canceled history lost the bounded per-update failure evidence.'
+Assert-True ($historyDetail -match 'RevisionID.*BundleAll' -and
+    $historyDetail -match 'fcd98fa1-a6b0-4613-8efd-ea8019bdd6e3') 'WSUS update errors printed a type name instead of the update identity and SQL error.'
+Assert-True ($historyDetail -match '\[truncated\]' -and $historyDetail.Length -lt 5000 -and
+    $historyDetail -notmatch 'fixture revision 4') 'WSUS update-error diagnostics exceeded their sample or text bounds.'
+Assert-True ($historyDetail -match 'cancellation alone does not identify' -and $historyDetail -notmatch 'cause=the sync was CANCELLED') `
+    'UserCanceled was attributed to a restart without evidence of the initiating fault.'
+
+$subscription.State = 'Running'
+$result = Invoke-WsusCmFailureFixture
+Assert-True ($result.Passed -and ($result.Details -join ' ') -match 'already stale.*running a new sync') 'A running replacement stopped superseding the older CM failure.'
+$subscription.State = 'NotProcessing'
+$history.Result = 'Succeeded'; $history.Error = 'NotApplicable'; $history.UpdateErrors = @()
+$history.EndTime = [datetime]::UtcNow
+$result = Invoke-WsusCmFailureFixture
+Assert-True ($result.Passed -and ($result.Details -join ' ') -match 'already stale.*completed a successful sync') 'A newer successful WSUS cycle stopped superseding the older CM failure.'
+$subscription.ThrowHistory = $true
+$result = Invoke-WsusCmFailureFixture
+Assert-True (-not $result.Passed -and ($result.Details -join ' ') -match 'history not collected.*fixture history unavailable') 'Unreadable history masked the CM failure or lost its diagnostic error.'
+$subscription.ThrowHistory = $false
+
 $siteFunction = $validationAst.Find({
     param($n)
     $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-CMSiteWideFunctionality'

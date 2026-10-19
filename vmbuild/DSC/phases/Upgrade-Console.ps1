@@ -50,7 +50,7 @@ function Get-ConsolePayloadState {
     $setupVersionText = (Get-Item -LiteralPath $setupPath -ErrorAction Stop).VersionInfo.FileVersion
     $siteSetup = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
     [version]$siteVersion = $null
-    [version]$setupVersion = $null
+    [version]$extensionVersion = $null
     $identification = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop
     $siteCode = "$($identification.'Site Code')"
     if (-not $siteCode) { throw 'Upgrade-Console: installed site identification has no Site Code' }
@@ -59,8 +59,13 @@ function Get-ConsolePayloadState {
     if (-not [version]::TryParse("$($liveSite.Version)".Trim(), [ref]$siteVersion)) {
         throw "Upgrade-Console: the SMS Provider returned no valid live site version for '$siteCode'"
     }
-    if (-not [version]::TryParse("$setupVersionText".Trim(), [ref]$setupVersion)) {
-        throw "Upgrade-Console: console setup exposes no valid site-build version ('$setupVersionText')"
+    # The setup bootstrapper can retain its baseline build after the payload is updated.
+    $consoleSetupInfo = Get-CimInstance -Namespace "root\sms\Site_$siteCode" `
+        -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' `
+        -OperationTimeoutSec 15 -ErrorAction Stop | Select-Object -First 1
+    $extensionVersionText = "$($consoleSetupInfo.FileVersion)".Trim()
+    if (-not [version]::TryParse($extensionVersionText, [ref]$extensionVersion) -or $extensionVersion.Build -le 0) {
+        throw "Upgrade-Console: SMS_ConsoleSetupInfo returned no valid payload extension version for site '$siteCode' ('$extensionVersionText')"
     }
     [pscustomobject]@{
         SourceDirectory = $directory
@@ -70,9 +75,10 @@ function Get-ConsolePayloadState {
         SiteVersion = "$siteVersion"
         RegistrySiteVersion = "$($siteSetup.'Full Version')"
         SetupVersion = "$setupVersionText"
+        PayloadExtensionVersion = "$extensionVersion"
         LiveSiteBuild = $siteVersion.Build
-        PayloadSiteBuild = $setupVersion.Build
-        SourceMatchesSite = $siteVersion.Build -eq $setupVersion.Build
+        PayloadSiteBuild = $extensionVersion.Build
+        SourceMatchesSite = $siteVersion.Build -eq $extensionVersion.Build
         VersionSource = 'live-site-console-payload'
     }
 }
@@ -277,6 +283,7 @@ function Get-ConsoleVersionState {
         RequiredExtensionVersion     = $requiredExtensionVersion
         RequiredExtensionSiteVersion = $requiredExtensionSiteVersion
         ReleaseMatches               = $releaseMatches
+        VersionMatches               = $versionMatches
         ExtensionMatches             = $extensionMatches
         ExpectedConsoleVersion       = "$ExpectedConsoleVersion"
         NewerThanSite                 = $newerThanSite
