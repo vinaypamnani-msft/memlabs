@@ -72,8 +72,10 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   Legacy VM notes without a NetBIOS domain name reuse the exact name from the
   matching saved baseline/expansion domain identity, allowing the NetBIOS
   credential fallback when a guest rejects UPN authentication. Conflicting
-  saved names fail explicitly; no DNS-label guess is used. Readiness failures
-  retain every attempted credential's transport error and PowerShell error ID.
+  saved names fail explicitly; no DNS-label guess is used. Readiness timeouts
+  retain the latest transport error and PowerShell error ID for every attempted
+  credential across polls, even if the deadline interrupts the final credential
+  pass. The runner regression exercises this boundary with a controlled clock.
 - Once per candidate revision, a scoped CAS or standalone Primary runs the
   recovery matrix: missing legacy/current MSI source and installer cache,
   advertised/missing registration, missing console version metadata,

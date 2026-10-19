@@ -956,7 +956,7 @@ function Wait-CrossRevisionRetainedVmReady {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $startRequested = $false
     $lastDetail = 'no readiness sample'
-    $lastProbeDetail = ''
+    $probeErrors = [ordered]@{}
     while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         $vm = Get-VM -Name $Target.Name -ErrorAction Stop
         if (-not $vm -or "$($vm.Id)" -ne "$expectedId") {
@@ -980,7 +980,6 @@ function Wait-CrossRevisionRetainedVmReady {
             }
             $credentials = @(New-DomainCredentials -Domain $note.domain -AdminName $account `
                     -DomainNetBiosName $note.domainNetBiosName -VmName $Target.Name -AdminCachePath $AdminCachePath)
-            $probeErrors = [Collections.Generic.List[string]]::new()
             foreach ($credential in $credentials) {
                 $remaining = [int][Math]::Ceiling($TimeoutSeconds - $timer.Elapsed.TotalSeconds)
                 if ($remaining -lt 1) { break }
@@ -1001,14 +1000,14 @@ function Wait-CrossRevisionRetainedVmReady {
                     }
                     elseif ("$($probeJob.State)" -eq 'Failed') {
                         $null = Receive-Job -Job $probeJob -ErrorAction Stop
-                        $probeErrors.Add("PSDirect probe failed using $($credential.UserName)")
+                        $probeErrors[$credential.UserName] = "PSDirect probe failed using $($credential.UserName)"
                     }
                     else {
-                        $probeErrors.Add("PSDirect probe timed out using $($credential.UserName)")
+                        $probeErrors[$credential.UserName] = "PSDirect probe timed out using $($credential.UserName)"
                     }
                 }
                 catch {
-                    $probeErrors.Add("PSDirect readiness using $($credential.UserName): $($_.Exception.Message -replace '\s+', ' ') [errorId=$($_.FullyQualifiedErrorId)]")
+                    $probeErrors[$credential.UserName] = "PSDirect readiness using $($credential.UserName): $($_.Exception.Message -replace '\s+', ' ') [errorId=$($_.FullyQualifiedErrorId)]"
                 }
                 finally {
                     if ($probeJob) {
@@ -1030,12 +1029,11 @@ function Wait-CrossRevisionRetainedVmReady {
                     return
                 }
             }
-            if ($probeErrors.Count) { $lastProbeDetail = $probeErrors -join '; ' }
-            if ($lastProbeDetail) { $lastDetail = "$lastDetail; $lastProbeDetail" }
         }
         elseif ($state -notin @('Starting', 'Stopping')) {
             throw "Retained VM '$($Target.Name)' cannot be prepared automatically: $lastDetail. No resume, reset, or hard power-off attempted."
         }
+        if ($probeErrors.Count) { $lastDetail = "$lastDetail; $($probeErrors.Values -join '; ')" }
         Write-Host "WAIT: retained VM '$($Target.Name)' ($expectedId) readiness: $lastDetail; elapsed=$([int]$timer.Elapsed.TotalSeconds)/${TimeoutSeconds}s." -ForegroundColor Yellow
         $delay = [Math]::Min($RetrySeconds, [Math]::Max(0, $TimeoutSeconds - $timer.Elapsed.TotalSeconds))
         if ($delay -gt 0) { Start-Sleep -Seconds $delay }

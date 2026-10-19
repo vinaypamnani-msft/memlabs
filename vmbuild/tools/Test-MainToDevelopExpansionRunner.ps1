@@ -1299,10 +1299,38 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
             } '*Conflicting saved NetBIOS*' 'conflicting saved domain names fail instead of guessing credentials'
             $script:State.DomainIdentities.Clear()
             $script:ReadyRejectedUsers = @('admin@ready.test', 'EXACT-NB\admin')
-            Assert-ThrowsLike {
-                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
-            } '*admin@ready.test*errorId=*EXACT-NB\admin*errorId=*' `
-                'readiness timeout preserves every credential transport error and error ID'
+            & {
+                $script:ReadyCredentialAttempts = @()
+                function New-ReadinessTestClock {
+                    $script:ReadyClock = [pscustomobject]@{ Elapsed = [timespan]::Zero }
+                    return $script:ReadyClock
+                }
+                function Start-Sleep {
+                    param($Seconds)
+                    $script:ReadyClock.Elapsed = [timespan]::FromSeconds(0.5)
+                }
+                function Invoke-Command {
+                    param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
+                    Assert-True ($AsJob -and "$VMId" -eq "$vmId") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
+                    $script:ReadyCredentialAttempts += $Credential.UserName
+                    $attempt = $script:ReadyCredentialAttempts.Count
+                    if ($attempt -eq 3) { $script:ReadyClock.Elapsed = [timespan]::FromSeconds(1) }
+                    throw [Management.Automation.ErrorRecord]::new(
+                        [InvalidOperationException]::new("fixture transport failure attempt $attempt"),
+                        "ReadinessTransport$attempt", [Management.Automation.ErrorCategory]::ConnectionError, $Credential.UserName)
+                }
+                $readinessSource = (Import-TestFunction -Path $runnerPath -Name Wait-CrossRevisionRetainedVmReady).ToString()
+                if (-not $readinessSource.Contains('[Diagnostics.Stopwatch]::StartNew()')) {
+                    throw 'Cannot attach the deterministic readiness test clock.'
+                }
+                . ([scriptblock]::Create($readinessSource.Replace('[Diagnostics.Stopwatch]::StartNew()', '(New-ReadinessTestClock)')))
+                Assert-ThrowsLike {
+                    Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+                } '*admin@ready.test*attempt 3*errorId=ReadinessTransport3*EXACT-NB\admin*attempt 2*errorId=ReadinessTransport2*' `
+                    'readiness timeout preserves every credential transport error and error ID after a partial final poll'
+                Assert-Equal 'admin@ready.test|EXACT-NB\admin|admin@ready.test' ($script:ReadyCredentialAttempts -join '|') `
+                    'readiness deadline prevents another credential probe after the budget expires'
+            }
             $script:State.DevelopDomainIdentities.Clear()
             Assert-True ($null -eq (Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name)) `
                 'missing saved NetBIOS metadata does not guess from the DNS label'
