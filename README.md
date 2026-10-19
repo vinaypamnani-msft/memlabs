@@ -178,6 +178,45 @@ Validate with `vmbuild\tools\Test-PhaseFailurePropagation.ps1`,
 `vmbuild\tools\Test-AutomatedResumePreparation.ps1`, and
 `vmbuild\tools\Test-OsdClientResumePreparation.ps1`.
 
+### Windows setup failure diagnostics
+
+A running VM and healthy Hyper-V heartbeat do not prove that Windows setup
+completed. If a guest displays a setup failure page, use Shift+F10 to inspect
+its setup state and Panther logs before attempting rename, domain repair, or
+setup-registry changes.
+
+When the guest console is unavailable, stop deployment/test retry loops and run
+the following from an elevated PowerShell prompt on the VM's Hyper-V host:
+
+```powershell
+.\vmbuild\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -AllowTurnOff
+```
+
+The collector targets one exact VM and holds the host mutation lease; an active
+test/maintenance owner causes an immediate refusal. It requests graceful
+shutdown for up to 90 seconds. `-AllowTurnOff` explicitly permits hard power-off
+if shutdown fails or the VM is saved/paused; omit it to prohibit that fallback.
+The VM is left **off**, not restarted. Only the VM's active disk paths are
+mounted, read-only and without drive letters. Existing host mounts are refused.
+
+The protected archive path is printed under `vmbuild\logs\setup-diagnostics`
+by default. It contains setup/domain-join logs (at most 20 MiB per file, retaining
+the newest bytes and encoding marker when truncated), selected offline
+setup/name/domain registry values, and a manifest of missing evidence/errors.
+Setup, System, Application, and DSC event summaries contain at most 80 selected
+records from the latest 1,000 records per log. Raw event XML is retained even
+when the host cannot format a guest event's message.
+Raw registry hives and unattend XML are excluded; private hive copies are
+removed after inspection. Setup logs can still contain sensitive details:
+review the archive before sharing it. Partial or failed collections are
+explicitly identified; unresolved disk-detach failures require manual cleanup
+before restarting the VM. `-WhatIf` previews without stopping or mounting.
+
+Validate the collector's mocked Hyper-V/storage safety contracts with
+`vmbuild\tools\Test-WindowsVmSetupDiagnostics.ps1`. It also exercises disposable
+application-hive fixtures and isolated mutex contention; it does not operate
+on real VMs or load host registry hives.
+
 ### Phase 2 DSC staging recovery
 
 A healthy Hyper-V heartbeat does not guarantee that PowerShell Direct can open
