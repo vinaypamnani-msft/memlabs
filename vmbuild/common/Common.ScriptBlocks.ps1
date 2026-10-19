@@ -2501,30 +2501,35 @@ function Invoke-MemLabsClientCertificatePrestage {
     if (-not $targets.Count -or @($targets | Where-Object { $_ -notin $allowed }).Count) {
         throw 'PKI pre-stage request contains empty or unconfigured push targets.'
     }
-    $results = @(
-        foreach ($target in $targets) {
-            $targetVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $target } | Select-Object -First 1
-            $targetDomain = if ($targetVm.domain) { $targetVm.domain } else { $DomainName }
-            try {
-                $probe = Invoke-VmCommand -VmName $target -VmDomainName $targetDomain -AsJob -TimeoutSeconds 120 `
-                    -SuppressLog -DisplayName 'PKI cert pre-stage' -ScriptBlock (Get-MemLabsClientCertificateReadinessBlock)
-                $state = $probe.ScriptBlockOutput
-                if ($probe.ScriptBlockFailed -or -not $state) { throw 'Certificate readiness probe failed or returned no result.' }
-                $detail = "certFound=$($state.CertFound), chain=$($state.ChainStatus); $($state.Diagnostics -join ' | ')"
-                Write-Log "[Phase 8]: ${target}: PKI pre-stage ready=$($state.Ready); $detail" -OutputStream -Warning:(!$state.Ready)
-                [pscustomobject]@{ Target = $target; Ready = [bool]$state.Ready; Detail = $detail }
+    $results = [Collections.Generic.List[object]]::new()
+    foreach ($target in $targets) {
+        $targetVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $target } | Select-Object -First 1
+        $targetDomain = if ($targetVm.domain) { $targetVm.domain } else { $DomainName }
+        try {
+            $probe = Invoke-VmCommand -VmName $target -VmDomainName $targetDomain -AsJob -TimeoutSeconds 120 `
+                -SuppressLog -DisplayName 'PKI cert pre-stage' -ScriptBlock (Get-MemLabsClientCertificateReadinessBlock)
+            if (-not $probe -or $probe.ScriptBlockFailed) {
+                throw "Certificate readiness probe failed. $($probe.ErrorDetails)"
             }
-            catch {
-                Write-Log "[Phase 8]: ${target}: PKI pre-stage failed: $($_.Exception.Message)" -Warning -OutputStream
-                [pscustomobject]@{ Target = $target; Ready = $false; Detail = $_.Exception.Message }
+            $states = @($probe.ScriptBlockOutput)
+            if ($states.Count -ne 1 -or $states[0].Ready -isnot [bool]) {
+                throw 'Certificate readiness probe must return exactly one result with a Boolean Ready value.'
             }
+            $state = $states[0]
+            $detail = "certFound=$($state.CertFound), chain=$($state.ChainStatus); $($state.Diagnostics -join ' | ')"
+            $targetResult = [pscustomobject]@{ Target = $target; Ready = [bool]$state.Ready; Detail = $detail }
         }
-    )
+        catch {
+            $targetResult = [pscustomobject]@{ Target = $target; Ready = $false; Detail = $_.Exception.Message }
+        }
+        $results.Add($targetResult)
+        $targetResult
+    }
     $receipt = [ordered]@{
         RunId = $RunId; RequestId = $request.RequestId
         Success = @($results | Where-Object { -not $_.Ready }).Count -eq 0
         Detail = (@($results | ForEach-Object { "$($_.Target): $($_.Detail)" }) -join ' | ')
-        Results = $results
+        Results = $results.ToArray()
     }
     $write = Invoke-VmCommand -VmName $CurrentItem.vmName -VmDomainName $DomainName -AsJob -TimeoutSeconds 30 -SuppressLog -ScriptBlock {
         param($json, $expectedRunId)
@@ -2536,7 +2541,7 @@ function Invoke-MemLabsClientCertificatePrestage {
         Set-Content -LiteralPath "$path.tmp" -Value $json -Encoding UTF8 -ErrorAction Stop
         Move-Item -LiteralPath "$path.tmp" -Destination $path -Force -ErrorAction Stop
     } -ArgumentList @(($receipt | ConvertTo-Json -Depth 6 -Compress), $RunId) -DisplayName 'Write PKI pre-stage receipt'
-    if ($write.ScriptBlockFailed) { throw "Could not persist PKI pre-stage receipt on $($CurrentItem.vmName)." }
+    if (-not $write -or $write.ScriptBlockFailed) { throw "Could not persist PKI pre-stage receipt on $($CurrentItem.vmName)." }
 }
 
 function Invoke-MemLabsGuestMemoryRecovery {
@@ -8690,7 +8695,11 @@ $global:VM_Config = {
                         if ($currentStatusTrimmed -match 'MEMLABS-PULSE-CERTS' -and $certPulseDone -ne $currentStatusTrimmed) {
                             try {
                                 Invoke-MemLabsClientCertificatePrestage -CurrentItem $currentItem `
-                                    -DeployConfig $deployConfig -DomainName $domainName -RunId $expectedRunId
+                                    -DeployConfig $deployConfig -DomainName $domainName -RunId $expectedRunId |
+                                    ForEach-Object {
+                                        Write-Log "[Phase 8]: $($_.Target): PKI pre-stage ready=$($_.Ready); $($_.Detail)" `
+                                            -OutputStream -Warning:(!$_.Ready)
+                                    }
                                 $certPulseDone = $currentStatusTrimmed
                             }
                             catch {

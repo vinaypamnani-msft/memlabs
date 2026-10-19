@@ -278,6 +278,10 @@ a current client-auth certificate with a private key and trusted chain. Missing
 or failed receipts stop client push. Phase 11 uses the same readiness probe.
 Enrollment command exit codes and recent autoenrollment events are diagnostic
 evidence; a future policy cycle is no longer treated as successful readiness.
+The receipt contains exactly one structured result per target. Per-target console
+logging is emitted separately by the host monitor, so log objects cannot become
+false certificate failures. Missing, malformed, or failed probe responses still
+fail closed, and transport errors remain visible in the per-target diagnostics.
 
 Existing provider-error diagnostics, bounded CIM-memory reboot recovery, Primary
 OSD/baseline payload repair, and physical/version-aware DP content checks remain

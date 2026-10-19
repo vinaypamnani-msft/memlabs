@@ -2773,7 +2773,7 @@ function Wait-MemLabsClientCertificatePrestage {
             $receipt = Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if ($receipt.RunId -eq $RunId -and $receipt.RequestId -eq $requestId) {
                 if ($receipt.Success -ne $true) {
-                    throw "PKI client pre-stage failed: $($receipt.Detail). Fix template enrollment, autoenrollment policy and CA trust before retrying Phase 8."
+                    throw "PKI client pre-stage failed: $($receipt.Detail). See host per-target PKI readiness diagnostics before retrying Phase 8."
                 }
                 Write-DscStatus "Host verified PKI client readiness for $($Targets.Count) target(s) (Request=$requestId)."
                 return
