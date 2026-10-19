@@ -60,6 +60,7 @@ $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
 $functionsPath = Join-Path $RootPath 'DSC\phases\ScriptFunctions.ps1'
 . (Import-TestFunction -Path $functionsPath -Name 'Get-MemLabsProjectedCimRows')
 . (Import-TestFunction -Path $functionsPath -Name 'Test-MemLabsOutOfMemoryError')
+. (Import-TestFunction -Path $functionsPath -Name 'Test-MemLabsProviderDisabledError')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsManagedDistributionPointNames')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Get-MemLabsServerFromNalPath')
 . (Import-TestFunction -Path $perfloadingPath -Name 'Test-MemLabsDistributionPointGroupMember')

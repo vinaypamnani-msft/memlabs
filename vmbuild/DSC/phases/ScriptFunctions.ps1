@@ -1559,6 +1559,21 @@ function Test-MemLabsOutOfMemoryError {
     return $false
 }
 
+function Test-MemLabsProviderDisabledError {
+    param([Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $pattern = '(?i)\b(0x8004108A|WBEM_E_PROVIDER_DISABLED)\b'
+    if ($ErrorRecord.FullyQualifiedErrorId -match $pattern) { return $true }
+    $exception = $ErrorRecord.Exception
+    while ($exception) {
+        if ($exception.HResult -eq -2147217270 -or $exception.Message -match $pattern) {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
 function Request-MemLabsGuestMemoryRecovery {
     param(
         [Parameter(Mandatory = $true)] [string] $Context,
@@ -1624,17 +1639,30 @@ function Get-MemLabsProjectedCimRows {
         [ValidateRange(0, 60)]
         [int] $RetrySeconds = 5,
         [ValidateRange(1, 300)]
-        [int] $OperationTimeoutSeconds = 30
+        [int] $OperationTimeoutSeconds = 30,
+        [ValidateRange(0, 300)]
+        [int] $ProviderRetryTimeoutSeconds = 120
     )
 
+    $providerRetryDeadlineUtc = $null
+    $providerRetryError = $null
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
         $instances = @()
+        $queryTimeoutSeconds = $OperationTimeoutSeconds
+        if ($providerRetryError) {
+            $remainingSeconds = [int][math]::Ceiling(($providerRetryDeadlineUtc - (Get-Date).ToUniversalTime()).TotalSeconds)
+            if ($remainingSeconds -le 0) {
+                Write-DscStatus "CIM query $Namespace/$ClassName remained disabled (WBEM_E_PROVIDER_DISABLED, 0x8004108A) after the ${ProviderRetryTimeoutSeconds}-second provider retry budget. ErrorId=$($providerRetryError.FullyQualifiedErrorId)" -Warning
+                $PSCmdlet.ThrowTerminatingError($providerRetryError)
+            }
+            $queryTimeoutSeconds = [math]::Min($queryTimeoutSeconds, $remainingSeconds)
+        }
         try {
             $query = @{
                 Namespace           = $Namespace
                 ClassName           = $ClassName
                 Property            = $Property
-                OperationTimeoutSec = $OperationTimeoutSeconds
+                OperationTimeoutSec = $queryTimeoutSeconds
                 ErrorAction         = 'Stop'
             }
             if (-not [string]::IsNullOrWhiteSpace($Filter)) {
@@ -1651,6 +1679,23 @@ function Get-MemLabsProjectedCimRows {
         }
         catch {
             $isOutOfMemory = Test-MemLabsOutOfMemoryError -ErrorRecord $_
+            if (-not $isOutOfMemory -and (Test-MemLabsProviderDisabledError -ErrorRecord $_)) {
+                $providerRetryError = $_
+                if (-not $providerRetryDeadlineUtc) {
+                    $providerRetryDeadlineUtc = (Get-Date).ToUniversalTime().AddSeconds($ProviderRetryTimeoutSeconds)
+                }
+                $remainingSeconds = [int][math]::Ceiling(($providerRetryDeadlineUtc - (Get-Date).ToUniversalTime()).TotalSeconds)
+                if ($remainingSeconds -le 0) {
+                    Write-DscStatus "CIM query $Namespace/$ClassName remained disabled (WBEM_E_PROVIDER_DISABLED, 0x8004108A) after the ${ProviderRetryTimeoutSeconds}-second provider retry budget. ErrorId=$($_.FullyQualifiedErrorId)" -Warning
+                    throw
+                }
+                $delaySeconds = [math]::Min($RetrySeconds, $remainingSeconds)
+                Write-DscStatus "CIM query $Namespace/$ClassName hit an unloaded SMS Provider (WBEM_E_PROVIDER_DISABLED, 0x8004108A). Retrying in $delaySeconds second(s), provider budget remaining=${remainingSeconds}s; no memory reboot requested. ErrorId=$($_.FullyQualifiedErrorId)" -Warning
+                if ($delaySeconds -gt 0) { Start-Sleep -Seconds $delaySeconds }
+                $attempt--
+                continue
+            }
+            $providerRetryError = $null
             if (-not $isOutOfMemory) {
                 throw
             }

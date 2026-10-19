@@ -34,6 +34,7 @@ function Assert-True {
 $guestAst = Get-TestAst $guestPath
 $hostAst = Get-TestAst $hostPath
 . (Import-TestFunction $guestAst 'Test-MemLabsOutOfMemoryError')
+. (Import-TestFunction $guestAst 'Test-MemLabsProviderDisabledError')
 . (Import-TestFunction $guestAst 'Request-MemLabsGuestMemoryRecovery')
 . (Import-TestFunction $guestAst 'Get-MemLabsProjectedCimRows')
 . (Import-TestFunction $hostAst 'Invoke-MemLabsGuestMemoryRecovery')
@@ -74,11 +75,17 @@ try {
     $script:QueryCalls = 0
     $script:QueryFailures = 2
     $script:QueryError = 'Out of memory'
+    $script:QueryErrors = @()
+    $script:QueryTimeouts = [Collections.Generic.List[int]]::new()
     function Get-CimInstance {
-        param($Namespace, $ClassName, $Property, $OperationTimeoutSec, $ErrorAction)
+        param($Namespace, $ClassName, $Filter, $Property, $OperationTimeoutSec, $ErrorAction)
         $script:QueryCalls++
+        $script:QueryTimeouts.Add($OperationTimeoutSec)
+        if ($script:QueryCalls -le $script:QueryErrors.Count) {
+            throw $script:QueryErrors[$script:QueryCalls - 1]
+        }
         if ($script:QueryCalls -le $script:QueryFailures) { throw $script:QueryError }
-        return [pscustomobject]@{ ServerNALPath = '\\fixture'; Unrequested = 'discard' }
+        return [pscustomobject]@{ ServerNALPath = '\\fixture'; StoredPkgVersion = 1; SourceVersion = 1; Unrequested = 'discard' }
     }
     $rows = @(Get-MemLabsProjectedCimRows -Namespace 'root\SMS\site_PRI' -ClassName SMS_DistributionPoint -Property ServerNALPath -RetrySeconds 0)
     Assert-True ($script:QueryCalls -eq 3 -and $rows.Count -eq 1 -and
@@ -105,6 +112,75 @@ try {
     try { Get-MemLabsProjectedCimRows -Namespace fixture -ClassName fixture -Property Name -RetrySeconds 0 }
     catch { $threw = $_.Exception.Message -eq 'Access denied' }
     Assert-True ($threw -and $script:QueryCalls -eq 1 -and -not (Test-Path -LiteralPath $requestPath)) 'Non-memory error was hidden, retried or requested reboot.'
+
+    $providerMessage = 'A general error occurred that is not covered by a more specific error code.'
+    $providerError = [Management.Automation.ErrorRecord]::new(
+        [InvalidOperationException]::new($providerMessage),
+        'HRESULT 0x8004108a,Microsoft.Management.Infrastructure.CimCmdlets.GetCimInstanceCommand',
+        [Management.Automation.ErrorCategory]::NotSpecified, 'root\SMS\site_PRI:SMS_Package')
+    $providerComError = [InvalidOperationException]::new('wrapper',
+        [Runtime.InteropServices.COMException]::new($providerMessage, -2147217270))
+    foreach ($errorCase in @($providerError, $providerComError, 'WBEM_E_PROVIDER_DISABLED (0x8004108A)')) {
+        $script:QueryCalls = 0
+        $script:QueryFailures = 2
+        $script:QueryError = $errorCase
+        $script:Statuses.Clear()
+        $rows = @(Get-MemLabsProjectedCimRows -Namespace 'root\SMS\site_PRI' -ClassName SMS_Package `
+                -Filter "PackageID='CAS00004'" -Property @('StoredPkgVersion', 'SourceVersion') -RetrySeconds 0)
+        Assert-True ($script:QueryCalls -eq 3 -and $rows.Count -eq 1 -and
+            $rows[0].StoredPkgVersion -eq 1 -and $rows[0].SourceVersion -eq 1 -and
+            $rows[0].PSObject.Properties.Name -notcontains 'Unrequested') 'A temporarily unloaded SMS Provider was not retried with projected results.'
+        Assert-True (-not (Test-Path -LiteralPath $requestPath) -and
+            ($script:Statuses -join ';') -match 'WBEM_E_PROVIDER_DISABLED.*0x8004108A' -and
+            ($script:Statuses -join ';') -notmatch 'out-of-memory boundary') 'Provider-disabled recovery was misreported as memory exhaustion or requested a reboot.'
+    }
+
+    $script:QueryCalls = 0
+    $script:QueryFailures = 0
+    $script:QueryErrors = @($providerError, $providerError, 'Out of memory', 'Out of memory')
+    $rows = @(Get-MemLabsProjectedCimRows -Namespace fixture -ClassName fixture -Property ServerNALPath -RetrySeconds 0)
+    Assert-True ($script:QueryCalls -eq 5 -and $rows.Count -eq 1 -and
+        -not (Test-Path -LiteralPath $requestPath)) 'Provider retries consumed the independent three-attempt memory recovery budget.'
+    $script:QueryErrors = @()
+
+    $script:ProviderClock = [datetime]'2026-10-19T04:03:30Z'
+    function Get-Date { return $script:ProviderClock }
+    function Start-Sleep {
+        param([int] $Seconds)
+        $script:ProviderClock = $script:ProviderClock.AddSeconds($Seconds)
+    }
+    try {
+        $script:QueryCalls = 0
+        $script:QueryFailures = 100
+        $script:QueryError = $providerError
+        $script:QueryTimeouts.Clear()
+        $caught = $null
+        try {
+            Get-MemLabsProjectedCimRows -Namespace 'root\SMS\site_PRI' -ClassName SMS_Package `
+                -Property SourceVersion -RetrySeconds 5 -ProviderRetryTimeoutSeconds 12
+        }
+        catch { $caught = $_ }
+        Assert-True ($caught -and $caught.Exception.Message -eq $providerMessage -and
+            $caught.FullyQualifiedErrorId -match '0x8004108a') 'Persistent provider failure lost its original HRESULT or message.'
+        Assert-True ($script:QueryCalls -eq 3 -and
+            ($script:QueryTimeouts -join ',') -eq '30,7,2' -and
+            $script:ProviderClock -eq [datetime]'2026-10-19T04:03:42Z') 'Provider retries exceeded their wall-clock budget or started another query after expiry.'
+        Assert-True (-not (Test-Path -LiteralPath $requestPath)) 'Persistent provider-disabled failure requested a memory reboot.'
+    }
+    finally {
+        Remove-Item -LiteralPath Function:\Get-Date
+        function Start-Sleep { param([int] $Seconds) }
+    }
+
+    $script:QueryCalls = 0
+    $caught = $null
+    try {
+        Get-MemLabsProjectedCimRows -Namespace fixture -ClassName fixture -Property Name `
+            -ProviderRetryTimeoutSeconds 0
+    }
+    catch { $caught = $_ }
+    Assert-True ($caught -and $caught.FullyQualifiedErrorId -match '0x8004108a' -and
+        $script:QueryCalls -eq 1 -and -not (Test-Path -LiteralPath $requestPath)) 'A zero provider retry budget did not fail closed immediately.'
 
     $script:RestartCalls = 0
     $script:RestartSucceeds = $true
@@ -211,4 +287,4 @@ finally {
     if (Test-Path -LiteralPath $script:TestRoot) { Remove-Item -LiteralPath $script:TestRoot -Recurse -Force }
 }
 
-Write-Host 'PASS -- guest CIM memory retries and bounded host reboot recovery.'
+Write-Host 'PASS -- bounded provider-disabled retries, guest CIM memory retries and host reboot recovery.'

@@ -1761,7 +1761,7 @@ $ensureClientPkgCoverageCore = {
             }
         }
         catch {
-            Write-DscStatus "Client pkg coverage: provider state for $PackageID is unreadable after memory-safe retries; refusing to infer missing content. $($_.Exception.Message)" -Failure
+            Write-DscStatus "Client pkg coverage: provider state for $PackageID is unreadable; refusing to infer missing content. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
             return
         }
         $contentPendingFromParent = ($storedVer -lt 1)
@@ -1798,7 +1798,7 @@ $ensureClientPkgCoverageCore = {
             }
         }
         catch {
-            Write-DscStatus "Client pkg coverage: DP summarizer state for $PackageID is unreadable after memory-safe retries; refusing remediation from unknown state. $($_.Exception.Message)" -Failure
+            Write-DscStatus "Client pkg coverage: DP summarizer state for $PackageID is unreadable; refusing remediation from unknown state. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
             return
         }
         $notInstalled = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
@@ -1887,7 +1887,7 @@ $ensureClientPkgCoverageCore = {
                         Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }).Count -gt 0
             }
             catch {
-                Write-DscStatus "Client pkg coverage: targeting rows for $PackageID are unreadable after memory-safe retries; refusing to create or refresh targeting from unknown state. $($_.Exception.Message)" -Failure
+                Write-DscStatus "Client pkg coverage: targeting rows for $PackageID are unreadable; refusing to create or refresh targeting from unknown state. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
                 return
             }
             if (-not $hasTgt) {
@@ -2125,7 +2125,7 @@ $ensureClientPkgCoverageCore = {
                 Select-Object -First 1).SourceVersion
     }
     catch {
-        Write-DscStatus "Client pkg coverage: final package version is unreadable after memory-safe retries. $($_.Exception.Message)" -Failure
+        Write-DscStatus "Client pkg coverage: final package version is unreadable. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
         return
     }
 
@@ -2143,7 +2143,7 @@ $ensureClientPkgCoverageCore = {
         }
     }
     catch {
-        Write-DscStatus "Client pkg coverage: final DP summarizer state is unreadable after memory-safe retries. $($_.Exception.Message)" -Failure
+        Write-DscStatus "Client pkg coverage: final DP summarizer state is unreadable. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
         return
     }
     if (-not $coverageExitReason) { $coverageExitReason = 'Deadline' }

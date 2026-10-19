@@ -488,6 +488,15 @@ and workflow step state without restoring a snapshot. A second request, failed
 graceful reboot, readiness timeout, or resume failure fails the VM explicitly.
 Other errors and stale requests never trigger this recovery.
 
+Projected CIM reads separately retry `WBEM_E_PROVIDER_DISABLED` (`0x8004108A`)
+for up to two minutes when the SMS Provider has been unloaded. The HRESULT is
+recognized from the CIM error ID even when the exception message is generic,
+and each retry's query timeout and delay are capped by the remaining budget.
+These read-only retries neither consume the three-attempt memory retry budget
+nor request a reboot. A persistent outage still fails coverage without treating
+unknown provider state as missing content; coverage errors retain the CIM error
+ID instead of claiming that a memory retry occurred.
+
 Graceful resume/DSC restarts close only idle cached PowerShell Direct sessions
 for the target VM before requesting shutdown. Busy or unverifiable cached
 pipelines fail closed without disposal or shutdown. A Hyper-V shutdown job still
