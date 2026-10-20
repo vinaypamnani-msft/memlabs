@@ -16,6 +16,41 @@ an unused `settings.json.memlabs-<id>.tmp`, but does not truncate the live file.
 These protections do not cover unrelated programs writing settings directly
 or filesystem/storage corruption.
 
+## Host ASP.NET Core runtime servicing
+
+`vmbuild\Invoke-Maintenance.ps1` services installed system-wide ASP.NET Core
+shared runtimes on VMBuild launch and in the daily **MemLabs Host Maintenance**
+scheduled task. This covers runtimes installed outside Chocolatey/WinGet as
+well as package-manager installations. It discovers installed stable branches
+and architectures from disk, checks Microsoft's release metadata each run, and
+installs the latest supported patch in the **same major/minor branch**. It does
+not install ASP.NET Core on hosts that do not already have it, downgrade newer
+patches, or remove whole runtime branches based on an assumption that they
+are unused. ASP.NET Core is a shared dependency, not a standalone application;
+its presence alone does not identify which application installed or needs it.
+
+Downloads must match Microsoft's SHA-512 hash and have a valid Microsoft
+Authenticode signature. Installation and registered standalone-runtime bundle
+removal are unattended, bounded, and never request a host restart. Superseded
+patches are removed only after replacement runtime files have been verified.
+Maintenance checks that older runtime directories are actually gone, so adding
+a patched version beside a vulnerable version is not reported as remediation.
+Hidden SDK/Visual Studio/Hosting Bundle MSI components and runtime directories
+are never deleted directly. Remaining older files, unsupported branches,
+download/installer failures, and failed verification are reported as errors;
+update the owning installer or review manual installations when indicated.
+Prerelease/unrecognized directories are preserved with a warning. Runtime
+changes defer while a MemLabs test cycle holds the host mutation lease.
+
+Main maintenance logs and separate `AspNetCore_*.log` installer logs are under
+`vmbuild\logs`. The scheduled run waits for package-manager upgrades before
+this check; interactive package-manager upgrade windows remain asynchronous.
+Applications already using a runtime may require restarting to load patched
+files, and a vulnerability report may not clear until its next inventory scan.
+Validate without changing host packages using
+`vmbuild\tools\Test-AspNetCoreMaintenance.ps1` under PowerShell 7 and Windows
+PowerShell 5.1.
+
 ## Skipping an unreliable test family
 
 Use `-SkipTest` to exclude one or more test families from a curated run:
