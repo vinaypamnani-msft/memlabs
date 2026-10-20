@@ -300,6 +300,9 @@ foreach ($variant in $invalidReplies.Keys) {
 }
 
 $blocksText = Get-Content -LiteralPath (Join-Path $root 'common\Common.ScriptBlocks.ps1') -Raw
+Assert-True (-not $blocksText.Contains('retaining the VM for diagnostics') -and
+    $blocksText.Contains('use -KeepFailedVMs to prevent failed-build cleanup')) `
+    'Fresh setup failure falsely promises retention despite normal Phase 1 cleanup.'
 Assert-True ([regex]::Matches($blocksText, 'Wait-MemLabsWindowsClientSetup -VmName \$currentItem\.vmName').Count -eq 3) `
     'Fresh, retained, and post-resume-reboot paths do not all enforce client setup readiness.'
 Assert-True ($blocksText -match '(?s)Windows client setup is not ready; resume preparation.+?if \(\$resumePreparation\)') `

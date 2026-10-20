@@ -202,8 +202,11 @@ Malformed responses also report envelope/setup-state object counts and types,
 plus missing or invalid field names, without dumping guest payloads.
 Late replies cannot pass after the readiness deadline. Unknown, missing,
 malformed, or incomplete client state never passes because
-a settle timer expired. A failure retains the VM for offline diagnostics;
-the gate itself never reboots, deletes, rejoins, or changes setup registry values.
+a settle timer expired. The gate itself never reboots, deletes, rejoins, or
+changes setup registry values. Failed retained-VM/Phase 0 preparation leaves
+the existing lab intact. Fresh Phase 1 builds still follow normal failure
+cleanup: use `New-Lab.ps1 -KeepFailedVMs` when investigating creation/setup
+failures so the created VMs survive for diagnostics.
 The legacy machine-OOBE wait cannot bypass this additional client gate.
 
 Phase 2 adds read-only backstops before client rename and domain join, including
@@ -331,6 +334,17 @@ deployment/test retry loops stopped:
 ```powershell
 .\vmbuild\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -RepairOobe
 ```
+
+If the selected VM is Saved or Paused, repair does not start and no disk is
+mounted unless `-AllowTurnOff` is explicitly supplied. That initial power-off
+discards saved memory state; review that consequence before opting in:
+
+```powershell
+.\vmbuild\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -RepairOobe -AllowTurnOff
+```
+
+This permission does not change the later verification reboot cycles, which
+still require graceful shutdown.
 
 Credentials are automatic: the tool reuses an already-loaded `Common.LocalAdmin`
 or calls the main script's `Get-LocalAdminCredential` helper against the same

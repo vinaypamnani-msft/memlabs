@@ -1010,7 +1010,7 @@ $global:VM_Create = {
             }
             if (-not $Migrate -and $currentItem.role -ne 'AADClient' -and
                 -not (Wait-MemLabsWindowsClientSetup -VmName $currentItem.vmName -VmDomainName $domainName)) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows client setup is not ready; retaining the VM for diagnostics." -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows client setup is not ready. Phase 1 will fail; use -KeepFailedVMs to prevent failed-build cleanup and preserve the VMs for diagnostics." -Failure -OutputStream
                 return
             }
         }
