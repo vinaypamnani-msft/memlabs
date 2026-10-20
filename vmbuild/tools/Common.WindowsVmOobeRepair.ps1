@@ -306,6 +306,7 @@ function Invoke-MemLabsWindowsOobeRepair {
     $backupAction = if ($backupRequested) { 'Export and verify a full VM backup' } else { 'Proceed WITHOUT a VM backup (a failed trial may require a rebuild)' }
     if (-not $PSCmdlet.ShouldProcess("$VmName [$($vm.Id)]",
             "$backupAction; trial temporary OOBE update access; restore original settings; verify two graceful reboots. No rename/domain repair.")) { return }
+    Initialize-MemLabsSetupDiagnosticModules
     $GuestCredential = Resolve-MemLabsOobeRepairCredential -GuestCredential $GuestCredential
     $destinationRoot = Resolve-MemLabsSetupDiagnosticPath -Path $Destination
     $backupRoot = $null

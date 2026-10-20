@@ -10,6 +10,7 @@
     Raw registry hives and unattend files are never included in the archive.
     Stop deployment/test retry loops before collection. The collector refuses
     to run while another process holds the MemLabs host mutation lease.
+    Required host modules and commands are checked before shutdown or mounting.
 .PARAMETER RepairOobe
     Explicitly opts into an OOBE-only Windows Update access trial. Uses the saved
     MemLabs local administrator credential unless GuestCredential is supplied.
@@ -43,6 +44,32 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Initialize-MemLabsSetupDiagnosticModules {
+    $requirements = [ordered]@{
+        'Hyper-V' = @('Get-VM', 'Stop-VM', 'Get-VMHardDiskDrive', 'Get-VHD', 'Mount-VHD', 'Dismount-VHD')
+        'Storage' = @('Get-Disk', 'Set-Disk', 'Get-Partition', 'Get-Volume')
+        'Microsoft.PowerShell.Diagnostics' = @('Get-WinEvent')
+        'Microsoft.PowerShell.Archive' = @('Compress-Archive')
+    }
+    foreach ($moduleName in $requirements.Keys) {
+        try {
+            Import-Module -Name $moduleName -Global -ErrorAction Stop | Out-Null
+            foreach ($commandName in $requirements[$moduleName]) {
+                Get-Command -Name "$moduleName\$commandName" -ErrorAction Stop | Out-Null
+            }
+        }
+        catch {
+            $message = "Diagnostic host dependency '$moduleName' failed before VM shutdown or disk mounting. " +
+                "Retry from a fresh elevated Windows PowerShell 5.1 process (powershell.exe -NoProfile), " +
+                "especially if the error names a missing remoteIpMoProxy format file. Original error: $($_.Exception.Message)"
+            $failure = [InvalidOperationException]::new($message, $_.Exception)
+            $failure.Data['DiagnosticModule'] = $moduleName
+            $failure.Data['OriginalErrorId'] = $_.FullyQualifiedErrorId
+            throw $failure
+        }
+    }
+}
 
 function Resolve-MemLabsSetupDiagnosticPath {
     param([Parameter(Mandatory)][string]$Path)
@@ -432,6 +459,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     if ($vms.Count -ne 1 -or $vms[0].Name -ine $VmName) { throw 'Exactly one matching VM is required.' }
     $vm = $vms[0]
     if (-not $PSCmdlet.ShouldProcess($vm.Name, 'Stop if necessary, collect read-only Windows setup evidence, and leave the VM off')) { return }
+    Initialize-MemLabsSetupDiagnosticModules
     $destinationPath = Resolve-MemLabsSetupDiagnosticPath -Path $Destination
     $safeName = $vm.Name -replace '[\\/:*?"<>|]', '_'
     $name = "$safeName-SetupFailure-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0,8))"

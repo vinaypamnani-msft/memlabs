@@ -212,6 +212,27 @@ try {
         $script:Protected.Add($Path)
         $null = New-Item -Path $Path -ItemType Directory -Force
     }
+    function Import-Module {
+        param($Name, [switch]$Global, $ErrorAction)
+        Assert-True ($Global -and $ErrorAction -eq 'Stop') 'Dependency imports were not explicit or visible to the collector.'
+        $script:ModuleImports.Add($Name)
+        if ($Name -eq $script:FailedModule) {
+            throw 'Synthetic module load failure: remoteIpMoProxy_DhcpServer_stale.format.ps1xml could not be found.'
+        }
+        [pscustomobject]@{ ImportedModule = $Name }
+    }
+    function Get-Command {
+        param($Name, $ErrorAction)
+        Assert-True ($Name -match '^(Hyper-V|Storage|Microsoft\.PowerShell\.(Diagnostics|Archive))\\' -and
+            $ErrorAction -eq 'Stop') 'Dependency command lookup was not module-qualified or fail-closed.'
+        $script:CommandChecks.Add($Name)
+        if ($Name -eq $script:MissingCommand) { throw "Synthetic missing dependency command: $Name" }
+        if ($Name -eq 'Microsoft.PowerShell.Archive\Compress-Archive') {
+            $script:DependenciesReady = ($script:ModuleImports.Count - $script:ModuleCycleStart) -eq 4 -and
+                ($script:CommandChecks.Count - $script:CommandCycleStart) -eq 12
+        }
+        [pscustomobject]@{ Name = $Name }
+    }
     $script:VmId = [guid]::NewGuid()
     function Get-VM {
         param($Name, $Id, $ErrorAction)
@@ -219,6 +240,9 @@ try {
         if ($Name -and $Name -ne 'BROKEN-W11') { throw "Unexpected VM name $Name" }
         if ($Id -and $Id -ne $script:VmId) { throw "Unexpected VM ID $Id" }
         if ($Name) {
+            $script:DependenciesReady = $false
+            $script:ModuleCycleStart = $script:ModuleImports.Count
+            $script:CommandCycleStart = $script:CommandChecks.Count
             for ($i = 0; $i -lt $script:VmCount; $i++) {
                 [pscustomobject]@{ Name = 'BROKEN-W11'; Id = $script:VmId; State = $script:VmState }
             }
@@ -228,6 +252,8 @@ try {
     function Stop-VM {
         param($VM, [switch]$AsJob, [switch]$TurnOff, $Confirm, $ErrorAction)
         Assert-True ($VM.Id -eq $script:VmId -and $AsJob) 'Shutdown was not scoped to the selected VM or was unbounded.'
+        Assert-True $script:DependenciesReady `
+            'Shutdown ran before all required modules and commands were checked.'
         $script:StopCalls++
         if ($TurnOff) {
             $script:ForceCalls++
@@ -346,13 +372,19 @@ try {
         $script:StartAfterDismount = $false; $script:StopJobFails = $false; $script:RemovedJobs = 0
         $script:EventMode = 'Normal'; $script:PrivateCleanupFails = $false; $script:ArchiveFails = $false
         $script:WaitBudgets = [Collections.Generic.List[int]]::new()
+        $script:ModuleImports = [Collections.Generic.List[string]]::new()
+        $script:CommandChecks = [Collections.Generic.List[string]]::new()
+        $script:FailedModule = ''; $script:MissingCommand = ''
+        $script:DependenciesReady = $false; $script:ModuleCycleStart = 0; $script:CommandCycleStart = 0
     }
     $parameters = @{ VmName = 'BROKEN-W11'; Destination = (Join-Path $testRoot 'output'); StopTimeoutSeconds = 5; Confirm = $false }
     Reset-Fixture
     $report = Invoke-MemLabsWindowsSetupDiagnostics @parameters
-    Assert-True ($report.Status -eq 'Complete' -and $report.FinalState -eq 'Off' -and
+    Assert-True ($report -is [pscustomobject] -and $report.Status -eq 'Complete' -and $report.FinalState -eq 'Off' -and
         $script:StopCalls -eq 1 -and $script:ForceCalls -eq 0 -and $script:MountCalls -eq 1 -and
-        $script:DismountCalls -eq 1 -and (Test-Path -LiteralPath $report.ArchivePath)) 'The normal offline collection did not finish safely.'
+        $script:DismountCalls -eq 1 -and (Test-Path -LiteralPath $report.ArchivePath) -and
+        ($script:ModuleImports -join ',') -eq 'Hyper-V,Storage,Microsoft.PowerShell.Diagnostics,Microsoft.PowerShell.Archive') `
+        'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
     Assert-True ($manifestRecord.CollectorVersion -eq 2 -and $manifestRecord.RegistryReader -eq 'offreg.dll') `
@@ -369,6 +401,33 @@ try {
         }
     }
     finally { $zip.Dispose() }
+
+    foreach ($moduleName in @('Hyper-V', 'Storage', 'Microsoft.PowerShell.Diagnostics', 'Microsoft.PowerShell.Archive')) {
+        Reset-Fixture
+        $script:FailedModule = $moduleName
+        $protectedCount = $script:Protected.Count
+        $failure = $null
+        $preflightFailure = $null
+        try { $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters }
+        catch { $failure = $_.Exception.Message; $preflightFailure = $_.Exception }
+        Assert-True ($failure -like "*'$moduleName'*" -and $failure -match 'before VM shutdown' -and
+            $failure -match 'fresh elevated Windows PowerShell 5.1' -and $failure -match 'remoteIpMoProxy_DhcpServer_stale' -and
+            $preflightFailure.Data['DiagnosticModule'] -eq $moduleName -and
+            -not [string]::IsNullOrWhiteSpace($preflightFailure.Data['OriginalErrorId']) -and
+            $preflightFailure.InnerException.Message -match 'Synthetic module load failure' -and
+            $script:VmState -eq 'Running' -and $script:StopCalls -eq 0 -and $script:MountCalls -eq 0 -and
+            $script:SetDiskCalls -eq 0 -and $script:Protected.Count -eq $protectedCount) `
+            "$moduleName dependency failure changed VM/disk/output state or lost the original error and retry guidance."
+    }
+    Reset-Fixture
+    $script:MissingCommand = 'Storage\Get-Disk'
+    $protectedCount = $script:Protected.Count
+    $failure = $null
+    try { $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'Synthetic missing dependency command: Storage\\Get-Disk' -and
+        $script:StopCalls -eq 0 -and $script:MountCalls -eq 0 -and $script:Protected.Count -eq $protectedCount) `
+        'A missing Storage command was deferred until after VM or output changes.'
 
     Reset-Fixture
     $script:VmState = 'Off'
@@ -409,8 +468,9 @@ try {
     Reset-Fixture
     $count = $script:Protected.Count
     $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters -WhatIf
-    Assert-True ($script:StopCalls -eq 0 -and $script:MountCalls -eq 0 -and $script:Protected.Count -eq $count) `
-        'WhatIf changed power, mounted a disk, or created output.'
+    Assert-True ($script:StopCalls -eq 0 -and $script:MountCalls -eq 0 -and $script:Protected.Count -eq $count -and
+        $script:ModuleImports.Count -eq 0 -and $script:CommandChecks.Count -eq 0) `
+        'WhatIf initialized modules, changed power, mounted a disk, or created output.'
 
     foreach ($matchingVmCount in @(0, 2)) {
         Reset-Fixture
@@ -660,4 +720,4 @@ finally {
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop
 }
 
-Write-Host 'PASS -- offline setup collection scopes power changes, enforces read-only mounts, cleans owned resources, and excludes raw hives and unattend files.'
+Write-Host 'PASS -- offline setup collection preflights host dependencies, scopes power changes, enforces read-only mounts, cleans owned resources, and excludes raw hives and unattend files.'

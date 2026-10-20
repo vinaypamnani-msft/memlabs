@@ -151,7 +151,7 @@ try {
     Assert-QualificationThrows { Assert-MaintenanceQualificationReference $reference } '*checksum changed*'
 
     $readinessCases = @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51')
-    foreach ($name in $readinessCases) {
+    foreach ($name in @($readinessCases + 'Test-CimProxyTempPath')) {
         Assert-Qualification ((Get-MaintenanceQualificationCases Preflight) -contains $name) "Preflight does not require $name."
         $receipt = New-TestQualificationReceipt -Mode Preflight -Targets @() -HasCm $false
         $receipt.Cases = @($receipt.Cases | Where-Object Name -ne $name)
@@ -164,9 +164,28 @@ try {
     $source = Get-MaintenanceQualificationSource -VmbuildRoot $RootPath
     foreach ($relative in @('Common.ps1', 'common\Common.ScriptBlocks.ps1', 'DSC\phases\WindowsSetupReadiness.ps1',
             'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
-            'tools\Test-WindowsClientSetupReadiness.ps1')) {
+            'tools\Test-WindowsClientSetupReadiness.ps1', 'tools\Test-CimProxyTempPath.ps1',
+            'tools\Clear-CimProxyTempFolders.ps1')) {
         Assert-Qualification ($source.Files.Contains($relative) -and $source.Files[$relative] -match '^[A-Fa-f0-9]{64}$') `
-            "Pinned source digest does not cover readiness input $relative."
+            "Pinned source digest does not cover regression input $relative."
+    }
+    & {
+        $script:TrackingQueries = 0
+        function git {
+            $global:LASTEXITCODE = 0
+            if ($args -contains 'rev-parse') { return $source.Commit }
+            if ($args -contains 'status') { return }
+            if ($args -contains 'ls-files') {
+                $script:TrackingQueries++
+                Assert-Qualification ($args -notcontains '--error-unmatch') 'Untracked candidate files must not become a native stderr failure on Windows PowerShell 5.1.'
+                foreach ($relative in @($source.Files.Keys | Select-Object -Skip 1)) { "vmbuild\$relative" }
+                return
+            }
+            throw "Unexpected source-inspection git command: $args"
+        }
+        $untrackedSource = Get-MaintenanceQualificationSource -VmbuildRoot $RootPath
+        Assert-Qualification ($script:TrackingQueries -eq 1 -and $untrackedSource.Dirty -and $untrackedSource.Digest -eq $source.Digest -and
+            $untrackedSource.Files.Count -eq $source.Files.Count) 'A missing tracked source file was accepted as clean or lost its source fingerprint.'
     }
     & {
         $root = Join-Path $tempRoot 'preflight'

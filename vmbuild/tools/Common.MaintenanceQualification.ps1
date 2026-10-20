@@ -3,7 +3,7 @@ function Get-MaintenanceQualificationCases {
     switch ($Mode) {
         'Preflight' {
             return @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51',
-                'Test-ConsoleUpgradeRouting', 'Test-MaintenanceFixRobustness', 'Test-Odbc18VersionEnforcement',
+                'Test-CimProxyTempPath', 'Test-ConsoleUpgradeRouting', 'Test-MaintenanceFixRobustness', 'Test-Odbc18VersionEnforcement',
                 'Test-MsiBusyRetryAndPassiveDependency', 'Test-VMMaintenanceNoteDiagnostics', 'Test-Phase11OsdContentState',
                 'Test-MaintenanceQualification', 'Test-MainToDevelopExpansionRunner', 'dsc-artifact')
         }
@@ -37,7 +37,8 @@ function Get-MaintenanceQualificationSource {
     foreach ($relative in @(
             'Common.ps1', 'common\Common.ScriptBlocks.ps1', 'DSC\phases\WindowsSetupReadiness.ps1',
             'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
-            'tools\Test-WindowsClientSetupReadiness.ps1',
+            'tools\Test-WindowsClientSetupReadiness.ps1', 'tools\Test-CimProxyTempPath.ps1',
+            'tools\Clear-CimProxyTempFolders.ps1',
             'common\Common.Maintenance.ps1', 'common\Common.Validation.Functional.ps1',
             'Fixes\Fix-ODBC18.ps1', 'Fixes\Fix-Upgrade-Console.ps1', 'Fixes\Fix-CMFullAdmin.ps1',
             'DSC\phases\Upgrade-Console.ps1', 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1',
@@ -57,9 +58,9 @@ function Get-MaintenanceQualificationSource {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $digest = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical)))).Replace('-', '') }
     finally { $sha.Dispose() }
-    $tracked = @(& git -C $repository ls-files --error-unmatch -- @($files.Keys | ForEach-Object { "vmbuild\$_" }) 2>&1)
-    $allTracked = $LASTEXITCODE -eq 0
-    [void]$tracked
+    $tracked = @(& git -C $repository ls-files -- @($files.Keys | ForEach-Object { "vmbuild\$_" }) 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not enumerate tracked candidate qualification files.' }
+    $allTracked = $tracked.Count -eq $files.Count
     [pscustomobject]@{ Commit = "$($commit[0])"; Dirty = $changes.Count -gt 0 -or -not $allTracked; Digest = $digest; Files = $files }
 }
 

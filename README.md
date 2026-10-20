@@ -48,6 +48,8 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   mutation, with separate required receipt cases for the two engines. Its test,
   command wrapper, shared probe, and phase wiring are included in the pinned
   source digest. A failure or missing engine blocks the candidate preflight.
+  The CIM proxy-temp regression also prevents cleanup from deleting shared
+  proxy directories that may still back other live PowerShell sessions.
 - Before expanding an exact-main baseline, develop runs **existing-site**
   maintenance without replacing the guest's legacy deployment configuration.
   Independent checks verify ODBC registration/DLLs in both registry views,
@@ -236,6 +238,49 @@ shutdown for up to 90 seconds. `-AllowTurnOff` explicitly permits hard power-off
 if shutdown fails or the VM is saved/paused; omit it to prohibit that fallback.
 The VM is left **off**, not restarted. Only the VM's active disk paths are
 mounted, read-only and without drive letters. Existing host mounts are refused.
+
+Collection and repair validate their Hyper-V, Storage, event-reader, and archive
+modules/commands before shutdown, mounting, exports, or guest changes. A failed
+dependency check leaves VM power and disks untouched and reports the original
+load error. `-WhatIf` skips the explicit dependency preflight as well as VM changes.
+
+If module loading names a missing `remoteIpMoProxy_*.format.ps1xml`, retry from a
+fresh elevated Windows PowerShell 5.1 process rather than reusing the affected
+PowerShell 7 session. From the repository root:
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    -File .\vmbuild\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1
+```
+
+MemLabs retains missing CIM temp-parent recreation and stale-proxy reset.
+When more than 200 shared `remoteIpMoProxy_*` directories accumulate, startup
+reports the cleanup requirement but does not automatically delete them.
+An old proxy may still be required by a live process. A clean process avoids
+already-stale in-memory module references; recreating an empty directory does
+not restore a missing format file.
+
+Cleanup remains available as **explicit maintenance**. Stop deployments and
+close other PowerShell-hosting applications, then start a fresh elevated
+`powershell.exe -NoProfile` window directly, not from an existing PowerShell
+session. From the repository root, preview before approving deletion:
+
+```powershell
+.\vmbuild\tools\Clear-CimProxyTempFolders.ps1 -WhatIf
+.\vmbuild\tools\Clear-CimProxyTempFolders.ps1
+```
+
+Deletion requires the host mutation lease and refuses known other PowerShell/ISE/
+remoting hosts, remoting sessions, or locally loaded proxy/CIM-producing modules
+(including DHCP and Storage). These checks
+do not identify every possible application embedding PowerShell; stopping those
+applications is also a maintenance prerequisite. The existing >200-folder and
+one-hour age safeguards remain. Only direct, non-reparse proxy directories with
+both creation and last-write times older than one hour are eligible; activity
+and directory eligibility are checked again before each deletion. Only flat
+proxy folders are removed; nested directories or reparse contents require
+manual inspection instead of recursive traversal.
 
 The protected archive path is printed under `vmbuild\logs\setup-diagnostics`
 by default. It contains setup/domain-join logs (at most 20 MiB per file, retaining

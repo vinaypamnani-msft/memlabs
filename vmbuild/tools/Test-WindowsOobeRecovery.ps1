@@ -194,6 +194,10 @@ function Get-VM {
     if ($Id -and $Id -ne $script:VMId) { throw 'Wrong VM ID' }
     return $script:VM
 }
+function Initialize-MemLabsSetupDiagnosticModules {
+    $script:HostModuleChecks++
+    if ($script:HostModuleFails) { throw 'Synthetic diagnostic host dependency failure' }
+}
 function Get-VMHardDiskDrive {
     param($VM, $ErrorAction)
     Assert-True ($VM.Id -eq $script:VMId) 'Disk inventory targeted another VM.'
@@ -289,6 +293,7 @@ function Reset-HostFixture {
     $script:VM.State = 'Off'
     $script:Exports = 0; $script:Starts = 0; $script:Stops = 0; $script:Diagnostics = 0
     $script:VMReads = 0
+    $script:HostModuleChecks = 0; $script:HostModuleFails = $false
     $script:BadExport = $false; $script:AuthFails = $false; $script:ApplyUnknown = $false
     $script:RestoreFails = $false; $script:OobeFails = $false; $script:VerificationFails = $false; $script:BadPersistence = $false
     $script:Actions = [Collections.Generic.List[string]]::new()
@@ -355,6 +360,18 @@ try {
     $global:Common.LocalAdmin = $credential
 
     Reset-HostFixture
+    $script:VM.State = 'Running'
+    $script:HostModuleFails = $true
+    $failure = $null
+    $directoryCount = @(Get-ChildItem -LiteralPath $testRoot -Directory).Count
+    try { $null = Invoke-MemLabsWindowsOobeRepair @parameters }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'Synthetic diagnostic host dependency failure' -and $script:HostModuleChecks -eq 1 -and
+        $script:VM.State -eq 'Running' -and $script:Exports -eq 0 -and $script:Starts -eq 0 -and
+        $script:Stops -eq 0 -and $script:Diagnostics -eq 0 -and $script:Actions.Count -eq 0 -and
+        @(Get-ChildItem -LiteralPath $testRoot -Directory).Count -eq $directoryCount) `
+        'A repair dependency failure reached power, backup, guest, or output changes.'
+    Reset-HostFixture
     $result = Invoke-MemLabsWindowsOobeRepair @parameters
     Assert-True ($result.Status -eq 'OobeRecoveredIdentityUnchanged' -and $result.FinalState -eq 'Off' -and
         $script:Exports -eq 1 -and $script:Starts -eq 3 -and $script:Stops -eq 3 -and $script:Diagnostics -eq 2 -and
@@ -408,7 +425,8 @@ try {
     }
     Reset-HostFixture
     $null = Invoke-MemLabsWindowsOobeRepair @parameters -WhatIf
-    Assert-True ($script:Exports -eq 0 -and $script:Starts -eq 0 -and $script:Diagnostics -eq 0) 'Repair WhatIf changed state or evidence.'
+    Assert-True ($script:Exports -eq 0 -and $script:Starts -eq 0 -and $script:Diagnostics -eq 0 -and
+        $script:HostModuleChecks -eq 0) 'Repair WhatIf initialized modules or changed state/evidence.'
     Reset-HostFixture
     $failure = $null
     $wildcardParameters = @{} + $parameters

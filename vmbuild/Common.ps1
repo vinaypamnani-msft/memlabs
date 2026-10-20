@@ -3235,13 +3235,8 @@ function Repair-CimProxyTempPath {
     # use actually exists, recreating any that vanished. Returns $true if it had
     # to recreate at least one directory (i.e. a retry is worthwhile).
     #
-    # NOTE: a FULL temp dir is NOT this failure (that surfaces as an
-    # IOException / "not enough space on the disk"). But every CIM/CDXML import
-    # LEAKS a remoteIpMoProxy_* folder here, and on a long-lived lab host these
-    # accumulate into the thousands -- bloating enumeration and raising the odds
-    # of a name collision during proxy generation. So we also opportunistically
-    # prune stale leaked proxy folders (age-gated so an in-flight import is
-    # never touched).
+    # Proxy folders may still back modules loaded by other long-lived processes.
+    # Keep cleanup explicit; age alone does not establish ownership or non-use.
     $recreated = $false
     $tempPaths = @(
         ([System.IO.Path]::GetTempPath()),
@@ -3255,35 +3250,15 @@ function Repair-CimProxyTempPath {
                 New-Item -ItemType Directory -Path $tp -Force -ErrorAction Stop | Out-Null
                 Write-Log "Repair-CimProxyTempPath: Recreated missing temp directory '$tp' (CIM proxy module generation needs it)." -Warning
                 $recreated = $true
-                continue   # freshly created -- nothing to prune
+                continue
             }
-
-            # Hygiene: prune leaked CIM proxy folders older than 1 hour. The
-            # 1-hour age gate guarantees we never delete the proxy folder of a
-            # currently-running import (those are minutes old at most), so this
-            # is safe to run unconditionally before every import. Only acts when
-            # the leak has actually built up (>200 folders) to keep it cheap.
-            $leaked = @(Get-ChildItem -LiteralPath $tp -Directory -Filter 'remoteIpMoProxy_*' -ErrorAction SilentlyContinue)
-            if ($leaked.Count -gt 200) {
-                $cutoff = (Get-Date).AddHours(-1)
-                $stale = @($leaked | Where-Object { $_.LastWriteTime -lt $cutoff })
-                $pruned = 0
-                foreach ($dir in $stale) {
-                    try {
-                        Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
-                        $pruned++
-                    }
-                    catch {
-                        # In-use / locked folder -- skip it, it'll age out later.
-                    }
-                }
-                if ($pruned -gt 0) {
-                    Write-Log "Repair-CimProxyTempPath: Pruned $pruned stale leaked CIM proxy folder(s) from '$tp' ($($leaked.Count) total)." -LogOnly
-                }
+            $proxies = @(Get-ChildItem -LiteralPath $tp -Directory -Filter 'remoteIpMoProxy_*' -ErrorAction Stop)
+            if ($proxies.Count -gt 200) {
+                Write-Log "Repair-CimProxyTempPath: Found $($proxies.Count) CIM proxy folders in '$tp'. Shared proxies were preserved; run tools\Clear-CimProxyTempFolders.ps1 during explicit maintenance after stopping other PowerShell sessions." -LogOnly
             }
         }
         catch {
-            Write-Log "Repair-CimProxyTempPath: Failed to ensure/clean temp directory '$tp': $_" -Warning
+            Write-Log "Repair-CimProxyTempPath: Failed to ensure temp directory '$tp': $_" -Warning
         }
     }
 
@@ -3446,7 +3421,7 @@ function Start-DHCP {
     # but Import-Module fails with "module could not be loaded".
     #
     # Proactively ensure the temp dir the CIM proxy generator writes to exists
-    # (and prune any leaked proxy folders) BEFORE importing, so the common
+    # BEFORE importing, so the common
     # "Could not find a part of the path '...remoteIpMoProxy_...format.ps1xml'"
     # failure is avoided outright rather than only handled after it throws.
     # Reset the cached WinPS-compat proxy if EITHER the temp dir had to be
