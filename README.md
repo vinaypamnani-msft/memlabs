@@ -264,17 +264,28 @@ Run on the Hyper-V host, from the repository root in elevated PowerShell, with
 deployment/test retry loops stopped:
 
 ```powershell
-$guest = Get-Credential -UserName 'vmbuildadmin' -Message 'Local administrator inside the affected VM'
-.\vmbuild\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 `
-    -RepairOobe -BackupPath 'E:\VMBackups' -GuestCredential $guest
+.\vmbuild\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -RepairOobe
 ```
 
-Use a backup location outside the VM's configuration and disk directories,
-with enough free space for a complete export. The script captures offline
-evidence, exports the stopped VM, validates its configuration/disks and
-self-contained parent chains, and restricts the backup ACLs before starting
-the selected VM. **The full export contains guest data and must not be shared
-as a diagnostic archive.** No repair starts if the backup cannot be verified.
+Credentials are automatic: the tool reuses an already-loaded `Common.LocalAdmin`
+or calls the main script's `Get-LocalAdminCredential` helper against the same
+`vmbuild\cache\vmbuildadmin.txt` cache. This does not initialize storage,
+maintenance, or host settings and does not download credentials. If the saved
+credential is missing or empty, the tool stops before guest operations; initialize
+credentials using the main script, or provide an explicit `-GuestCredential`
+override. Credentials are never included in the repair report.
+
+**A VM backup is optional and is skipped by default.** Without `-BackupPath`, the
+confirmation and warning identify that a failed trial may require rebuilding
+the client; the report records `BackupRequested=false` and `BackupVerified=false`.
+Offline before/after evidence and restoration of temporary settings still apply.
+
+To request a backup, add `-BackupPath 'E:\VMBackups'`. Use a location outside the
+VM's configuration/disk directories with enough space for a complete export.
+The tool then validates the stopped VM export, configuration/disks and
+self-contained parent chains, and restricts the backup ACLs before starting the
+selected VM. **The full export contains guest data and must not be shared as a
+diagnostic archive.** A requested but unverified backup still blocks repair.
 
 The trial supports the post-setup OOBE failure pattern, not arbitrary Windows
 damage. It stops if PowerShell Direct cannot authenticate with the supplied
@@ -301,8 +312,9 @@ protected report ZIP; credentials and the VM export are excluded.
 Known failures restore settings where safe and leave the VM off when graceful
 shutdown succeeds. A timed-out remote action or failed restoration is
 `Indeterminate`: the VM may remain running, and the script does **not** blindly
-retry, reboot, or overwrite later policy changes. Keep the backup and inspect
-the original-settings receipt before taking further action.
+retry, reboot, or overwrite later policy changes. Inspect
+the original-settings receipt before taking further action. Retain any backup
+that was requested.
 
 Validate with `vmbuild\tools\Test-WindowsOobeRecovery.ps1`. It uses mocked
 Hyper-V/guest operations and disposable files; live recovery viability must

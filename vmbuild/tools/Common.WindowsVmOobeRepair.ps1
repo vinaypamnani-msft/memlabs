@@ -1,3 +1,49 @@
+function Resolve-MemLabsOobeRepairCredential {
+    param([pscredential]$GuestCredential)
+
+    $credential = $GuestCredential
+    if (-not $credential) {
+        $commonVariable = Get-Variable -Name Common -Scope Global -ErrorAction SilentlyContinue
+        $existing = if ($commonVariable) { $commonVariable.Value } else { $null }
+        $localAdmin = if ($existing) { $existing.PSObject.Properties['LocalAdmin'] } else { $null }
+        if ($localAdmin -and $null -ne $localAdmin.Value) {
+            $credential = $localAdmin.Value
+        }
+        else {
+            $cacheProperty = if ($existing) { $existing.PSObject.Properties['CachePath'] } else { $null }
+            $cachePath = if ($cacheProperty -and $cacheProperty.Value -is [string] -and
+                -not [string]::IsNullOrWhiteSpace($cacheProperty.Value)) {
+                $cacheProperty.Value
+            } else { Join-Path $PSScriptRoot '..\cache' }
+            # Reuse the main loader without initializing storage, maintenance, or host settings.
+            $Common = [pscustomobject]@{
+                CachePath = $cachePath; OfflineMode = $true; LocalAdmin = $null; FatalError = $null
+            }
+            function Write-Log {
+                param([string]$Message, [switch]$LogOnly, [switch]$Warning)
+                if ($Warning) { Write-Warning $Message }
+                else { Write-Verbose $Message }
+            }
+            try {
+                . (Join-Path $PSScriptRoot '..\common\Common.StorageToken.ps1')
+                $loaded = @(Get-LocalAdminCredential)
+            }
+            catch {
+                throw 'Could not load the saved MemLabs local administrator credential. Initialize credentials with the main script or supply -GuestCredential. No guest operation was started.'
+            }
+            if ($loaded.Count -ne 1 -or $loaded[0] -isnot [bool] -or -not $loaded[0]) {
+                throw 'The saved vmbuildadmin credential is unavailable or empty. Initialize credentials with the main script or supply -GuestCredential. No guest operation was started.'
+            }
+            $credential = $Common.LocalAdmin
+        }
+    }
+    if ($credential -isnot [pscredential] -or [string]::IsNullOrWhiteSpace($credential.UserName) -or
+        $null -eq $credential.Password -or $credential.Password.Length -eq 0) {
+        throw 'The MemLabs local administrator credential is invalid. Initialize credentials with the main script or supply a valid -GuestCredential.'
+    }
+    return $credential
+}
+
 function Wait-MemLabsOobeRepairJob {
     param(
         [Parameter(Mandatory)]$Job,
@@ -241,53 +287,62 @@ function Invoke-MemLabsWindowsOobeRepair {
     param(
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][string]$Destination,
-        [Parameter(Mandatory)][string]$BackupPath,
-        [Parameter(Mandatory)][pscredential]$GuestCredential,
+        [ValidateNotNullOrEmpty()][string]$BackupPath,
+        [ValidateNotNull()][pscredential]$GuestCredential,
         [ValidateRange(60, 3600)][int]$RepairTimeoutSeconds = 900,
         [ValidateRange(60, 7200)][int]$BackupTimeoutSeconds = 3600,
         [ValidateRange(5, 600)][int]$StopTimeoutSeconds = 90,
         [switch]$AllowTurnOff
     )
 
+    if ($PSBoundParameters.ContainsKey('BackupPath') -and [string]::IsNullOrWhiteSpace($BackupPath)) {
+        throw 'BackupPath must not be blank. Omit it to run without a VM export.'
+    }
+    $backupRequested = -not [string]::IsNullOrWhiteSpace($BackupPath)
     if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($VmName)) { throw 'Repair requires one exact VM name.' }
     $vmMatches = @(Get-VM -Name $VmName -ErrorAction Stop)
     if ($vmMatches.Count -ne 1 -or $vmMatches[0].Name -ne $VmName) { throw 'Repair requires exactly one matching VM.' }
     $vm = $vmMatches[0]
+    $backupAction = if ($backupRequested) { 'Export and verify a full VM backup' } else { 'Proceed WITHOUT a VM backup (a failed trial may require a rebuild)' }
     if (-not $PSCmdlet.ShouldProcess("$VmName [$($vm.Id)]",
-            'Export a full backup; trial temporary OOBE update access; restore original settings; verify two graceful reboots. No rename/domain repair.')) { return }
+            "$backupAction; trial temporary OOBE update access; restore original settings; verify two graceful reboots. No rename/domain repair.")) { return }
+    $GuestCredential = Resolve-MemLabsOobeRepairCredential -GuestCredential $GuestCredential
     $destinationRoot = Resolve-MemLabsSetupDiagnosticPath -Path $Destination
-    $backupRoot = Resolve-MemLabsSetupDiagnosticPath -Path $BackupPath
-    $drives = @(Get-VMHardDiskDrive -VM $vm -ErrorAction Stop)
-    if (-not $drives.Count -or @($drives | Where-Object {
-                -not $_.Path -or $_.Path -notmatch '\.(?:a?vhdx?)$' -or
-                ($_.PSObject.Properties['SupportPersistentReservations'] -and $_.SupportPersistentReservations)
-            }).Count) {
-        throw 'A full repair backup requires ordinary file-backed VHD/VHDX disks; pass-through/shared-disk repair is not supported.'
-    }
-    foreach ($drive in $drives) {
-        $sourceDirectory = [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($drive.Path)).TrimEnd('\') + '\'
-        if (($backupRoot.TrimEnd('\') + '\').StartsWith($sourceDirectory, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'The repair backup must be outside the VM disk directory.'
+    $backupRoot = $null
+    if ($backupRequested) {
+        $backupRoot = Resolve-MemLabsSetupDiagnosticPath -Path $BackupPath
+        $drives = @(Get-VMHardDiskDrive -VM $vm -ErrorAction Stop)
+        if (-not $drives.Count -or @($drives | Where-Object {
+                    -not $_.Path -or $_.Path -notmatch '\.(?:a?vhdx?)$' -or
+                    ($_.PSObject.Properties['SupportPersistentReservations'] -and $_.SupportPersistentReservations)
+                }).Count) {
+            throw 'A full repair backup requires ordinary file-backed VHD/VHDX disks; pass-through/shared-disk repair is not supported.'
         }
-    }
-    foreach ($property in @('Path', 'ConfigurationLocation', 'SnapshotFileLocation', 'SmartPagingFilePath')) {
-        if ($vm.PSObject.Properties[$property] -and -not [string]::IsNullOrWhiteSpace($vm.$property)) {
-            $sourceDirectory = [IO.Path]::GetFullPath($vm.$property).TrimEnd('\') + '\'
+        foreach ($drive in $drives) {
+            $sourceDirectory = [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($drive.Path)).TrimEnd('\') + '\'
             if (($backupRoot.TrimEnd('\') + '\').StartsWith($sourceDirectory, [StringComparison]::OrdinalIgnoreCase)) {
-                throw 'The repair backup must be outside the VM configuration/checkpoint directories.'
+                throw 'The repair backup must be outside the VM disk directory.'
+            }
+        }
+        foreach ($property in @('Path', 'ConfigurationLocation', 'SnapshotFileLocation', 'SmartPagingFilePath')) {
+            if ($vm.PSObject.Properties[$property] -and -not [string]::IsNullOrWhiteSpace($vm.$property)) {
+                $sourceDirectory = [IO.Path]::GetFullPath($vm.$property).TrimEnd('\') + '\'
+                if (($backupRoot.TrimEnd('\') + '\').StartsWith($sourceDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'The repair backup must be outside the VM configuration/checkpoint directories.'
+                }
             }
         }
     }
     $runName = ($VmName -replace '[\\/:*?"<>|]', '_') + "-OobeRepair-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     $runRoot = Join-Path $destinationRoot $runName
-    $backup = Join-Path $backupRoot $runName
+    $backup = if ($backupRequested) { Join-Path $backupRoot $runName } else { $null }
     New-MemLabsPrivateDiagnosticDirectory -Path $runRoot
     $bundle = Join-Path $runRoot 'Bundle'
     $null = New-Item -Path $bundle -ItemType Directory
     $reportPath = Join-Path $bundle 'RepairResult.json'
     $report = [ordered]@{
         Version = 1; VMName = $vm.Name; VMId = "$($vm.Id)"; Scope = 'OobeOnly'
-        Status = 'Preparing'; BackupPath = $backup; BackupVerified = $false
+        Status = 'Preparing'; BackupRequested = $backupRequested; BackupPath = $backup; BackupVerified = $false
         IdentityRepairPerformed = $false; FullDeploymentReadinessVerified = $false
         OobeRecovered = $false; VerifiedReboots = 0; FinalState = ''
         Export = $null; Apply = $null; FinalGuestState = $null; FailureStage = ''
@@ -310,14 +365,17 @@ function Invoke-MemLabsWindowsOobeRepair {
             $offline.SYSTEM.ChildCompletion.Values.'setup.exe' -ne 3) {
             throw 'Offline evidence does not match the supported post-setup OOBE failure. No repair will be attempted.'
         }
-        $live = Get-VM -Id $vm.Id -ErrorAction Stop
-        if ($live.Name -ne $vm.Name -or "$($live.State)" -ne 'Off') { throw 'The selected VM changed before export.' }
-        New-MemLabsPrivateDiagnosticDirectory -Path $backup
-        Write-Host "$VmName`: exporting a full VM backup to '$backup'. This backup contains guest data and must remain private."
-        $job = Export-VM -VM $live -Path $backup -AsJob -Confirm:$false -ErrorAction Stop
-        $null = Wait-MemLabsOobeRepairJob -Job $job -TimeoutSeconds $BackupTimeoutSeconds -Operation 'Full VM export'
-        $report.Export = Test-MemLabsOobeRepairExport -Path $backup -VMId $vm.Id -DiskCount $drives.Count
-        $report.BackupVerified = $true
+        if ($backupRequested) {
+            $live = Get-VM -Id $vm.Id -ErrorAction Stop
+            if ($live.Name -ne $vm.Name -or "$($live.State)" -ne 'Off') { throw 'The selected VM changed before export.' }
+            New-MemLabsPrivateDiagnosticDirectory -Path $backup
+            Write-Host "$VmName`: exporting a full VM backup to '$backup'. This backup contains guest data and must remain private."
+            $job = Export-VM -VM $live -Path $backup -AsJob -Confirm:$false -ErrorAction Stop
+            $null = Wait-MemLabsOobeRepairJob -Job $job -TimeoutSeconds $BackupTimeoutSeconds -Operation 'Full VM export'
+            $report.Export = Test-MemLabsOobeRepairExport -Path $backup -VMId $vm.Id -DiskCount $drives.Count
+            $report.BackupVerified = $true
+        }
+        else { Write-Warning "$VmName`: no VM backup was requested. If recovery fails, rebuilding the client may be necessary." }
         $report.Status = 'Inspecting'
         Write-MemLabsOobeRepairReport -Path $reportPath -Report $report
         Start-MemLabsOobeRepairVm -VM $vm
@@ -412,8 +470,9 @@ function Invoke-MemLabsWindowsOobeRepair {
     $archive = Join-Path $runRoot "$runName.zip"
     try { Compress-Archive -Path (Join-Path $bundle '*') -DestinationPath $archive -ErrorAction Stop }
     catch { throw "Repair report archiving failed: $($_.Exception.Message). Unarchived evidence is preserved in '$bundle'; backup='$backup'." }
-    Write-Host "OOBE-only trial: status=$($report.Status); VM=$($report.FinalState); report=$archive; backup=$backup"
-    if ($indeterminate) { Write-Warning 'A remote action or restoration outcome is unknown. Do not retry, reboot, or discard the backup; inspect the report and original-settings receipt first.' }
+    $backupDescription = if ($backupRequested) { $backup } else { '<not requested>' }
+    Write-Host "OOBE-only trial: status=$($report.Status); VM=$($report.FinalState); report=$archive; backup=$backupDescription"
+    if ($indeterminate) { Write-Warning 'A remote action or restoration outcome is unknown. Do not retry or reboot; inspect the report and original-settings receipt first, and retain any backup that was requested.' }
     if ($failure) { throw "OOBE-only recovery was not verified: $($failure.Exception.Message). Evidence: $archive" }
     [pscustomobject]@{ Scope = 'OobeOnly'; Status = $report.Status; ArchivePath = $archive; BackupPath = $backup; FinalState = $report.FinalState }
 }

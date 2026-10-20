@@ -324,7 +324,36 @@ foreach ($character in 'NOT-A-REAL-PASSWORD-DO-NOT-ARCHIVE'.ToCharArray()) { $se
 $secret.MakeReadOnly()
 $credential = [pscredential]::new('fixtureadmin', $secret)
 $parameters = @{ VmName = 'TEST-CLIENT'; Destination = (Join-Path $testRoot 'results'); BackupPath = (Join-Path $testRoot 'backups'); GuestCredential = $credential; Confirm = $false }
+$previousCommonVariable = Get-Variable -Name Common -Scope Global -ErrorAction SilentlyContinue
+$hadCommon = $null -ne $previousCommonVariable
+$previousCommonValue = if ($hadCommon) { $previousCommonVariable.Value } else { $null }
 try {
+    $credentialCache = Join-Path $testRoot 'credential-cache'
+    $null = Microsoft.PowerShell.Management\New-Item -Path $credentialCache -ItemType Directory
+    $cachedCredentialFile = Join-Path $credentialCache 'vmbuildadmin.txt'
+    $global:Common = [pscustomobject]@{ LocalAdmin = $credential; CachePath = $credentialCache; OfflineMode = $false }
+    $resolved = Resolve-MemLabsOobeRepairCredential
+    Assert-True ([object]::ReferenceEquals($resolved, $credential)) 'The already-loaded main-script credential was not reused.'
+    $override = [pscredential]::new('explicitoverride', $secret)
+    $resolved = Resolve-MemLabsOobeRepairCredential -GuestCredential $override
+    Assert-True ([object]::ReferenceEquals($resolved, $override)) 'The explicit credential did not override automatic credentials.'
+    $global:Common.LocalAdmin = $null
+    [IO.File]::WriteAllText($cachedCredentialFile, 'NOT-A-REAL-PASSWORD-DO-NOT-ARCHIVE')
+    $resolved = Resolve-MemLabsOobeRepairCredential
+    Assert-True ($resolved -is [pscredential] -and $resolved.UserName -eq 'vmbuildadmin' -and
+        $resolved.Password.Length -eq $secret.Length -and $null -eq $global:Common.LocalAdmin -and
+        $global:Common.OfflineMode -eq $false) 'The main cache loader failed or changed the caller main-script context.'
+    foreach ($cacheCase in @('Missing', 'Empty')) {
+        if ($cacheCase -eq 'Missing') { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $cachedCredentialFile -Force }
+        else { [IO.File]::WriteAllText($cachedCredentialFile, '   ') }
+        $failure = $null
+        try { $null = Resolve-MemLabsOobeRepairCredential }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -match 'saved|credential' -and -not $failure.Contains('NOT-A-REAL-PASSWORD-DO-NOT-ARCHIVE')) `
+            "$cacheCase cached credential was silently accepted or exposed."
+    }
+    $global:Common.LocalAdmin = $credential
+
     Reset-HostFixture
     $result = Invoke-MemLabsWindowsOobeRepair @parameters
     Assert-True ($result.Status -eq 'OobeRecoveredIdentityUnchanged' -and $result.FinalState -eq 'Off' -and
@@ -340,6 +369,25 @@ try {
         }
     }
     finally { $zip.Dispose() }
+    Reset-HostFixture
+    $automaticParameters = @{} + $parameters
+    $automaticParameters.Remove('BackupPath')
+    $automaticParameters.Remove('GuestCredential')
+    $result = Invoke-MemLabsWindowsOobeRepair @automaticParameters
+    $noBackupReport = Get-Content -LiteralPath (Join-Path (Split-Path $result.ArchivePath -Parent) 'Bundle\RepairResult.json') -Raw | ConvertFrom-Json
+    Assert-True ($script:Exports -eq 0 -and $script:Starts -eq 3 -and
+        $noBackupReport.BackupRequested -eq $false -and $noBackupReport.BackupVerified -eq $false -and
+        $null -eq $noBackupReport.BackupPath -and $result.Status -eq 'OobeRecoveredIdentityUnchanged') `
+        'Automatic-credential/no-backup mode exported a VM or misreported its backup/recovery state.'
+    Reset-HostFixture
+    $global:Common.LocalAdmin = $null
+    [IO.File]::WriteAllText($cachedCredentialFile, ' ')
+    $failure = $null
+    try { $null = Invoke-MemLabsWindowsOobeRepair @automaticParameters }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ([bool]$failure -and $script:Starts -eq 0 -and $script:Exports -eq 0 -and $script:Diagnostics -eq 0) `
+        'Unavailable automatic credentials permitted a guest/VM operation.'
+    $global:Common.LocalAdmin = $credential
     foreach ($scenario in @('Backup', 'Authentication', 'Oobe', 'Verification', 'Persistence', 'Restore', 'Indeterminate')) {
         Reset-HostFixture
         if ($scenario -eq 'Backup') { $script:BadExport = $true }
@@ -453,6 +501,9 @@ try {
         -RepairOobe -BackupPath (Join-Path $testRoot 'entry-backup') -GuestCredential $credential -WhatIf
     Assert-True ($script:Exports -eq 0 -and $script:Starts -eq 0 -and $script:Diagnostics -eq 0) `
         'The actual repair entrypoint mutated state under WhatIf.'
+    $null = & $entrypoint -VmName TEST-CLIENT -Destination (Join-Path $testRoot 'entry-output') -RepairOobe -WhatIf
+    Assert-True ($script:Exports -eq 0 -and $script:Starts -eq 0 -and $script:Diagnostics -eq 0) `
+        'The automatic/no-backup repair entrypoint required an export or manual credential.'
     $failure = $null
     try {
         $null = & $entrypoint -VmName TEST-CLIENT -Destination (Join-Path $testRoot 'entry-output') -RepairOobe:$false `
@@ -461,5 +512,9 @@ try {
     catch { $failure = $_.Exception.Message }
     Assert-True ($failure -match 'explicitly enabled') 'Repair-specific parameters silently enabled mutation without the repair switch.'
 }
-finally { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop }
+finally {
+    if ($hadCommon) { $global:Common = $previousCommonValue }
+    else { Remove-Variable -Name Common -Scope Global -ErrorAction SilentlyContinue }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop
+}
 Write-Host 'PASS -- scoped guest trial/rollback, backup-before-start, authentication stop, two-reboot verification, privacy, and indeterminate outcomes.'

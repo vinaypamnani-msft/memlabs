@@ -11,13 +11,21 @@
     Stop deployment/test retry loops before collection. The collector refuses
     to run while another process holds the MemLabs host mutation lease.
 .PARAMETER RepairOobe
-    Explicitly opts into an OOBE-only Windows Update access trial after a verified
-    full VM export. Requires BackupPath and an administrator GuestCredential.
+    Explicitly opts into an OOBE-only Windows Update access trial. Uses the saved
+    MemLabs local administrator credential unless GuestCredential is supplied.
+    BackupPath optionally requests a verified full VM export before repair.
     No rename, domain repair, setup-completion override, or ACL reset is performed.
+.PARAMETER GuestCredential
+    Optional override. By default, reuses Common.LocalAdmin or loads cached
+    vmbuildadmin credentials through the same helper used by New-Lab.
+.PARAMETER BackupPath
+    Optional full-export destination. When omitted, repair runs without a VM backup.
 .PARAMETER AllowTurnOff
     Permits a hard power-off if graceful shutdown fails or the VM is saved/paused.
 .EXAMPLE
     .\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -AllowTurnOff
+.EXAMPLE
+    .\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -RepairOobe
 #>
 [CmdletBinding(DefaultParameterSetName = 'Collect', SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
@@ -28,8 +36,8 @@ param(
     [ValidateRange(5, 600)][int]$StopTimeoutSeconds = 90,
     [switch]$AllowTurnOff,
     [Parameter(Mandatory, ParameterSetName = 'Repair')][switch]$RepairOobe,
-    [Parameter(Mandatory, ParameterSetName = 'Repair')][ValidateNotNullOrEmpty()][string]$BackupPath,
-    [Parameter(Mandatory, ParameterSetName = 'Repair')][ValidateNotNull()][pscredential]$GuestCredential,
+    [Parameter(ParameterSetName = 'Repair')][ValidateNotNullOrEmpty()][string]$BackupPath,
+    [Parameter(ParameterSetName = 'Repair')][ValidateNotNull()][pscredential]$GuestCredential,
     [Parameter(ParameterSetName = 'Repair')][ValidateRange(60, 3600)][int]$RepairTimeoutSeconds = 900,
     [Parameter(ParameterSetName = 'Repair')][ValidateRange(60, 7200)][int]$BackupTimeoutSeconds = 3600
 )
