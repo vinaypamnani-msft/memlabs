@@ -34,7 +34,7 @@ function Get-MemLabsWindowsClientSetupState {
         ImageState = $null; SetupType = $null; SystemSetupInProgress = $null
         OOBEInProgress = $null; NativeOobeComplete = $null
         WinRtOobeState = $null; SetupExeCompletion = $null
-        OobeProcessCount = $null; OobeProcesses = @()
+        OobeProcessCount = $null; OobeProcesses = @(); OobeBlockingProcessCount = $null
         ActiveName = $null; PendingName = $null
         Reason = 'ProbeFailed'; Detail = ''; Diagnostics = @()
     }
@@ -119,7 +119,9 @@ function Get-MemLabsWindowsClientSetupState {
                     }
                     $state.OobeProcessCount = $processes.Count
                     $state.OobeProcesses = @($processes | ForEach-Object { $_.Name })
-                    if ($state.OobeProcessCount -eq 0) {
+                    $state.OobeBlockingProcessCount = @($state.OobeProcesses |
+                        Where-Object { $_ -ine 'CloudExperienceHostBroker.exe' }).Count
+                    if ($state.OobeBlockingProcessCount -eq 0) {
                         $state.Ready = $true
                         $state.Reason = 'MachineCompleteAwaitingFirstLogon'
                     }
@@ -132,7 +134,7 @@ function Get-MemLabsWindowsClientSetupState {
 
     $details = foreach ($name in @('ProductType', 'ImageState', 'SetupType', 'SystemSetupInProgress',
             'OOBEInProgress', 'NativeOobeComplete', 'WinRtOobeState', 'SetupExeCompletion',
-            'OobeProcessCount', 'OobeProcesses', 'ActiveName', 'PendingName')) {
+            'OobeProcessCount', 'OobeBlockingProcessCount', 'OobeProcesses', 'ActiveName', 'PendingName')) {
         $value = if ($null -eq $state.$name) { '<unavailable>' } else { "$($state.$name)" }
         "${name}=$value"
     }

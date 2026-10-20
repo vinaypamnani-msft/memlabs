@@ -144,6 +144,9 @@ function Add-MemLabsSetupConsoleScreenshot {
             if (-not [IO.File]::Exists((Join-Path $Bundle $name))) { throw 'Console capture did not create its PNG.' }
             $record.Width = $capture.Width; $record.Height = $capture.Height; $record.AllBlack = $capture.AllBlack
             $record['UsedFallbackResolution'] = $capture.UsedFallbackResolution
+            foreach ($field in @('BufferLayout', 'SourceBytes', 'PrefixBytes')) {
+                if ($capture.PSObject.Properties[$field]) { $record[$field] = $capture.$field }
+            }
             Write-Host "$($VM.Name): console screenshot captured ($Stage)."
         }
     }

@@ -6941,7 +6941,7 @@ function Wait-MemLabsWindowsClientSetup {
                         'SetupType', 'SystemSetupInProgress', 'OOBEInProgress')
                     if ($state.PSObject.Properties['Reason'] -and $state.Reason -is [string] -and
                         $state.Reason -eq 'MachineCompleteAwaitingFirstLogon') {
-                        $fieldNames += @('WinRtOobeState', 'SetupExeCompletion', 'OobeProcessCount', 'OobeProcesses', 'Diagnostics')
+                        $fieldNames += @('WinRtOobeState', 'SetupExeCompletion', 'OobeProcessCount', 'OobeBlockingProcessCount', 'OobeProcesses', 'Diagnostics')
                     }
                 }
                 $missingFields = @($fieldNames | Where-Object { -not $state.PSObject.Properties[$_] })
@@ -6970,8 +6970,13 @@ function Wait-MemLabsWindowsClientSetup {
                                 $checks['WinRtOobeState'] = $state.WinRtOobeState -is [string] -and $state.WinRtOobeState -eq 'NotStarted'
                                 $checks['SetupExeCompletion'] = ($state.SetupExeCompletion -is [int] -or
                                     $state.SetupExeCompletion -is [uint32]) -and $state.SetupExeCompletion -eq 3
-                                $checks['OobeProcessCount'] = $state.OobeProcessCount -is [int] -and $state.OobeProcessCount -eq 0
-                                $checks['OobeProcesses'] = @($state.OobeProcesses).Count -eq 0
+                                $checks['OobeProcessCount'] = $state.OobeProcessCount -is [int] -and $state.OobeProcessCount -ge 0
+                                $checks['OobeBlockingProcessCount'] = $state.OobeBlockingProcessCount -is [int] -and $state.OobeBlockingProcessCount -eq 0
+                                $checks['OobeProcesses'] = $checks.OobeProcessCount -and
+                                    @($state.OobeProcesses).Count -eq $state.OobeProcessCount -and
+                                    @(@($state.OobeProcesses) | Where-Object {
+                                            $_ -isnot [string] -or $_ -ine 'CloudExperienceHostBroker.exe'
+                                        }).Count -eq 0
                                 $checks['Diagnostics'] = @($state.Diagnostics).Count -eq 0
                             }
                             else {

@@ -3,6 +3,7 @@ function Get-MaintenanceQualificationCases {
     switch ($Mode) {
         'Preflight' {
             return @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51',
+                'Test-VmConsoleScreenshot-PS7', 'Test-VmConsoleScreenshot-PS51',
                 'Test-CimProxyTempPath', 'Test-SetupDiagnosticDefaults',
                 'Test-ConsoleUpgradeRouting', 'Test-MaintenanceFixRobustness', 'Test-Odbc18VersionEnforcement',
                 'Test-MsiBusyRetryAndPassiveDependency', 'Test-VMMaintenanceNoteDiagnostics', 'Test-Phase11OsdContentState',
@@ -40,7 +41,8 @@ function Get-MaintenanceQualificationSource {
             'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
             'tools\Test-WindowsClientSetupReadiness.ps1', 'tools\Test-CimProxyTempPath.ps1',
             'tools\Clear-CimProxyTempFolders.ps1', 'tools\Test-SetupDiagnosticDefaults.ps1',
-            'tools\Get-WindowsVmSetupDiagnostics.ps1',
+            'tools\Get-WindowsVmSetupDiagnostics.ps1', 'tools\Common.VmConsoleScreenshot.ps1',
+            'tools\Test-VmConsoleScreenshot.ps1',
             'common\Common.Maintenance.ps1', 'common\Common.Validation.Functional.ps1',
             'Fixes\Fix-ODBC18.ps1', 'Fixes\Fix-Upgrade-Console.ps1', 'Fixes\Fix-CMFullAdmin.ps1',
             'DSC\phases\Upgrade-Console.ps1', 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1',

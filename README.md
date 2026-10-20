@@ -48,6 +48,10 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   mutation, with separate required receipt cases for the two engines. Its test,
   command wrapper, shared probe, and phase wiring are included in the pinned
   source digest. A failure or missing engine blocks the candidate preflight.
+  Console framebuffer regressions also run as separate required cases on both
+  engines, with their helper, test, and collector sources included in the digest.
+  They verify raw and validated length-prefixed RGB565, pixel orientation/stride,
+  black-frame reporting, and rejection of malformed frames.
   The CIM proxy-temp regression also prevents cleanup from deleting shared
   proxy directories that may still back other live PowerShell sessions.
   Setup-diagnostic cold-launch checks verify omitted/explicit destinations and
@@ -203,8 +207,16 @@ first-user OOBE. This requires **all** of:
 - A successful native API query reporting incomplete, with the WinRT
   `SystemSetupInfo` OOBE lifecycle API reporting exactly `NotStarted`.
 - Numeric `setup.exe` child completion state `3` and readable active/pending names.
-- A successful bounded process query finding no setup, OOBE, CloudExperienceHost,
-  WWAHost, or first-logon-animation processes.
+- A successful bounded process query finding no setup, OOBE UI/execution,
+  CloudExperienceHost, WWAHost, or first-logon-animation hosts. The exact
+  `CloudExperienceHostBroker.exe` support broker is still recorded but does not
+  alone prove active OOBE once every other machine/API guard has passed.
+
+`OobeProcessCount`/`OobeProcesses` retain every observed matching process;
+`OobeBlockingProcessCount` distinguishes execution/UI hosts from the resident
+support broker. A broker alongside any blocking host remains blocked. The host
+also validates the observed count/names, so an unknown process cannot be hidden
+behind a zero blocking count.
 
 This classification permits unattended deployment before interactive first logon;
 it does not claim native OOBE completion. `InProgress`, active OOBE processes,
@@ -277,6 +289,12 @@ Off/Saved VMs have no available live framebuffer and are explicitly recorded
 as unavailable, not as successful screenshots. Blank/black frames are retained
 as evidence; API or rendering failures make the evidence partial rather than
 preventing the remaining setup-log collection.
+Raw RGB565 and a four-byte big-endian total-length-prefixed provider layout are
+supported. The latter is accepted only when the declared total exactly matches
+the buffer and the remaining bytes exactly match the requested pixel dimensions.
+Layout, source-byte count, and prefix size are recorded; black-frame detection
+examines only pixels. Unknown/truncated/mismatched buffers remain explicit errors,
+with dimensions and first/last DWORDs rather than blindly trimming extra bytes.
 The same bounded, resolution-capped capture helper is used by
 `vmbuild\tools\Save-VmConsoleScreenshot.ps1`.
 

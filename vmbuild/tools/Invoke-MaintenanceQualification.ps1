@@ -261,8 +261,10 @@ function Invoke-MQPreflight {
     foreach ($name in @(Get-MaintenanceQualificationCases Preflight | Where-Object { $_ -ne 'dsc-artifact' })) {
         $scriptName = if ($name -in @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51')) {
             'Test-WindowsClientSetupReadiness'
+        } elseif ($name -in @('Test-VmConsoleScreenshot-PS7', 'Test-VmConsoleScreenshot-PS51')) {
+            'Test-VmConsoleScreenshot'
         } else { $name }
-        $engine = if ($name -in @('Test-MainToDevelopExpansionRunner', 'Test-WindowsClientSetupReadiness-PS7')) {
+        $engine = if ($name -in @('Test-MainToDevelopExpansionRunner', 'Test-WindowsClientSetupReadiness-PS7', 'Test-VmConsoleScreenshot-PS7')) {
             (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
         } else { $powershell }
         Write-Host "Running pinned candidate regression: $name ($engine)"

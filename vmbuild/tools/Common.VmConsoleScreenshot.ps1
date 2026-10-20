@@ -1,3 +1,36 @@
+function Get-MemLabsVmConsoleFrameLayout {
+    param(
+        [Parameter(Mandatory)][byte[]]$ImageData,
+        [Parameter(Mandatory)][ValidateRange(1, 4096)][int]$Width,
+        [Parameter(Mandatory)][ValidateRange(1, 2160)][int]$Height
+    )
+
+    $expected = [long]$Width * $Height * 2
+    $prefix = 0
+    $layout = 'RawRgb565'
+    $declared = $null
+    if ($ImageData.Length -ge 4) {
+        $declared = ([long]$ImageData[0] -shl 24) -bor ([long]$ImageData[1] -shl 16) -bor
+            ([long]$ImageData[2] -shl 8) -bor [long]$ImageData[3]
+    }
+    if ($expected -le 16MB) {
+        if ($ImageData.Length -eq $expected) {
+            return [pscustomobject]@{ BufferLayout = $layout; PrefixBytes = 0; PixelBytes = $expected; SourceBytes = $ImageData.Length }
+        }
+        if ($ImageData.Length -eq $expected + 4 -and $declared -eq $ImageData.Length) {
+            $prefix = 4
+            $layout = 'BigEndianLengthPrefixedRgb565'
+            return [pscustomobject]@{ BufferLayout = $layout; PrefixBytes = $prefix; PixelBytes = $expected; SourceBytes = $ImageData.Length }
+        }
+    }
+    $first = '<unavailable>'; $last = '<unavailable>'
+    if ($ImageData.Length -ge 4) {
+        $first = '0x{0:X8}' -f [BitConverter]::ToUInt32($ImageData, 0)
+        $last = '0x{0:X8}' -f [BitConverter]::ToUInt32($ImageData, $ImageData.Length - 4)
+    }
+    throw "Invalid RGB565 framebuffer length: got $($ImageData.Length), expected $expected for ${Width}x${Height}; declared BE32 total=$declared; first/last DWORD=$first/$last. No bytes were discarded."
+}
+
 function Convert-MemLabsVmConsoleImage {
     param(
         [Parameter(Mandatory)][byte[]]$ImageData,
@@ -6,10 +39,7 @@ function Convert-MemLabsVmConsoleImage {
         [Parameter(Mandatory)][string]$Path
     )
 
-    $expected = [long]$Width * $Height * 2
-    if ($expected -gt 16MB -or $ImageData.Length -ne $expected) {
-        throw "Invalid RGB565 framebuffer length: got $($ImageData.Length), expected $expected."
-    }
+    $frame = Get-MemLabsVmConsoleFrameLayout -ImageData $ImageData -Width $Width -Height $Height
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
     $bitmap = [Drawing.Bitmap]::new($Width, $Height, [Drawing.Imaging.PixelFormat]::Format16bppRgb565)
     $png = $null
@@ -18,7 +48,7 @@ function Convert-MemLabsVmConsoleImage {
         $bits = $bitmap.LockBits($rectangle, [Drawing.Imaging.ImageLockMode]::WriteOnly, $bitmap.PixelFormat)
         try {
             for ($row = 0; $row -lt $Height; $row++) {
-                [Runtime.InteropServices.Marshal]::Copy($ImageData, $row * $Width * 2,
+                [Runtime.InteropServices.Marshal]::Copy($ImageData, $frame.PrefixBytes + $row * $Width * 2,
                     [IntPtr]::Add($bits.Scan0, $row * $bits.Stride), $Width * 2)
             }
         }
@@ -59,6 +89,7 @@ function Save-MemLabsVmConsoleScreenshot {
         Status = 'UnavailableNotRunning'; VMId = $system.Name; VMName = $system.ElementName
         EnabledState = $system.EnabledState; Path = $null; Width = $null; Height = $null
         AllBlack = $null; UsedFallbackResolution = $false
+        BufferLayout = $null; SourceBytes = $null; PrefixBytes = $null
     }
     if ($system.EnabledState -notin @(2, 32768)) { return $result }
 
@@ -87,15 +118,19 @@ function Save-MemLabsVmConsoleScreenshot {
         -OperationTimeoutSec 10 -ErrorAction Stop
     if ($response.ReturnValue -ne 0) { throw "Hyper-V console capture failed with ReturnValue=$($response.ReturnValue)." }
     $bytes = [byte[]]$response.ImageData
+    $frame = Get-MemLabsVmConsoleFrameLayout -ImageData $bytes -Width $width -Height $height
     Convert-MemLabsVmConsoleImage -ImageData $bytes -Width $width -Height $height -Path $Path
     $nonzero = 0
-    foreach ($value in $bytes) {
-        if ($value -ne 0) { $nonzero++; if ($nonzero -gt 64) { break } }
+    for ($index = $frame.PrefixBytes; $index -lt $bytes.Length; $index++) {
+        if ($bytes[$index] -ne 0) { $nonzero++; if ($nonzero -gt 64) { break } }
     }
     $result.Status = 'Captured'
     $result.Path = $Path
     $result.Width = $width
     $result.Height = $height
     $result.AllBlack = $nonzero -eq 0
+    $result.BufferLayout = $frame.BufferLayout
+    $result.SourceBytes = $frame.SourceBytes
+    $result.PrefixBytes = $frame.PrefixBytes
     return $result
 }

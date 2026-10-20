@@ -103,8 +103,18 @@ $firstLogonState = Get-MemLabsWindowsClientSetupState
 Assert-True ($firstLogonState.Ready -and $firstLogonState.Required -and -not $firstLogonState.NativeOobeComplete -and
     $firstLogonState.Reason -eq 'MachineCompleteAwaitingFirstLogon' -and $firstLogonState.WinRtOobeState -eq 'NotStarted' -and
     $firstLogonState.SetupExeCompletion -eq 3 -and $firstLogonState.OobeProcessCount -eq 0 -and
-    $firstLogonState.OobeProcesses.Count -eq 0 -and $script:UserOobeReads -eq 1 -and $script:ProcessReads -eq 1) `
+    $firstLogonState.OobeProcesses.Count -eq 0 -and $firstLogonState.OobeBlockingProcessCount -eq 0 -and
+    $script:UserOobeReads -eq 1 -and $script:ProcessReads -eq 1) `
     'The completed unattended machine at the sign-in screen was rejected or mislabeled as full native completion.'
+Reset-SetupFixture
+$script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
+$script:OobeProcesses = @([pscustomobject]@{ Name = 'CloudExperienceHostBroker.exe' })
+$brokerState = Get-MemLabsWindowsClientSetupState
+Assert-True ($brokerState.Ready -and -not $brokerState.NativeOobeComplete -and
+    $brokerState.Reason -eq 'MachineCompleteAwaitingFirstLogon' -and $brokerState.OobeProcessCount -eq 1 -and
+    $brokerState.OobeBlockingProcessCount -eq 0 -and $brokerState.OobeProcesses[0] -eq 'CloudExperienceHostBroker.exe' -and
+    $brokerState.Detail.Contains('CloudExperienceHostBroker.exe')) `
+    'A resident broker was mistaken for active OOBE or removed from diagnostic evidence.'
 foreach ($badUserState in @($null, '', 'Unknown', 'Completed', 0, @('NotStarted', 'InProgress'))) {
     Reset-SetupFixture
     $script:NativeValue = $false; $script:UserOobeValue = $badUserState
@@ -133,13 +143,17 @@ foreach ($completion in @(0, 1, 2)) {
         'Incomplete setup.exe child state reached deployment readiness or process inspection.'
 }
 foreach ($processName in @('setup.exe', 'setuphost.exe', 'msoobe.exe', 'oobeldr.exe', 'oobelauncher.exe',
-        'UserOOBEBroker.exe', 'CloudExperienceHostBroker.exe', 'CloudExperienceHost.exe', 'WWAHost.exe', 'FirstLogonAnim.exe')) {
-    Reset-SetupFixture
-    $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
-    $script:OobeProcesses = @([pscustomobject]@{ Name = $processName })
-    $state = Get-MemLabsWindowsClientSetupState
-    Assert-True (-not $state.Ready -and $state.OobeProcessCount -eq 1 -and $state.Detail.Contains($processName)) `
-        "Active $processName was accepted or omitted from diagnostics."
+        'UserOOBEBroker.exe', 'CloudExperienceHost.exe', 'WWAHost.exe', 'FirstLogonAnim.exe', 'UnexpectedBroker.exe')) {
+    foreach ($withBroker in @($false, $true)) {
+        Reset-SetupFixture
+        $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
+        $script:OobeProcesses = @([pscustomobject]@{ Name = $processName })
+        if ($withBroker) { $script:OobeProcesses += [pscustomobject]@{ Name = 'CloudExperienceHostBroker.exe' } }
+        $state = Get-MemLabsWindowsClientSetupState
+        Assert-True (-not $state.Ready -and $state.OobeBlockingProcessCount -eq 1 -and
+            $state.OobeProcessCount -eq $script:OobeProcesses.Count -and $state.Detail.Contains($processName)) `
+            "Active $processName was accepted or hidden by a support broker."
+    }
 }
 foreach ($failure in @('UserApi', 'ProcessQuery', 'UnreadableProcess', 'MachineFlag', 'ImageState')) {
     Reset-SetupFixture
@@ -236,12 +250,14 @@ Reset-HostFixture -Response (New-Reply $firstLogonState)
 Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'The host rejected a fully verified pre-first-logon machine.'
 Assert-True ($script:RpcCalls -eq 1 -and ($script:Messages -join ' ') -match 'MachineCompleteAwaitingFirstLogon') `
     'Unattended machine readiness required a timer or lost its distinct diagnostic.'
+Reset-HostFixture -Response (New-Reply $brokerState)
+Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'The host rejected machine-ready evidence with only the recorded support broker.'
 Reset-HostFixture -Response (New-Reply $readyState)
 $script:Replies.Enqueue((New-Reply $pendingState))
 $script:Replies.Enqueue((New-Reply $readyState))
 Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'An incomplete-to-complete transition was not retried.'
 Assert-True ($script:RpcCalls -eq 2 -and ($script:Messages -join ' ') -match 'WindowsWelcomeIncomplete') 'Pending user OOBE was not logged before retry.'
-foreach ($lateState in @($readyState, $firstLogonState)) {
+foreach ($lateState in @($readyState, $firstLogonState, $brokerState)) {
     Reset-HostFixture -Response (New-Reply $lateState)
     $script:ReplyDelayMilliseconds = 1100
     Assert-True (-not (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 1)) 'A late native/first-logon ready response passed after the readiness deadline.'
@@ -321,11 +337,16 @@ $invalidFirstLogon = [ordered]@{
     MissingUserState = 'Missing setup fields=\[WinRtOobeState\]'
     MissingCompletion = 'Missing setup fields=\[SetupExeCompletion\]'
     MissingProcessCount = 'Missing setup fields=\[OobeProcessCount\]'
+    MissingBlockingCount = 'Missing setup fields=\[OobeBlockingProcessCount\]'
     MissingProcesses = 'Missing setup fields=\[OobeProcesses\]'
     MissingDiagnostics = 'Missing setup fields=\[Diagnostics\]'
     InProgress = 'Invalid setup fields=\[WinRtOobeState\]'
     StringCompletion = 'Invalid setup fields=\[SetupExeCompletion\]'
-    ActiveProcess = 'Invalid setup fields=\[OobeProcessCount, OobeProcesses\]'
+    ActiveProcess = 'Invalid setup fields=\[OobeBlockingProcessCount, OobeProcesses\]'
+    ForgedBlockingCount = 'Invalid setup fields=\[OobeProcesses\]'
+    UnknownSupport = 'Invalid setup fields=\[OobeProcesses\]'
+    MismatchedCount = 'Invalid setup fields=\[OobeProcesses\]'
+    StringBlockingCount = 'Invalid setup fields=\[OobeBlockingProcessCount\]'
     NullProcesses = 'Invalid setup fields=\[OobeProcesses\]'
     ReportedError = 'Invalid setup fields=\[Diagnostics\]'
     InconsistentNative = 'Invalid setup fields=\[NativeOobeComplete\]'
@@ -335,11 +356,16 @@ foreach ($variant in $invalidFirstLogon.Keys) {
     if ($variant -eq 'MissingUserState') { $badState.PSObject.Properties.Remove('WinRtOobeState') }
     if ($variant -eq 'MissingCompletion') { $badState.PSObject.Properties.Remove('SetupExeCompletion') }
     if ($variant -eq 'MissingProcessCount') { $badState.PSObject.Properties.Remove('OobeProcessCount') }
+    if ($variant -eq 'MissingBlockingCount') { $badState.PSObject.Properties.Remove('OobeBlockingProcessCount') }
     if ($variant -eq 'MissingProcesses') { $badState.PSObject.Properties.Remove('OobeProcesses') }
     if ($variant -eq 'MissingDiagnostics') { $badState.PSObject.Properties.Remove('Diagnostics') }
     if ($variant -eq 'InProgress') { $badState.WinRtOobeState = 'InProgress' }
     if ($variant -eq 'StringCompletion') { $badState.SetupExeCompletion = '3' }
-    if ($variant -eq 'ActiveProcess') { $badState.OobeProcessCount = 1; $badState.OobeProcesses = @('msoobe.exe') }
+    if ($variant -eq 'ActiveProcess') { $badState.OobeProcessCount = 1; $badState.OobeProcesses = @('msoobe.exe'); $badState.OobeBlockingProcessCount = 1 }
+    if ($variant -eq 'ForgedBlockingCount') { $badState.OobeProcessCount = 1; $badState.OobeProcesses = @('msoobe.exe') }
+    if ($variant -eq 'UnknownSupport') { $badState.OobeProcessCount = 1; $badState.OobeProcesses = @('UnexpectedBroker.exe') }
+    if ($variant -eq 'MismatchedCount') { $badState.OobeProcessCount = 2; $badState.OobeProcesses = @('CloudExperienceHostBroker.exe') }
+    if ($variant -eq 'StringBlockingCount') { $badState.OobeBlockingProcessCount = '0' }
     if ($variant -eq 'NullProcesses') { $badState.OobeProcesses = $null }
     if ($variant -eq 'ReportedError') { $badState.Diagnostics = @('Synthetic query failure') }
     if ($variant -eq 'InconsistentNative') { $badState.NativeOobeComplete = $true }
@@ -380,14 +406,15 @@ foreach ($variant in $invalidFirstLogon.Keys) {
     }
 
     try {
-        foreach ($scenario in @('Client', 'AwaitingFirstLogon', 'DomainController', 'MemberServer', 'GuestFailure')) {
+        foreach ($scenario in @('Client', 'AwaitingFirstLogon', 'ResidentBroker', 'DomainController', 'MemberServer', 'GuestFailure')) {
             Reset-SetupFixture
             $script:ProductType = switch ($scenario) {
                 'DomainController' { 2 }
                 'MemberServer' { 3 }
                 default { 1 }
             }
-            if ($scenario -eq 'AwaitingFirstLogon') { $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted' }
+            if ($scenario -in @('AwaitingFirstLogon', 'ResidentBroker')) { $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted' }
+            if ($scenario -eq 'ResidentBroker') { $script:OobeProcesses = @([pscustomobject]@{ Name = 'CloudExperienceHostBroker.exe' }) }
             $guestState = Get-MemLabsWindowsClientSetupState
             $guestFailure = $scenario -eq 'GuestFailure'
             $script:Messages.Clear()
@@ -448,7 +475,7 @@ Assert-True ($workgroup -match "(?s)WriteStatus Rename\s*\{\s*DependsOn = '\[Scr
                 ". 'C:\staging\DSC\phases\WindowsSetupReadiness.ps1'", '')
             $guards[$name] = [scriptblock]::Create($body)
         }
-        foreach ($fixture in @($readyState, $firstLogonState, $pendingState, $malformedReady)) {
+        foreach ($fixture in @($readyState, $firstLogonState, $brokerState, $pendingState, $malformedReady)) {
             $script:GuardState = $fixture
             $expected = $fixture.Ready -is [bool] -and $fixture.Ready
             Assert-True ((& $guards.clientSetupTest) -eq $expected) 'A DSC test guard changed deployment-readiness classification.'

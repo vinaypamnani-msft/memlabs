@@ -151,7 +151,8 @@ try {
     Assert-QualificationThrows { Assert-MaintenanceQualificationReference $reference } '*checksum changed*'
 
     $readinessCases = @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51')
-    foreach ($name in @($readinessCases + 'Test-CimProxyTempPath' + 'Test-SetupDiagnosticDefaults')) {
+    $consoleCases = @('Test-VmConsoleScreenshot-PS7', 'Test-VmConsoleScreenshot-PS51')
+    foreach ($name in @($readinessCases + $consoleCases + 'Test-CimProxyTempPath' + 'Test-SetupDiagnosticDefaults')) {
         Assert-Qualification ((Get-MaintenanceQualificationCases Preflight) -contains $name) "Preflight does not require $name."
         $receipt = New-TestQualificationReceipt -Mode Preflight -Targets @() -HasCm $false
         $receipt.Cases = @($receipt.Cases | Where-Object Name -ne $name)
@@ -166,7 +167,8 @@ try {
             'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
             'tools\Test-WindowsClientSetupReadiness.ps1', 'tools\Test-CimProxyTempPath.ps1',
             'tools\Clear-CimProxyTempFolders.ps1', 'tools\Test-SetupDiagnosticDefaults.ps1',
-            'tools\Get-WindowsVmSetupDiagnostics.ps1')) {
+            'tools\Get-WindowsVmSetupDiagnostics.ps1', 'tools\Common.VmConsoleScreenshot.ps1',
+            'tools\Test-VmConsoleScreenshot.ps1')) {
         Assert-Qualification ($source.Files.Contains($relative) -and $source.Files[$relative] -match '^[A-Fa-f0-9]{64}$') `
             "Pinned source digest does not cover regression input $relative."
     }
@@ -220,16 +222,20 @@ function Get-MemLabsDscArtifactState {
         function Invoke-QualificationEngine7 {
             param([string]$File)
             Assert-Qualification (Test-Path -LiteralPath $File -PathType Leaf) "Preflight selected a missing script: $File"
-            $script:PreflightCalls.Add([pscustomobject]@{ Engine = 'PS7'; Script = (Split-Path $File -Leaf) })
-            $global:LASTEXITCODE = if ($script:PreflightScenario -eq 'FailPS7') { 37 } else { 0 }
+            $scriptName = Split-Path $File -Leaf
+            $script:PreflightCalls.Add([pscustomobject]@{ Engine = 'PS7'; Script = $scriptName })
+            $global:LASTEXITCODE = if ($script:PreflightScenario -eq 'FailPS7' -or
+                ($script:PreflightScenario -eq 'FailConsolePS7' -and $scriptName -eq 'Test-VmConsoleScreenshot.ps1')) { 37 } else { 0 }
         }
         function Invoke-QualificationEngine51 {
             param([string]$File)
             Assert-Qualification (Test-Path -LiteralPath $File -PathType Leaf) "Preflight selected a missing script: $File"
-            $script:PreflightCalls.Add([pscustomobject]@{ Engine = 'PS51'; Script = (Split-Path $File -Leaf) })
-            $global:LASTEXITCODE = if ($script:PreflightScenario -eq 'FailPS51') { 37 } else { 0 }
+            $scriptName = Split-Path $File -Leaf
+            $script:PreflightCalls.Add([pscustomobject]@{ Engine = 'PS51'; Script = $scriptName })
+            $global:LASTEXITCODE = if ($script:PreflightScenario -eq 'FailPS51' -or
+                ($script:PreflightScenario -eq 'FailConsolePS51' -and $scriptName -eq 'Test-VmConsoleScreenshot.ps1')) { 37 } else { 0 }
         }
-        foreach ($scenario in @('Passed', 'FailPS7', 'FailPS51', 'MissingPS7', 'MissingPS51', 'StaleArtifact')) {
+        foreach ($scenario in @('Passed', 'FailPS7', 'FailPS51', 'FailConsolePS7', 'FailConsolePS51', 'MissingPS7', 'MissingPS51', 'StaleArtifact')) {
             $script:PreflightScenario = $scenario
             $script:PreflightCalls = [Collections.Generic.List[object]]::new()
             $script:MQReceipt = New-TestQualificationReceipt -Mode Preflight -Targets @() -HasCm $false
@@ -240,16 +246,21 @@ function Get-MemLabsDscArtifactState {
                 $readinessCalls = @($script:PreflightCalls | Where-Object Script -eq 'Test-WindowsClientSetupReadiness.ps1')
                 Assert-Qualification ($readinessCalls.Count -eq 2 -and
                     ($readinessCalls.Engine -join ',') -eq 'PS7,PS51') 'Readiness preflight did not run the same script under both engines.'
+                $consoleCalls = @($script:PreflightCalls | Where-Object Script -eq 'Test-VmConsoleScreenshot.ps1')
+                Assert-Qualification ($consoleCalls.Count -eq 2 -and
+                    ($consoleCalls.Engine -join ',') -eq 'PS7,PS51') 'Console preflight did not run the same script under both engines.'
                 Assert-Qualification ($script:PreflightCalls.Count -eq (Get-MaintenanceQualificationCases Preflight).Count - 1) `
                     'Preflight skipped or duplicated a regression invocation.'
                 foreach ($entry in @(
-                        @{ Name = $readinessCases[0]; Engine = 'Invoke-QualificationEngine7' },
-                        @{ Name = $readinessCases[1]; Engine = 'Invoke-QualificationEngine51' }
+                        @{ Name = $readinessCases[0]; Engine = 'Invoke-QualificationEngine7'; Script = 'Test-WindowsClientSetupReadiness.ps1' },
+                        @{ Name = $readinessCases[1]; Engine = 'Invoke-QualificationEngine51'; Script = 'Test-WindowsClientSetupReadiness.ps1' },
+                        @{ Name = $consoleCases[0]; Engine = 'Invoke-QualificationEngine7'; Script = 'Test-VmConsoleScreenshot.ps1' },
+                        @{ Name = $consoleCases[1]; Engine = 'Invoke-QualificationEngine51'; Script = 'Test-VmConsoleScreenshot.ps1' }
                     )) {
                     $case = @($script:MQReceipt.Cases | Where-Object Name -eq $entry.Name)
                     Assert-Qualification ($case.Count -eq 1 -and $case[0].Status -eq 'Passed' -and
                         $case[0].Data.Engine -eq $entry.Engine -and $case[0].Data.ExitCode -eq 0 -and
-                        $case[0].Data.Script -eq 'Test-WindowsClientSetupReadiness.ps1') 'Preflight receipt lost per-engine readiness evidence.'
+                        $case[0].Data.Script -eq $entry.Script) 'Preflight receipt lost per-engine readiness or console evidence.'
                 }
                 $script:MQReceipt.Status = 'Passed'
                 Write-MaintenanceQualificationReceipt $ReceiptPath $script:MQReceipt
@@ -260,17 +271,27 @@ function Get-MemLabsDscArtifactState {
                 $pattern = switch ($scenario) {
                     'FailPS7' { '*Test-WindowsClientSetupReadiness-PS7 (exit 37)*' }
                     'FailPS51' { '*Test-WindowsClientSetupReadiness-PS51 (exit 37)*' }
+                    'FailConsolePS7' { '*Test-VmConsoleScreenshot-PS7 (exit 37)*' }
+                    'FailConsolePS51' { '*Test-VmConsoleScreenshot-PS51 (exit 37)*' }
                     'MissingPS7' { '*Synthetic missing PowerShell 7*' }
                     'MissingPS51' { '*Windows PowerShell 5.1 is required*' }
                     'StaleArtifact' { '*Candidate DSC artifact is stale*' }
                 }
                 Assert-QualificationThrows { Invoke-MQPreflight } $pattern
                 $passedReadiness = @($script:MQReceipt.Cases | Where-Object { $_.Name -in $readinessCases })
-                $expectedPassed = if ($scenario -eq 'FailPS51') { 1 } else { 0 }
-                $expectedCalls = if ($scenario -eq 'FailPS7') { 1 } elseif ($scenario -eq 'FailPS51') { 2 } else { 0 }
-                Assert-Qualification ($passedReadiness.Count -eq $expectedPassed -and
+                $passedConsole = @($script:MQReceipt.Cases | Where-Object { $_.Name -in $consoleCases })
+                $expectedPassed = if ($scenario -eq 'FailPS51') { 1 } elseif ($scenario -in @('FailConsolePS7', 'FailConsolePS51')) { 2 } else { 0 }
+                $expectedConsolePassed = if ($scenario -eq 'FailConsolePS51') { 1 } else { 0 }
+                $expectedCalls = switch ($scenario) {
+                    'FailPS7' { 1 }
+                    'FailPS51' { 2 }
+                    'FailConsolePS7' { 3 }
+                    'FailConsolePS51' { 4 }
+                    default { 0 }
+                }
+                Assert-Qualification ($passedReadiness.Count -eq $expectedPassed -and $passedConsole.Count -eq $expectedConsolePassed -and
                     $script:PreflightCalls.Count -eq $expectedCalls -and $script:MQReceipt.Status -eq 'Running') `
-                    "$scenario continued after a failed/missing engine or recorded unearned readiness coverage."
+                    "$scenario continued after a failed/missing engine or recorded unearned readiness/console coverage."
             }
         }
     }
