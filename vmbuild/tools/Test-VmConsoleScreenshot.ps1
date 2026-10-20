@@ -93,7 +93,7 @@ try {
         $script:EnabledState = 2; $script:QueryCount = 0; $script:MethodCalls = 0; $script:ReturnValue = 0
         $script:WrongId = $false; $script:Duplicate = $false; $script:BadLength = $false
         $script:VideoWidth = 2; $script:VideoHeight = 2; $script:NoHead = $false; $script:Black = $false
-        $script:Prefixed = $false
+        $script:Prefixed = $false; $script:FrameOverride = $null
     }
     function Get-CimInstance {
         param($Namespace, $ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
@@ -125,6 +125,7 @@ try {
         $script:MethodCalls++
         $size = [int]$Arguments.WidthPixels * [int]$Arguments.HeightPixels * 2
         $bytes = if ($script:BadLength) { [byte[]]@(1) } elseif ($size -eq 8 -and -not $script:Black) { $colors } else { [byte[]]::new($size) }
+        if ($null -ne $script:FrameOverride) { $bytes = $script:FrameOverride }
         if ($script:Prefixed) {
             $header = [BitConverter]::GetBytes([Net.IPAddress]::HostToNetworkOrder([int]($bytes.Length + 4)))
             $bytes = [byte[]]($header + $bytes)
@@ -169,6 +170,45 @@ try {
         Assert-True ([bool]$failure -and -not (Test-Path -LiteralPath (Join-Path $root "$scenario.png"))) "$scenario became a false successful capture."
     }
     Reset-CaptureFixture
+    $script:BadLength = $true
+    $failure = $null
+    try { $null = Save-MemLabsVmConsoleScreenshot -VMId $script:VMId -Path (Join-Path $root 'raw-error.png') }
+    catch { $failure = $_.Exception }
+    Assert-True ($null -ne $failure -and $failure.Data['ConsoleWidth'] -eq 2 -and
+        $failure.Data['ConsoleHeight'] -eq 2 -and $failure.Data['ConsoleRawPath'] -eq (Join-Path $root 'raw-error.rgb565.bin') -and
+        -not (Test-Path -LiteralPath (Join-Path $root 'raw-error.png'))) 'Malformed frame preservation lost dimensions or claimed a PNG.'
+    $rawBytes = [IO.File]::ReadAllBytes($failure.Data['ConsoleRawPath'])
+    $rawMetadata = Get-Content -LiteralPath $failure.Data['ConsoleRawMetadataPath'] -Raw | ConvertFrom-Json
+    Assert-True ($rawBytes.Length -eq 1 -and $rawBytes[0] -eq 1 -and
+        $rawMetadata.ActualBytes -eq 1 -and $rawMetadata.ExpectedPackedBytes -eq 8 -and
+        $rawMetadata.BytesDiscarded -eq 0 -and $rawMetadata.VMId -eq $script:VMId.ToString('D') -and
+        $rawMetadata.ConversionError -match 'Invalid RGB565') 'Malformed frame bytes or their error sidecar were changed or lost.'
+    Reset-CaptureFixture
+    $script:FrameOverride = $extra
+    $failure = $null
+    try { $null = Save-MemLabsVmConsoleScreenshot -VMId $script:VMId -Path (Join-Path $root 'unknown-prefix.png') }
+    catch { $failure = $_.Exception }
+    Assert-True ($null -ne $failure -and $failure.Data['ConsoleRawPath'] -and
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($failure.Data['ConsoleRawPath'])) -eq [Convert]::ToBase64String($extra) -and
+        -not (Test-Path -LiteralPath (Join-Path $root 'unknown-prefix.png'))) `
+        'An unverified four-byte prefix was discarded instead of preserving the complete provider response.'
+    Reset-CaptureFixture
+    $script:FrameOverride = [byte[]]::new(16MB + 64KB)
+    $failure = $null
+    try { $null = Save-MemLabsVmConsoleScreenshot -VMId $script:VMId -Path (Join-Path $root 'at-limit.png') }
+    catch { $failure = $_.Exception }
+    Assert-True ($null -ne $failure -and $failure.Data['ConsoleRawPath'] -and
+        [IO.FileInfo]::new($failure.Data['ConsoleRawPath']).Length -eq 16MB + 64KB -and
+        -not (Test-Path -LiteralPath (Join-Path $root 'at-limit.png'))) 'The exact raw-frame byte limit was incorrectly rejected or rendered.'
+    Reset-CaptureFixture
+    $script:FrameOverride = [byte[]]::new(16MB + 64KB + 1)
+    $failure = $null
+    try { $null = Save-MemLabsVmConsoleScreenshot -VMId $script:VMId -Path (Join-Path $root 'over-limit.png') }
+    catch { $failure = $_.Exception }
+    Assert-True ($null -ne $failure -and -not $failure.Data['ConsoleRawPath'] -and
+        -not (Test-Path -LiteralPath (Join-Path $root 'over-limit.rgb565.bin')) -and
+        -not (Test-Path -LiteralPath (Join-Path $root 'over-limit.png'))) 'Raw-frame preservation exceeded its explicit byte bound.'
+    Reset-CaptureFixture
     $script:VideoWidth = 3840; $script:VideoHeight = 2160
     $capture = Save-MemLabsVmConsoleScreenshot -VMId $script:VMId -Path (Join-Path $root 'bounded.png')
     Assert-True ($capture.Width -eq 1280 -and $capture.Height -eq 720) 'Large console resolution did not respect exact output bounds/aspect ratio.'
@@ -204,9 +244,20 @@ try {
         -Records $records -Errors $captureErrors
     Assert-True ($record.Status -eq 'Error' -and $records.Count -eq 3 -and $captureErrors.Count -eq 1) `
         'Console failure was not retained as explicit partial evidence.'
+    Reset-CaptureFixture
+    $script:BadLength = $true
+    $record = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $root -Stage RawFailure `
+        -Records $records -Errors $captureErrors
+    Assert-True ($record.Status -eq 'Error' -and $records.Count -eq 4 -and $captureErrors.Count -eq 2 -and
+        $record.RawPath -eq 'Console-RawFailure.rgb565.bin' -and
+        $record.RawMetadataPath -eq 'Console-RawFailure.rgb565.json' -and
+        $record.Width -eq 2 -and $record.Height -eq 2 -and
+        (Test-Path -LiteralPath (Join-Path $root $record.RawPath)) -and
+        (Test-Path -LiteralPath (Join-Path $root $record.RawMetadataPath))) `
+        'The archive wrapper lost bounded raw-frame evidence or reported a decoding failure as capture success.'
     $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Common.VmConsoleScreenshot.ps1') -Raw
     Assert-True ($source -notmatch 'CopyFromScreen|Start-VM|Stop-VM|Restart-VM|Save-VM|Debug-VM') `
         'Console capture can access the host desktop or change guest power state.'
 }
 finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop }
-Write-Host 'PASS -- raw/validated big-endian RGB565 colors/stride, observed frame sizes, exact VM targeting, bounded capture, pixel-only black detection, and malformed-frame rejection.'
+Write-Host 'PASS -- raw/validated big-endian RGB565 colors/stride, observed frame sizes, exact VM targeting, bounded capture, pixel-only black detection, and malformed-frame rejection/preservation.'

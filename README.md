@@ -330,6 +330,9 @@ the buffer and the remaining bytes exactly match the requested pixel dimensions.
 Layout, source-byte count, and prefix size are recorded; black-frame detection
 examines only pixels. Unknown/truncated/mismatched buffers remain explicit errors,
 with dimensions and first/last DWORDs rather than blindly trimming extra bytes.
+On decoding failures, buffers up to 16 MiB + 64 KiB are preserved unchanged as
+`.rgb565.bin` with a `.rgb565.json` dimensions/error sidecar in the protected
+evidence directory. These are diagnostic data, not successful screenshots.
 The same bounded, resolution-capped capture helper is used by
 `vmbuild\tools\Save-VmConsoleScreenshot.ps1`.
 
@@ -399,7 +402,20 @@ inspection. No hive is mounted into the host registry. This supports OS hives
 with different key security descriptors, which `RegLoadAppKey` does not.
 Selected first-logon animation, autologon-progress, and user-OOBE settings are
 also collected; Winlogon passwords and full unattend files remain excluded.
-The manifest identifies this implementation as `CollectorVersion=3` and
+`AppxPrerequisiteInventory.json` adds read-only Runtime 2, Start Experiences, and
+selected system OOBE/shell package-folder checks, manifest identities, and declared
+framework dependencies. AppReadiness event 319 Runtime 2 package IDs are checked
+against their exact expected manifest paths, retaining event timestamps so
+inherited reference-image events can be distinguished from fresh failures.
+Reads are limited to 64 matching folders per location, 1 MiB per manifest, and
+128 dependencies per manifest; reparse points and XML DTDs are rejected.
+This inventory does not export manifests, per-user registration databases, or
+user profiles, and it does not change packages or permissions. It is not a DISM
+provisioned-package inventory or proof that a missing old version caused the
+stall: a newer installed version can make an old preregistration entry stale.
+Inventory read/parse failures are explicit partial evidence, while absent folders
+and manifests are recorded as observations.
+The manifest identifies this implementation as `CollectorVersion=4` and
 `RegistryReader=offreg.dll`.
 An unavailable library or unreadable copy is reported as a collection error,
 not proof of guest registry corruption. Console images and logs can contain

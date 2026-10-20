@@ -212,6 +212,136 @@ try {
     foreach ($log in @('Setup', 'System', 'Application', 'Microsoft-Windows-DSC%4Operational')) {
         [IO.File]::WriteAllText((Join-Path $windows "System32\winevt\Logs\$log.evtx"), 'event fixture')
     }
+    $runtimeId = 'Microsoft.WindowsAppRuntime.2_2.5.1.0_x64__8wekyb3d8bbwe'
+    $oldRuntimeId = 'Microsoft.WindowsAppRuntime.2_2.2.0.0_x64__8wekyb3d8bbwe'
+    $runtimeFolder = Join-Path $script:GuestRoot "Program Files\WindowsApps\$runtimeId"
+    $oobeFolder = Join-Path $windows 'SystemApps\MicrosoftWindows.Client.OOBE_cw5n1h2txyewy'
+    $privateAppFolder = Join-Path $script:GuestRoot 'Program Files\WindowsApps\Private.CompanyApp_1.0.0.0_x64__private'
+    $appxBundle = Join-Path $testRoot 'appx-evidence'
+    $null = New-Item -Path $runtimeFolder, $oobeFolder, $privateAppFolder, $appxBundle -ItemType Directory -Force
+    $runtimeManifest = Join-Path $runtimeFolder 'AppxManifest.xml'
+    $runtimeXml = '<Package xmlns="urn:test:appx"><Identity Name="Microsoft.WindowsAppRuntime.2" Version="2.5.1.0" ProcessorArchitecture="x64"/><Properties><Description>RAW-SECRET-MUST-NOT-BE-ARCHIVED</Description></Properties></Package>'
+    [IO.File]::WriteAllText($runtimeManifest, $runtimeXml)
+    [IO.File]::WriteAllText((Join-Path $privateAppFolder 'AppxManifest.xml'), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
+    $oobeManifest = Join-Path $oobeFolder 'AppxManifest.xml'
+    $oobeXml = '<Package xmlns="urn:test:appx" xmlns:p="urn:test:dependencies"><Identity Name="MicrosoftWindows.Client.OOBE" Version="1.0.0.0" ProcessorArchitecture="x64"/><Dependencies><p:PackageDependency Name="Microsoft.WindowsAppRuntime.2" MinVersion="2.2.0.0" Publisher="CN=Microsoft"/><p:MainPackageDependency Name="Microsoft.Other" MinVersion="1.0.0.0"/></Dependencies></Package>'
+    [IO.File]::WriteAllText($oobeManifest, $oobeXml)
+    $eventXml = "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><EventData><Data Name='PackageId'>$oldRuntimeId</Data><Data Name='Result'>-2147024894</Data></EventData></Event>"
+    $eventJson = ConvertTo-Json -InputObject @(
+        [pscustomobject]@{ Id = 319; TimeCreated = '2026-10-20T16:53:16Z'; Xml = $eventXml },
+        [pscustomobject]@{ Id = 319; TimeCreated = '2026-10-05T16:53:16Z'; Xml = $eventXml }
+    )
+    $appxEvents = Join-Path $appxBundle 'AppReadiness-events.json'
+    [IO.File]::WriteAllText($appxEvents, $eventJson)
+    $runtimeHash = (Get-FileHash -LiteralPath $runtimeManifest -Algorithm SHA256).Hash
+    $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $windows -Bundle $appxBundle
+    $runtimePackage = @($inventory.Packages | Where-Object Name -eq 'Microsoft.WindowsAppRuntime.2')[0]
+    $oobePackage = @($inventory.Packages | Where-Object Name -eq 'MicrosoftWindows.Client.OOBE')[0]
+    Assert-True ($inventory.Errors.Count -eq 0 -and $inventory.Packages.Count -eq 2 -and
+        $runtimePackage.Version -eq '2.5.1.0' -and $runtimePackage.Architecture -eq 'x64' -and
+        $runtimePackage.ManifestPresent -and $oobePackage.Dependencies.Count -eq 2 -and
+        $oobePackage.Dependencies[0].Name -eq 'Microsoft.WindowsAppRuntime.2' -and
+        $oobePackage.Dependencies[0].MinVersion -eq '2.2.0.0' -and
+        $oobePackage.Dependencies[1].Type -eq 'MainPackageDependency' -and
+        $inventory.FailedRuntimePreregistration.Count -eq 2 -and
+        @($inventory.FailedRuntimePreregistration | Where-Object ManifestPresent).Count -eq 0 -and
+        ([DateTimeOffset]$inventory.FailedRuntimePreregistration[0].EventTime).UtcDateTime -eq ([DateTimeOffset]'2026-10-20T16:53:16Z').UtcDateTime -and
+        ([DateTimeOffset]$inventory.FailedRuntimePreregistration[1].EventTime).UtcDateTime -eq ([DateTimeOffset]'2026-10-05T16:53:16Z').UtcDateTime -and
+        ($inventory | ConvertTo-Json -Depth 8) -notmatch 'RAW-SECRET|Private.CompanyApp' -and
+        (Get-FileHash -LiteralPath $runtimeManifest -Algorithm SHA256).Hash -eq $runtimeHash) `
+        'Read-only AppX evidence lost exact missing paths, manifest identities/dependencies, event dates, or privacy.'
+    $oldRuntimeFolder = Join-Path $script:GuestRoot "Program Files\WindowsApps\$oldRuntimeId"
+    $null = New-Item -Path $oldRuntimeFolder -ItemType Directory
+    $oldRuntimeManifest = Join-Path $oldRuntimeFolder 'AppxManifest.xml'
+    [IO.File]::WriteAllText($oldRuntimeManifest, $runtimeXml.Replace('2.5.1.0', '2.2.0.0'))
+    $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $windows -Bundle $appxBundle
+    Assert-True ($inventory.Errors.Count -eq 0 -and
+        @($inventory.FailedRuntimePreregistration | Where-Object ManifestPresent).Count -eq 2) `
+        'An existing exact preregistration manifest was incorrectly reported missing.'
+    [IO.File]::Delete($oldRuntimeManifest)
+    foreach ($invalidXml in @('<Package>', '<Package><Identity Name="NoVersion"/></Package>',
+            '<!DOCTYPE Package [<!ENTITY hidden "RAW-SECRET-MUST-NOT-BE-ARCHIVED">]><Package>&hidden;</Package>',
+            (' ' * (1MB + 1)),
+            ('<Package><Identity Name="ManyDependencies" Version="1.0.0.0"/><Dependencies>' +
+                ('<PackageDependency Name="Framework" MinVersion="1.0.0.0"/>' * 129) + '</Dependencies></Package>'))) {
+        try {
+            [IO.File]::WriteAllText($oobeManifest, $invalidXml)
+            $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $windows -Bundle $appxBundle
+            Assert-True ($inventory.Errors.Count -eq 1 -and
+                @($inventory.Packages | Where-Object { $_.Name -eq 'Microsoft.WindowsAppRuntime.2' -and $_.Version -eq '2.5.1.0' }).Count -eq 1 -and
+                @($inventory.Packages | Where-Object Error).Count -eq 1) `
+                'An invalid, oversized, or DTD-bearing manifest hid its error or discarded another package.'
+        }
+        finally { [IO.File]::WriteAllText($oobeManifest, $oobeXml) }
+    }
+    foreach ($boundaryXml in @(
+            ($oobeXml + (' ' * (1MB - [Text.Encoding]::UTF8.GetByteCount($oobeXml)))),
+            ('<Package><Identity Name="DependencyBoundary" Version="1.0.0.0"/><Dependencies>' +
+                ('<PackageDependency Name="Framework" MinVersion="1.0.0.0"/>' * 128) + '</Dependencies></Package>'))) {
+        try {
+            [IO.File]::WriteAllText($oobeManifest, $boundaryXml)
+            $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $windows -Bundle $appxBundle
+            Assert-True ($inventory.Errors.Count -eq 0 -and $inventory.Packages.Count -eq 3) `
+                'A manifest exactly at its byte or dependency limit was incorrectly rejected.'
+        }
+        finally { [IO.File]::WriteAllText($oobeManifest, $oobeXml) }
+    }
+    foreach ($badEvents in @('{broken', '[{"Id":319,"Xml":"<Event>"}]',
+            '[{"Id":319,"Xml":"<!DOCTYPE Event><Event/>"}]',
+            ('[{"Id":319,"Xml":"<Event><Data Name=\"PackageId\">Microsoft.WindowsAppRuntime.2_..\\escape</Data></Event>"}]'))) {
+        try {
+            [IO.File]::WriteAllText($appxEvents, $badEvents)
+            $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $windows -Bundle $appxBundle
+            Assert-True ($inventory.Errors.Count -eq 1 -and $inventory.Packages.Count -eq 3) `
+                'Malformed package-event data became clean evidence or prevented independent folder checks.'
+        }
+        finally { [IO.File]::WriteAllText($appxEvents, $eventJson) }
+    }
+    foreach ($eventCount in @(80, 81)) {
+        try {
+            $eventRecords = @(foreach ($number in 1..$eventCount) {
+                    [pscustomobject]@{ Id = 319; TimeCreated = '2026-10-20T16:53:16Z'; Xml = $eventXml }
+                })
+            [IO.File]::WriteAllText($appxEvents, (ConvertTo-Json -InputObject $eventRecords))
+            $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $windows -Bundle $appxBundle
+            if ($eventCount -eq 80) {
+                Assert-True ($inventory.Errors.Count -eq 0 -and $inventory.FailedRuntimePreregistration.Count -eq 80) `
+                    'An 80-record package summary was rejected or treated as a nested array.'
+            }
+            else {
+                Assert-True ($inventory.Errors.Count -eq 1 -and ($inventory.Errors -join ' ') -match '80-record' -and
+                    $inventory.FailedRuntimePreregistration.Count -eq 0) 'The package-event summary exceeded its exact record bound.'
+            }
+        }
+        finally { [IO.File]::WriteAllText($appxEvents, $eventJson) }
+    }
+    foreach ($badRelativePath in @('..\outside', '.\Windows', 'C:\Windows')) {
+        $failure = $null
+        try { $null = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $windows -RelativePath $badRelativePath }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -match 'relative.*traversal') 'Offline package metadata can escape its mounted-volume root.'
+    }
+    $packageJunction = Join-Path $script:GuestRoot 'Program Files\WindowsApps\Microsoft.WindowsAppRuntime.2_9.0.0.0_x64__8wekyb3d8bbwe'
+    $null = New-Item -Path $packageJunction -ItemType Junction -Target $privateAppFolder
+    try {
+        $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $windows -Bundle $appxBundle
+        Assert-True ($inventory.Errors.Count -eq 1 -and ($inventory.Errors -join ' ') -match 'reparse' -and
+            ($inventory | ConvertTo-Json -Depth 8) -notmatch 'RAW-SECRET') 'Package inventory followed a reparse point.'
+    }
+    finally { [IO.Directory]::Delete($packageJunction) }
+    $limitRoot = Join-Path $testRoot 'package-limit'
+    $limitWindows = Join-Path $limitRoot 'Windows'
+    $null = New-Item -Path $limitWindows -ItemType Directory
+    foreach ($number in 1..64) {
+        $null = New-Item -Path (Join-Path $limitRoot "Program Files\WindowsApps\Microsoft.WindowsAppRuntime.2_2.5.1.$number`_x64__8wekyb3d8bbwe") -ItemType Directory -Force
+    }
+    $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $limitWindows -Bundle $appxBundle
+    Assert-True ($inventory.Errors.Count -eq 0 -and $inventory.Packages.Count -eq 64) `
+        'The exact 64-folder inventory limit was incorrectly rejected.'
+    $null = New-Item -Path (Join-Path $limitRoot 'Program Files\WindowsApps\Microsoft.WindowsAppRuntime.2_2.5.1.65_x64__8wekyb3d8bbwe') -ItemType Directory
+    $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $limitWindows -Bundle $appxBundle
+    Assert-True ($inventory.Errors.Count -eq 1 -and ($inventory.Errors -join ' ') -match 'Too many matching' -and
+        $inventory.Packages.Count -eq 0) 'Offline package enumeration exceeded its fixed folder bound.'
     $script:Protected = [Collections.Generic.List[string]]::new()
     function New-MemLabsPrivateDiagnosticDirectory {
         param($Path)
@@ -276,8 +406,18 @@ try {
         $script:ConsoleStates.Add($script:VmState)
         $record = [pscustomobject]@{ Status = 'UnavailableNotRunning'; Path = "Console-$Stage.png" }
         if ($script:VmState -eq 'Running') {
-            $record.Status = 'Captured'
-            [IO.File]::WriteAllBytes((Join-Path $Bundle $record.Path), [byte[]]@(137, 80, 78, 71))
+            if ($script:ConsoleBadFrame) {
+                $record.Status = 'Error'
+                $record | Add-Member -NotePropertyName RawPath -NotePropertyValue "Console-$Stage.rgb565.bin"
+                $record | Add-Member -NotePropertyName RawMetadataPath -NotePropertyValue "Console-$Stage.rgb565.json"
+                [IO.File]::WriteAllBytes((Join-Path $Bundle $record.RawPath), [byte[]]@(1, 2, 3))
+                [IO.File]::WriteAllText((Join-Path $Bundle $record.RawMetadataPath), '{"BytesDiscarded":0}')
+                $Errors.Add('Synthetic malformed console frame; raw bytes preserved.')
+            }
+            else {
+                $record.Status = 'Captured'
+                [IO.File]::WriteAllBytes((Join-Path $Bundle $record.Path), [byte[]]@(137, 80, 78, 71))
+            }
         }
         $Records.Add($record)
         return $record
@@ -397,6 +537,7 @@ try {
         $script:FailedModule = ''; $script:MissingCommand = ''
         $script:DependenciesReady = $false; $script:ModuleCycleStart = 0; $script:CommandCycleStart = 0
         $script:ConsoleStates = [Collections.Generic.List[string]]::new()
+        $script:ConsoleBadFrame = $false
     }
     $parameters = @{ VmName = 'BROKEN-W11'; Destination = (Join-Path $testRoot 'output'); StopTimeoutSeconds = 5; Confirm = $false }
     Reset-Fixture
@@ -409,8 +550,9 @@ try {
         'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
-    Assert-True ($manifestRecord.CollectorVersion -eq 3 -and $manifestRecord.RegistryReader -eq 'offreg.dll') `
-        'The archive does not identify the corrected offline registry reader.'
+    Assert-True ($manifestRecord.CollectorVersion -eq 4 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
+        @($manifestRecord.Files | Where-Object Path -eq 'AppxPrerequisiteInventory.json').Count -eq 1) `
+        'The archive does not identify the corrected registry reader and package-inventory collector.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'
     $zip = [IO.Compression.ZipFile]::OpenRead($report.ArchivePath)
     try {
@@ -423,6 +565,24 @@ try {
         }
     }
     finally { $zip.Dispose() }
+
+    Reset-Fixture
+    $script:ConsoleBadFrame = $true
+    $rawReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
+    $rawBundle = Join-Path (Split-Path $rawReport.ArchivePath -Parent) 'Bundle'
+    $rawManifest = Get-Content -LiteralPath (Join-Path $rawBundle 'Manifest.json') -Raw | ConvertFrom-Json
+    $rawZip = [IO.Compression.ZipFile]::OpenRead($rawReport.ArchivePath)
+    try {
+        Assert-True ($rawReport.Status -eq 'Partial' -and
+            @($rawManifest.Files | Where-Object Kind -eq 'RawConsoleFramebuffer').Count -eq 1 -and
+            @($rawManifest.Files | Where-Object Kind -eq 'RawConsoleMetadata').Count -eq 1 -and
+            @($rawZip.Entries | Where-Object FullName -eq 'Console-BeforeStop.rgb565.bin').Count -eq 1 -and
+            @($rawZip.Entries | Where-Object FullName -eq 'Console-BeforeStop.rgb565.json').Count -eq 1 -and
+            -not (Test-Path -LiteralPath (Join-Path $rawBundle 'Console-BeforeStop.png')) -and
+            (Test-Path -LiteralPath (Join-Path $rawBundle 'WindowsSetupState.json'))) `
+            'A malformed console frame lost raw archive evidence, claimed a PNG, or prevented offline setup collection.'
+    }
+    finally { $rawZip.Dispose() }
 
     foreach ($moduleName in @('Hyper-V', 'Storage', 'Microsoft.PowerShell.Diagnostics', 'Microsoft.PowerShell.Archive', 'CimCmdlets')) {
         Reset-Fixture
@@ -720,7 +880,7 @@ try {
     $savedSourceResolver = ${function:Get-MemLabsOfflineSetupSourcePath}
     try {
         function Get-MemLabsOfflineSetupSourcePath {
-            param($WindowsRoot, $RelativePath)
+            param($WindowsRoot, $RelativePath, [switch]$AllowDirectory)
             if ($RelativePath.EndsWith('.evtx')) { return "$WindowsRoot\$RelativePath" }
         }
         Reset-Fixture
@@ -734,7 +894,7 @@ try {
         }
         Copy-MemLabsWindowsSetupEvidence -WindowsRoot '\\?\Volume{11111111-1111-1111-1111-111111111111}\Windows' `
             -Bundle $volumeBundle -PrivateRoot $aclPath -Manifest $volumeManifest
-        Assert-True ($volumeManifest.Files.Count -eq 8 -and $volumeManifest.Errors.Count -eq 2 -and
+        Assert-True ($volumeManifest.Files.Count -eq 9 -and $volumeManifest.Errors.Count -eq 2 -and
             ($volumeManifest.Errors -join ' ') -notmatch 'wildcard') 'Literal volume-GUID event paths failed their production evidence pipeline.'
     }
     finally { Set-Item -Path Function:\Get-MemLabsOfflineSetupSourcePath -Value $savedSourceResolver }
@@ -743,4 +903,4 @@ finally {
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop
 }
 
-Write-Host 'PASS -- offline setup collection preflights host dependencies, scopes power changes, enforces read-only mounts, cleans owned resources, and excludes raw hives and unattend files.'
+Write-Host 'PASS -- offline setup collection preflights dependencies, scopes power changes/read-only mounts, preserves malformed frames, inventories bounded package evidence, cleans owned resources, and excludes raw hives/unattend/manifests.'

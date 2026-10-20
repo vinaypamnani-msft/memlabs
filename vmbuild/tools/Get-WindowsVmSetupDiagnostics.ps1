@@ -152,6 +152,11 @@ function Add-MemLabsSetupConsoleScreenshot {
     }
     catch {
         $record.Status = 'Error'; $record.Error = $_.Exception.Message
+        if ($_.Exception.Data['ConsoleRawPath']) {
+            $record['RawPath'] = [IO.Path]::GetFileName($_.Exception.Data['ConsoleRawPath'])
+            $record['RawMetadataPath'] = [IO.Path]::GetFileName($_.Exception.Data['ConsoleRawMetadataPath'])
+            $record.Width = $_.Exception.Data['ConsoleWidth']; $record.Height = $_.Exception.Data['ConsoleHeight']
+        }
         $Errors.Add("Console capture ($Stage) failed: $($_.Exception.Message)")
         Write-Warning "$($VM.Name): console capture ($Stage) failed: $($_.Exception.Message)"
     }
@@ -356,20 +361,137 @@ function Read-MemLabsOfflineWindowsSetupHive {
 function Get-MemLabsOfflineSetupSourcePath {
     param(
         [Parameter(Mandatory)][string]$WindowsRoot,
-        [Parameter(Mandatory)][string]$RelativePath
+        [Parameter(Mandatory)][string]$RelativePath,
+        [switch]$AllowDirectory
     )
 
+    if ([IO.Path]::IsPathRooted($RelativePath) -or
+        @($RelativePath.Split('\') | Where-Object { $_ -in @('.', '..') }).Count) {
+        throw 'Offline evidence paths must be relative and must not contain traversal segments.'
+    }
     $path = $WindowsRoot
     foreach ($part in (@('') + $RelativePath.Split('\'))) {
         if ($part) { $path = Join-Path $path $part }
         try { $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop }
         catch [Management.Automation.ItemNotFoundException] { return }
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw "Refusing reparse point '$path'; offline evidence must remain inside the mounted Windows directory."
+            throw "Refusing reparse point '$path'; offline evidence must remain inside the mounted Windows volume."
         }
     }
-    if ($item.PSIsContainer) { throw "Expected an evidence file, not a directory: '$path'." }
+    if ($item.PSIsContainer -and -not $AllowDirectory) { throw "Expected an evidence file, not a directory: '$path'." }
+    if (-not $item.PSIsContainer -and $AllowDirectory) { throw "Expected an evidence directory, not a file: '$path'." }
     return $path
+}
+
+function Get-MemLabsOfflineAppxInventory {
+    param(
+        [Parameter(Mandatory)][string]$WindowsRoot,
+        [Parameter(Mandatory)][string]$Bundle
+    )
+
+    $volumeRoot = [IO.DirectoryInfo]::new($WindowsRoot).Parent.FullName
+    $packages = [Collections.Generic.List[object]]::new()
+    $missing = [Collections.Generic.List[string]]::new()
+    $errors = [Collections.Generic.List[string]]::new()
+    $failedPackages = [Collections.Generic.List[object]]::new()
+    $settings = [Xml.XmlReaderSettings]::new()
+    $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $settings.MaxCharactersInDocument = 1MB
+    $eventPath = Join-Path $Bundle 'AppReadiness-events.json'
+    if ([IO.File]::Exists($eventPath)) {
+        try {
+            $records = Get-Content -LiteralPath $eventPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if (@($records).Count -gt 80) { throw 'The AppReadiness summary exceeds its 80-record diagnostic limit.' }
+            foreach ($record in $records) {
+                if ($record.Id -ne 319) { continue }
+                try {
+                    $textReader = [IO.StringReader]::new($record.Xml)
+                    $reader = $null
+                    try {
+                        $reader = [Xml.XmlReader]::Create($textReader, $settings)
+                        $document = [xml]::new()
+                        $document.XmlResolver = $null
+                        $document.Load($reader)
+                    }
+                    finally { if ($reader) { $reader.Dispose() }; $textReader.Dispose() }
+                    $packageNode = @($document.GetElementsByTagName('Data') | Where-Object { $_.GetAttribute('Name') -eq 'PackageId' })
+                    if ($packageNode.Count -ne 1) { throw 'The failed-preregistration event has no unique PackageId.' }
+                    if (-not $packageNode[0].InnerText.StartsWith('Microsoft.WindowsAppRuntime.2_', [StringComparison]::OrdinalIgnoreCase)) { continue }
+                    if ($packageNode[0].InnerText -notmatch '^Microsoft\.WindowsAppRuntime\.2_(?:[0-9]+\.){3}[0-9]+_(?:x64|x86|arm64)__8wekyb3d8bbwe$') {
+                        throw 'The failed-preregistration event has an invalid Runtime 2 package identity.'
+                    }
+                    $relative = "Program Files\WindowsApps\$($packageNode[0].InnerText)\AppxManifest.xml"
+                    $manifestPath = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath $relative
+                    $failedPackages.Add([pscustomobject]@{
+                        PackageId = $packageNode[0].InnerText; EventTime = $record.TimeCreated
+                        ExpectedManifest = $relative; ManifestPresent = [bool]$manifestPath
+                    })
+                }
+                catch { $errors.Add("Inspect AppReadiness event 319 at '$($record.TimeCreated)': $($_.Exception.Message)") }
+            }
+        }
+        catch { $errors.Add("Read AppReadiness package evidence: $($_.Exception.Message)") }
+    }
+    foreach ($location in @(
+            @{ Path = 'Program Files\WindowsApps'; Prefixes = @('Microsoft.WindowsAppRuntime.2_', 'Microsoft.StartExperiencesApp_') },
+            @{ Path = 'Windows\SystemApps'; Prefixes = @('MicrosoftWindows.Client.OOBE_', 'Microsoft.Windows.CloudExperienceHost_', 'MicrosoftWindows.Client.CBS_', 'Microsoft.Windows.StartMenuExperienceHost_') }
+        )) {
+        try {
+            $directory = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath $location.Path -AllowDirectory
+            if (-not $directory) { $missing.Add($location.Path); continue }
+            $folders = @(foreach ($prefix in $location.Prefixes) {
+                    Get-ChildItem -LiteralPath $directory -Filter "$prefix*" -Directory -Force -ErrorAction Stop |
+                        Select-Object -First 65
+                })
+            if ($folders.Count -gt 64) { throw "Too many matching package folders under $($location.Path)." }
+        }
+        catch { $errors.Add("Read package inventory under '$($location.Path)': $($_.Exception.Message)"); continue }
+        foreach ($folder in $folders | Sort-Object Name) {
+            $package = [ordered]@{
+                Folder = "$($location.Path)\$($folder.Name)"; ManifestPresent = $null
+                Name = $null; Version = $null; Architecture = $null; Dependencies = @(); Error = $null
+            }
+            try {
+                $relative = "$($location.Path)\$($folder.Name)\AppxManifest.xml"
+                $manifestPath = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath $relative
+                $package.ManifestPresent = [bool]$manifestPath
+                if ($manifestPath) {
+                    if ([IO.FileInfo]::new($manifestPath).Length -gt 1MB) { throw "Package manifest exceeds the 1 MiB diagnostic limit: $relative" }
+                    $reader = [Xml.XmlReader]::Create($manifestPath, $settings)
+                    try {
+                        $document = [xml]::new()
+                        $document.XmlResolver = $null
+                        $document.Load($reader)
+                    }
+                    finally { $reader.Dispose() }
+                    $identity = @($document.SelectNodes('/*[local-name()="Package"]/*[local-name()="Identity"]'))
+                    if ($identity.Count -ne 1) { throw "Package identity is missing/ambiguous: $relative" }
+                    if (-not $identity[0].GetAttribute('Name') -or -not $identity[0].GetAttribute('Version')) {
+                        throw "Package identity name/version is missing: $relative"
+                    }
+                    $package['Name'] = $identity[0].GetAttribute('Name')
+                    $package['Version'] = $identity[0].GetAttribute('Version')
+                    $package['Architecture'] = $identity[0].GetAttribute('ProcessorArchitecture')
+                    $dependencies = @($document.SelectNodes('/*[local-name()="Package"]/*[local-name()="Dependencies"]/*[local-name()="PackageDependency" or local-name()="MainPackageDependency"]'))
+                    if ($dependencies.Count -gt 128) { throw "Package dependency count exceeds the diagnostic limit: $relative" }
+                    $package['Dependencies'] = @($dependencies | ForEach-Object {
+                            [pscustomobject]@{ Type = $_.LocalName; Name = $_.GetAttribute('Name'); MinVersion = $_.GetAttribute('MinVersion'); Publisher = $_.GetAttribute('Publisher') }
+                        })
+                }
+            }
+            catch {
+                $package.Error = $_.Exception.Message
+                $errors.Add("Read package '$($package.Folder)': $($_.Exception.Message)")
+            }
+            $packages.Add([pscustomobject]$package)
+        }
+    }
+    [pscustomobject]@{
+        Version = 1; Purpose = 'Read-only package payload/dependency evidence, not a diagnosis of corruption'
+        FailedRuntimePreregistration = $failedPackages.ToArray()
+        Packages = $packages.ToArray(); MissingDirectories = $missing.ToArray(); Errors = $errors.ToArray()
+    }
 }
 
 function Copy-MemLabsWindowsSetupEvidence {
@@ -495,6 +617,11 @@ function Copy-MemLabsWindowsSetupEvidence {
             else { $Manifest.Errors.Add("Read offline $log events: $($_.Exception.Message)") }
         }
     }
+    $inventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $WindowsRoot -Bundle $Bundle
+    $inventory | ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath (Join-Path $Bundle 'AppxPrerequisiteInventory.json') -Encoding UTF8 -ErrorAction Stop
+    $Manifest.Files.Add([ordered]@{ Path = 'AppxPrerequisiteInventory.json'; Truncated = $false })
+    foreach ($errorMessage in $inventory.Errors) { $Manifest.Errors.Add($errorMessage) }
 }
 
 function Invoke-MemLabsWindowsSetupDiagnostics {
@@ -523,7 +650,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $privateRoot = Join-Path $collectionRoot 'PrivateState'
     $null = New-Item -Path $bundle, $privateRoot -ItemType Directory
     $manifest = @{
-        SchemaVersion = 1; CollectorVersion = 3; RegistryReader = 'offreg.dll'
+        SchemaVersion = 1; CollectorVersion = 4; RegistryReader = 'offreg.dll'
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Host = $env:COMPUTERNAME; VMName = $vm.Name; VMId = "$($vm.Id)"
         OriginalState = "$($vm.State)"; FinalState = ''; Status = 'Collecting'
@@ -541,6 +668,10 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
         $console = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage BeforeStop `
             -Records $manifest.Screenshots -Errors $manifest.Errors
         if ($console.Status -eq 'Captured') { $manifest.Files.Add([ordered]@{ Path = $console.Path; Truncated = $false; Kind = 'ConsoleScreenshot' }) }
+        if ($console.PSObject.Properties['RawPath']) {
+            $manifest.Files.Add([ordered]@{ Path = $console.RawPath; Truncated = $false; Kind = 'RawConsoleFramebuffer' })
+            $manifest.Files.Add([ordered]@{ Path = $console.RawMetadataPath; Truncated = $false; Kind = 'RawConsoleMetadata' })
+        }
         $manifest.ShutdownMode = Stop-MemLabsVmForSetupDiagnostics -VM $vm -TimeoutSeconds $StopTimeoutSeconds -AllowTurnOff:$AllowTurnOff
         $vm = Get-VM -Id $vm.Id -ErrorAction Stop
         $drives = @(Get-VMHardDiskDrive -VM $vm -ErrorAction Stop | Sort-Object ControllerNumber, ControllerLocation)

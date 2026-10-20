@@ -118,8 +118,36 @@ function Save-MemLabsVmConsoleScreenshot {
         -OperationTimeoutSec 10 -ErrorAction Stop
     if ($response.ReturnValue -ne 0) { throw "Hyper-V console capture failed with ReturnValue=$($response.ReturnValue)." }
     $bytes = [byte[]]$response.ImageData
-    $frame = Get-MemLabsVmConsoleFrameLayout -ImageData $bytes -Width $width -Height $height
-    Convert-MemLabsVmConsoleImage -ImageData $bytes -Width $width -Height $height -Path $Path
+    try {
+        $frame = Get-MemLabsVmConsoleFrameLayout -ImageData $bytes -Width $width -Height $height
+        Convert-MemLabsVmConsoleImage -ImageData $bytes -Width $width -Height $height -Path $Path
+    }
+    catch {
+        $conversionError = $_
+        if ($null -ne $bytes -and $bytes.Length -le 16MB + 64KB) {
+            $rawPath = [IO.Path]::ChangeExtension($Path, '.rgb565.bin')
+            $metadataPath = [IO.Path]::ChangeExtension($Path, '.rgb565.json')
+            $first = if ($bytes.Length -ge 4) { '0x{0:X8}' -f [BitConverter]::ToUInt32($bytes, 0) } else { '<unavailable>' }
+            $last = if ($bytes.Length -ge 4) { '0x{0:X8}' -f [BitConverter]::ToUInt32($bytes, $bytes.Length - 4) } else { '<unavailable>' }
+            [IO.File]::WriteAllBytes($rawPath, $bytes)
+            [ordered]@{
+                Version = 1; VMId = $system.Name; Width = $width; Height = $height; Format = 'RGB565'
+                ActualBytes = $bytes.Length; ExpectedPackedBytes = [long]$width * $height * 2
+                FirstDword = $first; LastDword = $last; BytesDiscarded = 0
+                ConversionError = $conversionError.Exception.Message
+            } | ConvertTo-Json -Depth 3 |
+                Set-Content -LiteralPath $metadataPath -Encoding UTF8 -ErrorAction Stop
+            $failure = [IO.InvalidDataException]::new(
+                "$($conversionError.Exception.Message) Raw framebuffer and dimensions were preserved; no bytes were discarded.",
+                $conversionError.Exception)
+            $failure.Data['ConsoleRawPath'] = $rawPath
+            $failure.Data['ConsoleRawMetadataPath'] = $metadataPath
+            $failure.Data['ConsoleWidth'] = $width
+            $failure.Data['ConsoleHeight'] = $height
+            throw $failure
+        }
+        throw
+    }
     $nonzero = 0
     for ($index = $frame.PrefixBytes; $index -lt $bytes.Length; $index++) {
         if ($bytes[$index] -ne 0) { $nonzero++; if ($nonzero -gt 64) { break } }
