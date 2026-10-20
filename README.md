@@ -196,14 +196,17 @@ the gate itself never reboots, deletes, rejoins, or changes setup registry value
 The legacy machine-OOBE wait cannot bypass this additional client gate.
 
 Phase 2 adds read-only backstops before client rename and domain join, including
-workgroup-client rename. Servers do not require the native client gate;
+workgroup-client rename. Domain controllers and member servers pass immediately
+after OS classification without client setup-registry or native OOBE checks;
 intentional AAD OOBE, PXE/OSD, Linux, and migration preparation retain their
 existing behavior. Domain-member rename verification reads the active registry
 name, recognizes an already-staged pending rename, and requests a reboot only
 after verifying the pending name. Failed or ignored rename writes fail explicitly.
 
 Validate with `vmbuild\tools\Test-WindowsClientSetupReadiness.ps1` plus the existing
-resume, OSD/PXE, and base-image staging regressions.
+resume, OSD/PXE, and base-image staging regressions. The readiness regression uses
+real background jobs to verify that the guest-command wrapper returns exactly one
+result envelope, preserving client/server setup state and guest failure diagnostics.
 
 ### Windows setup failure diagnostics
 

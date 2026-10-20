@@ -8061,7 +8061,7 @@ function Invoke-VmCommand {
                         }
                     }
                     else {
-                        $job | Wait-Job -Timeout $TimeoutSeconds
+                        $job | Wait-Job -Timeout $TimeoutSeconds | Out-Null
                     }
                     if ($job.State -eq "Completed") {
                         # Read the child's error stream BEFORE Receive-Job drains it.

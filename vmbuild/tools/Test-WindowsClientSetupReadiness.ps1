@@ -194,6 +194,70 @@ foreach ($variant in @('Pending', 'StringReady', 'MissingFlag', 'StringFlag', 'I
     finally { Set-StrictMode -Off }
 }
 
+& {
+    $invokeDefinition = $commonAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-VmCommand'
+        }, $true)
+    . ([scriptblock]::Create($invokeDefinition.Extent.Text))
+    Set-Variable -Name Common -Value @{ LocalAdmin = [pscredential]::Empty }
+    $jobIds = [Collections.Generic.List[guid]]::new()
+    function Get-VmSession { [pscustomobject]@{ Runspace = $null } }
+    function Enter-VmSessionInflight {}
+    function Exit-VmSessionInflight {}
+    function Write-VmJobLedger {}
+    function Remove-VmSessionFromCache {}
+    function Invoke-Command {
+        [CmdletBinding()]
+        param($Session, [scriptblock]$ScriptBlock, [switch]$AsJob)
+        Assert-True ($Session -and $AsJob -and $ScriptBlock.ToString().Contains('Get-MemLabsWindowsClientSetupState')) `
+            'The real command wrapper did not dispatch the asynchronous setup probe.'
+        $job = Start-Job -ScriptBlock {
+            param($State, $Fail)
+            if ($Fail) { throw 'Synthetic setup probe failure' }
+            $State
+        } -ArgumentList $guestState, $guestFailure
+        $jobIds.Add($job.InstanceId)
+        return $job
+    }
+
+    try {
+        foreach ($scenario in @('Client', 'DomainController', 'MemberServer', 'GuestFailure')) {
+            Reset-SetupFixture
+            $script:ProductType = switch ($scenario) {
+                'DomainController' { 2 }
+                'MemberServer' { 3 }
+                default { 1 }
+            }
+            $guestState = Get-MemLabsWindowsClientSetupState
+            $guestFailure = $scenario -eq 'GuestFailure'
+            $script:Messages.Clear()
+            $results = @(Invoke-VmCommand -VmName TEST-W11 -VmDomainName WORKGROUP -AsJob -SuppressLog `
+                    -TimeoutSeconds 30 -ScriptBlock (Get-MemLabsWindowsClientSetupStateBlock))
+            Assert-True ($results.Count -eq 1 -and $results[0].ScriptBlockFailed -is [bool]) `
+                "$scenario asynchronous command returned $($results.Count) output objects instead of one result envelope."
+            if ($guestFailure) {
+                Assert-True ($results[0].ScriptBlockFailed -and -not $results[0].CommandResult -and
+                    ($results[0].ErrorDetails -join ' ') -match 'Synthetic setup probe failure') `
+                    "The asynchronous command wrapper lost the guest failure or its diagnostic: $($results[0] | ConvertTo-Json -Compress)."
+            }
+            else {
+                Assert-True ($results[0].CommandResult -and -not $results[0].ScriptBlockFailed -and
+                    $results[0].ScriptBlockOutput.ProductType -eq $script:ProductType) `
+                    "$scenario asynchronous command lost its serialized setup state."
+                Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 30) `
+                    "$scenario was rejected when the readiness gate used the real asynchronous command wrapper."
+                Assert-True (($script:Messages -join ' ') -match 'gate passed') "$scenario passed without a readiness diagnostic."
+            }
+        }
+    }
+    finally {
+        foreach ($jobId in $jobIds) {
+            Get-Job -InstanceId $jobId -ErrorAction SilentlyContinue | Remove-Job -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 $blocksText = Get-Content -LiteralPath (Join-Path $root 'common\Common.ScriptBlocks.ps1') -Raw
 Assert-True ([regex]::Matches($blocksText, 'Wait-MemLabsWindowsClientSetup -VmName \$currentItem\.vmName').Count -eq 3) `
     'Fresh, retained, and post-resume-reboot paths do not all enforce client setup readiness.'
@@ -265,4 +329,4 @@ $commands = @($helperAst.FindAll({ param($node) $node -is [Management.Automation
 Assert-True (@($commands | Where-Object { $_ -match '^(Set-|New-Item|Restart-|Stop-|Rename-|Add-Computer|Reset-)' }).Count -eq 0) `
     'The shared setup probe can mutate guest state.'
 
-Write-Host 'PASS -- native/registry client readiness, fail-closed protocol, bounded retries, server exclusions, and fresh/resume/DSC wiring.'
+Write-Host 'PASS -- native/registry client readiness, real asynchronous command results, fail-closed protocol, bounded retries, server exclusions, and fresh/resume/DSC wiring.'
