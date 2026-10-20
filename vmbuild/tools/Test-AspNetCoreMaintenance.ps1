@@ -37,7 +37,8 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [r
 if (@($parseErrors).Count -gt 0) { throw "$SourceFile has parse errors: $parseErrors" }
 $wantedFunctions = @(
     'Get-InstalledAspNetCoreRuntime', 'Invoke-AspNetCoreInstaller', 'Invoke-AspNetCoreMaintenanceCore',
-    'Invoke-AspNetCoreMaintenance', 'ConvertTo-QuietUninstallCommand', 'Split-UninstallCommand', 'Test-ChocoSuccessCode'
+    'Invoke-AspNetCoreMaintenance', 'Get-InstalledAspNetCoreEntry', 'Get-SupersededAspNetCoreEntry', 'Remove-SupersededAspNetCoreRuntime',
+    'ConvertTo-QuietUninstallCommand', 'Split-UninstallCommand', 'Test-ChocoSuccessCode'
 )
 foreach ($name in $wantedFunctions) {
     $node = $ast.FindAll({
@@ -126,6 +127,8 @@ function Reset-Fixture {
     $script:MetadataFails = $false
     $script:LeaseAllowed = $true
     $script:Lease = $null
+    $script:EntryQueryFails = $false
+    $script:UninstallerUnregisters = $true
 }
 
 function Write-LogMessage {
@@ -164,8 +167,9 @@ function Get-AuthenticodeSignature {
 }
 
 function Get-InstalledEntry {
-    param ([string] $NameLike)
-    $script:Entries
+    param ([string] $NameLike, [switch] $Strict)
+    if ($script:EntryQueryFails) { throw 'simulated registry access denied' }
+    $script:Entries | Where-Object DisplayName -like $NameLike
 }
 
 function Stop-ProcessTree {
@@ -177,15 +181,30 @@ function Start-Process {
     [CmdletBinding()]
     param ([string] $FilePath, [string] $ArgumentList, [switch] $PassThru, [string] $WindowStyle)
     $script:Processes += [pscustomobject]@{ FilePath = $FilePath; Arguments = $ArgumentList }
-    if ($FilePath -notmatch 'aspnetcore-(?:runtime-)?(?<Version>\d+\.\d+\.\d+)-(?:win-)?(?<Architecture>x64|x86|arm64)') {
-        throw "Unexpected installer path '$FilePath'."
+    $uninstall = $ArgumentList -match '(?:^|\s)/(?:uninstall|x)(?:\s|$)'
+    if ([IO.Path]::GetFileName($FilePath) -ieq 'msiexec.exe') {
+        if ($ArgumentList -notmatch '/x\s+(?<ProductCode>\{[a-fA-F0-9-]{36}\})') { throw 'MSI removal must use an exact product GUID.' }
+        $productCode = $Matches.ProductCode
+        $uninstalling = @($script:Entries | Where-Object PSChildName -eq $productCode)
+        if ($uninstalling.Count -ne 1 -or $uninstalling[0].DisplayName -notmatch '(?<Version>\d+\.\d+\.\d+).*\((?<Architecture>x64|x86|arm64)\)') {
+            throw 'MSI fixture did not match a runtime product.'
+        }
+    }
+    else {
+        if ($FilePath -notmatch 'aspnetcore-(?:runtime-)?(?<Version>\d+\.\d+\.\d+)-(?:win-)?(?<Architecture>x64|x86|arm64)') {
+            throw "Unexpected installer path '$FilePath'."
+        }
+        $uninstalling = @($script:Entries | Where-Object { $_.QuietUninstallString -like "*$FilePath*" })
     }
     $version = $Matches.Version
     $architecture = $Matches.Architecture
     $path = Get-FixtureRuntimePath -Version $version -Architecture $architecture
-    if ($script:InstallerCompletes -and $script:InstallerExitCode -in @(0, 1641, 3010)) {
-        if ($ArgumentList -match '/uninstall') {
-            if ($script:UninstallerRemovesOld) { Remove-Item -LiteralPath $path -Recurse -Force }
+    if ($script:InstallerCompletes -and ($script:InstallerExitCode -in @(0, 1641, 3010) -or ($uninstall -and $script:InstallerExitCode -in @(1605, 1614)))) {
+        if ($uninstall) {
+            if ($script:UninstallerRemovesOld -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Recurse -Force }
+            if ($script:UninstallerUnregisters) {
+                $script:Entries = @($script:Entries | Where-Object { $uninstalling.PSChildName -notcontains $_.PSChildName })
+            }
             if ($script:UninstallerRemovesReplacement) {
                 Remove-Item -LiteralPath (Get-FixtureRuntimePath -Version '10.0.13' -Architecture $architecture) -Recurse -Force
             }
@@ -215,12 +234,14 @@ function Invoke-WithMemLabsRuntimeUpgradeLease {
 }
 
 function Set-FixtureStandaloneEntry {
-    param ([string] $Architecture = 'x64', [string] $Version = '10.0.8')
+    param ([string] $Architecture = 'x64', [string] $Version = '10.0.8', [switch] $Msi, [switch] $Hidden)
+    $productCode = [guid]::NewGuid().ToString('B')
     $script:Entries = @([pscustomobject]@{
             DisplayName = "Microsoft ASP.NET Core $Version - Shared Framework ($Architecture)"
-            SystemComponent = 0
-            WindowsInstaller = 0
-            QuietUninstallString = "`"C:\Package Cache\aspnetcore-runtime-$Version-win-$Architecture.exe`" /uninstall"
+            SystemComponent = [int]$Hidden.IsPresent
+            WindowsInstaller = [int]$Msi.IsPresent
+            PSChildName = $productCode
+            QuietUninstallString = $(if ($Msi) { "MsiExec.exe /X$productCode" } else { "`"C:\Package Cache\aspnetcore-runtime-$Version-win-$Architecture.exe`" /uninstall" })
         })
 }
 
@@ -239,6 +260,12 @@ try {
     Assert-Equal 0 $script:Processes.Count 'hosts without ASP.NET Core run no installers'
     Assert-Equal 'Global\MemLabsTestMutationLock' $script:Lease.Name 'servicing uses the existing host mutation lease'
     Assert-Equal 0 $script:Lease.Timeout 'servicing does not wait on an active test cycle'
+
+    Reset-Fixture
+    Set-FixtureStandaloneEntry -Msi -Hidden
+    Assert-Throws { Invoke-AspNetCoreMaintenance } 'missing runtime files cannot hide leftover runtime uninstall registrations'
+    Assert-Equal 0 $script:Downloads.Count 'leftover registrations without runtime files do not install ASP.NET'
+    Assert-Equal 0 $script:Processes.Count 'registration-only unknown patch state requires explicit repair rather than an assumed removal'
 
     Reset-Fixture
     Add-FixtureRuntime
@@ -281,11 +308,11 @@ try {
     Add-FixtureRuntime
     $script:LeaseAllowed = $false
     Invoke-AspNetCoreMaintenance
-    Assert-Equal 0 $script:MetadataCalls.Count 'an active test cycle defers servicing before network or mutation'
-    Assert-Equal 0 $script:Processes.Count 'an active test cycle cannot replace a live runtime'
-    Assert-Equal $true ($script:Logs[-1].Message -like '*deferred, not verified*') 'deferral does not claim remediation'
+    Assert-Equal $true ($script:MetadataCalls.Count -gt 0) 'an active test cycle does not defer security remediation'
+    Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) 'an active test cycle does not exempt an old vulnerable patch'
+    Assert-Equal $true (@($script:Logs | Where-Object Message -like '*will not be deferred*').Count -gt 0) 'overriding a held test lease is explicit'
 
-    foreach ($failure in @('metadata', 'hash', 'unsigned', 'publisher', 'exit', 'timeout', 'no-files', 'old-files', 'bad-url', 'bad-metadata')) {
+    foreach ($failure in @('metadata', 'hash', 'unsigned', 'publisher', 'exit', 'timeout', 'no-files', 'bad-url', 'bad-metadata')) {
         Reset-Fixture
         Add-FixtureRuntime
         switch ($failure) {
@@ -296,7 +323,6 @@ try {
             'exit' { $script:InstallerExitCode = 1603 }
             'timeout' { $script:InstallerCompletes = $false }
             'no-files' { $script:InstallerWritesRuntime = $false }
-            'old-files' { $script:InstallerRemovesOld = $false }
             'bad-url' { $script:Releases['10.0'].releases[0].'aspnetcore-runtime'.files[0].url = 'https://example.invalid/installer.exe' }
             'bad-metadata' { $script:Index.'releases-index'[0].'latest-runtime' = '11.0.0' }
         }
@@ -305,7 +331,8 @@ try {
             Assert-Equal 0 $script:Processes.Count "$failure cannot launch an installer"
         }
         if ($failure -eq 'timeout') { Assert-Equal 987654 $script:StoppedProcess 'a timed-out installer is stopped by its specific process ID' }
-        Assert-Equal $true (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) "$failure preserves the old runtime rather than blindly deleting it"
+        $canIdentifySuperseded = $failure -notin @('metadata', 'bad-metadata')
+        Assert-Equal (-not $canIdentifySuperseded) (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) "$failure still removes a superseded patch when the trusted minimum is known"
     }
 
     Reset-Fixture
@@ -325,24 +352,173 @@ try {
     Assert-Equal $true ($script:Processes[0].Arguments -match '/uninstall.*?/quiet.*?/norestart') 'registered uninstall is quiet and cannot request a restart'
     Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) 'stale files are verified absent after bundle removal'
 
-    foreach ($protected in @('hidden-msi', 'msi', 'other-architecture', 'latest-version', 'missing-replacement', 'ineffective-uninstall', 'removed-replacement')) {
+    foreach ($protected in @('missing-replacement', 'ineffective-uninstall', 'removed-replacement')) {
         Reset-Fixture
         Add-FixtureRuntime
         Add-FixtureRuntime '10.0.13' -Incomplete:($protected -eq 'missing-replacement')
         Set-FixtureStandaloneEntry
         switch ($protected) {
-            'hidden-msi' { $script:Entries[0].SystemComponent = 1 }
-            'msi' { $script:Entries[0].WindowsInstaller = 1 }
-            'other-architecture' { Set-FixtureStandaloneEntry 'x86' }
-            'latest-version' { Set-FixtureStandaloneEntry -Version '10.0.13' }
-            'ineffective-uninstall' { $script:UninstallerRemovesOld = $false }
+            'ineffective-uninstall' { $script:UninstallerRemovesOld = $false; $script:UninstallerUnregisters = $false }
             'removed-replacement' { $script:UninstallerRemovesReplacement = $true }
         }
         Assert-Throws { Invoke-AspNetCoreMaintenance } "$protected does not produce false remediation"
-        if ($protected -notin @('ineffective-uninstall', 'removed-replacement')) {
-            Assert-Equal 0 $script:Processes.Count "$protected cannot uninstall an unverified or protected component"
+        Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) "$protected does not retain the superseded files"
+    }
+
+    Reset-Fixture
+    Add-FixtureRuntime
+    Add-FixtureRuntime '10.0.13'
+    Invoke-AspNetCoreMaintenance
+    Assert-Equal 0 $script:Downloads.Count 'reported coexistence case does not reinstall an already-current patch'
+    Assert-Equal 0 $script:Processes.Count 'unregistered leftover cleanup needs no new uninstall utility'
+    Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) 'reported unregistered 10.0.8 directory is actually removed'
+    Assert-Equal $true (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.13')) 'unregistered cleanup preserves 10.0.13'
+    Invoke-AspNetCoreMaintenance
+    Assert-Equal 0 $script:Processes.Count 'unregistered cleanup is idempotent'
+
+    Reset-Fixture
+    Add-FixtureRuntime
+    $script:InstallerRemovesOld = $false
+    Invoke-AspNetCoreMaintenance
+    Assert-Equal 1 $script:Downloads.Count 'patching still installs the replacement before orphan cleanup'
+    Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) 'unregistered leftovers from an otherwise successful update are cleaned'
+
+    foreach ($unrelated in @('other-architecture', 'latest-version')) {
+        Reset-Fixture
+        Add-FixtureRuntime
+        Add-FixtureRuntime '10.0.13'
+        if ($unrelated -eq 'other-architecture') { Set-FixtureStandaloneEntry 'x86' }
+        else { Set-FixtureStandaloneEntry -Version '10.0.13' }
+        Invoke-AspNetCoreMaintenance
+        Assert-Equal 0 $script:Processes.Count "$unrelated registration is not uninstalled"
+        Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) "$unrelated registration does not block an unowned x64 old patch"
+    }
+
+    Reset-Fixture
+    Add-FixtureRuntime
+    Add-FixtureRuntime '10.0.13'
+    Set-FixtureStandaloneEntry
+    $script:Entries[0].DisplayName = 'ASP.NET Core Runtime - 10.0.8 (x64)'
+    Invoke-AspNetCoreMaintenance
+    Assert-Equal 1 $script:Processes.Count 'a standalone bundle without the Microsoft name prefix uses its registered uninstaller'
+
+    foreach ($enforcement in @('hidden-bundle', 'hidden-msi', 'sdk-files', 'sdk-registration', 'unknown-architecture', 'installer-failure', 'registry-error', 'missing-product-code')) {
+        Reset-Fixture
+        Add-FixtureRuntime
+        Add-FixtureRuntime '10.0.13'
+        switch ($enforcement) {
+            'hidden-bundle' { Set-FixtureStandaloneEntry -Hidden }
+            'hidden-msi' { Set-FixtureStandaloneEntry -Msi -Hidden }
+            'sdk-files' {
+                $null = New-Item -Path (Join-Path $script:NativeRoot 'sdk\10.0.108') -ItemType Directory -Force
+            }
+            'sdk-registration' {
+                $script:Entries = @([pscustomobject]@{ DisplayName = 'Microsoft .NET SDK 10.0.108 (x64)'; DisplayVersion = '10.0.108' })
+            }
+            'unknown-architecture' {
+                Set-FixtureStandaloneEntry
+                $script:Entries[0].DisplayName = 'ASP.NET Core Runtime - 10.0.8'
+            }
+            'installer-failure' { Set-FixtureStandaloneEntry -Msi -Hidden; $script:InstallerExitCode = 1603 }
+            'registry-error' { $script:EntryQueryFails = $true }
+            'missing-product-code' { Set-FixtureStandaloneEntry -Msi -Hidden; $script:Entries[0].PSChildName = 'not-a-product-guid' }
+        }
+        $msiProductCode = if ($enforcement -eq 'hidden-msi') { $script:Entries[0].PSChildName } else { '' }
+        if ($enforcement -in @('installer-failure', 'registry-error', 'missing-product-code')) {
+            Assert-Throws { Invoke-AspNetCoreMaintenance } "$enforcement remains an explicit maintenance failure"
+        }
+        else {
+            Invoke-AspNetCoreMaintenance
+        }
+        Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) "$enforcement cannot exempt a superseded runtime from removal"
+        Assert-Equal $true (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.13')) "$enforcement does not remove the patched runtime"
+        if ($enforcement -eq 'hidden-msi') {
+            Assert-Equal (Join-Path $env:SystemRoot 'System32\msiexec.exe') $script:Processes[0].FilePath 'hidden runtime MSI is uninstalled through the system installer'
+            Assert-Equal $true ($script:Processes[0].Arguments -like "/x $msiProductCode /qn /norestart /log *") 'MSI removal uses the exact superseded product and never requests a restart'
+            Assert-Equal 0 $script:Entries.Count 'successful MSI removal leaves no old runtime registration'
+        }
+        if ($enforcement -eq 'sdk-files') {
+            Assert-Equal $true (Test-Path -LiteralPath (Join-Path $script:NativeRoot 'sdk\10.0.108')) 'the SDK itself is not deleted to remove an old shared runtime'
         }
     }
+
+    Reset-Fixture
+    Add-FixtureRuntime '10.0.13'
+    Set-FixtureStandaloneEntry -Msi -Hidden
+    Invoke-AspNetCoreMaintenance
+    Assert-Equal 1 $script:Processes.Count 'an old registered runtime is removed even when its files are already absent'
+    Assert-Equal 0 $script:Entries.Count 'stale runtime registration cannot resurrect the old runtime through repair'
+
+    Reset-Fixture
+    Add-FixtureRuntime
+    Add-FixtureRuntime '10.0.13'
+    $script:MetadataFails = $true
+    Assert-Throws { Invoke-AspNetCoreMaintenance } 'metadata outage prevents a latest-version success claim'
+    Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) 'metadata outage does not retain an older patch beside an installed newer one'
+
+    foreach ($forceable in @('read-only', 'old-marker')) {
+        Reset-Fixture
+        Add-FixtureRuntime
+        Add-FixtureRuntime '10.0.13'
+        $oldPath = Get-FixtureRuntimePath '10.0.8'
+        if ($forceable -eq 'read-only') {
+            [IO.File]::SetAttributes((Join-Path $oldPath 'Microsoft.AspNetCore.dll'), [IO.FileAttributes]::ReadOnly)
+        }
+        else { Set-Content -LiteralPath (Join-Path $oldPath '.version') -Value '10.0.7' -Encoding ascii }
+        Invoke-AspNetCoreMaintenance
+        Assert-Equal $false (Test-Path -LiteralPath $oldPath) "$forceable does not preserve a known superseded runtime directory"
+    }
+
+    Reset-Fixture
+    Add-FixtureRuntime
+    Add-FixtureRuntime '10.0.13'
+    Set-Content -LiteralPath (Join-Path (Get-FixtureRuntimePath '10.0.13') '.version') -Value '10.0.8' -Encoding ascii
+    Assert-Throws { Invoke-AspNetCoreMaintenance } 'an unverified target version marker prevents a success claim'
+    Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) 'an invalid replacement marker does not retain the superseded runtime'
+
+    foreach ($unsafe in @('nested-directory', 'unexpected-file', 'locked-file')) {
+        Reset-Fixture
+        Add-FixtureRuntime
+        Add-FixtureRuntime '10.0.13'
+        $oldPath = Get-FixtureRuntimePath '10.0.8'
+        $dll = Join-Path $oldPath 'Microsoft.AspNetCore.dll'
+        $lock = $null
+        try {
+            switch ($unsafe) {
+                'nested-directory' { $null = New-Item -Path (Join-Path $oldPath 'unexpected') -ItemType Directory -Force }
+                'unexpected-file' { Set-Content -LiteralPath (Join-Path $oldPath 'customer.txt') -Value 'preserve' -Encoding ascii }
+                'locked-file' { $lock = [IO.File]::Open($dll, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) }
+            }
+            Assert-Throws { Invoke-AspNetCoreMaintenance } "$unsafe prevents direct cleanup"
+            Assert-Equal $true (Test-Path -LiteralPath $dll) "$unsafe leaves old runtime files intact"
+            Assert-Equal $true (Test-Path -LiteralPath (Join-Path $oldPath '.version')) "$unsafe is detected before deleting any marker"
+        }
+        finally { if ($lock) { $lock.Dispose() } }
+    }
+
+    Reset-Fixture
+    Add-FixtureRuntime
+    Add-FixtureRuntime '10.0.13'
+    $outside = Join-Path $fixtureRoot 'outside-runtime'
+    $null = New-Item -Path $outside -ItemType Directory -Force
+    $sentinel = Join-Path $outside 'keep.txt'
+    Set-Content -LiteralPath $sentinel -Value 'preserve' -Encoding ascii
+    $junction = Join-Path (Get-FixtureRuntimePath '10.0.8') 'redirect'
+    $null = New-Item -Path $junction -ItemType Junction -Target $outside
+    try {
+        Assert-Throws { Invoke-AspNetCoreMaintenance } 'a reparse child cannot redirect cleanup outside the runtime'
+        Assert-Equal 'preserve' (Get-Content -LiteralPath $sentinel -Raw).Trim() 'reparse target contents are untouched'
+    }
+    finally { [IO.Directory]::Delete($junction, $false) }
+
+    Reset-Fixture
+    Add-FixtureRuntime
+    Add-FixtureRuntime '10.0.13'
+    $currentRuntime = Get-InstalledAspNetCoreRuntime | Where-Object Version -eq ([version]'10.0.13')
+    Assert-Throws {
+        Remove-SupersededAspNetCoreRuntime -Runtime $currentRuntime -MinimumVersion ([version]'10.0.8')
+    } 'direct cleanup cannot be called to delete the newer runtime'
+    Assert-Equal $true (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.13')) 'newer runtime remains after a reversed cleanup request'
 
     Reset-Fixture
     Add-FixtureRuntime '7.0.20'

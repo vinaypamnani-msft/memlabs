@@ -214,7 +214,8 @@ try {
     Assert-Equal $true ([regex]::IsMatch($sourceText, $userRoutePattern)) 'scheduled mode bypasses file association and task self-replacement'
     Assert-Equal $true $sourceText.Contains('Invoke-GitMaintenance -SkipGarbageCollection:$ScheduledTask') 'scheduled mode bypasses repository garbage collection'
     Assert-Equal $true $sourceText.Contains('Invoke-MRemoteNGMaintenance -SkipUserConfiguration:$ScheduledTask') 'scheduled mode bypasses mRemoteNG user-profile writes'
-    Assert-Equal $true $sourceText.Contains('Invoke-WeeklyUpgrades -WaitForCompletion:$ScheduledTask') 'scheduled mode waits for weekly upgrades'
+    Assert-Equal $true $sourceText.Contains('Invoke-WeeklyUpgrades -WaitForCompletion }') 'all host launches wait for weekly upgrades before security verification'
+    Assert-Equal $true $sourceText.Contains('Invoke-WinGetMaintenance -WaitForCompletion }') 'all host launches wait for WinGet before security verification'
     Assert-Equal $true $sourceText.Contains("-Name 'Global\MemLabs_ChocolateyUpgrade' -TimeoutSeconds `$mutexTimeoutSeconds") 'all package-mutating maintenance phases share the Chocolatey mutex'
     Assert-Equal 3 ([regex]::Matches($sourceText, 'Get-WindowsAdminCenterRemovalLockPath').Count) 'WAC launcher and worker use the shared lock path helper'
 

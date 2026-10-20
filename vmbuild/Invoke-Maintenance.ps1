@@ -788,7 +788,8 @@ function Invoke-AspNetCoreInstaller {
     param (
         [Parameter(Mandatory = $true)][string] $FilePath,
         [Parameter(Mandatory = $true)][string] $Arguments,
-        [ValidateRange(1, 3600)][int] $TimeoutSeconds = 600
+        [ValidateRange(1, 3600)][int] $TimeoutSeconds = 600,
+        [switch] $Uninstall
     )
 
     $signature = Get-AuthenticodeSignature -LiteralPath $FilePath -ErrorAction Stop
@@ -801,12 +802,89 @@ function Invoke-AspNetCoreInstaller {
         Stop-ProcessTree -ProcessId $process.Id
         throw "ASP.NET Core installer timed out after $TimeoutSeconds seconds: '$FilePath'."
     }
-    if (-not (Test-ChocoSuccessCode -Code $process.ExitCode)) {
+    if (-not (Test-ChocoSuccessCode -Code $process.ExitCode) -and -not ($Uninstall -and $process.ExitCode -in @(1605, 1614))) {
         throw "ASP.NET Core installer failed with exit code $($process.ExitCode): '$FilePath'."
     }
     if ($process.ExitCode -in @(1641, 3010)) {
         Write-LogMessage 'ASP.NET Core servicing requires a host restart; no restart will be initiated by maintenance.' -Level 'WARNING'
     }
+}
+
+function Get-InstalledAspNetCoreEntry {
+    foreach ($entry in @(Get-InstalledEntry -NameLike '*ASP.NET Core*' -Strict)) {
+        if ($entry.DisplayName -match '^(?:Microsoft )?ASP\.NET Core (?:Runtime - )?(?<Version>\d+\.\d+\.\d+)(?:(?: -)? Shared Framework)?(?: \((?<Architecture>x64|x86|arm64)\))?$') {
+            [pscustomobject]@{
+                Entry = $entry
+                Version = [version]$Matches.Version
+                Architecture = $Matches.Architecture
+            }
+        }
+    }
+}
+
+function Get-SupersededAspNetCoreEntry {
+    param (
+        [Parameter(Mandatory = $true)][version] $MinimumVersion,
+        [Parameter(Mandatory = $true)][ValidateSet('x64', 'x86', 'arm64')][string] $Architecture
+    )
+
+    Get-InstalledAspNetCoreEntry | Where-Object {
+        (-not $_.Architecture -or $_.Architecture -eq $Architecture) -and
+        $_.Version.ToString(2) -eq $MinimumVersion.ToString(2) -and $_.Version -lt $MinimumVersion
+    }
+}
+
+function Remove-SupersededAspNetCoreRuntime {
+    param (
+        [Parameter(Mandatory = $true)][pscustomobject] $Runtime,
+        [Parameter(Mandatory = $true)][version] $MinimumVersion
+    )
+
+    $inventory = @(Get-InstalledAspNetCoreRuntime)
+    $old = @($inventory | Where-Object { $_.Path -eq $Runtime.Path -and $_.Version -eq $Runtime.Version -and $_.Architecture -eq $Runtime.Architecture })
+    if ($old.Count -ne 1 -or $Runtime.Channel -ne $MinimumVersion.ToString(2) -or $Runtime.Version -ge $MinimumVersion) {
+        throw "Security cleanup requires an inventoried runtime below $MinimumVersion in the same branch: '$($Runtime.Path)'."
+    }
+    $frameworkPath = Split-Path -Parent $Runtime.Path
+    $sharedPath = Split-Path -Parent $frameworkPath
+    $dotNetRoot = Split-Path -Parent $sharedPath
+    foreach ($path in @($dotNetRoot, $sharedPath, $frameworkPath, $Runtime.Path)) {
+        $directory = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Security runtime cleanup refuses a non-directory or reparse path: '$path'."
+        }
+    }
+    $files = @(Get-ChildItem -LiteralPath $Runtime.Path -Force -ErrorAction Stop)
+    foreach ($file in $files) {
+        if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $file.Name -notmatch '^(?:\.version|Microsoft\.AspNetCore\.App\.(?:deps|runtimeconfig)\.json|(?:Microsoft|System)\..+\.dll)$') {
+            throw "Runtime cleanup found a nested, linked, or unexpected item; manual removal is required and remediation is NOT complete: '$($file.FullName)'."
+        }
+    }
+
+    Write-LogMessage "SECURITY: Removing superseded ASP.NET Core '$($Runtime.Path)' below required patch $MinimumVersion. SDK/application dependencies do not exempt this version from removal." -Level 'WARNING'
+    $handles = [Collections.Generic.List[IO.FileStream]]::new()
+    try {
+        # Check every file before deleting any, and prevent new readers while allowing our deletes.
+        foreach ($file in $files) {
+            $handles.Add([IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Delete))
+        }
+        foreach ($file in $files) {
+            if ($file.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                [IO.File]::SetAttributes($file.FullName, ($file.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)))
+            }
+            [IO.File]::Delete($file.FullName)
+        }
+    }
+    catch {
+        throw "SECURITY REMEDIATION INCOMPLETE at '$($Runtime.Path)': $_. Stop processes locking these files or restart the host and rerun maintenance; the old version is not exempt."
+    }
+    finally {
+        foreach ($handle in $handles) { $handle.Dispose() }
+    }
+    [IO.Directory]::Delete($Runtime.Path, $false)
+    if (Test-Path -LiteralPath $Runtime.Path -ErrorAction Stop) { throw "Superseded runtime directory still exists: '$($Runtime.Path)'." }
+    Write-LogMessage "Removed superseded ASP.NET Core $($Runtime.Version) ($($Runtime.Architecture))."
 }
 
 function Invoke-AspNetCoreMaintenanceCore {
@@ -818,6 +896,10 @@ function Invoke-AspNetCoreMaintenanceCore {
     Write-LogMessage 'Starting ASP.NET Core shared runtime maintenance...'
     $installed = @(Get-InstalledAspNetCoreRuntime)
     if ($installed.Count -eq 0) {
+        $registered = @(Get-InstalledAspNetCoreEntry)
+        if ($registered.Count -gt 0) {
+            throw "ASP.NET Core runtime files are absent, but runtime uninstall entries remain: $(($registered.Entry.DisplayName) -join '; '). Nothing will be installed; these registrations must be repaired/removed before remediation can be verified."
+        }
         Write-LogMessage 'No stable system-wide ASP.NET Core runtimes found; nothing will be installed.'
         return
     }
@@ -826,9 +908,16 @@ function Invoke-AspNetCoreMaintenanceCore {
     }
 
     $metadataRoot = 'https://builds.dotnet.microsoft.com/dotnet/release-metadata'
-    $index = Invoke-RestMethod -Uri "$metadataRoot/releases-index.json" -TimeoutSec 60 -ErrorAction Stop
     $releaseMetadata = @{}
     $hadFailure = $false
+    $index = $null
+    try {
+        $index = Invoke-RestMethod -Uri "$metadataRoot/releases-index.json" -TimeoutSec 60 -ErrorAction Stop
+    }
+    catch {
+        $hadFailure = $true
+        Write-LogMessage "ASP.NET Core release metadata failed: $_. Removal below an already-installed newer patch will still run." -Level 'ERROR'
+    }
 
     foreach ($group in @($installed | Group-Object Channel, Architecture)) {
         $newest = $group.Group | Sort-Object Version -Descending | Select-Object -First 1
@@ -836,93 +925,128 @@ function Invoke-AspNetCoreMaintenanceCore {
         $architecture = $newest.Architecture
         try {
             Write-LogMessage "Checking ASP.NET Core $channel ($architecture): $($group.Group.Version -join ', ')."
-            $channelInfo = $index.'releases-index' | Where-Object { $_.'channel-version' -eq $channel } | Select-Object -First 1
-            if (-not $channelInfo -or $channelInfo.'support-phase' -notin @('active', 'maintenance')) {
-                throw "No supported stable servicing channel exists for $channel. Review its owning application before removing or migrating this runtime."
+            $targetVersion = $newest.Version
+            $branchHadFailure = $false
+            try {
+                if ($null -eq $index) { throw 'Release metadata is unavailable; the latest secure patch cannot be verified.' }
+                $channelInfo = $index.'releases-index' | Where-Object { $_.'channel-version' -eq $channel } | Select-Object -First 1
+                if (-not $channelInfo -or $channelInfo.'support-phase' -notin @('active', 'maintenance')) {
+                    throw "No supported stable servicing channel exists for $channel. Migration or removal of this unsupported branch is required."
+                }
+                $latestText = [string]$channelInfo.'latest-runtime'
+                if ($latestText -notmatch ('^{0}\.\d+$' -f [regex]::Escape($channel))) {
+                    throw "Invalid latest runtime version '$latestText' in Microsoft's $channel release metadata."
+                }
+                if ([version]$latestText -gt $targetVersion) { $targetVersion = [version]$latestText }
+
+                if ($newest.Version -lt $targetVersion) {
+                    if (-not $releaseMetadata.ContainsKey($channel)) {
+                        $releaseMetadata[$channel] = Invoke-RestMethod -Uri "$metadataRoot/$channel/releases.json" -TimeoutSec 60 -ErrorAction Stop
+                    }
+                    $release = $releaseMetadata[$channel].releases |
+                        Where-Object { $_.'aspnetcore-runtime'.version -eq $targetVersion.ToString(3) } | Select-Object -First 1
+                    $file = $release.'aspnetcore-runtime'.files |
+                        Where-Object { $_.rid -eq "win-$architecture" -and $_.name -eq "aspnetcore-runtime-win-$architecture.exe" } |
+                        Select-Object -First 1
+                    if (-not $file -or "$($file.hash)" -notmatch '^[a-fA-F0-9]{128}$') {
+                        throw "No SHA-512-verified Windows ASP.NET Core $targetVersion ($architecture) installer is listed."
+                    }
+                    $downloadUri = [uri]$file.url
+                    if ($downloadUri.Scheme -ne 'https' -or $downloadUri.Host -notin @('builds.dotnet.microsoft.com', 'download.visualstudio.microsoft.com')) {
+                        throw "Untrusted ASP.NET Core installer URL '$($file.url)'."
+                    }
+
+                    $null = New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop
+                    $installerLog = Join-Path $LogDirectory ("AspNetCore_{0}_{1}_{2}.log" -f $targetVersion, $architecture, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+                    $installerPath = Join-Path $env:TEMP ("memlabs-aspnetcore-{0}-{1}-{2}.exe" -f $targetVersion, $architecture, [guid]::NewGuid().ToString('N'))
+                    try {
+                        Write-LogMessage "Updating ASP.NET Core $channel ($architecture) to $targetVersion using Microsoft's installer. Installer log: $installerLog"
+                        Invoke-WebRequest -Uri $downloadUri.AbsoluteUri -OutFile $installerPath -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop | Out-Null
+                        $hash = Get-FileHash -LiteralPath $installerPath -Algorithm SHA512 -ErrorAction Stop
+                        if ($hash.Hash -ine $file.hash) { throw "ASP.NET Core installer SHA-512 mismatch: '$installerPath'." }
+                        Invoke-AspNetCoreInstaller -FilePath $installerPath -Arguments "/install /quiet /norestart /log `"$installerLog`"" -TimeoutSeconds $InstallerTimeoutSeconds
+                    }
+                    finally {
+                        if (Test-Path -LiteralPath $installerPath) {
+                            try { Remove-Item -LiteralPath $installerPath -Force -ErrorAction Stop }
+                            catch { Write-LogMessage "Could not remove temporary ASP.NET Core installer '$installerPath': $_" -Level 'WARNING' }
+                        }
+                    }
+                }
             }
-            $latestText = [string]$channelInfo.'latest-runtime'
-            if ($latestText -notmatch ('^{0}\.\d+$' -f [regex]::Escape($channel))) {
-                throw "Invalid latest runtime version '$latestText' in Microsoft's $channel release metadata."
+            catch {
+                $hadFailure = $branchHadFailure = $true
+                Write-LogMessage "ASP.NET Core $channel ($architecture) patching failed: $_. SECURITY: removal of identified superseded versions below $targetVersion will still run, even if applications break." -Level 'ERROR'
             }
-            $targetVersion = [version]$latestText
-            if ($newest.Version -gt $targetVersion) { $targetVersion = $newest.Version }
+
             $targetPath = Join-Path (Split-Path -Parent $newest.Path) $targetVersion.ToString(3)
-
-            if ($newest.Version -lt $targetVersion) {
-                if (-not $releaseMetadata.ContainsKey($channel)) {
-                    $releaseMetadata[$channel] = Invoke-RestMethod -Uri "$metadataRoot/$channel/releases.json" -TimeoutSec 60 -ErrorAction Stop
-                }
-                $release = $releaseMetadata[$channel].releases |
-                    Where-Object { $_.'aspnetcore-runtime'.version -eq $targetVersion.ToString(3) } | Select-Object -First 1
-                $file = $release.'aspnetcore-runtime'.files |
-                    Where-Object { $_.rid -eq "win-$architecture" -and $_.name -eq "aspnetcore-runtime-win-$architecture.exe" } |
-                    Select-Object -First 1
-                if (-not $file -or "$($file.hash)" -notmatch '^[a-fA-F0-9]{128}$') {
-                    throw "No SHA-512-verified Windows ASP.NET Core $targetVersion ($architecture) installer is listed."
-                }
-                $downloadUri = [uri]$file.url
-                if ($downloadUri.Scheme -ne 'https' -or $downloadUri.Host -notin @('builds.dotnet.microsoft.com', 'download.visualstudio.microsoft.com')) {
-                    throw "Untrusted ASP.NET Core installer URL '$($file.url)'."
-                }
-
-                $null = New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop
-                $installerLog = Join-Path $LogDirectory ("AspNetCore_{0}_{1}_{2}.log" -f $targetVersion, $architecture, (Get-Date -Format 'yyyyMMdd_HHmmss'))
-                $installerPath = Join-Path $env:TEMP ("memlabs-aspnetcore-{0}-{1}-{2}.exe" -f $targetVersion, $architecture, [guid]::NewGuid().ToString('N'))
+            $components = @()
+            try {
+                $components = @(Get-SupersededAspNetCoreEntry -MinimumVersion $targetVersion -Architecture $architecture)
+            }
+            catch {
+                $hadFailure = $branchHadFailure = $true
+                Write-LogMessage "Could not inventory registered ASP.NET Core components: $_. SECURITY: file cleanup will still run." -Level 'ERROR'
+            }
+            foreach ($component in $components) {
+                $entry = $component.Entry
                 try {
-                    Write-LogMessage "Updating ASP.NET Core $channel ($architecture) to $targetVersion using Microsoft's installer. Installer log: $installerLog"
-                    Invoke-WebRequest -Uri $downloadUri.AbsoluteUri -OutFile $installerPath -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop | Out-Null
-                    $hash = Get-FileHash -LiteralPath $installerPath -Algorithm SHA512 -ErrorAction Stop
-                    if ($hash.Hash -ine $file.hash) { throw "ASP.NET Core installer SHA-512 mismatch: '$installerPath'." }
-                    Invoke-AspNetCoreInstaller -FilePath $installerPath -Arguments "/install /quiet /norestart /log `"$installerLog`"" -TimeoutSeconds $InstallerTimeoutSeconds
-                }
-                finally {
-                    if (Test-Path -LiteralPath $installerPath) {
-                        try { Remove-Item -LiteralPath $installerPath -Force -ErrorAction Stop }
-                        catch { Write-LogMessage "Could not remove temporary ASP.NET Core installer '$installerPath': $_" -Level 'WARNING' }
-                    }
-                }
-            }
-
-            foreach ($requiredFile in @('Microsoft.AspNetCore.App.deps.json', 'Microsoft.AspNetCore.dll')) {
-                if (-not (Test-Path -LiteralPath (Join-Path $targetPath $requiredFile) -PathType Leaf -ErrorAction Stop)) {
-                    throw "ASP.NET Core $targetVersion ($architecture) was not verified at '$targetPath'; older runtimes will not be uninstalled."
-                }
-            }
-
-            $stale = @(Get-InstalledAspNetCoreRuntime | Where-Object {
-                    $_.Channel -eq $channel -and $_.Architecture -eq $architecture -and $_.Version -lt $targetVersion
-                })
-            if ($stale.Count -gt 0) {
-                foreach ($entry in @(Get-InstalledEntry -NameLike 'Microsoft ASP.NET Core*')) {
-                    # Hidden MSI components belong to SDK/VS/hosting installers; never remove those directly.
-                    if ($entry.SystemComponent -eq 1 -or $entry.WindowsInstaller -eq 1) { continue }
-                    if ($entry.DisplayName -notmatch '^Microsoft ASP\.NET Core (?:Runtime - )?(?<Version>\d+\.\d+\.\d+)(?:(?: -)? Shared Framework)? \((?<Architecture>x64|x86|arm64)\)$') { continue }
-                    $entryVersion = [version]$Matches.Version
-                    if ($Matches.Architecture -ne $architecture -or $stale.Version -notcontains $entryVersion) { continue }
-
                     $command = ConvertTo-QuietUninstallCommand -Entry $entry
-                    if ([string]::IsNullOrWhiteSpace($command)) { throw "No registered uninstall command exists for '$($entry.DisplayName)'." }
-                    $invocation = Split-UninstallCommand -CommandLine $command
-                    if ([IO.Path]::GetExtension($invocation.FilePath) -ine '.exe' -or $invocation.FilePath -match '(?i)\\msiexec\.exe$|^msiexec\.exe$') {
-                        throw "Not a standalone runtime bundle uninstall command: '$command'."
+                    $invocation = if ($command) { Split-UninstallCommand -CommandLine $command } else { $null }
+                    if ($entry.WindowsInstaller -eq 1 -or ($invocation -and [IO.Path]::GetFileName($invocation.FilePath) -match '^msiexec(?:\.exe)?$')) {
+                        $productCode = [guid]::Empty
+                        if (-not [guid]::TryParse([string]$entry.PSChildName, [ref]$productCode)) {
+                            throw "No valid MSI product code exists for '$($entry.DisplayName)'."
+                        }
+                        $null = New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop
+                        $uninstallLog = Join-Path $LogDirectory ("AspNetCore_Remove_{0}_{1}_{2}.log" -f $component.Version, $architecture, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+                        $invocation = [pscustomobject]@{
+                            FilePath = Join-Path $env:SystemRoot 'System32\msiexec.exe'
+                            Arguments = "/x $($productCode.ToString('B')) /qn /norestart /log `"$uninstallLog`""
+                        }
                     }
-                    Write-LogMessage "Removing superseded standalone ASP.NET Core runtime '$($entry.DisplayName)' after verifying $targetVersion ($architecture)."
-                    Invoke-AspNetCoreInstaller -FilePath $invocation.FilePath -Arguments $invocation.Arguments -TimeoutSeconds $InstallerTimeoutSeconds
+                    elseif ($null -eq $invocation -or [IO.Path]::GetExtension($invocation.FilePath) -ine '.exe') {
+                        throw "No supported registered uninstall command exists for '$($entry.DisplayName)'."
+                    }
+                    Write-LogMessage "SECURITY: Uninstalling superseded ASP.NET Core '$($entry.DisplayName)', including hidden/SDK-owned runtime components." -Level 'WARNING'
+                    Invoke-AspNetCoreInstaller -FilePath $invocation.FilePath -Arguments $invocation.Arguments -TimeoutSeconds $InstallerTimeoutSeconds -Uninstall
+                }
+                catch {
+                    $hadFailure = $branchHadFailure = $true
+                    Write-LogMessage "Registered ASP.NET Core removal failed for '$($entry.DisplayName)': $_. SECURITY: remaining old runtime files will still be removed." -Level 'ERROR'
                 }
             }
 
             $remaining = @(Get-InstalledAspNetCoreRuntime | Where-Object {
                     $_.Channel -eq $channel -and $_.Architecture -eq $architecture -and $_.Version -lt $targetVersion
                 })
-            if ($remaining.Count -gt 0) {
-                throw "Superseded ASP.NET Core files remain: $($remaining.Path -join '; '). Update the owning SDK, Visual Studio, or Hosting Bundle, or review a manual installation. Runtime folders were not deleted directly; a pending restart may also need to complete."
+            foreach ($runtime in $remaining) {
+                Remove-SupersededAspNetCoreRuntime -Runtime $runtime -MinimumVersion $targetVersion
             }
-            foreach ($requiredFile in @('Microsoft.AspNetCore.App.deps.json', 'Microsoft.AspNetCore.dll')) {
+            $remaining = @(Get-InstalledAspNetCoreRuntime | Where-Object {
+                    $_.Channel -eq $channel -and $_.Architecture -eq $architecture -and $_.Version -lt $targetVersion
+                })
+            if ($remaining.Count -gt 0) {
+                throw "SECURITY REMEDIATION INCOMPLETE: superseded ASP.NET Core files remain: $($remaining.Path -join '; '). Stop processes locking these files or restart the host, then rerun maintenance."
+            }
+            $registered = @(Get-SupersededAspNetCoreEntry -MinimumVersion $targetVersion -Architecture $architecture)
+            if ($registered.Count -gt 0) {
+                throw "Superseded ASP.NET Core remains registered after file cleanup: $(($registered.Entry.DisplayName) -join '; '). Installer repair could restore the removed version; remediation is NOT complete."
+            }
+            foreach ($requiredFile in @('Microsoft.AspNetCore.App.deps.json', 'Microsoft.AspNetCore.dll', '.version')) {
                 if (-not (Test-Path -LiteralPath (Join-Path $targetPath $requiredFile) -PathType Leaf -ErrorAction Stop)) {
                     throw "ASP.NET Core $targetVersion ($architecture) is missing after cleanup at '$targetPath'."
                 }
             }
-            Write-LogMessage "ASP.NET Core $channel ($architecture) is current at $targetVersion; no superseded stable runtime directories remain."
+            if ([IO.File]::ReadAllLines((Join-Path $targetPath '.version')) -notcontains $targetVersion.ToString(3)) {
+                throw "ASP.NET Core version marker does not verify the required patch at '$targetPath'."
+            }
+            if ($branchHadFailure) {
+                Write-LogMessage "Superseded ASP.NET Core $channel ($architecture) files/registrations are gone, but servicing errors prevent a successful maintenance result." -Level 'ERROR'
+            }
+            else {
+                Write-LogMessage "ASP.NET Core $channel ($architecture) is current at $targetVersion; no superseded stable runtime directories or matching runtime registrations remain."
+            }
         }
         catch {
             $hadFailure = $true
@@ -945,15 +1069,21 @@ function Invoke-AspNetCoreMaintenance {
         Invoke-AspNetCoreMaintenanceCore -InstallerTimeoutSeconds $Timeout -LogDirectory $Directory
     }
     if (-not $ran) {
-        Write-LogMessage 'A MemLabs test cycle owns the host mutation lease; ASP.NET Core servicing is deferred, not verified. It will be retried on the next maintenance run.' -Level 'WARNING'
+        Write-LogMessage 'SECURITY: The host mutation lease is unavailable or held by a test cycle. ASP.NET Core security remediation will not be deferred; applications and tests may be interrupted.' -Level 'WARNING'
+        Invoke-AspNetCoreMaintenanceCore -InstallerTimeoutSeconds $InstallerTimeoutSeconds -LogDirectory $LogDirectory
     }
 }
 
 function Get-InstalledEntry {
+    [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)][string] $NameLike
+        [Parameter(Mandatory = $true)][string] $NameLike,
+        [switch] $Strict
     )
 
+    if ($Strict -and [Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        throw 'Strict runtime registration verification requires 64-bit PowerShell on this host.'
+    }
     $paths = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
@@ -961,7 +1091,9 @@ function Get-InstalledEntry {
 
     $found = @()
     foreach ($path in $paths) {
-        foreach ($item in @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue)) {
+        if ($Strict -and -not (Test-Path -LiteralPath (Split-Path -Parent $path) -ErrorAction Stop)) { continue }
+        $registryErrorAction = if ($Strict) { 'Stop' } else { 'SilentlyContinue' }
+        foreach ($item in @(Get-ItemProperty -Path $path -ErrorAction $registryErrorAction)) {
             if ($item.DisplayName -like $NameLike) { $found += $item }
         }
     }
@@ -1947,7 +2079,7 @@ function Invoke-WeeklyUpgradesCore {
             return
         }
 
-        # Interactive launches retain the non-blocking upgrade window used by VMBuild.
+        # Non-waiting callers retain the separate upgrade window.
         Write-LogMessage 'Launching Chocolatey upgrade all in new window...'
         $scriptLines = @()
         $scriptLines += '$Host.UI.RawUI.WindowTitle = "MemLabs - Chocolatey Upgrades"'
@@ -2076,12 +2208,12 @@ $maintenanceRan = Invoke-WithMemLabsMaintenanceMutex -TimeoutSeconds $mutexTimeo
         try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-WindowsAdminCenterRemoval } catch { Write-LogMessage "Windows Admin Center removal threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-        try { Invoke-WinGetMaintenance -WaitForCompletion:$ScheduledTask } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-WinGetMaintenance -WaitForCompletion } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         # Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
         try { Invoke-SevenZipMaintenance } catch { Write-LogMessage "7-Zip maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-MRemoteNGMaintenance -SkipUserConfiguration:$ScheduledTask } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-        try { Invoke-WeeklyUpgrades -WaitForCompletion:$ScheduledTask } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        try { Invoke-WeeklyUpgrades -WaitForCompletion } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-AspNetCoreMaintenance } catch { Write-LogMessage "ASP.NET Core maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
     }
 }

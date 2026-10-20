@@ -30,21 +30,38 @@ are unused. ASP.NET Core is a shared dependency, not a standalone application;
 its presence alone does not identify which application installed or needs it.
 
 Downloads must match Microsoft's SHA-512 hash and have a valid Microsoft
-Authenticode signature. Installation and registered standalone-runtime bundle
-removal are unattended, bounded, and never request a host restart. Superseded
-patches are removed only after replacement runtime files have been verified.
-Maintenance checks that older runtime directories are actually gone, so adding
-a patched version beside a vulnerable version is not reported as remediation.
-Hidden SDK/Visual Studio/Hosting Bundle MSI components and runtime directories
-are never deleted directly. Remaining older files, unsupported branches,
-download/installer failures, and failed verification are reported as errors;
-update the owning installer or review manual installations when indicated.
-Prerelease/unrecognized directories are preserved with a warning. Runtime
-changes defer while a MemLabs test cycle holds the host mutation lease.
+Authenticode signature. **Security takes precedence over compatibility:**
+identified superseded patches must be removed even if an SDK/application still
+needs them, a test cycle is active, or installing the required replacement fails.
+This can break applications or SDK operations until their dependencies are fixed.
+Registered runtime bundles and exact runtime MSI products (including hidden
+SDK-owned components) are uninstalled unattended without requesting a restart.
+Remaining old files are then removed from their specific version directory,
+regardless of installer ownership. SDKs and unrelated runtime families themselves
+are not uninstalled.
+
+File cleanup rejects reparse points, nested directories, and unexpected files,
+uses literal file paths and a non-recursive empty-directory delete, and clears
+read-only attributes on known old runtime files. It opens all old files before
+deleting any to detect locks and prevent new readers during cleanup. Windows
+locks/permissions or unsafe contents require administrator intervention; they
+remain explicit failures, not exemptions or successful remediation. Maintenance
+does not automatically reboot the host or force-close unrelated applications.
+If metadata is unavailable, lower patches can still be removed when a newer
+patch is already installed, but latest-version verification still fails.
+
+Success requires the old directories **and matching runtime uninstall entries**
+to be absent and the required target's files/version marker to verify. Failed
+patching, uninstall/inventory errors, unsupported branches, or incomplete cleanup
+fail maintenance even if some old files were removed. Prerelease/unrecognized
+directories are preserved with a warning. SDK repair or external installers can
+restore removed dependencies; a subsequent maintenance run enforces removal again.
 
 Main maintenance logs and separate `AspNetCore_*.log` installer logs are under
-`vmbuild\logs`. The scheduled run waits for package-manager upgrades before
-this check; interactive package-manager upgrade windows remain asynchronous.
+`vmbuild\logs`. Scheduled and interactive host maintenance both wait for
+package-manager upgrades before this final security check, so a background upgrade
+from that run cannot restore an old runtime after verification. Interactive
+VMBuild launches can therefore take longer.
 Applications already using a runtime may require restarting to load patched
 files, and a vulnerability report may not clear until its next inventory scan.
 Validate without changing host packages using

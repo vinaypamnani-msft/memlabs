@@ -197,7 +197,7 @@ finally {
 }
 
 $sourceText = [System.IO.File]::ReadAllText($sourcePath)
-Assert-Equal $true $sourceText.Contains('Invoke-WinGetMaintenance -WaitForCompletion:$ScheduledTask') 'only scheduled maintenance waits for WinGet completion'
+Assert-Equal $true $sourceText.Contains('Invoke-WinGetMaintenance -WaitForCompletion }') 'all host maintenance waits for WinGet before final security verification'
 
 Write-Host ''
 if ($script:Failures -gt 0) {
