@@ -148,7 +148,9 @@ try {
                 @{ Path = 'ControlSet001\Control\ComputerName\ComputerName'; Values = @{ ComputerName = 'CST-W11CLIENT1' } },
                 @{ Path = 'ControlSet001\Services\Tcpip\Parameters'; Values = @{ Domain = 'cstest8.com'; Hostname = 'DESKTOP-FIXTURE' } },
                 @{ Path = 'Microsoft\Windows\CurrentVersion\Setup\State'; Values = @{ ImageState = 'IMAGE_STATE_UNDEPLOYABLE' } },
-                @{ Path = 'Microsoft\Windows NT\CurrentVersion'; Values = @{ CurrentBuild = '26300'; UBR = 9457 } }
+                @{ Path = 'Microsoft\Windows NT\CurrentVersion'; Values = @{ CurrentBuild = '26300'; UBR = 9457 } },
+                @{ Path = 'Microsoft\Windows\CurrentVersion\Policies\System'; Values = @{ EnableFirstLogonAnimation = 0 } },
+                @{ Path = 'Microsoft\Windows NT\CurrentVersion\Winlogon'; Values = @{ AutoAdminLogon = '1'; DefaultUserName = 'fixtureadmin'; DefaultPassword = 'DO-NOT-EXPORT-THIS-SYNTHETIC-VALUE' } }
             )) {
             $key = $fixtureHive.CreateSubKey($entry.Path)
             try {
@@ -166,9 +168,13 @@ try {
         $systemState.PendingName.Values.ComputerName -eq 'CST-W11CLIENT1' -and
         $systemState.Tcpip.Values.Domain -eq 'cstest8.com') 'Native offline setup/name/domain extraction is incorrect.'
     Assert-True ($softwareState.ImageState.Values.ImageState -eq 'IMAGE_STATE_UNDEPLOYABLE' -and
-        $softwareState.WindowsVersion.Values.UBR -eq 9457) 'Native offline image/version extraction is incorrect.'
+        $softwareState.WindowsVersion.Values.UBR -eq 9457 -and
+        $softwareState.FirstLogonPolicy.Values.EnableFirstLogonAnimation -eq 0 -and
+        $softwareState.WinlogonProgress.Values.AutoAdminLogon -eq '1') 'Native offline image/version/first-logon extraction is incorrect.'
     Assert-True (-not (($systemState | ConvertTo-Json -Depth 10).Contains('DO-NOT-EXPORT-THIS-SYNTHETIC-VALUE'))) `
         'Offline registry extraction escaped its value allowlist.'
+    Assert-True (-not (($softwareState | ConvertTo-Json -Depth 10).Contains('DO-NOT-EXPORT-THIS-SYNTHETIC-VALUE'))) `
+        'First-logon metadata exported the Winlogon password.'
     $readOnlyHive = [MemLabs.OfflineSetupHiveReader]::OpenReadOnly($fixtureHivePath)
     try {
         $writeBlocked = $false
@@ -223,13 +229,13 @@ try {
     }
     function Get-Command {
         param($Name, $ErrorAction)
-        Assert-True ($Name -match '^(Hyper-V|Storage|Microsoft\.PowerShell\.(Diagnostics|Archive))\\' -and
+        Assert-True ($Name -match '^(Hyper-V|Storage|CimCmdlets|Microsoft\.PowerShell\.(Diagnostics|Archive))\\' -and
             $ErrorAction -eq 'Stop') 'Dependency command lookup was not module-qualified or fail-closed.'
         $script:CommandChecks.Add($Name)
         if ($Name -eq $script:MissingCommand) { throw "Synthetic missing dependency command: $Name" }
-        if ($Name -eq 'Microsoft.PowerShell.Archive\Compress-Archive') {
-            $script:DependenciesReady = ($script:ModuleImports.Count - $script:ModuleCycleStart) -eq 4 -and
-                ($script:CommandChecks.Count - $script:CommandCycleStart) -eq 12
+        if ($Name -eq 'CimCmdlets\Invoke-CimMethod') {
+            $script:DependenciesReady = ($script:ModuleImports.Count - $script:ModuleCycleStart) -eq 5 -and
+                ($script:CommandChecks.Count - $script:CommandCycleStart) -eq 15
         }
         [pscustomobject]@{ Name = $Name }
     }
@@ -240,6 +246,7 @@ try {
         if ($Name -and $Name -ne 'BROKEN-W11') { throw "Unexpected VM name $Name" }
         if ($Id -and $Id -ne $script:VmId) { throw "Unexpected VM ID $Id" }
         if ($Name) {
+            $script:CapturedForCurrentOperation = $false
             $script:DependenciesReady = $false
             $script:ModuleCycleStart = $script:ModuleImports.Count
             $script:CommandCycleStart = $script:CommandChecks.Count
@@ -252,6 +259,7 @@ try {
     function Stop-VM {
         param($VM, [switch]$AsJob, [switch]$TurnOff, $Confirm, $ErrorAction)
         Assert-True ($VM.Id -eq $script:VmId -and $AsJob) 'Shutdown was not scoped to the selected VM or was unbounded.'
+        Assert-True $script:CapturedForCurrentOperation 'Shutdown ran before console evidence capture.'
         Assert-True $script:DependenciesReady `
             'Shutdown ran before all required modules and commands were checked.'
         $script:StopCalls++
@@ -261,6 +269,18 @@ try {
         }
         elseif ($script:GracefulWorks) { $script:VmState = 'Off' }
         [pscustomobject]@{ State = $(if ($script:VmState -eq 'Off') { 'Completed' } else { 'Running' }) }
+    }
+    function Add-MemLabsSetupConsoleScreenshot {
+        param($VM, $Bundle, $Stage, $Records, $Errors)
+        $script:CapturedForCurrentOperation = $true
+        $script:ConsoleStates.Add($script:VmState)
+        $record = [pscustomobject]@{ Status = 'UnavailableNotRunning'; Path = "Console-$Stage.png" }
+        if ($script:VmState -eq 'Running') {
+            $record.Status = 'Captured'
+            [IO.File]::WriteAllBytes((Join-Path $Bundle $record.Path), [byte[]]@(137, 80, 78, 71))
+        }
+        $Records.Add($record)
+        return $record
     }
     function Wait-Job {
         param($Job, $Timeout, $ErrorAction)
@@ -376,6 +396,7 @@ try {
         $script:CommandChecks = [Collections.Generic.List[string]]::new()
         $script:FailedModule = ''; $script:MissingCommand = ''
         $script:DependenciesReady = $false; $script:ModuleCycleStart = 0; $script:CommandCycleStart = 0
+        $script:ConsoleStates = [Collections.Generic.List[string]]::new()
     }
     $parameters = @{ VmName = 'BROKEN-W11'; Destination = (Join-Path $testRoot 'output'); StopTimeoutSeconds = 5; Confirm = $false }
     Reset-Fixture
@@ -383,11 +404,12 @@ try {
     Assert-True ($report -is [pscustomobject] -and $report.Status -eq 'Complete' -and $report.FinalState -eq 'Off' -and
         $script:StopCalls -eq 1 -and $script:ForceCalls -eq 0 -and $script:MountCalls -eq 1 -and
         $script:DismountCalls -eq 1 -and (Test-Path -LiteralPath $report.ArchivePath) -and
-        ($script:ModuleImports -join ',') -eq 'Hyper-V,Storage,Microsoft.PowerShell.Diagnostics,Microsoft.PowerShell.Archive') `
+        ($script:ModuleImports -join ',') -eq 'Hyper-V,Storage,Microsoft.PowerShell.Diagnostics,Microsoft.PowerShell.Archive,CimCmdlets' -and
+        $script:ConsoleStates[0] -eq 'Running') `
         'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
-    Assert-True ($manifestRecord.CollectorVersion -eq 2 -and $manifestRecord.RegistryReader -eq 'offreg.dll') `
+    Assert-True ($manifestRecord.CollectorVersion -eq 3 -and $manifestRecord.RegistryReader -eq 'offreg.dll') `
         'The archive does not identify the corrected offline registry reader.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'
     $zip = [IO.Compression.ZipFile]::OpenRead($report.ArchivePath)
@@ -402,7 +424,7 @@ try {
     }
     finally { $zip.Dispose() }
 
-    foreach ($moduleName in @('Hyper-V', 'Storage', 'Microsoft.PowerShell.Diagnostics', 'Microsoft.PowerShell.Archive')) {
+    foreach ($moduleName in @('Hyper-V', 'Storage', 'Microsoft.PowerShell.Diagnostics', 'Microsoft.PowerShell.Archive', 'CimCmdlets')) {
         Reset-Fixture
         $script:FailedModule = $moduleName
         $protectedCount = $script:Protected.Count
@@ -712,7 +734,7 @@ try {
         }
         Copy-MemLabsWindowsSetupEvidence -WindowsRoot '\\?\Volume{11111111-1111-1111-1111-111111111111}\Windows' `
             -Bundle $volumeBundle -PrivateRoot $aclPath -Manifest $volumeManifest
-        Assert-True ($volumeManifest.Files.Count -eq 4 -and $volumeManifest.Errors.Count -eq 2 -and
+        Assert-True ($volumeManifest.Files.Count -eq 8 -and $volumeManifest.Errors.Count -eq 2 -and
             ($volumeManifest.Errors -join ' ') -notmatch 'wildcard') 'Literal volume-GUID event paths failed their production evidence pipeline.'
     }
     finally { Set-Item -Path Function:\Get-MemLabsOfflineSetupSourcePath -Value $savedSourceResolver }

@@ -6,6 +6,7 @@
 .DESCRIPTION
     By default, gracefully stops the selected VM, mounts only its disks read-only without
     drive letters, and collects setup logs plus allowlisted registry state.
+    Captures the selected VM console before shutdown when a framebuffer exists.
     The VM is left off. No guest rename, rejoin, registry repair, or restart runs.
     Raw registry hives and unattend files are never included in the archive.
     Stop deployment/test retry loops before collection. The collector refuses
@@ -51,6 +52,7 @@ function Initialize-MemLabsSetupDiagnosticModules {
         'Storage' = @('Get-Disk', 'Set-Disk', 'Get-Partition', 'Get-Volume')
         'Microsoft.PowerShell.Diagnostics' = @('Get-WinEvent')
         'Microsoft.PowerShell.Archive' = @('Compress-Archive')
+        'CimCmdlets' = @('Get-CimInstance', 'Get-CimAssociatedInstance', 'Invoke-CimMethod')
     }
     foreach ($moduleName in $requirements.Keys) {
         try {
@@ -115,6 +117,43 @@ function Remove-MemLabsSetupDiagnosticJob {
     }
     try { Remove-Job -Job $Job -Force -ErrorAction Stop }
     catch { Write-Warning "${Context}: removing the owned shutdown job failed: $($_.Exception.Message)" }
+}
+
+function Add-MemLabsSetupConsoleScreenshot {
+    param(
+        [Parameter(Mandatory)]$VM,
+        [Parameter(Mandatory)][string]$Bundle,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9-]+$')][string]$Stage,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[object]]$Records,
+        [Parameter(Mandatory)][AllowEmptyCollection()][Collections.Generic.List[string]]$Errors
+    )
+
+    $name = "Console-$Stage.png"
+    $record = [ordered]@{
+        Stage = $Stage; Path = $name; Status = 'Unavailable'
+        CapturedAtUtc = [DateTime]::UtcNow.ToString('o'); VMId = "$($VM.Id)"
+        Width = $null; Height = $null; AllBlack = $null; Error = $null
+    }
+    try {
+        $live = Get-VM -Id $VM.Id -ErrorAction Stop
+        if ($live.Name -ne $VM.Name) { throw 'The selected VM identity changed before console capture.' }
+        . (Join-Path $PSScriptRoot 'Common.VmConsoleScreenshot.ps1')
+        $capture = Save-MemLabsVmConsoleScreenshot -VMId $VM.Id -Path (Join-Path $Bundle $name)
+        $record.Status = $capture.Status
+        if ($capture.Status -eq 'Captured') {
+            if (-not [IO.File]::Exists((Join-Path $Bundle $name))) { throw 'Console capture did not create its PNG.' }
+            $record.Width = $capture.Width; $record.Height = $capture.Height; $record.AllBlack = $capture.AllBlack
+            $record['UsedFallbackResolution'] = $capture.UsedFallbackResolution
+            Write-Host "$($VM.Name): console screenshot captured ($Stage)."
+        }
+    }
+    catch {
+        $record.Status = 'Error'; $record.Error = $_.Exception.Message
+        $Errors.Add("Console capture ($Stage) failed: $($_.Exception.Message)")
+        Write-Warning "$($VM.Name): console capture ($Stage) failed: $($_.Exception.Message)"
+    }
+    $Records.Add([pscustomobject]$record)
+    return [pscustomobject]$record
 }
 
 function Stop-MemLabsVmForSetupDiagnostics {
@@ -276,6 +315,14 @@ function Read-MemLabsOfflineWindowsSetupHive {
                 WindowsVersion = Read-MemLabsOfflineSetupRegistryValues -Hive $hive `
                     -SubKey 'Microsoft\Windows NT\CurrentVersion' `
                     -Names @('ProductName', 'DisplayVersion', 'CurrentBuild', 'UBR', 'EditionID', 'InstallationType')
+                FirstLogonPolicy = Read-MemLabsOfflineSetupRegistryValues -Hive $hive `
+                    -SubKey 'Microsoft\Windows\CurrentVersion\Policies\System' -Names @('EnableFirstLogonAnimation')
+                WinlogonProgress = Read-MemLabsOfflineSetupRegistryValues -Hive $hive `
+                    -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon' `
+                    -Names @('AutoAdminLogon', 'AutoLogonCount', 'DefaultUserName', 'DefaultDomainName')
+                UserOobeSettings = Read-MemLabsOfflineSetupRegistryValues -Hive $hive `
+                    -SubKey 'Microsoft\Windows\CurrentVersion\OOBE' `
+                    -Names @('SkipUserOOBE', 'SkipMachineOOBE', 'LaunchUserOOBE', 'BypassNRO')
             }
         }
         $select = Read-MemLabsOfflineSetupRegistryValues -Hive $hive -SubKey 'Select' -Names @('Current')
@@ -403,7 +450,11 @@ function Copy-MemLabsWindowsSetupEvidence {
             @{ Name = 'Setup'; File = 'Setup.evtx' },
             @{ Name = 'System'; File = 'System.evtx' },
             @{ Name = 'Application'; File = 'Application.evtx' },
-            @{ Name = 'DSC-Operational'; File = 'Microsoft-Windows-DSC%4Operational.evtx' }
+            @{ Name = 'DSC-Operational'; File = 'Microsoft-Windows-DSC%4Operational.evtx' },
+            @{ Name = 'UserProfiles'; File = 'Microsoft-Windows-User Profiles Service%4Operational.evtx' },
+            @{ Name = 'AppReadiness'; File = 'Microsoft-Windows-AppReadiness%4Admin.evtx' },
+            @{ Name = 'Shell-Core'; File = 'Microsoft-Windows-Shell-Core%4Operational.evtx' },
+            @{ Name = 'AppModel'; File = 'Microsoft-Windows-AppModel-Runtime%4Admin.evtx' }
         )) {
         $log = $eventSource.Name
         try {
@@ -414,7 +465,7 @@ function Copy-MemLabsWindowsSetupEvidence {
             # Get-WinEvent treats the literal '?' in volume-GUID paths as a wildcard.
             $events = @(Get-WinEvent -Path ([Management.Automation.WildcardPattern]::Escape($source)) -MaxEvents 1000 -ErrorAction Stop |
                 ForEach-Object { $sourceRecordCount++; $_ } |
-                Where-Object { $log -in @('Setup', 'DSC-Operational') -or
+                Where-Object { $log -in @('Setup', 'DSC-Operational', 'UserProfiles', 'AppReadiness', 'Shell-Core', 'AppModel') -or
                     $_.ProviderName -match 'Setup|OOBE|Netlogon|Kernel-Boot|Kernel-Power|User32|Application Error|Windows Error Reporting|AppModel|CloudExperienceHost' -or
                     $_.Id -in @(6005, 6006, 6008) } |
                 Select-Object -First 80 |
@@ -469,7 +520,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $privateRoot = Join-Path $collectionRoot 'PrivateState'
     $null = New-Item -Path $bundle, $privateRoot -ItemType Directory
     $manifest = @{
-        SchemaVersion = 1; CollectorVersion = 2; RegistryReader = 'offreg.dll'
+        SchemaVersion = 1; CollectorVersion = 3; RegistryReader = 'offreg.dll'
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Host = $env:COMPUTERNAME; VMName = $vm.Name; VMId = "$($vm.Id)"
         OriginalState = "$($vm.State)"; FinalState = ''; Status = 'Collecting'
@@ -477,12 +528,16 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
         Missing = [Collections.Generic.List[string]]::new()
         Errors = [Collections.Generic.List[string]]::new()
         Disks = [Collections.Generic.List[object]]::new()
-        Privacy = 'No unattend XML, SAM, SECURITY, or raw registry hives are archived. Setup logs may contain device/account identifiers, paths, or other sensitive details; review the protected archive before sharing.'
+        Screenshots = [Collections.Generic.List[object]]::new()
+        Privacy = 'No unattend XML, SAM, SECURITY, or raw registry hives are archived. Console images and logs may contain visible guest data, device/account identifiers, paths, or other sensitive details; review the protected archive before sharing.'
     }
     $fatal = $null
     $windowsFound = $false
     $mountCleanupFailed = $false
     try {
+        $console = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage BeforeStop `
+            -Records $manifest.Screenshots -Errors $manifest.Errors
+        if ($console.Status -eq 'Captured') { $manifest.Files.Add([ordered]@{ Path = $console.Path; Truncated = $false; Kind = 'ConsoleScreenshot' }) }
         $manifest.ShutdownMode = Stop-MemLabsVmForSetupDiagnostics -VM $vm -TimeoutSeconds $StopTimeoutSeconds -AllowTurnOff:$AllowTurnOff
         $vm = Get-VM -Id $vm.Id -ErrorAction Stop
         $drives = @(Get-VMHardDiskDrive -VM $vm -ErrorAction Stop | Sort-Object ControllerNumber, ControllerLocation)

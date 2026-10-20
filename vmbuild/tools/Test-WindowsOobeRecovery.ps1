@@ -198,6 +198,20 @@ function Initialize-MemLabsSetupDiagnosticModules {
     $script:HostModuleChecks++
     if ($script:HostModuleFails) { throw 'Synthetic diagnostic host dependency failure' }
 }
+function Add-MemLabsSetupConsoleScreenshot {
+    param($VM, $Bundle, $Stage, $Records, $Errors)
+    $record = [pscustomobject]@{ Stage = $Stage; Status = 'UnavailableNotRunning'; Path = "Console-$Stage.png" }
+    if ($script:CaptureFails) {
+        $record.Status = 'Error'
+        $Errors.Add('Synthetic console capture failure')
+    }
+    elseif ($script:VM.State -eq 'Running') {
+        $record.Status = 'Captured'
+        [IO.File]::WriteAllBytes((Join-Path $Bundle $record.Path), [byte[]]@(137, 80, 78, 71))
+    }
+    $Records.Add($record)
+    return $record
+}
 function Get-VMHardDiskDrive {
     param($VM, $ErrorAction)
     Assert-True ($VM.Id -eq $script:VMId) 'Disk inventory targeted another VM.'
@@ -293,6 +307,7 @@ function Reset-HostFixture {
     $script:VM.State = 'Off'
     $script:Exports = 0; $script:Starts = 0; $script:Stops = 0; $script:Diagnostics = 0
     $script:VMReads = 0
+    $script:CaptureFails = $false
     $script:HostModuleChecks = 0; $script:HostModuleFails = $false
     $script:BadExport = $false; $script:AuthFails = $false; $script:ApplyUnknown = $false
     $script:RestoreFails = $false; $script:OobeFails = $false; $script:VerificationFails = $false; $script:BadPersistence = $false
@@ -396,6 +411,12 @@ try {
         $noBackupReport.BackupRequested -eq $false -and $noBackupReport.BackupVerified -eq $false -and
         $null -eq $noBackupReport.BackupPath -and $result.Status -eq 'OobeRecoveredIdentityUnchanged') `
         'Automatic-credential/no-backup mode exported a VM or misreported its backup/recovery state.'
+    Reset-HostFixture
+    $script:CaptureFails = $true
+    $partialEvidence = Invoke-MemLabsWindowsOobeRepair @automaticParameters
+    $partialReport = Get-Content -LiteralPath (Join-Path (Split-Path $partialEvidence.ArchivePath -Parent) 'Bundle\RepairResult.json') -Raw | ConvertFrom-Json
+    Assert-True ($partialReport.EvidenceStatus -eq 'Partial' -and $partialReport.Screenshots.Count -gt 0 -and
+        $partialEvidence.Status -eq 'OobeRecoveredIdentityUnchanged') 'Console failure hid partial evidence or changed the independently verified recovery outcome.'
     Reset-HostFixture
     $global:Common.LocalAdmin = $null
     [IO.File]::WriteAllText($cachedCredentialFile, ' ')

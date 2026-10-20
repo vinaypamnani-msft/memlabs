@@ -351,6 +351,7 @@ function Invoke-MemLabsWindowsOobeRepair {
         OobeRecovered = $false; VerifiedReboots = 0; FinalState = ''
         Export = $null; Apply = $null; FinalGuestState = $null; FailureStage = ''
         GuestChangesAttempted = $false
+        Screenshots = [Collections.Generic.List[object]]::new(); EvidenceStatus = 'Complete'
         OriginalSettingsRestored = $false; Errors = [Collections.Generic.List[string]]::new()
     }
     $failure = $null; $snapshot = $null; $applyAttempted = $false; $restored = $false; $indeterminate = $false
@@ -383,6 +384,7 @@ function Invoke-MemLabsWindowsOobeRepair {
         $report.Status = 'Inspecting'
         Write-MemLabsOobeRepairReport -Path $reportPath -Report $report
         Start-MemLabsOobeRepairVm -VM $vm
+        $null = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage RepairStart -Records $report.Screenshots -Errors $report.Errors
         $snapshot = Invoke-MemLabsOobeRepairGuestCommand -VM $vm -GuestCredential $GuestCredential -GuestBlock $guestBlock -Action Inspect
         Assert-MemLabsOobeRepairSnapshot -Snapshot $snapshot
         $snapshot | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $bundle 'OriginalSettings.json') -Encoding UTF8 -ErrorAction Stop
@@ -402,6 +404,7 @@ function Invoke-MemLabsWindowsOobeRepair {
         }
         $complete = Wait-MemLabsOobeRepairCompletion -VM $vm -GuestCredential $GuestCredential -GuestBlock $guestBlock `
             -MachineGuid $snapshot.MachineGuid -TimeoutSeconds $RepairTimeoutSeconds
+        $null = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage OobeCompleted -Records $report.Screenshots -Errors $report.Errors
         if ($applyAttempted) {
             $receipt = Invoke-MemLabsOobeRepairGuestCommand -VM $vm -GuestCredential $GuestCredential `
                 -GuestBlock $guestBlock -Action Restore -Snapshot $snapshot -TimeoutSeconds 60
@@ -418,6 +421,7 @@ function Invoke-MemLabsWindowsOobeRepair {
             $complete = Wait-MemLabsOobeRepairCompletion -VM $vm -GuestCredential $GuestCredential -GuestBlock $guestBlock `
                 -MachineGuid $snapshot.MachineGuid -ExpectedName $expectedName -TimeoutSeconds ($RepairTimeoutSeconds + 190) -StableSeconds 190
             $report.VerifiedReboots = $boot
+            $null = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage "VerifiedBoot$boot" -Records $report.Screenshots -Errors $report.Errors
         }
         $report.FinalGuestState = $complete
         $report.OobeRecovered = $true
@@ -431,6 +435,9 @@ function Invoke-MemLabsWindowsOobeRepair {
         $report.Errors.Add($_.Exception.Message)
     }
     finally {
+        if ($failure) {
+            $null = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage Failure -Records $report.Screenshots -Errors $report.Errors
+        }
         if ($applyAttempted -and -not $restored -and -not $indeterminate) {
             try {
                 $receipt = Invoke-MemLabsOobeRepairGuestCommand -VM $vm -GuestCredential $GuestCredential `
@@ -469,6 +476,7 @@ function Invoke-MemLabsWindowsOobeRepair {
         }
         try { $report.FinalState = "$((Get-VM -Id $vm.Id -ErrorAction Stop).State)" }
         catch { $report.Errors.Add("Final VM state could not be read: $($_.Exception.Message)"); if (-not $failure) { $failure = $_ } }
+        if (@($report.Screenshots | Where-Object Status -eq 'Error').Count) { $report.EvidenceStatus = 'Partial' }
         Write-MemLabsOobeRepairReport -Path $reportPath -Report $report
     }
     $archive = Join-Path $runRoot "$runName.zip"
@@ -476,6 +484,7 @@ function Invoke-MemLabsWindowsOobeRepair {
     catch { throw "Repair report archiving failed: $($_.Exception.Message). Unarchived evidence is preserved in '$bundle'; backup='$backup'." }
     $backupDescription = if ($backupRequested) { $backup } else { '<not requested>' }
     Write-Host "OOBE-only trial: status=$($report.Status); VM=$($report.FinalState); report=$archive; backup=$backupDescription"
+    if ($report.EvidenceStatus -eq 'Partial') { Write-Warning 'Console evidence is partial; inspect screenshot errors in the repair report.' }
     if ($indeterminate) { Write-Warning 'A remote action or restoration outcome is unknown. Do not retry or reboot; inspect the report and original-settings receipt first, and retain any backup that was requested.' }
     if ($failure) { throw "OOBE-only recovery was not verified: $($failure.Exception.Message). Evidence: $archive" }
     [pscustomobject]@{ Scope = 'OobeOnly'; Status = $report.Status; ArchivePath = $archive; BackupPath = $backup; FinalState = $report.FinalState }

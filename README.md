@@ -269,6 +269,17 @@ if shutdown fails or the VM is saved/paused; omit it to prohibit that fallback.
 The VM is left **off**, not restarted. Only the VM's active disk paths are
 mounted, read-only and without drive letters. Existing host mounts are refused.
 
+Console screenshots are automatic. Before stopping a running/paused VM, the
+collector captures its console through the Hyper-V framebuffer API using the
+exact VM ID; it does not capture the host desktop or require guest credentials.
+`Console-BeforeStop.png` and capture metadata are included in the protected ZIP.
+Off/Saved VMs have no available live framebuffer and are explicitly recorded
+as unavailable, not as successful screenshots. Blank/black frames are retained
+as evidence; API or rendering failures make the evidence partial rather than
+preventing the remaining setup-log collection.
+The same bounded, resolution-capped capture helper is used by
+`vmbuild\tools\Save-VmConsoleScreenshot.ps1`.
+
 Collection and repair validate their Hyper-V, Storage, event-reader, and archive
 modules/commands before shutdown, mounting, exports, or guest changes. A failed
 dependency check leaves VM power and disks untouched and reports the original
@@ -322,7 +333,8 @@ The protected archive path is printed under `vmbuild\logs\setup-diagnostics`
 by default. It contains setup/domain-join logs (at most 20 MiB per file, retaining
 the newest bytes and encoding marker when truncated), selected offline
 setup/name/domain registry values, and a manifest of missing evidence/errors.
-Setup, System, Application, and DSC event summaries contain at most 80 selected
+Setup, System, Application, DSC, user-profile, AppReadiness, Shell-Core, and
+AppModel event summaries contain at most 80 selected
 records from the latest 1,000 records per log. Raw event XML is retained even
 when the host cannot format a guest event's message.
 Volume-GUID paths are passed literally to the event reader. A query that
@@ -332,10 +344,13 @@ Raw registry hives and unattend XML are excluded; private hive copies are
 read using the system `offreg.dll` offline-registry library and removed after
 inspection. No hive is mounted into the host registry. This supports OS hives
 with different key security descriptors, which `RegLoadAppKey` does not.
-The manifest identifies this implementation as `CollectorVersion=2` and
+Selected first-logon animation, autologon-progress, and user-OOBE settings are
+also collected; Winlogon passwords and full unattend files remain excluded.
+The manifest identifies this implementation as `CollectorVersion=3` and
 `RegistryReader=offreg.dll`.
 An unavailable library or unreadable copy is reported as a collection error,
-not proof of guest registry corruption. Setup logs can still contain sensitive details:
+not proof of guest registry corruption. Console images and logs can contain
+visible guest data or other sensitive details:
 review the archive before sharing it. Partial or failed collections are
 explicitly identified; unresolved disk-detach failures require manual cleanup
 before restarting the VM. `-WhatIf` previews without stopping or mounting.
@@ -344,6 +359,8 @@ Validate the collector's mocked Hyper-V/storage safety contracts with
 `vmbuild\tools\Test-WindowsVmSetupDiagnostics.ps1`. It also exercises disposable
 uniform/mixed-security hive fixtures and isolated mutex contention; it does not operate
 on real VMs or load host registry hives.
+Validate framebuffer conversion, exact VM targeting, unavailable/black-frame
+handling, and capture-error reporting with `vmbuild\tools\Test-VmConsoleScreenshot.ps1`.
 
 ### Explicit OOBE-only recovery trial
 
@@ -412,6 +429,10 @@ A successful result is `OobeRecoveredIdentityUnchanged`, not a claim that AD
 identity or the whole deployment is repaired. Before/after diagnostics,
 original settings, backup location, and stage outcomes are written to a
 protected report ZIP; credentials and the VM export are excluded.
+Repair captures additional console images after startup, after OOBE completion,
+after each verified reboot, and on failure before any safe final shutdown.
+`EvidenceStatus=Partial` identifies screenshot failures separately from the
+recovery outcome. No screenshot failure silently turns into clean evidence.
 Known failures restore settings where safe and leave the VM off when graceful
 shutdown succeeds. A timed-out remote action or failed restoration is
 `Indeterminate`: the VM may remain running, and the script does **not** blindly
