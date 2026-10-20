@@ -438,7 +438,7 @@ provisioned-package inventory or proof that a missing old version caused the
 stall: a newer installed version can make an old preregistration entry stale.
 Inventory read/parse failures are explicit partial evidence, while absent folders
 and manifests are recorded as observations.
-The manifest identifies this implementation as `CollectorVersion=6` and
+The manifest identifies this implementation as `CollectorVersion=7` and
 `RegistryReader=offreg.dll`.
 An unavailable library or unreadable copy is reported as a collection error,
 not proof of guest registry corruption. Console images and logs can contain
@@ -477,8 +477,10 @@ starts the VM. Saved/Paused VMs must first be resumed or shut down normally;
 machine/native OOBE state, scoped first-logon service states,
 selected process/session/owner SIDs and FirstLogonAnim
 thread wait reasons, registered package status and per-user install states,
-and scoped provisioned-package identities/manifest presence. Package scopes
-include Windows App Runtime, VCLibs, XAML, OOBE, CloudExperienceHost, CBS,
+and scoped provisioned-package identities/manifest presence.
+Package-user identities use the AppX object's SID field rather than its type-name
+string representation; unreadable/invalid SIDs make the evidence explicitly partial.
+Package scopes include Windows App Runtime, VCLibs, XAML, OOBE, CloudExperienceHost, CBS,
 Start Menu, Shell Experience Host, and Start Experiences. Bundle manifests are
 checked at their bundle-specific path. No process command lines, memory dumps,
 passwords, user-profile contents, or raw registration databases are collected.

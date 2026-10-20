@@ -14,6 +14,16 @@ function Assert-Throws {
     try { $null = & $Action } catch { $message = $_.Exception.Message }
     Assert-True ($message -match $Pattern) "Expected '$Pattern', got '$message'."
 }
+if (-not ('MemLabs.ProbeAppxUserSecurityId' -as [type])) {
+    Add-Type -TypeDefinition @'
+namespace MemLabs {
+    public struct ProbeAppxUserSecurityId {
+        public string Sid;
+        public string Username;
+    }
+}
+'@
+}
 $root = Join-Path ([IO.Path]::GetTempPath()) "memlabs-firstlogon-probe-$([guid]::NewGuid().ToString('N'))"
 $originalProgramFiles = $env:ProgramFiles
 $null = New-Item -Path $root -ItemType Directory
@@ -28,6 +38,9 @@ try {
     [IO.File]::WriteAllText((Join-Path $bundleLocation 'AppxMetadata\AppxBundleManifest.xml'), '<Bundle/>')
     $script:MachineGuid = [guid]::NewGuid().ToString('D')
     $script:DefaultSid = 'S-1-5-21-111-222-333-1001'
+    $script:AppxUserId = [MemLabs.ProbeAppxUserSecurityId]::new()
+    $script:AppxUserId.Sid = $script:DefaultSid
+    $script:AppxUserId.Username = 'SYNTHETIC-USERNAME-MUST-NOT-EXPORT'
     $script:Administrator = $true
     $script:ProcessCount = 1; $script:ThreadCount = 2; $script:OwnerFailure = $false
     $script:DisposedProcesses = 0; $script:QueryFamilyFailure = ''; $script:ProvisionedFailure = $false
@@ -82,11 +95,12 @@ try {
         $process
     }
     function New-PackageFixture {
-        param([string]$Name = 'Microsoft.WindowsAppRuntime.2', [string]$FullName = $runtimeId, [string]$Location = $runtimeLocation, [bool]$Bundle = $false)
+        param([string]$Name = 'Microsoft.WindowsAppRuntime.2', [string]$FullName = $runtimeId,
+            [string]$Location = $runtimeLocation, [bool]$Bundle = $false, $UserSecurityId = $script:AppxUserId)
         [pscustomobject]@{
             Name = $Name; PackageFullName = $FullName; Version = [version]'2.5.1.0'; Architecture = 'X64'
             Status = 'Ok'; IsFramework = -not $Bundle; IsBundle = $Bundle; InstallLocation = $Location
-            PackageUserInformation = @([pscustomobject]@{ UserSecurityId = $script:DefaultSid; InstallState = 'Staged' })
+            PackageUserInformation = @([pscustomobject]@{ UserSecurityId = $UserSecurityId; InstallState = 'Staged' })
             Dependencies = @(); Password = 'SYNTHETIC-SECRET-MUST-NOT-EXPORT'
         }
     }
@@ -128,12 +142,38 @@ try {
     $appx = & $guest -Action Appx
     Assert-True ($appx.Status -eq 'Complete' -and $appx.RegisteredPackages.Count -eq 2 -and
         $appx.RegisteredPackages[0].Users[0].InstallState -eq 'Staged' -and
+        $appx.RegisteredPackages[0].Users[0].Sid -eq $script:DefaultSid -and
+        $null -eq $appx.RegisteredPackages[0].Users[0].Error -and
         $appx.RegisteredPackages[1].Manifest.Status -eq 'Present' -and
         $appx.RegisteredPackages[1].Manifest.Path.EndsWith('AppxMetadata\AppxBundleManifest.xml') -and
         $appx.ProvisionedPackages.Count -eq 2 -and $appx.ProvisionedPackages[0].Manifest.Status -eq 'Absent' -and
         $appx.ProvisionedPackages[1].Manifest.Status -eq 'Present' -and
         $appx.ProvisionedPackages[1].RegisteredPackageMatches.Count -eq 1 -and
-        ($appx | ConvertTo-Json -Depth 12) -notmatch 'Private.CompanyApp|SYNTHETIC-SECRET') 'Package registration/provisioning evidence inferred success or lost scope, bundle paths, or privacy.'
+        ($appx | ConvertTo-Json -Depth 12) -notmatch 'Private.CompanyApp|SYNTHETIC-SECRET|SYNTHETIC-USERNAME|ProbeAppxUserSecurityId') 'Package registration/provisioning evidence inferred success or lost scope, SID fields, bundle paths, or privacy.'
+    $savedPackages = $script:Registered
+    foreach ($userId in @(
+            $script:DefaultSid,
+            [Management.Automation.PSSerializer]::Deserialize([Management.Automation.PSSerializer]::Serialize($script:AppxUserId))
+        )) {
+        $script:Registered = @((New-PackageFixture -UserSecurityId $userId))
+        $sidResult = & $guest -Action Appx
+        Assert-True ($sidResult.Status -eq 'Complete' -and $sidResult.RegisteredPackages[0].Users[0].Sid -eq $script:DefaultSid) `
+            'A SID string or deserialized AppX SID field lost its validated value.'
+    }
+    foreach ($userId in @(
+            [pscustomobject]@{ Sid = 'not-a-sid'; Username = 'SYNTHETIC-USERNAME-MUST-NOT-EXPORT' },
+            [pscustomobject]@{ Username = 'SYNTHETIC-USERNAME-MUST-NOT-EXPORT' }
+        )) {
+        $script:Registered = @((New-PackageFixture -UserSecurityId $userId))
+        $sidResult = & $guest -Action Appx
+        Assert-True ($sidResult.Status -eq 'Partial' -and $sidResult.Errors.Count -eq 1 -and
+            $sidResult.RegisteredPackages.Count -eq 1 -and $null -eq $sidResult.RegisteredPackages[0].Users[0].Sid -and
+            $sidResult.RegisteredPackages[0].Users[0].InstallState -eq 'Staged' -and
+            -not [string]::IsNullOrWhiteSpace($sidResult.RegisteredPackages[0].Users[0].Error) -and
+            ($sidResult | ConvertTo-Json -Depth 12) -notmatch 'SYNTHETIC-USERNAME') `
+            'An invalid package-user SID became clean evidence or discarded package/install-state data.'
+    }
+    $script:Registered = $savedPackages
     $script:Administrator = $false
     Assert-Throws { & $guest -Action Appx } 'requires a guest administrator'
     $script:Administrator = $true

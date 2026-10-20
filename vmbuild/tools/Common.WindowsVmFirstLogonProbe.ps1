@@ -134,7 +134,21 @@ function Get-MemLabsFirstLogonGuestBlock {
                             IsFramework = [bool]$package.IsFramework; IsBundle = [bool]$package.IsBundle
                             InstallLocation = $package.InstallLocation; Manifest = $manifest
                             Users = @($users | ForEach-Object {
-                                    [pscustomobject]@{ Sid = "$($_.UserSecurityId)"; InstallState = "$($_.InstallState)" }
+                                    $packageUser = $_
+                                    $sid = $null; $sidError = $null
+                                    try {
+                                        $identity = $packageUser.UserSecurityId
+                                        $value = if ($identity -is [string]) { $identity } else { $identity.Sid }
+                                        if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) {
+                                            throw 'The package user has no readable SID field.'
+                                        }
+                                        $sid = [Security.Principal.SecurityIdentifier]::new($value).Value
+                                    }
+                                    catch {
+                                        $sidError = $_.Exception.Message
+                                        $errors.Add("Package user SID for '$($package.PackageFullName)': $sidError")
+                                    }
+                                    [pscustomobject]@{ Sid = $sid; InstallState = "$($packageUser.InstallState)"; Error = $sidError }
                                 })
                             Dependencies = @($dependencies | ForEach-Object {
                                     [pscustomobject]@{ Name = $_.Name; PackageFullName = $_.PackageFullName; Version = "$($_.Version)" }

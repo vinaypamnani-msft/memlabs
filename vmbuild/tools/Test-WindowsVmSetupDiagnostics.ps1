@@ -615,7 +615,7 @@ try {
         'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
-    Assert-True ($manifestRecord.CollectorVersion -eq 6 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
+    Assert-True ($manifestRecord.CollectorVersion -eq 7 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
         @($manifestRecord.Files | Where-Object Path -eq 'AppxPrerequisiteInventory.json').Count -eq 1) `
         'The archive does not identify the corrected registry reader and package-inventory collector.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'

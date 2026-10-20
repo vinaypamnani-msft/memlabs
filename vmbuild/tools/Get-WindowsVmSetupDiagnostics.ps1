@@ -677,7 +677,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $privateRoot = Join-Path $collectionRoot 'PrivateState'
     $null = New-Item -Path $bundle, $privateRoot -ItemType Directory
     $manifest = @{
-        SchemaVersion = 1; CollectorVersion = 6; RegistryReader = 'offreg.dll'
+        SchemaVersion = 1; CollectorVersion = 7; RegistryReader = 'offreg.dll'
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Host = $env:COMPUTERNAME; VMName = $vm.Name; VMId = "$($vm.Id)"
         OriginalState = "$($vm.State)"; FinalState = ''; Status = 'Collecting'
