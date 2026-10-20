@@ -386,7 +386,7 @@ try {
         if ($Name -eq $script:MissingCommand) { throw "Synthetic missing dependency command: $Name" }
         if ($Name -eq 'CimCmdlets\Invoke-CimMethod') {
             $script:DependenciesReady = ($script:ModuleImports.Count - $script:ModuleCycleStart) -eq 5 -and
-                ($script:CommandChecks.Count - $script:CommandCycleStart) -eq 15
+                ($script:CommandChecks.Count - $script:CommandCycleStart) -eq (15 + [int]$script:LiveRequested)
         }
         [pscustomobject]@{ Name = $Name }
     }
@@ -442,6 +442,45 @@ try {
         }
         $Records.Add($record)
         return $record
+    }
+    $probePassword = [Security.SecureString]::new()
+    foreach ($character in 'SYNTHETIC-PROBE-SECRET'.ToCharArray()) { $probePassword.AppendChar($character) }
+    $script:ProbeCredential = [pscredential]::new('fixture-admin', $probePassword)
+    function Resolve-MemLabsOobeRepairCredential {
+        param([pscredential]$GuestCredential)
+        $script:CredentialResolves++
+        if ($script:CredentialFails) { throw 'Synthetic saved credential is unavailable.' }
+        if ($GuestCredential) { return $GuestCredential }
+        return $script:ProbeCredential
+    }
+    function Get-MemLabsFirstLogonGuestBlock {
+        $script:GuestBlockBuilds++
+        return { param($Action) }
+    }
+    function Invoke-MemLabsWindowsFirstLogonProbe {
+        param($VM, [pscredential]$GuestCredential, $GuestBlock, $Bundle, $Manifest)
+        Assert-True ($VM.Id -eq $script:VmId -and
+            [object]::ReferenceEquals($GuestCredential, $script:ProbeCredential) -and $script:DependenciesReady) `
+            'Live inspection lost the exact VM, saved credential, or dependency preflight.'
+        $script:LiveProbeCalls++
+        if ($script:VmState -eq 'Off') {
+            $Manifest.LiveProbe.StartAttempted = $true
+            $Manifest.LiveProbe.StartedVm = $true
+            $script:ProbeStarts++; $script:VmState = 'Running'
+        }
+        if ($script:LiveFailure -eq 'PowerUnknown') {
+            $failure = [TimeoutException]::new('Synthetic startup outcome is unknown.')
+            $failure.Data['FirstLogonProbePowerIndeterminate'] = $true
+            throw $failure
+        }
+        if ($script:LiveFailure -eq 'Auth') { throw [UnauthorizedAccessException]::new('Synthetic PowerShell Direct authentication failure.') }
+        foreach ($stage in @('StateBefore', 'Appx', 'StateAfter')) {
+            $relative = "Live-$stage.json"
+            [IO.File]::WriteAllText((Join-Path $Bundle $relative), '{"ReadOnly":true,"RepairPerformed":false}')
+            $Manifest.Files.Add([ordered]@{ Path = $relative; Kind = 'LiveFirstLogonProbe'; Truncated = $false })
+            $Manifest.LiveProbe.Stages.Add([pscustomobject]@{ Name = $stage; Status = 'Complete'; Path = $relative })
+        }
+        $Manifest.LiveProbe.Status = 'Complete'
     }
     function Wait-Job {
         param($Job, $Timeout, $ErrorAction)
@@ -562,6 +601,8 @@ try {
         $script:ConsoleStates = [Collections.Generic.List[string]]::new()
         $script:ConsoleBadFrame = $false
         $script:NativeVolumePaths = $false
+        $script:LiveRequested = $false; $script:CredentialResolves = 0; $script:CredentialFails = $false
+        $script:GuestBlockBuilds = 0; $script:LiveProbeCalls = 0; $script:ProbeStarts = 0; $script:LiveFailure = ''
     }
     $parameters = @{ VmName = 'BROKEN-W11'; Destination = (Join-Path $testRoot 'output'); StopTimeoutSeconds = 5; Confirm = $false }
     Reset-Fixture
@@ -574,7 +615,7 @@ try {
         'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
-    Assert-True ($manifestRecord.CollectorVersion -eq 5 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
+    Assert-True ($manifestRecord.CollectorVersion -eq 6 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
         @($manifestRecord.Files | Where-Object Path -eq 'AppxPrerequisiteInventory.json').Count -eq 1) `
         'The archive does not identify the corrected registry reader and package-inventory collector.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'
@@ -589,6 +630,65 @@ try {
         }
     }
     finally { $zip.Dispose() }
+
+    Assert-True ($script:CredentialResolves -eq 0 -and $script:GuestBlockBuilds -eq 0 -and
+        -not $manifestRecord.LiveProbe.Requested) 'Offline collection unexpectedly read credentials or prepared a live probe.'
+    foreach ($initialState in @('Off', 'Running')) {
+        Reset-Fixture
+        $script:VmState = $initialState; $script:LiveRequested = $true
+        $liveReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeLiveProbe
+        $liveBundle = Join-Path (Split-Path $liveReport.ArchivePath -Parent) 'Bundle'
+        $liveManifest = Get-Content -LiteralPath (Join-Path $liveBundle 'Manifest.json') -Raw | ConvertFrom-Json
+        Assert-True ($liveReport.Status -eq 'Complete' -and $liveReport.FinalState -eq 'Off' -and
+            $liveManifest.OriginalState -eq $initialState -and $liveManifest.LiveProbe.Requested -and
+            $liveManifest.LiveProbe.Status -eq 'Complete' -and -not $liveManifest.LiveProbe.RepairPerformed -and
+            $script:CredentialResolves -eq 1 -and $script:LiveProbeCalls -eq 1 -and
+            $script:ProbeStarts -eq [int]($initialState -eq 'Off') -and $script:StopCalls -eq 1 -and $script:MountCalls -eq 1 -and
+            @($liveManifest.Files | Where-Object Kind -eq 'LiveFirstLogonProbe').Count -eq 3 -and
+            (Test-Path -LiteralPath (Join-Path $liveBundle 'Live-Appx.json'))) `
+            "$initialState live inspection lost protected artifacts, saved-credential preflight, or stop-before-mount behavior."
+        Assert-True ((Get-Content -LiteralPath (Join-Path $liveBundle 'Manifest.json') -Raw) -notmatch 'SYNTHETIC-PROBE-SECRET') `
+            'Live credentials leaked into the collection report.'
+    }
+    Reset-Fixture
+    $script:VmState = 'Off'; $script:LiveRequested = $true; $script:LiveFailure = 'Auth'
+    $authReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeLiveProbe
+    $authBundle = Join-Path (Split-Path $authReport.ArchivePath -Parent) 'Bundle'
+    $authManifest = Get-Content -LiteralPath (Join-Path $authBundle 'Manifest.json') -Raw | ConvertFrom-Json
+    Assert-True ($authReport.Status -eq 'Partial' -and $authReport.FinalState -eq 'Off' -and
+        $authManifest.LiveProbe.Status -eq 'Failed' -and $script:LiveProbeCalls -eq 1 -and
+        -not $authManifest.LiveProbe.AuthenticationRetried -and $script:StopCalls -eq 1 -and
+        (Test-Path -LiteralPath (Join-Path $authBundle 'WindowsSetupState.json'))) `
+        'Authentication failure retried, became clean live evidence, or prevented safe offline evidence.'
+    Reset-Fixture
+    $script:VmState = 'Off'; $script:LiveRequested = $true; $script:CredentialFails = $true
+    $failure = $null
+    try { $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeLiveProbe }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'credential' -and $script:VmState -eq 'Off' -and
+        $script:LiveProbeCalls -eq 0 -and $script:StopCalls -eq 0 -and $script:MountCalls -eq 0) `
+        'Credential preflight failure reached VM power operations.'
+    Reset-Fixture
+    $script:VmState = 'Off'; $script:LiveRequested = $true
+    $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeLiveProbe -WhatIf
+    Assert-True ($script:CredentialResolves -eq 0 -and $script:GuestBlockBuilds -eq 0 -and
+        $script:LiveProbeCalls -eq 0 -and $script:VmState -eq 'Off') 'Live WhatIf read credentials or changed power.'
+    foreach ($unsupported in @('Saved', 'Paused')) {
+        Reset-Fixture
+        $script:VmState = $unsupported; $script:LiveRequested = $true
+        $failure = $null
+        try { $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeLiveProbe -AllowTurnOff }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -match 'Off or Running' -and $script:CredentialResolves -eq 0 -and
+            $script:StopCalls -eq 0 -and $script:LiveProbeCalls -eq 0) 'Live inspection discarded saved/paused state.'
+    }
+    Reset-Fixture
+    $script:VmState = 'Off'; $script:LiveRequested = $true; $script:LiveFailure = 'PowerUnknown'
+    $failure = $null
+    try { $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeLiveProbe -AllowTurnOff }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'startup outcome is unknown' -and $script:LiveProbeCalls -eq 1 -and
+        $script:StopCalls -eq 0 -and $script:MountCalls -eq 0) 'Unknown live startup triggered another power operation or disk mount.'
 
     Reset-Fixture
     $script:NativeVolumePaths = $true

@@ -12,6 +12,10 @@
     Stop deployment/test retry loops before collection. The collector refuses
     to run while another process holds the MemLabs host mutation lease.
     Required host modules and commands are checked before shutdown or mounting.
+.PARAMETER IncludeLiveProbe
+    Opts into bounded, read-only first-logon/process and registered/provisioned AppX
+    inspection before the offline collection. Starts an Off VM, observes for 190s,
+    uses saved credentials, and makes no repair changes. Off/Running VMs only.
 .PARAMETER RepairOobe
     Explicitly opts into an OOBE-only Windows Update access trial. Uses the saved
     MemLabs local administrator credential unless GuestCredential is supplied.
@@ -28,18 +32,23 @@
     .\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -AllowTurnOff
 .EXAMPLE
     .\Get-WindowsVmSetupDiagnostics.ps1 -VmName CST-W11CLIENT1 -RepairOobe
+.EXAMPLE
+    .\Get-WindowsVmSetupDiagnostics.ps1 -VmName ADA-W11CLIENT1 -IncludeLiveProbe
 #>
 [CmdletBinding(DefaultParameterSetName = 'Collect', SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
     [Parameter(Mandatory, ParameterSetName = 'Collect')]
     [Parameter(Mandatory, ParameterSetName = 'Repair')]
+    [Parameter(Mandatory, ParameterSetName = 'Live')]
     [ValidateNotNullOrEmpty()][string]$VmName,
     [string]$Destination,
     [ValidateRange(5, 600)][int]$StopTimeoutSeconds = 90,
     [switch]$AllowTurnOff,
+    [Parameter(Mandatory, ParameterSetName = 'Live')][switch]$IncludeLiveProbe,
     [Parameter(Mandatory, ParameterSetName = 'Repair')][switch]$RepairOobe,
     [Parameter(ParameterSetName = 'Repair')][ValidateNotNullOrEmpty()][string]$BackupPath,
-    [Parameter(ParameterSetName = 'Repair')][ValidateNotNull()][pscredential]$GuestCredential,
+    [Parameter(ParameterSetName = 'Repair')]
+    [Parameter(ParameterSetName = 'Live')][ValidateNotNull()][pscredential]$GuestCredential,
     [Parameter(ParameterSetName = 'Repair')][ValidateRange(60, 3600)][int]$RepairTimeoutSeconds = 900,
     [Parameter(ParameterSetName = 'Repair')][ValidateRange(60, 7200)][int]$BackupTimeoutSeconds = 3600
 )
@@ -47,6 +56,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Initialize-MemLabsSetupDiagnosticModules {
+    param([switch]$IncludeLiveProbe)
     $requirements = [ordered]@{
         'Hyper-V' = @('Get-VM', 'Stop-VM', 'Get-VMHardDiskDrive', 'Get-VHD', 'Mount-VHD', 'Dismount-VHD')
         'Storage' = @('Get-Disk', 'Set-Disk', 'Get-Partition', 'Get-Volume')
@@ -54,6 +64,7 @@ function Initialize-MemLabsSetupDiagnosticModules {
         'Microsoft.PowerShell.Archive' = @('Compress-Archive')
         'CimCmdlets' = @('Get-CimInstance', 'Get-CimAssociatedInstance', 'Invoke-CimMethod')
     }
+    if ($IncludeLiveProbe) { $requirements['Hyper-V'] += 'Start-VM' }
     foreach ($moduleName in $requirements.Keys) {
         try {
             Import-Module -Name $moduleName -Global -ErrorAction Stop | Out-Null
@@ -636,7 +647,9 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][string]$Destination,
         [ValidateRange(5, 600)][int]$StopTimeoutSeconds = 90,
-        [switch]$AllowTurnOff
+        [switch]$AllowTurnOff,
+        [switch]$IncludeLiveProbe,
+        [pscredential]$GuestCredential
     )
 
     if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($VmName)) {
@@ -645,8 +658,16 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $vms = @(Get-VM -Name $VmName -ErrorAction Stop)
     if ($vms.Count -ne 1 -or $vms[0].Name -ine $VmName) { throw 'Exactly one matching VM is required.' }
     $vm = $vms[0]
-    if (-not $PSCmdlet.ShouldProcess($vm.Name, 'Stop if necessary, collect read-only Windows setup evidence, and leave the VM off')) { return }
-    Initialize-MemLabsSetupDiagnosticModules
+    $action = if ($IncludeLiveProbe) { 'Start if Off, observe and inspect first logon without repair, then collect offline evidence and leave Off' } else {
+        'Stop if necessary, collect read-only Windows setup evidence, and leave the VM off'
+    }
+    if (-not $PSCmdlet.ShouldProcess($vm.Name, $action)) { return }
+    if ($IncludeLiveProbe -and "$($vm.State)" -notin @('Off', 'Running')) { throw 'Live inspection requires an Off or Running VM; resume or shut it down normally first.' }
+    Initialize-MemLabsSetupDiagnosticModules -IncludeLiveProbe:$IncludeLiveProbe
+    if ($IncludeLiveProbe) {
+        $GuestCredential = Resolve-MemLabsOobeRepairCredential -GuestCredential $GuestCredential
+        $liveGuestBlock = Get-MemLabsFirstLogonGuestBlock
+    }
     $destinationPath = Resolve-MemLabsSetupDiagnosticPath -Path $Destination
     $safeName = $vm.Name -replace '[\\/:*?"<>|]', '_'
     $name = "$safeName-SetupFailure-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0,8))"
@@ -656,7 +677,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $privateRoot = Join-Path $collectionRoot 'PrivateState'
     $null = New-Item -Path $bundle, $privateRoot -ItemType Directory
     $manifest = @{
-        SchemaVersion = 1; CollectorVersion = 5; RegistryReader = 'offreg.dll'
+        SchemaVersion = 1; CollectorVersion = 6; RegistryReader = 'offreg.dll'
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Host = $env:COMPUTERNAME; VMName = $vm.Name; VMId = "$($vm.Id)"
         OriginalState = "$($vm.State)"; FinalState = ''; Status = 'Collecting'
@@ -665,12 +686,32 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
         Errors = [Collections.Generic.List[string]]::new()
         Disks = [Collections.Generic.List[object]]::new()
         Screenshots = [Collections.Generic.List[object]]::new()
+        LiveProbe = [ordered]@{
+            Requested = [bool]$IncludeLiveProbe; Status = 'NotRequested'; ReadOnlyGuestQueries = $true
+            StartAttempted = $false; StartedVm = $false; ObservationSeconds = 190
+            RepairPerformed = $false; AuthenticationRetried = $false
+            Stages = [Collections.Generic.List[object]]::new(); Error = $null
+        }
         Privacy = 'No unattend XML, SAM, SECURITY, or raw registry hives are archived. Console images and logs may contain visible guest data, device/account identifiers, paths, or other sensitive details; review the protected archive before sharing.'
     }
     $fatal = $null
     $windowsFound = $false
     $mountCleanupFailed = $false
     try {
+        if ($IncludeLiveProbe) {
+            try { Invoke-MemLabsWindowsFirstLogonProbe -VM $vm -GuestCredential $GuestCredential -GuestBlock $liveGuestBlock -Bundle $bundle -Manifest $manifest }
+            catch {
+                $manifest.LiveProbe.Status = 'Failed'; $manifest.LiveProbe.Error = $_.Exception.Message
+                $manifest.Errors.Add("Read-only live probe failed; no authentication retry or repair was attempted: $($_.Exception.Message)")
+                if ($_.Exception.Data['FirstLogonProbePowerIndeterminate']) {
+                    $manifest.LiveProbe.Status = 'Indeterminate'
+                    throw 'Live probe startup outcome is unknown. No further power operation or disk mount is safe; inspect the report before retrying.'
+                }
+                Write-Warning "Live inspection failed: $($_.Exception.Message). Continuing with offline evidence only."
+            }
+            $vm = Get-VM -Id $vm.Id -ErrorAction Stop
+            if ($vm.Name -ne $manifest.VMName) { throw 'The selected VM identity changed during live inspection.' }
+        }
         $console = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage BeforeStop `
             -Records $manifest.Screenshots -Errors $manifest.Errors
         if ($console.Status -eq 'Captured') { $manifest.Files.Add([ordered]@{ Path = $console.Path; Truncated = $false; Kind = 'ConsoleScreenshot' }) }
@@ -785,6 +826,11 @@ if ($RepairOobe) {
     $operation = 'Invoke-MemLabsWindowsOobeRepair'
 }
 elseif ($PSCmdlet.ParameterSetName -eq 'Repair') { throw 'Repair parameters require -RepairOobe to be explicitly enabled.' }
+elseif ($IncludeLiveProbe) {
+    . (Join-Path $PSScriptRoot 'Common.WindowsVmOobeRepair.ps1')
+    . (Join-Path $PSScriptRoot 'Common.WindowsVmFirstLogonProbe.ps1')
+}
+elseif ($PSCmdlet.ParameterSetName -eq 'Live') { throw 'Live probe parameters require -IncludeLiveProbe to be explicitly enabled.' }
 if ($WhatIfPreference) { & $operation @collectorParameters; return }
 $mutationMutex = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
 $leaseHeld = $false

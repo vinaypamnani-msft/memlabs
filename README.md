@@ -436,7 +436,7 @@ provisioned-package inventory or proof that a missing old version caused the
 stall: a newer installed version can make an old preregistration entry stale.
 Inventory read/parse failures are explicit partial evidence, while absent folders
 and manifests are recorded as observations.
-The manifest identifies this implementation as `CollectorVersion=5` and
+The manifest identifies this implementation as `CollectorVersion=6` and
 `RegistryReader=offreg.dll`.
 An unavailable library or unreadable copy is reported as a collection error,
 not proof of guest registry corruption. Console images and logs can contain
@@ -453,6 +453,51 @@ Package inventory is also tested through real local volume-GUID aliases of
 disposable fixture files, including the production collection/archive path.
 Validate framebuffer conversion, exact VM targeting, unavailable/black-frame
 handling, and capture-error reporting with `vmbuild\tools\Test-VmConsoleScreenshot.ps1`.
+
+### Optional read-only live first-logon probe
+
+For an intact Windows client stalled at first sign-in, add `-IncludeLiveProbe`
+to the same collector command:
+
+```powershell
+.\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName ADA-W11CLIENT1 -IncludeLiveProbe
+```
+
+The default remains offline-only. The opt-in mode accepts **Off or Running**
+VMs, starts only the exact selected Off VM, allows 190 seconds of normal
+first-logon progress, then performs bounded PowerShell Direct queries.
+It automatically uses the saved MemLabs administrator credential; an explicit
+`-GuestCredential` still overrides it. `-WhatIf` never loads credentials or
+starts the VM. Saved/Paused VMs must first be resumed or shut down normally;
+`-AllowTurnOff` does not bypass this live-probe precondition.
+
+`Live-StateBefore.json`, `Live-Appx.json`, and `Live-StateAfter.json` record
+machine/native OOBE state, scoped first-logon service states,
+selected process/session/owner SIDs and FirstLogonAnim
+thread wait reasons, registered package status and per-user install states,
+and scoped provisioned-package identities/manifest presence. Package scopes
+include Windows App Runtime, VCLibs, XAML, OOBE, CloudExperienceHost, CBS,
+Start Menu, Shell Experience Host, and Start Experiences. Bundle manifests are
+checked at their bundle-specific path. No process command lines, memory dumps,
+passwords, user-profile contents, or raw registration databases are collected.
+
+Each guest query has a 60-second deadline and is never retried with alternate
+credentials. PowerShell Direct authentication, transport, and timeout failures
+stop further live queries and make the evidence partial; normal graceful shutdown
+and offline collection then continue. A failed or unverified VM startup instead
+stops further power/disk actions and reports failed/indeterminate evidence for
+manual inspection.
+The normal collector shutdown/mount safety rules still apply and the VM is
+left Off when shutdown succeeds.
+Individual package/service/process read errors are retained explicitly while
+independent data can still be collected; they never become clean empty results.
+
+This is inspection, **not repair or proof of recovery**: it does not change
+AppX registration, policies, setup-completion flags, computer names, or domain
+membership. Windows can naturally progress during the explicitly requested
+boot/observation period. Validate the guest scopes and bounded host orchestration
+with `vmbuild\tools\Test-WindowsVmFirstLogonProbe.ps1`, plus the existing collector
+and startup-default regression scripts, on both PowerShell engines.
 
 ### Explicit OOBE-only recovery trial
 
