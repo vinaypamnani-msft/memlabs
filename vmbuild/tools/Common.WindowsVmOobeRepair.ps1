@@ -168,6 +168,9 @@ function Wait-MemLabsOobeRepairCompletion {
             }
             $lastDetail = $state.Setup.Detail
             if ($state.Setup.Ready) {
+                if ($state.Setup.Reason -eq 'MachineCompleteAwaitingFirstLogon') {
+                    throw 'Deployment-ready machine setup awaiting first logon is not full native OOBE recovery; the repair trial cannot qualify it as recovered.'
+                }
                 if ($state.Setup.NativeOobeComplete -isnot [bool] -or -not $state.Setup.NativeOobeComplete -or
                     $state.Setup.Reason -ne 'Complete' -or
                     $state.Setup.ImageState -isnot [string] -or $state.Setup.ImageState -ne 'IMAGE_STATE_COMPLETE' -or

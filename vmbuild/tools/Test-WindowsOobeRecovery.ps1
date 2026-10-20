@@ -478,6 +478,15 @@ try {
     catch { $failure = $_.Exception.Message }
     Assert-True ($failure -match 'not verified within') 'A late ready reply passed after the repair verification deadline.'
 
+    Reset-HostFixture
+    [MemLabs.OobeRepairTestClock]::Now = 0
+    $script:LastProbe.Setup.NativeOobeComplete = $false
+    $script:LastProbe.Setup.Reason = 'MachineCompleteAwaitingFirstLogon'
+    $failure = $null
+    try { $null = & $clockedWait @waitParameters }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'not full native OOBE recovery') 'Deployment readiness qualified a strict OOBE repair recovery trial.'
+
     $exportFixture = Join-Path $testRoot 'export-fixture'
     $null = Microsoft.PowerShell.Management\New-Item -Path $exportFixture -ItemType Directory
     [IO.File]::WriteAllText((Join-Path $exportFixture "$($script:VMId).vmcx"), 'synthetic config')

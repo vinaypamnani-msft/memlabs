@@ -189,15 +189,31 @@ Validate with `vmbuild\tools\Test-PhaseFailurePropagation.ps1`,
 
 ### Windows client setup readiness
 
-Ordinary Windows-client deployments require both complete machine-setup state
-and the supported native `OOBEComplete` Windows Welcome signal before advancing.
-`IMAGE_STATE_COMPLETE` alone is insufficient: user OOBE can still fail and
-re-arm setup, changing the computer name after a successful domain join.
+Ordinary Windows-client deployments require complete machine-setup state before
+advancing. A successful native `OOBEComplete` Windows Welcome signal still passes
+the normal completion path. There is also an explicit unattended-machine-ready
+state, `MachineCompleteAwaitingFirstLogon`, for a guest that has not started its
+first-user OOBE. This requires **all** of:
+
+- `IMAGE_STATE_COMPLETE` and numeric zero `SetupType`, `SystemSetupInProgress`,
+  and `OOBEInProgress`.
+- A successful native API query reporting incomplete, with the WinRT
+  `SystemSetupInfo` OOBE lifecycle API reporting exactly `NotStarted`.
+- Numeric `setup.exe` child completion state `3` and readable active/pending names.
+- A successful bounded process query finding no setup, OOBE, CloudExperienceHost,
+  WWAHost, or first-logon-animation processes.
+
+This classification permits unattended deployment before interactive first logon;
+it does not claim native OOBE completion. `InProgress`, active OOBE processes,
+incomplete machine setup, conflicting API signals, missing/malformed values, and
+API/query errors remain blocked. `IMAGE_STATE_COMPLETE` alone is insufficient:
+failed user OOBE can still re-arm setup or change the computer name.
 
 The mandatory client gate runs after fresh-VM machine readiness, before
 retained-VM resume reboot checks, and again after any required resume reboot.
 It uses a 30-minute polling deadline, bounded guest-command probes, and reports
-the setup flags, native completion result, active/pending names, and read errors.
+the setup flags, native/WinRT OOBE states, child completion, process evidence,
+active/pending names, and read errors.
 Malformed responses also report envelope/setup-state object counts and types,
 plus missing or invalid field names, without dumping guest payloads.
 Late replies cannot pass after the readiness deadline. Unknown, missing,
@@ -223,6 +239,11 @@ real background jobs to verify that the guest-command wrapper returns exactly on
 result envelope, preserving client/server setup state and guest failure diagnostics.
 The pinned main-to-develop candidate preflight runs this regression automatically
 under both PowerShell engines; neither engine's result can substitute for the other.
+OOBE repair qualification remains stricter: deployment readiness awaiting first
+logon cannot substitute for full native OOBE completion and stability checks.
+The shared helper ships as a loose `DSC\phases` script, not inside the module-only
+`DSC.zip`. Deployment staging refreshes the whole DSC folder when its payload
+signature changes; update the full folder rather than replacing only the ZIP.
 
 ### Windows setup failure diagnostics
 

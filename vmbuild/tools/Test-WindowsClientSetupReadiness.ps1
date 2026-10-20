@@ -22,12 +22,22 @@ function Reset-SetupFixture {
     $script:ActiveName = 'CST-W11CLIENT1'; $script:PendingName = 'CST-W11CLIENT1'
     $script:NativeValue = $true; $script:NativeThrows = $false; $script:CimThrows = $false
     $script:RegistryThrows = $false; $script:RegistryReads = 0; $script:NativeReads = 0
+    $script:UserOobeValue = 'InProgress'; $script:UserOobeThrows = $false; $script:UserOobeReads = 0
+    $script:CompletionValues = [pscustomobject]@{ 'setup.exe' = 3 }
+    $script:OobeProcesses = @(); $script:ProcessThrows = $false; $script:ProcessReads = 0
 }
 function Get-CimInstance {
-    param($ClassName, $OperationTimeoutSec, $ErrorAction)
-    Assert-True ($ClassName -eq 'Win32_OperatingSystem' -and $OperationTimeoutSec -eq 5) 'OS classification lost its bounded local query.'
-    if ($script:CimThrows) { throw 'Synthetic CIM failure' }
-    [pscustomobject]@{ ProductType = $script:ProductType }
+    param($ClassName, $OperationTimeoutSec, $Filter, $ErrorAction)
+    Assert-True ($OperationTimeoutSec -eq 5 -and $ErrorAction -eq 'Stop') 'Setup classification lost its bounded fail-closed local query.'
+    if ($ClassName -eq 'Win32_OperatingSystem') {
+        if ($script:CimThrows) { throw 'Synthetic CIM failure' }
+        return [pscustomobject]@{ ProductType = $script:ProductType }
+    }
+    Assert-True ($ClassName -eq 'Win32_Process' -and $Filter -match 'UserOOBEBroker' -and
+        $Filter -notmatch 'LogonUI') 'Setup process inspection queried a different class or treated the sign-in screen as active OOBE.'
+    $script:ProcessReads++
+    if ($script:ProcessThrows) { throw 'Synthetic OOBE process query failure' }
+    return $script:OobeProcesses
 }
 function Get-ItemProperty {
     param($LiteralPath, $Name, $ErrorAction)
@@ -36,6 +46,7 @@ function Get-ItemProperty {
     switch ($LiteralPath) {
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' { return [pscustomobject]@{ ImageState = $script:ImageState } }
         'HKLM:\SYSTEM\Setup' { return $script:SetupValues }
+        'HKLM:\SYSTEM\Setup\Status\ChildCompletion' { return $script:CompletionValues }
         'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' { return [pscustomobject]@{ ComputerName = $script:ActiveName } }
         'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' { return [pscustomobject]@{ ComputerName = $script:PendingName } }
         default { throw "Unexpected registry path: $LiteralPath" }
@@ -46,6 +57,11 @@ function Get-MemLabsWindowsOobeCompletion {
     if ($script:NativeThrows) { throw 'Synthetic native OOBE API failure' }
     return $script:NativeValue
 }
+function Get-MemLabsWindowsOobeLifecycleState {
+    $script:UserOobeReads++
+    if ($script:UserOobeThrows) { throw 'Synthetic user OOBE API failure' }
+    return $script:UserOobeValue
+}
 
 Reset-SetupFixture
 $readyState = Get-MemLabsWindowsClientSetupState
@@ -54,7 +70,8 @@ foreach ($serverType in @(2, 3)) {
     Reset-SetupFixture
     $script:ProductType = $serverType
     $state = Get-MemLabsWindowsClientSetupState
-    Assert-True ($state.Ready -and -not $state.Required -and $script:RegistryReads -eq 0 -and $script:NativeReads -eq 0) `
+    Assert-True ($state.Ready -and -not $state.Required -and $script:RegistryReads -eq 0 -and $script:NativeReads -eq 0 -and
+        $script:UserOobeReads -eq 0 -and $script:ProcessReads -eq 0) `
         'Server setup behavior was changed by the client-only gate.'
 }
 foreach ($badProduct in @($null, 0, '1')) {
@@ -80,6 +97,65 @@ $script:NativeValue = $false
 $pendingState = Get-MemLabsWindowsClientSetupState
 Assert-True (-not $pendingState.Ready -and $pendingState.Reason -eq 'WindowsWelcomeIncomplete' -and
     $pendingState.ImageState -eq 'IMAGE_STATE_COMPLETE') 'Machine ImageState completion bypassed unfinished Windows Welcome.'
+Reset-SetupFixture
+$script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
+$firstLogonState = Get-MemLabsWindowsClientSetupState
+Assert-True ($firstLogonState.Ready -and $firstLogonState.Required -and -not $firstLogonState.NativeOobeComplete -and
+    $firstLogonState.Reason -eq 'MachineCompleteAwaitingFirstLogon' -and $firstLogonState.WinRtOobeState -eq 'NotStarted' -and
+    $firstLogonState.SetupExeCompletion -eq 3 -and $firstLogonState.OobeProcessCount -eq 0 -and
+    $firstLogonState.OobeProcesses.Count -eq 0 -and $script:UserOobeReads -eq 1 -and $script:ProcessReads -eq 1) `
+    'The completed unattended machine at the sign-in screen was rejected or mislabeled as full native completion.'
+foreach ($badUserState in @($null, '', 'Unknown', 'Completed', 0, @('NotStarted', 'InProgress'))) {
+    Reset-SetupFixture
+    $script:NativeValue = $false; $script:UserOobeValue = $badUserState
+    $state = Get-MemLabsWindowsClientSetupState
+    Assert-True (-not $state.Ready -and $state.Reason -eq 'ProbeFailed' -and $state.Diagnostics.Count -gt 0) `
+        'Unknown/malformed/conflicting user OOBE state became deployment-ready.'
+}
+foreach ($badCompletion in @($null, '3', -1, @($true, $true))) {
+    Reset-SetupFixture
+    $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
+    $script:CompletionValues.'setup.exe' = $badCompletion
+    $state = Get-MemLabsWindowsClientSetupState
+    Assert-True (-not $state.Ready -and $state.Diagnostics.Count -gt 0) 'Malformed setup.exe completion became deployment-ready.'
+}
+Reset-SetupFixture
+$script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
+$script:CompletionValues.PSObject.Properties.Remove('setup.exe')
+$state = Get-MemLabsWindowsClientSetupState
+Assert-True (-not $state.Ready -and $state.Diagnostics.Count -gt 0) 'Missing setup.exe completion became deployment-ready.'
+foreach ($completion in @(0, 1, 2)) {
+    Reset-SetupFixture
+    $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
+    $script:CompletionValues.'setup.exe' = $completion
+    $state = Get-MemLabsWindowsClientSetupState
+    Assert-True (-not $state.Ready -and $state.Reason -eq 'MachineSetupIncomplete' -and $script:ProcessReads -eq 0) `
+        'Incomplete setup.exe child state reached deployment readiness or process inspection.'
+}
+foreach ($processName in @('setup.exe', 'setuphost.exe', 'msoobe.exe', 'oobeldr.exe', 'oobelauncher.exe',
+        'UserOOBEBroker.exe', 'CloudExperienceHostBroker.exe', 'CloudExperienceHost.exe', 'WWAHost.exe', 'FirstLogonAnim.exe')) {
+    Reset-SetupFixture
+    $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
+    $script:OobeProcesses = @([pscustomobject]@{ Name = $processName })
+    $state = Get-MemLabsWindowsClientSetupState
+    Assert-True (-not $state.Ready -and $state.OobeProcessCount -eq 1 -and $state.Detail.Contains($processName)) `
+        "Active $processName was accepted or omitted from diagnostics."
+}
+foreach ($failure in @('UserApi', 'ProcessQuery', 'UnreadableProcess', 'MachineFlag', 'ImageState')) {
+    Reset-SetupFixture
+    $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted'
+    if ($failure -eq 'UserApi') { $script:UserOobeThrows = $true }
+    if ($failure -eq 'ProcessQuery') { $script:ProcessThrows = $true }
+    if ($failure -eq 'UnreadableProcess') { $script:OobeProcesses = @([pscustomobject]@{ Name = '' }) }
+    if ($failure -eq 'MachineFlag') { $script:SetupValues.OOBEInProgress = 1 }
+    if ($failure -eq 'ImageState') { $script:ImageState = 'IMAGE_STATE_UNDEPLOYABLE' }
+    $state = Get-MemLabsWindowsClientSetupState
+    Assert-True (-not $state.Ready -and -not [string]::IsNullOrWhiteSpace($state.Detail)) "$failure bypassed the unattended-machine guards."
+    if ($failure -in @('MachineFlag', 'ImageState')) {
+        Assert-True ($script:UserOobeReads -eq 0 -and $script:ProcessReads -eq 0) 'Incomplete machine setup queried a first-logon exception.'
+    }
+    else { Assert-True ($state.Diagnostics.Count -gt 0) "$failure lost its explicit error." }
+}
 foreach ($badNative in @($null, 'True', @($true, $true))) {
     Reset-SetupFixture
     $script:NativeValue = $badNative
@@ -156,15 +232,21 @@ function New-Reply {
 Reset-HostFixture -Response (New-Reply $readyState)
 Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'Completed host client gate failed.'
 Assert-True ($script:RpcCalls -eq 1 -and $script:ProgressCalls -eq 1) 'A completed client did not pass immediately.'
+Reset-HostFixture -Response (New-Reply $firstLogonState)
+Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'The host rejected a fully verified pre-first-logon machine.'
+Assert-True ($script:RpcCalls -eq 1 -and ($script:Messages -join ' ') -match 'MachineCompleteAwaitingFirstLogon') `
+    'Unattended machine readiness required a timer or lost its distinct diagnostic.'
 Reset-HostFixture -Response (New-Reply $readyState)
 $script:Replies.Enqueue((New-Reply $pendingState))
 $script:Replies.Enqueue((New-Reply $readyState))
 Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'An incomplete-to-complete transition was not retried.'
 Assert-True ($script:RpcCalls -eq 2 -and ($script:Messages -join ' ') -match 'WindowsWelcomeIncomplete') 'Pending user OOBE was not logged before retry.'
-Reset-HostFixture -Response (New-Reply $readyState)
-$script:ReplyDelayMilliseconds = 1100
-Assert-True (-not (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 1)) 'A late completed response passed after the readiness deadline.'
-Assert-True (($script:Messages -join ' ') -match 'late reply') 'The readiness deadline rejected a late response without explanation.'
+foreach ($lateState in @($readyState, $firstLogonState)) {
+    Reset-HostFixture -Response (New-Reply $lateState)
+    $script:ReplyDelayMilliseconds = 1100
+    Assert-True (-not (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 1)) 'A late native/first-logon ready response passed after the readiness deadline.'
+    Assert-True (($script:Messages -join ' ') -match 'late reply') 'The readiness deadline rejected a late response without explanation.'
+}
 
 $invalidReplies = [ordered]@{
     Pending = 'WindowsWelcomeIncomplete'
@@ -235,6 +317,41 @@ foreach ($variant in $invalidReplies.Keys) {
     finally { Set-StrictMode -Off }
 }
 
+$invalidFirstLogon = [ordered]@{
+    MissingUserState = 'Missing setup fields=\[WinRtOobeState\]'
+    MissingCompletion = 'Missing setup fields=\[SetupExeCompletion\]'
+    MissingProcessCount = 'Missing setup fields=\[OobeProcessCount\]'
+    MissingProcesses = 'Missing setup fields=\[OobeProcesses\]'
+    MissingDiagnostics = 'Missing setup fields=\[Diagnostics\]'
+    InProgress = 'Invalid setup fields=\[WinRtOobeState\]'
+    StringCompletion = 'Invalid setup fields=\[SetupExeCompletion\]'
+    ActiveProcess = 'Invalid setup fields=\[OobeProcessCount, OobeProcesses\]'
+    NullProcesses = 'Invalid setup fields=\[OobeProcesses\]'
+    ReportedError = 'Invalid setup fields=\[Diagnostics\]'
+    InconsistentNative = 'Invalid setup fields=\[NativeOobeComplete\]'
+}
+foreach ($variant in $invalidFirstLogon.Keys) {
+    $badState = $firstLogonState | Select-Object *
+    if ($variant -eq 'MissingUserState') { $badState.PSObject.Properties.Remove('WinRtOobeState') }
+    if ($variant -eq 'MissingCompletion') { $badState.PSObject.Properties.Remove('SetupExeCompletion') }
+    if ($variant -eq 'MissingProcessCount') { $badState.PSObject.Properties.Remove('OobeProcessCount') }
+    if ($variant -eq 'MissingProcesses') { $badState.PSObject.Properties.Remove('OobeProcesses') }
+    if ($variant -eq 'MissingDiagnostics') { $badState.PSObject.Properties.Remove('Diagnostics') }
+    if ($variant -eq 'InProgress') { $badState.WinRtOobeState = 'InProgress' }
+    if ($variant -eq 'StringCompletion') { $badState.SetupExeCompletion = '3' }
+    if ($variant -eq 'ActiveProcess') { $badState.OobeProcessCount = 1; $badState.OobeProcesses = @('msoobe.exe') }
+    if ($variant -eq 'NullProcesses') { $badState.OobeProcesses = $null }
+    if ($variant -eq 'ReportedError') { $badState.Diagnostics = @('Synthetic query failure') }
+    if ($variant -eq 'InconsistentNative') { $badState.NativeOobeComplete = $true }
+    Reset-HostFixture -Response (New-Reply $badState) -AdvanceClock
+    Set-StrictMode -Version Latest
+    try {
+        Assert-True (-not (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 1) -and
+            ($script:Messages -join ' ') -match $invalidFirstLogon[$variant]) "$variant bypassed host first-logon protocol validation."
+    }
+    finally { Set-StrictMode -Off }
+}
+
 & {
     $invokeDefinition = $commonAst.Find({
             param($node)
@@ -263,13 +380,14 @@ foreach ($variant in $invalidReplies.Keys) {
     }
 
     try {
-        foreach ($scenario in @('Client', 'DomainController', 'MemberServer', 'GuestFailure')) {
+        foreach ($scenario in @('Client', 'AwaitingFirstLogon', 'DomainController', 'MemberServer', 'GuestFailure')) {
             Reset-SetupFixture
             $script:ProductType = switch ($scenario) {
                 'DomainController' { 2 }
                 'MemberServer' { 3 }
                 default { 1 }
             }
+            if ($scenario -eq 'AwaitingFirstLogon') { $script:NativeValue = $false; $script:UserOobeValue = 'NotStarted' }
             $guestState = Get-MemLabsWindowsClientSetupState
             $guestFailure = $scenario -eq 'GuestFailure'
             $script:Messages.Clear()
@@ -315,6 +433,31 @@ $workgroup = Get-Content -LiteralPath (Join-Path $root 'DSC\phases\Phase2Workgro
 Assert-True ($workgroup -match "(?s)WriteStatus Rename\s*\{\s*DependsOn = '\[Script\]ClientSetupBeforeRename'" -and
     $workgroup -match "(?s)Computer NewName.+?DependsOn = '\[WriteStatus\]Rename'" -and
     $workgroup -match "if \(\`$ThisVM\.role -eq 'AADClient'\)") 'Workgroup rename bypasses its guard or changed the AAD OOBE exemption.'
+
+& {
+    function Get-MemLabsWindowsClientSetupState { return $script:GuardState }
+    $malformedReady = $readyState | Select-Object *
+    $malformedReady.Ready = 'True'
+    foreach ($phaseText in @($phase2, $workgroup)) {
+        $guards = @{}
+        foreach ($name in @('clientSetupTest', 'clientSetupSet')) {
+            $match = [regex]::Match($phaseText, ('(?ms)^    \$' + $name + ' = (?<body>\{.*?^    \})'))
+            Assert-True $match.Success "The actual DSC $name guard could not be extracted."
+            $body = $match.Groups['body'].Value
+            $body = $body.Substring(1, $body.Length - 2).Replace(
+                ". 'C:\staging\DSC\phases\WindowsSetupReadiness.ps1'", '')
+            $guards[$name] = [scriptblock]::Create($body)
+        }
+        foreach ($fixture in @($readyState, $firstLogonState, $pendingState, $malformedReady)) {
+            $script:GuardState = $fixture
+            $expected = $fixture.Ready -is [bool] -and $fixture.Ready
+            Assert-True ((& $guards.clientSetupTest) -eq $expected) 'A DSC test guard changed deployment-readiness classification.'
+            $failure = $null
+            try { & $guards.clientSetupSet } catch { $failure = $_.Exception.Message }
+            Assert-True (($null -eq $failure) -eq $expected) 'A DSC set guard bypassed a blocked state or rejected machine-ready first logon.'
+        }
+    }
+}
 
 $confirmStart = $phase2.IndexOf('Script ConfirmComputerName {')
 $confirmEnd = $phase2.IndexOf('WriteStatus WaitDomain', $confirmStart)
@@ -373,4 +516,4 @@ $commands = @($helperAst.FindAll({ param($node) $node -is [Management.Automation
 Assert-True (@($commands | Where-Object { $_ -match '^(Set-|New-Item|Restart-|Stop-|Rename-|Add-Computer|Reset-)' }).Count -eq 0) `
     'The shared setup probe can mutate guest state.'
 
-Write-Host 'PASS -- native/registry client readiness, real asynchronous command results, fail-closed protocol, bounded retries, server exclusions, and fresh/resume/DSC wiring.'
+Write-Host 'PASS -- full-native and guarded first-logon deployment readiness, real asynchronous results, fail-closed protocol, bounded retries, server exclusions, and actual DSC guards.'

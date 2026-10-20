@@ -24,11 +24,17 @@ namespace MemLabs {
     return [MemLabs.WindowsOobeReadiness]::ReadCompletion()
 }
 
+function Get-MemLabsWindowsOobeLifecycleState {
+    return [string][Windows.System.Profile.SystemSetupInfo, Windows.System.Profile, ContentType=WindowsRuntime]::OutOfBoxExperienceState
+}
+
 function Get-MemLabsWindowsClientSetupState {
     $state = [pscustomobject]@{
         Version = 1; Required = $true; Ready = $false; ProductType = $null
         ImageState = $null; SetupType = $null; SystemSetupInProgress = $null
         OOBEInProgress = $null; NativeOobeComplete = $null
+        WinRtOobeState = $null; SetupExeCompletion = $null
+        OobeProcessCount = $null; OobeProcesses = @()
         ActiveName = $null; PendingName = $null
         Reason = 'ProbeFailed'; Detail = ''; Diagnostics = @()
     }
@@ -80,13 +86,53 @@ function Get-MemLabsWindowsClientSetupState {
             $state.SystemSetupInProgress -ne 0 -or $state.OOBEInProgress -ne 0) {
             $state.Reason = 'MachineSetupIncomplete'
         }
-        elseif (-not $state.NativeOobeComplete) { $state.Reason = 'WindowsWelcomeIncomplete' }
+        elseif (-not $state.NativeOobeComplete) {
+            $state.Reason = 'WindowsWelcomeIncomplete'
+            $userStates = @(Get-MemLabsWindowsOobeLifecycleState)
+            if ($userStates.Count -ne 1 -or $userStates[0] -isnot [string] -or
+                $userStates[0] -notin @('NotStarted', 'InProgress', 'Completed')) {
+                throw 'The WinRT OOBE lifecycle API did not return one supported state.'
+            }
+            $state.WinRtOobeState = $userStates[0]
+            if ($state.WinRtOobeState -eq 'Completed') {
+                throw 'Native and WinRT OOBE completion signals disagree.'
+            }
+            if ($state.WinRtOobeState -eq 'NotStarted') {
+                $completion = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\Setup\Status\ChildCompletion' `
+                    -Name 'setup.exe' -ErrorAction Stop
+                $property = $completion.PSObject.Properties['setup.exe']
+                if (-not $property -or ($property.Value -isnot [int] -and $property.Value -isnot [uint32]) -or
+                    $property.Value -lt 0) {
+                    throw 'Windows setup.exe completion state is missing or invalid.'
+                }
+                $state.SetupExeCompletion = $property.Value
+                if ($state.SetupExeCompletion -ne 3) { $state.Reason = 'MachineSetupIncomplete' }
+                else {
+                    $processes = @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop `
+                        -Filter "Name='setup.exe' OR Name='setuphost.exe' OR Name='msoobe.exe' OR Name='oobeldr.exe' OR Name='oobelauncher.exe' OR Name='UserOOBEBroker.exe' OR Name='CloudExperienceHostBroker.exe' OR Name='CloudExperienceHost.exe' OR Name='WWAHost.exe' OR Name='FirstLogonAnim.exe'")
+                    foreach ($process in $processes) {
+                        $nameProperty = $process.PSObject.Properties['Name']
+                        if (-not $nameProperty -or $nameProperty.Value -isnot [string] -or
+                            [string]::IsNullOrWhiteSpace($nameProperty.Value)) {
+                            throw 'The OOBE process query returned an unreadable process name.'
+                        }
+                    }
+                    $state.OobeProcessCount = $processes.Count
+                    $state.OobeProcesses = @($processes | ForEach-Object { $_.Name })
+                    if ($state.OobeProcessCount -eq 0) {
+                        $state.Ready = $true
+                        $state.Reason = 'MachineCompleteAwaitingFirstLogon'
+                    }
+                }
+            }
+        }
         else { $state.Ready = $true; $state.Reason = 'Complete' }
     }
-    catch { $state.Diagnostics = @($_.Exception.Message) }
+    catch { $state.Reason = 'ProbeFailed'; $state.Diagnostics = @($_.Exception.Message) }
 
     $details = foreach ($name in @('ProductType', 'ImageState', 'SetupType', 'SystemSetupInProgress',
-            'OOBEInProgress', 'NativeOobeComplete', 'ActiveName', 'PendingName')) {
+            'OOBEInProgress', 'NativeOobeComplete', 'WinRtOobeState', 'SetupExeCompletion',
+            'OobeProcessCount', 'OobeProcesses', 'ActiveName', 'PendingName')) {
         $value = if ($null -eq $state.$name) { '<unavailable>' } else { "$($state.$name)" }
         "${name}=$value"
     }

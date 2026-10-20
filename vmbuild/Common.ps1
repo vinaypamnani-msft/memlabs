@@ -6939,6 +6939,10 @@ function Wait-MemLabsWindowsClientSetup {
                     $readyProperty -and $readyProperty.Value -is [bool] -and $readyProperty.Value) {
                     $fieldNames += @('ProductType', 'NativeOobeComplete', 'ImageState', 'ActiveName', 'PendingName',
                         'SetupType', 'SystemSetupInProgress', 'OOBEInProgress')
+                    if ($state.PSObject.Properties['Reason'] -and $state.Reason -is [string] -and
+                        $state.Reason -eq 'MachineCompleteAwaitingFirstLogon') {
+                        $fieldNames += @('WinRtOobeState', 'SetupExeCompletion', 'OobeProcessCount', 'OobeProcesses', 'Diagnostics')
+                    }
                 }
                 $missingFields = @($fieldNames | Where-Object { -not $state.PSObject.Properties[$_] })
                 if ($missingFields.Count) {
@@ -6960,9 +6964,20 @@ function Wait-MemLabsWindowsClientSetup {
                         }
                         elseif ($state.Ready) {
                             $checks['ProductType'] = $state.ProductType -is [int] -and $state.ProductType -eq 1
-                            $checks['NativeOobeComplete'] = $state.NativeOobeComplete -is [bool] -and $state.NativeOobeComplete
                             $checks['ImageState'] = $state.ImageState -is [string] -and $state.ImageState -eq 'IMAGE_STATE_COMPLETE'
-                            $checks['Reason'] = $checks.Reason -and $state.Reason -eq 'Complete'
+                            if ($checks.Reason -and $state.Reason -eq 'MachineCompleteAwaitingFirstLogon') {
+                                $checks['NativeOobeComplete'] = $state.NativeOobeComplete -is [bool] -and -not $state.NativeOobeComplete
+                                $checks['WinRtOobeState'] = $state.WinRtOobeState -is [string] -and $state.WinRtOobeState -eq 'NotStarted'
+                                $checks['SetupExeCompletion'] = ($state.SetupExeCompletion -is [int] -or
+                                    $state.SetupExeCompletion -is [uint32]) -and $state.SetupExeCompletion -eq 3
+                                $checks['OobeProcessCount'] = $state.OobeProcessCount -is [int] -and $state.OobeProcessCount -eq 0
+                                $checks['OobeProcesses'] = @($state.OobeProcesses).Count -eq 0
+                                $checks['Diagnostics'] = @($state.Diagnostics).Count -eq 0
+                            }
+                            else {
+                                $checks['NativeOobeComplete'] = $state.NativeOobeComplete -is [bool] -and $state.NativeOobeComplete
+                                $checks['Reason'] = $checks.Reason -and $state.Reason -eq 'Complete'
+                            }
                             $checks['ActiveName'] = $state.ActiveName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.ActiveName)
                             $checks['PendingName'] = $state.PendingName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.PendingName)
                             foreach ($name in @('SetupType', 'SystemSetupInProgress', 'OOBEInProgress')) {
