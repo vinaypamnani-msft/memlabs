@@ -136,6 +136,7 @@ function Invoke-VmCommand {
     $script:RpcBudgets.Add($TimeoutSeconds)
     if ($script:ReplyDelayMilliseconds) { [Threading.Thread]::Sleep($script:ReplyDelayMilliseconds) }
     if ($script:Replies.Count) { $script:LastReply = $script:Replies.Dequeue() }
+    if ($null -eq $script:LastReply) { return }
     return $script:LastReply
 }
 function Write-Log {
@@ -165,10 +166,32 @@ $script:ReplyDelayMilliseconds = 1100
 Assert-True (-not (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 1)) 'A late completed response passed after the readiness deadline.'
 Assert-True (($script:Messages -join ' ') -match 'late reply') 'The readiness deadline rejected a late response without explanation.'
 
-foreach ($variant in @('Pending', 'StringReady', 'MissingFlag', 'StringFlag', 'InconsistentNative',
-        'InvalidServer', 'MissingVersion', 'MissingPendingName', 'BlankPendingName', 'ArrayImageState',
-        'InconsistentReason', 'Multiple', 'Transport', 'NoResponse')) {
-    $badState = $readyState | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+$invalidReplies = [ordered]@{
+    Pending = 'WindowsWelcomeIncomplete'
+    StringReady = 'Invalid setup fields=\[Ready\]'
+    MissingFlag = 'Missing setup fields=\[OOBEInProgress\]'
+    StringFlag = 'Invalid setup fields=\[OOBEInProgress\]'
+    InconsistentNative = 'Invalid setup fields=\[NativeOobeComplete\]'
+    InvalidServer = 'Invalid setup fields=\[Reason, ProductType\]'
+    MissingVersion = 'Missing setup fields=\[Version\]'
+    StringVersion = 'Invalid setup fields=\[Version\]'
+    MissingPendingName = 'Missing setup fields=\[PendingName\]'
+    BlankPendingName = 'Invalid setup fields=\[PendingName\]'
+    ArrayImageState = 'Invalid setup fields=\[ImageState\]'
+    InconsistentReason = 'Invalid setup fields=\[Reason\]'
+    BlankDetail = 'Invalid setup fields=\[Detail\]'
+    Multiple = 'stateCount=2 stateTypes=\[System.Management.Automation.PSCustomObject, System.Management.Automation.PSCustomObject\]'
+    Transport = 'Synthetic transport failure'
+    NoResponse = 'envelopeCount=0 envelopeTypes=\[\]'
+    MissingEnvelopeFlag = "Missing envelope field 'ScriptBlockFailed'"
+    StringEnvelopeFlag = "Invalid envelope field 'ScriptBlockFailed'"
+    MissingEnvelopeOutput = "Missing envelope field 'ScriptBlockOutput'"
+    NullState = 'stateCount=1 stateTypes=\[<null>\]'
+    ScalarEnvelope = 'envelopeCount=1 envelopeTypes=\[System.Boolean\]'
+    MultipleEnvelopes = 'envelopeCount=2 envelopeTypes=\[System.String, System.Management.Automation.PSCustomObject\]'
+}
+foreach ($variant in $invalidReplies.Keys) {
+    $badState = $readyState | Select-Object *
     if ($variant -eq 'Pending') { $badState = $pendingState }
     if ($variant -eq 'StringReady') { $badState.Ready = 'True' }
     if ($variant -eq 'MissingFlag') { $badState.PSObject.Properties.Remove('OOBEInProgress') }
@@ -176,20 +199,38 @@ foreach ($variant in @('Pending', 'StringReady', 'MissingFlag', 'StringFlag', 'I
     if ($variant -eq 'InconsistentNative') { $badState.NativeOobeComplete = $false }
     if ($variant -eq 'InvalidServer') { $badState.Required = $false }
     if ($variant -eq 'MissingVersion') { $badState.PSObject.Properties.Remove('Version') }
+    if ($variant -eq 'StringVersion') { $badState.Version = '1' }
     if ($variant -eq 'MissingPendingName') { $badState.PSObject.Properties.Remove('PendingName') }
     if ($variant -eq 'BlankPendingName') { $badState.PendingName = '' }
     if ($variant -eq 'ArrayImageState') { $badState.ImageState = @('IMAGE_STATE_COMPLETE', 'INVALID') }
     if ($variant -eq 'InconsistentReason') { $badState.Reason = 'ProbeFailed' }
+    if ($variant -eq 'BlankDetail') { $badState.Detail = '' }
     $reply = New-Reply $badState
     if ($variant -eq 'Multiple') { $reply.ScriptBlockOutput = @($readyState, $readyState) }
     if ($variant -eq 'Transport') { $reply.ScriptBlockFailed = $true; $reply.ErrorDetails = @('Synthetic transport failure') }
     if ($variant -eq 'NoResponse') { $reply = $null }
+    if ($variant -eq 'MissingEnvelopeFlag') { $reply.PSObject.Properties.Remove('ScriptBlockFailed') }
+    if ($variant -eq 'StringEnvelopeFlag') { $reply.ScriptBlockFailed = 'False' }
+    if ($variant -eq 'MissingEnvelopeOutput') { $reply.PSObject.Properties.Remove('ScriptBlockOutput') }
+    if ($variant -eq 'NullState') { $reply.ScriptBlockOutput = $null }
+    if ($variant -eq 'ScalarEnvelope') { $reply = $false }
+    if ($variant -eq 'MultipleEnvelopes') { $reply = @('Synthetic leaked job output', $reply) }
     Reset-HostFixture -Response $reply -AdvanceClock
     Set-StrictMode -Version Latest
     try {
         $passed = Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 1
         Assert-True (-not $passed -and $script:RpcCalls -eq 1 -and $script:RpcBudgets[0] -eq 1 -and
             ($script:Messages -join ' ') -match 'did not become ready') "$variant became ready or escaped its deadline/diagnostics."
+        $diagnostic = $script:Messages -join ' '
+        Assert-True ($diagnostic -match $invalidReplies[$variant]) "$variant lost its specific diagnostic: $diagnostic"
+        if ($variant -eq 'Pending') {
+            Assert-True ($diagnostic -notmatch 'unreadable or malformed') 'A valid pending setup state was mislabeled as a protocol error.'
+        }
+        else {
+            Assert-True ($diagnostic -match 'envelopeCount=\d+ envelopeTypes=\[' -and
+                $diagnostic -match 'stateCount=\d+ stateTypes=\[') "$variant omitted response counts or types."
+        }
+        Assert-True ($diagnostic -notmatch 'Synthetic leaked job output') 'Readiness diagnostics dumped an unexpected response payload.'
     }
     finally { Set-StrictMode -Off }
 }

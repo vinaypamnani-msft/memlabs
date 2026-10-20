@@ -6924,67 +6924,107 @@ function Wait-MemLabsWindowsClientSetup {
             if ($remaining -le 0) { break }
             Write-ProgressElapsed -showTimeout -stopwatch $watch -timespan $budget `
                 -text "$VmName`: verifying Windows client setup completion"
-            $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob `
+            $probeResults = @(Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob `
                 -TimeoutSeconds ([Math]::Max(1, [Math]::Min(30, [int][Math]::Floor($remaining)))) `
-                -SessionMaxRetries 1 -SuppressLog -ScriptBlock $probeBlock
+                -SessionMaxRetries 1 -SuppressLog -ScriptBlock $probeBlock)
             if ($watch.Elapsed -ge $budget) {
                 $lastDetail = 'The guest probe exceeded the remaining readiness deadline; a late reply cannot establish readiness.'
                 break
             }
+            $issues = [Collections.Generic.List[string]]::new()
             $states = @()
-            $failedProperty = $null
-            if ($probe) {
+            if ($probeResults.Count -ne 1 -or $null -eq $probeResults[0]) {
+                $issues.Add('Expected one non-null guest-command result envelope.')
+            }
+            else {
+                $probe = $probeResults[0]
+                foreach ($name in @('ScriptBlockFailed', 'ScriptBlockOutput')) {
+                    if (-not $probe.PSObject.Properties[$name]) { $issues.Add("Missing envelope field '$name'.") }
+                }
                 $failedProperty = $probe.PSObject.Properties['ScriptBlockFailed']
+                if ($failedProperty) {
+                    if ($failedProperty.Value -isnot [bool]) { $issues.Add("Invalid envelope field 'ScriptBlockFailed'.") }
+                    elseif ($failedProperty.Value) { $issues.Add('Guest command reported ScriptBlockFailed=True.') }
+                }
                 $outputProperty = $probe.PSObject.Properties['ScriptBlockOutput']
                 if ($outputProperty) { $states = @($outputProperty.Value) }
             }
-            $hasFields = $states.Count -eq 1 -and $null -ne $states[0]
-            if ($hasFields) {
-                foreach ($name in @('Version', 'Required', 'Ready', 'Reason', 'Detail')) {
-                    if (-not $states[0].PSObject.Properties[$name]) { $hasFields = $false }
-                }
+            if ($states.Count -ne 1 -or $null -eq $states[0]) {
+                $issues.Add('Expected one non-null setup-state object.')
             }
-            $valid = $failedProperty -and $failedProperty.Value -is [bool] -and -not $failedProperty.Value -and
-                $hasFields -and $states[0].Version -is [int] -and $states[0].Version -eq 1 -and
-                $states[0].Required -is [bool] -and $states[0].Ready -is [bool] -and
-                $states[0].Reason -is [string] -and -not [string]::IsNullOrWhiteSpace($states[0].Reason) -and
-                $states[0].Detail -is [string] -and -not [string]::IsNullOrWhiteSpace($states[0].Detail)
-            if ($valid) {
+            else {
                 $state = $states[0]
-                if (-not $state.Required) {
-                    $valid = $state.Ready -and $state.PSObject.Properties['ProductType'] -and
-                        $state.ProductType -is [int] -and $state.ProductType -in @(2, 3) -and
-                        $state.Reason -eq 'NotWindowsClient'
+                $fieldNames = @('Version', 'Required', 'Ready', 'Reason', 'Detail')
+                $requiredProperty = $state.PSObject.Properties['Required']
+                $readyProperty = $state.PSObject.Properties['Ready']
+                if ($requiredProperty -and $requiredProperty.Value -is [bool] -and -not $requiredProperty.Value) {
+                    $fieldNames += 'ProductType'
                 }
-                elseif ($state.Ready) {
-                    foreach ($name in @('ProductType', 'NativeOobeComplete', 'ImageState', 'ActiveName', 'PendingName',
-                            'SetupType', 'SystemSetupInProgress', 'OOBEInProgress')) {
-                        if (-not $state.PSObject.Properties[$name]) { $valid = $false }
+                elseif ($requiredProperty -and $requiredProperty.Value -is [bool] -and $requiredProperty.Value -and
+                    $readyProperty -and $readyProperty.Value -is [bool] -and $readyProperty.Value) {
+                    $fieldNames += @('ProductType', 'NativeOobeComplete', 'ImageState', 'ActiveName', 'PendingName',
+                        'SetupType', 'SystemSetupInProgress', 'OOBEInProgress')
+                }
+                $missingFields = @($fieldNames | Where-Object { -not $state.PSObject.Properties[$_] })
+                if ($missingFields.Count) {
+                    $issues.Add("Missing setup fields=[$($missingFields -join ', ')].")
+                }
+                else {
+                    $checks = [ordered]@{
+                        Version = $state.Version -is [int] -and $state.Version -eq 1
+                        Required = $state.Required -is [bool]
+                        Ready = $state.Ready -is [bool]
+                        Reason = $state.Reason -is [string] -and -not [string]::IsNullOrWhiteSpace($state.Reason)
+                        Detail = $state.Detail -is [string] -and -not [string]::IsNullOrWhiteSpace($state.Detail)
                     }
-                    $valid = $valid -and $state.ProductType -is [int] -and $state.ProductType -eq 1 -and
-                        $state.NativeOobeComplete -is [bool] -and $state.NativeOobeComplete -and
-                        $state.ImageState -is [string] -and $state.ImageState -eq 'IMAGE_STATE_COMPLETE' -and
-                        $state.Reason -eq 'Complete' -and
-                        $state.ActiveName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.ActiveName) -and
-                        $state.PendingName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.PendingName)
-                    if ($valid) {
-                        foreach ($name in @('SetupType', 'SystemSetupInProgress', 'OOBEInProgress')) {
-                            $valid = $valid -and ($state.$name -is [int] -or $state.$name -is [uint32]) -and $state.$name -eq 0
+                    if ($checks.Required -and $checks.Ready) {
+                        if (-not $state.Required) {
+                            $checks['Ready'] = $state.Ready
+                            $checks['ProductType'] = $state.ProductType -is [int] -and $state.ProductType -in @(2, 3)
+                            $checks['Reason'] = $checks.Reason -and $state.Reason -eq 'NotWindowsClient'
+                        }
+                        elseif ($state.Ready) {
+                            $checks['ProductType'] = $state.ProductType -is [int] -and $state.ProductType -eq 1
+                            $checks['NativeOobeComplete'] = $state.NativeOobeComplete -is [bool] -and $state.NativeOobeComplete
+                            $checks['ImageState'] = $state.ImageState -is [string] -and $state.ImageState -eq 'IMAGE_STATE_COMPLETE'
+                            $checks['Reason'] = $checks.Reason -and $state.Reason -eq 'Complete'
+                            $checks['ActiveName'] = $state.ActiveName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.ActiveName)
+                            $checks['PendingName'] = $state.PendingName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.PendingName)
+                            foreach ($name in @('SetupType', 'SystemSetupInProgress', 'OOBEInProgress')) {
+                                $checks[$name] = ($state.$name -is [int] -or $state.$name -is [uint32]) -and $state.$name -eq 0
+                            }
                         }
                     }
-                }
-                if ($valid) {
-                    $lastDetail = $state.Detail
-                    if ($state.Ready) {
-                        Write-Log "$VmName`: Windows client setup gate passed. $lastDetail"
-                        return $true
-                    }
+                    $invalidFields = @($checks.Keys | Where-Object { -not $checks[$_] })
+                    if ($invalidFields.Count) { $issues.Add("Invalid setup fields=[$($invalidFields -join ', ')].") }
                 }
             }
-            if (-not $valid) {
-                $errorProperty = if ($probe) { $probe.PSObject.Properties['ErrorDetails'] } else { $null }
-                $errors = if ($errorProperty) { @($errorProperty.Value) -join '; ' } else { 'No readable guest response.' }
-                $lastDetail = "Windows client setup state is unreadable or malformed. $errors"
+            if ($issues.Count -eq 0) {
+                $lastDetail = $state.Detail
+                if ($state.Ready) {
+                    Write-Log "$VmName`: Windows client setup gate passed. $lastDetail"
+                    return $true
+                }
+            }
+            else {
+                $envelopeTypes = @(foreach ($item in $probeResults) {
+                        if ($null -eq $item) { '<null>' } else { $item.GetType().FullName }
+                    })
+                $stateTypes = @(foreach ($item in $states) {
+                        if ($null -eq $item) { '<null>' } else { $item.GetType().FullName }
+                    })
+                $errors = @(foreach ($item in $probeResults) {
+                        if ($null -ne $item) {
+                            $errorProperty = $item.PSObject.Properties['ErrorDetails']
+                            if ($errorProperty) { @($errorProperty.Value) }
+                        }
+                    })
+                $lastDetail = "Windows client setup state is unreadable or malformed. " +
+                    "envelopeCount=$($probeResults.Count) envelopeTypes=[$($envelopeTypes -join ', ')]; " +
+                    "stateCount=$($states.Count) stateTypes=[$($stateTypes -join ', ')]; $($issues -join ' ')"
+                if ($errors.Count) {
+                    $lastDetail += " Command errors: $($errors -join '; ')"
+                }
             }
             if ($lastDetail -ne $lastLoggedDetail -or $watch.Elapsed.TotalSeconds - $lastLoggedAt -ge 30) {
                 Write-Log "$VmName`: waiting for Windows client setup. $lastDetail" -Warning

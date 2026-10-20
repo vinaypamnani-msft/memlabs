@@ -6,6 +6,7 @@
 param([string]$RootPath)
 
 $ErrorActionPreference = 'Stop'
+$previousExitCode = $global:LASTEXITCODE
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 . (Join-Path $PSScriptRoot 'Common.MaintenanceQualification.ps1')
 function Assert-Qualification {
@@ -19,8 +20,8 @@ function Assert-QualificationThrows {
     Assert-Qualification ($message -like $Pattern) "Expected '$Pattern', got '$message'."
 }
 function Import-QualificationRunnerFunction {
-    param([string]$Name)
-    $path = Join-Path $PSScriptRoot 'Invoke-MainToDevelopExpansionTest.ps1'
+    param([string]$Name, [string]$ScriptName = 'Invoke-MainToDevelopExpansionTest.ps1')
+    $path = Join-Path $PSScriptRoot $ScriptName
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
     if ($errors.Count) { throw ($errors -join '; ') }
@@ -29,7 +30,8 @@ function Import-QualificationRunnerFunction {
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name
             }, $true))
     if ($found.Count -ne 1) { throw "Expected one runner definition $Name." }
-    return [scriptblock]::Create($found[0].Extent.Text)
+    $scriptRoot = (Split-Path $path -Parent).Replace("'", "''")
+    return [scriptblock]::Create($found[0].Extent.Text.Replace('$PSScriptRoot', "'$scriptRoot'"))
 }
 foreach ($name in @('Initialize-CrossRevisionMaintenanceState', 'Get-CrossRevisionMaintenanceTargets',
         'Invoke-CrossRevisionMaintenanceGate', 'Invoke-CrossRevisionRecoveryGate', 'Resume-CrossRevisionMaintenanceGate',
@@ -147,6 +149,111 @@ try {
     $reference.Sha256 = $checksum
     Add-Content -LiteralPath $path -Value ' '
     Assert-QualificationThrows { Assert-MaintenanceQualificationReference $reference } '*checksum changed*'
+
+    $readinessCases = @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51')
+    foreach ($name in $readinessCases) {
+        Assert-Qualification ((Get-MaintenanceQualificationCases Preflight) -contains $name) "Preflight does not require $name."
+        $receipt = New-TestQualificationReceipt -Mode Preflight -Targets @() -HasCm $false
+        $receipt.Cases = @($receipt.Cases | Where-Object Name -ne $name)
+        Write-MaintenanceQualificationReceipt $path $receipt
+        Assert-QualificationThrows {
+            Assert-MaintenanceQualificationReceipt -Path $path -Mode Preflight -MainRevision $mainCommit `
+                -DevelopRevision $developCommit -SourceDigest $digest
+        } '*missing or duplicate*'
+    }
+    $source = Get-MaintenanceQualificationSource -VmbuildRoot $RootPath
+    foreach ($relative in @('Common.ps1', 'common\Common.ScriptBlocks.ps1', 'DSC\phases\WindowsSetupReadiness.ps1',
+            'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
+            'tools\Test-WindowsClientSetupReadiness.ps1')) {
+        Assert-Qualification ($source.Files.Contains($relative) -and $source.Files[$relative] -match '^[A-Fa-f0-9]{64}$') `
+            "Pinned source digest does not cover readiness input $relative."
+    }
+    & {
+        $root = Join-Path $tempRoot 'preflight'
+        $null = New-Item -Path (Join-Path $root 'common') -ItemType Directory -Force
+        @'
+function Get-MemLabsDscArtifactState {
+    param($DscRoot)
+    [pscustomobject]@{ Current = $script:PreflightScenario -ne 'StaleArtifact'; Reason = 'Synthetic DSC state'; Root = $DscRoot }
+}
+'@ | Set-Content -LiteralPath (Join-Path $root 'common\Common.Prereqs.ps1') -Encoding UTF8
+        foreach ($name in @('Add-MQCase', 'Invoke-MQPreflight')) {
+            . (Import-QualificationRunnerFunction -Name $name -ScriptName 'Invoke-MaintenanceQualification.ps1')
+        }
+        $ReceiptPath = Join-Path $root 'receipt.json'
+        function Join-Path {
+            param([string]$Path, [string]$ChildPath)
+            if ($ChildPath -eq 'System32\WindowsPowerShell\v1.0\powershell.exe') { return 'Invoke-QualificationEngine51' }
+            Microsoft.PowerShell.Management\Join-Path -Path $Path -ChildPath $ChildPath
+        }
+        function Test-Path {
+            param([string]$LiteralPath, [string]$PathType)
+            if ($LiteralPath -eq 'Invoke-QualificationEngine51') { return $script:PreflightScenario -ne 'MissingPS51' }
+            Microsoft.PowerShell.Management\Test-Path @PSBoundParameters
+        }
+        function Get-Command {
+            param($Name, $CommandType, $ErrorAction)
+            Assert-Qualification ($Name -eq 'pwsh.exe' -and $CommandType -eq 'Application') 'Preflight did not resolve the PowerShell 7 application.'
+            if ($script:PreflightScenario -eq 'MissingPS7') { throw 'Synthetic missing PowerShell 7.' }
+            [pscustomobject]@{ Source = 'Invoke-QualificationEngine7' }
+        }
+        function Invoke-QualificationEngine7 {
+            param([string]$File)
+            Assert-Qualification (Test-Path -LiteralPath $File -PathType Leaf) "Preflight selected a missing script: $File"
+            $script:PreflightCalls.Add([pscustomobject]@{ Engine = 'PS7'; Script = (Split-Path $File -Leaf) })
+            $global:LASTEXITCODE = if ($script:PreflightScenario -eq 'FailPS7') { 37 } else { 0 }
+        }
+        function Invoke-QualificationEngine51 {
+            param([string]$File)
+            Assert-Qualification (Test-Path -LiteralPath $File -PathType Leaf) "Preflight selected a missing script: $File"
+            $script:PreflightCalls.Add([pscustomobject]@{ Engine = 'PS51'; Script = (Split-Path $File -Leaf) })
+            $global:LASTEXITCODE = if ($script:PreflightScenario -eq 'FailPS51') { 37 } else { 0 }
+        }
+        foreach ($scenario in @('Passed', 'FailPS7', 'FailPS51', 'MissingPS7', 'MissingPS51', 'StaleArtifact')) {
+            $script:PreflightScenario = $scenario
+            $script:PreflightCalls = [Collections.Generic.List[object]]::new()
+            $script:MQReceipt = New-TestQualificationReceipt -Mode Preflight -Targets @() -HasCm $false
+            $script:MQReceipt.Status = 'Running'
+            $script:MQReceipt.Cases = @()
+            if ($scenario -eq 'Passed') {
+                Invoke-MQPreflight
+                $readinessCalls = @($script:PreflightCalls | Where-Object Script -eq 'Test-WindowsClientSetupReadiness.ps1')
+                Assert-Qualification ($readinessCalls.Count -eq 2 -and
+                    ($readinessCalls.Engine -join ',') -eq 'PS7,PS51') 'Readiness preflight did not run the same script under both engines.'
+                Assert-Qualification ($script:PreflightCalls.Count -eq (Get-MaintenanceQualificationCases Preflight).Count - 1) `
+                    'Preflight skipped or duplicated a regression invocation.'
+                foreach ($entry in @(
+                        @{ Name = $readinessCases[0]; Engine = 'Invoke-QualificationEngine7' },
+                        @{ Name = $readinessCases[1]; Engine = 'Invoke-QualificationEngine51' }
+                    )) {
+                    $case = @($script:MQReceipt.Cases | Where-Object Name -eq $entry.Name)
+                    Assert-Qualification ($case.Count -eq 1 -and $case[0].Status -eq 'Passed' -and
+                        $case[0].Data.Engine -eq $entry.Engine -and $case[0].Data.ExitCode -eq 0 -and
+                        $case[0].Data.Script -eq 'Test-WindowsClientSetupReadiness.ps1') 'Preflight receipt lost per-engine readiness evidence.'
+                }
+                $script:MQReceipt.Status = 'Passed'
+                Write-MaintenanceQualificationReceipt $ReceiptPath $script:MQReceipt
+                $null = Assert-MaintenanceQualificationReceipt -Path $ReceiptPath -Mode Preflight -MainRevision $mainCommit `
+                    -DevelopRevision $developCommit -SourceDigest $digest
+            }
+            else {
+                $pattern = switch ($scenario) {
+                    'FailPS7' { '*Test-WindowsClientSetupReadiness-PS7 (exit 37)*' }
+                    'FailPS51' { '*Test-WindowsClientSetupReadiness-PS51 (exit 37)*' }
+                    'MissingPS7' { '*Synthetic missing PowerShell 7*' }
+                    'MissingPS51' { '*Windows PowerShell 5.1 is required*' }
+                    'StaleArtifact' { '*Candidate DSC artifact is stale*' }
+                }
+                Assert-QualificationThrows { Invoke-MQPreflight } $pattern
+                $passedReadiness = @($script:MQReceipt.Cases | Where-Object { $_.Name -in $readinessCases })
+                $expectedPassed = if ($scenario -eq 'FailPS51') { 1 } else { 0 }
+                $expectedCalls = if ($scenario -eq 'FailPS7') { 1 } elseif ($scenario -eq 'FailPS51') { 2 } else { 0 }
+                Assert-Qualification ($passedReadiness.Count -eq $expectedPassed -and
+                    $script:PreflightCalls.Count -eq $expectedCalls -and $script:MQReceipt.Status -eq 'Running') `
+                    "$scenario continued after a failed/missing engine or recorded unearned readiness coverage."
+            }
+        }
+    }
 
     Assert-Qualification (Test-MaintenanceQualificationCmScope ([pscustomobject]@{ virtualMachines = @([pscustomobject]@{ role = 'CAS' }) })) 'CAS recovery target was not recognized.'
     Assert-Qualification (-not (Test-MaintenanceQualificationCmScope ([pscustomobject]@{ virtualMachines = @([pscustomobject]@{ role = 'Primary'; parentSiteCode = 'CAS' }) }))) 'A child Primary was misclassified as a Full Administrator qualification target.'
@@ -268,6 +375,7 @@ try {
         $seed.Contains('$codes += "$code"')) 'The one-shot MSI RelatedProducts enumerator is reused instead of retaining product codes during its first traversal.'
 }
 finally {
+    $global:LASTEXITCODE = $previousExitCode
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction Stop
 }
-Write-Host 'PASS -- Pinned maintenance receipts, identity/source validation, N/A coverage, resume migration and cleanup gates.'
+Write-Host 'PASS -- Pinned maintenance receipts, dual-engine readiness preflight, identity/source validation, N/A coverage, resume migration and cleanup gates.'

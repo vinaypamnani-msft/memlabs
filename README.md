@@ -43,7 +43,11 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
 - Before live candidate work, the pinned develop worktree must be clean, its
   shipped DSC archive must match its source/build receipt, and the focused
   maintenance, console, ODBC, Phase 11, receipt, and expansion-runner regressions
-  must pass.
+  must pass. The Windows setup-readiness regression also runs with real
+  background jobs under both PowerShell 7 and Windows PowerShell 5.1 before VM
+  mutation, with separate required receipt cases for the two engines. Its test,
+  command wrapper, shared probe, and phase wiring are included in the pinned
+  source digest. A failure or missing engine blocks the candidate preflight.
 - Before expanding an exact-main baseline, develop runs **existing-site**
   maintenance without replacing the guest's legacy deployment configuration.
   Independent checks verify ODBC registration/DLLs in both registry views,
@@ -189,6 +193,8 @@ The mandatory client gate runs after fresh-VM machine readiness, before
 retained-VM resume reboot checks, and again after any required resume reboot.
 It uses a 30-minute polling deadline, bounded guest-command probes, and reports
 the setup flags, native completion result, active/pending names, and read errors.
+Malformed responses also report envelope/setup-state object counts and types,
+plus missing or invalid field names, without dumping guest payloads.
 Late replies cannot pass after the readiness deadline. Unknown, missing,
 malformed, or incomplete client state never passes because
 a settle timer expired. A failure retains the VM for offline diagnostics;
@@ -207,6 +213,8 @@ Validate with `vmbuild\tools\Test-WindowsClientSetupReadiness.ps1` plus the exis
 resume, OSD/PXE, and base-image staging regressions. The readiness regression uses
 real background jobs to verify that the guest-command wrapper returns exactly one
 result envelope, preserving client/server setup state and guest failure diagnostics.
+The pinned main-to-develop candidate preflight runs this regression automatically
+under both PowerShell engines; neither engine's result can substitute for the other.
 
 ### Windows setup failure diagnostics
 

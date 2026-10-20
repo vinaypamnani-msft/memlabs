@@ -259,12 +259,16 @@ function Invoke-MQPreflight {
     $powershell = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $powershell)) { throw 'Windows PowerShell 5.1 is required for the candidate preflight.' }
     foreach ($name in @(Get-MaintenanceQualificationCases Preflight | Where-Object { $_ -ne 'dsc-artifact' })) {
-        $engine = if ($name -eq 'Test-MainToDevelopExpansionRunner') {
+        $scriptName = if ($name -in @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51')) {
+            'Test-WindowsClientSetupReadiness'
+        } else { $name }
+        $engine = if ($name -in @('Test-MainToDevelopExpansionRunner', 'Test-WindowsClientSetupReadiness-PS7')) {
             (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
         } else { $powershell }
-        & $engine -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "$name.ps1") | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "Pinned candidate regression failed: $name" }
-        Add-MQCase $name ([pscustomobject]@{ ExitCode = 0 })
+        Write-Host "Running pinned candidate regression: $name ($engine)"
+        & $engine -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "$scriptName.ps1") | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Pinned candidate regression failed: $name (exit $LASTEXITCODE)." }
+        Add-MQCase $name ([pscustomobject]@{ ExitCode = 0; Engine = $engine; Script = "$scriptName.ps1" })
     }
 }
 
