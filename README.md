@@ -170,6 +170,14 @@ the pinned revisions, source/module/archive hashes, VM identities, individual
 case results, and recovery evidence. Checkpoint state stores their SHA-256
 checksums. Missing, stale, dirty-source, incomplete, or changed receipts block
 family completion and cleanup; failures retain the VMs.
+On a rolling run, completed families are checked against the required cases in
+their own pinned Git revision, not a newer candidate's expanded case list.
+The runner reads literal case lists from Git without executing historical code;
+missing history or an unreadable contract fails closed. Current candidate
+preflight still requires every current case, and historical receipts cannot
+substitute for it. Receipt checksums, source identity, targets, statuses, and
+CM recovery coverage remain enforced. Case-list failures report the candidate,
+expected/actual counts, and missing, unexpected, or duplicate names.
 Runner failures also record the error ID, source position, script stack, and
 current step in checkpoint `LastErrorDetails`, and print the source/stack beside
 the failure. Missing VM identity entries fail explicitly before Hyper-V calls

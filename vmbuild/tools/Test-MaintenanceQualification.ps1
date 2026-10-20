@@ -45,11 +45,11 @@ $developCommit = 'a' * 40
 $digest = 'C' * 64
 $target = [pscustomobject]@{ Name = 'LAB-PRI'; Id = '11111111-1111-1111-1111-111111111111'; Domain = 'lab.test' }
 function New-TestQualificationReceipt {
-    param([string]$Mode = 'Recovery', [object[]]$Targets = @($target), [bool]$HasCm = $true)
+    param([string]$Mode = 'Recovery', [object[]]$Targets = @($target), [bool]$HasCm = $true, [string]$Revision = $developCommit)
     [pscustomobject]@{
-        SchemaVersion = 1; Mode = $Mode; Status = 'Passed'; MainRevision = $mainCommit; DevelopRevision = $developCommit
+        SchemaVersion = 1; Mode = $Mode; Status = 'Passed'; MainRevision = $mainCommit; DevelopRevision = $Revision
         Source = [pscustomobject]@{
-            Digest = $digest; Commit = $developCommit; Dirty = $false
+            Digest = $digest; Commit = $Revision; Dirty = $false
             Files = [pscustomobject]@{ 'DSC\DSC.zip' = ('D' * 64); 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1' = ('E' * 64) }
         }
         Targets = @($Targets | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Id = $_.Id; Domain = $_.Domain } })
@@ -389,6 +389,137 @@ function Get-MemLabsDscArtifactState {
     Assert-QualificationThrows { Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab' } '*wrong-mode*'
     $script:State.MaintenanceReceipts[$preflightKey] = $goodPreflight
 
+    & {
+        $RepositoryRoot = Join-Path $tempRoot 'contract-history'
+        $contractPath = Join-Path $RepositoryRoot 'vmbuild\tools\Common.MaintenanceQualification.ps1'
+        $null = New-Item -Path (Split-Path $contractPath -Parent) -ItemType Directory -Force
+        & git -C $RepositoryRoot init -q
+        if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the historical contract fixture.' }
+        function New-TestCaseContractCommit {
+            param([string]$Source)
+            [IO.File]::WriteAllText($contractPath, $Source)
+            & git -C $RepositoryRoot -c core.autocrlf=false add -- 'vmbuild\tools\Common.MaintenanceQualification.ps1'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not stage the historical contract fixture.' }
+            & git -C $RepositoryRoot -c user.name=MemLabsTest -c user.email=memlabs-test@example.invalid `
+                -c commit.gpgsign=false -c "core.hooksPath=$RepositoryRoot\no-hooks" commit -q `
+                -m 'Qualification contract fixture' -m 'Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not commit the historical contract fixture.' }
+            $revision = @(& git -C $RepositoryRoot rev-parse HEAD)
+            if ($LASTEXITCODE -ne 0 -or $revision.Count -ne 1) { throw 'Could not resolve the historical contract fixture.' }
+            return "$($revision[0])"
+        }
+        $legacyCases = @('Test-ConsoleUpgradeRouting', 'Test-MaintenanceFixRobustness', 'Test-Odbc18VersionEnforcement',
+            'Test-MsiBusyRetryAndPassiveDependency', 'Test-VMMaintenanceNoteDiagnostics', 'Test-Phase11OsdContentState',
+            'Test-MaintenanceQualification', 'Test-MainToDevelopExpansionRunner', 'dsc-artifact')
+        $otherModes = foreach ($mode in @('Baseline', 'Postconditions', 'Recovery')) {
+            $names = @(Get-MaintenanceQualificationCases $mode | ForEach-Object { "'$_'" }) -join ', '
+            "'$mode' { return @($names) }"
+        }
+        $template = @'
+throw 'Historical qualifier source must never execute.'
+function Get-MaintenanceQualificationCases {
+    param([string]$Mode)
+    switch ($Mode) {
+        'Preflight' { return @(__PREFLIGHT__) }
+        __OTHER_MODES__
+    }
+}
+'@
+        $template = $template.Replace('__OTHER_MODES__', ($otherModes -join "`n"))
+        $legacySource = $template.Replace('__PREFLIGHT__', (($legacyCases | ForEach-Object { "'$_'" }) -join ', '))
+        $legacyRevision = New-TestCaseContractCommit $legacySource
+        $currentSource = $template.Replace('__PREFLIGHT__', ((Get-MaintenanceQualificationCases Preflight | ForEach-Object { "'$_'" }) -join ', '))
+        $developCommit = New-TestCaseContractCommit $currentSource
+        [IO.File]::WriteAllText($contractPath, 'throw "The mutable checkout is not a pinned contract."')
+        foreach ($mode in @('Preflight', 'Baseline', 'Postconditions', 'Recovery')) {
+            $expectedCases = if ($mode -eq 'Preflight') { $legacyCases } else { @(Get-MaintenanceQualificationCases $mode) }
+            $pinnedCases = @(Get-PinnedMaintenanceQualificationCases -RepositoryRoot $RepositoryRoot -Revision $legacyRevision -Mode $mode)
+            Assert-Qualification (($pinnedCases -join ',') -ceq ($expectedCases -join ',')) "Historical $mode cases were taken from the current or mutable checkout."
+        }
+        $currentCases = @(Get-PinnedMaintenanceQualificationCases -RepositoryRoot $RepositoryRoot -Revision $developCommit -Mode Preflight)
+        Assert-Qualification (($currentCases -join ',') -ceq ((Get-MaintenanceQualificationCases Preflight) -join ',')) 'The current pinned case contract lost required regressions.'
+        Assert-QualificationThrows {
+            Get-PinnedMaintenanceQualificationCases -RepositoryRoot $RepositoryRoot -Revision ('0' * 40) -Mode Preflight
+        } '*Could not read pinned maintenance case contract*'
+
+        $historicalPreflightKey = "__revision__|maintenance|preflight|$legacyRevision"
+        $historicalBaselineKey = "lab|maintenance|baseline|$legacyRevision"
+        $historicalRecoveryKey = "__revision__|maintenance|recovery|$legacyRevision"
+        $historicalPostKeys = @("lab|maintenance|post|1|B.json|$legacyRevision", "lab|maintenance|post|2|B.json|$legacyRevision",
+            "lab|maintenance|final|$legacyRevision")
+        $previousState = $script:State
+        try {
+            $script:State = [ordered]@{ MaintenanceReceipts = @{}; MaintenanceFamilyGates = @{} }
+            $script:State.MaintenanceFamilyGates.lab = [ordered]@{
+                DevelopRevision = $legacyRevision; SourceDigest = $digest; FollowOns = @('B.json'); HasCmTarget = $true
+                PreflightKey = $historicalPreflightKey; BaselineKey = $historicalBaselineKey
+                RecoveryKey = $historicalRecoveryKey; PostconditionKeys = $historicalPostKeys
+            }
+            foreach ($entry in @(
+                    @{ Key = $historicalPreflightKey; Mode = 'Preflight' },
+                    @{ Key = $historicalBaselineKey; Mode = 'Baseline' },
+                    @{ Key = $historicalRecoveryKey; Mode = 'Recovery' }
+                ) + @($historicalPostKeys | ForEach-Object { @{ Key = $_; Mode = 'Postconditions' } })) {
+                $file = Join-Path $tempRoot "$($entry.Key -replace '[^A-Za-z0-9_.-]', '_').json"
+                $receipt = New-TestQualificationReceipt -Mode $entry.Mode -Revision $legacyRevision
+                if ($entry.Mode -eq 'Preflight') {
+                    $receipt.Targets = @()
+                    $receipt.Cases = @($legacyCases | ForEach-Object { [pscustomobject]@{ Name = $_; Status = 'Passed'; Reason = '' } })
+                    $historicalPreflight = $receipt
+                    $historicalPreflightPath = $file
+                }
+                Write-MaintenanceQualificationReceipt $file $receipt
+                $script:State.MaintenanceReceipts[$entry.Key] = New-MaintenanceQualificationReference $file $receipt
+            }
+            Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab'
+            Add-Content -LiteralPath $historicalPreflightPath -Value ' '
+            Assert-QualificationThrows { Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab' } '*checksum changed*'
+            foreach ($mutation in @(
+                    @{ Change = { param($r) $r.Cases = @($r.Cases | Select-Object -Skip 1) }; Error = "*candidate $legacyRevision*expected=9; actual=8; missing=[[]Test-ConsoleUpgradeRouting[]]*" },
+                    @{ Change = { param($r) $r.Cases[-1].Name = $r.Cases[0].Name }; Error = '*duplicate=[[]Test-ConsoleUpgradeRouting[]]*' },
+                    @{ Change = { param($r) $r.Cases[0].Name = 'Unrecognized-Case' }; Error = '*unexpected=[[]Unrecognized-Case[]]*' },
+                    @{ Change = { param($r) $r.Cases[0].Status = 'Failed' }; Error = "*case 'Test-ConsoleUpgradeRouting' did not pass*" },
+                    @{ Change = { param($r) $r.Source.Dirty = $true }; Error = '*clean pinned source*' }
+                )) {
+                $receipt = $historicalPreflight | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+                & $mutation.Change $receipt
+                Write-MaintenanceQualificationReceipt $historicalPreflightPath $receipt
+                $script:State.MaintenanceReceipts[$historicalPreflightKey] = New-MaintenanceQualificationReference $historicalPreflightPath $receipt
+                Assert-QualificationThrows { Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab' } $mutation.Error
+            }
+            Write-MaintenanceQualificationReceipt $historicalPreflightPath $historicalPreflight
+            $script:State.MaintenanceReceipts[$historicalPreflightKey] = New-MaintenanceQualificationReference $historicalPreflightPath $historicalPreflight
+            Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab'
+            $savedRepository = $RepositoryRoot
+            $RepositoryRoot = ''
+            Assert-QualificationThrows { Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab' } '*requires its Git repository*'
+            $RepositoryRoot = $savedRepository
+        }
+        finally { $script:State = $previousState }
+
+        $currentPath = Join-Path $tempRoot 'current-preflight.json'
+        $receipt = New-TestQualificationReceipt -Mode Preflight -Revision $developCommit -Targets @()
+        $receipt.Cases = $historicalPreflight.Cases
+        Write-MaintenanceQualificationReceipt $currentPath $receipt
+        $reference = New-MaintenanceQualificationReference $currentPath $receipt
+        foreach ($parameters in @(@{}, @{ RepositoryRoot = $RepositoryRoot })) {
+            Assert-QualificationThrows { Assert-MaintenanceQualificationReference $reference @parameters } `
+                "*candidate $developCommit*missing=[[]Test-WindowsClientSetupReadiness-PS7*"
+        }
+        $receipt = New-TestQualificationReceipt -Mode Preflight -Revision $developCommit -Targets @()
+        Write-MaintenanceQualificationReceipt $currentPath $receipt
+        $reference = New-MaintenanceQualificationReference $currentPath $receipt
+        $null = Assert-MaintenanceQualificationReference $reference -RepositoryRoot $RepositoryRoot
+        $dynamicRevision = New-TestCaseContractCommit ($template.Replace('__PREFLIGHT__', '(Write-Output ''forged-case'')'))
+        Assert-QualificationThrows {
+            Get-PinnedMaintenanceQualificationCases -RepositoryRoot $RepositoryRoot -Revision $dynamicRevision -Mode Preflight
+        } '*not a literal Preflight case list*'
+        $duplicateRevision = New-TestCaseContractCommit ($template.Replace('__PREFLIGHT__', "'duplicate', 'duplicate'"))
+        Assert-QualificationThrows {
+            Get-PinnedMaintenanceQualificationCases -RepositoryRoot $RepositoryRoot -Revision $duplicateRevision -Mode Preflight
+        } '*invalid or duplicate Preflight cases*'
+    }
+
     $pendingKey = "lab|maintenance|recovery|$developCommit"
     $script:State.CurrentStep = $pendingKey
     $beforeCalls = $script:ChildCalls
@@ -419,4 +550,4 @@ finally {
     $global:LASTEXITCODE = $previousExitCode
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction Stop
 }
-Write-Host 'PASS -- Pinned maintenance receipts, dual-engine readiness preflight, identity/source validation, N/A coverage, resume migration and cleanup gates.'
+Write-Host 'PASS -- Pinned historical/current case contracts, dual-engine preflight, receipt/source/identity integrity, N/A coverage, resume migration and cleanup gates.'

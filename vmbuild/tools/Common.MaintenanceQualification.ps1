@@ -18,6 +18,51 @@ function Get-MaintenanceQualificationCases {
     }
 }
 
+function Get-PinnedMaintenanceQualificationCases {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Revision,
+        [Parameter(Mandatory)][ValidateSet('Preflight', 'Baseline', 'Postconditions', 'Recovery')][string]$Mode
+    )
+    try {
+        $source = @(& git -C $RepositoryRoot show "$Revision`:vmbuild/tools/Common.MaintenanceQualification.ps1" 2>&1)
+        if ($LASTEXITCODE -ne 0) { throw ($source -join [Environment]::NewLine) }
+    }
+    catch { throw "Could not read pinned maintenance case contract at $Revision`: $($_.Exception.Message)" }
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput(($source -join "`n"), [ref]$null, [ref]$errors)
+    $definitions = @($ast.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -ceq 'Get-MaintenanceQualificationCases'
+        })
+    if ($errors.Count -or $definitions.Count -ne 1) {
+        throw "Pinned maintenance case contract is malformed at $Revision."
+    }
+    $switches = @($definitions[0].Body.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.SwitchStatementAst] -and $_.Condition.Extent.Text.Trim() -ceq '$Mode'
+        })
+    if ($switches.Count -ne 1) { throw "Pinned maintenance case contract has no unambiguous mode switch at $Revision." }
+    $clauses = @($switches[0].Clauses | Where-Object {
+            $_.Item1 -is [Management.Automation.Language.StringConstantExpressionAst] -and $_.Item1.Value -ceq $Mode
+        })
+    if ($clauses.Count -ne 1 -or $clauses[0].Item2.Statements.Count -ne 1 -or
+        $clauses[0].Item2.Statements[0] -isnot [Management.Automation.Language.ReturnStatementAst]) {
+        throw "Pinned maintenance case contract has no unambiguous $Mode return at $Revision."
+    }
+    $pipeline = $clauses[0].Item2.Statements[0].Pipeline
+    if ($pipeline -isnot [Management.Automation.Language.PipelineAst] -or $pipeline.PipelineElements.Count -ne 1 -or
+        $pipeline.PipelineElements[0] -isnot [Management.Automation.Language.CommandExpressionAst]) {
+        throw "Pinned maintenance case contract is not a literal $Mode case list at $Revision."
+    }
+    # Read literal case lists without executing historical qualifier code.
+    try { $cases = @($pipeline.PipelineElements[0].Expression.SafeGetValue()) }
+    catch { throw "Pinned maintenance case contract is not a literal $Mode case list at $Revision`: $($_.Exception.Message)" }
+    if (-not $cases.Count -or @($cases | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count -or
+        @($cases | Select-Object -Unique).Count -ne $cases.Count) {
+        throw "Pinned maintenance case contract has invalid or duplicate $Mode cases at $Revision."
+    }
+    return $cases
+}
+
 function Test-MaintenanceQualificationCmScope {
     param([object]$Config)
     return @($Config.virtualMachines | Where-Object {
@@ -92,6 +137,7 @@ function Assert-MaintenanceQualificationReceipt {
         [Parameter(Mandatory)][string]$SourceDigest,
         [object[]]$Targets = @(),
         [string]$ExpectedSha256,
+        [string]$RepositoryRoot,
         [switch]$RequireCmCoverage
     )
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Maintenance qualification receipt is missing: $Path" }
@@ -119,10 +165,16 @@ function Assert-MaintenanceQualificationReceipt {
     $actual = @($receipt.Targets | ForEach-Object { "$($_.Name)|$($_.Id)".ToLowerInvariant() } | Sort-Object)
     if ($Mode -ne 'Preflight' -and -not $expected.Count) { throw "Live maintenance receipt has no scoped target: $Path" }
     if (($expected -join "`n") -cne ($actual -join "`n")) { throw "Maintenance qualification target identity differs: $Path" }
-    $required = @(Get-MaintenanceQualificationCases -Mode $Mode)
+    $required = @(if ($RepositoryRoot) {
+            Get-PinnedMaintenanceQualificationCases -RepositoryRoot $RepositoryRoot -Revision $DevelopRevision -Mode $Mode
+        } else { Get-MaintenanceQualificationCases -Mode $Mode })
     $results = @($receipt.Cases)
-    if ($results.Count -ne $required.Count -or @($results.Name | Select-Object -Unique).Count -ne $required.Count) {
-        throw "Maintenance qualification has missing or duplicate cases: $Path"
+    $names = @($results | ForEach-Object { "$($_.Name)" })
+    $missing = @($required | Where-Object { $names -cnotcontains $_ })
+    $unexpected = @($names | Where-Object { $required -cnotcontains $_ } | Select-Object -Unique)
+    $duplicates = @($names | Group-Object -CaseSensitive | Where-Object Count -gt 1 | ForEach-Object Name)
+    if ($results.Count -ne $required.Count -or $missing.Count -or $unexpected.Count -or $duplicates.Count) {
+        throw "Maintenance qualification has missing or duplicate cases for $Mode candidate $DevelopRevision (expected=$($required.Count); actual=$($results.Count); missing=[$($missing -join ', ')]; unexpected=[$($unexpected -join ', ')]; duplicate=[$($duplicates -join ', ')]): $Path"
     }
     foreach ($name in $required) {
         $case = @($results | Where-Object Name -ceq $name)
@@ -158,12 +210,12 @@ function New-MaintenanceQualificationReference {
 }
 
 function Assert-MaintenanceQualificationReference {
-    param([Parameter(Mandatory)]$Reference, [switch]$RequireCmCoverage)
+    param([Parameter(Mandatory)]$Reference, [switch]$RequireCmCoverage, [string]$RepositoryRoot)
     if ("$($Reference.Sha256)" -notmatch '^[A-Fa-f0-9]{64}$') {
         throw 'Maintenance qualification reference has no valid receipt checksum.'
     }
     return Assert-MaintenanceQualificationReceipt -Path $Reference.Path -Mode $Reference.Mode `
         -MainRevision $Reference.MainRevision -DevelopRevision $Reference.DevelopRevision `
         -SourceDigest $Reference.SourceDigest -Targets @($Reference.Targets) -ExpectedSha256 $Reference.Sha256 `
-        -RequireCmCoverage:$RequireCmCoverage
+        -RequireCmCoverage:$RequireCmCoverage -RepositoryRoot $RepositoryRoot
 }

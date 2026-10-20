@@ -1763,6 +1763,11 @@ function Assert-CrossRevisionMaintenanceFamilyGate {
     }
     $expectedRecovery = if ($gate.HasCmTarget) { "__revision__|maintenance|recovery|$revision" } else { "$key|maintenance|recovery-na|$revision" }
     if ($gate.RecoveryKey -cne $expectedRecovery) { throw "Family '$Family' has no required recovery-matrix/N/A gate." }
+    $contractArguments = @{}
+    if ($revision -cne $developCommit) {
+        if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) { throw "Historical maintenance validation for '$Family' requires its Git repository." }
+        $contractArguments.RepositoryRoot = $RepositoryRoot
+    }
     $required = @($gate.PreflightKey, $gate.BaselineKey, $gate.RecoveryKey) + $expectedPost
     foreach ($receiptKey in $required) {
         $expectedMode = if ($receiptKey -eq $gate.PreflightKey) { 'Preflight' }
@@ -1776,7 +1781,7 @@ function Assert-CrossRevisionMaintenanceFamilyGate {
             throw "Family '$Family' has stale-revision or wrong-mode maintenance coverage."
         }
         $null = Assert-MaintenanceQualificationReference -Reference $reference `
-            -RequireCmCoverage:($gate.HasCmTarget -and $receiptKey -eq $gate.RecoveryKey)
+            -RequireCmCoverage:($gate.HasCmTarget -and $receiptKey -eq $gate.RecoveryKey) @contractArguments
     }
 }
 
