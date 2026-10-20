@@ -372,14 +372,17 @@ function Get-MemLabsOfflineSetupSourcePath {
     $path = $WindowsRoot
     foreach ($part in (@('') + $RelativePath.Split('\'))) {
         if ($part) { $path = Join-Path $path $part }
-        try { $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop }
-        catch [Management.Automation.ItemNotFoundException] { return }
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        # PS5.1 Get-Item can silently return no item for missing volume-GUID paths.
+        try { $attributes = [IO.File]::GetAttributes($path) }
+        catch [IO.FileNotFoundException] { return }
+        catch [IO.DirectoryNotFoundException] { return }
+        if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "Refusing reparse point '$path'; offline evidence must remain inside the mounted Windows volume."
         }
     }
-    if ($item.PSIsContainer -and -not $AllowDirectory) { throw "Expected an evidence file, not a directory: '$path'." }
-    if (-not $item.PSIsContainer -and $AllowDirectory) { throw "Expected an evidence directory, not a file: '$path'." }
+    $isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+    if ($isDirectory -and -not $AllowDirectory) { throw "Expected an evidence file, not a directory: '$path'." }
+    if (-not $isDirectory -and $AllowDirectory) { throw "Expected an evidence directory, not a file: '$path'." }
     return $path
 }
 
@@ -457,14 +460,17 @@ function Get-MemLabsOfflineAppxInventory {
                 $manifestPath = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath $relative
                 $package.ManifestPresent = [bool]$manifestPath
                 if ($manifestPath) {
-                    if ([IO.FileInfo]::new($manifestPath).Length -gt 1MB) { throw "Package manifest exceeds the 1 MiB diagnostic limit: $relative" }
-                    $reader = [Xml.XmlReader]::Create($manifestPath, $settings)
+                    $manifestStream = [IO.File]::OpenRead($manifestPath)
+                    $reader = $null
                     try {
+                        if ($manifestStream.Length -gt 1MB) { throw "Package manifest exceeds the 1 MiB diagnostic limit: $relative" }
+                        # A volume-GUID file path must not be interpreted as an XML source URI.
+                        $reader = [Xml.XmlReader]::Create($manifestStream, $settings)
                         $document = [xml]::new()
                         $document.XmlResolver = $null
                         $document.Load($reader)
                     }
-                    finally { $reader.Dispose() }
+                    finally { if ($reader) { $reader.Dispose() }; $manifestStream.Dispose() }
                     $identity = @($document.SelectNodes('/*[local-name()="Package"]/*[local-name()="Identity"]'))
                     if ($identity.Count -ne 1) { throw "Package identity is missing/ambiguous: $relative" }
                     if (-not $identity[0].GetAttribute('Name') -or -not $identity[0].GetAttribute('Version')) {
@@ -650,7 +656,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $privateRoot = Join-Path $collectionRoot 'PrivateState'
     $null = New-Item -Path $bundle, $privateRoot -ItemType Directory
     $manifest = @{
-        SchemaVersion = 1; CollectorVersion = 4; RegistryReader = 'offreg.dll'
+        SchemaVersion = 1; CollectorVersion = 5; RegistryReader = 'offreg.dll'
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Host = $env:COMPUTERNAME; VMName = $vm.Name; VMId = "$($vm.Id)"
         OriginalState = "$($vm.State)"; FinalState = ''; Status = 'Collecting'

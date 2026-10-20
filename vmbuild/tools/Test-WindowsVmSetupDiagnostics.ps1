@@ -25,12 +25,17 @@ Initialize-MemLabsOfflineSetupHiveType
 Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 namespace MemLabs {
     public static class SetupDiagnosticTestSupport {
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetVolumeNameForVolumeMountPoint(string mountPoint, StringBuilder name, uint capacity);
         [DllImport("advapi32.dll", CharSet=CharSet.Unicode)]
         private static extern int RegLoadAppKey(string path, out IntPtr key, int access, int options, int reserved);
         [DllImport("offreg.dll", CharSet=CharSet.Unicode, ExactSpelling=true)]
@@ -52,6 +57,15 @@ namespace MemLabs {
         [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         private static extern int ORCloseHive(IntPtr key);
 
+        public static string GetVolumeGuidPath(string path) {
+            string fullPath = Path.GetFullPath(path);
+            string root = Path.GetPathRoot(fullPath);
+            StringBuilder name = new StringBuilder(1024);
+            if (!GetVolumeNameForVolumeMountPoint(root, name, (uint)name.Capacity)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return name.ToString() + fullPath.Substring(root.Length);
+        }
         public static void CreateMixedSecurityFixture(string source, string destination, byte[] descriptor) {
             IntPtr root;
             int error = OROpenHive(source, out root);
@@ -250,6 +264,13 @@ try {
         ($inventory | ConvertTo-Json -Depth 8) -notmatch 'RAW-SECRET|Private.CompanyApp' -and
         (Get-FileHash -LiteralPath $runtimeManifest -Algorithm SHA256).Hash -eq $runtimeHash) `
         'Read-only AppX evidence lost exact missing paths, manifest identities/dependencies, event dates, or privacy.'
+    $guidWindows = [MemLabs.SetupDiagnosticTestSupport]::GetVolumeGuidPath($windows)
+    Assert-True ($guidWindows.StartsWith('\\?\Volume{')) 'The native manifest fixture did not use a real volume-GUID path.'
+    $guidInventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $guidWindows -Bundle $appxBundle
+    Assert-True ($guidInventory.Errors.Count -eq 0 -and
+        ($guidInventory | ConvertTo-Json -Depth 8 -Compress) -eq ($inventory | ConvertTo-Json -Depth 8 -Compress) -and
+        (Get-FileHash -LiteralPath $runtimeManifest -Algorithm SHA256).Hash -eq $runtimeHash) `
+        'Native volume-GUID manifest reads failed or differed from ordinary read-only file paths.'
     $oldRuntimeFolder = Join-Path $script:GuestRoot "Program Files\WindowsApps\$oldRuntimeId"
     $null = New-Item -Path $oldRuntimeFolder -ItemType Directory
     $oldRuntimeManifest = Join-Path $oldRuntimeFolder 'AppxManifest.xml'
@@ -475,7 +496,9 @@ try {
     function Get-Volume {
         param($Partition, $ErrorAction)
         if ($script:VolumeReadFails) { throw 'Synthetic volume lookup failure' }
-        [pscustomobject]@{ Path = $(if ($script:NoWindows) { $script:EmptyRoot } else { $script:GuestRoot }) }
+        $path = if ($script:NoWindows) { $script:EmptyRoot } else { $script:GuestRoot }
+        if ($script:NativeVolumePaths) { $path = [MemLabs.SetupDiagnosticTestSupport]::GetVolumeGuidPath($path) }
+        [pscustomobject]@{ Path = $path }
     }
     function Dismount-VHD {
         param($Path, $ErrorAction)
@@ -538,6 +561,7 @@ try {
         $script:DependenciesReady = $false; $script:ModuleCycleStart = 0; $script:CommandCycleStart = 0
         $script:ConsoleStates = [Collections.Generic.List[string]]::new()
         $script:ConsoleBadFrame = $false
+        $script:NativeVolumePaths = $false
     }
     $parameters = @{ VmName = 'BROKEN-W11'; Destination = (Join-Path $testRoot 'output'); StopTimeoutSeconds = 5; Confirm = $false }
     Reset-Fixture
@@ -550,7 +574,7 @@ try {
         'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
-    Assert-True ($manifestRecord.CollectorVersion -eq 4 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
+    Assert-True ($manifestRecord.CollectorVersion -eq 5 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
         @($manifestRecord.Files | Where-Object Path -eq 'AppxPrerequisiteInventory.json').Count -eq 1) `
         'The archive does not identify the corrected registry reader and package-inventory collector.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'
@@ -565,6 +589,18 @@ try {
         }
     }
     finally { $zip.Dispose() }
+
+    Reset-Fixture
+    $script:NativeVolumePaths = $true
+    $guidReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
+    $guidBundle = Join-Path (Split-Path $guidReport.ArchivePath -Parent) 'Bundle'
+    $guidManifest = Get-Content -LiteralPath (Join-Path $guidBundle 'Manifest.json') -Raw | ConvertFrom-Json
+    $guidInventory = Get-Content -LiteralPath (Join-Path $guidBundle 'AppxPrerequisiteInventory.json') -Raw | ConvertFrom-Json
+    Assert-True ($guidReport.Status -eq 'Complete' -and $guidManifest.Errors.Count -eq 0 -and
+        $guidInventory.Errors.Count -eq 0 -and
+        @($guidInventory.Packages | Where-Object { $_.Name -eq 'Microsoft.WindowsAppRuntime.2' -and $_.Version -eq '2.5.1.0' }).Count -eq 1 -and
+        @($guidInventory.Packages | Where-Object { $_.Name -eq 'MicrosoftWindows.Client.OOBE' -and $_.Dependencies.Count -eq 2 }).Count -eq 1 -and
+        $script:DismountCalls -eq 1) 'The production collector lost native volume-GUID manifest evidence or mount cleanup.'
 
     Reset-Fixture
     $script:ConsoleBadFrame = $true
@@ -903,4 +939,4 @@ finally {
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop
 }
 
-Write-Host 'PASS -- offline setup collection preflights dependencies, scopes power changes/read-only mounts, preserves malformed frames, inventories bounded package evidence, cleans owned resources, and excludes raw hives/unattend/manifests.'
+Write-Host 'PASS -- offline setup collection preflights dependencies, scopes power changes/read-only mounts, preserves malformed frames, inventories bounded package evidence through native volume-GUID paths, cleans owned resources, and excludes raw hives/unattend/manifests.'

@@ -409,13 +409,17 @@ against their exact expected manifest paths, retaining event timestamps so
 inherited reference-image events can be distinguished from fresh failures.
 Reads are limited to 64 matching folders per location, 1 MiB per manifest, and
 128 dependencies per manifest; reparse points and XML DTDs are rejected.
+Manifests are parsed from read-only file streams, so mounted volume-GUID paths
+are not mistaken for XML source URIs.
+Filesystem attributes distinguish missing paths from read errors on both
+PowerShell engines while preserving the reparse-point refusal.
 This inventory does not export manifests, per-user registration databases, or
 user profiles, and it does not change packages or permissions. It is not a DISM
 provisioned-package inventory or proof that a missing old version caused the
 stall: a newer installed version can make an old preregistration entry stale.
 Inventory read/parse failures are explicit partial evidence, while absent folders
 and manifests are recorded as observations.
-The manifest identifies this implementation as `CollectorVersion=4` and
+The manifest identifies this implementation as `CollectorVersion=5` and
 `RegistryReader=offreg.dll`.
 An unavailable library or unreadable copy is reported as a collection error,
 not proof of guest registry corruption. Console images and logs can contain
@@ -428,6 +432,8 @@ Validate the collector's mocked Hyper-V/storage safety contracts with
 `vmbuild\tools\Test-WindowsVmSetupDiagnostics.ps1`. It also exercises disposable
 uniform/mixed-security hive fixtures and isolated mutex contention; it does not operate
 on real VMs or load host registry hives.
+Package inventory is also tested through real local volume-GUID aliases of
+disposable fixture files, including the production collection/archive path.
 Validate framebuffer conversion, exact VM targeting, unavailable/black-frame
 handling, and capture-error reporting with `vmbuild\tools\Test-VmConsoleScreenshot.ps1`.
 
