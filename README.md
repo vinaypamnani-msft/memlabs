@@ -53,6 +53,9 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   Setup-diagnostic cold-launch checks verify omitted/explicit destinations and
   collect/repair routing through real `-File` launches under both engines, with
   VM operations replaced by no-op reports.
+  Cancellation preflight uses windowless native child processes and verifies
+  that no console is attached, while still checking parent/descendant teardown
+  and checkpoint preservation.
 - Before expanding an exact-main baseline, develop runs **existing-site**
   maintenance without replacing the guest's legacy deployment configuration.
   Independent checks verify ODBC registration/DLLs in both registry views,

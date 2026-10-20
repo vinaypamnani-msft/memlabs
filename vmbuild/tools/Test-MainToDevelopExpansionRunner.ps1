@@ -448,6 +448,7 @@ $cancelState = Join-Path $cancelRoot 'state'
 $cancelWorktree = Join-Path $cancelRoot 'worktree'
 $cancelMarker = Join-Path $cancelRoot 'started.txt'
 $cancelPids = Join-Path $cancelRoot 'pids.txt'
+$cancelConsole = Join-Path $cancelRoot 'console.txt'
 $cancelCheckpoint = Join-Path $cancelRoot 'checkpoint.txt'
 $cancelLocationResult = Join-Path $cancelRoot 'location.txt'
 $cancelPs = $null
@@ -455,9 +456,23 @@ try {
     $null = New-Item -ItemType Directory -Path (Join-Path $cancelSource 'vmbuild\logs') -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $cancelWorktree 'vmbuild') -Force
     $cancelChild = Join-Path $cancelWorktree 'vmbuild\CancelChild.ps1'
+    $cancelDescendant = Join-Path $cancelWorktree 'vmbuild\Cancel Descendant.ps1'
+    [IO.File]::WriteAllText($cancelDescendant, @'
+param([string] $ConsolePath)
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CancellationConsoleNative { [DllImport("kernel32.dll", ExactSpelling=true)] public static extern IntPtr GetConsoleWindow(); }' -ErrorAction Stop
+[IO.File]::WriteAllText($ConsolePath, [CancellationConsoleNative]::GetConsoleWindow().ToInt64().ToString())
+Start-Sleep -Seconds 120
+'@)
     [IO.File]::WriteAllText($cancelChild, @'
-param([string] $MarkerPath, [string] $PidPath)
-$descendant = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120') -PassThru
+param([string] $MarkerPath, [string] $PidPath, [string] $DescendantPath, [string] $ConsolePath)
+$startInfo = [Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = Join-Path $PSHOME 'pwsh.exe'
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $DescendantPath, '-ConsolePath', $ConsolePath)) {
+    $null = $startInfo.ArgumentList.Add($argument)
+}
+$descendant = [Diagnostics.Process]::Start($startInfo)
 [IO.File]::WriteAllText($PidPath, "$PID|$($descendant.Id)")
 [IO.File]::WriteAllText($MarkerPath, 'started')
 Start-Sleep -Seconds 120
@@ -475,6 +490,8 @@ Start-Sleep -Seconds 120
             [string] $Pwsh,
             [string] $Marker,
             [string] $Pids,
+            [string] $Descendant,
+            [string] $Console,
             [string] $LocationResult
         )
         . ([scriptblock]::Create($StopFunctionText))
@@ -486,7 +503,7 @@ Start-Sleep -Seconds 120
         $initialLocation = (Get-Location).Path
         try {
             Invoke-ChildScript -WorktreePath $Worktree -ScriptName 'CancelChild.ps1' `
-                -Parameters ([ordered]@{ MarkerPath = $Marker; PidPath = $Pids }) -Label 'cancel-test'
+                -Parameters ([ordered]@{ MarkerPath = $Marker; PidPath = $Pids; DescendantPath = $Descendant; ConsolePath = $Console }) -Label 'cancel-test'
         }
         finally {
             [IO.File]::WriteAllText($LocationResult, "$(Get-Location)")
@@ -504,10 +521,13 @@ Start-Sleep -Seconds 120
         AddArgument($pwshPath).
         AddArgument($cancelMarker).
         AddArgument($cancelPids).
+        AddArgument($cancelDescendant).
+        AddArgument($cancelConsole).
         AddArgument($cancelLocationResult)
     $cancelAsync = $cancelPs.BeginInvoke()
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    while (-not (Test-Path -LiteralPath $cancelMarker -PathType Leaf) -and [DateTime]::UtcNow -lt $deadline) {
+    while ((-not (Test-Path -LiteralPath $cancelMarker -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $cancelConsole -PathType Leaf)) -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
     }
     $publishedPids = if (Test-Path -LiteralPath $cancelPids) {
@@ -517,6 +537,14 @@ Start-Sleep -Seconds 120
         @()
     }
     Assert-Equal 2 $publishedPids.Count 'cancellation fixture publishes launcher and descendant IDs'
+    $consoleHandle = if (Test-Path -LiteralPath $cancelConsole -PathType Leaf) {
+        (Get-Content -LiteralPath $cancelConsole -Raw).Trim()
+    } else { '<missing>' }
+    Assert-Equal '0' $consoleHandle 'cancellation descendant starts without a console or Terminal window'
+    if ($publishedPids.Count -eq 2) {
+        Assert-True ($null -ne (Get-Process -Id $publishedPids[1] -ErrorAction SilentlyContinue)) `
+            'windowless cancellation descendant is alive before teardown'
+    }
     $cancelPs.Stop()
     try { $null = $cancelPs.EndInvoke($cancelAsync) } catch [Management.Automation.PipelineStoppedException] { }
     Start-Sleep -Seconds 1
