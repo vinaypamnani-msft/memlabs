@@ -644,8 +644,9 @@ try {
     $testMutexName = "Local\MemLabsSetupDiagnosticTest-$([guid]::NewGuid().ToString('N'))"
     $entryText = $entryText.Replace('Global\MemLabsTestMutationLock', $testMutexName)
     $defaultOutput = Join-Path $testRoot 'default-output'
-    $parameterText = $ast.ParamBlock.Extent.Text.Replace(
+    $entryText = $entryText.Replace(
         '(Join-Path $PSScriptRoot ''..\logs\setup-diagnostics'')', "'$($defaultOutput.Replace("'", "''"))'")
+    $parameterText = $ast.ParamBlock.Extent.Text
     if ($parameterText -notmatch 'CmdletBinding') { $parameterText = "[CmdletBinding(SupportsShouldProcess)]`n$parameterText" }
     $entrypoint = [scriptblock]::Create("$parameterText`n$entryText")
     $leaseKeepAlive = [Threading.Mutex]::new($false, $testMutexName)

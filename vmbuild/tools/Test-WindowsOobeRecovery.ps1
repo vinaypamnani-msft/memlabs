@@ -522,6 +522,9 @@ try {
     $null = & $entrypoint -VmName TEST-CLIENT -Destination (Join-Path $testRoot 'entry-output') -RepairOobe -WhatIf
     Assert-True ($script:Exports -eq 0 -and $script:Starts -eq 0 -and $script:Diagnostics -eq 0) `
         'The automatic/no-backup repair entrypoint required an export or manual credential.'
+    $null = & $entrypoint -VmName TEST-CLIENT -RepairOobe -WhatIf
+    Assert-True ($script:Exports -eq 0 -and $script:Starts -eq 0 -and $script:Diagnostics -eq 0 -and
+        $script:HostModuleChecks -eq 0) 'Omitting the repair destination initialized dependencies or changed state/evidence under WhatIf.'
     $failure = $null
     try {
         $null = & $entrypoint -VmName TEST-CLIENT -Destination (Join-Path $testRoot 'entry-output') -RepairOobe:$false `

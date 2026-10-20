@@ -33,7 +33,7 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Collect')]
     [Parameter(Mandatory, ParameterSetName = 'Repair')]
     [ValidateNotNullOrEmpty()][string]$VmName,
-    [string]$Destination = (Join-Path $PSScriptRoot '..\logs\setup-diagnostics'),
+    [string]$Destination,
     [ValidateRange(5, 600)][int]$StopTimeoutSeconds = 90,
     [switch]$AllowTurnOff,
     [Parameter(Mandatory, ParameterSetName = 'Repair')][switch]$RepairOobe,
@@ -575,6 +575,9 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     [pscustomobject]@{ VMName = $vm.Name; Status = $manifest.Status; ArchivePath = $archive; FinalState = $manifest.FinalState }
 }
 
+if (-not $PSBoundParameters.ContainsKey('Destination')) {
+    $Destination = (Join-Path $PSScriptRoot '..\logs\setup-diagnostics')
+}
 $collectorParameters = @{} + $PSBoundParameters
 $collectorParameters.Destination = $Destination
 $collectorParameters.StopTimeoutSeconds = $StopTimeoutSeconds

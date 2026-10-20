@@ -50,6 +50,9 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   source digest. A failure or missing engine blocks the candidate preflight.
   The CIM proxy-temp regression also prevents cleanup from deleting shared
   proxy directories that may still back other live PowerShell sessions.
+  Setup-diagnostic cold-launch checks verify omitted/explicit destinations and
+  collect/repair routing through real `-File` launches under both engines, with
+  VM operations replaced by no-op reports.
 - Before expanding an exact-main baseline, develop runs **existing-site**
   maintenance without replacing the guest's legacy deployment configuration.
   Independent checks verify ODBC registration/DLLs in both registry views,
@@ -281,6 +284,12 @@ both creation and last-write times older than one hour are eligible; activity
 and directory eligibility are checked again before each deletion. Only flat
 proxy folders are removed; nested directories or reparse contents require
 manual inspection instead of recursive traversal.
+
+When `-Destination` is omitted, its default is resolved from the tool's directory
+after script parameter binding so fresh Windows PowerShell 5.1 `-File` launches
+work correctly. An explicitly supplied destination is not replaced. Validate
+this startup contract with `vmbuild\tools\Test-SetupDiagnosticDefaults.ps1`,
+which also runs automatically in pinned-candidate preflight.
 
 The protected archive path is printed under `vmbuild\logs\setup-diagnostics`
 by default. It contains setup/domain-join logs (at most 20 MiB per file, retaining

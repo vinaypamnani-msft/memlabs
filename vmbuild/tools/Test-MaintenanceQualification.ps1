@@ -151,7 +151,7 @@ try {
     Assert-QualificationThrows { Assert-MaintenanceQualificationReference $reference } '*checksum changed*'
 
     $readinessCases = @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51')
-    foreach ($name in @($readinessCases + 'Test-CimProxyTempPath')) {
+    foreach ($name in @($readinessCases + 'Test-CimProxyTempPath' + 'Test-SetupDiagnosticDefaults')) {
         Assert-Qualification ((Get-MaintenanceQualificationCases Preflight) -contains $name) "Preflight does not require $name."
         $receipt = New-TestQualificationReceipt -Mode Preflight -Targets @() -HasCm $false
         $receipt.Cases = @($receipt.Cases | Where-Object Name -ne $name)
@@ -165,7 +165,8 @@ try {
     foreach ($relative in @('Common.ps1', 'common\Common.ScriptBlocks.ps1', 'DSC\phases\WindowsSetupReadiness.ps1',
             'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
             'tools\Test-WindowsClientSetupReadiness.ps1', 'tools\Test-CimProxyTempPath.ps1',
-            'tools\Clear-CimProxyTempFolders.ps1')) {
+            'tools\Clear-CimProxyTempFolders.ps1', 'tools\Test-SetupDiagnosticDefaults.ps1',
+            'tools\Get-WindowsVmSetupDiagnostics.ps1')) {
         Assert-Qualification ($source.Files.Contains($relative) -and $source.Files[$relative] -match '^[A-Fa-f0-9]{64}$') `
             "Pinned source digest does not cover regression input $relative."
     }

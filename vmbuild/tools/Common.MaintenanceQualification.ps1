@@ -3,7 +3,8 @@ function Get-MaintenanceQualificationCases {
     switch ($Mode) {
         'Preflight' {
             return @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51',
-                'Test-CimProxyTempPath', 'Test-ConsoleUpgradeRouting', 'Test-MaintenanceFixRobustness', 'Test-Odbc18VersionEnforcement',
+                'Test-CimProxyTempPath', 'Test-SetupDiagnosticDefaults',
+                'Test-ConsoleUpgradeRouting', 'Test-MaintenanceFixRobustness', 'Test-Odbc18VersionEnforcement',
                 'Test-MsiBusyRetryAndPassiveDependency', 'Test-VMMaintenanceNoteDiagnostics', 'Test-Phase11OsdContentState',
                 'Test-MaintenanceQualification', 'Test-MainToDevelopExpansionRunner', 'dsc-artifact')
         }
@@ -38,7 +39,8 @@ function Get-MaintenanceQualificationSource {
             'Common.ps1', 'common\Common.ScriptBlocks.ps1', 'DSC\phases\WindowsSetupReadiness.ps1',
             'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
             'tools\Test-WindowsClientSetupReadiness.ps1', 'tools\Test-CimProxyTempPath.ps1',
-            'tools\Clear-CimProxyTempFolders.ps1',
+            'tools\Clear-CimProxyTempFolders.ps1', 'tools\Test-SetupDiagnosticDefaults.ps1',
+            'tools\Get-WindowsVmSetupDiagnostics.ps1',
             'common\Common.Maintenance.ps1', 'common\Common.Validation.Functional.ps1',
             'Fixes\Fix-ODBC18.ps1', 'Fixes\Fix-Upgrade-Console.ps1', 'Fixes\Fix-CMFullAdmin.ps1',
             'DSC\phases\Upgrade-Console.ps1', 'DSC\TemplateHelpDSC\TemplateHelpDSC.psm1',
