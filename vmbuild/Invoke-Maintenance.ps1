@@ -857,7 +857,7 @@ function Remove-SupersededAspNetCoreRuntime {
     $files = @(Get-ChildItem -LiteralPath $Runtime.Path -Force -ErrorAction Stop)
     foreach ($file in $files) {
         if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-            $file.Name -notmatch '^(?:\.version|Microsoft\.AspNetCore\.App\.(?:deps|runtimeconfig)\.json|(?:Microsoft|System)\..+\.dll)$') {
+            $file.Name -notmatch '^(?:\.version|Microsoft\.AspNetCore\.App\.(?:deps|runtimeconfig)\.json|.+\.dll|THIRD-PARTY-NOTICES\.txt)$') {
             throw "Runtime cleanup found a nested, linked, or unexpected item; manual removal is required and remediation is NOT complete: '$($file.FullName)'."
         }
     }

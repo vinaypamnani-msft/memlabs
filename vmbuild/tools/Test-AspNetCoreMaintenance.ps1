@@ -69,7 +69,12 @@ function Add-FixtureRuntime {
     $null = New-Item -Path $path -ItemType Directory -Force
     Set-Content -LiteralPath (Join-Path $path '.version') -Value $Version -Encoding ascii
     if (-not $Incomplete) {
-        foreach ($file in @('Microsoft.AspNetCore.App.deps.json', 'Microsoft.AspNetCore.dll')) {
+        $files = @(
+            'Microsoft.AspNetCore.App.deps.json', 'Microsoft.AspNetCore.App.runtimeconfig.json',
+            'Microsoft.AspNetCore.dll', 'System.IO.Pipelines.dll', 'aspnetcorev2_inprocess.dll'
+        )
+        if ($Version -match '^[89]\.') { $files += 'THIRD-PARTY-NOTICES.txt' }
+        foreach ($file in $files) {
             Set-Content -LiteralPath (Join-Path $path $file) -Value 'fixture' -Encoding ascii
         }
     }
@@ -129,6 +134,7 @@ function Reset-Fixture {
     $script:Lease = $null
     $script:EntryQueryFails = $false
     $script:UninstallerUnregisters = $true
+    $script:UninstallerLeavesNativeFiles = $false
 }
 
 function Write-LogMessage {
@@ -201,7 +207,12 @@ function Start-Process {
     $path = Get-FixtureRuntimePath -Version $version -Architecture $architecture
     if ($script:InstallerCompletes -and ($script:InstallerExitCode -in @(0, 1641, 3010) -or ($uninstall -and $script:InstallerExitCode -in @(1605, 1614)))) {
         if ($uninstall) {
-            if ($script:UninstallerRemovesOld -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Recurse -Force }
+            if ($script:UninstallerLeavesNativeFiles) {
+                foreach ($file in @(Get-ChildItem -LiteralPath $path -File -Force | Where-Object Name -ne 'aspnetcorev2_inprocess.dll')) {
+                    Remove-Item -LiteralPath $file.FullName -Force
+                }
+            }
+            elseif ($script:UninstallerRemovesOld -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Recurse -Force }
             if ($script:UninstallerUnregisters) {
                 $script:Entries = @($script:Entries | Where-Object { $uninstalling.PSChildName -notcontains $_.PSChildName })
             }
@@ -402,6 +413,34 @@ try {
     Invoke-AspNetCoreMaintenance
     Assert-Equal 1 $script:Processes.Count 'a standalone bundle without the Microsoft name prefix uses its registered uninstaller'
 
+    foreach ($architecture in @('x64', 'x86', 'arm64')) {
+        Reset-Fixture
+        if ($architecture -eq 'arm64') { $env:PROCESSOR_ARCHITECTURE = 'ARM64' }
+        Add-FixtureRuntime '10.0.8' $architecture
+        Add-FixtureRuntime '10.0.13' $architecture
+        Set-FixtureStandaloneEntry -Architecture $architecture -Msi -Hidden
+        $script:UninstallerLeavesNativeFiles = $true
+        $oldPath = Get-FixtureRuntimePath '10.0.8' $architecture
+        $nativePath = Join-Path $oldPath 'aspnetcorev2_inprocess.dll'
+        $targetPath = Get-FixtureRuntimePath '10.0.13' $architecture
+        Invoke-AspNetCoreMaintenance
+        Assert-Equal 1 $script:Processes.Count "$architecture native-only cleanup follows the registered MSI uninstall"
+        Assert-Equal 0 $script:Entries.Count "$architecture native-only cleanup leaves no superseded MSI registration"
+        Assert-Equal $false (Test-Path -LiteralPath $nativePath) "$architecture removes the exact aspnetcorev2_inprocess.dll from the reported failure"
+        Assert-Equal $false (Test-Path -LiteralPath $oldPath) "$architecture removes the old directory even when uninstall removed its managed files and version marker"
+        Assert-Equal 'fixture' (Get-Content -LiteralPath (Join-Path $targetPath 'aspnetcorev2_inprocess.dll') -Raw).Trim() "$architecture preserves the patched native hosting DLL"
+        Assert-Equal 0 $script:Downloads.Count "$architecture native-only cleanup does not download or reinstall the current patch"
+    }
+
+    Reset-Fixture
+    Add-FixtureRuntime '8.0.20'
+    Add-FixtureRuntime '8.0.32'
+    $noticePath = Join-Path (Get-FixtureRuntimePath '8.0.20') 'THIRD-PARTY-NOTICES.txt'
+    Invoke-AspNetCoreMaintenance
+    Assert-Equal $false (Test-Path -LiteralPath $noticePath) 'older runtime license notices do not block superseded patch removal'
+    Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '8.0.20')) 'a real-shaped older branch runtime directory is fully removed'
+    Assert-Equal 'fixture' (Get-Content -LiteralPath (Join-Path (Get-FixtureRuntimePath '8.0.32') 'THIRD-PARTY-NOTICES.txt') -Raw).Trim() 'the supported patch retains its third-party notices'
+
     foreach ($enforcement in @('hidden-bundle', 'hidden-msi', 'sdk-files', 'sdk-registration', 'unknown-architecture', 'installer-failure', 'registry-error', 'missing-product-code')) {
         Reset-Fixture
         Add-FixtureRuntime
@@ -476,18 +515,19 @@ try {
     Assert-Throws { Invoke-AspNetCoreMaintenance } 'an unverified target version marker prevents a success claim'
     Assert-Equal $false (Test-Path -LiteralPath (Get-FixtureRuntimePath '10.0.8')) 'an invalid replacement marker does not retain the superseded runtime'
 
-    foreach ($unsafe in @('nested-directory', 'unexpected-file', 'locked-file')) {
+    foreach ($unsafe in @('nested-directory', 'unexpected-file', 'locked-file', 'locked-native-file')) {
         Reset-Fixture
         Add-FixtureRuntime
         Add-FixtureRuntime '10.0.13'
         $oldPath = Get-FixtureRuntimePath '10.0.8'
-        $dll = Join-Path $oldPath 'Microsoft.AspNetCore.dll'
+        $dll = Join-Path $oldPath $(if ($unsafe -eq 'locked-native-file') { 'aspnetcorev2_inprocess.dll' } else { 'Microsoft.AspNetCore.dll' })
         $lock = $null
         try {
             switch ($unsafe) {
                 'nested-directory' { $null = New-Item -Path (Join-Path $oldPath 'unexpected') -ItemType Directory -Force }
                 'unexpected-file' { Set-Content -LiteralPath (Join-Path $oldPath 'customer.txt') -Value 'preserve' -Encoding ascii }
                 'locked-file' { $lock = [IO.File]::Open($dll, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) }
+                'locked-native-file' { $lock = [IO.File]::Open($dll, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) }
             }
             Assert-Throws { Invoke-AspNetCoreMaintenance } "$unsafe prevents direct cleanup"
             Assert-Equal $true (Test-Path -LiteralPath $dll) "$unsafe leaves old runtime files intact"

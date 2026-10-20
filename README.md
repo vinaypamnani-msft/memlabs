@@ -40,9 +40,11 @@ Remaining old files are then removed from their specific version directory,
 regardless of installer ownership. SDKs and unrelated runtime families themselves
 are not uninstalled.
 
-File cleanup rejects reparse points, nested directories, and unexpected files,
-uses literal file paths and a non-recursive empty-directory delete, and clears
-read-only attributes on known old runtime files. It opens all old files before
+Within the exact superseded version directory, cleanup accepts managed and native
+DLLs (including `aspnetcorev2_inprocess.dll`), runtime manifests/version markers,
+and `THIRD-PARTY-NOTICES.txt`. It rejects reparse points, nested directories, and
+other unexpected files, uses literal file paths and a non-recursive empty-directory
+delete, and clears read-only attributes on known old runtime files. It opens all old files before
 deleting any to detect locks and prevent new readers during cleanup. Windows
 locks/permissions or unsafe contents require administrator intervention; they
 remain explicit failures, not exemptions or successful remediation. Maintenance
