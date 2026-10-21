@@ -16,11 +16,12 @@ if (-not $lastDefinition) { throw 'Collector function definitions were not found
 $operationStub = @'
 function __OPERATION__ {
     [CmdletBinding(SupportsShouldProcess)]
-    param($VmName, $Destination, $StopTimeoutSeconds, $AllowTurnOff, $BackupPath,
+    param($VmName, $VhdxPath, $Destination, $StopTimeoutSeconds, $AllowTurnOff, $BackupPath,
         $GuestCredential, $RepairTimeoutSeconds, $BackupTimeoutSeconds, $IncludeLiveProbe, $IncludeHangDump)
     [pscustomobject]@{
         Operation = $MyInvocation.MyCommand.Name
         VMName = $VmName
+        VhdxPath = $VhdxPath
         Destination = [IO.Path]::GetFullPath($Destination)
         StopTimeoutSeconds = $StopTimeoutSeconds
         IncludeLiveProbe = [bool]$IncludeLiveProbe
@@ -50,9 +51,11 @@ try {
     foreach ($engine in $engines) {
         if (-not (Test-Path -LiteralPath $engine.Path -PathType Leaf)) { throw "Missing test engine: $($engine.Path)" }
         foreach ($scenario in @('DefaultCollect', 'ExplicitCollect', 'DefaultRepair', 'ExplicitRepair', 'DefaultLive', 'ExplicitLive',
-                'DefaultDump', 'ExplicitDump', 'DefaultLiveDump', 'ExplicitLiveDump')) {
+                'DefaultDump', 'ExplicitDump', 'DefaultLiveDump', 'ExplicitLiveDump', 'DefaultVhdx', 'ExplicitVhdx')) {
             $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                '-File', $fixturePath, '-VmName', 'BINDING-FIXTURE', '-WhatIf')
+                '-File', $fixturePath, '-WhatIf')
+            if ($scenario -like '*Vhdx') { $arguments += @('-VhdxPath', (Join-Path $testRoot 'disk with spaces.vhdx')) }
+            else { $arguments += @('-VmName', 'BINDING-FIXTURE') }
             $expectedDestination = [IO.Path]::GetFullPath((Join-Path $toolsRoot '..\logs\setup-diagnostics'))
             $expectedOperation = 'Invoke-MemLabsWindowsSetupDiagnostics'
             if ($scenario -like 'Explicit*') {
@@ -71,8 +74,11 @@ try {
                 throw "$($engine.Name)/$scenario returned exit $LASTEXITCODE and $($output.Count) records: $($output -join ' ')"
             }
             $report = $output[0] | ConvertFrom-Json -ErrorAction Stop
-            if ($report.Operation -ne $expectedOperation -or $report.VMName -ne 'BINDING-FIXTURE' -or
-                $report.Destination -ne $expectedDestination -or $report.StopTimeoutSeconds -ne 90 -or
+            $expectedVm = if ($scenario -like '*Vhdx') { $null } else { 'BINDING-FIXTURE' }
+            $expectedStopTimeout = if ($scenario -like '*Vhdx') { $null } else { 90 }
+            if ($report.Operation -ne $expectedOperation -or $report.VMName -ne $expectedVm -or
+                $report.Destination -ne $expectedDestination -or $report.StopTimeoutSeconds -ne $expectedStopTimeout -or
+                ($scenario -like '*Vhdx' -and $report.VhdxPath -ne (Join-Path $testRoot 'disk with spaces.vhdx')) -or
                 $report.IncludeLiveProbe -ne ($scenario -like '*Live*') -or
                 $report.IncludeHangDump -ne ($scenario -like '*Dump')) {
                 throw "$($engine.Name)/$scenario lost its default, explicit path, mode, or timeout: $($output[0])"
@@ -80,11 +86,11 @@ try {
             $casesRun++
         }
     }
-    if ($casesRun -ne 20) { throw "Expected twenty cold -File cases, executed $casesRun." }
+    if ($casesRun -ne 24) { throw "Expected twenty-four cold -File cases, executed $casesRun." }
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop
     }
 }
-Write-Host 'PASS -- twenty real -File launches preserve omitted/explicit offline, live, dump and repair modes/destinations on PS5.1 and PS7; no VM operations run.'
+Write-Host 'PASS -- twenty-four real -File launches preserve omitted/explicit VM, VHDX, live, dump and repair modes/destinations on PS5.1 and PS7; no VM operations run.'

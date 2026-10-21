@@ -2,7 +2,7 @@
 #requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Collects offline Windows setup diagnostics from one Hyper-V VM.
+    Collects Windows setup diagnostics from one Hyper-V VM or detached VHDX.
 .DESCRIPTION
     By default, gracefully stops the selected VM, mounts only its disks read-only without
     drive letters, and collects setup logs plus allowlisted registry state.
@@ -12,6 +12,9 @@
     Stop deployment/test retry loops before collection. The collector refuses
     to run while another process holds the MemLabs host mutation lease.
     Required host modules and commands are checked before shutdown or mounting.
+.PARAMETER VhdxPath
+    Reads a detached VHDX/AVHDX directly, read-only and without drive letters.
+    Does not query, start, stop, or modify a VM and never loads guest credentials.
 .PARAMETER IncludeLiveProbe
     Opts into bounded, read-only first-logon/process and registered/provisioned AppX
     inspection before the offline collection. Starts an Off VM, observes for 190s,
@@ -41,6 +44,8 @@
     .\Get-WindowsVmSetupDiagnostics.ps1 -VmName ADA-W11CLIENT1 -IncludeLiveProbe
 .EXAMPLE
     .\Get-WindowsVmSetupDiagnostics.ps1 -VmName ADA-W11CLIENT1 -IncludeLiveProbe -IncludeHangDump
+.EXAMPLE
+    .\Get-WindowsVmSetupDiagnostics.ps1 -VhdxPath C:\Evidence\ADA-W11CLIENT1_OS.vhdx
 #>
 [CmdletBinding(DefaultParameterSetName = 'Collect', SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
@@ -49,8 +54,13 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Live')]
     [Parameter(Mandatory, ParameterSetName = 'Dump')]
     [ValidateNotNullOrEmpty()][string]$VmName,
+    [Parameter(Mandatory, ParameterSetName = 'Vhdx')][ValidateNotNullOrEmpty()][string]$VhdxPath,
     [string]$Destination,
+    [Parameter(ParameterSetName = 'Collect')][Parameter(ParameterSetName = 'Repair')]
+    [Parameter(ParameterSetName = 'Live')][Parameter(ParameterSetName = 'Dump')]
     [ValidateRange(5, 600)][int]$StopTimeoutSeconds = 90,
+    [Parameter(ParameterSetName = 'Collect')][Parameter(ParameterSetName = 'Repair')]
+    [Parameter(ParameterSetName = 'Live')][Parameter(ParameterSetName = 'Dump')]
     [switch]$AllowTurnOff,
     [Parameter(Mandatory, ParameterSetName = 'Live')][switch]$IncludeLiveProbe,
     [Parameter(Mandatory, ParameterSetName = 'Dump')]
@@ -67,13 +77,17 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function Initialize-MemLabsSetupDiagnosticModules {
-    param([switch]$IncludeLiveProbe)
+    param([switch]$IncludeLiveProbe, [switch]$OfflineDisk)
     $requirements = [ordered]@{
         'Hyper-V' = @('Get-VM', 'Stop-VM', 'Get-VMHardDiskDrive', 'Get-VHD', 'Mount-VHD', 'Dismount-VHD')
         'Storage' = @('Get-Disk', 'Set-Disk', 'Get-Partition', 'Get-Volume')
         'Microsoft.PowerShell.Diagnostics' = @('Get-WinEvent')
         'Microsoft.PowerShell.Archive' = @('Compress-Archive')
         'CimCmdlets' = @('Get-CimInstance', 'Get-CimAssociatedInstance', 'Invoke-CimMethod')
+    }
+    if ($OfflineDisk) {
+        $requirements['Hyper-V'] = @('Get-VHD', 'Mount-VHD', 'Dismount-VHD')
+        $requirements.Remove('CimCmdlets')
     }
     if ($IncludeLiveProbe) { $requirements['Hyper-V'] += 'Start-VM' }
     foreach ($moduleName in $requirements.Keys) {
@@ -235,7 +249,12 @@ function Stop-MemLabsVmForSetupDiagnostics {
 }
 
 function Initialize-MemLabsOfflineSetupHiveType {
-    if ('MemLabs.OfflineSetupHiveReader' -as [type]) { return }
+    if ('MemLabs.OfflineSetupHiveReader' -as [type]) {
+        if (-not ('MemLabs.OfflineSetupHiveReader+Key' -as [type]).GetMethod('GetValueMetadata')) {
+            throw 'The cached offline-registry reader is older than this collector. Retry from a fresh PowerShell process.'
+        }
+        return
+    }
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -267,6 +286,11 @@ namespace MemLabs {
             internal OfflineHandle(IntPtr value, bool isRoot) : base(true) { SetHandle(value); root = isRoot; }
             protected override bool ReleaseHandle() { return (root ? ORCloseHive(handle) : ORCloseKey(handle)) == 0; }
         }
+        public sealed class ValueMetadata {
+            public bool Present;
+            public uint Type;
+            public uint Bytes;
+        }
         public sealed class Key : IDisposable {
             private readonly OfflineHandle handle;
             internal Key(OfflineHandle value) { handle = value; }
@@ -296,6 +320,14 @@ namespace MemLabs {
                     return text.Length == 0 ? new string[0] : text.Split('\0');
                 }
                 throw new InvalidDataException("Unsupported offline setup value type/size for " + name + ": " + type + "/" + size);
+            }
+            public ValueMetadata GetValueMetadata(string name) {
+                uint type;
+                uint size = 0;
+                int error = ORGetValue(handle, null, name, out type, null, ref size);
+                if (error == 2) return new ValueMetadata { Present = false };
+                if (error != 0 && error != 234) throw new Win32Exception(error, "ORGetValue metadata query failed for " + name + ".");
+                return new ValueMetadata { Present = true, Type = type, Bytes = size };
             }
             public void Dispose() { handle.Dispose(); }
         }
@@ -349,7 +381,13 @@ function Read-MemLabsOfflineWindowsSetupHive {
                     -SubKey 'Microsoft\Windows\CurrentVersion\Policies\System' -Names @('EnableFirstLogonAnimation')
                 WinlogonProgress = Read-MemLabsOfflineSetupRegistryValues -Hive $hive `
                     -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon' `
-                    -Names @('AutoAdminLogon', 'AutoLogonCount', 'DefaultUserName', 'DefaultDomainName')
+                    -Names @('AutoAdminLogon', 'AutoLogonCount', 'DefaultUserName', 'DefaultDomainName',
+                        'AutoLogonSID', 'SystemAutoLogon', 'Shell', 'Userinit', 'EnableFirstLogonAnimation')
+                WinlogonCredentialMetadata = Read-MemLabsOfflineSetupRegistryMetadata -Hive $hive `
+                    -SubKey 'Microsoft\Windows NT\CurrentVersion\Winlogon' -Names @('DefaultPassword')
+                LogonUI = Read-MemLabsOfflineSetupRegistryValues -Hive $hive `
+                    -SubKey 'Microsoft\Windows\CurrentVersion\Authentication\LogonUI' `
+                    -Names @('SelectedUserSID', 'LastLoggedOnUser', 'LastLoggedOnUserSID', 'LastLoggedOnProvider')
                 UserOobeSettings = Read-MemLabsOfflineSetupRegistryValues -Hive $hive `
                     -SubKey 'Microsoft\Windows\CurrentVersion\OOBE' `
                     -Names @('SkipUserOOBE', 'SkipMachineOOBE', 'LaunchUserOOBE', 'BypassNRO')
@@ -378,6 +416,18 @@ function Read-MemLabsOfflineWindowsSetupHive {
         return $state
     }
     finally { $hive.Dispose() }
+}
+
+function Read-MemLabsOfflineSetupRegistryMetadata {
+    param($Hive, [string]$SubKey, [string[]]$Names)
+    $key = $Hive.OpenSubKey($SubKey, $false)
+    if (-not $key) { return [pscustomobject]@{ Path = $SubKey; Present = $false; Metadata = @{}; ValueDataCollected = $false } }
+    try {
+        $metadata = [ordered]@{}
+        foreach ($name in $Names) { $metadata[$name] = $key.GetValueMetadata($name) }
+        [pscustomobject]@{ Path = $SubKey; Present = $true; Metadata = $metadata; ValueDataCollected = $false }
+    }
+    finally { $key.Dispose() }
 }
 
 function Get-MemLabsOfflineSetupSourcePath {
@@ -587,6 +637,169 @@ function Copy-MemLabsOfflineOobeWerReports {
     }
 }
 
+function Copy-MemLabsFirstLogonConfiguration {
+    param([string]$WindowsRoot, [string]$Bundle, $Manifest)
+    $volumeRoot = [IO.DirectoryInfo]::new($WindowsRoot).Parent.FullName
+    $profiles = [Collections.Generic.List[object]]::new()
+    $answers = [Collections.Generic.List[object]]::new()
+    $errors = [Collections.Generic.List[string]]::new()
+    function Get-FirstLogonPathMetadata {
+        param([string]$Path, [string]$RelativePath)
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        [pscustomobject]@{
+            Path = $RelativePath; Directory = $item.PSIsContainer
+            Bytes = $(if ($item.PSIsContainer) { $null } else { $item.Length })
+            CreatedUtc = $item.CreationTimeUtc.ToString('o'); ModifiedUtc = $item.LastWriteTimeUtc.ToString('o')
+            Attributes = "$($item.Attributes)"
+            OwnerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            GroupSid = $acl.GetGroup([Security.Principal.SecurityIdentifier]).Value
+            Dacl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+        }
+    }
+    try {
+        $users = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath 'Users' -AllowDirectory
+        if ($users) {
+            $directories = @(Get-ChildItem -LiteralPath $users -Directory -Force -ErrorAction Stop | Sort-Object Name | Select-Object -First 33)
+            if ($directories.Count -gt 32) { $errors.Add('SFAP inventory exceeds its 32-profile limit; only the first 32 profile directories were inspected.') }
+            foreach ($profile in $directories | Select-Object -First 32) {
+                $row = [ordered]@{ Profile = $profile.Name; Status = 'Absent'; Directory = $null; Files = @(); Error = $null }
+                $profiles.Add($row)
+                if ($profile.Attributes -band [IO.FileAttributes]::ReparsePoint) { $row.Status = 'SkippedReparseProfile'; continue }
+                try {
+                    $relative = "Users\$($profile.Name)\AppData\Local\Microsoft\Windows\SFAP"
+                    $path = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath $relative -AllowDirectory
+                    if (-not $path) { continue }
+                    $row.Directory = Get-FirstLogonPathMetadata -Path $path -RelativePath $relative
+                    $row.Status = 'Present'
+                    $files = @(Get-ChildItem -LiteralPath $path -File -Force -ErrorAction Stop | Sort-Object Name | Select-Object -First 33)
+                    if ($files.Count -gt 32) { $errors.Add("SFAP inventory '$($profile.Name)' exceeds its 32-file metadata limit; only the first 32 files were inspected.") }
+                    $row.Files = @($files | Select-Object -First 32 | ForEach-Object {
+                            $file = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath "$relative\$($_.Name)"
+                            Get-FirstLogonPathMetadata -Path $file -RelativePath "$relative\$($_.Name)"
+                        })
+                }
+                catch { $row.Status = 'Error'; $row.Error = $_.Exception.Message; $errors.Add("SFAP metadata '$($profile.Name)': $($_.Exception.Message)") }
+            }
+        }
+        else { $Manifest.Missing.Add('Users (SFAP profile metadata)') }
+    }
+    catch { $errors.Add("Read SFAP profile metadata: $($_.Exception.Message)") }
+    foreach ($relative in @('Windows\Panther\unattend.xml', 'staging\Unattend.xml')) {
+        try {
+            $path = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath $relative
+            if (-not $path) { $Manifest.Missing.Add("$relative (sanitized settings only)"); continue }
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null
+            $settings.MaxCharactersInDocument = 1MB
+            $stream = [IO.File]::OpenRead($path); $reader = $null
+            try {
+                if ($stream.Length -gt 1MB) { throw 'The answer file exceeds the 1 MiB diagnostic limit.' }
+                $reader = [Xml.XmlReader]::Create($stream, $settings)
+                $document = [xml]::new(); $document.XmlResolver = $null; $document.Load($reader)
+            }
+            finally { if ($reader) { $reader.Dispose() }; $stream.Dispose() }
+            $components = [Collections.Generic.List[object]]::new()
+            foreach ($component in $document.SelectNodes('//*[local-name()="component" and @name="Microsoft-Windows-Shell-Setup"]')) {
+                $row = [ordered]@{ Pass = $component.ParentNode.GetAttribute('pass'); CopyProfile = $null; Oobe = @{}; AutoLogon = @{}; LocalAccounts = @() }
+                $copyProfile = $component.SelectSingleNode('*[local-name()="CopyProfile"]')
+                if ($copyProfile) { $row.CopyProfile = $copyProfile.InnerText }
+                foreach ($name in @('HideEULAPage','HideLocalAccountScreen','HideOnlineAccountScreens','HideWirelessSetupInOOBE','ProtectYourPC','SkipUserOOBE','SkipMachineOOBE')) {
+                    $node = $component.SelectSingleNode('*[local-name()="OOBE"]/*[local-name()="' + $name + '"]')
+                    if ($node) { $row.Oobe[$name] = $node.InnerText }
+                }
+                foreach ($name in @('Enabled','Username','Domain','LogonCount')) {
+                    $node = $component.SelectSingleNode('*[local-name()="AutoLogon"]/*[local-name()="' + $name + '"]')
+                    if ($node) { $row.AutoLogon[$name] = $node.InnerText }
+                }
+                $row.LocalAccounts = @($component.SelectNodes('*[local-name()="UserAccounts"]/*[local-name()="LocalAccounts"]/*[local-name()="LocalAccount"]') | ForEach-Object {
+                        $accountName = $_.SelectSingleNode('*[local-name()="Name"]')
+                        $group = $_.SelectSingleNode('*[local-name()="Group"]')
+                        [pscustomobject]@{ Name = $(if ($accountName) { $accountName.InnerText }); Group = $(if ($group) { $group.InnerText }) }
+                    })
+                $components.Add($row)
+            }
+            $answers.Add([pscustomobject]@{ Source = $relative; ShellSetup = $components.ToArray() })
+        }
+        catch { $errors.Add("Read sanitized answer settings '$relative': $($_.Exception.Message)") }
+    }
+    [pscustomobject]@{
+        Version = 1; CacheContentsCollected = $false; PasswordValuesCollected = $false
+        MaxProfiles = 32; MaxFilesPerProfile = 32
+        Profiles = $profiles.ToArray(); AnswerFiles = $answers.ToArray(); Errors = $errors.ToArray()
+        Interpretation = 'Credential-cache age/copy/permission evidence is not by itself proof of a causal Windows authentication defect.'
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Bundle 'FirstLogonConfiguration.json') -Encoding UTF8 -ErrorAction Stop
+    $Manifest.Files.Add([ordered]@{ Path = 'FirstLogonConfiguration.json'; Truncated = $false })
+    foreach ($message in $errors) { $Manifest.Errors.Add($message) }
+}
+
+function Write-MemLabsFirstLogonFindings {
+    param([string]$Bundle, $Manifest)
+    $rows = [Collections.Generic.List[object]]::new()
+    $available = [Collections.Generic.List[string]]::new()
+    $missing = [Collections.Generic.List[string]]::new()
+    foreach ($name in @('UserOobeSignIn','UserOobeAccount','WinlogonAuthentication','Application')) {
+        $path = Join-Path $Bundle "$name-events.json"
+        if (-not [IO.File]::Exists($path)) { $missing.Add($name); continue }
+        try {
+            if ([IO.FileInfo]::new($path).Length -gt 8MB) { throw 'An event summary exceeds the 8 MiB correlation limit.' }
+            $records = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if (@($records).Count -gt 1000) { throw 'An event summary exceeds the 1,000-record correlation limit.' }
+            $available.Add($name)
+            foreach ($record in $records) {
+                if ($name -eq 'Application' -and ($record.Id -ne 1509 -or $record.Message -notmatch '\\SFAP')) { continue }
+                $text = [IO.StringReader]::new($record.Xml); $reader = $null
+                $settings = [Xml.XmlReaderSettings]::new()
+                $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null; $settings.MaxCharactersInDocument = 1MB
+                try {
+                    $reader = [Xml.XmlReader]::Create($text, $settings)
+                    $document = [xml]::new(); $document.XmlResolver = $null; $document.Load($reader)
+                }
+                finally { if ($reader) { $reader.Dispose() }; $text.Dispose() }
+                $data = @{}
+                foreach ($node in $document.GetElementsByTagName('Data')) { $data[$node.GetAttribute('Name')] = $node.InnerText }
+                $timeNode = $document.SelectSingleNode('/*[local-name()="Event"]/*[local-name()="System"]/*[local-name()="TimeCreated"]')
+                $time = if ($timeNode) { [DateTimeOffset]$timeNode.GetAttribute('SystemTime') } else { [DateTimeOffset]$record.TimeCreated }
+                $rows.Add([pscustomobject]@{
+                    Source = $name; Id = $record.Id; TimeUtc = $time.UtcDateTime.ToString('o')
+                    User = $data.TargetUserName; Sid = $(if ($data.TargetSid) { $data.TargetSid } else { $data.TargetUserSid })
+                    Status = $data.Status; SubStatus = $data.SubStatus; LogonType = $data.LogonType
+                    ProcessId = $data.ProcessId; ProcessName = $data.ProcessName; Win32Status = $data.Win32Status
+                    ProfileCopyWarning = $(if ($name -eq 'Application') { $record.Message } else { $null })
+                })
+            }
+        }
+        catch { $Manifest.Errors.Add("Correlate $name first-logon evidence: $($_.Exception.Message)") }
+    }
+    $wrongPassword = @($rows | Where-Object { $_.Source -eq 'UserOobeSignIn' -and $_.Id -eq 4625 -and
+            $_.User -ieq 'defaultuser0' -and $_.LogonType -eq '2' -and $_.SubStatus -ieq '0xc000006a' })
+    $winlogon = @($rows | Where-Object { $_.Source -eq 'WinlogonAuthentication' -and $_.Id -eq 2 -and $_.Win32Status -eq '1326' })
+    [long[]]$winlogonTicks = @($winlogon | ForEach-Object { ([DateTimeOffset]$_.TimeUtc).UtcDateTime.Ticks } | Sort-Object)
+    $correlated = @($wrongPassword | Where-Object {
+            $ticks = ([DateTimeOffset]$_.TimeUtc).UtcDateTime.Ticks
+            $position = [Array]::BinarySearch([Array]$winlogonTicks, [object]$ticks)
+            if ($position -lt 0) { $position = -$position - 1 }
+            $nearby = $false
+            foreach ($index in @(($position - 1), $position)) {
+                if ($index -ge 0 -and $index -lt $winlogonTicks.Length -and
+                    [Math]::Abs($winlogonTicks[$index] - $ticks) -le 5L * [TimeSpan]::TicksPerSecond) { $nearby = $true }
+            }
+            $nearby
+        })
+    [pscustomobject]@{
+        Version = 1; AvailableSummaries = $available.ToArray(); MissingSummaries = $missing.ToArray()
+        DefaultUserWrongPasswordEvents = $wrongPassword.Count; Winlogon1326Events = $winlogon.Count
+        CorrelationWindowSeconds = 5; CorrelationIsTemporal = $true
+        CorroboratedInteractiveSignInFailure = $correlated.Count -gt 0
+        Finding = $(if ($correlated.Count) { 'Windows defaultuser0 interactive authentication rejected credentials; Winlogon 1326 corroborates Security substatus C000006A.' }
+            elseif ($wrongPassword.Count) { 'A defaultuser0 wrong-password audit event was observed without a matching captured Winlogon 1326 event.' }
+            else { 'No matching wrong-password failure was observed in the available summaries; this is not proof of healthy sign-in or enabled auditing.' })
+        Timeline = @($rows | Sort-Object TimeUtc)
+        Limitations = 'Offline configuration/audit evidence cannot query live native OOBE readiness, identify the submitted password, or prove SFAP cache causality. No passwords or cache contents are collected.'
+    } | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $Bundle 'FirstLogonFindings.json') -Encoding UTF8 -ErrorAction Stop
+    $Manifest.Files.Add([ordered]@{ Path = 'FirstLogonFindings.json'; Truncated = $false })
+}
+
 function Copy-MemLabsWindowsSetupEvidence {
     param(
         [Parameter(Mandatory)][string]$WindowsRoot,
@@ -689,11 +902,15 @@ function Copy-MemLabsWindowsSetupEvidence {
             @{ Name = 'Shell-Core'; File = 'Microsoft-Windows-Shell-Core%4Operational.evtx' },
             @{ Name = 'AppModel'; File = 'Microsoft-Windows-AppModel-Runtime%4Admin.evtx' },
             @{ Name = 'Winlogon'; File = 'Microsoft-Windows-Winlogon%4Operational.evtx' },
+            @{ Name = 'WinlogonAuthentication'; File = 'Microsoft-Windows-Winlogon%4Operational.evtx';
+                XPath = '*[System[(EventID=1 or EventID=2)]]' },
             @{ Name = 'AppXDeployment'; File = 'Microsoft-Windows-AppXDeploymentServer%4Operational.evtx' },
             @{ Name = 'TaskScheduler'; File = 'Microsoft-Windows-TaskScheduler%4Operational.evtx' },
             @{ Name = 'CloudExperienceHost'; File = 'Microsoft-Windows-CloudExperienceHost%4Operational.evtx' },
             @{ Name = 'UserOobeSignIn'; File = 'Security.evtx';
-                XPath = "*[System[(EventID=4624 or EventID=4625)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]" }
+                XPath = "*[System[(EventID=4624 or EventID=4625)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]" },
+            @{ Name = 'UserOobeAccount'; File = 'Security.evtx';
+                XPath = "*[System[(EventID=4720 or EventID=4722 or EventID=4723 or EventID=4724 or EventID=4725 or EventID=4726 or EventID=4738)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]" }
         )) {
         if (-not $eventSource.ContainsKey('XPath')) { $eventSource.XPath = $null }
         $eventSources.Add($eventSource)
@@ -723,7 +940,7 @@ function Copy-MemLabsWindowsSetupEvidence {
     $Manifest['EventEvidenceLimits'] = [ordered]@{
         MaxChannels = 64; MaxRawBytesPerLog = 64MB; MaxRawBytesTotal = 256MB
         MaxSummaryScan = 1000; MaxSummaryRecords = 80; MaxDefaultUserSignInRecords = 1000
-        SecurityScope = 'Only defaultuser0 event 4624/4625 records; absence does not prove logon success or that auditing was enabled.'
+        SecurityScope = 'Only defaultuser0 sign-in/account lifecycle events; absence does not prove success or enabled auditing.'
     }
     foreach ($eventSource in $eventSources) {
         $log = $eventSource.Name
@@ -752,7 +969,7 @@ function Copy-MemLabsWindowsSetupEvidence {
                     $Manifest.Errors.Add("Copy full offline $log EVTX: $($_.Exception.Message)")
                 }
             }
-            else { $eventRecordInfo.RawStatus = 'ScopedSignInSummaryOnly' }
+            else { $eventRecordInfo.RawStatus = 'FilteredSummaryOnly' }
             Write-Host "Summarizing offline $log events."
             $sourceRecordCount = 0
             $eventParameters = @{ Path = [Management.Automation.WildcardPattern]::Escape($source); MaxEvents = 1000; ErrorAction = 'Stop' }
@@ -776,7 +993,7 @@ function Copy-MemLabsWindowsSetupEvidence {
                 })
             if ($sourceRecordCount -eq 0) { throw 'The offline event query returned no records without an empty-log status; evidence could not be verified.' }
             if ($eventSource.XPath -and $sourceRecordCount -ge 1000) {
-                $Manifest.Errors.Add('The defaultuser0 sign-in summary reached its 1,000-event limit; sign-in history may be incomplete.')
+                $Manifest.Errors.Add("The $log filtered summary reached its 1,000-event limit; relevant history may be incomplete.")
             }
             ConvertTo-Json -InputObject $events -Depth 5 |
                 Set-Content -LiteralPath (Join-Path $Bundle "$log-events.json") -Encoding UTF8 -ErrorAction Stop
@@ -801,34 +1018,50 @@ function Copy-MemLabsWindowsSetupEvidence {
         Set-Content -LiteralPath (Join-Path $Bundle 'AppxPrerequisiteInventory.json') -Encoding UTF8 -ErrorAction Stop
     $Manifest.Files.Add([ordered]@{ Path = 'AppxPrerequisiteInventory.json'; Truncated = $false })
     foreach ($errorMessage in $inventory.Errors) { $Manifest.Errors.Add($errorMessage) }
+    Copy-MemLabsFirstLogonConfiguration -WindowsRoot $WindowsRoot -Bundle $Bundle -Manifest $Manifest
+    Write-MemLabsFirstLogonFindings -Bundle $Bundle -Manifest $Manifest
 }
 
 function Invoke-MemLabsWindowsSetupDiagnostics {
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    [CmdletBinding(DefaultParameterSetName = 'VM', SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory, ParameterSetName = 'VM')][string]$VmName,
+        [Parameter(Mandatory, ParameterSetName = 'Vhdx')][string]$VhdxPath,
         [Parameter(Mandatory)][string]$Destination,
+        [Parameter(ParameterSetName = 'VM')]
         [ValidateRange(5, 600)][int]$StopTimeoutSeconds = 90,
-        [switch]$AllowTurnOff,
-        [switch]$IncludeLiveProbe,
-        [switch]$IncludeHangDump,
-        [pscredential]$GuestCredential
+        [Parameter(ParameterSetName = 'VM')][switch]$AllowTurnOff,
+        [Parameter(ParameterSetName = 'VM')][switch]$IncludeLiveProbe,
+        [Parameter(ParameterSetName = 'VM')][switch]$IncludeHangDump,
+        [Parameter(ParameterSetName = 'VM')][pscredential]$GuestCredential
     )
 
-    if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($VmName)) {
-        throw 'Specify one exact VM name, not a wildcard.'
+    $offlineDisk = $PSCmdlet.ParameterSetName -eq 'Vhdx'
+    $vm = $null
+    if ($offlineDisk) {
+        $VhdxPath = Resolve-MemLabsSetupDiagnosticPath -Path $VhdxPath
+        if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($VhdxPath) -or
+            -not [IO.File]::Exists($VhdxPath) -or [IO.Path]::GetExtension($VhdxPath) -notin @('.vhdx', '.avhdx')) {
+            throw 'Specify one existing, exact VHDX/AVHDX file, not a wildcard.'
+        }
+        $target = $VhdxPath
+        $displayName = [IO.Path]::GetFileNameWithoutExtension($VhdxPath)
+        $action = 'Collect read-only offline disk evidence without VM, credential, or power operations; leave the owned mount detached'
     }
-    $vms = @(Get-VM -Name $VmName -ErrorAction Stop)
-    if ($vms.Count -ne 1 -or $vms[0].Name -ine $VmName) { throw 'Exactly one matching VM is required.' }
-    $vm = $vms[0]
-    $action = if ($IncludeHangDump) { 'Capture the live FirstLogonAnim hang dump, collect diagnostics without repair, and leave Off; never start the VM' }
-    elseif ($IncludeLiveProbe) { 'Start if Off, observe and inspect first logon without repair, then collect offline evidence and leave Off' } else {
-        'Stop if necessary, collect read-only Windows setup evidence, and leave the VM off'
+    else {
+        if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($VmName)) { throw 'Specify one exact VM name, not a wildcard.' }
+        $vms = @(Get-VM -Name $VmName -ErrorAction Stop)
+        if ($vms.Count -ne 1 -or $vms[0].Name -ine $VmName) { throw 'Exactly one matching VM is required.' }
+        $vm = $vms[0]; $target = $vm.Name; $displayName = $vm.Name
+        $action = if ($IncludeHangDump) { 'Capture the live FirstLogonAnim hang dump, collect diagnostics without repair, and leave Off; never start the VM' }
+        elseif ($IncludeLiveProbe) { 'Start if Off, observe and inspect first logon without repair, then collect offline evidence and leave Off' } else {
+            'Stop if necessary, collect read-only Windows setup evidence, and leave the VM off'
+        }
     }
-    if (-not $PSCmdlet.ShouldProcess($vm.Name, $action)) { return }
+    if (-not $PSCmdlet.ShouldProcess($target, $action)) { return }
     if ($IncludeHangDump -and "$($vm.State)" -ne 'Running') { throw 'Hang-dump collection requires an already Running VM displaying the stall; it will not boot or resume a VM.' }
     if ($IncludeLiveProbe -and "$($vm.State)" -notin @('Off', 'Running')) { throw 'Live inspection requires an Off or Running VM; resume or shut it down normally first.' }
-    Initialize-MemLabsSetupDiagnosticModules -IncludeLiveProbe:$IncludeLiveProbe
+    Initialize-MemLabsSetupDiagnosticModules -IncludeLiveProbe:$IncludeLiveProbe -OfflineDisk:$offlineDisk
     if ($IncludeLiveProbe -or $IncludeHangDump) {
         $GuestCredential = Resolve-MemLabsOobeRepairCredential -GuestCredential $GuestCredential
     }
@@ -837,7 +1070,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     }
     if ($IncludeHangDump) { $dumpGuestBlock = Get-MemLabsFirstLogonDumpGuestBlock }
     $destinationPath = Resolve-MemLabsSetupDiagnosticPath -Path $Destination
-    $safeName = $vm.Name -replace '[\\/:*?"<>|]', '_'
+    $safeName = $displayName -replace '[\\/:*?"<>|]', '_'
     $name = "$safeName-SetupFailure-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     $collectionRoot = Join-Path $destinationPath $name
     New-MemLabsPrivateDiagnosticDirectory -Path $collectionRoot
@@ -845,10 +1078,12 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $privateRoot = Join-Path $collectionRoot 'PrivateState'
     $null = New-Item -Path $bundle, $privateRoot -ItemType Directory
     $manifest = @{
-        SchemaVersion = 1; CollectorVersion = 8; RegistryReader = 'offreg.dll'
+        SchemaVersion = 1; CollectorVersion = 9; RegistryReader = 'offreg.dll'
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
-        Host = $env:COMPUTERNAME; VMName = $vm.Name; VMId = "$($vm.Id)"
-        OriginalState = "$($vm.State)"; FinalState = ''; Status = 'Collecting'
+        Host = $env:COMPUTERNAME
+        InputKind = $(if ($offlineDisk) { 'Vhdx' } else { 'VM' }); InputPath = $(if ($offlineDisk) { $VhdxPath } else { $null })
+        VMName = $(if ($vm) { $vm.Name } else { $null }); VMId = $(if ($vm) { "$($vm.Id)" } else { $null })
+        OriginalState = $(if ($vm) { "$($vm.State)" } else { 'OfflineDiskInput' }); FinalState = ''; Status = 'Collecting'
         Files = [Collections.Generic.List[object]]::new()
         Missing = [Collections.Generic.List[string]]::new()
         Errors = [Collections.Generic.List[string]]::new()
@@ -866,7 +1101,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
             Capture = $null; Error = $null
             GuestDumpRetention = 'A captured dump remains in its protected guest directory; the offline mount is never made writable to delete it.'
         }
-        Privacy = 'No unattend XML, SAM, SECURITY registry hive, or raw registry hives are archived. Security event summaries are limited to defaultuser0 sign-ins. Opt-in hang dumps contain process memory. Console images and logs may contain visible guest data, device/account identifiers, paths, or other sensitive details; review the protected archive before sharing.'
+        Privacy = 'No raw unattend XML, SAM/SECURITY registry hives, password values, or SFAP cache contents are archived. Security summaries are limited to defaultuser0 sign-in/account events. Opt-in hang dumps contain process memory. Console images and logs may contain visible guest data, device/account identifiers, paths, or other sensitive details; review the protected archive before sharing.'
     }
     $fatal = $null
     $windowsFound = $false
@@ -895,31 +1130,37 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
             $vm = Get-VM -Id $vm.Id -ErrorAction Stop
             if ($vm.Name -ne $manifest.VMName) { throw 'The selected VM identity changed during live inspection.' }
         }
-        $null = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage BeforeStop `
-            -Records $manifest.Screenshots -Errors $manifest.Errors
-        $manifest.ShutdownMode = Stop-MemLabsVmForSetupDiagnostics -VM $vm -TimeoutSeconds $StopTimeoutSeconds -AllowTurnOff:$AllowTurnOff
-        $vm = Get-VM -Id $vm.Id -ErrorAction Stop
-        $drives = @(Get-VMHardDiskDrive -VM $vm -ErrorAction Stop | Sort-Object ControllerNumber, ControllerLocation)
-        if ($drives.Count -eq 0) { throw 'The VM has no virtual hard disks.' }
+        if ($offlineDisk) {
+            $manifest.ShutdownMode = 'NotApplicableNoVmOperations'
+            $drives = @([pscustomobject]@{ Path = $VhdxPath })
+        }
+        else {
+            $null = Add-MemLabsSetupConsoleScreenshot -VM $vm -Bundle $bundle -Stage BeforeStop `
+                -Records $manifest.Screenshots -Errors $manifest.Errors
+            $manifest.ShutdownMode = Stop-MemLabsVmForSetupDiagnostics -VM $vm -TimeoutSeconds $StopTimeoutSeconds -AllowTurnOff:$AllowTurnOff
+            $vm = Get-VM -Id $vm.Id -ErrorAction Stop
+            $drives = @(Get-VMHardDiskDrive -VM $vm -ErrorAction Stop | Sort-Object ControllerNumber, ControllerLocation)
+            if ($drives.Count -eq 0) { throw 'The VM has no virtual hard disks.' }
+        }
         foreach ($drive in $drives) {
             if (-not $drive.Path) { $manifest.Errors.Add('A pass-through or pathless disk was not mounted.'); continue }
             $mounted = $null
             try {
-                if ("$((Get-VM -Id $vm.Id -ErrorAction Stop).State)" -ne 'Off') { throw 'VM power state changed before disk mounting.' }
+                if (-not $offlineDisk -and "$((Get-VM -Id $vm.Id -ErrorAction Stop).State)" -ne 'Off') { throw 'VM power state changed before disk mounting.' }
                 $info = Get-VHD -Path $drive.Path -ErrorAction Stop
                 if ($info.Attached) { throw "Disk '$($drive.Path)' is already attached; it will not be borrowed or dismounted." }
-                Write-Host "$($vm.Name): mounting '$($drive.Path)' read-only, without drive letters."
+                Write-Host "$displayName`: mounting '$($drive.Path)' read-only, without drive letters."
                 $mounted = Mount-VHD -Path $drive.Path -ReadOnly -NoDriveLetter -Passthru -ErrorAction Stop
                 $disk = Get-Disk -Number $mounted.DiskNumber -ErrorAction Stop
-                if (-not $disk.IsReadOnly) { throw 'The mounted disk is not read-only.' }
+                if ($disk.Number -ne $mounted.DiskNumber -or -not $disk.IsReadOnly) { throw 'The mounted disk identity/read-only access mode could not be verified.' }
                 if ($disk.IsOffline) {
                     $null = Set-Disk -Number $disk.Number -IsOffline $false -ErrorAction Stop
                     $disk = Get-Disk -Number $disk.Number -ErrorAction Stop
-                    if (-not $disk.IsReadOnly -or $disk.IsOffline) { throw 'The mounted disk did not remain read-only and online.' }
+                    if ($disk.Number -ne $mounted.DiskNumber -or -not $disk.IsReadOnly -or $disk.IsOffline) { throw 'The mounted disk did not remain the same read-only, online disk.' }
                 }
                 $manifest.Disks.Add([ordered]@{ Path = $drive.Path; ParentPath = $info.ParentPath; DiskNumber = $disk.Number; ReadOnly = $true })
                 foreach ($partition in @(Get-Partition -DiskNumber $disk.Number -ErrorAction Stop)) {
-                    if ("$($partition.GptType)" -eq '{E3C9E316-0B5C-4DB8-817D-F92DF00215AE}') { continue }
+                    if (("$($partition.GptType)" -replace '[{}]', '') -ieq 'e3c9e316-0b5c-4db8-817d-f92df00215ae') { continue }
                     try { $volumes = @(Get-Volume -Partition $partition -ErrorAction Stop) }
                     catch {
                         $manifest.Errors.Add("Read volume for disk $($disk.Number) partition $($partition.PartitionNumber): $($_.Exception.Message)")
@@ -931,7 +1172,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
                         if (-not [IO.File]::Exists((Join-Path $windows 'System32\config\SYSTEM'))) { continue }
                         $windowsFound = $true
                         $manifest.WindowsVolume = $volume.Path
-                        Write-Host "$($vm.Name): found Windows at '$windows'."
+                        Write-Host "$displayName`: found Windows at '$windows'."
                         Copy-MemLabsWindowsSetupEvidence -WindowsRoot $windows -Bundle $bundle -PrivateRoot $privateRoot -Manifest $manifest
                         if ($IncludeHangDump) {
                             try { Copy-MemLabsOfflineFirstLogonDump -WindowsRoot $windows -Bundle $bundle -Manifest $manifest }
@@ -973,11 +1214,18 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
         try { Remove-Item -LiteralPath $privateRoot -Recurse -Force -ErrorAction Stop }
         catch { $manifest.Errors.Add("Private hive cleanup failed; files are excluded from the archive: $($_.Exception.Message)") }
         try {
-            $manifest.FinalState = "$((Get-VM -Id $vm.Id -ErrorAction Stop).State)"
-            if ($manifest.FinalState -ne 'Off') { throw "VM is $($manifest.FinalState), not Off." }
+            if ($offlineDisk) {
+                $manifest.FinalState = 'DetachUnverified'
+                if ((Get-VHD -Path $VhdxPath -ErrorAction Stop).Attached -or $mountCleanupFailed) { throw 'The input disk could not be verified detached; no borrowed mount was dismounted.' }
+                $manifest.FinalState = 'Detached'
+            }
+            else {
+                $manifest.FinalState = "$((Get-VM -Id $vm.Id -ErrorAction Stop).State)"
+                if ($manifest.FinalState -ne 'Off') { throw "VM is $($manifest.FinalState), not Off." }
+            }
         }
         catch {
-            $manifest.Errors.Add("Final VM state could not be verified as Off: $($_.Exception.Message)")
+            $manifest.Errors.Add("Final input state could not be verified safely: $($_.Exception.Message)")
             if (-not $fatal) { $fatal = $_ }
         }
     }
@@ -1000,11 +1248,11 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     Write-Host 'Creating the protected diagnostic archive.'
     try { Compress-Archive -Path (Join-Path $bundle '*') -DestinationPath $archive -ErrorAction Stop }
     catch { throw "Could not create '$archive': $($_.Exception.Message). Unarchived evidence is preserved in '$bundle'." }
-    Write-Host "Setup diagnostics: $archive (status=$($manifest.Status); VM left $($manifest.FinalState))."
+    Write-Host "Setup diagnostics: $archive (status=$($manifest.Status); final state=$($manifest.FinalState))."
     Write-Host $manifest.Privacy
     if ($fatal) { throw "Setup diagnostic collection failed: $($fatal.Exception.Message). Partial evidence: $archive" }
     if ($manifest.Errors.Count) { Write-Warning "Collection is partial; review Manifest.json in $archive." }
-    [pscustomobject]@{ VMName = $vm.Name; Status = $manifest.Status; ArchivePath = $archive; FinalState = $manifest.FinalState }
+    [pscustomobject]@{ VMName = $manifest.VMName; VhdxPath = $manifest.InputPath; InputKind = $manifest.InputKind; Status = $manifest.Status; ArchivePath = $archive; FinalState = $manifest.FinalState }
 }
 
 if (-not $PSBoundParameters.ContainsKey('Destination')) {
@@ -1012,7 +1260,7 @@ if (-not $PSBoundParameters.ContainsKey('Destination')) {
 }
 $collectorParameters = @{} + $PSBoundParameters
 $collectorParameters.Destination = $Destination
-$collectorParameters.StopTimeoutSeconds = $StopTimeoutSeconds
+if ($PSCmdlet.ParameterSetName -ne 'Vhdx') { $collectorParameters.StopTimeoutSeconds = $StopTimeoutSeconds }
 $operation = 'Invoke-MemLabsWindowsSetupDiagnostics'
 if ($RepairOobe) {
     . (Join-Path $PSScriptRoot 'Common.WindowsVmOobeRepair.ps1')

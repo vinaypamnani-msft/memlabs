@@ -185,6 +185,11 @@ try {
         $softwareState.WindowsVersion.Values.UBR -eq 9457 -and
         $softwareState.FirstLogonPolicy.Values.EnableFirstLogonAnimation -eq 0 -and
         $softwareState.WinlogonProgress.Values.AutoAdminLogon -eq '1') 'Native offline image/version/first-logon extraction is incorrect.'
+    Assert-True (-not $softwareState.WinlogonCredentialMetadata.ValueDataCollected -and
+        $softwareState.WinlogonCredentialMetadata.Metadata.DefaultPassword.Present -and
+        $softwareState.WinlogonCredentialMetadata.Metadata.DefaultPassword.Type -eq 1 -and
+        $softwareState.WinlogonCredentialMetadata.Metadata.DefaultPassword.Bytes -gt 0) `
+        'Native Winlogon credential metadata did not query presence/type/size without collecting value data.'
     Assert-True (-not (($systemState | ConvertTo-Json -Depth 10).Contains('DO-NOT-EXPORT-THIS-SYNTHETIC-VALUE'))) `
         'Offline registry extraction escaped its value allowlist.'
     Assert-True (-not (($softwareState | ConvertTo-Json -Depth 10).Contains('DO-NOT-EXPORT-THIS-SYNTHETIC-VALUE'))) `
@@ -224,7 +229,11 @@ try {
     [IO.File]::WriteAllText((Join-Path $windows 'Logs\DISM\dism.log'), 'Synthetic image diagnostic')
     [IO.File]::WriteAllText((Join-Path $windows 'Debug\UserMode\userenv.log'), 'Synthetic profile diagnostic')
     [IO.File]::WriteAllBytes((Join-Path $windows 'Panther\setup.etl'), [byte[]]@(1, 2, 3, 4))
-    [IO.File]::WriteAllText((Join-Path $windows 'Panther\unattend.xml'), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
+    [IO.File]::WriteAllText((Join-Path $windows 'Panther\unattend.xml'),
+        '<unattend><settings pass="specialize"><component name="Microsoft-Windows-Shell-Setup"><CopyProfile>true</CopyProfile></component></settings><settings pass="oobeSystem"><component name="Microsoft-Windows-Shell-Setup"><UserAccounts><LocalAccounts><LocalAccount><Name>fixtureadmin</Name><Password><Value>RAW-SECRET-MUST-NOT-BE-ARCHIVED</Value></Password></LocalAccount></LocalAccounts></UserAccounts></component></settings></unattend>')
+    $sfapDirectory = Join-Path $script:GuestRoot 'Users\Default\AppData\Local\Microsoft\Windows\SFAP'
+    $null = New-Item -Path $sfapDirectory -ItemType Directory -Force
+    [IO.File]::WriteAllText((Join-Path $sfapDirectory 'cache0.bin'), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
     foreach ($hive in @('SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY')) {
         [IO.File]::WriteAllText((Join-Path $windows "System32\config\$hive"), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
     }
@@ -568,12 +577,12 @@ try {
     }
     function Get-VHD {
         param($Path, $ErrorAction)
-        Assert-True ($Path -eq 'C:\fixture\active-leaf.avhdx') 'A parent/base image was inspected instead of the active disk.'
+        Assert-True ($Path -eq $(if ($script:DiskInputMode) { $script:InputVhdxPath } else { 'C:\fixture\active-leaf.avhdx' })) 'A different disk was inspected.'
         [pscustomobject]@{ Attached = $script:AlreadyAttached; ParentPath = 'C:\fixture\parent.vhdx' }
     }
     function Mount-VHD {
         param($Path, [switch]$ReadOnly, [switch]$NoDriveLetter, [switch]$Passthru, $ErrorAction)
-        Assert-True ($ReadOnly -and $NoDriveLetter -and $Passthru -and $script:VmState -eq 'Off') `
+        Assert-True ($ReadOnly -and $NoDriveLetter -and $Passthru -and ($script:DiskInputMode -or $script:VmState -eq 'Off')) `
             'Collector mounted a writable disk, assigned a letter, or mounted a running guest.'
         $script:MountCalls++
         if ($script:MountFails) { throw 'Synthetic mount failure' }
@@ -605,7 +614,7 @@ try {
     }
     function Dismount-VHD {
         param($Path, $ErrorAction)
-        Assert-True ($Path -eq 'C:\fixture\active-leaf.avhdx') 'Collector tried to detach an unowned disk.'
+        Assert-True ($Path -eq $(if ($script:DiskInputMode) { $script:InputVhdxPath } else { 'C:\fixture\active-leaf.avhdx' })) 'Collector tried to detach an unowned disk.'
         $script:DismountCalls++
         if ($script:DismountFailures -gt 0) { $script:DismountFailures--; throw 'Synthetic detach failure' }
         if ($script:StartAfterDismount) { $script:VmState = 'Running' }
@@ -629,15 +638,26 @@ try {
             ProviderName = 'Microsoft-Windows-Kernel-Power'; Level = 1; Message = 'fixture'
         }
         if ((Split-Path $Path -Leaf) -eq 'Security.evtx') {
-            Assert-True ($FilterXPath -ceq "*[System[(EventID=4624 or EventID=4625)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]") `
-                'Security evidence was not filtered to only defaultuser0 sign-in events at the native reader.'
-            $eventRecord.Id = 4625; $eventRecord.ProviderName = 'Microsoft-Windows-Security-Auditing'
+            Assert-True ($FilterXPath -ceq "*[System[(EventID=4624 or EventID=4625)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]" -or
+                $FilterXPath -ceq "*[System[(EventID=4720 or EventID=4722 or EventID=4723 or EventID=4724 or EventID=4725 or EventID=4726 or EventID=4738)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]") `
+                'Security evidence was not filtered to only defaultuser0 authentication/account records.'
+            $eventRecord.Id = if ($FilterXPath -match '4720') { 4720 } else { 4625 }
+            $eventRecord.ProviderName = 'Microsoft-Windows-Security-Auditing'
         }
-        else { Assert-True (-not $FilterXPath) 'An unrelated channel received the Security account filter.' }
+        elseif ($FilterXPath) {
+            Assert-True ((Split-Path $Path -Leaf) -eq 'Microsoft-Windows-Winlogon%4Operational.evtx' -and
+                $FilterXPath -ceq '*[System[(EventID=1 or EventID=2)]]') 'An unrelated channel received an incorrect filter.'
+            $eventRecord.Id = 2; $eventRecord.ProviderName = 'Microsoft-Windows-Winlogon'
+        }
         if ($script:EventMode -eq 'LogonFailure' -and (Split-Path $Path -Leaf) -eq 'Application.evtx') {
             $eventRecord.ProviderName = 'Microsoft-Windows-User Profiles Service'; $eventRecord.Id = 1509
         }
-        $eventRecord | Add-Member -MemberType ScriptMethod -Name ToXml -Value { '<Event><EventData>fixture</EventData></Event>' }
+        $eventRecord | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+            if ($this.Id -eq 4625) { return '<Event><EventData><Data Name="TargetUserName">defaultuser0</Data><Data Name="LogonType">2</Data><Data Name="SubStatus">0xc000006a</Data></EventData></Event>' }
+            if ($this.Id -eq 4720) { return '<Event><EventData><Data Name="TargetUserName">defaultuser0</Data><Data Name="TargetSid">S-1-5-21-111-222-333-1002</Data></EventData></Event>' }
+            if ($this.Id -eq 2 -and $this.ProviderName -eq 'Microsoft-Windows-Winlogon') { return '<Event><EventData><Data Name="Win32Status">1326</Data></EventData></Event>' }
+            '<Event><EventData>fixture</EventData></Event>'
+        }
         $eventRecord | Add-Member -MemberType ScriptMethod -Name FormatDescription -Value {
             if ($script:EventMode -eq 'MessageFails') { throw 'Synthetic message resource failure' }
             return 'fixture'
@@ -677,6 +697,7 @@ try {
         $script:LiveRequested = $false; $script:CredentialResolves = 0; $script:CredentialFails = $false
         $script:GuestBlockBuilds = 0; $script:LiveProbeCalls = 0; $script:ProbeStarts = 0; $script:LiveFailure = ''
         $script:DumpBlockBuilds = 0; $script:DumpCalls = 0; $script:DumpUnknown = $false; $script:DumpCopyFails = $false
+        $script:DiskInputMode = $false
     }
     $parameters = @{ VmName = 'BROKEN-W11'; Destination = (Join-Path $testRoot 'output'); StopTimeoutSeconds = 5; Confirm = $false }
     Reset-Fixture
@@ -689,9 +710,16 @@ try {
         'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
-    Assert-True ($manifestRecord.CollectorVersion -eq 8 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
+    Assert-True ($manifestRecord.CollectorVersion -eq 9 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
         @($manifestRecord.Files | Where-Object Path -eq 'AppxPrerequisiteInventory.json').Count -eq 1) `
         'The archive does not identify the corrected registry reader and package-inventory collector.'
+    $configuration = Get-Content -LiteralPath (Join-Path $container 'Bundle\FirstLogonConfiguration.json') -Raw | ConvertFrom-Json
+    $findings = Get-Content -LiteralPath (Join-Path $container 'Bundle\FirstLogonFindings.json') -Raw | ConvertFrom-Json
+    Assert-True (-not $configuration.CacheContentsCollected -and -not $configuration.PasswordValuesCollected -and
+        $configuration.Profiles[0].Status -eq 'Present' -and $configuration.Profiles[0].Files[0].Bytes -gt 0 -and
+        $configuration.AnswerFiles[0].ShellSetup[0].CopyProfile -eq 'true' -and
+        $findings.DefaultUserWrongPasswordEvents -eq 1 -and $findings.Winlogon1326Events -eq 1 -and
+        $findings.CorroboratedInteractiveSignInFailure) 'Safe profile/answer settings or corroborated logon findings were not collected.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'
     $zip = [IO.Compression.ZipFile]::OpenRead($report.ArchivePath)
     try {
@@ -721,6 +749,41 @@ try {
         @($manifestRecord.Files | Where-Object Kind -eq 'SetupTrace').Count -eq 1 -and
         [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $container 'Bundle\SetupLogs\Panther\setup.etl'))) -eq 'AQIDBA==') `
         'Servicing/profile text or full binary setup traces were not retained.'
+
+    $script:InputVhdxPath = Join-Path $testRoot 'offline-input.vhdx'
+    [IO.File]::WriteAllText($script:InputVhdxPath, 'SYNTHETIC-DETACHED-VHDX')
+    $inputHash = (Get-FileHash -LiteralPath $script:InputVhdxPath -Algorithm SHA256).Hash
+    $diskParameters = @{ VhdxPath = $script:InputVhdxPath; Destination = (Join-Path $testRoot 'disk-output'); Confirm = $false }
+    Reset-Fixture
+    $script:DiskInputMode = $true
+    $diskReport = Invoke-MemLabsWindowsSetupDiagnostics @diskParameters
+    $diskManifest = Get-Content -LiteralPath (Join-Path (Split-Path $diskReport.ArchivePath -Parent) 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
+    Assert-True ($diskReport.Status -eq 'Complete' -and $diskReport.FinalState -eq 'Detached' -and $diskReport.InputKind -eq 'Vhdx' -and
+        $null -eq $diskManifest.VMId -and $diskManifest.Screenshots.Count -eq 0 -and
+        $script:VmReads -eq 0 -and $script:StopCalls -eq 0 -and $script:CredentialResolves -eq 0 -and
+        $script:MountCalls -eq 1 -and $script:DismountCalls -eq 1 -and
+        ($script:ModuleImports -join ',') -eq 'Hyper-V,Storage,Microsoft.PowerShell.Diagnostics,Microsoft.PowerShell.Archive' -and
+        (Get-FileHash -LiteralPath $script:InputVhdxPath -Algorithm SHA256).Hash -eq $inputHash) `
+        'Direct VHDX collection touched VM/credential/power/CIM surfaces, failed owned read-only detach, or changed input bytes.'
+    Reset-Fixture
+    $script:DiskInputMode = $true
+    $null = Invoke-MemLabsWindowsSetupDiagnostics @diskParameters -WhatIf
+    Assert-True ($script:VmReads -eq 0 -and $script:MountCalls -eq 0 -and $script:ModuleImports.Count -eq 0 -and
+        $script:CredentialResolves -eq 0) 'VHDX WhatIf touched host mounts, VMs, or credentials.'
+    Reset-Fixture
+    $script:DiskInputMode = $true; $script:AlreadyAttached = $true
+    $failure = $null
+    try { $null = Invoke-MemLabsWindowsSetupDiagnostics @diskParameters }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'already attached' -and $script:VmReads -eq 0 -and $script:StopCalls -eq 0 -and
+        $script:MountCalls -eq 0 -and $script:DismountCalls -eq 0) 'Direct VHDX collection borrowed or detached another owner''s mount.'
+    Reset-Fixture
+    $script:DiskInputMode = $true; $script:DismountFailures = 2
+    $failure = $null
+    try { $null = Invoke-MemLabsWindowsSetupDiagnostics @diskParameters }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'mount' -and $script:VmReads -eq 0 -and $script:StopCalls -eq 0 -and
+        $script:DismountCalls -eq 2) 'Direct disk detach failure was hidden, unbounded, or reached a VM power operation.'
 
     Reset-Fixture
     $script:LiveRequested = $true
@@ -1102,14 +1165,14 @@ try {
     }
     $extraChannels = [Collections.Generic.List[string]]::new()
     try {
-        foreach ($number in 1..47) {
+        foreach ($number in 1..45) {
             $path = Join-Path $windows "System32\winevt\Logs\Microsoft-Windows-OOBE-Fixture$number%4Operational.evtx"
             [IO.File]::WriteAllText($path, 'synthetic discovered channel')
             $extraChannels.Add($path)
         }
         foreach ($count in @(64, 65)) {
             if ($count -eq 65) {
-                $path = Join-Path $windows 'System32\winevt\Logs\Microsoft-Windows-OOBE-Fixture48%4Operational.evtx'
+                $path = Join-Path $windows 'System32\winevt\Logs\Microsoft-Windows-OOBE-Fixture46%4Operational.evtx'
                 [IO.File]::WriteAllText($path, 'synthetic extra discovered channel')
                 $extraChannels.Add($path)
             }
@@ -1256,6 +1319,47 @@ try {
     Assert-True ($emptyQueryReport.Status -eq 'Partial' -and
         ($emptyManifest.Errors -join ' ') -match 'without an empty-log status') 'A silent zero-record event query became false clean evidence.'
 
+    foreach ($case in @(
+            @{ Ticks = 0L; Type = '2'; SubStatus = '0xc000006a'; Expected = $true },
+            @{ Ticks = 50000000L; Type = '2'; SubStatus = '0xc000006a'; Expected = $true },
+            @{ Ticks = -50000000L; Type = '2'; SubStatus = '0xc000006a'; Expected = $true },
+            @{ Ticks = 50000001L; Type = '2'; SubStatus = '0xc000006a'; Expected = $false },
+            @{ Ticks = -50000001L; Type = '2'; SubStatus = '0xc000006a'; Expected = $false },
+            @{ Ticks = 0L; Type = '3'; SubStatus = '0xc000006a'; Expected = $false },
+            @{ Ticks = 0L; Type = '2'; SubStatus = '0xc000006d'; Expected = $false }
+        )) {
+        $summaryRoot = Join-Path $testRoot ("correlation-" + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -Path $summaryRoot -ItemType Directory
+        $baseTime = [DateTimeOffset]'2026-10-21T00:20:55Z'
+        $authenticationTime = $baseTime.AddTicks($case.Ticks)
+        $securityXml = "<Event><System><TimeCreated SystemTime='$($baseTime.ToString('o'))'/></System><EventData><Data Name='TargetUserName'>defaultuser0</Data><Data Name='LogonType'>$($case.Type)</Data><Data Name='SubStatus'>$($case.SubStatus)</Data></EventData></Event>"
+        $authenticationXml = "<Event><System><TimeCreated SystemTime='$($authenticationTime.ToString('o'))'/></System><EventData><Data Name='Win32Status'>1326</Data></EventData></Event>"
+        ConvertTo-Json -InputObject @([pscustomobject]@{ Id = 4625; TimeCreated = $baseTime.UtcDateTime; Xml = $securityXml }) |
+            Set-Content -LiteralPath (Join-Path $summaryRoot 'UserOobeSignIn-events.json') -Encoding UTF8
+        ConvertTo-Json -InputObject @([pscustomobject]@{ Id = 2; TimeCreated = $authenticationTime.UtcDateTime; Xml = $authenticationXml }) |
+            Set-Content -LiteralPath (Join-Path $summaryRoot 'WinlogonAuthentication-events.json') -Encoding UTF8
+        $summaryManifest = @{ Files = [Collections.Generic.List[object]]::new(); Errors = [Collections.Generic.List[string]]::new() }
+        Write-MemLabsFirstLogonFindings -Bundle $summaryRoot -Manifest $summaryManifest
+        $summary = Get-Content -LiteralPath (Join-Path $summaryRoot 'FirstLogonFindings.json') -Raw | ConvertFrom-Json
+        Assert-True ($summaryManifest.Errors.Count -eq 0 -and $summary.CorroboratedInteractiveSignInFailure -eq $case.Expected -and
+            $summary.CorrelationWindowSeconds -eq 5 -and $summary.CorrelationIsTemporal) `
+            'Authentication correlation failed its exact five-second/tick boundary or mislabeled a network/different-status logon.'
+    }
+    $originalAnswer = Get-Content -LiteralPath (Join-Path $windows 'Panther\unattend.xml') -Raw
+    try {
+        foreach ($invalid in @('<unattend>', '<!DOCTYPE unattend [<!ENTITY password "RAW-SECRET-MUST-NOT-BE-ARCHIVED">]><unattend>&password;</unattend>')) {
+            [IO.File]::WriteAllText((Join-Path $windows 'Panther\unattend.xml'), $invalid)
+            $configRoot = Join-Path $testRoot ("invalid-answer-" + [guid]::NewGuid().ToString('N'))
+            $null = New-Item -Path $configRoot -ItemType Directory
+            $configManifest = @{ Files = [Collections.Generic.List[object]]::new(); Errors = [Collections.Generic.List[string]]::new(); Missing = [Collections.Generic.List[string]]::new() }
+            Copy-MemLabsFirstLogonConfiguration -WindowsRoot $windows -Bundle $configRoot -Manifest $configManifest
+            $configuration = Get-Content -LiteralPath (Join-Path $configRoot 'FirstLogonConfiguration.json') -Raw | ConvertFrom-Json
+            Assert-True ($configManifest.Errors.Count -eq 1 -and $configuration.Profiles.Count -gt 0 -and
+                (Get-Content -LiteralPath (Join-Path $configRoot 'FirstLogonConfiguration.json') -Raw) -notmatch 'RAW-SECRET') `
+                'Malformed/DTD-bearing answer settings discarded independent metadata, leaked a value, or became clean evidence.'
+        }
+    }
+    finally { [IO.File]::WriteAllText((Join-Path $windows 'Panther\unattend.xml'), $originalAnswer) }
 }
 finally {
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop

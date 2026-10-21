@@ -471,7 +471,33 @@ provisioned-package inventory or proof that a missing old version caused the
 stall: a newer installed version can make an old preregistration entry stale.
 Inventory read/parse failures are explicit partial evidence, while absent folders
 and manifests are recorded as observations.
-The manifest identifies this implementation as `CollectorVersion=8` and
+`FirstLogonConfiguration.json` adds SFAP profile/cache-file presence, size,
+creation/modification times, owner/group SIDs, and DACLs. It records metadata
+only (up to 32 profile directories/32 files each), never cache bytes. It also
+extracts allowlisted `CopyProfile`, OOBE, local-account-name/group, and autologon
+settings from available answer files; raw answer files, command lines, and
+password values remain excluded. Oversize/malformed/DTD-bearing XML and
+metadata-access failures are explicit partial evidence.
+
+The offline registry allowlist includes the actual autologon SID,
+`SystemAutoLogon`, shell/userinit, and selected LogonUI identity fields.
+`WinlogonCredentialMetadata` uses a native **sizing-only** query for
+`DefaultPassword` presence/type/byte length; it never reads that value's data.
+Use a fresh PowerShell process after updating if an older native reader type
+is already cached in the current process.
+
+Security account lifecycle events for defaultuser0 (4720/4722/4723/4724/4725/
+4726/4738) are retained separately from its sign-in events. A filtered Winlogon
+authentication summary retains event 1/2 history, including `Win32Status`,
+independently of the general 80-record summary.
+`FirstLogonFindings.json` builds a UTC timeline and flags interactive
+defaultuser0 wrong-password audits (`4625`, substatus `C000006A`, logon type 2).
+It temporally corroborates them with Winlogon result `1326` within five seconds.
+This is observed audit evidence, not password recovery, a live OOBE-ready
+classification, or proof that an SFAP cache caused the failure. Missing/empty
+audits do not establish healthy sign-in or enabled auditing.
+
+The manifest identifies this implementation as `CollectorVersion=9` and
 `RegistryReader=offreg.dll`.
 An unavailable library or unreadable copy is reported as a collection error,
 not proof of guest registry corruption. Console images and logs can contain
@@ -479,6 +505,31 @@ visible guest data or other sensitive details:
 review the archive before sharing it. Partial or failed collections are
 explicitly identified; unresolved disk-detach failures require manual cleanup
 before restarting the VM. `-WhatIf` previews without stopping or mounting.
+
+### Read-only collection directly from a VHDX
+
+An exported/copied, detached OS disk can be inspected locally without importing
+or booting its VM. In elevated PowerShell on a Windows machine with the Hyper-V
+disk and Storage tools:
+
+```powershell
+.\tools\Get-WindowsVmSetupDiagnostics.ps1 -VhdxPath 'C:\Evidence\ADA-W11CLIENT1_OS.vhdx'
+```
+
+Extract a ZIP first and point at the actual `.vhdx` (or active `.avhdx`, with
+its complete parent chain available). This mode is mutually exclusive with
+`-VmName`, live probes, hang dumps, repair, guest credentials, and power options.
+It does not invoke VM inventory/power/console operations or load guest credentials.
+The disk is mounted **read-only, without drive letters**, using the same evidence
+pipeline as VM collection. Already attached disks are refused rather than
+borrowed, stopped, or detached. Only the owned mount is dismounted, and final
+state is reported as `Detached`; an unverified detach is explicit failure.
+`-Destination` and `-WhatIf` remain available.
+
+Offline inspection cannot reconstruct a stopped process's memory or validate
+Windows first-boot authentication/readiness. The guided image comparison still
+requires fresh generalized copies and actual VM boots; changing an already-failed
+disk offline would not by itself establish prevention or recovery.
 
 Validate the collector's mocked Hyper-V/storage safety contracts with
 `vmbuild\tools\Test-WindowsVmSetupDiagnostics.ps1`. It also exercises disposable

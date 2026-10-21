@@ -30,7 +30,7 @@ function Import-MemLabsImageComparisonHelpers {
     if ($comparisonHelperErrors.Count) { throw "Diagnostic helper parse errors: $($comparisonHelperErrors -join '; ')" }
     foreach ($comparisonHelperName in @('Initialize-MemLabsSetupDiagnosticModules', 'Resolve-MemLabsSetupDiagnosticPath',
             'New-MemLabsPrivateDiagnosticDirectory', 'Initialize-MemLabsOfflineSetupHiveType',
-            'Read-MemLabsOfflineSetupRegistryValues', 'Read-MemLabsOfflineWindowsSetupHive',
+            'Read-MemLabsOfflineSetupRegistryValues', 'Read-MemLabsOfflineSetupRegistryMetadata', 'Read-MemLabsOfflineWindowsSetupHive',
             'Get-MemLabsOfflineSetupSourcePath')) {
         $comparisonHelperDefinitions = @($comparisonHelperAst.FindAll({
                     param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $comparisonHelperName
