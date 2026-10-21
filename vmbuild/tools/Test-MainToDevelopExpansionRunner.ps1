@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Tests the main-to-develop expansion runner without changing Hyper-V.
+    Tests expansion scopes, workflow failures and diagnostic recovery without changing Hyper-V.
 #>
 [CmdletBinding()]
 param([string] $RootPath)
@@ -24,6 +24,7 @@ $script:RejectedCredentialUsers = @()
 $script:MockIdentityDnsDomain = 'nocm.com'
 $script:MockIdentityUser = $null
 $script:MockGetVmFailure = $false
+Write-Host 'Initial defect coverage: complete maintenance scopes, terminal workflow failures, and timeline sharing recovery.'
 $script:MockDomainHealth = [pscustomobject]@{
     PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
     NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
@@ -1384,6 +1385,49 @@ foreach ($invalidIdentity in @(@(), @($null), @(@{ Id = 'id-only' }), @(@{ Name 
     Assert-ThrowsLike -Action { Get-CrossRevisionMaintenanceTargets -Identity $invalidIdentity } `
         -Pattern '*Maintenance scope*' -What 'invalid maintenance scope fails explicitly before Hyper-V parameter binding'
 }
+& {
+    $scopeVms = @{}
+    foreach ($entry in @(
+            @{ Name = 'SCOPE-DC'; Role = 'DC'; OS = 'Server 2022' },
+            @{ Name = 'SCOPE-PRI'; Role = 'Primary'; OS = 'Server 2022' },
+            @{ Name = 'SCOPE-SQL'; Role = 'DomainMember'; OS = 'Server 2019' },
+            @{ Name = 'SCOPE-PROXY'; Role = 'Proxy'; OS = 'Server 2022' },
+            @{ Name = 'SCOPE-LINUX'; Role = 'DomainMember'; OS = 'Ubuntu' }
+        )) {
+        $scopeVms[$entry.Name] = [pscustomobject]@{
+            Name = $entry.Name; Id = [guid]::NewGuid()
+            Notes = (@{ role = $entry.Role; operatingSystem = $entry.OS; domain = 'scope.test' } | ConvertTo-Json -Compress)
+        }
+    }
+    function Get-VM {
+        param($Name, $ErrorAction)
+        if (-not $scopeVms.ContainsKey($Name)) { throw "Unexpected maintenance target '$Name'." }
+        return $scopeVms[$Name]
+    }
+    function Get-CrossRevisionVmDiskIdentity { param($VmName) return @() }
+    $saved = @(Get-VmIdentity -VmNames @($scopeVms.Keys))
+    $plain = @($saved | ForEach-Object { @{ Name = $_.Name; Id = $_.Id } })
+    foreach ($shape in @(
+            @{ Label = 'fresh ordered dictionaries'; Values = $saved },
+            @{ Label = 'plain hashtables'; Values = $plain },
+            @{ Label = 'checkpoint objects'; Values = @($saved | ConvertTo-Json -Depth 12 | ConvertFrom-Json) },
+            @{ Label = 'checkpoint hashtables'; Values = @($saved | ConvertTo-Json -Depth 12 | ConvertFrom-Json -AsHashtable) },
+            @{ Label = 'overlapping baseline and expansion'; Values = @($saved) + @($saved) }
+        )) {
+        $scoped = @(Get-CrossRevisionMaintenanceTargets -Identity $shape.Values)
+        Assert-Equal 'SCOPE-DC,SCOPE-PRI,SCOPE-SQL' ($scoped.Name -join ',') `
+            "maintenance retains the complete independently expected supported scope for $($shape.Label)"
+        Assert-Equal 1 @($scoped | Where-Object Role -eq 'Primary').Count `
+            "maintenance cannot turn a CM family into N/A for $($shape.Label)"
+        foreach ($vm in $scoped) {
+            Assert-Equal "$($scopeVms[$vm.Name].Id)" $vm.Id "maintenance preserves the saved GUID for $($vm.Name)"
+        }
+    }
+    $conflict = [ordered]@{ Name = 'scope-pri'; Id = [guid]::NewGuid().ToString() }
+    Assert-ThrowsLike {
+        Get-CrossRevisionMaintenanceTargets -Identity (@($saved) + @($conflict))
+    } '*conflicting saved identities*' 'maintenance rejects conflicting duplicates before deduplication can hide replacement'
+}
 $savedTestState = $script:State
 try {
     & {
@@ -1699,6 +1743,16 @@ Assert-Equal $true ([bool](Test-StepComplete -Step 'nocm|main|A')) 'completed st
 Assert-Equal 'nocm|main|A' $completedState.CompletedSteps 'completed step is persisted atomically'
 Assert-Equal $false (Test-Path -LiteralPath "$script:StatePath.$PID.tmp") 'atomic checkpoint leaves no temporary file'
 Remove-Item -LiteralPath $script:StatePath -Force -ErrorAction SilentlyContinue
+
+foreach ($regression in @(
+        @{ Name = 'Test-RemoteWorkflowDependency'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' },
+        @{ Name = 'Test-RemoteWorkflowDependency'; Engine = (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'); Label = 'PS51' },
+        @{ Name = 'Test-Phase8DiagnosticTelemetry'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' }
+    )) {
+    & $regression.Engine -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File (Join-Path $PSScriptRoot "$($regression.Name).ps1")
+    Write-TestResult -Passed ($LASTEXITCODE -eq 0) -What "early defect coverage: $($regression.Name) ($($regression.Label))"
+}
 
 Write-Host ''
 if ($script:Failures -gt 0) {

@@ -2,12 +2,13 @@ function Get-MaintenanceQualificationCases {
     param([ValidateSet('Preflight', 'Baseline', 'Postconditions', 'Recovery')][string]$Mode)
     switch ($Mode) {
         'Preflight' {
-            return @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51',
+            return @('Test-MainToDevelopExpansionRunner',
+                'Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51',
                 'Test-VmConsoleScreenshot-PS7', 'Test-VmConsoleScreenshot-PS51',
                 'Test-CimProxyTempPath', 'Test-SetupDiagnosticDefaults',
                 'Test-ConsoleUpgradeRouting', 'Test-MaintenanceFixRobustness', 'Test-Odbc18VersionEnforcement',
                 'Test-MsiBusyRetryAndPassiveDependency', 'Test-VMMaintenanceNoteDiagnostics', 'Test-Phase11OsdContentState',
-                'Test-MaintenanceQualification', 'Test-MainToDevelopExpansionRunner', 'dsc-artifact')
+                'Test-MaintenanceQualification', 'dsc-artifact')
         }
         'Baseline' { return @('existing-maintenance', 'independent-readiness', 'maintenance-idempotence', 'identity-preserved') }
         'Postconditions' { return @('independent-readiness', 'identity-preserved') }
@@ -82,7 +83,8 @@ function Get-MaintenanceQualificationSource {
     if ($LASTEXITCODE -ne 0) { throw 'Could not determine candidate source cleanliness.' }
     $files = [ordered]@{}
     foreach ($relative in @(
-            'Common.ps1', 'common\Common.ScriptBlocks.ps1', 'DSC\phases\WindowsSetupReadiness.ps1',
+            'Common.ps1', 'common\Common.ScriptBlocks.ps1', 'common\Common.Phases.ps1',
+            'DSC\phases\ScriptFunctions.ps1', 'DSC\phases\ScriptWorkFlow.ps1', 'DSC\phases\WindowsSetupReadiness.ps1',
             'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
             'tools\Test-WindowsClientSetupReadiness.ps1', 'tools\Test-CimProxyTempPath.ps1',
             'tools\Clear-CimProxyTempFolders.ps1', 'tools\Test-SetupDiagnosticDefaults.ps1',
@@ -97,7 +99,9 @@ function Get-MaintenanceQualificationSource {
             'tools\Test-ConsoleUpgradeRouting.ps1', 'tools\Test-MaintenanceFixRobustness.ps1',
             'tools\Test-Odbc18VersionEnforcement.ps1', 'tools\Test-MsiBusyRetryAndPassiveDependency.ps1',
             'tools\Test-VMMaintenanceNoteDiagnostics.ps1', 'tools\Test-Phase11OsdContentState.ps1',
-            'tools\Test-MaintenanceQualification.ps1', 'tools\Test-MainToDevelopExpansionRunner.ps1'
+            'tools\Test-MaintenanceQualification.ps1', 'tools\Test-MainToDevelopExpansionRunner.ps1',
+            'tools\Test-RemoteWorkflowDependency.ps1', 'tools\Test-Phase8DiagnosticTelemetry.ps1',
+            'tools\Analyze-Phase8Diagnostics.ps1'
         )) {
         $path = Join-Path $VmbuildRoot $relative
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Candidate qualification source is missing: $path" }
@@ -187,7 +191,7 @@ function Assert-MaintenanceQualificationReceipt {
         }
     }
     if ($RequireCmCoverage -and (-not $receipt.HasCmTarget -or @($results | Where-Object Status -ne 'Passed').Count)) {
-        throw "Maintenance recovery matrix did not exercise a CM target: $Path"
+        throw "Maintenance qualification did not exercise a CM target: $Path"
     }
     if ($Mode -eq 'Recovery' -and -not $receipt.HasCmTarget -and @($results | Where-Object Status -ne 'NotApplicable').Count) {
         throw "Maintenance recovery receipt claims passed CM cases without a CM target: $Path"

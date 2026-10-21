@@ -97,7 +97,21 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
 - Before live candidate work, the pinned develop worktree must be clean, its
   shipped DSC archive must match its source/build receipt, and the focused
   maintenance, console, ODBC, Phase 11, receipt, and expansion-runner regressions
-  must pass. The Windows setup-readiness regression also runs with real
+  must pass. The **first regression** is `Test-MainToDevelopExpansionRunner.ps1`.
+  It checks complete multi-VM maintenance scopes in fresh ordered dictionaries
+  and restored checkpoints, then runs workflow-receipt regressions under
+  PowerShell 7 and Windows PowerShell 5.1 and Phase 8 diagnostic regressions
+  under PowerShell 7. These exercise real file-lock contention, bounded append
+  retries, and recovery of the final snapshot. All three burn-in defects fail
+  preflight before any VM deployment. The regression inputs and their production
+  helpers are included in the pinned source digest.
+  To run this initial gate alone without changing Hyper-V:
+
+  ```powershell
+  pwsh -NoProfile -File .\vmbuild\tools\Test-MainToDevelopExpansionRunner.ps1
+  ```
+
+  The Windows setup-readiness regression also runs with real
   background jobs under both PowerShell 7 and Windows PowerShell 5.1 before VM
   mutation, with separate required receipt cases for the two engines. Its test,
   command wrapper, shared probe, and phase wiring are included in the pinned
@@ -119,7 +133,13 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   Independent checks verify ODBC registration/DLLs in both registry views,
   installed MSI/cache state, live-site console policy, and the exact
   domain-qualified Full Administrator. A second maintenance run must add no
-  attempts for the three implicated fixes.
+  attempts for the three implicated fixes. Target deduplication uses saved VM
+  names rather than dictionary properties and rejects conflicting GUIDs.
+  A CAS/standalone Primary in the baseline fixture independently requires CM
+  coverage in baseline and postcondition receipts; losing that VM cannot
+  turn a CM family into a successful N/A receipt. Previously completed CM
+  families with a DC-only/N/A gate fail instead of being skipped as qualified;
+  use a fresh state root to requalify them.
 - Each develop fixture/pass gets independent readiness checks before being
   checkpointed complete. VM/disk lineage and domain SID checks remain enabled.
   First-pass expansion VM/disk and applicable domain identities are persisted
@@ -146,6 +166,19 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   retain the latest transport error and PowerShell error ID for every attempted
   credential across polls, even if the deadline interrupts the final credential
   pass. The runner regression exercises this boundary with a controlled clock.
+- The host publishes and verifies the workflow RunId before launching DSC, not
+  after a potentially long-running start call. Phase 8/9 cannot start without
+  that verified identity. Workflow failures publish an atomic, RunId-bound
+  failure receipt. Local and
+  cross-node DSC receipt waits reject the matching failure immediately; the
+  host also reads it independently so overwritten status text cannot hide it.
+  Stale failures do not poison a replacement invocation. Elapsed-only receipt
+  updates remain visible but do not reset progress/stall clocks, and receipt
+  dependents track the actual owner VM. Existing bounded CIM-memory recovery
+  still takes priority over the terminal-failure status.
+- Phase 8 timeline writes retry transient exclusive-append contention. Exhausted
+  writes warn and back off without disabling subsequent or final snapshots;
+  final-capture failures are warnings too, not INFO-only evidence loss.
 - Once per candidate revision, a scoped CAS or standalone Primary runs the
   recovery matrix: missing legacy/current MSI source and installer cache,
   advertised/missing registration, missing console version metadata,

@@ -8,11 +8,14 @@ param(
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
-# There was no top-level handler, so any unhandled terminating error below exited
-# the scheduled task silently and the host saw only 'last result 0x00000001'.
-# Log what killed it, then let it die -- the guest watchdog owns the restart /
-# JOBFAILURE decision, so do not pre-empt it by stamping a status here.
+$ExpectedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.expected.runid'
+$CompletedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.completed.runid'
+$FailedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.failed.json'
+$ScriptWorkflowRunId = $null
+
+# Publish the captured invocation's failure, never a later deployment's RunId.
 trap {
+    $workflowError = $_
     try {
         "ScriptWorkflow TERMINATING ERROR: $($_.Exception.Message)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  Type  : $($_.Exception.GetType().FullName)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
@@ -29,7 +32,24 @@ trap {
         ($crumbText -replace '\s+', ' ').Trim() | Out-File -FilePath 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Force
     }
     catch { }
+    if ($ScriptWorkflowRunId) {
+        try {
+            Write-ScriptWorkflowFailureReceipt -RunId $ScriptWorkflowRunId `
+                -Message "$($workflowError.InvocationInfo.ScriptName) line $($workflowError.InvocationInfo.ScriptLineNumber): $($workflowError.Exception.Message)"
+        }
+        catch {
+            Write-Warning "ScriptWorkflow could not publish its terminal failure receipt: $($_.Exception.Message)"
+        }
+    }
     break
+}
+
+if (Test-Path -LiteralPath $ExpectedRunIdFile) {
+    $ScriptWorkflowRunId = (Get-Content -LiteralPath $ExpectedRunIdFile -Raw -ErrorAction Stop).Trim()
+    Write-DscStatus "ScriptWorkflow.ps1 RunId for this deploy: $ScriptWorkflowRunId"
+}
+if (Test-Path -LiteralPath $FailedRunIdFile) {
+    Remove-Item -LiteralPath $FailedRunIdFile -Force -ErrorAction Stop
 }
 
 # The breadcrumb must describe the MOST RECENT run, not an earlier one.
@@ -91,18 +111,6 @@ catch {
 }
 
 Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
-
-# Read the per-deploy RunId stamped by the orchestrator (Common.ScriptBlocks.ps1)
-# right before it began monitoring this phase. We'll echo it back into
-# ScriptWorkflow.completed.runid at the very end so the orchestrator can
-# detect completion authoritatively (immune to status-string overwrites).
-$ExpectedRunIdFile  = 'C:\staging\DSC\ScriptWorkflow.expected.runid'
-$CompletedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.completed.runid'
-$ScriptWorkflowRunId = $null
-if (Test-Path $ExpectedRunIdFile) {
-    $ScriptWorkflowRunId = (Get-Content $ExpectedRunIdFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-    Write-DscStatus "ScriptWorkflow.ps1 RunId for this deploy: $ScriptWorkflowRunId"
-}
 
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json

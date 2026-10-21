@@ -501,7 +501,10 @@ function Write-JobProgress {
                     # it with a status reads as "this step has taken 8 minutes" when the step
                     # actually took 4 seconds and something later went quiet. Track when the
                     # status text last changed so the bar can say which it is.
-                    $statusSince = if ($lastEntry -and $lastEntry.StatusSince -and $lastEntry.Status -eq $latestStatus) { $lastEntry.StatusSince } else { $now }
+                    $statusUnchanged = $lastEntry -and
+                        (Get-WorkflowReceiptProgressKey -StatusText "$($lastEntry.Status)") -eq
+                        (Get-WorkflowReceiptProgressKey -StatusText "$latestStatus")
+                    $statusSince = if ($statusUnchanged -and $lastEntry.StatusSince) { $lastEntry.StatusSince } else { $now }
                     if ($changed -or $stale) {
                         # Status is kept unconcatenated (Line mixes in id/activity/percent) so
                         # Wait-Phase can read "Waiting on <VM> to Complete" and spot a wait on a
@@ -3551,6 +3554,13 @@ DROP TABLE #memlabs_idxprobe;
 # where X owns this job's progress and stranding it strands this job too -- PL-PICKLE
 # held Phase 8 for 55m+ on "[PL-MELT]: ..." after PL-MELT had already failed, and in
 # that shape its status never contains the word "Waiting".
+function Get-WorkflowReceiptProgressKey {
+    param([string]$StatusText)
+
+    # A receipt's age is diagnostic output, not work advancing.
+    return $StatusText -replace '(Waiting for ScriptWorkflow receipt on [A-Za-z0-9.\-]+ \()elapsed=[0-9]+(?:[.,][0-9]+)?m,\s*', '$1'
+}
+
 function Get-JobWaitTargets {
     param([string]$StatusText)
 
@@ -3561,7 +3571,10 @@ function Get-JobWaitTargets {
 
     # [regex]::Match, not -match: a nested -match would clobber the caller's $Matches.
     # WaitFor is joined with ',' so one status can name several VMs.
-    $waitMatch = [regex]::Match($StatusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
+    $waitMatch = [regex]::Match($StatusText, 'Waiting for ScriptWorkflow receipt on ([A-Za-z0-9\-]+)')
+    if (-not $waitMatch.Success) {
+        $waitMatch = [regex]::Match($StatusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
+    }
     if ($waitMatch.Success) {
         foreach ($w in ($waitMatch.Groups[1].Value -split ',')) {
             $t = "$w".Trim().ToUpper()
@@ -3769,7 +3782,7 @@ function Write-Phase8DiagnosticSnapshot {
         [void](New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop)
     }
     $line = $snapshot | ConvertTo-Json -Depth 9 -Compress -ErrorAction Stop -WarningAction SilentlyContinue
-    [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    Add-LogTextToFile -Path $Path -Text ($line + [Environment]::NewLine)
 }
 
 function Wait-Phase {
@@ -3856,7 +3869,7 @@ function Wait-Phase {
                 Write-Log "[Phase 8] Critical-path diagnostics will be written to $phase8TimelinePath" -LogOnly
             }
             catch {
-                Write-Log "[Phase 8] Could not initialize critical-path diagnostics: $($_.Exception.Message)" -LogOnly
+                Write-Log "[Phase 8] Could not initialize critical-path diagnostics: $($_.Exception.Message)" -Warning
                 $phase8TimelinePath = $null
             }
         }
@@ -3872,7 +3885,7 @@ function Wait-Phase {
                     Write-Log "[Phase 8] Critical-path diagnostics captured '$Trigger' -> $phase8TimelinePath" -LogOnly
                 }
                 catch {
-                    Write-Log "[Phase 8] Final critical-path diagnostic snapshot failed: $($_.Exception.Message)" -LogOnly
+                    Write-Log "[Phase 8] Final critical-path diagnostic snapshot failed: $($_.Exception.Message)" -Warning
                 }
             }
         }
@@ -4579,7 +4592,7 @@ function Wait-Phase {
                     $phase8FingerprintParts = foreach ($phase8Job in $runningJobs) {
                         $phase8History = $global:JobProgressHistory[$phase8Job.Id]
                         '{0}|{1}|{2}' -f $phase8Job.Id, $phase8Job.State,
-                            $(if ($phase8History) { "$($phase8History.Status)" } else { '' })
+                            $(if ($phase8History) { Get-WorkflowReceiptProgressKey -StatusText "$($phase8History.Status)" } else { '' })
                     }
                     $phase8Fingerprint = @($phase8FingerprintParts) -join "`n"
                     $phase8NowUtc = [DateTime]::UtcNow
@@ -4600,8 +4613,10 @@ function Wait-Phase {
                     }
                 }
                 catch {
-                    Write-Log "[Phase 8] Critical-path diagnostic snapshot failed: $($_.Exception.Message)" -LogOnly
-                    $phase8TimelinePath = $null
+                    Write-Log "[Phase 8] Critical-path diagnostic snapshot failed; later and final captures remain enabled: $($_.Exception.Message)" -Warning
+                    $phase8NextPeriodicUtc = [DateTime]::UtcNow.AddMinutes(5)
+                    $phase8CapturedFingerprint = $phase8Fingerprint
+                    $phase8LastChangeSnapshotUtc = [DateTime]::UtcNow
                 }
             }
 

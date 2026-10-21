@@ -29,7 +29,9 @@ function Import-TestFunction {
 }
 
 . (Import-TestFunction -Path $phasePath -Name 'Get-Phase8HostReliabilityEvents')
+. (Import-TestFunction -Path $phasePath -Name 'Get-WorkflowReceiptProgressKey')
 . (Import-TestFunction -Path $phasePath -Name 'Write-Phase8DiagnosticSnapshot')
+. (Import-TestFunction -Path (Join-Path $root 'Common.ps1') -Name 'Add-LogTextToFile')
 . (Import-TestFunction -Path $boundaryPath -Name 'Write-MemLabsClientPackageTimelineRecord')
 . (Import-TestFunction -Path $boundaryPath -Name 'Invoke-MemLabsClientPackageDiagnosticProbe')
 . (Import-TestFunction -Path $boundaryPath -Name 'Test-MemLabsLocalComputerName')
@@ -375,6 +377,94 @@ try {
         $boundedAnalysis[0].Errors -notmatch 'fixture diagnostic timeout' -or $boundedAnalysis[1].Classification -ne 'Installed') {
         $details = $script:DiagnosticStatuses | ConvertTo-Json -Compress
         throw "Forced capture did not recover after timeout, or the analyzer lost explicit timeout evidence. Disabled=$($coverageTimelineState.Disabled); calls=$script:DiagnosticProbeCalls; classifications=$(@($boundedAnalysis.Classification) -join ','); statuses=$details"
+    }
+
+    & {
+        $path = Join-Path $tempRoot 'Phase8-transient-lock.jsonl'
+        $script:SnapshotLock = [IO.File]::Open($path, 'CreateNew', 'ReadWrite', 'None')
+        $script:SnapshotRetries = 0
+        function Start-Sleep {
+            param([int]$Milliseconds)
+            $script:SnapshotRetries++
+            $script:SnapshotLock.Dispose()
+            $script:SnapshotLock = $null
+        }
+        try {
+            Write-Phase8DiagnosticSnapshot -Path $path -Jobs @($job) -PhaseStart (Get-Date).AddMinutes(-8) -Trigger 'contention-recovered'
+        }
+        finally {
+            if ($script:SnapshotLock) { $script:SnapshotLock.Dispose(); $script:SnapshotLock = $null }
+        }
+        $records = @(Get-Content -LiteralPath $path | ForEach-Object { $_ | ConvertFrom-Json })
+        if ($script:SnapshotRetries -ne 1 -or $records.Count -ne 1 -or $records[0].Trigger -ne 'contention-recovered') {
+            throw 'A real transient sharing violation lost or duplicated a Phase 8 snapshot instead of retrying its exclusive append.'
+        }
+    }
+    & {
+        $errors = $null
+        $phaseAst = [Management.Automation.Language.Parser]::ParseFile($phasePath, [ref]$null, [ref]$errors)
+        if ($errors.Count) { throw "Phase telemetry parse errors: $($errors -join '; ')" }
+        $handlers = @($phaseAst.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.CatchClauseAst] -and
+                    $node.Body.Extent.Text.Contains('[Phase 8] Critical-path diagnostic snapshot failed')
+                }, $true))
+        $finals = @($phaseAst.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                    $node.Left.VariablePath.UserPath -eq 'writePhase8FinalSnapshot'
+                }, $true))
+        if ($handlers.Count -ne 1 -or $finals.Count -ne 1) { throw 'The production timeline failure/final handlers are not unambiguous.' }
+        $failureHandler = [scriptblock]::Create(($handlers[0].Body.Statements | ForEach-Object { $_.Extent.Text }) -join "`n")
+        . ([scriptblock]::Create($finals[0].Extent.Text))
+        $phase8TimelinePath = Join-Path $tempRoot 'Phase8-after-exhausted-lock.jsonl'
+        $expectedPath = $phase8TimelinePath
+        $phase8Fingerprint = 'unchanged receipt'
+        $phase8SeenJobs = @{}
+        $jobs = @($job)
+        $StartTime = (Get-Date).AddMinutes(-8)
+        $DeployConfig = [pscustomobject]@{ virtualMachines = @([pscustomobject]@{ vmName = 'LAB-PRI' }) }
+        $phase8NextPeriodicUtc = [DateTime]::UtcNow
+        $phase8LastChangeSnapshotUtc = [DateTime]::MinValue
+        $script:SnapshotWarnings = [Collections.Generic.List[string]]::new()
+        $script:SnapshotRetries = 0
+        function Write-Log {
+            param($Message, [switch]$Warning, [switch]$LogOnly)
+            if ($Warning) { $script:SnapshotWarnings.Add("$Message") }
+        }
+        function Start-Sleep {
+            param([int]$Milliseconds)
+            $script:SnapshotRetries++
+            if ($script:SnapshotRetries -gt 12) { throw 'Snapshot append exceeded its bounded retry budget.' }
+        }
+        $lock = [IO.File]::Open($phase8TimelinePath, 'CreateNew', 'ReadWrite', 'None')
+        $writeFailure = $null
+        try {
+            try {
+                Write-Phase8DiagnosticSnapshot -Path $phase8TimelinePath -Jobs @($job) -PhaseStart $StartTime -Trigger 'locked'
+            }
+            catch {
+                $writeFailure = $_
+                . $failureHandler
+            }
+        }
+        finally { $lock.Dispose() }
+        if (-not $writeFailure -or $writeFailure.Exception.GetBaseException() -isnot [IO.IOException] -or
+            $script:SnapshotRetries -ne 11 -or $script:SnapshotWarnings.Count -ne 1 -or
+            $phase8TimelinePath -ne $expectedPath -or $phase8NextPeriodicUtc -lt [DateTime]::UtcNow.AddMinutes(4) -or
+            $phase8LastChangeSnapshotUtc -lt [DateTime]::UtcNow.AddSeconds(-5) -or
+            $phase8CapturedFingerprint -cne $phase8Fingerprint) {
+            throw 'Exhausted timeline contention did not warn, retain the capture path, and back off without disabling future evidence.'
+        }
+        & $writePhase8FinalSnapshot 'critical-failure'
+        $records = @(Get-Content -LiteralPath $expectedPath | ForEach-Object { $_ | ConvertFrom-Json })
+        if ($records.Count -ne 1 -or $records[0].Trigger -ne 'critical-failure' -or
+            $script:SnapshotWarnings.Count -ne 1 -or $records[0].Jobs.Count -ne $jobs.Count -or
+            $phase8SeenJobs.Count -ne $jobs.Count -or $records[0].Jobs[0].Id -ne $jobs[0].Id -or
+            $records[0].Host.VMs[0].Name -ne $DeployConfig.virtualMachines[0].vmName) {
+            throw 'The actual terminal snapshot handler did not recover after a transient timeline failure.'
+        }
     }
 
     $phaseSource = Get-Content -LiteralPath $phasePath -Raw

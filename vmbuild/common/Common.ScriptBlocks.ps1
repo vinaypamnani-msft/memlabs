@@ -2652,6 +2652,8 @@ function Invoke-MemLabsGuestMemoryRecovery {
         $task = Get-ScheduledTask -TaskName 'ScriptWorkflow'
         if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName 'ScriptWorkflow' }
         Remove-Item -LiteralPath (Join-Path $root 'ScriptWorkflow.memory-recovery.json') -Force
+        $failedPath = Join-Path $root 'ScriptWorkflow.failed.json'
+        if (Test-Path -LiteralPath $failedPath) { Remove-Item -LiteralPath $failedPath -Force -ErrorAction Stop }
         Set-Content -LiteralPath (Join-Path $root 'DSC_Status.txt') -Value 'Setting up ConfigMgr. Resuming after host-managed memory recovery.'
         # Re-apply the existing configuration so DSC restarts the task and waits for its receipt.
         Start-DscConfiguration -UseExisting -Force
@@ -7539,6 +7541,34 @@ $global:VM_Config = {
             }
         }
 
+        # Publish the invocation before DSC can launch ScriptWorkflow, including
+        # the single-node start that can wait for the entire configuration.
+        $expectedRunId = [guid]::NewGuid().ToString()
+        $stampResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
+            -AsJob -TimeoutSeconds 60 -FailOnRemoteError -SuppressLog -ScriptBlock {
+            param($runId, [string]$workflowRoot = 'C:\staging\DSC')
+            $ErrorActionPreference = 'Stop'
+            $dir = $workflowRoot
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            Remove-Item -Path (Join-Path $dir 'ScriptWorkflow.completed.runid') -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path (Join-Path $dir 'ScriptWorkflow.memory-recovery.json') -Force -ErrorAction SilentlyContinue
+            $failedPath = Join-Path $dir 'ScriptWorkflow.failed.json'
+            if (Test-Path -LiteralPath $failedPath) { Remove-Item -LiteralPath $failedPath -Force -ErrorAction Stop }
+            $expectedPath = Join-Path $dir 'ScriptWorkflow.expected.runid'
+            Set-Content -LiteralPath $expectedPath -Value $runId -Force -Encoding ASCII -ErrorAction Stop
+            $written = (Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop).Trim()
+            if ($written -ne $runId) { throw 'The workflow invocation RunId was not persisted.' }
+            return $written
+        } -ArgumentList $expectedRunId -DisplayName "DSC: Stamp Phase RunId"
+        if (-not $stampResult -or $stampResult.ScriptBlockFailed -or $stampResult.ScriptBlockOutput -notcontains $expectedRunId) {
+            if ($Phase -in @(8, 9)) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Cannot start workflow without a verified RunId. $($stampResult.ScriptBlockOutput)" -Failure -OutputStream
+                return
+            }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to stamp RunId (will rely on status-string fallback). $($stampResult.ScriptBlockOutput)" -Warning
+            $expectedRunId = $null
+        }
+
         if ($skipStartDsc) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) configuration will be started on the DC."
             Write-Progress2 $Activity -Status "Waiting for DC to start DSC" -percentcomplete 75 -force
@@ -8024,30 +8054,6 @@ $global:VM_Config = {
             if ($dscSplit) { Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] $dscSplit" -LogOnly }
         }
 
-        # =============================================================
-        # Stamp a per-deploy RunId on the VM and clear any stale
-        # completion marker. ScriptWorkflow.ps1 will echo this RunId
-        # into ScriptWorkflow.completed.runid once it finishes ALL of
-        # its post-install scripts (InstallProvider, PushClients,
-        # EnableBLM, etc.). The monitoring loop below treats matching
-        # RunIds as authoritative completion, eliminating the race
-        # where Complete! status is overwritten by later writes.
-        # =============================================================
-        $expectedRunId = [guid]::NewGuid().ToString()
-        $stampResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
-            param($runId)
-            $dir = 'C:\staging\DSC'
-            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-            # Delete any stale completion marker from a prior deploy BEFORE writing expected -- guarantees no false positive
-            Remove-Item -Path (Join-Path $dir 'ScriptWorkflow.completed.runid') -Force -ErrorAction SilentlyContinue
-            Remove-Item -Path (Join-Path $dir 'ScriptWorkflow.memory-recovery.json') -Force -ErrorAction SilentlyContinue
-            Set-Content -Path (Join-Path $dir 'ScriptWorkflow.expected.runid') -Value $runId -Force -Encoding ASCII
-        } -ArgumentList $expectedRunId -DisplayName "DSC: Stamp Phase RunId"
-        if ($stampResult.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to stamp RunId (will rely on status-string fallback). $($stampResult.ScriptBlockOutput)" -Warning
-            $expectedRunId = $null
-        }
-
         ### ===========================
         ### Start Monitoring the jobs
         ### ===========================
@@ -8493,9 +8499,23 @@ $global:VM_Config = {
                 $stopwatch2.Start()
                 # Single round-trip: fetch DSC_Status.txt AND the completion-runid sentinel
                 $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock {
-                    param($workflowRunId)
-                    $statusText = Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue
-                    $coveragePath = 'C:\staging\DSC\ClientPackageCoverage.progress.json'
+                    param($workflowRunId, [string]$workflowRoot = 'C:\staging\DSC')
+                    $statusText = Get-Content -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt') -ErrorAction SilentlyContinue
+                    $failurePath = Join-Path $workflowRoot 'ScriptWorkflow.failed.json'
+                    if ($workflowRunId -and [IO.File]::Exists($failurePath)) {
+                        $failure = Get-Content -LiteralPath $failurePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                        if ($failure.RunId -isnot [string] -or [string]::IsNullOrWhiteSpace($failure.RunId)) {
+                            throw 'Invalid ScriptWorkflow failure RunId.'
+                        }
+                        if ($failure.RunId -eq $workflowRunId) {
+                            if ($failure.SchemaVersion -ne 1 -or $failure.Status -cne 'Failed' -or
+                                $failure.Message -isnot [string] -or [string]::IsNullOrWhiteSpace($failure.Message)) {
+                                throw "Invalid ScriptWorkflow failure receipt for RunId '$workflowRunId'."
+                            }
+                            $statusText = "JOBFAILURE: ScriptWorkflow failed for RunId '$workflowRunId': $($failure.Message)"
+                        }
+                    }
+                    $coveragePath = Join-Path $workflowRoot 'ClientPackageCoverage.progress.json'
                     if ($workflowRunId -and "$statusText" -notmatch 'JOBFAILURE' -and
                         [IO.File]::Exists($coveragePath)) {
                         try {
@@ -8510,12 +8530,13 @@ $global:VM_Config = {
                         }
                     }
                     $completedRunId = $null
-                    if (Test-Path C:\staging\DSC\ScriptWorkflow.completed.runid) {
-                        $completedRunId = (Get-Content C:\staging\DSC\ScriptWorkflow.completed.runid -ErrorAction SilentlyContinue | Select-Object -First 1)
+                    $completedPath = Join-Path $workflowRoot 'ScriptWorkflow.completed.runid'
+                    if (Test-Path -LiteralPath $completedPath) {
+                        $completedRunId = (Get-Content -LiteralPath $completedPath -ErrorAction SilentlyContinue | Select-Object -First 1)
                     }
                     # Emit status text first (preserves legacy string consumers) then runid as a side property
                     $memoryRecovery = $null
-                    $memoryRecoveryPath = 'C:\staging\DSC\ScriptWorkflow.memory-recovery.json'
+                    $memoryRecoveryPath = Join-Path $workflowRoot 'ScriptWorkflow.memory-recovery.json'
                     if (Test-Path -LiteralPath $memoryRecoveryPath) {
                         $memoryRecovery = Get-Content -LiteralPath $memoryRecoveryPath -Raw -ErrorAction Stop |
                             ConvertFrom-Json -ErrorAction Stop
@@ -8686,9 +8707,10 @@ $global:VM_Config = {
                 if ($statusTextSnapshot -and $statusTextSnapshot -is [string]) {
                     $noStatus = $false
                     $currentStatus = $statusTextSnapshot | Out-String
+                    $currentStatusKey = Get-WorkflowReceiptProgressKey -StatusText $currentStatus
 
                     # Write to log if status changed
-                    if ($currentStatus -ne $previousStatus) {
+                    if ($currentStatusKey -ne $previousStatus) {
                         # Trim status for logging
                         if ($currentStatus.Contains("; checking again in ")) {
                             try {
@@ -8725,7 +8747,7 @@ $global:VM_Config = {
                         }
 
                         $dscConfigReRan = $false
-                        $dscStatusIsNew = $dscSeenStatuses.Add($currentStatusTrimmed.Trim())
+                        $dscStatusIsNew = $dscSeenStatuses.Add((Get-WorkflowReceiptProgressKey -StatusText $currentStatusTrimmed).Trim())
                         if ($dscResumeAwaitingProgress) {
                             $resumeElapsedSec = if ($dscResumeStartedUtc) { [math]::Round(([DateTime]::UtcNow - $dscResumeStartedUtc).TotalSeconds, 1) } else { 0 }
                             if ($dscStatusIsNew) {
@@ -8743,7 +8765,7 @@ $global:VM_Config = {
                             $dscResumeFromStatus = ''
                         }
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
-                        $previousStatus = $currentStatus
+                        $previousStatus = $currentStatusKey
                         $lastStatusChangeTime = [DateTime]::UtcNow
                         $lastStaleWarningTime = [DateTime]::MinValue
                         $deadWorkflowConfirmations = 0
@@ -9373,7 +9395,8 @@ $global:VM_Config = {
                             # other role the probe below CANNOT find a task, so "not found"
                             # there is a property of the role, not a measurement.
                             $workflowOwnedHere = ("$($currentItem.role)" -in @('CAS', 'Primary'))
-                            $crossNodeWait = [regex]::IsMatch($currentStatus.Trim(), '^Waiting (?:on [A-Za-z0-9\-,]+ to Complete|for [A-Za-z0-9\-]+ to finish adding passive site server role|for Site Server [A-Za-z0-9\-]+ to finish configuration\.)')
+                            $crossNodeWait = @(Get-JobWaitTargets -StatusText $currentStatus |
+                                Where-Object { $_ -ine "$($currentItem.vmName)" }).Count -gt 0
                             if (-not $crossNodeWait -and -not $lcmIdleSince -and -not $lcmRebootPendingSince -and -not $lcmPendingNoRebootSince) {
                                 $swStale = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
                                     # Report REGISTERED separately from STATE. Returning $null for

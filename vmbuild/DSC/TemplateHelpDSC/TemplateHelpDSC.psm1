@@ -2827,6 +2827,21 @@ class WaitForWorkflowReceipt {
         return "\\$($this.MachineName)\$($this.LogFolder)"
     }
 
+    [string] GetFailureMessage([string] $ExpectedRunId) {
+        $failedPath = Join-Path $this.GetReceiptRoot() 'ScriptWorkflow.failed.json'
+        if (-not (Test-Path -LiteralPath $failedPath -PathType Leaf)) { return '' }
+        $failure = Get-Content -LiteralPath $failedPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($failure.RunId -isnot [string] -or [string]::IsNullOrWhiteSpace($failure.RunId)) {
+            throw "Invalid ScriptWorkflow failure RunId on $($this.MachineName)."
+        }
+        if (-not $ExpectedRunId.Equals($failure.RunId, [StringComparison]::OrdinalIgnoreCase)) { return '' }
+        if ($failure.SchemaVersion -ne 1 -or $failure.Status -cne 'Failed' -or
+            $failure.Message -isnot [string] -or [string]::IsNullOrWhiteSpace($failure.Message)) {
+            throw "Invalid ScriptWorkflow failure receipt on $($this.MachineName) for RunId '$ExpectedRunId'."
+        }
+        return $failure.Message
+    }
+
     [bool] ReceiptMatches() {
         try {
             $root = $this.GetReceiptRoot()
@@ -2839,7 +2854,8 @@ class WaitForWorkflowReceipt {
             $expected = "$(Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop)".Trim()
             $completed = "$(Get-Content -LiteralPath $completedPath -Raw -ErrorAction Stop)".Trim()
             return -not [string]::IsNullOrWhiteSpace($expected) -and
-                $expected.Equals($completed, [StringComparison]::OrdinalIgnoreCase)
+                $expected.Equals($completed, [StringComparison]::OrdinalIgnoreCase) -and
+                [string]::IsNullOrEmpty($this.GetFailureMessage($expected))
         }
         catch {
             return $false
@@ -2866,6 +2882,14 @@ class WaitForWorkflowReceipt {
                 }
             }
             catch { $completed = "<unreadable: $($_.Exception.Message)>" }
+            if ($expected -ne '<missing>' -and $expected -notlike '<unreadable:*') {
+                $failureMessage = $this.GetFailureMessage($expected)
+                if ($failureMessage) {
+                    $message = "JOBFAILURE: ScriptWorkflow on $($this.MachineName) failed for RunId '$expected': $failureMessage"
+                    Write-Status $message
+                    throw $message
+                }
+            }
             $elapsedMinutes = [math]::Round(((Get-Date) - $started).TotalMinutes, 1)
             Write-Status "Waiting for ScriptWorkflow receipt on $($this.MachineName) (elapsed=${elapsedMinutes}m, expected='$expected', completed='$completed')."
             Start-Sleep -Seconds 30

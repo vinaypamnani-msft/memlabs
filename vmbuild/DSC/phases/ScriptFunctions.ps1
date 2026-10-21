@@ -667,6 +667,31 @@ function Write-ScriptWorkflowJsonAtomic {
     }
 }
 
+function Write-ScriptWorkflowFailureReceipt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$RunId,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Message,
+        [string]$Root = 'C:\staging\DSC'
+    )
+
+    $expected = (Get-Content -LiteralPath (Join-Path $Root 'ScriptWorkflow.expected.runid') -Raw -ErrorAction Stop).Trim()
+    if (-not $RunId.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Cannot publish failure for superseded ScriptWorkflow RunId '$RunId' (expected '$expected')."
+    }
+    $detail = ($Message -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($detail)) { throw 'ScriptWorkflow failure message must not be empty.' }
+    if ($detail.Length -gt 4000) { $detail = $detail.Substring(0, 4000) }
+    $receipt = [ordered]@{
+        SchemaVersion = 1
+        RunId = $RunId
+        Status = 'Failed'
+        Message = $detail
+        FailedAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    Write-ScriptWorkflowJsonAtomic -Configuration $receipt -ConfigurationFile (Join-Path $Root 'ScriptWorkflow.failed.json')
+}
+
 function Read-ScriptWorkflowData {
     [CmdletBinding()]
     param(

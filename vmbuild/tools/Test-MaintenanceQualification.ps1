@@ -152,6 +152,8 @@ try {
 
     $readinessCases = @('Test-WindowsClientSetupReadiness-PS7', 'Test-WindowsClientSetupReadiness-PS51')
     $consoleCases = @('Test-VmConsoleScreenshot-PS7', 'Test-VmConsoleScreenshot-PS51')
+    Assert-Qualification ((Get-MaintenanceQualificationCases Preflight)[0] -eq 'Test-MainToDevelopExpansionRunner') `
+        'The first candidate regression does not exercise all three burn-in defects.'
     foreach ($name in @($readinessCases + $consoleCases + 'Test-CimProxyTempPath' + 'Test-SetupDiagnosticDefaults')) {
         Assert-Qualification ((Get-MaintenanceQualificationCases Preflight) -contains $name) "Preflight does not require $name."
         $receipt = New-TestQualificationReceipt -Mode Preflight -Targets @() -HasCm $false
@@ -168,7 +170,9 @@ try {
             'tools\Test-WindowsClientSetupReadiness.ps1', 'tools\Test-CimProxyTempPath.ps1',
             'tools\Clear-CimProxyTempFolders.ps1', 'tools\Test-SetupDiagnosticDefaults.ps1',
             'tools\Get-WindowsVmSetupDiagnostics.ps1', 'tools\Common.VmConsoleScreenshot.ps1',
-            'tools\Test-VmConsoleScreenshot.ps1')) {
+            'tools\Test-VmConsoleScreenshot.ps1', 'common\Common.Phases.ps1',
+            'DSC\phases\ScriptFunctions.ps1', 'DSC\phases\ScriptWorkFlow.ps1',
+            'tools\Test-RemoteWorkflowDependency.ps1', 'tools\Test-Phase8DiagnosticTelemetry.ps1')) {
         Assert-Qualification ($source.Files.Contains($relative) -and $source.Files[$relative] -match '^[A-Fa-f0-9]{64}$') `
             "Pinned source digest does not cover regression input $relative."
     }
@@ -224,7 +228,8 @@ function Get-MemLabsDscArtifactState {
             Assert-Qualification (Test-Path -LiteralPath $File -PathType Leaf) "Preflight selected a missing script: $File"
             $scriptName = Split-Path $File -Leaf
             $script:PreflightCalls.Add([pscustomobject]@{ Engine = 'PS7'; Script = $scriptName })
-            $global:LASTEXITCODE = if ($script:PreflightScenario -eq 'FailPS7' -or
+            $global:LASTEXITCODE = if (($script:PreflightScenario -eq 'FailEarlyCoverage' -and $scriptName -eq 'Test-MainToDevelopExpansionRunner.ps1') -or
+                ($script:PreflightScenario -eq 'FailPS7' -and $scriptName -eq 'Test-WindowsClientSetupReadiness.ps1') -or
                 ($script:PreflightScenario -eq 'FailConsolePS7' -and $scriptName -eq 'Test-VmConsoleScreenshot.ps1')) { 37 } else { 0 }
         }
         function Invoke-QualificationEngine51 {
@@ -235,7 +240,7 @@ function Get-MemLabsDscArtifactState {
             $global:LASTEXITCODE = if ($script:PreflightScenario -eq 'FailPS51' -or
                 ($script:PreflightScenario -eq 'FailConsolePS51' -and $scriptName -eq 'Test-VmConsoleScreenshot.ps1')) { 37 } else { 0 }
         }
-        foreach ($scenario in @('Passed', 'FailPS7', 'FailPS51', 'FailConsolePS7', 'FailConsolePS51', 'MissingPS7', 'MissingPS51', 'StaleArtifact')) {
+        foreach ($scenario in @('Passed', 'FailEarlyCoverage', 'FailPS7', 'FailPS51', 'FailConsolePS7', 'FailConsolePS51', 'MissingPS7', 'MissingPS51', 'StaleArtifact')) {
             $script:PreflightScenario = $scenario
             $script:PreflightCalls = [Collections.Generic.List[object]]::new()
             $script:MQReceipt = New-TestQualificationReceipt -Mode Preflight -Targets @() -HasCm $false
@@ -243,6 +248,8 @@ function Get-MemLabsDscArtifactState {
             $script:MQReceipt.Cases = @()
             if ($scenario -eq 'Passed') {
                 Invoke-MQPreflight
+                Assert-Qualification ($script:PreflightCalls[0].Script -eq 'Test-MainToDevelopExpansionRunner.ps1' -and
+                    $script:PreflightCalls[0].Engine -eq 'PS7') 'The live preflight did not run the complete defect gate first.'
                 $readinessCalls = @($script:PreflightCalls | Where-Object Script -eq 'Test-WindowsClientSetupReadiness.ps1')
                 Assert-Qualification ($readinessCalls.Count -eq 2 -and
                     ($readinessCalls.Engine -join ',') -eq 'PS7,PS51') 'Readiness preflight did not run the same script under both engines.'
@@ -269,6 +276,7 @@ function Get-MemLabsDscArtifactState {
             }
             else {
                 $pattern = switch ($scenario) {
+                    'FailEarlyCoverage' { '*Test-MainToDevelopExpansionRunner (exit 37)*' }
                     'FailPS7' { '*Test-WindowsClientSetupReadiness-PS7 (exit 37)*' }
                     'FailPS51' { '*Test-WindowsClientSetupReadiness-PS51 (exit 37)*' }
                     'FailConsolePS7' { '*Test-VmConsoleScreenshot-PS7 (exit 37)*' }
@@ -283,10 +291,11 @@ function Get-MemLabsDscArtifactState {
                 $expectedPassed = if ($scenario -eq 'FailPS51') { 1 } elseif ($scenario -in @('FailConsolePS7', 'FailConsolePS51')) { 2 } else { 0 }
                 $expectedConsolePassed = if ($scenario -eq 'FailConsolePS51') { 1 } else { 0 }
                 $expectedCalls = switch ($scenario) {
-                    'FailPS7' { 1 }
-                    'FailPS51' { 2 }
-                    'FailConsolePS7' { 3 }
-                    'FailConsolePS51' { 4 }
+                    'FailEarlyCoverage' { 1 }
+                    'FailPS7' { 2 }
+                    'FailPS51' { 3 }
+                    'FailConsolePS7' { 4 }
+                    'FailConsolePS51' { 5 }
                     default { 0 }
                 }
                 Assert-Qualification ($passedReadiness.Count -eq $expectedPassed -and $passedConsole.Count -eq $expectedConsolePassed -and
@@ -364,6 +373,12 @@ function Get-MemLabsDscArtifactState {
     $null = Invoke-CrossRevisionRecoveryGate -Family 'next' -Identity @($target) -WorktreePath 'C:\pinned'
     Assert-Qualification ($script:ChildCalls -eq $beforeCalls + 1 -and $recoveryKey -like '__revision__|maintenance|recovery|*') 'The CM fault matrix did not run exactly once per candidate.'
     $script:MockRole = 'DC'
+    $beforeCalls = $script:ChildCalls
+    Assert-QualificationThrows {
+        Invoke-CrossRevisionMaintenanceGate -Key "lab|maintenance|baseline-required|$developCommit" -Mode Baseline `
+            -Family 'lab' -Identity @($target) -WorktreePath 'C:\pinned' -RequireCmCoverage
+    } '*scope has no CAS or standalone Primary required by the family configuration*'
+    Assert-Qualification ($script:ChildCalls -eq $beforeCalls) 'A CM family with an omitted Primary reached live maintenance instead of failing its scope gate.'
     $naKey = Invoke-CrossRevisionRecoveryGate -Family 'nocm' -Identity @($target) -WorktreePath 'C:\pinned'
     Assert-Qualification ($naKey -like 'nocm|maintenance|recovery-na|*' -and -not $script:State.MaintenanceReceipts[$naKey].HasCmTarget) 'NOCM incorrectly qualified CM recovery coverage.'
     $script:MockRole = 'Primary'
@@ -381,6 +396,18 @@ function Get-MemLabsDscArtifactState {
         PreflightKey = $preflightKey; BaselineKey = $key; RecoveryKey = $recoveryKey; PostconditionKeys = $postKeys
     }
     Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab'
+    $script:State.MaintenanceFamilyGates.lab.HasCmTarget = $false
+    Assert-QualificationThrows {
+        Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab' -RequireCmCoverage
+    } '*saved maintenance gate omits CM coverage*'
+    $script:State.MaintenanceFamilyGates.lab.HasCmTarget = $true
+    $baselineReference = $script:State.MaintenanceReceipts[$key]
+    $narrowBaselinePath = Join-Path $tempRoot 'narrow-baseline.json'
+    $narrowBaseline = New-TestQualificationReceipt -Mode Baseline -HasCm $false
+    Write-MaintenanceQualificationReceipt $narrowBaselinePath $narrowBaseline
+    $script:State.MaintenanceReceipts[$key] = New-MaintenanceQualificationReference $narrowBaselinePath $narrowBaseline
+    Assert-QualificationThrows { Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab' } '*did not exercise a CM target*'
+    $script:State.MaintenanceReceipts[$key] = $baselineReference
     $script:State.MaintenanceFamilyGates.lab.PostconditionKeys = @($postKeys | Select-Object -Skip 1)
     Assert-QualificationThrows { Assert-CrossRevisionMaintenanceFamilyGate -Family 'lab' } '*incomplete maintenance gate*'
     $script:State.MaintenanceFamilyGates.lab.PostconditionKeys = $postKeys
@@ -537,7 +564,7 @@ function Get-MaintenanceQualificationCases {
     Assert-Qualification ($script:State.MaintenanceReceipts.Contains($refreshKey) -and -not $script:State.CurrentStep) 'An interrupted refreshed readiness check cannot resume after its receipt is replaced.'
 
     $runner = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-MainToDevelopExpansionTest.ps1') -Raw
-    Assert-Qualification ($runner -match '(?s)Assert-CrossRevisionMaintenanceFamilyGate -Family \$family\s+foreach \(\$domain in \$familyPlan.Domains\)') 'Cleanup is not guarded by maintenance qualification.'
+    Assert-Qualification ($runner -match '(?s)Assert-CrossRevisionMaintenanceFamilyGate -Family \$family -RequireCmCoverage:\$baselineHasCm\s+foreach \(\$domain in \$familyPlan.Domains\)') 'Cleanup is not guarded by the independently required CM maintenance coverage.'
     Assert-Qualification ($runner -match 'Mode Postconditions' -and $runner -match 'Mode Recovery' -and $runner -match 'Mode Preflight') 'A required runner qualification stage is missing.'
     $qualifier = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-MaintenanceQualification.ps1') -Raw
     $start = $qualifier.IndexOf("'SeedLegacy' {", [StringComparison]::Ordinal)

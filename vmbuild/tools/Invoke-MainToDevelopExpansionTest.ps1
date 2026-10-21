@@ -1624,14 +1624,22 @@ function Initialize-CrossRevisionMaintenanceState {
 function Get-CrossRevisionMaintenanceTargets {
     param([object[]]$Identity)
     $targets = @()
+    $identitiesByName = @{}
     if ($Identity.Count -eq 0) { throw 'Maintenance scope has an empty VM identity checkpoint.' }
     foreach ($expected in $Identity) {
         if (-not $expected -or [string]::IsNullOrWhiteSpace("$($expected.Name)") -or
             [string]::IsNullOrWhiteSpace("$($expected.Id)")) {
             throw 'Maintenance scope has a missing VM identity entry, Name, or Id.'
         }
+        $name = "$($expected.Name)"
+        if ($identitiesByName.ContainsKey($name) -and
+            "$($identitiesByName[$name].Id)" -ine "$($expected.Id)") {
+            throw "Maintenance scope has conflicting saved identities for VM '$name'."
+        }
+        $identitiesByName[$name] = $expected
     }
-    foreach ($expected in @($Identity | Sort-Object Name -Unique)) {
+    foreach ($name in @($identitiesByName.Keys | Sort-Object)) {
+        $expected = $identitiesByName[$name]
         $vm = Get-VM -Name $expected.Name -ErrorAction Stop
         if ("$($vm.Id)" -ne "$($expected.Id)") { throw "Maintenance scope VM '$($expected.Name)' was replaced." }
         $note = $vm.Notes | ConvertFrom-Json -ErrorAction Stop
@@ -1659,6 +1667,10 @@ function Invoke-CrossRevisionMaintenanceGate {
     )
     $targets = @(if ($Mode -ne 'Preflight') { Get-CrossRevisionMaintenanceTargets -Identity $Identity })
     if ($Mode -ne 'Preflight' -and -not $targets.Count) { throw "Maintenance gate '$Key' has no supported scoped VMs." }
+    if ($RequireCmCoverage -and
+        -not (Test-MaintenanceQualificationCmScope -Config ([pscustomobject]@{ virtualMachines = $targets }))) {
+        throw "Maintenance gate '$Key' scope has no CAS or standalone Primary required by the family configuration."
+    }
     if ($script:State.MaintenanceReceipts.Contains($Key)) {
         $reference = $script:State.MaintenanceReceipts[$Key]
         if ($reference.SourceDigest -cne $script:MaintenanceCandidateSource.Digest -or $reference.DevelopRevision -cne $developCommit) {
@@ -1745,7 +1757,7 @@ function Resume-CrossRevisionMaintenanceGate {
 }
 
 function Assert-CrossRevisionMaintenanceFamilyGate {
-    param([string]$Family)
+    param([string]$Family, [switch]$RequireCmCoverage)
     $key = $Family.ToLowerInvariant()
     if (-not $script:State.MaintenanceFamilyGates.Contains($key)) { throw "Family '$Family' has no maintenance completion gate." }
     $gate = $script:State.MaintenanceFamilyGates[$key]
@@ -1760,6 +1772,9 @@ function Assert-CrossRevisionMaintenanceFamilyGate {
         $gate.BaselineKey -cne "$key|maintenance|baseline|$revision" -or
         (@($expectedPost | Sort-Object) -join "`n") -cne (@($gate.PostconditionKeys | Sort-Object) -join "`n")) {
         throw "Family '$Family' has an incomplete maintenance gate contract."
+    }
+    if ($RequireCmCoverage -and -not $gate.HasCmTarget) {
+        throw "Family '$Family' has a CAS/standalone Primary but its saved maintenance gate omits CM coverage. Use a fresh state root to requalify the family."
     }
     $expectedRecovery = if ($gate.HasCmTarget) { "__revision__|maintenance|recovery|$revision" } else { "$key|maintenance|recovery-na|$revision" }
     if ($gate.RecoveryKey -cne $expectedRecovery) { throw "Family '$Family' has no required recovery-matrix/N/A gate." }
@@ -1781,7 +1796,7 @@ function Assert-CrossRevisionMaintenanceFamilyGate {
             throw "Family '$Family' has stale-revision or wrong-mode maintenance coverage."
         }
         $null = Assert-MaintenanceQualificationReference -Reference $reference `
-            -RequireCmCoverage:($gate.HasCmTarget -and $receiptKey -eq $gate.RecoveryKey) @contractArguments
+            -RequireCmCoverage:($gate.HasCmTarget -and $expectedMode -ne 'Preflight') @contractArguments
     }
 }
 
@@ -2418,9 +2433,10 @@ try {
     foreach ($familyPlan in $plan) {
         $family = [string]$familyPlan.Family
         $familyKey = $family.ToLowerInvariant()
+        $baselineHasCm = Test-MaintenanceQualificationCmScope -Config $familyPlan.BaselineConfig
         $completeKey = "$familyKey|complete"
         if (Test-StepComplete -Step $completeKey) {
-            Assert-CrossRevisionMaintenanceFamilyGate -Family $family
+            Assert-CrossRevisionMaintenanceFamilyGate -Family $family -RequireCmCoverage:$baselineHasCm
             Write-Host "SKIP: $family already completed for this revision pair." -ForegroundColor DarkGray
             continue
         }
@@ -2479,7 +2495,6 @@ try {
         if (-not $domainIdentity) {
             throw "$family baseline is marked complete but has no saved domain SID. Use -ResetState after removing its lab."
         }
-
         $cleanupStarted = $script:State.CurrentStep -like "$familyKey|cleanup|*" -or
             @($script:State.CompletedSteps | Where-Object { $_ -like "$familyKey|cleanup|*" }).Count -gt 0
         if (-not $cleanupStarted) {
@@ -2489,7 +2504,7 @@ try {
             }
             Assert-DomainIdentity -Identity $domainIdentity -AdminCachePath $credentialPath
         }
-        else { Assert-CrossRevisionMaintenanceFamilyGate -Family $family }
+        else { Assert-CrossRevisionMaintenanceFamilyGate -Family $family -RequireCmCoverage:$baselineHasCm }
 
         $maintenanceBaselineKey = "$familyKey|maintenance|baseline|$developCommit"
         $maintenanceRecoveryKey = "__revision__|maintenance|recovery|$developCommit"
@@ -2500,7 +2515,7 @@ try {
         }
         if (-not $cleanupStarted -and -not $maintenanceDeferred) {
             $null = Invoke-CrossRevisionMaintenanceGate -Key $maintenanceBaselineKey -Mode Baseline -Family $family `
-                -Identity $baselineIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath
+                -Identity $baselineIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath -RequireCmCoverage:$baselineHasCm
             $baselineTargets = @(Get-CrossRevisionMaintenanceTargets -Identity $baselineIdentity)
             if (Test-MaintenanceQualificationCmScope -Config ([pscustomobject]@{ virtualMachines = $baselineTargets })) {
                 $null = Invoke-CrossRevisionRecoveryGate -Family $family -Identity $baselineIdentity `
@@ -2566,7 +2581,7 @@ try {
                             $stageIdentity = @($baselineIdentity) + @($savedDevelopIdentity)
                             $postKey = "$familyKey|maintenance|post|$pass|$($followOn.Name)|$developCommit"
                             $null = Invoke-CrossRevisionMaintenanceGate -Key $postKey -Mode Postconditions -Family $family `
-                                -Identity $stageIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath -AlwaysRun
+                                -Identity $stageIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath -AlwaysRun -RequireCmCoverage:$baselineHasCm
                         }
                     }
                     continue
@@ -2611,7 +2626,7 @@ try {
                         -Config $followOnConfig -AdminCachePath $credentialPath
                 }
                 $null = Invoke-CrossRevisionMaintenanceGate -Key $maintenanceBaselineKey -Mode Baseline -Family $family `
-                    -Identity $baselineIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath
+                    -Identity $baselineIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath -RequireCmCoverage:$baselineHasCm
                 $maintenanceDeferred = $false
                 $stageIdentity = @($baselineIdentity) + @(Get-VmIdentity -VmNames $followOnVmNames)
                 $stageTargets = @(Get-CrossRevisionMaintenanceTargets -Identity $stageIdentity)
@@ -2622,7 +2637,7 @@ try {
                 }
                 $postKey = "$familyKey|maintenance|post|$pass|$($followOn.Name)|$developCommit"
                 $null = Invoke-CrossRevisionMaintenanceGate -Key $postKey -Mode Postconditions -Family $family `
-                    -Identity $stageIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath -AlwaysRun
+                    -Identity $stageIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath -AlwaysRun -RequireCmCoverage:$baselineHasCm
                 if ($pass -eq 2) {
                     Assert-BaselineIdentity -Identity @($script:State.DevelopIdentities[$identityKey])
                     if ($followOnHasDc) {
@@ -2648,14 +2663,14 @@ try {
                     if (-not $script:State.MaintenanceReceipts.Contains($postKey)) {
                         $null = Invoke-CrossRevisionMaintenanceGate -Key $postKey -Mode Postconditions -Family $family `
                             -Identity (@($baselineIdentity) + @($script:State.DevelopIdentities[$identityKey])) `
-                            -WorktreePath $developWorktree -AdminCachePath $credentialPath -AlwaysRun
+                            -WorktreePath $developWorktree -AdminCachePath $credentialPath -AlwaysRun -RequireCmCoverage:$baselineHasCm
                     }
                     $postKeys += $postKey
                 }
             }
             $finalKey = "$familyKey|maintenance|final|$developCommit"
             $null = Invoke-CrossRevisionMaintenanceGate -Key $finalKey -Mode Postconditions -Family $family `
-                -Identity $allIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath -AlwaysRun
+                -Identity $allIdentity -WorktreePath $developWorktree -AdminCachePath $credentialPath -AlwaysRun -RequireCmCoverage:$baselineHasCm
             $postKeys += $finalKey
             $familyTargets = @(Get-CrossRevisionMaintenanceTargets -Identity $allIdentity)
             $hasCm = Test-MaintenanceQualificationCmScope -Config ([pscustomobject]@{ virtualMachines = $familyTargets })
@@ -2670,7 +2685,7 @@ try {
             }
             Save-State
         }
-        Assert-CrossRevisionMaintenanceFamilyGate -Family $family
+        Assert-CrossRevisionMaintenanceFamilyGate -Family $family -RequireCmCoverage:$baselineHasCm
 
         foreach ($domain in $familyPlan.Domains) {
             $cleanupStep = "$familyKey|cleanup|$($domain.ToLowerInvariant())"
@@ -2685,7 +2700,7 @@ try {
             if ($remaining.Count -gt 0) { throw "Cleanup of $domain left VM(s): $($remaining.Name -join ', ')." }
             Complete-Step -Step $cleanupStep
         }
-        Assert-CrossRevisionMaintenanceFamilyGate -Family $family
+        Assert-CrossRevisionMaintenanceFamilyGate -Family $family -RequireCmCoverage:$baselineHasCm
         Complete-Step -Step $completeKey
         $familyCompletedUtc = [DateTime]::UtcNow
         Write-MemLabsTestHistoryEvent -Event ([pscustomobject]@{
