@@ -773,9 +773,11 @@ function Write-MemLabsFirstLogonFindings {
     }
     $wrongPassword = @($rows | Where-Object { $_.Source -eq 'UserOobeSignIn' -and $_.Id -eq 4625 -and
             $_.User -ieq 'defaultuser0' -and $_.LogonType -eq '2' -and $_.SubStatus -ieq '0xc000006a' })
+    $allWrongPassword = @($rows | Where-Object { $_.Source -eq 'UserOobeSignIn' -and $_.Id -eq 4625 -and
+            $_.LogonType -eq '2' -and $_.SubStatus -ieq '0xc000006a' })
     $winlogon = @($rows | Where-Object { $_.Source -eq 'WinlogonAuthentication' -and $_.Id -eq 2 -and $_.Win32Status -eq '1326' })
     [long[]]$winlogonTicks = @($winlogon | ForEach-Object { ([DateTimeOffset]$_.TimeUtc).UtcDateTime.Ticks } | Sort-Object)
-    $correlated = @($wrongPassword | Where-Object {
+    $allCorrelated = @($allWrongPassword | Where-Object {
             $ticks = ([DateTimeOffset]$_.TimeUtc).UtcDateTime.Ticks
             $position = [Array]::BinarySearch([Array]$winlogonTicks, [object]$ticks)
             if ($position -lt 0) { $position = -$position - 1 }
@@ -786,13 +788,19 @@ function Write-MemLabsFirstLogonFindings {
             }
             $nearby
         })
+    $correlated = @($allCorrelated | Where-Object User -ieq 'defaultuser0')
     [pscustomobject]@{
         Version = 1; AvailableSummaries = $available.ToArray(); MissingSummaries = $missing.ToArray()
         DefaultUserWrongPasswordEvents = $wrongPassword.Count; Winlogon1326Events = $winlogon.Count
+        InteractiveWrongPasswordByAccount = @($allWrongPassword | Group-Object User | ForEach-Object { [pscustomobject]@{ Account = $_.Name; Count = $_.Count } })
+        CorroboratedAccountNames = @($allCorrelated | Select-Object -ExpandProperty User -Unique)
+        AnyCorroboratedInteractiveSignInFailure = $allCorrelated.Count -gt 0
         CorrelationWindowSeconds = 5; CorrelationIsTemporal = $true
         CorroboratedInteractiveSignInFailure = $correlated.Count -gt 0
         Finding = $(if ($correlated.Count) { 'Windows defaultuser0 interactive authentication rejected credentials; Winlogon 1326 corroborates Security substatus C000006A.' }
             elseif ($wrongPassword.Count) { 'A defaultuser0 wrong-password audit event was observed without a matching captured Winlogon 1326 event.' }
+            elseif ($allCorrelated.Count) { 'A configured local autologon account has an interactive wrong-password audit temporally corroborated by Winlogon 1326; see the account timeline.' }
+            elseif ($allWrongPassword.Count) { 'A configured local autologon wrong-password audit was observed without a matching captured Winlogon 1326 event.' }
             else { 'No matching wrong-password failure was observed in the available summaries; this is not proof of healthy sign-in or enabled auditing.' })
         Timeline = @($rows | Sort-Object TimeUtc)
         Limitations = 'Offline configuration/audit evidence cannot query live native OOBE readiness, identify the submitted password, or prove SFAP cache causality. No passwords or cache contents are collected.'
@@ -890,6 +898,21 @@ function Copy-MemLabsWindowsSetupEvidence {
             Set-Content -LiteralPath (Join-Path $Bundle 'WindowsSetupState.json') -Encoding UTF8 -ErrorAction Stop
         $Manifest.Files.Add([ordered]@{ Path = 'WindowsSetupState.json'; Truncated = $false })
     }
+    $signInNames = [Collections.Generic.List[string]]::new()
+    $signInNames.Add('defaultuser0')
+    $signInPredicate = "Data[@Name='TargetUserName']='defaultuser0'"
+    if ($registryState.Contains('SOFTWARE') -and $registryState.SOFTWARE.WinlogonProgress.Values.DefaultUserName) {
+        $configuredName = [string]$registryState.SOFTWARE.WinlogonProgress.Values.DefaultUserName
+        if ($configuredName -ine 'defaultuser0') {
+            if ([string]::IsNullOrWhiteSpace($configuredName) -or $configuredName.Length -gt 64 -or $configuredName -match '["\\/@\x00-\x1f]') {
+                $Manifest.Errors.Add('The configured autologon username cannot be safely scoped as an additional local audit account; defaultuser0 evidence is still collected.')
+            }
+            else {
+                $signInNames.Add($configuredName)
+                $signInPredicate += ' or Data[@Name=''TargetUserName'']="' + $configuredName + '"'
+            }
+        }
+    }
     $eventSources = [Collections.Generic.List[object]]::new()
     foreach ($eventSource in @(
             @{ Name = 'Setup'; File = 'Setup.evtx' },
@@ -908,9 +931,9 @@ function Copy-MemLabsWindowsSetupEvidence {
             @{ Name = 'TaskScheduler'; File = 'Microsoft-Windows-TaskScheduler%4Operational.evtx' },
             @{ Name = 'CloudExperienceHost'; File = 'Microsoft-Windows-CloudExperienceHost%4Operational.evtx' },
             @{ Name = 'UserOobeSignIn'; File = 'Security.evtx';
-                XPath = "*[System[(EventID=4624 or EventID=4625)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]" },
+                XPath = "*[System[(EventID=4624 or EventID=4625)] and EventData[$signInPredicate]]" },
             @{ Name = 'UserOobeAccount'; File = 'Security.evtx';
-                XPath = "*[System[(EventID=4720 or EventID=4722 or EventID=4723 or EventID=4724 or EventID=4725 or EventID=4726 or EventID=4738)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]" }
+                XPath = "*[System[(EventID=4720 or EventID=4722 or EventID=4723 or EventID=4724 or EventID=4725 or EventID=4726 or EventID=4738)] and EventData[$signInPredicate]]" }
         )) {
         if (-not $eventSource.ContainsKey('XPath')) { $eventSource.XPath = $null }
         $eventSources.Add($eventSource)
@@ -940,7 +963,8 @@ function Copy-MemLabsWindowsSetupEvidence {
     $Manifest['EventEvidenceLimits'] = [ordered]@{
         MaxChannels = 64; MaxRawBytesPerLog = 64MB; MaxRawBytesTotal = 256MB
         MaxSummaryScan = 1000; MaxSummaryRecords = 80; MaxDefaultUserSignInRecords = 1000
-        SecurityScope = 'Only defaultuser0 sign-in/account lifecycle events; absence does not prove success or enabled auditing.'
+        SecurityScope = 'Only defaultuser0 and the configured local autologon account; absence does not prove success or enabled auditing.'
+        SignInAccounts = $signInNames.ToArray()
     }
     foreach ($eventSource in $eventSources) {
         $log = $eventSource.Name
@@ -1078,7 +1102,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
     $privateRoot = Join-Path $collectionRoot 'PrivateState'
     $null = New-Item -Path $bundle, $privateRoot -ItemType Directory
     $manifest = @{
-        SchemaVersion = 1; CollectorVersion = 9; RegistryReader = 'offreg.dll'
+        SchemaVersion = 1; CollectorVersion = 10; RegistryReader = 'offreg.dll'
         CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
         Host = $env:COMPUTERNAME
         InputKind = $(if ($offlineDisk) { 'Vhdx' } else { 'VM' }); InputPath = $(if ($offlineDisk) { $VhdxPath } else { $null })
@@ -1101,7 +1125,7 @@ function Invoke-MemLabsWindowsSetupDiagnostics {
             Capture = $null; Error = $null
             GuestDumpRetention = 'A captured dump remains in its protected guest directory; the offline mount is never made writable to delete it.'
         }
-        Privacy = 'No raw unattend XML, SAM/SECURITY registry hives, password values, or SFAP cache contents are archived. Security summaries are limited to defaultuser0 sign-in/account events. Opt-in hang dumps contain process memory. Console images and logs may contain visible guest data, device/account identifiers, paths, or other sensitive details; review the protected archive before sharing.'
+        Privacy = 'No raw unattend XML, SAM/SECURITY registry hives, password values, or SFAP cache contents are archived. Security summaries are limited to defaultuser0 and the configured local autologon account. Opt-in hang dumps contain process memory. Console images and logs may contain visible guest data, device/account identifiers, paths, or other sensitive details; review the protected archive before sharing.'
     }
     $fatal = $null
     $windowsFound = $false

@@ -143,6 +143,72 @@ try {
         (Test-Path -LiteralPath (Join-Path $sfap 'cache0.bin'))) 'A dismount failure leaked private hive copies or changed source cache state.'
     $script:DismountFails = $false
 
+    $encodedFixture = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('SYNTHETIC-NOT-A-REAL-PASSWORDPassword'))
+    $autoAnswer = '<unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="specialize"><component name="Microsoft-Windows-Shell-Setup"><CopyProfile>true</CopyProfile></component></settings><settings pass="oobeSystem"><component name="Microsoft-Windows-Shell-Setup"><OOBE><HideEULAPage>true</HideEULAPage></OOBE><UserAccounts><LocalAccounts><LocalAccount><Name>fixture-admin</Name><Group>Administrators</Group><Password><Value>' +
+        $encodedFixture + '</Value><PlainText>false</PlainText></Password></LocalAccount></LocalAccounts></UserAccounts></component></settings></unattend>'
+    $stagingAnswer = Join-Path $guest 'staging\Unattend.xml'
+    $null = New-Item -Path (Split-Path $stagingAnswer -Parent) -ItemType Directory -Force
+    $scrubbedAnswer = $autoAnswer.Replace($encodedFixture, '*SENSITIVE*DATA*DELETED*')
+    [IO.File]::WriteAllText($stagingAnswer, $autoAnswer)
+    [IO.File]::WriteAllText($answer, $scrubbedAnswer)
+    $answerHash = (Get-FileHash -LiteralPath $answer -Algorithm SHA256).Hash
+    $masterHash = (Get-FileHash -LiteralPath $stagingAnswer -Algorithm SHA256).Hash
+    $autoArguments = @{ Workspace = $workspace; TestVariant = 'ExplicitAutoLogon'; AutoLogonUserName = 'fixture-admin' }
+    $script:ExpectedMode = 'Source'
+    $autoSource = Invoke-MemLabsComparisonImageInspection -Path $source -Mode Source @autoArguments
+    $script:ExpectedMode = 'Control'
+    $autoControl = Invoke-MemLabsComparisonImageInspection -Path $controlDisk -Mode Control @autoArguments
+    Assert-True (-not $autoSource.ExplicitAutoLogon.Configured -and -not $autoControl.ExplicitAutoLogon.Configured -and
+        (Get-FileHash -LiteralPath $answer -Algorithm SHA256).Hash -eq $answerHash -and
+        (Get-FileHash -LiteralPath $stagingAnswer -Algorithm SHA256).Hash -eq $masterHash) 'Explicit-sign-in preflight changed the source/control answer files.'
+    $script:ExpectedMode = 'Test'
+    $autoTest = Invoke-MemLabsComparisonImageInspection -Path (Join-Path $workspace 'Test\Test.vhdx') -Mode Test @autoArguments
+    Assert-True ($autoTest.ExplicitAutoLogon.Configured -and $autoTest.ExplicitAutoLogon.AnswerFiles.Count -eq 2 -and
+        @($autoTest.Caches | Where-Object Removed).Count -eq 0 -and
+        (Get-FileHash -LiteralPath (Join-Path $sfap 'cache0.bin') -Algorithm SHA256).Hash -eq $cacheHash -and
+        ($autoTest | ConvertTo-Json -Depth 10) -notmatch [regex]::Escape($encodedFixture)) `
+        'Explicit-sign-in mode deleted caches, lost its matched answer changes, or exported the password element.'
+    foreach ($path in @($answer,$stagingAnswer)) {
+        $document = [xml]::new(); $document.XmlResolver = $null
+        $document.LoadXml((Get-Content -LiteralPath $path -Raw))
+        $auto = $document.SelectSingleNode('//*[local-name()="AutoLogon"]')
+        Assert-True ($auto.NamespaceURI -eq 'urn:schemas-microsoft-com:unattend' -and
+            $auto.SelectSingleNode('*[local-name()="Username"]').InnerText -eq 'fixture-admin' -and
+            $auto.SelectSingleNode('*[local-name()="Domain"]').InnerText -eq '.' -and
+            $auto.SelectSingleNode('*[local-name()="LogonCount"]').InnerText -eq '1' -and
+            $auto.SelectSingleNode('*[local-name()="Password"]/*[local-name()="Value"]').InnerText -ceq $encodedFixture -and
+            $auto.SelectSingleNode('*[local-name()="Password"]/*[local-name()="PlainText"]').InnerText -eq 'false' -and
+            $document.SelectSingleNode('//*[local-name()="HideEULAPage"]').InnerText -eq 'true') `
+            'Trial autologon lost schema namespace, existing password encoding, preserved OOBE settings, or the exact local account/count.'
+    }
+    Assert-Throws { Invoke-MemLabsComparisonImageInspection -Path (Join-Path $workspace 'Test\Test.vhdx') -Mode Test @autoArguments } 'already configures'
+    foreach ($variant in @('WrongUser','MissingPassword','NonAdmin','DuplicateAccount','NamespaceMismatch')) {
+        [IO.File]::WriteAllText($stagingAnswer, $autoAnswer)
+        [IO.File]::WriteAllText($answer, $scrubbedAnswer)
+        $arguments = @{} + $autoArguments
+        switch ($variant) {
+            WrongUser { $arguments.AutoLogonUserName = 'different-admin' }
+            MissingPassword { [IO.File]::WriteAllText($stagingAnswer, $scrubbedAnswer) }
+            NonAdmin { [IO.File]::WriteAllText($stagingAnswer, $autoAnswer.Replace('<Group>Administrators</Group>','<Group>Users</Group>')) }
+            DuplicateAccount {
+                $xml = [xml]::new(); $xml.XmlResolver = $null; $xml.LoadXml($autoAnswer)
+                $accounts = $xml.SelectSingleNode('//*[local-name()="LocalAccounts"]')
+                $null = $accounts.AppendChild($accounts.FirstChild.CloneNode($true))
+                [IO.File]::WriteAllText($stagingAnswer,$xml.OuterXml)
+            }
+            NamespaceMismatch { [IO.File]::WriteAllText($answer,$scrubbedAnswer.Replace(' xmlns="urn:schemas-microsoft-com:unattend"','')) }
+        }
+        $beforePanther = (Get-FileHash -LiteralPath $answer -Algorithm SHA256).Hash
+        $beforeMaster = (Get-FileHash -LiteralPath $stagingAnswer -Algorithm SHA256).Hash
+        Assert-Throws { Invoke-MemLabsComparisonImageInspection -Path (Join-Path $workspace 'Test\Test.vhdx') -Mode Test @arguments } `
+            'does not uniquely match|No usable|not explicitly|different XML namespaces'
+        Assert-True ((Get-FileHash -LiteralPath $answer -Algorithm SHA256).Hash -eq $beforePanther -and
+            (Get-FileHash -LiteralPath $stagingAnswer -Algorithm SHA256).Hash -eq $beforeMaster -and
+            (Test-Path -LiteralPath (Join-Path $sfap 'cache0.bin'))) 'A rejected explicit-sign-in plan partially changed files or caches.'
+    }
+    [IO.File]::WriteAllText($answer,$answerXml)
+    [IO.File]::Delete($stagingAnswer)
+
     $copy = Join-Path $root 'verified-copy.vhdx'
     Copy-MemLabsComparisonDisk -Source $source -Destination $copy -ExpectedHash $sourceHash
     Assert-True ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -eq $sourceHash -and
@@ -205,7 +271,7 @@ try {
 
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     function New-TrialArchive {
-        param([string]$Path,[guid]$VMId,[string]$Observation)
+        param([string]$Path,[guid]$VMId,[string]$Observation,[bool]$Interactive = $true)
         $ready = $Observation -eq 'Ready'
         $reason = if ($ready) { 'MachineCompleteAwaitingFirstLogon' } elseif ($Observation -eq 'FirstLogonStall') { 'WindowsWelcomeIncomplete' } else { 'MachineSetupIncomplete' }
         $setup = [pscustomobject]@{
@@ -217,12 +283,15 @@ try {
             OobeProcesses = @($(if (-not $ready) { 'FirstLogonAnim.exe' })); Diagnostics = @()
         }
         if ($ready) { $setup.OobeProcesses = @() }
-        $state = [pscustomobject]@{ Scope = 'WindowsFirstLogonProbe'; MachineGuid = [guid]::NewGuid().ToString('D'); Setup = $setup }
+        $actor = [pscustomobject]@{ Name = 'TEST\fixture-admin'; Sid = 'S-1-5-21-111-222-333-1000' }
+        $processes = if ($ready -and $Interactive) { @([pscustomobject]@{ Name = 'explorer.exe'; SessionId = 1; OwnerSid = $actor.Sid }) } else { @() }
+        $state = [pscustomobject]@{ Scope = 'WindowsFirstLogonProbe'; MachineGuid = [guid]::NewGuid().ToString('D'); Setup = $setup; Actor = $actor; Processes = $processes }
         $zip = [IO.Compression.ZipFile]::Open($Path,[IO.Compression.ZipArchiveMode]::Create)
         try {
             $entries = @{
                 'Manifest.json' = @{ VMId = $VMId.ToString('D'); FinalState = 'Off'; Status = 'Complete'; LiveProbe = @{ Status = 'Complete' } }
                 'Live-StateBefore.json' = $state; 'Live-StateAfter.json' = $state
+                'WindowsSetupState.json' = @{ SOFTWARE = @{ WinlogonProgress = @{ Values = @{ DefaultUserName = $(if ($ready) { 'fixture-admin' } else { 'defaultuser0' }) } } } }
             }
             foreach ($name in $entries.Keys) {
                 $entry = $zip.CreateEntry($name)
@@ -244,7 +313,7 @@ try {
 
     $script:CredentialReads = 0; $script:Inspections = [Collections.Generic.List[string]]::new()
     $script:Started = [Collections.Generic.List[guid]]::new(); $script:Removed = [Collections.Generic.List[guid]]::new()
-    $script:VMs = @{}; $script:Observations = @{ Control = 'FirstLogonStall'; Test = 'Ready' }; $script:StartupFails = $false
+    $script:VMs = @{}; $script:Observations = @{ Control = 'FirstLogonStall'; Test = 'Ready' }; $script:StartupFails = $false; $script:NoInteractive = $false
     $secret = [Security.SecureString]::new(); $secret.AppendChar('x')
     $script:Credential = [pscredential]::new('fixture-admin',$secret)
     function Get-VM { param($Name,$Id,$ErrorAction); if ($Name -eq $original.Name) { return $original }; if ($Id) { return $script:VMs["$Id"] }; throw 'Unexpected original/unknown VM lookup.' }
@@ -257,9 +326,9 @@ try {
     function Get-VMFirmware { param($VM,$ErrorAction); [pscustomobject]@{ SecureBoot = 'On'; SecureBootTemplate = 'MicrosoftWindows' } }
     function Get-VMSecurity { param($VM,$ErrorAction); [pscustomobject]@{ TpmEnabled = $true } }
     function Invoke-MemLabsComparisonImageInspection {
-        param($Path,$Mode,$Workspace)
+        param($Path,$Mode,$Workspace,$TestVariant,$AutoLogonUserName)
         $script:Inspections.Add($Mode)
-        [pscustomobject]@{ ImageState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; CopyProfile = $true; Caches = @([pscustomobject]@{ Removed = ($Mode -eq 'Test') }) }
+        [pscustomobject]@{ ImageState = 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE'; CopyProfile = $true; Caches = @([pscustomobject]@{ Removed = ($Mode -eq 'Test' -and $TestVariant -eq 'SfapCache') }) }
     }
     function Invoke-MemLabsComparisonWorker {
         param($Block,$Arguments,$TimeoutSeconds,$Operation)
@@ -285,7 +354,7 @@ try {
         $null = New-Item -Path $Destination -ItemType Directory -Force
         $label = if ($VM.Name -like 'ML-OOBE-C-*') { 'Control' } else { 'Test' }
         $archive = Join-Path $Destination 'collected.zip'
-        New-TrialArchive -Path $archive -VMId $VM.Id -Observation $script:Observations[$label]
+        New-TrialArchive -Path $archive -VMId $VM.Id -Observation $script:Observations[$label] -Interactive:(-not $script:NoInteractive)
         $VM.State = 'Off'
         [pscustomobject]@{ FinalState = 'Off'; ArchivePath = $archive }
     }
@@ -302,11 +371,16 @@ try {
             @{ Control = 'Ready'; Test = 'Ready'; Expected = 'BothReady' },
             @{ Control = 'FirstLogonStall'; Test = 'FirstLogonStall'; Expected = 'BothBlocked' },
             @{ Control = 'Ready'; Test = 'FirstLogonStall'; Expected = 'do not adopt' },
-            @{ Control = 'Other'; Test = 'Ready'; Expected = 'Inconclusive' }
+            @{ Control = 'Other'; Test = 'Ready'; Expected = 'Inconclusive' },
+            @{ Control = 'FirstLogonStall'; Test = 'Ready'; Variant = 'ExplicitAutoLogon'; Expected = 'ExplicitSignInCopyReadyControlBlocked' },
+            @{ Control = 'FirstLogonStall'; Test = 'Ready'; Variant = 'ExplicitAutoLogon'; NoInteractive = $true; Expected = 'InconclusiveReadinessDifference' },
+            @{ Control = 'FirstLogonStall'; Test = 'FirstLogonStall'; Variant = 'ExplicitAutoLogon'; Expected = 'explicit sign-in did not resolve' }
         )) {
         $script:Observations = $scenario
+        $script:NoInteractive = [bool]$scenario.NoInteractive
         $startedBefore = $script:Started.Count; $removedBefore = $script:Removed.Count
-        $result = Invoke-MemLabsFirstLogonImageComparison -VmName $original.Name -SourceVhdxPath $source -Destination $runs
+        $variant = if ($scenario.Variant) { $scenario.Variant } else { 'SfapCache' }
+        $result = Invoke-MemLabsFirstLogonImageComparison -VmName $original.Name -SourceVhdxPath $source -Destination $runs -TestVariant $variant
         Assert-True ($result.Status -eq 'Completed' -and $result.Verdict -match $scenario.Expected -and
             $script:Started.Count -eq $startedBefore + 2 -and $script:Removed.Count -eq $removedBefore + 2 -and
             $original.State -eq 'Off' -and (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -eq $sourceHash) `
@@ -331,7 +405,7 @@ try {
     $stub = @'
 function Invoke-MemLabsFirstLogonImageComparison {
     [CmdletBinding(SupportsShouldProcess)]
-    param($VmName,$SourceVhdxPath,$Destination,[pscredential]$GuestCredential,[switch]$KeepTrialVMs)
+    param($VmName,$SourceVhdxPath,$Destination,[pscredential]$GuestCredential,[switch]$KeepTrialVMs,[string]$TestVariant='SfapCache')
     if (-not $WhatIfPreference) {
         $inner = [Threading.Mutex]::new($false,'__LOCAL_MUTEX__')
         $acquired = $false
@@ -341,7 +415,7 @@ function Invoke-MemLabsFirstLogonImageComparison {
         }
         finally { try { if ($acquired) { $inner.ReleaseMutex() } } finally { $inner.Dispose() } }
     }
-    [pscustomobject]@{ VmName = $VmName; Source = $SourceVhdxPath; Destination = $Destination; Keep = [bool]$KeepTrialVMs } | ConvertTo-Json -Compress
+    [pscustomobject]@{ VmName = $VmName; Source = $SourceVhdxPath; Destination = $Destination; Keep = [bool]$KeepTrialVMs; Variant = $TestVariant } | ConvertTo-Json -Compress
 }
 '@
     $lastDefinition = $definitions | Sort-Object { $_.Extent.EndOffset } | Select-Object -Last 1
@@ -356,11 +430,12 @@ function Invoke-MemLabsFirstLogonImageComparison {
             foreach ($preview in @($false,$true)) {
                 $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$fixture,'-VmName','ORIGINAL-W11')
                 if ($preview) { $arguments += '-WhatIf' }
-                if ($explicit) { $arguments += @('-SourceVhdxPath',$source,'-Destination',(Join-Path $root 'explicit output'),'-KeepTrialVMs') }
+                if ($explicit) { $arguments += @('-SourceVhdxPath',$source,'-Destination',(Join-Path $root 'explicit output'),'-KeepTrialVMs','-TestVariant','ExplicitAutoLogon') }
                 $output = @(& $engine @arguments 2>&1)
                 if ($LASTEXITCODE -ne 0 -or $output.Count -ne 1) { throw "Cold comparison startup/lease failed: $($output -join ' ')" }
                 $reply = $output[0] | ConvertFrom-Json -ErrorAction Stop
                 Assert-True ($reply.VmName -eq 'ORIGINAL-W11' -and $reply.Keep -eq $explicit -and
+                    $reply.Variant -eq $(if ($explicit) { 'ExplicitAutoLogon' } else { 'SfapCache' }) -and
                     (($explicit -and $reply.Source -eq $source) -or (-not $explicit -and -not $reply.Source))) `
                     'Dot-sourced helper imports lost real -File parameters, WhatIf routing, or recursive lease ownership.'
             }

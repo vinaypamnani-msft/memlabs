@@ -433,7 +433,8 @@ to its original channel filename and records missing/read/copy outcomes.
 Raw events are limited to 64 MiB per file, 256 MiB total, and 64 channels;
 exceeding a limit is explicit partial evidence, never a silently truncated EVTX.
 Security is not copied wholesale: `UserOobeSignIn-events.json` queries only
-defaultuser0 sign-in success/failure events (4624/4625), retaining up to 1,000
+defaultuser0 and the configured local autologon account's sign-in success/failure
+events (4624/4625), retaining up to 1,000
 matching records. Hitting that limit is reported as partial. Empty results do
 not prove that sign-in succeeded or that the guest had auditing enabled.
 
@@ -486,18 +487,23 @@ The offline registry allowlist includes the actual autologon SID,
 Use a fresh PowerShell process after updating if an older native reader type
 is already cached in the current process.
 
-Security account lifecycle events for defaultuser0 (4720/4722/4723/4724/4725/
+Security account lifecycle events for those scoped local accounts (4720/4722/4723/4724/4725/
 4726/4738) are retained separately from its sign-in events. A filtered Winlogon
 authentication summary retains event 1/2 history, including `Win32Status`,
 independently of the general 80-record summary.
 `FirstLogonFindings.json` builds a UTC timeline and flags interactive
 defaultuser0 wrong-password audits (`4625`, substatus `C000006A`, logon type 2).
 It temporally corroborates them with Winlogon result `1326` within five seconds.
+Account-specific failure counts and corroborated account names are also recorded,
+so a trial that signs in as the existing lab administrator does not hide its
+authentication failures behind a defaultuser0-only filter. Unsafe/domain-qualified
+autologon names are not interpolated into the XPath; the audit gap is reported
+explicitly while defaultuser0 collection continues.
 This is observed audit evidence, not password recovery, a live OOBE-ready
 classification, or proof that an SFAP cache caused the failure. Missing/empty
 audits do not establish healthy sign-in or enabled auditing.
 
-The manifest identifies this implementation as `CollectorVersion=9` and
+The manifest identifies this implementation as `CollectorVersion=10` and
 `RegistryReader=offreg.dll`.
 An unavailable library or unreadable copy is reported as a collection error,
 not proof of guest registry corruption. Console images and logs can contain
@@ -698,6 +704,44 @@ Both ready means the original failure was not reproduced; both stalled means
 cache removal alone did not resolve it. Other/unreadable/transitioning setup
 states are inconclusive. Review the supplied diagnostics before adopting any
 image-preparation change.
+
+#### Explicit local-account sign-in variant
+
+If the cache comparison reproduces the same temporary-account authentication
+failure in both arms, test Windows-supported unattended sign-in using the
+image's existing local lab-administrator account:
+
+```powershell
+.\tools\Test-WindowsFirstLogonImage.ps1 -VmName ADA-W11CLIENT1 -TestVariant ExplicitAutoLogon
+```
+
+The default `SfapCache` experiment is unchanged. `ExplicitAutoLogon` leaves
+**CopyProfile and all SFAP caches untouched** in both arms. It changes only the
+disposable test copy's existing `oobeSystem` Shell-Setup components by adding
+`AutoLogon` for the local administrator whose name matches the saved lab
+credential. No account password is reset.
+
+The password XML element is reused from the same image's matching local-account
+configuration, preferring the staging answer file when the cached Panther copy
+has scrubbed sensitive data. It is not decoded, printed, or put in the report.
+Missing/ambiguous accounts, non-administrator groups, unusable password elements,
+namespace mismatches, and pre-existing oobeSystem autologon are rejected before
+any answer file is changed. Only the exact owned test VHDX is writable; source
+and control files remain unchanged, and both written answer files are read back.
+
+The test requests `LogonCount=1`. Microsoft documents an off-by-one issue where
+positive counts can allow one additional sign-in; this tool performs only its
+single trial startup and does not add a registry-bypass first-logon command.
+These settings are **temporary experiment data, not a production image change**.
+If `-KeepTrialVMs` is used or a failure requires retention, keep the disposable
+test copy protected: it contains administrator autologon configuration.
+
+Readiness alone is not called a verified explicit-sign-in success. The report
+also checks the effective autologon username and an interactive Explorer shell
+owned by the lab account in both live snapshots. Missing confirmation is
+inconclusive. Even a positive comparison supports an alternate sign-in path
+only for that trial; it does not explain why Windows supplied the wrong
+temporary-account credential or prove a permanent fix.
 
 Run `vmbuild\tools\Test-WindowsFirstLogonImageComparison.ps1` on PowerShell 5.1
 and 7 to validate discovery, source/copy safeguards, matched create/cleanup

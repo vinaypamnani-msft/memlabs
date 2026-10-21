@@ -623,6 +623,9 @@ try {
         param($Path, $Kind)
         Assert-True ($Path -match '\\PrivateState\\(SYSTEM|SOFTWARE)$') 'Registry hives were loaded directly from the mounted guest.'
         if ($script:HiveFails) { throw 'Synthetic offline hive failure' }
+        if ($Kind -eq 'SOFTWARE' -and $script:ConfiguredAuditName) {
+            return @{ Kind = $Kind; WinlogonProgress = @{ Values = @{ DefaultUserName = $script:ConfiguredAuditName } } }
+        }
         @{ Kind = $Kind; Setup = @{ OOBEInProgress = 1 }; ActiveName = 'DESKTOP-FIXTURE' }
     }
     function Get-WinEvent {
@@ -638,11 +641,18 @@ try {
             ProviderName = 'Microsoft-Windows-Kernel-Power'; Level = 1; Message = 'fixture'
         }
         if ((Split-Path $Path -Leaf) -eq 'Security.evtx') {
-            Assert-True ($FilterXPath -ceq "*[System[(EventID=4624 or EventID=4625)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]" -or
-                $FilterXPath -ceq "*[System[(EventID=4720 or EventID=4722 or EventID=4723 or EventID=4724 or EventID=4725 or EventID=4726 or EventID=4738)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]") `
+            $predicate = "Data[@Name='TargetUserName']='defaultuser0'"
+            $auditName = 'defaultuser0'
+            if ($script:ConfiguredAuditName -and $script:ConfiguredAuditName -notmatch '["\\/@\x00-\x1f]') {
+                $predicate += ' or Data[@Name=''TargetUserName'']="' + $script:ConfiguredAuditName + '"'
+                $auditName = $script:ConfiguredAuditName
+            }
+            Assert-True ($FilterXPath -ceq "*[System[(EventID=4624 or EventID=4625)] and EventData[$predicate]]" -or
+                $FilterXPath -ceq "*[System[(EventID=4720 or EventID=4722 or EventID=4723 or EventID=4724 or EventID=4725 or EventID=4726 or EventID=4738)] and EventData[$predicate]]") `
                 'Security evidence was not filtered to only defaultuser0 authentication/account records.'
             $eventRecord.Id = if ($FilterXPath -match '4720') { 4720 } else { 4625 }
             $eventRecord.ProviderName = 'Microsoft-Windows-Security-Auditing'
+            $eventRecord | Add-Member -NotePropertyName AuditUserName -NotePropertyValue $auditName
         }
         elseif ($FilterXPath) {
             Assert-True ((Split-Path $Path -Leaf) -eq 'Microsoft-Windows-Winlogon%4Operational.evtx' -and
@@ -653,8 +663,8 @@ try {
             $eventRecord.ProviderName = 'Microsoft-Windows-User Profiles Service'; $eventRecord.Id = 1509
         }
         $eventRecord | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
-            if ($this.Id -eq 4625) { return '<Event><EventData><Data Name="TargetUserName">defaultuser0</Data><Data Name="LogonType">2</Data><Data Name="SubStatus">0xc000006a</Data></EventData></Event>' }
-            if ($this.Id -eq 4720) { return '<Event><EventData><Data Name="TargetUserName">defaultuser0</Data><Data Name="TargetSid">S-1-5-21-111-222-333-1002</Data></EventData></Event>' }
+            if ($this.Id -eq 4625) { return '<Event><EventData><Data Name="TargetUserName">' + [Security.SecurityElement]::Escape($this.AuditUserName) + '</Data><Data Name="LogonType">2</Data><Data Name="SubStatus">0xc000006a</Data></EventData></Event>' }
+            if ($this.Id -eq 4720) { return '<Event><EventData><Data Name="TargetUserName">' + [Security.SecurityElement]::Escape($this.AuditUserName) + '</Data><Data Name="TargetSid">S-1-5-21-111-222-333-1002</Data></EventData></Event>' }
             if ($this.Id -eq 2 -and $this.ProviderName -eq 'Microsoft-Windows-Winlogon') { return '<Event><EventData><Data Name="Win32Status">1326</Data></EventData></Event>' }
             '<Event><EventData>fixture</EventData></Event>'
         }
@@ -698,6 +708,7 @@ try {
         $script:GuestBlockBuilds = 0; $script:LiveProbeCalls = 0; $script:ProbeStarts = 0; $script:LiveFailure = ''
         $script:DumpBlockBuilds = 0; $script:DumpCalls = 0; $script:DumpUnknown = $false; $script:DumpCopyFails = $false
         $script:DiskInputMode = $false
+        $script:ConfiguredAuditName = $null
     }
     $parameters = @{ VmName = 'BROKEN-W11'; Destination = (Join-Path $testRoot 'output'); StopTimeoutSeconds = 5; Confirm = $false }
     Reset-Fixture
@@ -710,7 +721,7 @@ try {
         'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
-    Assert-True ($manifestRecord.CollectorVersion -eq 9 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
+    Assert-True ($manifestRecord.CollectorVersion -eq 10 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
         @($manifestRecord.Files | Where-Object Path -eq 'AppxPrerequisiteInventory.json').Count -eq 1) `
         'The archive does not identify the corrected registry reader and package-inventory collector.'
     $configuration = Get-Content -LiteralPath (Join-Path $container 'Bundle\FirstLogonConfiguration.json') -Raw | ConvertFrom-Json
@@ -720,6 +731,27 @@ try {
         $configuration.AnswerFiles[0].ShellSetup[0].CopyProfile -eq 'true' -and
         $findings.DefaultUserWrongPasswordEvents -eq 1 -and $findings.Winlogon1326Events -eq 1 -and
         $findings.CorroboratedInteractiveSignInFailure) 'Safe profile/answer settings or corroborated logon findings were not collected.'
+    foreach ($account in @('fixture-admin', "O'Brien", 'bad"account')) {
+        Reset-Fixture
+        $script:ConfiguredAuditName = $account
+        $accountReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
+        $accountBundle = Join-Path (Split-Path $accountReport.ArchivePath -Parent) 'Bundle'
+        $accountFindings = Get-Content -LiteralPath (Join-Path $accountBundle 'FirstLogonFindings.json') -Raw | ConvertFrom-Json
+        $accountManifest = Get-Content -LiteralPath (Join-Path $accountBundle 'Manifest.json') -Raw | ConvertFrom-Json
+        if ($account -eq 'bad"account') {
+            Assert-True ($accountReport.Status -eq 'Partial' -and $accountManifest.EventEvidenceLimits.SignInAccounts.Count -eq 1 -and
+                ($accountManifest.Errors -join ' ') -match 'cannot be safely scoped') 'A malformed account expanded the native XPath or silently hid audit gaps.'
+        }
+        else {
+            Assert-True ($accountReport.Status -eq 'Complete' -and $accountManifest.EventEvidenceLimits.SignInAccounts.Count -eq 2 -and
+                $accountFindings.DefaultUserWrongPasswordEvents -eq 0 -and
+                $accountFindings.AnyCorroboratedInteractiveSignInFailure -and
+                $account -in $accountFindings.CorroboratedAccountNames -and
+                $accountFindings.InteractiveWrongPasswordByAccount[0].Account -ceq $account) `
+                'The configured local sign-in account, apostrophe-safe XPath, or account-specific findings were lost.'
+        }
+    }
+    Reset-Fixture
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'
     $zip = [IO.Compression.ZipFile]::OpenRead($report.ArchivePath)
     try {
