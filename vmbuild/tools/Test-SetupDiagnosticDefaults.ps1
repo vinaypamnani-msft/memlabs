@@ -17,13 +17,14 @@ $operationStub = @'
 function __OPERATION__ {
     [CmdletBinding(SupportsShouldProcess)]
     param($VmName, $Destination, $StopTimeoutSeconds, $AllowTurnOff, $BackupPath,
-        $GuestCredential, $RepairTimeoutSeconds, $BackupTimeoutSeconds, $IncludeLiveProbe)
+        $GuestCredential, $RepairTimeoutSeconds, $BackupTimeoutSeconds, $IncludeLiveProbe, $IncludeHangDump)
     [pscustomobject]@{
         Operation = $MyInvocation.MyCommand.Name
         VMName = $VmName
         Destination = [IO.Path]::GetFullPath($Destination)
         StopTimeoutSeconds = $StopTimeoutSeconds
         IncludeLiveProbe = [bool]$IncludeLiveProbe
+        IncludeHangDump = [bool]$IncludeHangDump
     } | ConvertTo-Json -Compress
 }
 '@
@@ -40,6 +41,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $toolsRoot 'Common.WindowsVmOobeRepair.ps1'),
         $operationStub.Replace('__OPERATION__', 'Invoke-MemLabsWindowsOobeRepair'), [Text.UTF8Encoding]::new($true))
     [IO.File]::WriteAllText((Join-Path $toolsRoot 'Common.WindowsVmFirstLogonProbe.ps1'), '# Fixture: no live operations.', [Text.UTF8Encoding]::new($true))
+    [IO.File]::WriteAllText((Join-Path $toolsRoot 'Common.WindowsVmFirstLogonDump.ps1'), '# Fixture: no dump operations.', [Text.UTF8Encoding]::new($true))
     $engines = @(
         [pscustomobject]@{ Name = 'Windows PowerShell 5.1'; Path = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') }
         [pscustomobject]@{ Name = 'PowerShell 7'; Path = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source }
@@ -47,7 +49,8 @@ try {
     $casesRun = 0
     foreach ($engine in $engines) {
         if (-not (Test-Path -LiteralPath $engine.Path -PathType Leaf)) { throw "Missing test engine: $($engine.Path)" }
-        foreach ($scenario in @('DefaultCollect', 'ExplicitCollect', 'DefaultRepair', 'ExplicitRepair', 'DefaultLive', 'ExplicitLive')) {
+        foreach ($scenario in @('DefaultCollect', 'ExplicitCollect', 'DefaultRepair', 'ExplicitRepair', 'DefaultLive', 'ExplicitLive',
+                'DefaultDump', 'ExplicitDump', 'DefaultLiveDump', 'ExplicitLiveDump')) {
             $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
                 '-File', $fixturePath, '-VmName', 'BINDING-FIXTURE', '-WhatIf')
             $expectedDestination = [IO.Path]::GetFullPath((Join-Path $toolsRoot '..\logs\setup-diagnostics'))
@@ -60,7 +63,8 @@ try {
                 $arguments += '-RepairOobe'
                 $expectedOperation = 'Invoke-MemLabsWindowsOobeRepair'
             }
-            if ($scenario -like '*Live') { $arguments += '-IncludeLiveProbe' }
+            if ($scenario -like '*Live*') { $arguments += '-IncludeLiveProbe' }
+            if ($scenario -like '*Dump') { $arguments += '-IncludeHangDump' }
             try { $output = @(& $engine.Path @arguments 2>&1) }
             catch { throw "$($engine.Name)/$scenario cold -File launch failed: $($_.Exception.Message)" }
             if ($LASTEXITCODE -ne 0 -or $output.Count -ne 1) {
@@ -69,17 +73,18 @@ try {
             $report = $output[0] | ConvertFrom-Json -ErrorAction Stop
             if ($report.Operation -ne $expectedOperation -or $report.VMName -ne 'BINDING-FIXTURE' -or
                 $report.Destination -ne $expectedDestination -or $report.StopTimeoutSeconds -ne 90 -or
-                $report.IncludeLiveProbe -ne ($scenario -like '*Live')) {
+                $report.IncludeLiveProbe -ne ($scenario -like '*Live*') -or
+                $report.IncludeHangDump -ne ($scenario -like '*Dump')) {
                 throw "$($engine.Name)/$scenario lost its default, explicit path, mode, or timeout: $($output[0])"
             }
             $casesRun++
         }
     }
-    if ($casesRun -ne 12) { throw "Expected twelve cold -File cases, executed $casesRun." }
+    if ($casesRun -ne 20) { throw "Expected twenty cold -File cases, executed $casesRun." }
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop
     }
 }
-Write-Host 'PASS -- twelve real -File launches preserve omitted/explicit offline, live and repair modes/destinations on PS5.1 and PS7; no VM operations run.'
+Write-Host 'PASS -- twenty real -File launches preserve omitted/explicit offline, live, dump and repair modes/destinations on PS5.1 and PS7; no VM operations run.'

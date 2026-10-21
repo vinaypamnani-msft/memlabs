@@ -416,10 +416,35 @@ The protected archive path is printed under `vmbuild\logs\setup-diagnostics`
 by default. It contains setup/domain-join logs (at most 20 MiB per file, retaining
 the newest bytes and encoding marker when truncated), selected offline
 setup/name/domain registry values, and a manifest of missing evidence/errors.
-Setup, System, Application, DSC, user-profile, AppReadiness, Shell-Core, and
-AppModel event summaries contain at most 80 selected
-records from the latest 1,000 records per log. Raw event XML is retained even
-when the host cannot format a guest event's message.
+Setup, System, Application, DSC, user-profile, Winlogon, AppReadiness, AppX
+deployment, Task Scheduler, CloudExperienceHost, Shell-Core, and AppModel
+event summaries contain at most 80 selected records from the latest 1,000
+records per log. Application summaries include profile and Winlogon failures.
+Raw event XML is retained even when the host cannot format a guest event's message.
+The collector checks both singular `User Profile Service` and legacy plural
+`User Profiles Service` channel filenames. It also discovers existing OOBE,
+authentication UI, profile/logon, AppX/AppModel, shell, device-registration,
+modern/enterprise-deployment, AppLocker, and Code Integrity channels rather than
+assuming every Windows build uses identical channel filenames.
+
+`EventLogs` preserves the **full retained EVTX files**, independent of JSON
+summary filtering and record limits. `Manifest.json` maps each short output name
+to its original channel filename and records missing/read/copy outcomes.
+Raw events are limited to 64 MiB per file, 256 MiB total, and 64 channels;
+exceeding a limit is explicit partial evidence, never a silently truncated EVTX.
+Security is not copied wholesale: `UserOobeSignIn-events.json` queries only
+defaultuser0 sign-in success/failure events (4624/4625), retaining up to 1,000
+matching records. Hitting that limit is reported as partial. Empty results do
+not prove that sign-in succeeded or that the guest had auditing enabled.
+
+Existing Panther setup ETLs are retained whole up to 64 MiB each/128 MiB total.
+CBS, DISM, and legacy userenv text logs are included when present, with the same
+20 MiB text-log limit. Relevant FirstLogonAnim, OOBE, CloudExperienceHost,
+Winlogon, msoobe, and WWAHost WER `Report.wer` files are collected from ReportArchive
+and ReportQueue: at most 1 MiB per report, the newest 64 matching reports per
+location, and 64 MiB total. Unrelated reports and WER memory dumps are excluded.
+Disabled/unavailable channels cannot supply events retroactively; collection
+does not enable tracing or restart Windows to manufacture missing evidence.
 Volume-GUID paths are passed literally to the event reader. A query that
 silently returns no records without an explicit empty-log status is reported
 as missing/unverified evidence, not as a clean empty event log.
@@ -446,7 +471,7 @@ provisioned-package inventory or proof that a missing old version caused the
 stall: a newer installed version can make an old preregistration entry stale.
 Inventory read/parse failures are explicit partial evidence, while absent folders
 and manifests are recorded as observations.
-The manifest identifies this implementation as `CollectorVersion=7` and
+The manifest identifies this implementation as `CollectorVersion=8` and
 `RegistryReader=offreg.dll`.
 An unavailable library or unreadable copy is reported as a collection error,
 not proof of guest registry corruption. Console images and logs can contain
@@ -510,6 +535,50 @@ membership. Windows can naturally progress during the explicitly requested
 boot/observation period. Validate the guest scopes and bounded host orchestration
 with `vmbuild\tools\Test-WindowsVmFirstLogonProbe.ps1`, plus the existing collector
 and startup-default regression scripts, on both PowerShell engines.
+
+### Optional FirstLogonAnim hang dump
+
+While the existing VM is **Running and still displaying "Just a moment"**, run:
+
+```powershell
+.\tools\Get-WindowsVmSetupDiagnostics.ps1 -VmName ADA-W11CLIENT1 -IncludeLiveProbe -IncludeHangDump
+```
+
+`-IncludeHangDump` is explicit and cannot be combined with `-RepairOobe`.
+It requires an already Running VM even when `-IncludeLiveProbe` is also present:
+it never starts/resumes/restarts a stopped VM to obtain a dump. The normal
+offline-only command remains usable when the VM is Off, but cannot reconstruct
+the memory of a process that stopped at shutdown.
+
+The collector captures a console image, then dumps only the unique
+`System32\oobe\FirstLogonAnim.exe` process before live queries or shutdown.
+PID, executable path, and process start time are checked again against the
+native process handle, preventing PID reuse from selecting another process.
+A separate guest writer uses the system DbgHelp API with full process memory,
+handles, unloaded modules, and thread metadata. No external dump tool is
+downloaded, and no Winlogon, LSASS, or whole-VM dump is taken.
+Capture can briefly affect the target process; it is diagnostic work, not a
+strictly passive query or a repair.
+
+The writer is limited to 120 seconds and has its own watchdog. Only its owned
+capture process may be stopped on timeout, never FirstLogonAnim. The host RPC
+has a 180-second deadline with no authentication retry. An unverified outcome
+leaves the VM running and aborts shutdown/mounting rather than destroying the
+wait state. Known capture failures are explicit partial evidence.
+
+Successful capture continues through the usual graceful shutdown/read-only
+mount. The collector verifies the MDMP header and rejects files over 512 MiB,
+then copies and checks the captured length/SHA-256 before including
+`FirstLogonAnim.dmp` in the protected ZIP. The protected guest artifact remains
+at `C:\ProgramData\MemLabsSetupDiagnostics-<token>\FirstLogonAnim-<pid>.dmp`;
+its path is recorded for later operator cleanup. The offline mount is never
+made writable to remove it. Owned writer scripts and output files are cleaned
+up when the writer is confirmed stopped.
+
+Process memory can contain sensitive data even in a lab; review/protect the
+dump before sharing. Validate native-payload compilation, target restrictions,
+deadline/unknown-outcome behavior, and verified offline transfer using
+`vmbuild\tools\Test-WindowsVmFirstLogonDump.ps1` on both PowerShell engines.
 
 ### Explicit OOBE-only recovery trial
 

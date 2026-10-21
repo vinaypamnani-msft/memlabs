@@ -219,13 +219,57 @@ try {
     [IO.File]::WriteAllText((Join-Path $windows 'Panther\setupact.log'), 'Synthetic setup failure in specialize')
     [IO.File]::WriteAllText((Join-Path $windows 'Panther\setuperr.log'), 'Synthetic setup error')
     [IO.File]::WriteAllText((Join-Path $windows 'Debug\NetSetup.log'), 'Synthetic domain-join error')
+    $null = New-Item -Path (Join-Path $windows 'Logs\CBS'), (Join-Path $windows 'Logs\DISM'), (Join-Path $windows 'Debug\UserMode') -ItemType Directory -Force
+    [IO.File]::WriteAllText((Join-Path $windows 'Logs\CBS\CBS.log'), 'Synthetic component registration diagnostic')
+    [IO.File]::WriteAllText((Join-Path $windows 'Logs\DISM\dism.log'), 'Synthetic image diagnostic')
+    [IO.File]::WriteAllText((Join-Path $windows 'Debug\UserMode\userenv.log'), 'Synthetic profile diagnostic')
+    [IO.File]::WriteAllBytes((Join-Path $windows 'Panther\setup.etl'), [byte[]]@(1, 2, 3, 4))
     [IO.File]::WriteAllText((Join-Path $windows 'Panther\unattend.xml'), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
     foreach ($hive in @('SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY')) {
         [IO.File]::WriteAllText((Join-Path $windows "System32\config\$hive"), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
     }
-    foreach ($log in @('Setup', 'System', 'Application', 'Microsoft-Windows-DSC%4Operational')) {
+    foreach ($log in @('Setup', 'System', 'Application', 'Microsoft-Windows-DSC%4Operational',
+            'Microsoft-Windows-User Profile Service%4Operational', 'Microsoft-Windows-Winlogon%4Operational',
+            'Microsoft-Windows-AppXDeploymentServer%4Operational', 'Microsoft-Windows-OOBE-Machine-Core%4Operational',
+            'Microsoft-Windows-Authentication User Interface%4Operational', 'Microsoft-Windows-AppLocker%4Packaged app-Execution')) {
         [IO.File]::WriteAllText((Join-Path $windows "System32\winevt\Logs\$log.evtx"), 'event fixture')
     }
+    [IO.File]::WriteAllText((Join-Path $windows 'System32\winevt\Logs\Security.evtx'), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
+    $werFolder = Join-Path $script:GuestRoot 'ProgramData\Microsoft\Windows\WER\ReportArchive\AppHang_FirstLogonAnim.exe_fixture'
+    $unrelatedWerFolder = Join-Path $script:GuestRoot 'ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_PrivateApp_fixture'
+    $null = New-Item -Path $werFolder, $unrelatedWerFolder -ItemType Directory -Force
+    [IO.File]::WriteAllText((Join-Path $werFolder 'Report.wer'), 'EventType=AppHangB1;AppName=FirstLogonAnim.exe')
+    [IO.File]::WriteAllText((Join-Path $werFolder 'memory.dmp'), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
+    [IO.File]::WriteAllText((Join-Path $unrelatedWerFolder 'Report.wer'), 'RAW-SECRET-MUST-NOT-BE-ARCHIVED')
+    $limitSource = Join-Path $testRoot 'raw-limit.evtx'
+    $limitCopy = Join-Path $testRoot 'raw-limit-copy.evtx'
+    $limitStream = [IO.File]::Open($limitSource, [IO.FileMode]::CreateNew)
+    try { $limitStream.SetLength(64MB) } finally { $limitStream.Dispose() }
+    try {
+        $budget = @{ Bytes = 192MB }
+        $copiedBytes = Copy-MemLabsBoundedDiagnosticFile -Source ([MemLabs.SetupDiagnosticTestSupport]::GetVolumeGuidPath($limitSource)) `
+            -Destination $limitCopy -MaxBytes 64MB -MaxTotalBytes 256MB -Budget $budget
+        Assert-True ($copiedBytes -eq 64MB -and $budget.Bytes -eq 256MB -and [IO.FileInfo]::new($limitCopy).Length -eq 64MB) `
+            'Exact raw per-file/aggregate limits or volume-GUID binary reads were rejected.'
+        [IO.File]::Delete($limitCopy)
+        $failure = $null
+        try {
+            $null = Copy-MemLabsBoundedDiagnosticFile -Source $limitSource -Destination $limitCopy `
+                -MaxBytes 64MB -MaxTotalBytes 256MB -Budget @{ Bytes = (192MB + 1) }
+        }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -match 'aggregate limit' -and -not [IO.File]::Exists($limitCopy)) 'Raw event evidence exceeded its aggregate byte budget.'
+        $limitStream = [IO.File]::OpenWrite($limitSource)
+        try { $limitStream.SetLength(64MB + 1) } finally { $limitStream.Dispose() }
+        $failure = $null
+        try {
+            $null = Copy-MemLabsBoundedDiagnosticFile -Source $limitSource -Destination $limitCopy `
+                -MaxBytes 64MB -MaxTotalBytes 256MB -Budget @{ Bytes = 0L }
+        }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -match 'byte limit' -and -not [IO.File]::Exists($limitCopy)) 'An oversized raw EVTX was truncated or copied as if complete.'
+    }
+    finally { [IO.File]::Delete($limitSource); if ([IO.File]::Exists($limitCopy)) { [IO.File]::Delete($limitCopy) } }
     $runtimeId = 'Microsoft.WindowsAppRuntime.2_2.5.1.0_x64__8wekyb3d8bbwe'
     $oldRuntimeId = 'Microsoft.WindowsAppRuntime.2_2.2.0.0_x64__8wekyb3d8bbwe'
     $runtimeFolder = Join-Path $script:GuestRoot "Program Files\WindowsApps\$runtimeId"
@@ -425,7 +469,7 @@ try {
         param($VM, $Bundle, $Stage, $Records, $Errors)
         $script:CapturedForCurrentOperation = $true
         $script:ConsoleStates.Add($script:VmState)
-        $record = [pscustomobject]@{ Status = 'UnavailableNotRunning'; Path = "Console-$Stage.png" }
+        $record = [pscustomobject]@{ Stage = $Stage; Status = 'UnavailableNotRunning'; Path = "Console-$Stage.png" }
         if ($script:VmState -eq 'Running') {
             if ($script:ConsoleBadFrame) {
                 $record.Status = 'Error'
@@ -456,6 +500,26 @@ try {
     function Get-MemLabsFirstLogonGuestBlock {
         $script:GuestBlockBuilds++
         return { param($Action) }
+    }
+    function Get-MemLabsFirstLogonDumpGuestBlock { $script:DumpBlockBuilds++; return { param($Token) } }
+    function Invoke-MemLabsFirstLogonHangDump {
+        param($VM, [pscredential]$GuestCredential, $GuestBlock, $Manifest)
+        Assert-True ($script:VmState -eq 'Running' -and $VM.Id -eq $script:VmId -and
+            [object]::ReferenceEquals($GuestCredential, $script:ProbeCredential) -and
+            $Manifest.Screenshots.Count -eq 1 -and $Manifest.Screenshots[0].Stage -eq 'BeforeDump' -and
+            $script:LiveProbeCalls -eq 0) 'Dump capture lost its exact running target or ran after live observation/shutdown.'
+        $script:DumpCalls++
+        if ($script:DumpUnknown) { $Manifest.HangDump.Status = 'Indeterminate'; throw 'Synthetic unverified dump writer outcome.' }
+        $Manifest.HangDump.Status = 'Captured'
+    }
+    function Copy-MemLabsOfflineFirstLogonDump {
+        param($WindowsRoot, $Bundle, $Manifest)
+        if ($Manifest.HangDump.Status -ne 'Captured') { return }
+        Assert-True ($script:VmState -eq 'Off' -and $script:MountCalls -eq 1) 'A dump was copied before safe offline mounting.'
+        if ($script:DumpCopyFails) { throw 'Synthetic dump hash mismatch.' }
+        [IO.File]::WriteAllBytes((Join-Path $Bundle 'FirstLogonAnim.dmp'), [byte[]]@(77, 68, 77, 80))
+        $Manifest.Files.Add([ordered]@{ Path = 'FirstLogonAnim.dmp'; Kind = 'FirstLogonHangDump'; Truncated = $false })
+        $Manifest.HangDump.Status = 'CopiedAndVerified'
     }
     function Invoke-MemLabsWindowsFirstLogonProbe {
         param($VM, [pscredential]$GuestCredential, $GuestBlock, $Bundle, $Manifest)
@@ -553,7 +617,7 @@ try {
         @{ Kind = $Kind; Setup = @{ OOBEInProgress = 1 }; ActiveName = 'DESKTOP-FIXTURE' }
     }
     function Get-WinEvent {
-        param($Path, $MaxEvents, $ErrorAction)
+        param($Path, $MaxEvents, $FilterXPath, $ErrorAction)
         Assert-True ($MaxEvents -eq 1000) 'Offline event scanning lost its record bound.'
         if ($script:EventMode -eq 'NoMatching') { Write-Error -Message 'No events' -ErrorId NoMatchingEventsFound -ErrorAction Stop }
         if ($script:EventMode -eq 'SilentEmpty') { return }
@@ -564,6 +628,15 @@ try {
             TimeCreated = [DateTime]::UtcNow; Id = 41
             ProviderName = 'Microsoft-Windows-Kernel-Power'; Level = 1; Message = 'fixture'
         }
+        if ((Split-Path $Path -Leaf) -eq 'Security.evtx') {
+            Assert-True ($FilterXPath -ceq "*[System[(EventID=4624 or EventID=4625)] and EventData[Data[@Name='TargetUserName']='defaultuser0']]") `
+                'Security evidence was not filtered to only defaultuser0 sign-in events at the native reader.'
+            $eventRecord.Id = 4625; $eventRecord.ProviderName = 'Microsoft-Windows-Security-Auditing'
+        }
+        else { Assert-True (-not $FilterXPath) 'An unrelated channel received the Security account filter.' }
+        if ($script:EventMode -eq 'LogonFailure' -and (Split-Path $Path -Leaf) -eq 'Application.evtx') {
+            $eventRecord.ProviderName = 'Microsoft-Windows-User Profiles Service'; $eventRecord.Id = 1509
+        }
         $eventRecord | Add-Member -MemberType ScriptMethod -Name ToXml -Value { '<Event><EventData>fixture</EventData></Event>' }
         $eventRecord | Add-Member -MemberType ScriptMethod -Name FormatDescription -Value {
             if ($script:EventMode -eq 'MessageFails') { throw 'Synthetic message resource failure' }
@@ -572,7 +645,7 @@ try {
         if ($script:EventMode -eq 'FilteredEmpty' -and (Split-Path $Path -Leaf) -eq 'System.evtx') {
             $eventRecord.ProviderName = 'UnrelatedProvider'; $eventRecord.Id = 1234
         }
-        $count = if ($script:EventMode -eq 'Many') { 101 } else { 1 }
+        $count = if ($script:EventMode -eq 'AccountLimit' -and $FilterXPath) { 1000 } elseif ($script:EventMode -eq 'Many') { 101 } else { 1 }
         for ($i = 0; $i -lt $count; $i++) { $eventRecord }
     }
     function Remove-Item {
@@ -603,6 +676,7 @@ try {
         $script:NativeVolumePaths = $false
         $script:LiveRequested = $false; $script:CredentialResolves = 0; $script:CredentialFails = $false
         $script:GuestBlockBuilds = 0; $script:LiveProbeCalls = 0; $script:ProbeStarts = 0; $script:LiveFailure = ''
+        $script:DumpBlockBuilds = 0; $script:DumpCalls = 0; $script:DumpUnknown = $false; $script:DumpCopyFails = $false
     }
     $parameters = @{ VmName = 'BROKEN-W11'; Destination = (Join-Path $testRoot 'output'); StopTimeoutSeconds = 5; Confirm = $false }
     Reset-Fixture
@@ -615,7 +689,7 @@ try {
         'The normal offline collection did not preflight dependencies, return one report, or finish safely.'
     $container = Split-Path $report.ArchivePath -Parent
     $manifestRecord = Get-Content -LiteralPath (Join-Path $container 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
-    Assert-True ($manifestRecord.CollectorVersion -eq 7 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
+    Assert-True ($manifestRecord.CollectorVersion -eq 8 -and $manifestRecord.RegistryReader -eq 'offreg.dll' -and
         @($manifestRecord.Files | Where-Object Path -eq 'AppxPrerequisiteInventory.json').Count -eq 1) `
         'The archive does not identify the corrected registry reader and package-inventory collector.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $container 'PrivateState'))) 'Private raw hives were retained after collection.'
@@ -628,8 +702,60 @@ try {
             try { Assert-True (-not $reader.ReadToEnd().Contains('RAW-SECRET-MUST-NOT-BE-ARCHIVED')) 'A private hive/unattend payload leaked into the archive.' }
             finally { $reader.Dispose() }
         }
+        $zipNames = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        Assert-True ('EventLogs/UserProfiles.evtx' -in $zipNames -and
+            'EventLogs/Winlogon.evtx' -in $zipNames -and 'WER-000.wer' -in $zipNames -and
+            @($zipNames | Where-Object { $_ -match 'Security\.evtx$|memory\.dmp$|PrivateApp' }).Count -eq 0) `
+            'Raw profile/logon or WER evidence is absent, or unrelated Security/memory/WER data leaked.'
     }
     finally { $zip.Dispose() }
+    Assert-True (@($manifestRecord.EventLogs | Where-Object { $_.Source -eq 'Microsoft-Windows-User Profile Service%4Operational.evtx' -and $_.Status -eq 'Collected' }).Count -eq 1 -and
+        @($manifestRecord.EventLogs | Where-Object Source -eq 'Microsoft-Windows-OOBE-Machine-Core%4Operational.evtx').Count -eq 1 -and
+        @($manifestRecord.EventLogs | Where-Object Source -eq 'Microsoft-Windows-Authentication User Interface%4Operational.evtx').Count -eq 1 -and
+        @($manifestRecord.EventLogs | Where-Object Source -eq 'Microsoft-Windows-AppLocker%4Packaged app-Execution.evtx').Count -eq 1 -and
+        @($manifestRecord.Files | Where-Object Kind -eq 'RawEventLog').Count -eq 10) `
+        'Canonical/discovered channel coverage or full EVTX preservation is incomplete.'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $container 'Bundle\SetupLogs\Logs\CBS\CBS.log')) -and
+        (Test-Path -LiteralPath (Join-Path $container 'Bundle\SetupLogs\Logs\DISM\dism.log')) -and
+        (Test-Path -LiteralPath (Join-Path $container 'Bundle\SetupLogs\Debug\UserMode\userenv.log')) -and
+        @($manifestRecord.Files | Where-Object Kind -eq 'SetupTrace').Count -eq 1 -and
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $container 'Bundle\SetupLogs\Panther\setup.etl'))) -eq 'AQIDBA==') `
+        'Servicing/profile text or full binary setup traces were not retained.'
+
+    Reset-Fixture
+    $script:LiveRequested = $true
+    $dumpReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeLiveProbe -IncludeHangDump
+    $dumpBundle = Join-Path (Split-Path $dumpReport.ArchivePath -Parent) 'Bundle'
+    $dumpManifest = Get-Content -LiteralPath (Join-Path $dumpBundle 'Manifest.json') -Raw | ConvertFrom-Json
+    Assert-True ($dumpReport.Status -eq 'Complete' -and $dumpReport.FinalState -eq 'Off' -and
+        $dumpManifest.HangDump.Status -eq 'CopiedAndVerified' -and $script:DumpCalls -eq 1 -and
+        $script:CredentialResolves -eq 1 -and $script:LiveProbeCalls -eq 1 -and $script:ProbeStarts -eq 0 -and
+        $dumpManifest.Screenshots.Count -eq 2 -and (Test-Path -LiteralPath (Join-Path $dumpBundle 'FirstLogonAnim.dmp'))) `
+        'Opt-in dump/live/offline orchestration lost ordering, saved credentials, artifacts, or no-boot behavior.'
+    Reset-Fixture
+    $script:DumpUnknown = $true
+    $failure = $null
+    try { $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeHangDump }
+    catch { $failure = $_.Exception.Message }
+    Assert-True ($failure -match 'unverified dump writer' -and $script:VmState -eq 'Running' -and
+        $script:StopCalls -eq 0 -and $script:MountCalls -eq 0 -and $script:LiveProbeCalls -eq 0) `
+        'An unknown dump outcome allowed shutdown, mounting, or additional guest work.'
+    Reset-Fixture
+    $script:DumpCopyFails = $true
+    $dumpReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeHangDump
+    $dumpManifest = Get-Content -LiteralPath (Join-Path (Split-Path $dumpReport.ArchivePath -Parent) 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
+    Assert-True ($dumpReport.Status -eq 'Partial' -and $dumpReport.FinalState -eq 'Off' -and
+        $dumpManifest.HangDump.Status -eq 'CopyFailed' -and ($dumpManifest.Errors -join ' ') -match 'hash mismatch') `
+        'An unverified offline dump was claimed as successfully collected.'
+    foreach ($state in @('Off', 'Saved', 'Paused')) {
+        Reset-Fixture
+        $script:VmState = $state
+        $failure = $null
+        try { $null = Invoke-MemLabsWindowsSetupDiagnostics @parameters -IncludeLiveProbe -IncludeHangDump -AllowTurnOff }
+        catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -match 'already Running' -and $script:CredentialResolves -eq 0 -and
+            $script:StopCalls -eq 0 -and $script:DumpCalls -eq 0 -and $script:ProbeStarts -eq 0) 'Dump mode booted/resumed or discarded a stopped/saved VM.'
+    }
 
     Assert-True ($script:CredentialResolves -eq 0 -and $script:GuestBlockBuilds -eq 0 -and
         -not $manifestRecord.LiveProbe.Requested) 'Offline collection unexpectedly read credentials or prepared a live probe.'
@@ -692,6 +818,7 @@ try {
 
     Reset-Fixture
     $script:NativeVolumePaths = $true
+    $script:EventMode = 'LiteralVolume'
     $guidReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
     $guidBundle = Join-Path (Split-Path $guidReport.ArchivePath -Parent) 'Bundle'
     $guidManifest = Get-Content -LiteralPath (Join-Path $guidBundle 'Manifest.json') -Raw | ConvertFrom-Json
@@ -863,7 +990,7 @@ try {
         $failedManifest.Status -eq 'Failed' -and ($failedManifest.Errors -join ' ') -match 'detach it manually') `
         'Permanent disk cleanup failure was hidden, unbounded, or omitted manual recovery context.'
 
-    foreach ($desiredEventMode in @('NoMatching', 'FilteredEmpty', 'Many', 'MessageFails')) {
+    foreach ($desiredEventMode in @('NoMatching', 'FilteredEmpty', 'Many', 'MessageFails', 'LogonFailure')) {
         Reset-Fixture
         $script:EventMode = $desiredEventMode
         $eventReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
@@ -875,11 +1002,127 @@ try {
             Assert-True ($json -match '^\s*\[\s*\]\s*$' -and $eventReport.Status -eq 'Complete') 'Empty events produced invalid JSON or a false failure.'
         }
         elseif ($desiredEventMode -eq 'Many') { Assert-True ($events.Count -eq 80) 'Offline event output exceeded its exact 80-record cap.' }
-        else {
+        elseif ($desiredEventMode -eq 'MessageFails') {
             Assert-True ($eventReport.Status -eq 'Partial' -and $events.Count -eq 1 -and $events[0].Xml -match 'EventData') `
                 'Unavailable event message resources discarded the raw event evidence or hid the formatting error.'
         }
+        else {
+            $application = Get-Content -LiteralPath (Join-Path $eventBundle 'Application-events.json') -Raw | ConvertFrom-Json
+            Assert-True ($application.Id -eq 1509 -and $application.ProviderName -match 'User Profiles Service') `
+                'Application profile/logon failures were filtered out of root-cause evidence.'
+        }
+        Assert-True ((Get-FileHash -LiteralPath (Join-Path $eventBundle 'EventLogs\System.evtx') -Algorithm SHA256).Hash -eq
+            (Get-FileHash -LiteralPath (Join-Path $windows 'System32\winevt\Logs\System.evtx') -Algorithm SHA256).Hash) `
+            'A summary query/filter/format failure discarded or truncated the full event source.'
     }
+    Reset-Fixture
+    $script:EventMode = 'AccountLimit'
+    $accountReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
+    $accountBundle = Join-Path (Split-Path $accountReport.ArchivePath -Parent) 'Bundle'
+    $accountEvents = Get-Content -LiteralPath (Join-Path $accountBundle 'UserOobeSignIn-events.json') -Raw | ConvertFrom-Json
+    $accountManifest = Get-Content -LiteralPath (Join-Path $accountBundle 'Manifest.json') -Raw | ConvertFrom-Json
+    Assert-True ($accountReport.Status -eq 'Partial' -and $accountEvents.Count -eq 1000 -and
+        ($accountManifest.Errors -join ' ') -match '1,000-event limit' -and
+        -not (Test-Path -LiteralPath (Join-Path $accountBundle 'EventLogs\UserOobeSignIn.evtx'))) `
+        'Scoped sign-in evidence exceeded its limit, was clipped to 80, or exported the entire Security log.'
+
+    $legacyProfile = Join-Path $windows 'System32\winevt\Logs\Microsoft-Windows-User Profiles Service%4Operational.evtx'
+    [IO.File]::WriteAllText($legacyProfile, 'legacy profile fixture')
+    try {
+        Reset-Fixture
+        $legacyReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
+        $legacyBundle = Join-Path (Split-Path $legacyReport.ArchivePath -Parent) 'Bundle'
+        Assert-True ((Test-Path -LiteralPath (Join-Path $legacyBundle 'EventLogs\UserProfiles-Legacy.evtx')) -and
+            (Test-Path -LiteralPath (Join-Path $legacyBundle 'EventLogs\UserProfiles.evtx'))) 'Canonical and legacy profile logs were not both preserved when present.'
+    }
+    finally { [IO.File]::Delete($legacyProfile) }
+
+    $werTestBundle = Join-Path $testRoot 'wer-limits'
+    $null = New-Item -Path $werTestBundle -ItemType Directory
+    foreach ($size in @(1MB, (1MB + 1))) {
+        [IO.File]::WriteAllText((Join-Path $werFolder 'Report.wer'), ('X' * $size), [Text.UTF8Encoding]::new($false))
+        $werManifest = @{
+            Files = [Collections.Generic.List[object]]::new(); Missing = [Collections.Generic.List[string]]::new()
+            Errors = [Collections.Generic.List[string]]::new()
+        }
+        Copy-MemLabsOfflineOobeWerReports -WindowsRoot $windows -Bundle $werTestBundle -Manifest $werManifest
+        if ($size -eq 1MB) {
+            Assert-True ($werManifest.Files.Count -eq 1 -and $werManifest.Errors.Count -eq 0 -and
+                [IO.FileInfo]::new((Join-Path $werTestBundle 'WER-000.wer')).Length -eq 1MB) 'The exact WER report byte limit was rejected.'
+            [IO.File]::Delete((Join-Path $werTestBundle 'WER-000.wer'))
+        }
+        else { Assert-True ($werManifest.Files.Count -eq 0 -and ($werManifest.Errors -join ' ') -match 'byte limit') 'An oversized WER report was silently truncated/copied.' }
+    }
+    [IO.File]::WriteAllText((Join-Path $werFolder 'Report.wer'), 'EventType=AppHangB1;AppName=FirstLogonAnim.exe')
+    $werJunction = Join-Path (Split-Path $werFolder -Parent) 'AppHang_FirstLogonAnim_link'
+    $null = New-Item -Path $werJunction -ItemType Junction -Target $unrelatedWerFolder
+    try {
+        $werManifest = @{
+            Files = [Collections.Generic.List[object]]::new(); Missing = [Collections.Generic.List[string]]::new()
+            Errors = [Collections.Generic.List[string]]::new()
+        }
+        Copy-MemLabsOfflineOobeWerReports -WindowsRoot $windows -Bundle $werTestBundle -Manifest $werManifest
+        Assert-True ($werManifest.Files.Count -eq 1 -and ($werManifest.Errors -join ' ') -match 'reparse' -and
+            (Get-Content -LiteralPath (Join-Path $werTestBundle 'WER-000.wer') -Raw) -notmatch 'RAW-SECRET') 'WER evidence followed an out-of-scope reparse point.'
+    }
+    finally { [IO.Directory]::Delete($werJunction) }
+    $werCountFolders = [Collections.Generic.List[string]]::new()
+    try {
+        foreach ($number in 1..63) {
+            $folder = Join-Path (Split-Path $werFolder -Parent) "AppHang_FirstLogonAnim_count-$number"
+            $null = New-Item -Path $folder -ItemType Directory
+            [IO.File]::WriteAllText((Join-Path $folder 'Report.wer'), 'Synthetic related hang report')
+            $werCountFolders.Add($folder)
+        }
+        foreach ($count in @(64, 65)) {
+            if ($count -eq 65) {
+                $folder = Join-Path (Split-Path $werFolder -Parent) 'AppHang_FirstLogonAnim_count-64'
+                $null = New-Item -Path $folder -ItemType Directory
+                [IO.File]::WriteAllText((Join-Path $folder 'Report.wer'), 'Synthetic newest related hang report')
+                $werCountFolders.Add($folder)
+            }
+            $countBundle = Join-Path $testRoot "wer-count-$count"
+            $null = New-Item -Path $countBundle -ItemType Directory
+            $werManifest = @{
+                Files = [Collections.Generic.List[object]]::new(); Missing = [Collections.Generic.List[string]]::new()
+                Errors = [Collections.Generic.List[string]]::new()
+            }
+            Copy-MemLabsOfflineOobeWerReports -WindowsRoot $windows -Bundle $countBundle -Manifest $werManifest
+            Assert-True ($werManifest.Files.Count -eq 64 -and
+                (($count -eq 64 -and $werManifest.Errors.Count -eq 0) -or
+                 ($count -eq 65 -and ($werManifest.Errors -join ' ') -match 'newest 64 reports'))) `
+                'WER count limiting rejected the exact boundary or discarded all evidence on overflow.'
+        }
+    }
+    finally {
+        foreach ($folder in $werCountFolders) {
+            [IO.File]::Delete((Join-Path $folder 'Report.wer'))
+            [IO.Directory]::Delete($folder)
+        }
+    }
+    $extraChannels = [Collections.Generic.List[string]]::new()
+    try {
+        foreach ($number in 1..47) {
+            $path = Join-Path $windows "System32\winevt\Logs\Microsoft-Windows-OOBE-Fixture$number%4Operational.evtx"
+            [IO.File]::WriteAllText($path, 'synthetic discovered channel')
+            $extraChannels.Add($path)
+        }
+        foreach ($count in @(64, 65)) {
+            if ($count -eq 65) {
+                $path = Join-Path $windows 'System32\winevt\Logs\Microsoft-Windows-OOBE-Fixture48%4Operational.evtx'
+                [IO.File]::WriteAllText($path, 'synthetic extra discovered channel')
+                $extraChannels.Add($path)
+            }
+            Reset-Fixture
+            $channelReport = Invoke-MemLabsWindowsSetupDiagnostics @parameters
+            $channelManifest = Get-Content -LiteralPath (Join-Path (Split-Path $channelReport.ArchivePath -Parent) 'Bundle\Manifest.json') -Raw | ConvertFrom-Json
+            Assert-True ($channelManifest.EventLogs.Count -eq 64 -and
+                (($count -eq 64 -and $channelReport.Status -eq 'Complete') -or
+                 ($count -eq 65 -and $channelReport.Status -eq 'Partial' -and ($channelManifest.Errors -join ' ') -match '64-channel limit'))) `
+                'Channel discovery failed its exact 64/65 boundary or silently discarded excess evidence.'
+        }
+    }
+    finally { foreach ($path in $extraChannels) { [IO.File]::Delete($path) } }
 
     $largeLog = Join-Path $windows 'Panther\setupact.log'
     try {
@@ -1013,27 +1256,6 @@ try {
     Assert-True ($emptyQueryReport.Status -eq 'Partial' -and
         ($emptyManifest.Errors -join ' ') -match 'without an empty-log status') 'A silent zero-record event query became false clean evidence.'
 
-    $savedSourceResolver = ${function:Get-MemLabsOfflineSetupSourcePath}
-    try {
-        function Get-MemLabsOfflineSetupSourcePath {
-            param($WindowsRoot, $RelativePath, [switch]$AllowDirectory)
-            if ($RelativePath.EndsWith('.evtx')) { return "$WindowsRoot\$RelativePath" }
-        }
-        Reset-Fixture
-        $script:EventMode = 'LiteralVolume'
-        $volumeBundle = Join-Path $testRoot 'volume-events'
-        $null = New-Item -Path $volumeBundle -ItemType Directory
-        $volumeManifest = @{
-            Files = [Collections.Generic.List[object]]::new()
-            Missing = [Collections.Generic.List[string]]::new()
-            Errors = [Collections.Generic.List[string]]::new()
-        }
-        Copy-MemLabsWindowsSetupEvidence -WindowsRoot '\\?\Volume{11111111-1111-1111-1111-111111111111}\Windows' `
-            -Bundle $volumeBundle -PrivateRoot $aclPath -Manifest $volumeManifest
-        Assert-True ($volumeManifest.Files.Count -eq 9 -and $volumeManifest.Errors.Count -eq 2 -and
-            ($volumeManifest.Errors -join ' ') -notmatch 'wildcard') 'Literal volume-GUID event paths failed their production evidence pipeline.'
-    }
-    finally { Set-Item -Path Function:\Get-MemLabsOfflineSetupSourcePath -Value $savedSourceResolver }
 }
 finally {
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop
