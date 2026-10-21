@@ -580,6 +580,79 @@ dump before sharing. Validate native-payload compilation, target restrictions,
 deadline/unknown-outcome behavior, and verified offline transfer using
 `vmbuild\tools\Test-WindowsVmFirstLogonDump.ps1` on both PowerShell engines.
 
+### Guided, disposable first-logon image comparison
+
+Use this when investigating whether per-user SFAP credential-cache state carried
+through `CopyProfile` contributes to a fresh Windows 11 first-logon stall.
+This is an experiment, **not a production image fix or a readiness bypass**.
+
+Stop deployment/test retry loops. In elevated PowerShell on the lab's Hyper-V
+host, run:
+
+```powershell
+Set-Location E:\memlabs\vmbuild
+.\tools\Test-WindowsFirstLogonImage.ps1 -VmName ADA-W11CLIENT1
+```
+
+No guest-console commands, manual registry changes, or manual VHDX edits are
+needed. The selected existing VM is only a reference for the cached OS identity,
+memory/CPU, secure boot/TPM, and existing virtual switch. Its power state,
+configuration, and disks are not changed.
+
+The tool:
+
+1. Finds the OS-ID match in the locally cached file lists under `azureFiles`
+   (or an already loaded `Common.AzureFilesPath`). If there is no unique match,
+   it presents available Windows 11 images for a simple numbered selection.
+   An explicit `-SourceVhdxPath` is available when the image lives elsewhere.
+2. Inspects the chosen source **read-only** and rejects attached/differencing
+   disks, completed/failed VM OS disks, non-Windows-11 images, missing
+   `CopyProfile`, and answer files requesting a domain join. A fresh generalized
+   base image is required: cold-booting an already-failed VM would confound
+   this comparison.
+3. Makes and hash-verifies two independent VHDX copies. Both receive matched
+   offline inspection/mounting. The control keeps its SFAP state. Only the
+   disposable test copy has known `cache0.bin`/`cache1.bin` files and their empty
+   SFAP directories removed from its local profiles. Unexpected files, reparse
+   points, or path mismatches stop the test instead of broadening deletion.
+4. Creates fresh `ML-OOBE-C-*` and `ML-OOBE-T-*` VMs with new identities, runs
+   them **one at a time**, and invokes the existing live/offline diagnostic
+   collector automatically with saved MemLabs credentials.
+5. Saves `FirstLogonComparison.zip` containing a comparison report and the two
+   diagnostic ZIPs, **not** the large VHDX copies. The source hash is checked
+   again before reporting completion.
+
+The trial VMs use the reference VM's existing lab virtual switch; they are
+isolated **copies**, not a separate isolated network. New adapters receive new
+MAC addresses. The guided path requires one untagged adapter and does not
+guess special VLAN/network settings. No MemLabs DSC, computer rename, or
+domain-join phases run.
+
+Allow twice the base VHDX file size plus 2 GiB of free space, and time for two
+fresh Windows boots, image copies/hashes, and diagnostic collection. Progress
+steps and operation limits are printed. The default workspace is a protected
+`FirstLogonComparisons` sibling directory beside the original VM; `-Destination`
+can select another local drive.
+
+After evidence and final Off state are verified, the tool removes only its own
+tagged trial VMs and disks. `-KeepTrialVMs` retains them Off for further inspection.
+Unknown startup/operation outcomes or failed ownership checks stop the comparison
+and preserve unverified resources at their reported paths. The original VM and
+golden image are never cleanup targets. `-WhatIf` performs no credential loading,
+mounting, copying, startup, or removal.
+
+A cleaned copy becoming ready while the control reproduces the specific
+FirstLogonAnim stall supports the cache hypothesis **in that trial only**.
+Both ready means the original failure was not reproduced; both stalled means
+cache removal alone did not resolve it. Other/unreadable/transitioning setup
+states are inconclusive. Review the supplied diagnostics before adopting any
+image-preparation change.
+
+Run `vmbuild\tools\Test-WindowsFirstLogonImageComparison.ps1` on PowerShell 5.1
+and 7 to validate discovery, source/copy safeguards, matched create/cleanup
+contracts, sequential execution, verdicts, and real cold-start parameter binding
+using synthetic files and mocked VM operations.
+
 ### Explicit OOBE-only recovery trial
 
 Repair is **not** the normal deployment strategy. The client setup gates above
