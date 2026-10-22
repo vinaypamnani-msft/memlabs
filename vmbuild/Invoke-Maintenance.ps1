@@ -3,14 +3,30 @@ param (
     # Re-entry point: the removal relaunches this script with this switch so the uninstaller runs in
     # its own process and can never delay the VMBuild launch that is waiting on maintenance.
     [switch] $WindowsAdminCenterRemovalOnly,
-    [switch] $ScheduledTask
+    [switch] $ScheduledTask,
+    [switch] $BackgroundUpgradeWorker,
+    [switch] $UserWinGetTask
 )
 
 $ErrorActionPreference = 'Continue'
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $logsPath = Join-Path $scriptPath 'logs'
-$logPrefix = if ($WindowsAdminCenterRemovalOnly) { 'WacRemoval' } elseif ($ScheduledTask) { 'ScheduledMaintenance' } else { 'Maintenance' }
+$logPrefix = if ($WindowsAdminCenterRemovalOnly) {
+    'WacRemoval'
+}
+elseif ($UserWinGetTask) {
+    'UserWinGetMaintenance'
+}
+elseif ($BackgroundUpgradeWorker) {
+    'BackgroundMaintenance'
+}
+elseif ($ScheduledTask) {
+    'ScheduledMaintenance'
+}
+else {
+    'Maintenance'
+}
 $logFile = Join-Path $logsPath "${logPrefix}_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 if (-not (Test-Path $logsPath)) {
@@ -175,6 +191,43 @@ function Install-MemLabsMaintenanceScheduledTask {
     }
 
     Write-LogMessage "Scheduled task '$TaskPath$TaskName' is current (daily at 11:00 PM; missed starts run when available)."
+}
+
+function Install-MemLabsUserWinGetScheduledTask {
+    [CmdletBinding()]
+    param (
+        [string] $TaskName = 'MemLabs User WinGet Maintenance',
+        [string] $TaskPath = '\',
+        [string] $MaintenanceScriptPath = $PSCommandPath,
+        [string] $UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    )
+
+    if (-not (Test-Path -LiteralPath $MaintenanceScriptPath -PathType Leaf)) {
+        throw "Maintenance script not found at '$MaintenanceScriptPath'."
+    }
+    if ([string]::IsNullOrWhiteSpace($UserId)) {
+        throw 'The current-user WinGet maintenance task requires a user identity.'
+    }
+
+    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -UserWinGetTask' -f $MaintenanceScriptPath
+    $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments -WorkingDirectory (Split-Path -Parent $MaintenanceScriptPath)
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserId
+    $trigger.Delay = 'PT2M'
+    $principal = New-ScheduledTaskPrincipal -UserId $UserId -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    $definition = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+        -Description 'Updates WinGet-managed MemLabs host applications for the signed-in user at most once per day.'
+
+    Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -InputObject $definition -Force -ErrorAction Stop | Out-Null
+
+    $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+    $registeredAction = @($task.Actions)[0]
+    if ($null -eq $registeredAction -or $registeredAction.Execute -ne $powerShellPath -or $registeredAction.Arguments -ne $arguments) {
+        throw "Scheduled task '$TaskPath$TaskName' did not retain the expected current-user WinGet action."
+    }
+
+    Write-LogMessage "Scheduled task '$TaskPath$TaskName' is current for '$UserId' (two minutes after logon; upgrades run at most once per 24 hours)."
 }
 
 function Get-WindowsAdminCenterRemovalLockPath {
@@ -1129,7 +1182,7 @@ function Invoke-WinGetMaintenance {
     if (-not $winget) {
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
         Write-LogMessage "WinGet is unavailable for '$identity' (session=$([Diagnostics.Process]::GetCurrentProcess().SessionId), LOCALAPPDATA='$env:LOCALAPPDATA'). Skipping WinGet package upgrades. WinGet/App Installer must be installed and registered for the maintenance task's user, not only an interactive administrator. Verify Get-Command winget.exe and Get-AppxPackage Microsoft.DesktopAppInstaller under that identity." -Level 'WARNING'
-        return
+        return $false
     }
 
     $arguments = @(
@@ -1216,7 +1269,7 @@ function Invoke-WinGetMaintenance {
 
         Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wingetScriptPath -WindowStyle Normal
         Write-LogMessage "WinGet package upgrades launched in a new window (non-blocking). Full output: $wingetLogFile"
-        return
+        return $true
     }
 
     $wingetStarted = Get-Date
@@ -1235,7 +1288,7 @@ function Invoke-WinGetMaintenance {
     # WinGet uses this documented HRESULT when the installed build is already current.
     if ($exitCode -eq -1978335189) {
         Write-LogMessage "All WinGet-matched packages are already current. Full output: $wingetLogFile"
-        return
+        return $true
     }
 
     if ($exitCode -ne 0) {
@@ -1245,6 +1298,75 @@ function Invoke-WinGetMaintenance {
     }
 
     Write-LogMessage "WinGet package upgrades completed successfully. Full output: $wingetLogFile"
+    return $true
+}
+
+function Get-MemLabsUserWinGetTimestampPath {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw 'LOCALAPPDATA is unavailable; the current-user WinGet maintenance cadence cannot be tracked.'
+    }
+
+    return (Join-Path $env:LOCALAPPDATA 'MemLabs\winget_upgrade.timestamp')
+}
+
+function Test-MemLabsUserWinGetMaintenanceDue {
+    [CmdletBinding()]
+    param (
+        [string] $TimestampPath = (Get-MemLabsUserWinGetTimestampPath),
+        [ValidateRange(1, 168)]
+        [int] $MinimumIntervalHours = 24
+    )
+
+    if (-not (Test-Path -LiteralPath $TimestampPath -PathType Leaf)) {
+        return $true
+    }
+
+    try {
+        $lastRun = [DateTimeOffset]::Parse((Get-Content -LiteralPath $TimestampPath -Raw -ErrorAction Stop).Trim())
+    }
+    catch {
+        Write-LogMessage "The current-user WinGet timestamp '$TimestampPath' is invalid; maintenance will run: $_" -Level 'WARNING'
+        return $true
+    }
+
+    $elapsed = [DateTimeOffset]::Now - $lastRun
+    if ($elapsed.TotalSeconds -lt 0) {
+        Write-LogMessage "The current-user WinGet timestamp '$TimestampPath' is in the future; maintenance will run." -Level 'WARNING'
+        return $true
+    }
+
+    if ($elapsed -lt [TimeSpan]::FromHours($MinimumIntervalHours)) {
+        Write-LogMessage ("Current-user WinGet maintenance is not due (last successful run: {0}; {1:N1} hours ago)." -f $lastRun.ToString('yyyy-MM-dd HH:mm'), $elapsed.TotalHours)
+        return $false
+    }
+
+    return $true
+}
+
+function Invoke-MemLabsDueUserWinGetMaintenance {
+    [CmdletBinding()]
+    param (
+        [string] $TimestampPath = (Get-MemLabsUserWinGetTimestampPath),
+        [ValidateRange(1, 168)]
+        [int] $MinimumIntervalHours = 24
+    )
+
+    if (-not (Test-MemLabsUserWinGetMaintenanceDue -TimestampPath $TimestampPath -MinimumIntervalHours $MinimumIntervalHours)) {
+        return $false
+    }
+
+    $completed = Invoke-WinGetMaintenance -WaitForCompletion
+    if (-not $completed) {
+        return $false
+    }
+
+    $timestampDirectory = Split-Path -Parent $TimestampPath
+    if (-not (Test-Path -LiteralPath $timestampDirectory -PathType Container)) {
+        New-Item -Path $timestampDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+    [DateTimeOffset]::Now.ToString('o') | Set-Content -LiteralPath $TimestampPath -Encoding ascii -NoNewline -ErrorAction Stop
+    Write-LogMessage "Recorded successful current-user WinGet maintenance at '$TimestampPath'."
+    return $true
 }
 
 function ConvertTo-QuietUninstallCommand {
@@ -1525,7 +1647,7 @@ function Invoke-SevenZipMaintenance {
     else { Write-LogMessage '7-Zip is not installed on this host.' }
 
     if ($owner) {
-        Write-LogMessage "Chocolatey package '$owner' owns it, so the weekly 'choco upgrade all' keeps it current."
+        Write-LogMessage "Chocolatey package '$owner' owns it, so the daily 'choco upgrade all' keeps it current."
     }
     elseif (-not (Test-ChocoAvailable)) {
         Write-LogMessage 'No Chocolatey package owns 7-Zip and the CLI is missing, so nothing on this host can update it. Its currency is UNKNOWN, not current.' -Level 'WARNING'
@@ -1533,10 +1655,10 @@ function Invoke-SevenZipMaintenance {
     else {
         # MEASURED on a lab host 2026-09-01: 7-Zip 24.08 with InstallSource '<repo>\vmbuild\azureFiles\tools\'
         # and no package owning it, so 'choco upgrade all' could never reach it. Adopting it is what
-        # puts it under the existing weekly upgrade; measured to take 24.08 to 26.02 in place.
+        # puts it under the existing daily upgrade; measured to take 24.08 to 26.02 in place.
         # 7zip.install, never 7zip.portable: portable only shims chocolatey\bin, which Get-SevenZipPath
         # reaches last, so a stale Program Files copy would keep winning and the upgrades go unused.
-        Write-LogMessage 'No Chocolatey package owns 7-Zip. Adopting it so the weekly upgrade covers it...'
+        Write-LogMessage 'No Chocolatey package owns 7-Zip. Adopting it so the daily upgrade covers it...'
         & choco install 7zip.install -y | Out-Null
         $chocoRc = $LASTEXITCODE
         Write-LogMessage "choco install 7zip.install returned exit code: $chocoRc"
@@ -1951,23 +2073,23 @@ function Invoke-RdcManMaintenance {
     Write-LogMessage 'RDCMan maintenance completed.'
 }
 
-function Invoke-WeeklyUpgradesCore {
+function Invoke-DailyUpgradesCore {
     param (
         [switch] $WaitForCompletion,
         [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade'
     )
 
-    Write-LogMessage 'Starting weekly upgrades...'
+    Write-LogMessage 'Starting daily upgrades...'
 
     if (-not (Test-ChocoAvailable)) {
-        Write-LogMessage 'Chocolatey CLI not found. Skipping weekly upgrades.' -Level 'WARNING'
+        Write-LogMessage 'Chocolatey CLI not found. Skipping daily upgrades.' -Level 'WARNING'
         return
     }
 
     $ps7Flag = Join-Path $env:ProgramData 'memlabs\ps7_upgrade.timestamp'
     $chocoAllFlag = Join-Path $env:ProgramData 'memlabs\choco_all_upgrade.timestamp'
     $now = Get-Date
-    $weeklyInterval = [TimeSpan]::FromDays(7)
+    $dailyInterval = [TimeSpan]::FromDays(1)
 
     # Ensure the directory exists
     $flagDir = Join-Path $env:ProgramData 'memlabs'
@@ -1978,7 +2100,7 @@ function Invoke-WeeklyUpgradesCore {
         $lastRun = Get-Date (Get-Content $ps7Flag -ErrorAction SilentlyContinue)
         $elapsed = $now - $lastRun
         Write-LogMessage "Last PowerShell 7 upgrade: $($lastRun.ToString('yyyy-MM-dd HH:mm')) ($([int]$elapsed.TotalDays) days ago)"
-        if ($elapsed -lt $weeklyInterval) {
+        if ($elapsed -lt $dailyInterval) {
             $doPs7Upgrade = $false
         }
     }
@@ -1988,7 +2110,7 @@ function Invoke-WeeklyUpgradesCore {
         $lastChocoRun = Get-Date (Get-Content $chocoAllFlag -ErrorAction SilentlyContinue)
         $chocoElapsed = $now - $lastChocoRun
         Write-LogMessage "Last Chocolatey upgrade all: $($lastChocoRun.ToString('yyyy-MM-dd HH:mm')) ($([int]$chocoElapsed.TotalDays) days ago)"
-        if ($chocoElapsed -lt $weeklyInterval) {
+        if ($chocoElapsed -lt $dailyInterval) {
             $doChocoUpgrade = $false
         }
     }
@@ -2044,7 +2166,7 @@ function Invoke-WeeklyUpgradesCore {
         }
     }
     else {
-        Write-LogMessage 'PowerShell 7 upgrade skipped (less than 7 days since last run).'
+        Write-LogMessage 'PowerShell 7 upgrade skipped (less than 24 hours since last run).'
     }
 
     if ($doChocoUpgrade) {
@@ -2075,7 +2197,7 @@ function Invoke-WeeklyUpgradesCore {
                 Write-LogMessage 'Another Chocolatey upgrade is already running; skipping this scheduled upgrade.'
             }
 
-            Write-LogMessage 'Weekly upgrades maintenance completed.'
+            Write-LogMessage 'Daily upgrades maintenance completed.'
             return
         }
 
@@ -2125,13 +2247,13 @@ function Invoke-WeeklyUpgradesCore {
         Write-LogMessage 'Chocolatey upgrade all launched in a new window (non-blocking).'
     }
     else {
-        Write-LogMessage 'Chocolatey upgrade all skipped (less than 7 days since last run).'
+        Write-LogMessage 'Chocolatey upgrade all skipped (less than 24 hours since last run).'
     }
 
-    Write-LogMessage 'Weekly upgrades maintenance completed.'
+    Write-LogMessage 'Daily upgrades maintenance completed.'
 }
 
-function Invoke-WeeklyUpgrades {
+function Invoke-DailyUpgrades {
     param (
         [switch] $WaitForCompletion,
         [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade',
@@ -2145,11 +2267,52 @@ function Invoke-WeeklyUpgrades {
             [string] $MutexName
         )
 
-        Invoke-WeeklyUpgradesCore -WaitForCompletion:$Wait -UpgradeMutexName $MutexName
+        Invoke-DailyUpgradesCore -WaitForCompletion:$Wait -UpgradeMutexName $MutexName
     }
     if (-not $upgradeRan) {
-        Write-LogMessage 'A MemLabs test cycle is active; deferring weekly upgrades so the live PowerShell runtime is not replaced.' -Level 'WARNING'
+        Write-LogMessage 'A MemLabs test cycle is active; deferring daily upgrades so the live PowerShell runtime is not replaced.' -Level 'WARNING'
     }
+}
+
+function Invoke-MemLabsOrderedPackageMaintenance {
+    [CmdletBinding()]
+    param (
+        [switch] $IncludeWinGet,
+        [switch] $UseUserWinGetCadence,
+        [switch] $IncludeDailyUpgrades
+    )
+
+    if ($IncludeWinGet) {
+        if ($UseUserWinGetCadence) {
+            try { $null = Invoke-MemLabsDueUserWinGetMaintenance } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        }
+        else {
+            try { $null = Invoke-WinGetMaintenance -WaitForCompletion } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        }
+    }
+
+    if ($IncludeDailyUpgrades) {
+        try { Invoke-DailyUpgrades -WaitForCompletion } catch { Write-LogMessage "Daily upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+    }
+
+    try { Invoke-AspNetCoreMaintenance } catch { Write-LogMessage "ASP.NET Core maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+}
+
+function Start-MemLabsBackgroundUpgradeMaintenance {
+    [CmdletBinding()]
+    param (
+        [string] $MaintenanceScriptPath = $PSCommandPath
+    )
+
+    if (-not (Test-Path -LiteralPath $MaintenanceScriptPath -PathType Leaf)) {
+        throw "Maintenance script not found at '$MaintenanceScriptPath'."
+    }
+
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Normal -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$MaintenanceScriptPath`"", '-BackgroundUpgradeWorker'
+    )
+    Write-LogMessage 'WinGet, daily package upgrades, and final ASP.NET Core security verification launched in a visible background maintenance window.'
 }
 
 if ($WindowsAdminCenterRemovalOnly) {
@@ -2181,6 +2344,59 @@ if ($WindowsAdminCenterRemovalOnly) {
     exit $workerExitCode
 }
 
+if ($BackgroundUpgradeWorker -or $UserWinGetTask) {
+    $workerStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $workerName = if ($UserWinGetTask) { 'Current-user WinGet maintenance task' } else { 'Background upgrade maintenance worker' }
+    if ($BackgroundUpgradeWorker) {
+        try { $Host.UI.RawUI.WindowTitle = 'MemLabs - Background Maintenance' } catch {}
+    }
+
+    Write-LogMessage '========================================'
+    Write-LogMessage "$workerName started"
+    Write-LogMessage "Script path: $scriptPath"
+    Write-LogMessage "Log file: $logFile"
+    Write-LogMessage '========================================'
+
+    $workerState = [pscustomobject]@{ PackagePhasesRan = $false }
+    $workerRan = Invoke-WithMemLabsMaintenanceMutex -TimeoutSeconds 120 -ScriptBlock {
+        $workerState.PackagePhasesRan = Invoke-WithMemLabsMaintenanceMutex -Name 'Global\MemLabs_ChocolateyUpgrade' -TimeoutSeconds 120 -ScriptBlock {
+            Invoke-MemLabsOrderedPackageMaintenance -IncludeWinGet -UseUserWinGetCadence -IncludeDailyUpgrades:$BackgroundUpgradeWorker
+        }
+    }
+
+    if (-not $workerRan) {
+        Write-LogMessage 'Another host maintenance run remained active for 120 seconds; skipping this background worker.' -Level 'WARNING'
+    }
+    elseif (-not $workerState.PackagePhasesRan) {
+        Write-LogMessage 'Another package operation remained active for 120 seconds; skipping this background worker.' -Level 'WARNING'
+    }
+
+    $workerStopwatch.Stop()
+    $workerResult = if ($script:MaintenanceHadFailure) {
+        'FAILED'
+    }
+    elseif (-not $workerRan -or -not $workerState.PackagePhasesRan) {
+        'SKIPPED'
+    }
+    else {
+        'SUCCESS'
+    }
+    $workerResultLevel = if ($workerResult -eq 'FAILED') { 'ERROR' } elseif ($workerResult -eq 'SKIPPED') { 'WARNING' } else { 'INFO' }
+
+    Write-LogMessage '========================================'
+    Write-LogMessage "$workerName completed"
+    Write-LogMessage ("Maintenance result: {0}; elapsed: {1:N1}s" -f $workerResult, $workerStopwatch.Elapsed.TotalSeconds) -Level $workerResultLevel
+    Write-LogMessage "Log file: $logFile"
+    Write-LogMessage '========================================'
+
+    if ($BackgroundUpgradeWorker) {
+        Write-Host 'This maintenance window will close in 10 seconds.'
+        Start-Sleep -Seconds 10
+    }
+    if ($script:MaintenanceHadFailure) { exit 1 }
+    exit 0
+}
+
 $maintenanceStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 Write-LogMessage '========================================' 
 Write-LogMessage 'Maintenance script started'
@@ -2197,6 +2413,7 @@ Write-LogMessage '========================================'
 if (-not $ScheduledTask) {
     try { Invoke-MemLabsFileAssociationMaintenance } catch { Write-LogMessage "File association maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
     try { Install-MemLabsMaintenanceScheduledTask -MaintenanceScriptPath $PSCommandPath } catch { Write-LogMessage "Scheduled task maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+    try { Install-MemLabsUserWinGetScheduledTask -MaintenanceScriptPath $PSCommandPath } catch { Write-LogMessage "Current-user WinGet scheduled task maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 }
 
 $mutexTimeoutSeconds = if ($ScheduledTask) { 0 } else { 120 }
@@ -2208,14 +2425,18 @@ $maintenanceRan = Invoke-WithMemLabsMaintenanceMutex -TimeoutSeconds $mutexTimeo
         try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-WindowsAdminCenterRemoval } catch { Write-LogMessage "Windows Admin Center removal threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-        try { Invoke-WinGetMaintenance -WaitForCompletion } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-RdcManMaintenance } catch { Write-LogMessage "RDCMan maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         # Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
         try { Invoke-SevenZipMaintenance } catch { Write-LogMessage "7-Zip maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-MRemoteNGMaintenance -SkipUserConfiguration:$ScheduledTask } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-        try { Invoke-WeeklyUpgrades -WaitForCompletion } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-        try { Invoke-AspNetCoreMaintenance } catch { Write-LogMessage "ASP.NET Core maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        if ($ScheduledTask) {
+            Invoke-MemLabsOrderedPackageMaintenance -IncludeDailyUpgrades
+        }
     }
+}
+
+if (-not $ScheduledTask) {
+    try { Start-MemLabsBackgroundUpgradeMaintenance -MaintenanceScriptPath $PSCommandPath } catch { Write-LogMessage "Background upgrade maintenance launch threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 }
 
 if (-not $maintenanceRan) {

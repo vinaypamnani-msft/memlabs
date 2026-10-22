@@ -60,10 +60,13 @@ directories are preserved with a warning. SDK repair or external installers can
 restore removed dependencies; a subsequent maintenance run enforces removal again.
 
 Main maintenance logs and separate `AspNetCore_*.log` installer logs are under
-`vmbuild\logs`. Scheduled and interactive host maintenance both wait for
-package-manager upgrades before this final security check, so a background upgrade
-from that run cannot restore an old runtime after verification. Interactive
-VMBuild launches can therefore take longer.
+`vmbuild\logs`. The nightly SYSTEM task waits for machine package upgrades before
+the final security check. Because WinGet registration is user-scoped, interactive
+maintenance also registers a hidden **MemLabs User WinGet Maintenance** task that
+runs two minutes after logon, at most once per 24 hours. Normal VMBuild launches
+dispatch due WinGet and daily package work to a visible background maintenance
+window instead of waiting before opening the app. Both background entry points
+run the final ASP.NET Core security check after their package work.
 Applications already using a runtime may require restarting to load patched
 files, and a vulnerability report may not clear until its next inventory scan.
 Validate without changing host packages using

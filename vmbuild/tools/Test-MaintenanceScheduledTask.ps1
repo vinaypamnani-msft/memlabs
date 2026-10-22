@@ -52,11 +52,13 @@ if (@($parseErrors).Count -ne 0) {
 $wantedFunctions = @(
     'Get-WindowsAdminCenterRemovalLockPath',
     'Install-MemLabsMaintenanceScheduledTask',
+    'Install-MemLabsUserWinGetScheduledTask',
     'Invoke-GitMaintenance',
-    'Invoke-WeeklyUpgrades',
-    'Invoke-WeeklyUpgradesCore',
+    'Invoke-DailyUpgrades',
+    'Invoke-DailyUpgradesCore',
     'Invoke-WithMemLabsMaintenanceMutex',
     'Invoke-WithMemLabsRuntimeUpgradeLease',
+    'Start-MemLabsBackgroundUpgradeMaintenance',
     'Test-ChocoSuccessCode'
 )
 $loadedFunctions = @()
@@ -93,8 +95,14 @@ function New-ScheduledTaskAction {
 }
 
 function New-ScheduledTaskTrigger {
-    param ([switch] $Daily, [datetime] $At)
-    $script:Captured.Trigger = [pscustomobject]@{ Daily = $Daily.IsPresent; At = $At }
+    param ([switch] $Daily, [datetime] $At, [switch] $AtLogOn, [string] $User)
+    $script:Captured.Trigger = [pscustomobject]@{
+        Daily = $Daily.IsPresent
+        At = $At
+        AtLogOn = $AtLogOn.IsPresent
+        User = $User
+        Delay = $null
+    }
     return $script:Captured.Trigger
 }
 
@@ -202,22 +210,53 @@ try {
     Assert-Equal 'MemLabs Host Maintenance' $script:Captured.Registration.TaskName 'task has the stable maintenance name'
     Assert-Equal $true $script:Captured.Registration.Force 'task registration is idempotent'
 
+    Install-MemLabsUserWinGetScheduledTask -MaintenanceScriptPath $fixtureScript -UserId 'CONTOSO\labadmin'
+
+    $expectedUserArguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -UserWinGetTask' -f $fixtureScript
+    Assert-Equal $expectedPowerShell $script:Captured.Action.Execute 'user task uses inbox Windows PowerShell'
+    Assert-Equal $expectedUserArguments $script:Captured.Action.Arguments 'user task runs hidden through its dedicated entry point'
+    Assert-Equal $true $script:Captured.Trigger.AtLogOn 'user task is triggered at logon'
+    Assert-Equal 'CONTOSO\labadmin' $script:Captured.Trigger.User 'user task trigger targets the registering user'
+    Assert-Equal 'PT2M' $script:Captured.Trigger.Delay 'user task waits two minutes after logon'
+    Assert-Equal 'CONTOSO\labadmin' $script:Captured.Principal.UserId 'user task runs as the registering user'
+    Assert-Equal 'Interactive' $script:Captured.Principal.LogonType 'user task uses the interactive user token'
+    Assert-Equal 'Highest' $script:Captured.Principal.RunLevel 'user task runs elevated'
+    Assert-Equal '02:00:00' $script:Captured.Settings.ExecutionTimeLimit.ToString() 'user task execution is bounded'
+    Assert-Equal 'MemLabs User WinGet Maintenance' $script:Captured.Registration.TaskName 'user task has the stable maintenance name'
+
     $script:CorruptReadBack = $true
     Assert-Throws { Install-MemLabsMaintenanceScheduledTask -MaintenanceScriptPath $fixtureScript } 'a corrupted registered action fails read-back verification'
+    Assert-Throws { Install-MemLabsUserWinGetScheduledTask -MaintenanceScriptPath $fixtureScript -UserId 'CONTOSO\labadmin' } 'a corrupted user-task action fails read-back verification'
     Assert-Throws { Install-MemLabsMaintenanceScheduledTask -MaintenanceScriptPath (Join-Path $fixtureRoot 'missing.ps1') } 'a missing maintenance script cannot create a task'
+    $script:CorruptReadBack = $false
 
     $sourceText = [System.IO.File]::ReadAllText($sourcePath)
     $userRoutePattern = '(?s)if \(-not \$ScheduledTask\) \{\s+try \{ Invoke-MemLabsFileAssociationMaintenance.*?Install-MemLabsMaintenanceScheduledTask'
-    Assert-Equal $true $sourceText.Contains("elseif (`$ScheduledTask) { 'ScheduledMaintenance' }") 'scheduled runs write distinct ScheduledMaintenance logs'
+    Assert-Equal $true $sourceText.Contains("'ScheduledMaintenance'") 'scheduled runs write distinct ScheduledMaintenance logs'
+    Assert-Equal $true $sourceText.Contains("'UserWinGetMaintenance'") 'current-user task writes distinct maintenance logs'
+    Assert-Equal $true $sourceText.Contains("'BackgroundMaintenance'") 'interactive upgrade worker writes distinct maintenance logs'
     Assert-Equal $true $sourceText.Contains("Invocation mode: Scheduled task '\MemLabs Host Maintenance'") 'scheduled logs identify the task and invocation mode'
     Assert-Equal $true $sourceText.Contains('Maintenance result: {0}; elapsed: {1:N1}s') 'maintenance logs end with an explicit result and elapsed time'
     Assert-Equal $true ([regex]::IsMatch($sourceText, $userRoutePattern)) 'scheduled mode bypasses file association and task self-replacement'
     Assert-Equal $true $sourceText.Contains('Invoke-GitMaintenance -SkipGarbageCollection:$ScheduledTask') 'scheduled mode bypasses repository garbage collection'
     Assert-Equal $true $sourceText.Contains('Invoke-MRemoteNGMaintenance -SkipUserConfiguration:$ScheduledTask') 'scheduled mode bypasses mRemoteNG user-profile writes'
-    Assert-Equal $true $sourceText.Contains('Invoke-WeeklyUpgrades -WaitForCompletion }') 'all host launches wait for weekly upgrades before security verification'
-    Assert-Equal $true $sourceText.Contains('Invoke-WinGetMaintenance -WaitForCompletion }') 'all host launches wait for WinGet before security verification'
+    Assert-Equal $true $sourceText.Contains('Invoke-MemLabsOrderedPackageMaintenance -IncludeDailyUpgrades') 'scheduled maintenance keeps daily package upgrades before security verification'
+    Assert-Equal $true $sourceText.Contains('Invoke-MemLabsOrderedPackageMaintenance -IncludeWinGet -UseUserWinGetCadence -IncludeDailyUpgrades:$BackgroundUpgradeWorker') 'background workers use daily package cadence and preserve security ordering'
+    Assert-Equal $true $sourceText.Contains('Start-MemLabsBackgroundUpgradeMaintenance -MaintenanceScriptPath $PSCommandPath') 'interactive maintenance dispatches upgrades to the background worker'
     Assert-Equal $true $sourceText.Contains("-Name 'Global\MemLabs_ChocolateyUpgrade' -TimeoutSeconds `$mutexTimeoutSeconds") 'all package-mutating maintenance phases share the Chocolatey mutex'
     Assert-Equal 3 ([regex]::Matches($sourceText, 'Get-WindowsAdminCenterRemovalLockPath').Count) 'WAC launcher and worker use the shared lock path helper'
+
+    $script:AllowDetachedUpgrade = $true
+    $script:StartedProcess = $null
+    try {
+        Start-MemLabsBackgroundUpgradeMaintenance -MaintenanceScriptPath $fixtureScript
+    }
+    finally {
+        $script:AllowDetachedUpgrade = $false
+    }
+    Assert-Equal 'powershell.exe' $script:StartedProcess.FilePath 'interactive maintenance launches a Windows PowerShell background worker'
+    Assert-Equal 'Normal' $script:StartedProcess.WindowStyle 'interactive background maintenance remains visible'
+    Assert-Equal $true (($script:StartedProcess.ArgumentList -join ' ') -like '*-BackgroundUpgradeWorker*') 'interactive worker uses its dedicated entry point'
 
     Set-Variable -Name scriptPath -Value $RootPath -Scope Script
     $script:GitCalls = 0
@@ -232,10 +271,24 @@ try {
 
     $flagDirectory = Join-Path $fixtureRoot 'memlabs'
     $null = New-Item -Path $flagDirectory -ItemType Directory -Force
-    (Get-Date).ToString('o') | Out-File (Join-Path $flagDirectory 'ps7_upgrade.timestamp') -Encoding ascii -NoNewline
+    $ps7Flag = Join-Path $flagDirectory 'ps7_upgrade.timestamp'
     $chocoFlag = Join-Path $flagDirectory 'choco_all_upgrade.timestamp'
     $upgradeTestMutexName = 'Global\MemLabs_ChocolateyUpgrade_Test_{0}' -f [guid]::NewGuid().ToString('N')
     $testMutationMutexName = 'Global\MemLabsTestMutationLock_Test_{0}' -f [guid]::NewGuid().ToString('N')
+
+    (Get-Date).AddHours(-23).ToString('o') | Out-File $ps7Flag -Encoding ascii -NoNewline
+    (Get-Date).AddHours(-23).ToString('o') | Out-File $chocoFlag -Encoding ascii -NoNewline
+    $script:ChocoCalls = @()
+    Invoke-DailyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
+    Assert-Equal 0 $script:ChocoCalls.Count 'daily upgrades remain gated before 24 hours'
+
+    (Get-Date).ToString('o') | Out-File $ps7Flag -Encoding ascii -NoNewline
+    (Get-Date).AddHours(-25).ToString('o') | Out-File $chocoFlag -Encoding ascii -NoNewline
+    $script:ChocoCalls = @()
+    Invoke-DailyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
+    Assert-Equal 1 $script:ChocoCalls.Count 'Chocolatey upgrades run after the 24-hour gate expires'
+    Assert-Equal 'upgrade all -y --ignore-checksums' ($script:ChocoCalls[0] -join ' ') 'daily Chocolatey uses the expected upgrade command'
+    Remove-Item -LiteralPath $chocoFlag -Force
 
     $mutexName = 'Global\MemLabs_HostMaintenance_Test_{0}' -f [guid]::NewGuid().ToString('N')
     $mutexReady = Join-Path $fixtureRoot 'mutex-ready'
@@ -279,15 +332,15 @@ try {
 
         $script:ChocoCalls = @()
         $script:MaintenanceHadFailure = $false
-        Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $mutexName -TestMutationMutexName $testMutationMutexName
-        Assert-Equal 0 $script:ChocoCalls.Count 'scheduled weekly maintenance skips a concurrent Chocolatey upgrade'
+        Invoke-DailyUpgrades -WaitForCompletion -UpgradeMutexName $mutexName -TestMutationMutexName $testMutationMutexName
+        Assert-Equal 0 $script:ChocoCalls.Count 'scheduled daily maintenance skips a concurrent Chocolatey upgrade'
         Assert-Equal $false (Test-Path -LiteralPath $chocoFlag) 'a skipped scheduled upgrade does not stamp completion'
         Assert-Equal $false $script:MaintenanceHadFailure 'a concurrent Chocolatey upgrade is not reported as maintenance failure'
 
         $script:ChocoCalls = @()
         $script:MaintenanceHadFailure = $false
-        Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $mutexName
-        Assert-Equal 0 $script:ChocoCalls.Count 'scheduled weekly maintenance defers while a test cycle owns the host mutation lease'
+        Invoke-DailyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $mutexName
+        Assert-Equal 0 $script:ChocoCalls.Count 'scheduled daily maintenance defers while a test cycle owns the host mutation lease'
         Assert-Equal $false (Test-Path -LiteralPath $chocoFlag) 'a deferred runtime upgrade does not stamp completion'
         Assert-Equal $false $script:MaintenanceHadFailure 'an active test cycle is not reported as maintenance failure'
 
@@ -325,9 +378,9 @@ try {
         $script:ChocoCalls = @()
         $script:ChocoExitCode = $successCode
         $script:MaintenanceHadFailure = $false
-        Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
-        Assert-Equal 1 $script:ChocoCalls.Count "scheduled weekly maintenance invokes Chocolatey once for success code $successCode"
-        Assert-Equal 'upgrade all -y --ignore-checksums' ($script:ChocoCalls[0] -join ' ') "scheduled weekly maintenance runs upgrade all directly for success code $successCode"
+        Invoke-DailyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
+        Assert-Equal 1 $script:ChocoCalls.Count "scheduled daily maintenance invokes Chocolatey once for success code $successCode"
+        Assert-Equal 'upgrade all -y --ignore-checksums' ($script:ChocoCalls[0] -join ' ') "scheduled daily maintenance runs upgrade all directly for success code $successCode"
         Assert-Equal $true (Test-Path -LiteralPath $chocoFlag -PathType Leaf) "success code $successCode stamps completion time"
         Assert-Equal $false $script:MaintenanceHadFailure "success code $successCode leaves maintenance successful"
     }
@@ -337,34 +390,34 @@ try {
     $script:ChocoCalls = @()
     $script:ChocoExitCode = 9
     $script:MaintenanceHadFailure = $false
-    Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
-    Assert-Equal 1 $script:ChocoCalls.Count 'failed scheduled weekly maintenance invokes Chocolatey once'
+    Invoke-DailyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
+    Assert-Equal 1 $script:ChocoCalls.Count 'failed scheduled daily maintenance invokes Chocolatey once'
     Assert-Equal $false (Test-Path -LiteralPath $chocoFlag) 'failed scheduled upgrade does not stamp completion'
     Assert-Equal $true $script:MaintenanceHadFailure 'failed scheduled upgrade fails the maintenance result'
 
-    (Get-Date).AddDays(-8).ToString('o') | Out-File (Join-Path $flagDirectory 'ps7_upgrade.timestamp') -Encoding ascii -NoNewline
+    (Get-Date).AddHours(-25).ToString('o') | Out-File $ps7Flag -Encoding ascii -NoNewline
     (Get-Date).ToString('o') | Out-File $chocoFlag -Encoding ascii -NoNewline
     $script:ChocoCalls = @()
     $script:ChocoExitCode = 9
     $script:MaintenanceHadFailure = $false
-    Invoke-WeeklyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
+    Invoke-DailyUpgrades -WaitForCompletion -UpgradeMutexName $upgradeTestMutexName -TestMutationMutexName $testMutationMutexName
     Assert-Equal 1 $script:ChocoCalls.Count 'failed scheduled PowerShell upgrade invokes Chocolatey once'
     Assert-Equal 'upgrade pwsh -y' ($script:ChocoCalls[0] -join ' ') 'scheduled PowerShell upgrade uses the expected command'
     Assert-Equal $true $script:MaintenanceHadFailure 'failed scheduled PowerShell upgrade fails the maintenance result'
 
-    (Get-Date).ToString('o') | Out-File (Join-Path $flagDirectory 'ps7_upgrade.timestamp') -Encoding ascii -NoNewline
+    (Get-Date).ToString('o') | Out-File $ps7Flag -Encoding ascii -NoNewline
     Remove-Item -LiteralPath $chocoFlag -Force -ErrorAction SilentlyContinue
     $script:AllowDetachedUpgrade = $true
     $script:StartedProcess = $null
     try {
-        Invoke-WeeklyUpgrades -TestMutationMutexName $testMutationMutexName
+        Invoke-DailyUpgrades -TestMutationMutexName $testMutationMutexName
     }
     finally {
         $script:AllowDetachedUpgrade = $false
     }
-    Assert-Equal 'powershell' $script:StartedProcess.FilePath 'interactive weekly maintenance still launches non-blocking PowerShell'
+    Assert-Equal 'powershell' $script:StartedProcess.FilePath 'interactive daily maintenance still launches non-blocking PowerShell'
     $generatedScriptPath = Join-Path $fixtureRoot 'memlabs_choco_upgrade.ps1'
-    Assert-Equal $true (Test-Path -LiteralPath $generatedScriptPath -PathType Leaf) 'interactive weekly maintenance writes its child script'
+    Assert-Equal $true (Test-Path -LiteralPath $generatedScriptPath -PathType Leaf) 'interactive daily maintenance writes its child script'
     $generatedScript = [System.IO.File]::ReadAllText($generatedScriptPath)
     Assert-Equal $true $generatedScript.Contains('Global\MemLabs_ChocolateyUpgrade') 'interactive Chocolatey child uses the cross-session upgrade mutex'
     Assert-Equal $true $generatedScript.Contains('$mutex.WaitOne([TimeSpan]::FromSeconds(120))') 'interactive Chocolatey child waits for its parent to release the mutex'

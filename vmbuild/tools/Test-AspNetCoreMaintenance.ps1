@@ -578,7 +578,7 @@ try {
     Assert-Equal 1 $calls.Count 'the shared interactive/scheduled maintenance pipeline invokes the new phase'
     Assert-Equal $true ($calls[0].Extent.StartLineNumber -gt ($ast.FindAll({
                     param ($candidate)
-                    $candidate -is [System.Management.Automation.Language.CommandAst] -and $candidate.GetCommandName() -eq 'Invoke-WeeklyUpgrades'
+                    $candidate -is [System.Management.Automation.Language.CommandAst] -and $candidate.GetCommandName() -eq 'Invoke-DailyUpgrades'
                 }, $true) | Select-Object -Last 1).Extent.StartLineNumber) 'explicit servicing follows existing package-manager upgrades'
 }
 finally {

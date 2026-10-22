@@ -49,16 +49,26 @@ if (@($parseErrors).Count -ne 0) {
     exit 2
 }
 
-$functionNode = $ast.FindAll({
-        param ($node)
-        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -eq 'Invoke-WinGetMaintenance'
-    }, $true) | Select-Object -First 1
-if (-not $functionNode) {
-    Write-Host "SETUP FAIL: Invoke-WinGetMaintenance not found in $SourceFile" -ForegroundColor Red
+$wantedFunctions = @(
+    'Get-MemLabsUserWinGetTimestampPath',
+    'Invoke-MemLabsDueUserWinGetMaintenance',
+    'Invoke-WinGetMaintenance',
+    'Test-MemLabsUserWinGetMaintenanceDue'
+)
+$loadedFunctions = @()
+foreach ($functionNode in $ast.FindAll({
+            param ($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+        }, $true)) {
+    if ($wantedFunctions -notcontains $functionNode.Name) { continue }
+    . ([scriptblock]::Create($functionNode.Extent.Text))
+    $loadedFunctions += $functionNode.Name
+}
+$missingFunctions = @($wantedFunctions | Where-Object { $loadedFunctions -notcontains $_ })
+if ($missingFunctions.Count -gt 0) {
+    Write-Host "SETUP FAIL: functions not found in ${SourceFile}: $($missingFunctions -join ', ')" -ForegroundColor Red
     exit 2
 }
-. ([scriptblock]::Create($functionNode.Extent.Text))
 
 $script:WingetAvailable = $true
 $script:WingetCalls = @()
@@ -121,8 +131,10 @@ Write-Host ''
 
 $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('MemLabs WinGet maintenance test {0}' -f [guid]::NewGuid().ToString('N'))
 $savedTemp = $env:TEMP
+$savedLocalAppData = $env:LOCALAPPDATA
 $null = New-Item -Path $fixtureRoot -ItemType Directory -Force
 $env:TEMP = $fixtureRoot
+$env:LOCALAPPDATA = $fixtureRoot
 $script:logsPath = $fixtureRoot
 
 Reset-Fixture
@@ -190,14 +202,40 @@ try {
     $childParseErrors = $null
     [void] [System.Management.Automation.Language.Parser]::ParseInput($childScript, [ref] $childTokens, [ref] $childParseErrors)
     Assert-Equal 0 @($childParseErrors).Count 'generated interactive WinGet script parses successfully'
+
+    $timestampPath = Join-Path $fixtureRoot 'MemLabs\winget_upgrade.timestamp'
+    Reset-Fixture
+    $firstRun = Invoke-MemLabsDueUserWinGetMaintenance -TimestampPath $timestampPath
+    Assert-Equal $true $firstRun 'first current-user WinGet maintenance run is due'
+    Assert-Equal 1 $script:WingetCalls.Count 'first current-user run invokes WinGet'
+    Assert-Equal $true (Test-Path -LiteralPath $timestampPath -PathType Leaf) 'successful current-user maintenance records its cadence timestamp'
+
+    Reset-Fixture
+    $secondRun = Invoke-MemLabsDueUserWinGetMaintenance -TimestampPath $timestampPath
+    Assert-Equal $false $secondRun 'current-user WinGet maintenance is gated for 24 hours'
+    Assert-Equal 0 $script:WingetCalls.Count 'daily cadence gate avoids a duplicate WinGet invocation'
+
+    [DateTimeOffset]::Now.AddHours(-25).ToString('o') | Set-Content -LiteralPath $timestampPath -Encoding ascii -NoNewline
+    Reset-Fixture
+    $overdueRun = Invoke-MemLabsDueUserWinGetMaintenance -TimestampPath $timestampPath
+    Assert-Equal $true $overdueRun 'current-user WinGet maintenance runs after the daily gate expires'
+    Assert-Equal 1 $script:WingetCalls.Count 'overdue current-user maintenance invokes WinGet'
+
+    $missingTimestampPath = Join-Path $fixtureRoot 'unavailable\winget_upgrade.timestamp'
+    Reset-Fixture
+    $script:WingetAvailable = $false
+    $unavailableRun = Invoke-MemLabsDueUserWinGetMaintenance -TimestampPath $missingTimestampPath
+    Assert-Equal $false $unavailableRun 'unavailable WinGet does not report completed user maintenance'
+    Assert-Equal $false (Test-Path -LiteralPath $missingTimestampPath) 'unavailable WinGet does not advance the cadence timestamp'
 }
 finally {
     $env:TEMP = $savedTemp
+    $env:LOCALAPPDATA = $savedLocalAppData
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $sourceText = [System.IO.File]::ReadAllText($sourcePath)
-Assert-Equal $true $sourceText.Contains('Invoke-WinGetMaintenance -WaitForCompletion }') 'all host maintenance waits for WinGet before final security verification'
+Assert-Equal $true $sourceText.Contains('Invoke-MemLabsOrderedPackageMaintenance -IncludeWinGet -UseUserWinGetCadence -IncludeDailyUpgrades:$BackgroundUpgradeWorker') 'user and interactive workers preserve ordered security verification'
 
 Write-Host ''
 if ($script:Failures -gt 0) {
