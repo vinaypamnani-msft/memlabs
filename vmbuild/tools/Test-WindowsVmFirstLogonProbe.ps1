@@ -45,7 +45,14 @@ try {
     $script:ProcessCount = 1; $script:ThreadCount = 2; $script:OwnerFailure = $false
     $script:DisposedProcesses = 0; $script:QueryFamilyFailure = ''; $script:ProvisionedFailure = $false
     $script:PackageQueries = [Collections.Generic.List[string]]::new()
-    function Get-FixtureSetupState { [pscustomobject]@{ Version = 1; ProductType = 1; Ready = $false; Reason = 'OobeProcessesActive' } }
+    $script:SetupStateFails = $false
+    function Get-FixtureSetupState {
+        if ($script:SetupStateFails) {
+            return [pscustomobject]@{ Version = 1; ProductType = $null; Ready = $false; Reason = 'ProbeFailed';
+                Diagnostics = @('Synthetic Win32_OperatingSystem provider failure'); Detail = 'Synthetic Win32_OperatingSystem provider failure' }
+        }
+        [pscustomobject]@{ Version = 1; ProductType = 1; Ready = $false; Reason = 'OobeProcessesActive' }
+    }
     function Get-ItemProperty {
         param($LiteralPath, $Name, $ErrorAction)
         Assert-True ($LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\Cryptography' -and $Name -eq 'MachineGuid') 'The guest probe read unexpected registry data.'
@@ -134,6 +141,13 @@ try {
     $fixtureText = $fixtureText.Replace('$administrator = ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)', '$administrator = $script:Administrator')
     $guest = [scriptblock]::Create($fixtureText)
     $states = @(& $guest -Action State)
+    $script:SetupStateFails = $true
+    $failedState = @(& $guest -Action State)[0]
+    $script:SetupStateFails = $false
+    Assert-True ($failedState.Status -eq 'Partial' -and $failedState.Setup.Reason -eq 'ProbeFailed' -and
+        -not $failedState.Setup.Ready -and ($failedState.Errors -join ' ') -match 'Win32_OperatingSystem provider failure' -and
+        $failedState.Processes.Count -eq 0 -and $failedState.Services.Count -eq 0) `
+        'Unknown client type discarded its actual setup-query error or became successful evidence.'
     Assert-True ($states.Count -eq 1 -and $states[0].ReadOnly -and $states[0].Status -eq 'Complete' -and
         $states[0].Processes.Count -eq 1 -and $states[0].Processes[0].SessionId -eq 1 -and
         $states[0].Processes[0].OwnerSid -eq $script:DefaultSid -and $states[0].Processes[0].Threads.Count -eq 2 -and
@@ -274,6 +288,14 @@ try {
     $rpc = @{ VM = $vm; GuestCredential = $credential; GuestBlock = $block; Action = 'State' }
     $reply = Invoke-MemLabsFirstLogonGuestQuery @rpc
     Assert-True ($reply.ReadOnly -and $script:RpcCalls -eq 1) 'A valid live envelope was rejected or retried.'
+    $script:ReturnResult = $failedState
+    $failedReply = Invoke-MemLabsFirstLogonGuestQuery @rpc
+    Assert-True ($failedReply.Status -eq 'Partial' -and $failedReply.Setup.Reason -eq 'ProbeFailed' -and
+        ($failedReply.Errors -join ' ') -match 'Win32_OperatingSystem') 'The host rejected explicit failed-state diagnostics as an unsupported server.'
+    $script:ReturnResult = [Management.Automation.PSSerializer]::Deserialize([Management.Automation.PSSerializer]::Serialize($failedState))
+    $script:ReturnResult.Setup.Ready = $true
+    Assert-Throws { Invoke-MemLabsFirstLogonGuestQuery @rpc } 'scope or data limits'
+    $script:ReturnResult = $states[0]
     foreach ($invalid in @('Scope', 'ReadOnly', 'Version', 'Status')) {
         $script:ReturnResult = [Management.Automation.PSSerializer]::Deserialize([Management.Automation.PSSerializer]::Serialize($states[0]))
         switch ($invalid) {

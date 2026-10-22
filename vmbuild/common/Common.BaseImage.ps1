@@ -313,6 +313,339 @@ function Invoke-RemoveISOMount {
     }
 }
 
+function New-BaseImageAutoLogonPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$AnswerDocuments,
+        [Parameter(Mandatory = $true)][string]$UserName,
+        [switch]$AllowExisting,
+        [switch]$DisableAfterFirstLogon
+    )
+
+    if ([string]::IsNullOrWhiteSpace($UserName) -or $UserName -match '[\\@]') {
+        throw 'First-boot sign-in requires the existing local lab-administrator account name.'
+    }
+    $entries = [Collections.Generic.List[object]]::new()
+    $passwordTemplate = $null
+    $passwordElementSource = $null
+    $cleanupDescription = 'MemLabs disable first-boot autologon'
+    $cleanupCommand = 'cmd.exe /c reg.exe add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoLogonCount /t REG_DWORD /d 0 /f && reg.exe add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v AutoAdminLogon /t REG_SZ /d 0 /f'
+    foreach ($entry in $AnswerDocuments | Sort-Object @{ Expression = { $_.RelativePath -eq 'staging\Unattend.xml' }; Descending = $true }) {
+        $components = @($entry.Document.SelectNodes('//*[local-name()="settings" and @pass="oobeSystem"]/*[local-name()="component" and @name="Microsoft-Windows-Shell-Setup"]'))
+        if ($components.Count -ne 1) { throw 'Each available answer file must have one existing oobeSystem Shell-Setup component.' }
+        $component = $components[0]
+        $existingAuto = @($component.SelectNodes('*[local-name()="AutoLogon"]'))
+        if ($existingAuto.Count -gt 1 -or ($existingAuto.Count -and -not $AllowExisting)) {
+            throw 'An answer file already configures oobeSystem AutoLogon; this comparison is not applicable.'
+        }
+        $accounts = @($component.SelectNodes('*[local-name()="UserAccounts"]/*[local-name()="LocalAccounts"]/*[local-name()="LocalAccount"]') |
+            Where-Object { $node = $_.SelectSingleNode('*[local-name()="Name"]'); $node -and $node.InnerText -ieq $UserName })
+        if ($accounts.Count -ne 1) { throw 'The saved credential username does not uniquely match an existing local account configured by the image.' }
+        $group = $accounts[0].SelectSingleNode('*[local-name()="Group"]')
+        if (-not $group -or $group.InnerText -notmatch '(^|[,;])\s*Administrators\s*($|[,;])') {
+            throw 'The matching source account is not explicitly configured as a local administrator.'
+        }
+        $password = $accounts[0].SelectSingleNode('*[local-name()="Password"]')
+        if ($password) {
+            $value = $password.SelectSingleNode('*[local-name()="Value"]')
+            $plain = $password.SelectSingleNode('*[local-name()="PlainText"]')
+            if (-not $passwordTemplate -and $value -and -not [string]::IsNullOrWhiteSpace($value.InnerText) -and
+                $value.InnerText -notmatch 'SENSITIVE.*DELETED|^%.*%$' -and $plain -and $plain.InnerText -in @('true', 'false') -and
+                ($plain.InnerText -eq 'true' -or $value.InnerText -match '^[A-Za-z0-9+/]+={0,2}$')) {
+                $passwordTemplate = $password.CloneNode($true)
+                $passwordElementSource = $entry.RelativePath
+            }
+        }
+        $firstLogon = @($component.SelectNodes('*[local-name()="FirstLogonCommands"]'))
+        $cleanup = @()
+        $nextOrder = 1
+        if ($DisableAfterFirstLogon) {
+            if ($firstLogon.Count -gt 1) { throw 'The source has ambiguous FirstLogonCommands.' }
+            if ($firstLogon.Count) {
+                foreach ($command in @($firstLogon[0].SelectNodes('*[local-name()="SynchronousCommand"]'))) {
+                    $orderNode = $command.SelectSingleNode('*[local-name()="Order"]')
+                    $order = 0
+                    if (-not $orderNode -or -not [int]::TryParse($orderNode.InnerText, [ref]$order) -or $order -lt 1 -or $order -gt 500) {
+                        throw 'An existing first-logon command has an unsupported order.'
+                    }
+                    $nextOrder = [Math]::Max($nextOrder, $order + 1)
+                }
+                $cleanup = @($firstLogon[0].SelectNodes('*[local-name()="SynchronousCommand"]') |
+                    Where-Object { $description = $_.SelectSingleNode('*[local-name()="Description"]'); $description -and $description.InnerText -eq $cleanupDescription })
+                if ($cleanup.Count -gt 1 -or ($cleanup.Count -eq 1 -and
+                        $cleanup[0].SelectSingleNode('*[local-name()="CommandLine"]').InnerText -cne $cleanupCommand)) {
+                    throw 'An existing first-logon autologon cleanup command conflicts with the requested configuration.'
+                }
+                if (-not $cleanup.Count -and $nextOrder -gt 500) { throw 'No supported first-logon command order remains for autologon cleanup.' }
+            }
+        }
+        $entries.Add([pscustomobject]@{
+                Entry = $entry; Component = $component; ExistingAuto = $(if ($existingAuto.Count) { $existingAuto[0] } else { $null })
+                FirstLogon = $(if ($firstLogon.Count) { $firstLogon[0] } else { $null })
+                CleanupPresent = $cleanup.Count -eq 1; NextOrder = $nextOrder
+            })
+    }
+    if ($entries.Count -eq 0 -or -not $passwordTemplate) {
+        throw 'No usable existing account-password element was found in the source answer files. No password will be guessed, decoded, or reset.'
+    }
+    foreach ($item in $entries) {
+        if ($item.Component.NamespaceURI -cne $passwordTemplate.NamespaceURI) { throw 'The source password and target setup components use different XML namespaces.' }
+        if ($item.ExistingAuto) {
+            $auto = $item.ExistingAuto
+            if ($auto.SelectSingleNode('*[local-name()="Username"]').InnerText -cne $UserName -or
+                $auto.SelectSingleNode('*[local-name()="Domain"]').InnerText -ne '.' -or
+                $auto.SelectSingleNode('*[local-name()="Enabled"]').InnerText -ne 'true' -or
+                $auto.SelectSingleNode('*[local-name()="LogonCount"]').InnerText -ne '1' -or
+                $auto.SelectSingleNode('*[local-name()="Password"]/*[local-name()="PlainText"]').InnerText -cne $passwordTemplate.SelectSingleNode('*[local-name()="PlainText"]').InnerText -or
+                $auto.SelectSingleNode('*[local-name()="Password"]/*[local-name()="Value"]').InnerText -cne $passwordTemplate.SelectSingleNode('*[local-name()="Value"]').InnerText) {
+                throw 'Existing AutoLogon does not match the requested local-account configuration.'
+            }
+        }
+    }
+    return [pscustomobject]@{
+        Entries = $entries.ToArray(); UserName = $UserName; PasswordTemplate = $passwordTemplate
+        PasswordElementSource = $passwordElementSource; DisableAfterFirstLogon = [bool]$DisableAfterFirstLogon
+        CleanupCommand = $cleanupCommand; CleanupDescription = $cleanupDescription
+    }
+}
+
+function Write-BaseImageAutoLogonPlan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Plan)
+
+    $patched = [Collections.Generic.List[string]]::new()
+    foreach ($item in $Plan.Entries) {
+        $entry = $item.Entry; $document = $entry.Document; $component = $item.Component
+        if (-not $item.ExistingAuto) {
+            $auto = $document.CreateElement('AutoLogon', $component.NamespaceURI)
+            $null = $auto.AppendChild($document.ImportNode($Plan.PasswordTemplate, $true))
+            foreach ($setting in @(
+                    @{ Name = 'Domain'; Value = '.' }, @{ Name = 'Enabled'; Value = 'true' },
+                    @{ Name = 'LogonCount'; Value = '1' }, @{ Name = 'Username'; Value = $Plan.UserName }
+                )) {
+                $node = $document.CreateElement($setting.Name, $component.NamespaceURI)
+                $node.InnerText = $setting.Value
+                $null = $auto.AppendChild($node)
+            }
+            $null = $component.AppendChild($auto)
+        }
+        if ($Plan.DisableAfterFirstLogon -and -not $item.CleanupPresent) {
+            $firstLogon = $item.FirstLogon
+            if (-not $firstLogon) {
+                $firstLogon = $document.CreateElement('FirstLogonCommands', $component.NamespaceURI)
+                $null = $component.AppendChild($firstLogon)
+            }
+            $command = $document.CreateElement('SynchronousCommand', $component.NamespaceURI)
+            $null = $command.SetAttribute('action', 'http://schemas.microsoft.com/WMIConfig/2002/State', 'add')
+            foreach ($setting in @(
+                    @{ Name = 'CommandLine'; Value = $Plan.CleanupCommand }, @{ Name = 'Description'; Value = $Plan.CleanupDescription },
+                    @{ Name = 'Order'; Value = "$($item.NextOrder)" }, @{ Name = 'RequiresUserInput'; Value = 'false' }
+                )) {
+                $node = $document.CreateElement($setting.Name, $component.NamespaceURI)
+                $node.InnerText = $setting.Value
+                $null = $command.AppendChild($node)
+            }
+            $null = $firstLogon.AppendChild($command)
+        }
+        $stream = [IO.File]::Open($entry.Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $document.Save($stream) } finally { $stream.Dispose() }
+        $settings = [Xml.XmlReaderSettings]::new()
+        $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null; $settings.MaxCharactersInDocument = 1MB
+        $stream = [IO.File]::OpenRead($entry.Path); $reader = $null
+        try {
+            $reader = [Xml.XmlReader]::Create($stream, $settings)
+            $verified = [xml]::new(); $verified.XmlResolver = $null; $verified.Load($reader)
+        }
+        finally { if ($reader) { $reader.Dispose() }; $stream.Dispose() }
+        $readBack = $verified.SelectSingleNode('//*[local-name()="settings" and @pass="oobeSystem"]/*[local-name()="component" and @name="Microsoft-Windows-Shell-Setup"]/*[local-name()="AutoLogon"]')
+        if (-not $readBack -or $readBack.SelectSingleNode('*[local-name()="Username"]').InnerText -cne $Plan.UserName -or
+            $readBack.SelectSingleNode('*[local-name()="Enabled"]').InnerText -ne 'true' -or
+            $readBack.SelectSingleNode('*[local-name()="LogonCount"]').InnerText -ne '1' -or
+            $readBack.SelectSingleNode('*[local-name()="Domain"]').InnerText -ne '.' -or
+            $readBack.SelectSingleNode('*[local-name()="Password"]/*[local-name()="PlainText"]').InnerText -cne $Plan.PasswordTemplate.SelectSingleNode('*[local-name()="PlainText"]').InnerText -or
+            $readBack.SelectSingleNode('*[local-name()="Password"]/*[local-name()="Value"]').InnerText -cne $Plan.PasswordTemplate.SelectSingleNode('*[local-name()="Value"]').InnerText) {
+            throw 'The first-boot sign-in answer settings failed read-back verification.'
+        }
+        if ($Plan.DisableAfterFirstLogon) {
+            $commands = @($verified.SelectNodes('//*[local-name()="settings" and @pass="oobeSystem"]/*[local-name()="component" and @name="Microsoft-Windows-Shell-Setup"]/*[local-name()="FirstLogonCommands"]/*[local-name()="SynchronousCommand"]') |
+                Where-Object { $_.SelectSingleNode('*[local-name()="Description"]').InnerText -eq $Plan.CleanupDescription -and
+                    $_.SelectSingleNode('*[local-name()="CommandLine"]').InnerText -ceq $Plan.CleanupCommand })
+            if ($commands.Count -ne 1) { throw 'The first-boot autologon cleanup command failed read-back verification.' }
+        }
+        $patched.Add($entry.RelativePath)
+    }
+    return [pscustomobject]@{
+        Configured = $patched.Count -gt 0; UserName = $Plan.UserName; LogonCount = 1
+        AnswerFiles = $patched.ToArray(); PasswordElementSource = $Plan.PasswordElementSource
+        DisableAfterFirstLogon = $Plan.DisableAfterFirstLogon
+        PasswordHandling = 'Reused an existing local-account password XML element; not decoded, logged, or exported.'
+    }
+}
+
+function Import-BaseImageOfflineSetupHelpers {
+    [CmdletBinding()]
+    param()
+
+    $readerPath = Join-Path (Split-Path -Parent $PSScriptRoot) "tools\Get-WindowsVmSetupDiagnostics.ps1"
+    $parseErrors = $null
+    $readerAst = [Management.Automation.Language.Parser]::ParseFile($readerPath, [ref]$null, [ref]$parseErrors)
+    if ($parseErrors.Count) { throw "Offline registry reader parse errors: $($parseErrors -join '; ')" }
+    foreach ($name in @('Initialize-MemLabsOfflineSetupHiveType', 'Get-MemLabsOfflineSetupSourcePath')) {
+        $definitions = @($readerAst.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+                }, $true))
+        if ($definitions.Count -ne 1) { throw "The offline setup helper '$name' is missing or ambiguous." }
+        . ([scriptblock]::Create($definitions[0].Extent.Text))
+    }
+}
+
+function Get-BaseImageInstallationType {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$SoftwareHivePath)
+
+    . Import-BaseImageOfflineSetupHelpers
+    Initialize-MemLabsOfflineSetupHiveType
+
+    $hive = [MemLabs.OfflineSetupHiveReader]::OpenReadOnly($SoftwareHivePath)
+    $key = $null
+    try {
+        $key = $hive.OpenSubKey('Microsoft\Windows NT\CurrentVersion', $false)
+        if (-not $key) { throw 'The installed Windows version key is missing.' }
+        $installationType = $key.GetValue('InstallationType', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($installationType -notin @('Client', 'Server', 'Server Core')) {
+            throw "The installed Windows installation type '$installationType' is missing or unsupported."
+        }
+        return $installationType
+    }
+    finally {
+        if ($key) { $key.Dispose() }
+        $hive.Dispose()
+    }
+}
+
+function Invoke-BaseImageOfflineWindows {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VhdxPath,
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @(),
+        [switch]$ReadWrite
+    )
+
+    $diskImage = $null
+    $assignedPartition = $null
+    $assignedAccessPath = $null
+    $items = @()
+    $cleanupErrors = @()
+    try {
+        if (-not (Test-Path -LiteralPath $VhdxPath -PathType Leaf)) { throw "VHDX '$VhdxPath' does not exist." }
+        if ((Get-VHD -Path $VhdxPath -ErrorAction Stop).Attached) { throw "VHDX '$VhdxPath' is already attached." }
+        $access = if ($ReadWrite) { 'ReadWrite' } else { 'ReadOnly' }
+        $diskImage = Mount-DiskImage -ImagePath $VhdxPath -Access $access -PassThru -ErrorAction Stop
+        Start-Sleep -Seconds 2
+        $disk = $diskImage | Get-Disk -ErrorAction Stop
+        if ([bool]$disk.IsReadOnly -ne (-not [bool]$ReadWrite)) { throw 'The owned image was not mounted with the requested access mode.' }
+        $windowsRoot = $null
+        foreach ($partition in @($disk | Get-Partition -ErrorAction Stop | Sort-Object Size -Descending)) {
+            if ($partition.Size -lt 10GB) { continue }
+            $candidatePartition = $partition
+            if (-not $candidatePartition.DriveLetter) {
+                $candidatePartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction Stop | Out-Null
+                $assignedPartition = $candidatePartition
+                $candidatePartition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $candidatePartition.PartitionNumber -ErrorAction Stop
+                if (-not $candidatePartition.DriveLetter) { throw 'The owned Windows partition was not assigned an access path.' }
+                $assignedAccessPath = "$($candidatePartition.DriveLetter):\"
+            }
+            $candidateRoot = "$($candidatePartition.DriveLetter):\"
+            if (Test-Path -LiteralPath (Join-Path $candidateRoot "Windows\System32\Sysprep") -PathType Container) {
+                $windowsRoot = $candidateRoot
+                break
+            }
+            if ($assignedPartition -and $assignedAccessPath) {
+                $assignedPartition | Remove-PartitionAccessPath -AccessPath $assignedAccessPath -ErrorAction Stop | Out-Null
+                $assignedPartition = $null; $assignedAccessPath = $null
+            }
+        }
+        if (-not $windowsRoot) { throw "No Windows partition was found in '$VhdxPath'." }
+        $items = @(& $ScriptBlock $windowsRoot @ArgumentList)
+    }
+    finally {
+        if ($assignedPartition -and $assignedAccessPath) {
+            try { $assignedPartition | Remove-PartitionAccessPath -AccessPath $assignedAccessPath -ErrorAction Stop | Out-Null }
+            catch { $cleanupErrors += "Failed to remove owned access path '$assignedAccessPath': $($_.Exception.Message)" }
+        }
+        if ($diskImage) {
+            try { Dismount-DiskImage -ImagePath $VhdxPath -ErrorAction Stop | Out-Null }
+            catch { $cleanupErrors += "Failed to dismount owned image '$VhdxPath': $($_.Exception.Message)" }
+        }
+        if ($cleanupErrors.Count) { throw ($cleanupErrors -join '; ') }
+    }
+    return $items
+}
+
+function Set-BaseImageFirstBootAutoLogon {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VhdxPath,
+        [Parameter(Mandatory = $true)][string]$UserName
+    )
+
+    $info = Get-VHD -Path $VhdxPath -ErrorAction Stop
+    if ($info.VhdFormat -ne 'VHDX' -or $info.ParentPath -or $info.Attached) {
+        throw 'First-boot configuration requires an independent, unattached staging VHDX.'
+    }
+    return Invoke-BaseImageOfflineWindows -VhdxPath $VhdxPath -ReadWrite -ArgumentList @($UserName) -ScriptBlock {
+        param($WindowsRoot, $UserName)
+        . Import-BaseImageOfflineSetupHelpers
+        if ((Get-BaseImageInstallationType -SoftwareHivePath (Join-Path $WindowsRoot 'Windows\System32\config\SOFTWARE')) -ne 'Client') {
+            throw 'First-boot administrator sign-in is supported only for Windows client staging images.'
+        }
+        Initialize-MemLabsOfflineSetupHiveType
+        foreach ($check in @(
+                @{ Hive = 'SOFTWARE'; Key = 'Microsoft\Windows\CurrentVersion\Setup\State'; Name = 'ImageState'; Expected = @('IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE', 'IMAGE_STATE_SPECIALIZE_RESEAL_TO_OOBE') },
+                @{ Hive = 'SYSTEM'; Key = 'Setup'; Name = 'SetupType'; Expected = @(2) }
+            )) {
+            $hive = [MemLabs.OfflineSetupHiveReader]::OpenReadOnly((Join-Path $WindowsRoot "Windows\System32\config\$($check.Hive)"))
+            $key = $null
+            try {
+                $key = $hive.OpenSubKey($check.Key, $false)
+                if (-not $key -or $key.GetValue($check.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -notin $check.Expected) {
+                    throw 'The staging image is not generalized and awaiting OOBE; refusing to change its sign-in configuration.'
+                }
+            }
+            finally { if ($key) { $key.Dispose() }; $hive.Dispose() }
+        }
+        $documents = [Collections.Generic.List[object]]::new()
+        foreach ($relative in @('Windows\Panther\unattend.xml', 'staging\Unattend.xml')) {
+            $answer = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $WindowsRoot -RelativePath $relative
+            if (-not $answer) { continue }
+            $settings = [Xml.XmlReaderSettings]::new()
+            $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null; $settings.MaxCharactersInDocument = 1MB
+            $stream = [IO.File]::OpenRead($answer); $reader = $null
+            try {
+                if ($stream.Length -gt 1MB) { throw 'The staging answer file exceeds the inspection limit.' }
+                $reader = [Xml.XmlReader]::Create($stream, $settings)
+                $document = [xml]::new(); $document.XmlResolver = $null; $document.Load($reader)
+            }
+            finally { if ($reader) { $reader.Dispose() }; $stream.Dispose() }
+            if (@($document.SelectNodes('//*[local-name()="JoinDomain" and normalize-space(.)!=""]')).Count) {
+                throw 'The staging answer file requests a domain join; isolated first-boot configuration is refused.'
+            }
+            $documents.Add([pscustomobject]@{ Document = $document; Path = $answer; RelativePath = $relative })
+        }
+        $plan = New-BaseImageAutoLogonPlan -AnswerDocuments $documents.ToArray() -UserName $UserName -AllowExisting -DisableAfterFirstLogon
+        $configured = Write-BaseImageAutoLogonPlan -Plan $plan
+        $staging = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $WindowsRoot -RelativePath 'staging' -AllowDirectory
+        if (-not $staging) { throw 'The owned staging directory is missing.' }
+        $markerName = 'staging\MemLabs-BoundedFirstBootAutoLogon.txt'
+        $existingMarker = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $WindowsRoot -RelativePath $markerName
+        $marker = if ($existingMarker) { $existingMarker } else { Join-Path $staging 'MemLabs-BoundedFirstBootAutoLogon.txt' }
+        [IO.File]::WriteAllText($marker, '1', [Text.Encoding]::ASCII)
+        return $configured
+    }
+}
+
 function Test-BaseImageSysprepComplete {
     [CmdletBinding()]
     param(
@@ -327,6 +660,7 @@ function Test-BaseImageSysprepComplete {
             Success = $true
             Message = "WhatIf: Will verify offline Sysprep completion in '$VhdxPath'."
             Warnings = @()
+            InstallationType = $null
         }
     }
 
@@ -334,52 +668,11 @@ function Test-BaseImageSysprepComplete {
         Success = $false
         Message = ""
         Warnings = @()
+        InstallationType = $null
     }
-    $diskImage = $null
-    $assignedPartition = $null
-    $assignedAccessPath = $null
-
     try {
-        if (-not (Test-Path $VhdxPath -PathType Leaf)) {
-            throw "VHDX '$VhdxPath' does not exist."
-        }
-        if ((Get-VHD -Path $VhdxPath -ErrorAction Stop).Attached) {
-            throw "VHDX '$VhdxPath' is already attached."
-        }
-
-        $diskImage = Mount-DiskImage -ImagePath $VhdxPath -Access ReadOnly -PassThru -ErrorAction Stop
-        Start-Sleep -Seconds 2
-        $disk = $diskImage | Get-Disk -ErrorAction Stop
-        $partitions = @($disk | Get-Partition -ErrorAction Stop | Sort-Object Size -Descending)
-        $windowsRoot = $null
-
-        foreach ($partition in $partitions) {
-            if ($partition.Size -lt 10GB) { continue }
-
-            $candidatePartition = $partition
-            if (-not $candidatePartition.DriveLetter) {
-                $candidatePartition | Add-PartitionAccessPath -AssignDriveLetter -ErrorAction Stop | Out-Null
-                $assignedPartition = $candidatePartition
-                $candidatePartition = Get-Partition -DiskNumber $disk.Number -PartitionNumber $candidatePartition.PartitionNumber -ErrorAction Stop
-                $assignedAccessPath = "$($candidatePartition.DriveLetter):\"
-            }
-
-            $candidateRoot = "$($candidatePartition.DriveLetter):\"
-            if (Test-Path -LiteralPath (Join-Path $candidateRoot "Windows\System32\Sysprep") -PathType Container) {
-                $windowsRoot = $candidateRoot
-                break
-            }
-
-            if ($assignedPartition -and $assignedAccessPath) {
-                $assignedPartition | Remove-PartitionAccessPath -AccessPath $assignedAccessPath -ErrorAction Stop | Out-Null
-                $assignedPartition = $null
-                $assignedAccessPath = $null
-            }
-        }
-
-        if (-not $windowsRoot) {
-            throw "No Windows partition was found in '$VhdxPath'."
-        }
+        $null = Invoke-BaseImageOfflineWindows -VhdxPath $VhdxPath -ArgumentList @($result, $VhdxPath) -ScriptBlock {
+        param($windowsRoot, $result, $VhdxPath)
 
         $successTagPath = Join-Path $windowsRoot "Windows\System32\Sysprep\Sysprep_succeeded.tag"
         if (-not (Test-Path -LiteralPath $successTagPath -PathType Leaf)) {
@@ -433,31 +726,14 @@ function Test-BaseImageSysprepComplete {
             $result.Warnings = @($terminalErrors)
         }
 
+        $result.InstallationType = Get-BaseImageInstallationType -SoftwareHivePath (Join-Path $windowsRoot "Windows\System32\config\SOFTWARE")
         $result.Success = $true
         $result.Message = "Offline Sysprep verification passed for '$VhdxPath'. Windows recorded $($terminalErrors.Count) non-fatal provider error(s) before creating its success tag."
+        }
     }
     catch {
+        $result.Success = $false
         $result.Message = $_.Exception.Message
-    }
-    finally {
-        if ($assignedPartition -and $assignedAccessPath) {
-            try {
-                $assignedPartition | Remove-PartitionAccessPath -AccessPath $assignedAccessPath -ErrorAction Stop | Out-Null
-            }
-            catch {
-                $result.Success = $false
-                $result.Message = "Failed to remove temporary access path '$assignedAccessPath': $($_.Exception.Message)"
-            }
-        }
-        if ($diskImage) {
-            try {
-                Dismount-DiskImage -ImagePath $VhdxPath -ErrorAction Stop | Out-Null
-            }
-            catch {
-                $result.Success = $false
-                $result.Message = "Failed to dismount '$VhdxPath' after Sysprep verification: $($_.Exception.Message)"
-            }
-        }
     }
 
     return $result

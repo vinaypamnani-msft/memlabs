@@ -2,12 +2,13 @@
 #requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Runs an isolated, guided first-logon comparison using two fresh Windows 11 image copies.
+    Compares fresh Windows 11 image copies or qualifies one Windows 10/11 first-boot clone.
 .DESCRIPTION
     Uses the selected lab VM only for image identity and hardware/switch settings.
     Never starts, stops, changes, or deletes that VM or the generalized source image.
     Runs an unchanged control and the selected disposable test variant sequentially, without DSC,
-    rename, or domain-join actions. Collects diagnostics and a comparison ZIP.
+    rename, or domain-join actions. FirstBootQualification instead tests one unchanged client clone.
+    Collects diagnostics and a comparison ZIP.
     Disposable trial VMs/disks are cleaned after verified evidence collection unless
     KeepTrialVMs is specified. Unknown operation outcomes retain resources and stop.
 .EXAMPLE
@@ -21,7 +22,7 @@ param(
     [string]$SourceVhdxPath,
     [string]$Destination,
     [pscredential]$GuestCredential,
-    [ValidateSet('SfapCache', 'ExplicitAutoLogon')][string]$TestVariant = 'SfapCache',
+    [ValidateSet('SfapCache', 'ExplicitAutoLogon', 'FirstBootQualification')][string]$TestVariant = 'SfapCache',
     [switch]$KeepTrialVMs
 )
 $ErrorActionPreference = 'Stop'
@@ -42,6 +43,7 @@ function Import-MemLabsImageComparisonHelpers {
         . ([scriptblock]::Create($comparisonHelperDefinitions[0].Extent.Text))
     }
     . (Join-Path $PSScriptRoot 'Common.WindowsVmOobeRepair.ps1')
+    . (Join-Path $PSScriptRoot '..\common\Common.BaseImage.ps1')
 }
 
 function Get-MemLabsComparisonImageCandidates {
@@ -116,7 +118,7 @@ function Invoke-MemLabsComparisonImageInspection {
     param(
         [string]$Path, [ValidateSet('Source', 'Control', 'Test')][string]$Mode,
         [string]$Workspace,
-        [ValidateSet('SfapCache', 'ExplicitAutoLogon')][string]$TestVariant = 'SfapCache',
+        [ValidateSet('SfapCache', 'ExplicitAutoLogon', 'FirstBootQualification')][string]$TestVariant = 'SfapCache',
         [string]$AutoLogonUserName
     )
     $resolved = [IO.Path]::GetFullPath($Path)
@@ -159,11 +161,12 @@ function Invoke-MemLabsComparisonImageInspection {
         $software = Read-MemLabsOfflineWindowsSetupHive -Path (Join-Path $private 'SOFTWARE') -Kind SOFTWARE
         $system = Read-MemLabsOfflineWindowsSetupHive -Path (Join-Path $private 'SYSTEM') -Kind SYSTEM
         $build = 0
+        $minimumBuild = if ($TestVariant -eq 'FirstBootQualification') { 10240 } else { 22000 }
         if ($software.WindowsVersion.Values.InstallationType -ne 'Client' -or
-            -not [int]::TryParse($software.WindowsVersion.Values.CurrentBuild, [ref]$build) -or $build -lt 22000 -or
+            -not [int]::TryParse($software.WindowsVersion.Values.CurrentBuild, [ref]$build) -or $build -lt $minimumBuild -or
             $software.ImageState.Values.ImageState -notin @('IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE', 'IMAGE_STATE_SPECIALIZE_RESEAL_TO_OOBE') -or
             $system.Setup.Values.SetupType -ne 2) {
-            throw 'This is not a generalized Windows 11 base image awaiting first boot. An already-failed/deployed OS disk cannot provide a valid fresh-boot comparison.'
+            throw 'This is not a generalized supported Windows client base image awaiting first boot. An already-failed/deployed OS disk cannot provide a valid fresh-boot comparison.'
         }
         $volumeRoot = [IO.DirectoryInfo]::new($windowsRoot).Parent.FullName
         $copyProfile = $false
@@ -186,48 +189,18 @@ function Invoke-MemLabsComparisonImageInspection {
             if (@($document.SelectNodes('//*[local-name()="CopyProfile" and normalize-space(.)="true"]')).Count) { $copyProfile = $true }
             $answerDocuments.Add([pscustomobject]@{ Document = $document; Path = $answer; RelativePath = $relative })
         }
-        if (-not $copyProfile) { throw 'The candidate does not show CopyProfile enabled; this experiment would not test the proposed copied-profile-cache cause.' }
-        $autoLogonPlan = [Collections.Generic.List[object]]::new()
-        $passwordTemplate = $null
+        if (-not $copyProfile -and $TestVariant -ne 'FirstBootQualification') { throw 'The candidate does not show CopyProfile enabled; this experiment would not test the proposed copied-profile-cache cause.' }
+        $autoLogonPlan = $null
         $passwordElementSource = $null
         if ($TestVariant -eq 'ExplicitAutoLogon') {
-            if ([string]::IsNullOrWhiteSpace($AutoLogonUserName) -or $AutoLogonUserName -match '[\\@]') {
-                throw 'The explicit-sign-in trial requires the existing local lab-administrator account name.'
-            }
-            foreach ($entry in $answerDocuments | Sort-Object @{ Expression = { $_.RelativePath -eq 'staging\Unattend.xml' }; Descending = $true }) {
-                $components = @($entry.Document.SelectNodes('//*[local-name()="settings" and @pass="oobeSystem"]/*[local-name()="component" and @name="Microsoft-Windows-Shell-Setup"]'))
-                if ($components.Count -ne 1) { throw 'Each available answer file must have one existing oobeSystem Shell-Setup component; this test will not invent or replace setup components.' }
-                $component = $components[0]
-                if ($component.SelectSingleNode('*[local-name()="AutoLogon"]')) { throw 'An answer file already configures oobeSystem AutoLogon; this comparison is not applicable.' }
-                $accounts = @($component.SelectNodes('*[local-name()="UserAccounts"]/*[local-name()="LocalAccounts"]/*[local-name()="LocalAccount"]') |
-                    Where-Object { $node = $_.SelectSingleNode('*[local-name()="Name"]'); $node -and $node.InnerText -ieq $AutoLogonUserName })
-                if ($accounts.Count -ne 1) { throw 'The saved credential username does not uniquely match an existing local account configured by the image.' }
-                $group = $accounts[0].SelectSingleNode('*[local-name()="Group"]')
-                if (-not $group -or $group.InnerText -notmatch '(^|[,;])\s*Administrators\s*($|[,;])') {
-                    throw 'The matching source account is not explicitly configured as a local administrator.'
-                }
-                $password = $accounts[0].SelectSingleNode('*[local-name()="Password"]')
-                if ($password) {
-                    $value = $password.SelectSingleNode('*[local-name()="Value"]')
-                    $plain = $password.SelectSingleNode('*[local-name()="PlainText"]')
-                    if (-not $passwordTemplate -and $value -and -not [string]::IsNullOrWhiteSpace($value.InnerText) -and
-                        $value.InnerText -notmatch 'SENSITIVE.*DELETED|^%.*%$' -and $plain -and $plain.InnerText -in @('true', 'false') -and
-                        ($plain.InnerText -eq 'true' -or $value.InnerText -match '^[A-Za-z0-9+/]+={0,2}$')) {
-                        $passwordTemplate = $password.CloneNode($true)
-                        $passwordElementSource = $entry.RelativePath
-                    }
-                }
-                $autoLogonPlan.Add([pscustomobject]@{ Entry = $entry; Component = $component })
-            }
-            if ($autoLogonPlan.Count -eq 0 -or -not $passwordTemplate) {
-                throw 'No usable existing account-password element was found in the source answer files. No password will be guessed, decoded, or reset.'
-            }
-            if (@($autoLogonPlan | Where-Object { $_.Component.NamespaceURI -cne $passwordTemplate.NamespaceURI }).Count) {
-                throw 'The source password and target setup components use different XML namespaces.'
-            }
+            $autoLogonPlan = New-BaseImageAutoLogonPlan -AnswerDocuments $answerDocuments.ToArray() -UserName $AutoLogonUserName
+            $passwordElementSource = $autoLogonPlan.PasswordElementSource
         }
-        $users = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath 'Users' -AllowDirectory
-        $profiles = @(Get-ChildItem -LiteralPath $users -Directory -Force -ErrorAction Stop | Select-Object -First 33)
+        $profiles = @()
+        if ($TestVariant -ne 'FirstBootQualification') {
+            $users = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $volumeRoot -RelativePath 'Users' -AllowDirectory
+            $profiles = @(Get-ChildItem -LiteralPath $users -Directory -Force -ErrorAction Stop | Select-Object -First 33)
+        }
         if ($profiles.Count -gt 32) { throw 'The base image exceeds the 32-profile inspection limit.' }
         $caches = [Collections.Generic.List[object]]::new()
         foreach ($profile in $profiles) {
@@ -262,40 +235,8 @@ function Invoke-MemLabsComparisonImageInspection {
         }
         $patchedAnswers = [Collections.Generic.List[string]]::new()
         if ($Mode -eq 'Test' -and $TestVariant -eq 'ExplicitAutoLogon') {
-            foreach ($plan in $autoLogonPlan) {
-                $entry = $plan.Entry; $document = $entry.Document; $component = $plan.Component
-                $auto = $document.CreateElement('AutoLogon', $component.NamespaceURI)
-                $null = $auto.AppendChild($document.ImportNode($passwordTemplate, $true))
-                foreach ($setting in @(
-                        @{ Name = 'Domain'; Value = '.' }, @{ Name = 'Enabled'; Value = 'true' },
-                        @{ Name = 'LogonCount'; Value = '1' }, @{ Name = 'Username'; Value = $AutoLogonUserName }
-                    )) {
-                    $node = $document.CreateElement($setting.Name, $component.NamespaceURI)
-                    $node.InnerText = $setting.Value
-                    $null = $auto.AppendChild($node)
-                }
-                $null = $component.AppendChild($auto)
-                $stream = [IO.File]::Open($entry.Path, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
-                try { $document.Save($stream) } finally { $stream.Dispose() }
-                $stream = [IO.File]::OpenRead($entry.Path); $reader = $null
-                try {
-                    $reader = [Xml.XmlReader]::Create($stream, $settings)
-                    $verified = [xml]::new(); $verified.XmlResolver = $null; $verified.Load($reader)
-                }
-                finally { if ($reader) { $reader.Dispose() }; $stream.Dispose() }
-                $readBack = $verified.SelectSingleNode('//*[local-name()="settings" and @pass="oobeSystem"]/*[local-name()="component" and @name="Microsoft-Windows-Shell-Setup"]/*[local-name()="AutoLogon"]')
-                if (-not $readBack -or $readBack.SelectSingleNode('*[local-name()="Username"]').InnerText -cne $AutoLogonUserName -or
-                    $readBack.SelectSingleNode('*[local-name()="Enabled"]').InnerText -ne 'true' -or
-                    $readBack.SelectSingleNode('*[local-name()="LogonCount"]').InnerText -ne '1' -or
-                    $readBack.SelectSingleNode('*[local-name()="Domain"]').InnerText -ne '.' -or
-                    $readBack.SelectSingleNode('*[local-name()="Password"]/*[local-name()="PlainText"]').InnerText -cne
-                        $passwordTemplate.SelectSingleNode('*[local-name()="PlainText"]').InnerText -or
-                    $readBack.SelectSingleNode('*[local-name()="Password"]/*[local-name()="Value"]').InnerText -cne
-                        $passwordTemplate.SelectSingleNode('*[local-name()="Value"]').InnerText) {
-                    throw 'The disposable explicit-sign-in answer settings failed read-back verification.'
-                }
-                $patchedAnswers.Add($entry.RelativePath)
-            }
+            $configured = Write-BaseImageAutoLogonPlan -Plan $autoLogonPlan
+            foreach ($relative in $configured.AnswerFiles) { $patchedAnswers.Add($relative) }
         }
         $result = [pscustomobject]@{
             ImageState = $software.ImageState.Values.ImageState; Build = $build
@@ -360,13 +301,23 @@ function Copy-MemLabsComparisonDisk {
 function New-MemLabsComparisonVm {
     param($Spec, $Hardware, [string]$Token)
     $result = Invoke-MemLabsComparisonWorker -TimeoutSeconds 120 -Operation "Creating disposable $($Spec.Label) VM" `
-        -Arguments @($Spec, $Hardware, $Token) -Block {
-            param($Spec, $Hardware, $Token)
+        -Arguments @($Spec, $Hardware, $Token, (Join-Path $PSScriptRoot 'Common.WindowsVmOobeRepair.ps1')) -Block {
+            param($Spec, $Hardware, $Token, $RepairHelperPath)
             $ErrorActionPreference = 'Stop'
             Import-Module Hyper-V -ErrorAction Stop
-            if (@(Get-VM -ErrorAction Stop | Where-Object Name -eq $Spec.Name).Count) { throw 'The planned trial VM name already exists.' }
-            $vm = New-VM -Name $Spec.Name -Path $Spec.Root -Generation 2 -VHDPath $Spec.Disk `
-                -MemoryStartupBytes ([long]$Hardware.Startup) -SwitchName $Hardware.Switch -ErrorAction Stop
+            . $RepairHelperPath
+            $escapedName = $Spec.Name.Replace('\', '\\').Replace("'", "\'")
+            if (@(Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName Msvm_ComputerSystem `
+                        -Filter "ElementName='$escapedName'" -OperationTimeoutSec 10 -ErrorAction Stop).Count) {
+                throw 'The planned trial VM name already exists.'
+            }
+            $job = New-VM -Name $Spec.Name -Path $Spec.Root -Generation 2 -VHDPath $Spec.Disk `
+                -MemoryStartupBytes ([long]$Hardware.Startup) -SwitchName $Hardware.Switch -AsJob -ErrorAction Stop
+            $created = @(Wait-MemLabsOobeRepairJob -Job $job -TimeoutSeconds 60 -Operation 'Creating the owned comparison VM')
+            if ($created.Count -ne 1 -or $created[0].Name -ne $Spec.Name) {
+                throw 'Creation did not return one exact owned VM; resources were retained.'
+            }
+            $vm = $created[0]
             Set-VM -VM $vm -AutomaticCheckpointsEnabled $false -AutomaticStartAction Nothing -AutomaticStopAction ShutDown `
                 -Notes (@{ Purpose = 'MemLabsFirstLogonComparison'; Token = $Token; Label = $Spec.Label } | ConvertTo-Json -Compress) -ErrorAction Stop
             Set-VMProcessor -VM $vm -Count $Hardware.Processors -ErrorAction Stop
@@ -432,7 +383,8 @@ function Read-MemLabsComparisonDiagnostics {
                 }
             }
         }
-        $ready = [bool]($before.Setup.Ready -and $after.Setup.Ready)
+        $ready = [bool]($manifest.Status -eq 'Complete' -and $manifest.LiveProbe.Status -eq 'Complete' -and
+            $before.Status -eq 'Complete' -and $after.Status -eq 'Complete' -and $before.Setup.Ready -and $after.Setup.Ready)
         $interactiveUser = $true
         foreach ($snapshot in @($before, $after)) {
             if (-not $snapshot.PSObject.Properties['Actor'] -or -not $snapshot.Actor.Sid -or @($snapshot.Processes | Where-Object {
@@ -449,13 +401,22 @@ function Read-MemLabsComparisonDiagnostics {
                 @($setup.OobeProcesses | Where-Object { $_ -notin @('FirstLogonAnim.exe', 'CloudExperienceHostBroker.exe') }).Count) { $stalled = $false }
         }
         $effectiveAutoLogonUser = $null
-        if ($values.ContainsKey('WindowsSetupState.json')) { $effectiveAutoLogonUser = $values['WindowsSetupState.json'].SOFTWARE.WinlogonProgress.Values.DefaultUserName }
+        $autoLogonDisabled = $false
+        if ($values.ContainsKey('WindowsSetupState.json')) {
+            $winlogon = $values['WindowsSetupState.json'].SOFTWARE.WinlogonProgress
+            $effectiveAutoLogonUser = $winlogon.Values.DefaultUserName
+            $count = $winlogon.Values.AutoLogonCount
+            $autoLogonDisabled = $winlogon.Present -is [bool] -and $winlogon.Present -and
+                $winlogon.Values.AutoAdminLogon -is [string] -and $winlogon.Values.AutoAdminLogon -eq '0' -and
+                ($count -is [int] -or $count -is [long] -or $count -is [uint32]) -and $count -eq 0
+        }
         [pscustomobject]@{
             EvidenceStatus = $manifest.Status; Ready = $ready
             Observation = $(if ($ready) { 'Ready' } elseif ($stalled) { 'FirstLogonStall' } else { 'OtherOrTransitioning' })
             Before = $before.Setup; After = $after.Setup; MachineGuid = $before.MachineGuid
             InteractiveLabAccountObserved = $interactiveUser
             EffectiveAutoLogonUser = $effectiveAutoLogonUser
+            AutoLogonDisabled = [bool]$autoLogonDisabled
             AuthenticationFindings = $values['FirstLogonFindings.json']
         }
     }
@@ -481,15 +442,32 @@ function Remove-MemLabsComparisonVm {
         @(Get-VMSnapshot -VM $live -ErrorAction Stop).Count -gt 0) { throw 'Trial cleanup ownership/state/disk/checkpoint checks failed; resources were retained.' }
     $job = Remove-VM -VM $live -Force -AsJob -ErrorAction Stop
     $null = Wait-MemLabsOobeRepairJob -Job $job -TimeoutSeconds 60 -Operation 'Removing the owned Off trial VM'
-    if (@(Get-VM -ErrorAction Stop | Where-Object Id -eq $VM.Id).Count) { throw 'The trial VM still exists; its disk was retained.' }
+    if (@(Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName Msvm_ComputerSystem `
+                -Filter "Name='$($VM.Id.ToString('D'))'" -OperationTimeoutSec 10 -ErrorAction Stop).Count) {
+        throw 'The trial VM still exists; its disk was retained.'
+    }
     if ((Get-VHD -Path $Spec.Disk -ErrorAction Stop).Attached) { throw 'The trial disk remains attached; it was retained.' }
     [IO.File]::Delete($Spec.Disk)
+}
+
+function Wait-MemLabsImageQualificationObservation {
+    param($VM, [ValidateRange(0, 600)][int]$ObservationSeconds = 360)
+    . (Join-Path $PSScriptRoot 'Common.WindowsVmFirstLogonProbe.ps1')
+    $started = [DateTime]::UtcNow
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    Write-Host "Allowing ${ObservationSeconds}s for Windows-owned setup restarts; no guest queries or forced reboot."
+    Wait-MemLabsFirstLogonObservation -VM $VM -ObservationSeconds $ObservationSeconds -AllowSetupRestart
+    [pscustomobject]@{
+        StartedAtUtc = $started.ToString('o'); CompletedAtUtc = [DateTime]::UtcNow.ToString('o')
+        RequestedSeconds = $ObservationSeconds; ElapsedSeconds = $watch.Elapsed.TotalSeconds
+        FinalState = 'Running'; GuestQueries = 0; ForcedRestarts = 0
+    }
 }
 
 function Invoke-MemLabsFirstLogonImageComparison {
     [CmdletBinding(SupportsShouldProcess)]
     param([string]$VmName, [string]$SourceVhdxPath, [string]$Destination, [pscredential]$GuestCredential,
-        [ValidateSet('SfapCache', 'ExplicitAutoLogon')][string]$TestVariant = 'SfapCache', [switch]$KeepTrialVMs)
+        [ValidateSet('SfapCache', 'ExplicitAutoLogon', 'FirstBootQualification')][string]$TestVariant = 'SfapCache', [switch]$KeepTrialVMs)
     if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($VmName)) { throw 'Specify one exact original VM name.' }
     $originals = @(Get-VM -Name $VmName -ErrorAction Stop)
     if ($originals.Count -ne 1 -or $originals[0].Name -ine $VmName -or $originals[0].Generation -ne 2) { throw 'Exactly one existing Generation 2 reference VM is required.' }
@@ -497,7 +475,8 @@ function Invoke-MemLabsFirstLogonImageComparison {
     $source = Select-MemLabsComparisonImage -OriginalVM $original -ExplicitPath $SourceVhdxPath -PreviewOnly:$WhatIfPreference
     if (-not $source -and $WhatIfPreference) { return }
     if (-not [IO.File]::Exists($source) -or [IO.Path]::GetExtension($source) -ine '.vhdx') { throw 'The selected generalized VHDX file does not exist.' }
-    if (-not $PSCmdlet.ShouldProcess($original.Name, "Compare two disposable fresh copies of '$source' using '$TestVariant'; no change to this VM or source image")) { return }
+    $copies = if ($TestVariant -eq 'FirstBootQualification') { 1L } else { 2L }
+    if (-not $PSCmdlet.ShouldProcess($original.Name, "Run '$TestVariant' using $copies disposable fresh image copy/copies of '$source'; no change to this VM or source image")) { return }
     Initialize-MemLabsSetupDiagnosticModules -IncludeLiveProbe
     foreach ($command in @('New-VM', 'Set-VM', 'Set-VMMemory', 'Get-VMMemory', 'Set-VMProcessor', 'Get-VMFirmware',
             'Set-VMFirmware', 'Get-VMSecurity', 'Get-VMNetworkAdapter', 'Get-VMNetworkAdapterVlan',
@@ -529,10 +508,15 @@ function Invoke-MemLabsFirstLogonImageComparison {
     $destinationPath = Resolve-MemLabsSetupDiagnosticPath -Path $Destination
     $driveRoot = [IO.Path]::GetPathRoot($destinationPath)
     if ($driveRoot -notmatch '^[A-Za-z]:\\$') { throw 'Use a local drive for the comparison workspace.' }
-    $required = 2L * [IO.FileInfo]::new($source).Length + 2GB
-    if ([IO.DriveInfo]::new($driveRoot).AvailableFreeSpace -lt $required) { throw "The comparison needs at least $([math]::Ceiling($required / 1GB)) GiB free for two disposable copies and diagnostics." }
+    $required = $copies * [IO.FileInfo]::new($source).Length + 4GB
+    if ([IO.DriveInfo]::new($driveRoot).AvailableFreeSpace -lt $required) { throw "The comparison needs at least $([math]::Ceiling($required / 1GB)) GiB free for $copies disposable image copy/copies and diagnostics." }
     $token = [guid]::NewGuid().ToString('N')
     $workspace = Join-Path $destinationPath ("Compare-" + $token)
+    $plannedVmRoot = Join-Path (Join-Path $workspace 'Control') ("ML-OOBE-C-" + $token.Substring(0, 8))
+    $plannedVmConfiguration = Join-Path $plannedVmRoot ("Virtual Machines\" + [guid]::Empty.ToString('D') + '.vmcx')
+    if ($plannedVmConfiguration.Length -ge 260) {
+        throw "Hyper-V requires a shorter -Destination. The planned VM configuration path is $($plannedVmConfiguration.Length) characters; it must be below 260. No image copy or VM was created."
+    }
     New-MemLabsPrivateDiagnosticDirectory -Path $workspace
     $reportRoot = Join-Path $workspace 'Report'
     $null = New-Item -Path $reportRoot -ItemType Directory
@@ -558,8 +542,9 @@ function Invoke-MemLabsFirstLogonImageComparison {
         $report.SourceHash = $hashResult.Hash
         if ($report.SourceHash -notmatch '^[A-Fa-f0-9]{64}$') { throw 'The generalized source hash was not returned correctly.' }
         $specs = @()
-        Write-Host 'Step 2/4: creating and checking the two independent copies.'
-        foreach ($label in @('Control', 'Test')) {
+        Write-Host "Step 2/4: creating and checking $copies independent image copy/copies."
+        $labels = if ($TestVariant -eq 'FirstBootQualification') { @('Control') } else { @('Control', 'Test') }
+        foreach ($label in $labels) {
             $root = Join-Path $workspace $label
             $null = New-Item -Path $root -ItemType Directory
             $spec = [pscustomobject]@{ Label = $label; Root = $root; Disk = (Join-Path $root "$label.vhdx"); Name = "ML-OOBE-$($label.Substring(0,1))-$($token.Substring(0,8))" }
@@ -570,7 +555,7 @@ function Invoke-MemLabsFirstLogonImageComparison {
             $report.Trials.Add([ordered]@{ Label = $label; Name = $spec.Name; VMId = $null; Disk = $spec.Disk; Inspection = $inspection; Status = 'Prepared'; Evidence = $null; Cleaned = $false })
             $report | ConvertTo-Json -Depth 14 | Set-Content -LiteralPath $reportPath -Encoding UTF8 -ErrorAction Stop
         }
-        Write-Host "Step 3/4: running the control and '$TestVariant' test sequentially. No DSC, rename, or domain join will run."
+        Write-Host "Step 3/4: running the '$TestVariant' trial(s) sequentially. No DSC, rename, or domain join will run."
         foreach ($spec in $specs) {
             $trial = @($report.Trials | Where-Object Label -eq $spec.Label)[0]
             $trial.Status = 'Creating'
@@ -578,6 +563,9 @@ function Invoke-MemLabsFirstLogonImageComparison {
             $trial.VMId = "$($vm.Id)"; $trial.Status = 'Starting'
             $report | ConvertTo-Json -Depth 14 | Set-Content -LiteralPath $reportPath -Encoding UTF8 -ErrorAction Stop
             Start-MemLabsOobeRepairVm -VM $vm
+            if ($TestVariant -eq 'FirstBootQualification') {
+                $trial['PassiveObservation'] = Wait-MemLabsImageQualificationObservation -VM $vm
+            }
             $trial.Status = 'Collecting'
             $trial['DiagnosticDestination'] = Join-Path $spec.Root 'Evidence'
             $diagnostic = Invoke-MemLabsComparisonDiagnostics -VM $vm -GuestCredential $GuestCredential -Destination $trial.DiagnosticDestination
@@ -594,8 +582,12 @@ function Invoke-MemLabsFirstLogonImageComparison {
             [pscustomobject]@{ Hash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256 -ErrorAction Stop).Hash }
         }
         if ($finalHash.Hash -ine $report.SourceHash) { throw 'The source image changed during the test; the comparison is invalid.' }
-        $control = $report.Trials[0].Evidence.Observation; $test = $report.Trials[1].Evidence.Observation
-        $report.Verdict = if ($control -eq 'FirstLogonStall' -and $test -eq 'Ready' -and $TestVariant -eq 'ExplicitAutoLogon' -and
+        $control = $report.Trials[0].Evidence.Observation
+        $test = if ($report.Trials.Count -gt 1) { $report.Trials[1].Evidence.Observation } else { $null }
+        $report.Verdict = if ($TestVariant -eq 'FirstBootQualification') {
+            if ($control -eq 'Ready') { 'FirstBootQualified' } else { 'FirstBootNotQualified' }
+        }
+        elseif ($control -eq 'FirstLogonStall' -and $test -eq 'Ready' -and $TestVariant -eq 'ExplicitAutoLogon' -and
             $report.Trials[1].Evidence.InteractiveLabAccountObserved -and
             $report.Trials[1].Evidence.EffectiveAutoLogonUser -ieq $autoLogonUserName) {
             'ExplicitSignInCopyReadyControlBlocked: supports avoiding the temporary-account sign-in path in this trial, not proof of the underlying Windows defect'
@@ -640,7 +632,18 @@ function Invoke-MemLabsFirstLogonImageComparison {
         Write-Warning 'The retained disposable test copy contains temporary administrator autologon settings. Keep it protected and do not use it as a production image.'
     }
     if ($failure) { throw "Image comparison failed: $($failure.Exception.Message). Report: $archive" }
-    [pscustomobject]@{ Status = $report.Status; Verdict = $report.Verdict; ArchivePath = $archive; Workspace = $workspace }
+    [pscustomobject]@{
+        Status = $report.Status; Verdict = $report.Verdict; ArchivePath = $archive; Workspace = $workspace
+        Qualified = $TestVariant -eq 'FirstBootQualification' -and $report.Verdict -eq 'FirstBootQualified'
+        SourceHash = $report.SourceHash
+        AutoLogonDisabled = $report.Trials.Count -eq 1 -and $report.Trials[0].Evidence.AutoLogonDisabled -is [bool] -and
+            $report.Trials[0].Evidence.AutoLogonDisabled
+        OobeComplete = $report.Trials.Count -eq 1 -and $report.Trials[0].Evidence.Before.NativeOobeComplete -is [bool] -and
+            $report.Trials[0].Evidence.Before.NativeOobeComplete -and $report.Trials[0].Evidence.After.NativeOobeComplete -is [bool] -and
+            $report.Trials[0].Evidence.After.NativeOobeComplete
+        InteractiveLabAccountObserved = $report.Trials.Count -eq 1 -and
+            $report.Trials[0].Evidence.InteractiveLabAccountObserved -is [bool] -and $report.Trials[0].Evidence.InteractiveLabAccountObserved
+    }
 }
 
 $imageComparisonParameters = @{} + $PSBoundParameters

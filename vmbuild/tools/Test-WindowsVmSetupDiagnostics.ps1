@@ -318,6 +318,11 @@ try {
         (Get-FileHash -LiteralPath $runtimeManifest -Algorithm SHA256).Hash -eq $runtimeHash) `
         'Read-only AppX evidence lost exact missing paths, manifest identities/dependencies, event dates, or privacy.'
     $guidWindows = [MemLabs.SetupDiagnosticTestSupport]::GetVolumeGuidPath($windows)
+    $driveRoot = [IO.Path]::GetPathRoot($windows)
+    $bareVolumeRoot = [MemLabs.SetupDiagnosticTestSupport]::GetVolumeGuidPath($driveRoot).TrimEnd('\')
+    $relativeWindows = [IO.Path]::GetFullPath($windows).Substring($driveRoot.Length)
+    $rootResolved = Get-MemLabsOfflineSetupSourcePath -WindowsRoot $bareVolumeRoot -RelativePath $relativeWindows -AllowDirectory
+    Assert-True ($rootResolved -eq $guidWindows) 'A real bare volume-GUID root was not normalized before its native attribute check.'
     Assert-True ($guidWindows.StartsWith('\\?\Volume{')) 'The native manifest fixture did not use a real volume-GUID path.'
     $guidInventory = Get-MemLabsOfflineAppxInventory -WindowsRoot $guidWindows -Bundle $appxBundle
     Assert-True ($guidInventory.Errors.Count -eq 0 -and

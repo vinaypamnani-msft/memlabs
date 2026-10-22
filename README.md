@@ -482,6 +482,9 @@ does not enable tracing or restart Windows to manufacture missing evidence.
 Volume-GUID paths are passed literally to the event reader. A query that
 silently returns no records without an explicit empty-log status is reported
 as missing/unverified evidence, not as a clean empty event log.
+Bare volume-GUID roots are normalized to include their required trailing
+backslash before native attribute checks; .NET Framework's `DirectoryInfo.Parent`
+can omit it in Windows PowerShell 5.1.
 Raw registry hives and unattend XML are excluded; private hive copies are
 read using the system `offreg.dll` offline-registry library and removed after
 inspection. No hive is mounted into the host registry. This supports OS hives
@@ -625,6 +628,10 @@ membership. Windows can naturally progress during the explicitly requested
 boot/observation period. Validate the guest scopes and bounded host orchestration
 with `vmbuild\tools\Test-WindowsVmFirstLogonProbe.ps1`, plus the existing collector
 and startup-default regression scripts, on both PowerShell engines.
+If the setup-state query fails before it can determine the client type, the
+snapshot preserves its actual `ProbeFailed` diagnostics as explicit partial,
+not-ready evidence. It does not relabel an unknown type as a server or relax
+the deployment readiness gate.
 
 ### Optional FirstLogonAnim hang dump
 
@@ -669,6 +676,75 @@ Process memory can contain sensitive data even in a lab; review/protect the
 dump before sharing. Validate native-payload compilation, target restrictions,
 deadline/unknown-outcome behavior, and verified offline transfer using
 `vmbuild\tools\Test-WindowsVmFirstLogonDump.ps1` on both PowerShell engines.
+
+### Building and qualifying Windows client base images
+
+`vmbuild\baseimagestaging\New-BaseImage.ps1` requires a fresh disposable
+first-boot qualification for Windows 10/11 client images after successful
+offline Sysprep verification and **before** copying/promoting the golden image.
+The installed OS's read-only registry metadata determines whether this check is
+required; a custom WIM filename cannot bypass it.
+Sysprep tags, shutdown, disk integrity, and hashes alone do not qualify OOBE.
+
+The generalized source stays untouched. Qualification boots one independent,
+hash-verified clone using the staging VM's hardware/switch and saved local
+administrator credential. It allows Windows-owned setup restarts, waits an
+additional six minutes plus the collector's observation window, and requires
+both read-only snapshots to pass the existing unattended deployment readiness
+checks. Only the passive settling interval permits normal Off/Starting/Stopping
+transitions; the same VM must be Running at its end. Live collection remains
+strict about the target staying Running. The measured settling duration is saved
+in the qualification report. No completion flags, passwords, cache contents, rename, or domain-join
+settings are changed. Failure prevents capture/promotion and preserves the
+staging VM and diagnostic evidence; it does not replace the prior golden image.
+
+`-OutputDirectory` selects a separate candidate directory instead of the
+published OS cache. `-SkipHostPreparation` avoids unrelated host preparation
+and maintenance refresh on an already prepared host. Use a new WIM basename
+or the explicit clean-rebuild switches rather than reusing a failed deployment
+disk or resuming an old customization VM.
+Keep comparison `-Destination` paths short: Hyper-V configuration paths must be
+below 260 characters. Overlong destinations are rejected before image copying
+or VM creation rather than failing later while creating the Smart Paging store.
+
+`-EnableFirstBootAutoLogon` is an **opt-in lab-image setting** for clients that
+need a real first administrator sign-in to finish OOBE. After final Sysprep it
+configures only the owned staging VM disk, reusing the existing local lab
+administrator's answer-file password element without decoding or exporting it.
+The first-logon command sets `AutoLogonCount=0` and `AutoAdminLogon=0`; it does not
+set OOBE completion flags or bypass setup. This includes Microsoft's documented
+[single-logon workaround](https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-autologon-logoncount)
+for the positive `LogonCount` off-by-one issue. Existing first-logon commands and
+other answer-file settings are preserved. This option is not enabled by default,
+does not apply to servers, and refuses disks outside the owned staging VM path.
+Its staging marker also makes the existing host/DSC readiness gate wait until
+cleanup is verified, preventing rename/domain join from racing that first-logon
+command. Images without the marker retain their existing readiness behavior.
+This is not a disk-format migration: existing supported Windows 10/11 VHDX
+images do not need conversion or new metadata, and Windows Server remains
+excluded from the client-only gate.
+
+With this option, qualification additionally requires native OOBE completion
+in both snapshots, an interactive desktop owned by the lab administrator, and
+readable offline evidence that both autologon values are zero. A ready state
+awaiting first logon, partial collection, or still-enabled autologon cannot
+qualify this candidate. Use `-OutputDirectory` to retain it separately until a
+full deployment smoke test is complete; no rolling `Latest` mapping is changed.
+
+A qualified Windows client artifact gets a `.qualification.json` receipt with
+its SHA-256, qualification time, and diagnostic archive. The copied artifact is
+checked against the qualified source hash before promotion. The hash marker and
+receipt are staged before replacing any existing artifact; a publication failure
+rolls back the image and both metadata files together. Two ready snapshots are
+required, not a continuously monitored readiness interval. A first-boot pass
+is not a substitute for a full single-client deployment validation before
+changing a rolling `Latest` image mapping. The receipt also records whether
+bounded first-boot sign-in was enabled and its cleanup/OOBE completion verified.
+
+The single-clone check is also available through
+`Test-WindowsFirstLogonImage.ps1 -TestVariant FirstBootQualification`.
+Existing SFAP and explicit-autologon comparison variants retain their defaults.
+Windows Server offline Sysprep checks and the separate Linux builder are unchanged.
 
 ### Guided, disposable first-logon image comparison
 

@@ -35,6 +35,7 @@ function Get-MemLabsWindowsClientSetupState {
         OOBEInProgress = $null; NativeOobeComplete = $null
         WinRtOobeState = $null; SetupExeCompletion = $null
         OobeProcessCount = $null; OobeProcesses = @(); OobeBlockingProcessCount = $null
+        FirstBootAutoLogonRequired = $false; FirstBootAutoLogonDisabled = $null
         ActiveName = $null; PendingName = $null
         Reason = 'ProbeFailed'; Detail = ''; Diagnostics = @()
     }
@@ -54,6 +55,15 @@ function Get-MemLabsWindowsClientSetupState {
             return $state
         }
 
+        $autoLogonMarker = "$env:SystemDrive\staging\MemLabs-BoundedFirstBootAutoLogon.txt"
+        if (Test-Path -LiteralPath $autoLogonMarker -PathType Leaf -ErrorAction Stop) {
+            $markerInfo = Get-Item -LiteralPath $autoLogonMarker -Force -ErrorAction Stop
+            if ($markerInfo.Length -gt 16 -or ($markerInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                (Get-Content -LiteralPath $autoLogonMarker -Raw -ErrorAction Stop).Trim() -cne '1') {
+                throw 'The bounded first-boot autologon marker is invalid or unreadable.'
+            }
+            $state.FirstBootAutoLogonRequired = $true
+        }
         $image = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' `
             -Name ImageState -ErrorAction Stop
         if ($image.ImageState -isnot [string] -or [string]::IsNullOrWhiteSpace($image.ImageState)) {
@@ -129,12 +139,23 @@ function Get-MemLabsWindowsClientSetupState {
             }
         }
         else { $state.Ready = $true; $state.Reason = 'Complete' }
+        if ($state.Ready -and $state.FirstBootAutoLogonRequired) {
+            $autoLogon = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' `
+                -Name AutoAdminLogon, AutoLogonCount -ErrorAction Stop
+            $state.FirstBootAutoLogonDisabled = $autoLogon.AutoAdminLogon -is [string] -and $autoLogon.AutoAdminLogon -eq '0' -and
+                ($autoLogon.AutoLogonCount -is [int] -or $autoLogon.AutoLogonCount -is [uint32]) -and $autoLogon.AutoLogonCount -eq 0
+            if (-not $state.FirstBootAutoLogonDisabled) {
+                $state.Ready = $false
+                $state.Reason = 'FirstBootAutoLogonCleanupPending'
+            }
+        }
     }
-    catch { $state.Reason = 'ProbeFailed'; $state.Diagnostics = @($_.Exception.Message) }
+    catch { $state.Ready = $false; $state.Reason = 'ProbeFailed'; $state.Diagnostics = @($_.Exception.Message) }
 
     $details = foreach ($name in @('ProductType', 'ImageState', 'SetupType', 'SystemSetupInProgress',
             'OOBEInProgress', 'NativeOobeComplete', 'WinRtOobeState', 'SetupExeCompletion',
-            'OobeProcessCount', 'OobeBlockingProcessCount', 'OobeProcesses', 'ActiveName', 'PendingName')) {
+            'OobeProcessCount', 'OobeBlockingProcessCount', 'OobeProcesses', 'ActiveName', 'PendingName',
+            'FirstBootAutoLogonRequired', 'FirstBootAutoLogonDisabled')) {
         $value = if ($null -eq $state.$name) { '<unavailable>' } else { "$($state.$name)" }
         "${name}=$value"
     }

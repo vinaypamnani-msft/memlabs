@@ -64,6 +64,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $sfap 'cache0.bin'), 'SYNTHETIC-CREDENTIAL-CACHE-DO-NOT-EXPORT')
     $cacheHash = (Get-FileHash -LiteralPath (Join-Path $sfap 'cache0.bin') -Algorithm SHA256).Hash
     $script:ExpectedMode = 'Source'; $script:Mounts = 0; $script:Dismounts = 0; $script:Pristine = $true; $script:DismountFails = $false
+    $script:ImageBuild = '26300'; $script:InstallationType = 'Client'
     function Get-VHD {
         param($Path,$ErrorAction)
         [pscustomobject]@{ Attached = $false; ParentPath = '' }
@@ -95,12 +96,21 @@ try {
         param($Path,$Kind)
         Assert-True ($Path -match '\\Private-[a-f0-9]{32}\\(SYSTEM|SOFTWARE)$') 'Inspection read a live/mounted hive instead of a private copy.'
         if ($Kind -eq 'SYSTEM') { return @{ Setup = @{ Values = @{ SetupType = 2 } } } }
-        @{ WindowsVersion = @{ Values = @{ InstallationType = 'Client'; CurrentBuild = '26300' } }
+        @{ WindowsVersion = @{ Values = @{ InstallationType = $script:InstallationType; CurrentBuild = $script:ImageBuild } }
             ImageState = @{ Values = @{ ImageState = $(if ($script:Pristine) { 'IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE' } else { 'IMAGE_STATE_COMPLETE' }) } } }
     }
     $before = Invoke-MemLabsComparisonImageInspection -Path $source -Mode Source -Workspace $workspace
     Assert-True ($before.Access -eq 'ReadOnly' -and $before.Caches.Count -eq 1 -and -not $before.Caches[0].Removed -and
         (Get-FileHash -LiteralPath (Join-Path $sfap 'cache0.bin') -Algorithm SHA256).Hash -eq $cacheHash) 'Source inspection changed its cache.'
+    $script:ImageBuild = '19045'
+    $win10 = Invoke-MemLabsComparisonImageInspection -Path $source -Mode Source -Workspace $workspace -TestVariant FirstBootQualification
+    Assert-True ($win10.Build -eq 19045 -and $win10.Access -eq 'ReadOnly') 'Windows 10 qualification was rejected by a Windows 11-only build threshold.'
+    Assert-Throws { Invoke-MemLabsComparisonImageInspection -Path $source -Mode Source -Workspace $workspace } 'not a generalized'
+    $script:ImageBuild = '7601'
+    Assert-Throws { Invoke-MemLabsComparisonImageInspection -Path $source -Mode Source -Workspace $workspace -TestVariant FirstBootQualification } 'not a generalized'
+    $script:ImageBuild = '26300'; $script:InstallationType = 'Server'
+    Assert-Throws { Invoke-MemLabsComparisonImageInspection -Path $source -Mode Source -Workspace $workspace -TestVariant FirstBootQualification } 'not a generalized'
+    $script:InstallationType = 'Client'
     $script:ExpectedMode = 'Control'
     $controlDisk = Join-Path $workspace 'Control\Control.vhdx'
     $control = Invoke-MemLabsComparisonImageInspection -Path $controlDisk -Mode Control -Workspace $workspace
@@ -215,26 +225,77 @@ try {
         (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -eq $sourceHash) 'The real bounded copy worker modified the source or lost copy integrity.'
 
     & {
+        . (Join-Path $PSScriptRoot 'Common.WindowsVmFirstLogonProbe.ps1')
+        $observedVm = [pscustomobject]@{ Id = [guid]::NewGuid(); Name = 'OWNED-SETTLE-TRIAL' }
+        function Get-CimInstance {
+            param($Namespace,$ClassName,$Filter,$OperationTimeoutSec,$ErrorAction)
+            Assert-True ($Namespace -eq 'root\virtualization\v2' -and $ClassName -eq 'Msvm_ComputerSystem' -and
+                $Filter -eq "Name='$($observedVm.Id.ToString('D'))'" -and $OperationTimeoutSec -eq 10) 'Passive settling queried an unbounded or different target.'
+            $script:SettleReads++
+            $state = if ($script:SettleReads -eq 1) { $script:SettleInitialState } else { 2 }
+            [pscustomobject]@{ Name = "$($observedVm.Id)"; ElementName = $observedVm.Name; EnabledState = $state }
+        }
+        foreach ($initialState in @(3, 32770, 32774)) {
+            $script:SettleReads = 0; $script:SettleInitialState = $initialState
+            $settled = Wait-MemLabsImageQualificationObservation -VM $observedVm -ObservationSeconds 1
+            Assert-True ($settled.RequestedSeconds -eq 1 -and $settled.ElapsedSeconds -ge 1 -and
+                $settled.FinalState -eq 'Running' -and $settled.GuestQueries -eq 0 -and $settled.ForcedRestarts -eq 0) `
+                'Qualification did not allow a normal setup power transition for the full passive interval.'
+        }
+        $script:SettleReads = 0; $script:SettleInitialState = 3
+        Assert-Throws { Wait-MemLabsImageQualificationObservation -VM $observedVm -ObservationSeconds 0 } 'did not return to Running'
+        $script:SettleReads = 0; $script:SettleInitialState = 32768
+        Assert-Throws { Wait-MemLabsImageQualificationObservation -VM $observedVm -ObservationSeconds 0 } 'changed or stopped'
+        $script:SettleReads = 0; $script:SettleInitialState = 3
+        Assert-Throws { Wait-MemLabsFirstLogonObservation -VM $observedVm -ObservationSeconds 0 } 'changed or stopped'
+    }
+
+    & {
         $spec = [pscustomobject]@{ Label = 'Control'; Name = 'ML-OOBE-C-native'; Root = (Join-Path $root 'native-trial'); Disk = (Join-Path $root 'native-trial\Control.vhdx') }
         $null = New-Item -Path $spec.Root -ItemType Directory
         [IO.File]::Copy($source,$spec.Disk)
         $token = 'native-owner-token'
         $hardware = [pscustomobject]@{ Startup = 1GB; Minimum = 1GB; Maximum = 4GB; Dynamic = $true; Processors = 2; Switch = 'LAB-SWITCH'; SecureBoot = 'On'; Template = 'MicrosoftWindows'; Tpm = $true }
         $script:NativeVm = $null; $script:NativeRemoved = $false; $script:NativeDiskDrift = $false; $script:NativeCheckpoint = $false
+        $script:NativeInventoryFails = $false
         $script:NativeConfiguration = [Collections.Generic.List[string]]::new()
-        function Invoke-MemLabsComparisonWorker { param($Block,$Arguments,$TimeoutSeconds,$Operation); Assert-True ($TimeoutSeconds -eq 120) 'Creation lost its bound.'; & $Block @Arguments }
+        $fixtureRepairHelper = Join-Path $spec.Root 'job-helper.ps1'
+        [IO.File]::WriteAllText($fixtureRepairHelper, @'
+function Wait-MemLabsOobeRepairJob {
+    param($Job,$TimeoutSeconds,$Operation)
+    Assert-True ($TimeoutSeconds -eq 60 -and $Job.State -eq 'Completed') 'Native creation lost its bounded job result.'
+    $Job.Result
+}
+'@)
+        function Invoke-MemLabsComparisonWorker {
+            param($Block,$Arguments,$TimeoutSeconds,$Operation)
+            Assert-True ($TimeoutSeconds -eq 120 -and
+                $Arguments[3] -eq (Join-Path $PSScriptRoot 'Common.WindowsVmOobeRepair.ps1')) 'Creation lost its bound or shared job helper.'
+            $fixtureArguments = @($Arguments)
+            $fixtureArguments[3] = $fixtureRepairHelper
+            & $Block @fixtureArguments
+        }
         function Import-Module { param($Name,$ErrorAction); Assert-True ($Name -eq 'Hyper-V') 'Worker imported another host module.' }
         function Get-VM {
             param($Id,$ErrorAction)
             if ($Id) { return $script:NativeVm }
-            if (-not $script:NativeRemoved -and $script:NativeVm) { return $script:NativeVm }
+            throw 'Unfiltered inventory is unsupported by this fixture.'
+        }
+        function Get-CimInstance {
+            param($Namespace,$ClassName,$Filter,$OperationTimeoutSec,$ErrorAction)
+            Assert-True ($Namespace -eq 'root\virtualization\v2' -and $ClassName -eq 'Msvm_ComputerSystem' -and
+                $OperationTimeoutSec -eq 10) 'Native inventory lost its namespace or deadline.'
+            if ($script:NativeInventoryFails) { throw 'Synthetic inventory access denied' }
+            Assert-True ($Filter -eq "ElementName='$($spec.Name)'" -or
+                ($script:NativeVm -and $Filter -eq "Name='$($script:NativeVm.Id.ToString('D'))'")) 'Native inventory was not restricted to the owned trial identity.'
+            if ($script:NativeVm -and -not $script:NativeRemoved) { $script:NativeVm }
         }
         function New-VM {
-            param($Name,$Path,$Generation,$VHDPath,$MemoryStartupBytes,$SwitchName,$ErrorAction)
+            param($Name,$Path,$Generation,$VHDPath,$MemoryStartupBytes,$SwitchName,[switch]$AsJob,$ErrorAction)
             Assert-True ($Name -eq $spec.Name -and $Path -eq $spec.Root -and $Generation -eq 2 -and $VHDPath -eq $spec.Disk -and
-                $SwitchName -eq 'LAB-SWITCH' -and $MemoryStartupBytes -eq 1GB) 'Native VM creation lost isolation/hardware/source matching.'
+                $SwitchName -eq 'LAB-SWITCH' -and $MemoryStartupBytes -eq 1GB -and $AsJob) 'Native VM creation lost isolation/hardware/source matching or bounded job execution.'
             $script:NativeVm = [pscustomobject]@{ Id = [guid]::NewGuid(); Name = $Name; Path = (Join-Path $Path $Name); State = 'Off'; Notes = '' }
-            $script:NativeVm
+            [pscustomobject]@{ State = 'Completed'; Result = $script:NativeVm }
         }
         function Set-VM {
             param($VM,$AutomaticCheckpointsEnabled,$AutomaticStartAction,$AutomaticStopAction,$Notes,$ErrorAction)
@@ -246,9 +307,14 @@ try {
         function Set-VMFirmware { param($VM,$EnableSecureBoot,$SecureBootTemplate,$ErrorAction); Assert-True ($EnableSecureBoot -eq 'On' -and $SecureBootTemplate -eq 'MicrosoftWindows') 'Secure boot drifted.'; $script:NativeConfiguration.Add('Firmware') }
         function Set-VMKeyProtector { param($VM,[switch]$NewLocalKeyProtector,$ErrorAction); Assert-True $NewLocalKeyProtector 'Trial reused another VM''s TPM identity.'; $script:NativeConfiguration.Add('Key') }
         function Enable-VMTPM { param($VM,$ErrorAction); $script:NativeConfiguration.Add('TPM') }
+        $script:NativeInventoryFails = $true
+        Assert-Throws { New-MemLabsComparisonVm -Spec $spec -Hardware $hardware -Token $token } 'Synthetic inventory access denied'
+        Assert-True (-not $script:NativeVm) 'Failed inventory was treated as an empty VM list.'
+        $script:NativeInventoryFails = $false
         $created = New-MemLabsComparisonVm -Spec $spec -Hardware $hardware -Token $token
         Assert-True (($script:NativeConfiguration -join ',') -eq 'VM,CPU,Memory,Firmware,Key,TPM' -and
             $created.Id -ne $original.Id) 'The actual creation worker skipped matched configuration or selected the original.'
+        Assert-Throws { New-MemLabsComparisonVm -Spec $spec -Hardware $hardware -Token $token } 'name already exists'
         function Get-VMHardDiskDrive { param($VM,$ErrorAction); [pscustomobject]@{ Path = $(if ($script:NativeDiskDrift) { $source } else { $spec.Disk }) } }
         function Get-VMSnapshot { param($VM,$ErrorAction); if ($script:NativeCheckpoint) { [pscustomobject]@{ Name = 'Unexpected' } } }
         function Remove-VM { param($VM,[switch]$Force,[switch]$AsJob,$ErrorAction); Assert-True ($VM.Id -eq $created.Id -and $Force -and $AsJob) 'Cleanup targeted an unowned VM or lost its bound.'; $script:NativeRemoved = $true; [pscustomobject]@{ State = 'Completed' } }
@@ -271,7 +337,7 @@ try {
 
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     function New-TrialArchive {
-        param([string]$Path,[guid]$VMId,[string]$Observation,[bool]$Interactive = $true)
+        param([string]$Path,[guid]$VMId,[string]$Observation,[bool]$Interactive = $true,[switch]$Partial,[switch]$AutoLogonDisabled)
         $ready = $Observation -eq 'Ready'
         $reason = if ($ready) { 'MachineCompleteAwaitingFirstLogon' } elseif ($Observation -eq 'FirstLogonStall') { 'WindowsWelcomeIncomplete' } else { 'MachineSetupIncomplete' }
         $setup = [pscustomobject]@{
@@ -285,13 +351,18 @@ try {
         if ($ready) { $setup.OobeProcesses = @() }
         $actor = [pscustomobject]@{ Name = 'TEST\fixture-admin'; Sid = 'S-1-5-21-111-222-333-1000' }
         $processes = if ($ready -and $Interactive) { @([pscustomobject]@{ Name = 'explorer.exe'; SessionId = 1; OwnerSid = $actor.Sid }) } else { @() }
-        $state = [pscustomobject]@{ Scope = 'WindowsFirstLogonProbe'; MachineGuid = [guid]::NewGuid().ToString('D'); Setup = $setup; Actor = $actor; Processes = $processes }
+        $status = if ($Partial) { 'Partial' } else { 'Complete' }
+        $state = [pscustomobject]@{ Scope = 'WindowsFirstLogonProbe'; Status = $status; MachineGuid = [guid]::NewGuid().ToString('D'); Setup = $setup; Actor = $actor; Processes = $processes }
         $zip = [IO.Compression.ZipFile]::Open($Path,[IO.Compression.ZipArchiveMode]::Create)
         try {
             $entries = @{
-                'Manifest.json' = @{ VMId = $VMId.ToString('D'); FinalState = 'Off'; Status = 'Complete'; LiveProbe = @{ Status = 'Complete' } }
+                'Manifest.json' = @{ VMId = $VMId.ToString('D'); FinalState = 'Off'; Status = $status; LiveProbe = @{ Status = $status } }
                 'Live-StateBefore.json' = $state; 'Live-StateAfter.json' = $state
-                'WindowsSetupState.json' = @{ SOFTWARE = @{ WinlogonProgress = @{ Values = @{ DefaultUserName = $(if ($ready) { 'fixture-admin' } else { 'defaultuser0' }) } } } }
+                'WindowsSetupState.json' = @{ SOFTWARE = @{ WinlogonProgress = @{ Present = $true; Values = @{
+                                DefaultUserName = $(if ($ready) { 'fixture-admin' } else { 'defaultuser0' })
+                                AutoAdminLogon = $(if ($AutoLogonDisabled) { '0' } else { '1' })
+                                AutoLogonCount = $(if ($AutoLogonDisabled) { 0 } else { 1 })
+                            } } } }
             }
             foreach ($name in $entries.Keys) {
                 $entry = $zip.CreateEntry($name)
@@ -310,6 +381,15 @@ try {
         Assert-True ($evidence.Observation -eq $expected) 'A measured trial state was falsely classified.'
         Assert-Throws { Read-MemLabsComparisonDiagnostics -Archive $path -ExpectedVmId ([guid]::NewGuid()) } 'another VM'
     }
+    $id = [guid]::NewGuid()
+    $partialArchive = Join-Path $root 'PartialReady.zip'
+    New-TrialArchive -Path $partialArchive -VMId $id -Observation Ready -Partial
+    $partialReady = Read-MemLabsComparisonDiagnostics -Archive $partialArchive -ExpectedVmId $id
+    Assert-True (-not $partialReady.Ready -and $partialReady.Observation -eq 'OtherOrTransitioning') 'Partial evidence was accepted as a qualification pass.'
+    $disabledArchive = Join-Path $root 'AutoLogonDisabled.zip'
+    New-TrialArchive -Path $disabledArchive -VMId $id -Observation Ready -AutoLogonDisabled
+    $disabled = Read-MemLabsComparisonDiagnostics -Archive $disabledArchive -ExpectedVmId $id
+    Assert-True ($disabled.Ready -and $disabled.AutoLogonDisabled) 'Effective first-logon autologon cleanup was not preserved.'
 
     $script:CredentialReads = 0; $script:Inspections = [Collections.Generic.List[string]]::new()
     $script:Started = [Collections.Generic.List[guid]]::new(); $script:Removed = [Collections.Generic.List[guid]]::new()
@@ -363,9 +443,29 @@ try {
         Assert-True ($VM.Id -ne $original.Id -and $VM.State -eq 'Off') 'Cleanup touched the original or an unverified running VM.'
         $script:Removed.Add($VM.Id); [IO.File]::Delete($Spec.Disk)
     }
+    function Wait-MemLabsImageQualificationObservation {
+        param($VM)
+        Assert-True ($VM.Id -ne $original.Id) 'Qualification changed the original during passive settling.'
+    }
     $runs = Join-Path $root 'runs'
     $null = Invoke-MemLabsFirstLogonImageComparison -VmName $original.Name -SourceVhdxPath $source -Destination $runs -WhatIf
     Assert-True ($script:CredentialReads -eq 0 -and $script:Inspections.Count -eq 0 -and $script:Started.Count -eq 0 -and -not [IO.Directory]::Exists($runs)) 'WhatIf loaded credentials or mutated resources.'
+    $vmPathSuffix = '\Compare-' + ('a' * 32) + '\Control\ML-OOBE-C-' + ('a' * 8) +
+        '\Virtual Machines\00000000-0000-0000-0000-000000000000.vmcx'
+    $boundaryDestinationLength = 260 - $vmPathSuffix.Length
+    $padding = $boundaryDestinationLength - $root.Length - 1
+    Assert-True ($padding -gt 1) 'The path-budget fixture needs a shorter temporary root.'
+    $rejectedDestination = Join-Path $root ('x' * $padding)
+    Assert-True (($rejectedDestination + $vmPathSuffix).Length -eq 260) 'The rejected fixture does not exercise the exact Hyper-V path limit.'
+    Assert-Throws {
+        Invoke-MemLabsFirstLogonImageComparison -VmName $original.Name -SourceVhdxPath $source -Destination $rejectedDestination
+    } 'Hyper-V requires a shorter -Destination'
+    Assert-True ($script:Inspections.Count -eq 0 -and $script:Started.Count -eq 0 -and
+        -not [IO.Directory]::Exists($rejectedDestination)) 'An overlong Hyper-V path was rejected only after image inspection/copy or VM mutation.'
+    $acceptedDestination = Join-Path $root ('x' * ($padding - 1))
+    Assert-True (($acceptedDestination + $vmPathSuffix).Length -eq 259) 'The accepted fixture does not exercise the exact supported path boundary.'
+    $boundaryResult = Invoke-MemLabsFirstLogonImageComparison -VmName $original.Name -SourceVhdxPath $source -Destination $acceptedDestination
+    Assert-True ($boundaryResult.Status -eq 'Completed') 'A supported Hyper-V path was rejected at the boundary.'
     foreach ($scenario in @(
             @{ Control = 'FirstLogonStall'; Test = 'Ready'; Expected = 'supports the cache hypothesis' },
             @{ Control = 'Ready'; Test = 'Ready'; Expected = 'BothReady' },
@@ -397,11 +497,22 @@ try {
     Assert-True ($script:Started.Count -eq $before + 1 -and $original.State -eq 'Off') 'Unknown startup proceeded to another arm or touched the original.'
     Assert-True (@($script:Started | Where-Object { $_ -eq $original.Id }).Count -eq 0 -and
         @($script:Removed | Where-Object { $_ -eq $original.Id }).Count -eq 0) 'The original VM was included in trial lifecycle actions.'
+    $script:StartupFails = $false
+    foreach ($observation in @('Ready','FirstLogonStall')) {
+        $script:Observations = @{ Control = $observation; Test = 'Ready' }
+        $before = $script:Started.Count
+        $result = Invoke-MemLabsFirstLogonImageComparison -VmName $original.Name -SourceVhdxPath $source -Destination $runs -TestVariant FirstBootQualification
+        Assert-True ($script:Started.Count -eq $before + 1 -and $result.Qualified -eq ($observation -eq 'Ready') -and
+            $result.SourceHash -eq $sourceHash) 'First-boot qualification used two clones, misreported readiness, or lost its qualified source hash.'
+    }
 
     $coldTools = Join-Path $root 'cold tools with spaces'
     $null = New-Item -Path $coldTools -ItemType Directory
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Get-WindowsVmSetupDiagnostics.ps1'), (Join-Path $PSScriptRoot 'Common.WindowsVmOobeRepair.ps1') `
         -Destination $coldTools -ErrorAction Stop
+    $coldCommon = Join-Path $root 'common'
+    $null = New-Item -Path $coldCommon -ItemType Directory
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\common\Common.BaseImage.ps1') -Destination $coldCommon -ErrorAction Stop
     $stub = @'
 function Invoke-MemLabsFirstLogonImageComparison {
     [CmdletBinding(SupportsShouldProcess)]

@@ -442,6 +442,7 @@ function Get-MemLabsOfflineSetupSourcePath {
         throw 'Offline evidence paths must be relative and must not contain traversal segments.'
     }
     $path = $WindowsRoot
+    if ($path -match '^\\\\\?\\Volume\{[0-9A-Fa-f-]{36}\}$') { $path += '\' }
     foreach ($part in (@('') + $RelativePath.Split('\'))) {
         if ($part) { $path = Join-Path $path $part }
         # PS5.1 Get-Item can silently return no item for missing volume-GUID paths.

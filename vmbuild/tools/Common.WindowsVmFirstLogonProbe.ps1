@@ -47,7 +47,17 @@ function Get-MemLabsFirstLogonGuestBlock {
 
         if ($Action -eq 'State') {
             $setupState = Get-MemLabsWindowsClientSetupState
-            if ($setupState.ProductType -ne 1) { throw 'Live first-logon inspection supports Windows clients only.' }
+            if ($null -eq $setupState.ProductType -and $setupState.Reason -eq 'ProbeFailed' -and
+                $setupState.Ready -is [bool] -and -not $setupState.Ready -and @($setupState.Diagnostics).Count -gt 0) {
+                $result['Setup'] = $setupState
+                $result['Processes'] = @(); $result['DefaultUserAccount'] = @(); $result['Services'] = @()
+                $result['Errors'] = @("Windows setup-state query failed: $($setupState.Detail)")
+                $result['Status'] = 'Partial'
+                return [pscustomobject]$result
+            }
+            if ($setupState.ProductType -ne 1) {
+                throw "Live first-logon inspection requires a Windows client. Reported ProductType=$($setupState.ProductType); $($setupState.Detail)"
+            }
             $result['Setup'] = $setupState
             $result['DefaultUserAccount'] = @(Get-CimInstance -ClassName Win32_UserAccount `
                 -Filter "LocalAccount=TRUE AND Name='defaultuser0'" -OperationTimeoutSec 10 -ErrorAction Stop |
@@ -225,7 +235,12 @@ function Invoke-MemLabsFirstLogonGuestQuery {
     foreach ($field in $required) {
         if (-not $result.PSObject.Properties[$field]) { throw "Read-only $Action result is missing $field." }
     }
-    if (($Action -eq 'State' -and ($result.Setup.ProductType -ne 1 -or @($result.Processes).Count -gt 64 -or @($result.Services).Count -gt 16)) -or
+    $unknownFailedState = $Action -eq 'State' -and $result.Status -eq 'Partial' -and
+        $null -eq $result.Setup.ProductType -and $result.Setup.Reason -eq 'ProbeFailed' -and
+        $result.Setup.Ready -is [bool] -and -not $result.Setup.Ready -and
+        @($result.Setup.Diagnostics).Count -gt 0 -and $result.Errors.Count -gt 0
+    if (($Action -eq 'State' -and (($result.Setup.ProductType -ne 1 -and -not $unknownFailedState) -or
+                @($result.Processes).Count -gt 64 -or @($result.Services).Count -gt 16)) -or
         ($Action -eq 'Appx' -and (@($result.RegisteredPackages).Count -gt 128 -or @($result.ProvisionedPackages).Count -gt 128))) {
         throw "Read-only $Action result exceeds its scope or data limits."
     }
@@ -233,19 +248,27 @@ function Invoke-MemLabsFirstLogonGuestQuery {
 }
 
 function Wait-MemLabsFirstLogonObservation {
-    param([Parameter(Mandatory)]$VM, [ValidateRange(0, 190)][int]$ObservationSeconds = 190)
+    param(
+        [Parameter(Mandatory)]$VM,
+        [ValidateRange(0, 600)][int]$ObservationSeconds = 190,
+        [switch]$AllowSetupRestart
+    )
     $watch = [Diagnostics.Stopwatch]::StartNew()
     Write-Host "$($VM.Name): allowing ${ObservationSeconds}s of normal first-logon progress before read-only inspection; no completion flags will be changed."
     try {
         do {
             $live = @(Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName Msvm_ComputerSystem `
                 -Filter "Name='$($VM.Id.ToString('D'))'" -OperationTimeoutSec 10 -ErrorAction Stop)
-            if ($live.Count -ne 1 -or $live[0].Name -ne $VM.Id.ToString('D') -or
-                $live[0].ElementName -ne $VM.Name -or $live[0].EnabledState -ne 2) {
-                throw 'The live probe target changed or stopped during observation.'
+            if ($live.Count -ne 1 -or $live[0].Name -ne $VM.Id.ToString('D') -or $live[0].ElementName -ne $VM.Name -or
+                ($live[0].EnabledState -ne 2 -and
+                    (-not $AllowSetupRestart -or $live[0].EnabledState -notin @(3, 32770, 32774)))) {
+                throw "The live probe target changed or stopped during observation. Matches=$($live.Count); EnabledState=$($live.EnabledState -join ',')."
             }
             $remaining = $ObservationSeconds - $watch.Elapsed.TotalSeconds
-            if ($remaining -le 0) { break }
+            if ($remaining -le 0) {
+                if ($live[0].EnabledState -ne 2) { throw "The exact observed VM did not return to Running within ${ObservationSeconds}s; EnabledState=$($live[0].EnabledState)." }
+                break
+            }
             Write-Progress -Activity "$($VM.Name): observing first logon" -Status "$([int][Math]::Ceiling($remaining))s remaining; no repair actions"
             Start-Sleep -Milliseconds ([int][Math]::Min(5000, [Math]::Ceiling($remaining * 1000)))
         } while ($true)

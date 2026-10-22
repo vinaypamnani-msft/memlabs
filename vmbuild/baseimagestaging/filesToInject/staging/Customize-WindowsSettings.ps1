@@ -511,7 +511,10 @@ if ($RunSysprep.IsPresent) {
     Write-Host "Waiting for 30 seconds before starting sysprep..."
     Start-Sleep -Seconds 30
 
-    & taskkill /im sysprep.exe /f 2>$null | Out-Null
+    $existingSysprep = @(Get-Process -Name sysprep -ErrorAction SilentlyContinue)
+    if ($existingSysprep.Count) {
+        throw "A Sysprep process is already running (PID(s): $($existingSysprep.Id -join ', ')); refusing to terminate it or start a second instance."
+    }
     $sysprepArguments = "/generalize /oobe /quit /unattend:`"$sysprepUnattendPath`""
     $sysprepProcess = Start-Process -FilePath "$env:windir\system32\sysprep\sysprep.exe" -ArgumentList $sysprepArguments -Wait -PassThru
     $sysprepTagPath = "$env:windir\system32\sysprep\Sysprep_succeeded.tag"

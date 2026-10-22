@@ -25,6 +25,29 @@ function Reset-SetupFixture {
     $script:UserOobeValue = 'InProgress'; $script:UserOobeThrows = $false; $script:UserOobeReads = 0
     $script:CompletionValues = [pscustomobject]@{ 'setup.exe' = 3 }
     $script:OobeProcesses = @(); $script:ProcessThrows = $false; $script:ProcessReads = 0
+    $script:AutoMarkerExists = $false; $script:AutoMarkerText = '1'; $script:AutoMarkerLength = 1
+    $script:AutoMarkerAttributes = [IO.FileAttributes]::Archive; $script:AutoRegistryThrows = $false
+    $script:AutoLogonValues = [pscustomobject]@{ AutoAdminLogon = '1'; AutoLogonCount = 1 }
+}
+function Test-Path {
+    [CmdletBinding()]
+    param($LiteralPath, $Path, $PathType)
+    if ($LiteralPath -eq "$env:SystemDrive\staging\MemLabs-BoundedFirstBootAutoLogon.txt") { return $script:AutoMarkerExists }
+    Microsoft.PowerShell.Management\Test-Path @PSBoundParameters
+}
+function Get-Item {
+    [CmdletBinding()]
+    param($LiteralPath, [switch]$Force)
+    if ($LiteralPath -eq "$env:SystemDrive\staging\MemLabs-BoundedFirstBootAutoLogon.txt") {
+        return [pscustomobject]@{ Length = $script:AutoMarkerLength; Attributes = $script:AutoMarkerAttributes }
+    }
+    Microsoft.PowerShell.Management\Get-Item @PSBoundParameters
+}
+function Get-Content {
+    [CmdletBinding()]
+    param($LiteralPath, $Path, [switch]$Raw)
+    if ($LiteralPath -eq "$env:SystemDrive\staging\MemLabs-BoundedFirstBootAutoLogon.txt") { return $script:AutoMarkerText }
+    Microsoft.PowerShell.Management\Get-Content @PSBoundParameters
 }
 function Get-CimInstance {
     param($ClassName, $OperationTimeoutSec, $Filter, $ErrorAction)
@@ -49,6 +72,11 @@ function Get-ItemProperty {
         'HKLM:\SYSTEM\Setup\Status\ChildCompletion' { return $script:CompletionValues }
         'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' { return [pscustomobject]@{ ComputerName = $script:ActiveName } }
         'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' { return [pscustomobject]@{ ComputerName = $script:PendingName } }
+        'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' {
+            Assert-True (($Name -join ',') -eq 'AutoAdminLogon,AutoLogonCount') 'Readiness inspected credential values instead of only autologon flags.'
+            if ($script:AutoRegistryThrows) { throw 'Synthetic autologon registry failure' }
+            return $script:AutoLogonValues
+        }
         default { throw "Unexpected registry path: $LiteralPath" }
     }
 }
@@ -66,6 +94,33 @@ function Get-MemLabsWindowsOobeLifecycleState {
 Reset-SetupFixture
 $readyState = Get-MemLabsWindowsClientSetupState
 Assert-True ($readyState.Ready -and $readyState.Required -and $readyState.Version -eq 1) 'A fully completed client was rejected.'
+Assert-True (-not $readyState.FirstBootAutoLogonRequired -and $null -eq $readyState.FirstBootAutoLogonDisabled) `
+    'An unmarked legacy image was made dependent on first-boot autologon cleanup.'
+Reset-SetupFixture
+$script:AutoMarkerExists = $true
+$cleanupPendingState = Get-MemLabsWindowsClientSetupState
+Assert-True (-not $cleanupPendingState.Ready -and $cleanupPendingState.Reason -eq 'FirstBootAutoLogonCleanupPending' -and
+    $cleanupPendingState.FirstBootAutoLogonRequired -and -not $cleanupPendingState.FirstBootAutoLogonDisabled) `
+    'Native OOBE completion let deployment race the required first-logon autologon cleanup.'
+$script:AutoLogonValues = [pscustomobject]@{ AutoAdminLogon = '0'; AutoLogonCount = 0 }
+$boundedReadyState = Get-MemLabsWindowsClientSetupState
+Assert-True ($boundedReadyState.Ready -and $boundedReadyState.FirstBootAutoLogonDisabled -and $boundedReadyState.NativeOobeComplete) `
+    'A fully completed client with verified autologon cleanup was rejected.'
+$script:AutoRegistryThrows = $true
+$state = Get-MemLabsWindowsClientSetupState
+Assert-True (-not $state.Ready -and $state.Reason -eq 'ProbeFailed' -and $state.Diagnostics.Count -gt 0) `
+    'Failed cleanup verification retained an earlier Ready=true result.'
+foreach ($invalidMarker in @('bad', 'large', 'reparse')) {
+    Reset-SetupFixture
+    $script:AutoMarkerExists = $true
+    switch ($invalidMarker) {
+        bad { $script:AutoMarkerText = 'bad' }
+        large { $script:AutoMarkerLength = 17 }
+        reparse { $script:AutoMarkerAttributes = [IO.FileAttributes]::ReparsePoint }
+    }
+    $state = Get-MemLabsWindowsClientSetupState
+    Assert-True (-not $state.Ready -and $state.Reason -eq 'ProbeFailed') 'An invalid bounded-sign-in marker became ready.'
+}
 foreach ($serverType in @(2, 3)) {
     Reset-SetupFixture
     $script:ProductType = $serverType
@@ -246,6 +301,18 @@ function New-Reply {
 Reset-HostFixture -Response (New-Reply $readyState)
 Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'Completed host client gate failed.'
 Assert-True ($script:RpcCalls -eq 1 -and $script:ProgressCalls -eq 1) 'A completed client did not pass immediately.'
+$legacyReadyState = $readyState.PSObject.Copy()
+$legacyReadyState.PSObject.Properties.Remove('FirstBootAutoLogonRequired')
+$legacyReadyState.PSObject.Properties.Remove('FirstBootAutoLogonDisabled')
+Reset-HostFixture -Response (New-Reply $legacyReadyState)
+Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) `
+    'Legacy readiness replies without the new optional fields were rejected.'
+Reset-HostFixture -Response (New-Reply $boundedReadyState)
+$script:Replies.Enqueue((New-Reply $cleanupPendingState))
+$script:Replies.Enqueue((New-Reply $boundedReadyState))
+Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'The host did not wait for bounded first-sign-in cleanup.'
+Assert-True ($script:RpcCalls -eq 2 -and ($script:Messages -join ' ') -match 'FirstBootAutoLogonCleanupPending') `
+    'The host advanced past required autologon cleanup without recording its pending state.'
 Reset-HostFixture -Response (New-Reply $firstLogonState)
 Assert-True (Wait-MemLabsWindowsClientSetup -VmName TEST-W11 -TimeoutSeconds 5) 'The host rejected a fully verified pre-first-logon machine.'
 Assert-True ($script:RpcCalls -eq 1 -and ($script:Messages -join ' ') -match 'MachineCompleteAwaitingFirstLogon') `

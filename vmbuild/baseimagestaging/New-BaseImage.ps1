@@ -33,6 +33,12 @@ param (
     [string]$UnattendFileName,
     [Parameter(Mandatory = $false, HelpMessage = "Hyper-V switch with internet access. If omitted, an external switch or Default Switch is selected.")]
     [string]$SwitchName,
+    [Parameter(Mandatory = $false, HelpMessage = "Output directory for a qualified candidate. Omit to use the published OS cache.")]
+    [string]$OutputDirectory,
+    [Parameter(Mandatory = $false, HelpMessage = "Skip unrelated host preparation and maintenance refresh when building on an already prepared host.")]
+    [switch]$SkipHostPreparation,
+    [Parameter(Mandatory = $false, HelpMessage = "Opt into a supported Windows-client first sign-in using the existing lab administrator, then disable further autologon.")]
+    [switch]$EnableFirstBootAutoLogon,
     [Parameter(Mandatory = $false, HelpMessage = "Force reimporting WIM, if WIM already exists.")]
     [switch]$ForceNewWim,
     [Parameter(Mandatory = $false, HelpMessage = "Force recreating VHDX, if VHDX already exists.")]
@@ -81,7 +87,8 @@ $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
 
 # Dot source common
 $RootPath = Split-Path -Path $PSScriptRoot -Parent
-. $RootPath\Common.ps1 -VerboseEnabled:$enableVerbose -SkipMaintenanceRefresh:$WhatIf -SkipVmCacheRefresh:$WhatIf -SkipHostPreparation:$WhatIf
+. $RootPath\Common.ps1 -VerboseEnabled:$enableVerbose -SkipMaintenanceRefresh:($WhatIf -or $SkipHostPreparation) `
+    -SkipVmCacheRefresh:$WhatIf -SkipHostPreparation:($WhatIf -or $SkipHostPreparation)
 
 # Validate token exists
 if ($Common.FatalError) {
@@ -145,14 +152,14 @@ if ($IsoExpectedHash -ne "NONE") {
         Write-Log "IsoExpectedHash must be a $expectedHashLength-character hexadecimal $IsoHashAlgorithm hash." -Failure
         return
     }
-    if (($ResumeAuditVm.IsPresent -or $CaptureSyspreppedVm.IsPresent) -and ($ForceNewVm.IsPresent -or $UseExistingVm.IsPresent)) {
-        Write-Log "ResumeAuditVm and CaptureSyspreppedVm cannot be combined with ForceNewVm or UseExistingVm." -Failure
-        return
-    }
-    if ($ResumeAuditVm.IsPresent -and $CaptureSyspreppedVm.IsPresent) {
-        Write-Log "Specify either ResumeAuditVm or CaptureSyspreppedVm, not both." -Failure
-        return
-    }
+}
+if (($ResumeAuditVm.IsPresent -or $CaptureSyspreppedVm.IsPresent) -and ($ForceNewVm.IsPresent -or $UseExistingVm.IsPresent)) {
+    Write-Log "ResumeAuditVm and CaptureSyspreppedVm cannot be combined with ForceNewVm or UseExistingVm." -Failure
+    return
+}
+if ($ResumeAuditVm.IsPresent -and $CaptureSyspreppedVm.IsPresent) {
+    Write-Log "Specify either ResumeAuditVm or CaptureSyspreppedVm, not both." -Failure
+    return
 }
 
 # Check disk space (need ~150GB free for VHDX creation + golden image copy)
@@ -165,9 +172,10 @@ if ($targetDrive) {
 }
 
 # Check if gold image exists
-$goldImagePath = Join-Path $Common.AzureImagePath $vhdxFile
+$goldOutputDirectory = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { $Common.AzureImagePath }
+$goldImagePath = Join-Path $goldOutputDirectory $vhdxFile
 if (-not $WhatIf -and (Test-Path $goldImagePath)) {
-    Write-Log "Found $vhdxFile in $($Common.AzureImagePath)."
+    Write-Log "Found $vhdxFile in $goldOutputDirectory."
     if ($ForceNewGoldImage.IsPresent) {
         Write-Log "ForceNewGoldImage switch present. The existing image will be retained until its replacement is verified." -Warning
     }
@@ -182,6 +190,7 @@ Write-Log "Validation complete. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Su
 ################
 ### GET TOOLS
 ################
+if (-not $ResumeAuditVm -and -not $CaptureSyspreppedVm) {
 if ($Common.AzureFileList.Tools) {
     Write-Log "Obtaining Tools to inject in the image." -Activity
     $phaseTimer.Restart()
@@ -330,6 +339,10 @@ if (-not $WhatIf -and -not (Test-Path $vhdxPath)) {
 }
 
 Write-Log "VHDX ready. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
+}
+else {
+    Write-Log "Using only the retained owned staging VM; ISO/WIM/VHDX recreation is skipped for Audit/capture resume." -Warning
+}
 
 if ($SwitchName) {
     $selectedSwitch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
@@ -366,6 +379,10 @@ $createVm = $true
 $resumeAuditMode = $false
 $captureSyspreppedMode = $false
 $vmTest = Get-VM2 -Fallback -Name $vmName
+if (-not $vmTest -and ($ResumeAuditVm -or $CaptureSyspreppedVm)) {
+    Write-Log "The requested retained staging VM '$vmName' was not found; refusing to create a replacement during resume." -Failure
+    return
+}
 if ($vmTest) {
     Write-Log "Found $vmName in Hyper-V."
     if ($CaptureSyspreppedVm.IsPresent) {
@@ -380,7 +397,7 @@ if ($vmTest) {
     elseif ($ResumeAuditVm.IsPresent) {
         Write-Log "ResumeAuditVm switch present. Resuming the existing Audit-mode VM..." -Warning
         if ($vmTest.State -eq "Off") {
-            $startedVm = Start-VM2 -Name $vmName
+            $startedVm = Start-VM2 -Name $vmName -Passthru
             if (-not $startedVm) {
                 Write-Log "Existing Audit-mode VM '$vmName' could not be started." -Failure
                 return
@@ -397,7 +414,7 @@ if ($vmTest) {
         if ($UseExistingVm.IsPresent) {
             Write-Log "UseExistingVm switch present. Re-using existing VM..." -Warning
             if ($vmTest.State -eq "Off") {
-                $startedVm = Start-VM2 -Name $vmName
+                $startedVm = Start-VM2 -Name $vmName -Passthru
                 if (-not $startedVm) {
                     Write-Log "Existing VM '$vmName' could not be started." -Failure
                     return
@@ -480,7 +497,7 @@ if (-not $resumeAuditMode) {
     }
 
     if (-not $WhatIf) {
-        $startedVm = Start-VM2 -Name $vmName
+        $startedVm = Start-VM2 -Name $vmName -Passthru
         if (-not $startedVm) {
             Write-Log "Could not start '$vmName' in Audit mode." -Failure
             return
@@ -498,30 +515,38 @@ if (-not $auditReady) {
     return
 }
 
-$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock {
-    Remove-Item -Path "C:\staging\Customization.txt", "C:\staging\SysprepComplete.txt", "C:\staging\SysprepFailed.txt" -Force -ErrorAction SilentlyContinue
-} -WhatIf:$WhatIf
-if (-not $worked) {
-    Write-Log "Could not clear customization markers in '$vmName'." -Failure
-    return
-}
-
-$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock {
-    $customizationScript = "C:\staging\Customize-WindowsSettings.ps1"
-    $existingProcess = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*$customizationScript*" } |
-        Select-Object -First 1
-    if (-not $existingProcess) {
+$customizationSource = Get-Content -LiteralPath (Join-Path $Common.StagingInjectPath 'staging\Customize-WindowsSettings.ps1') -Raw -ErrorAction Stop
+$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -DisplayName "Start or observe image customization" `
+    -ArgumentList @($customizationSource) -CommandReturnsBool -ScriptBlock {
+        param($Source)
+        $customizationScript = "C:\staging\Customize-WindowsSettings.ps1"
+        if (Test-Path -LiteralPath "C:\staging\SysprepFailed.txt" -PathType Leaf) {
+            throw 'A previous Sysprep failure marker exists; inspect the guest before resuming.'
+        }
+        $existingProcess = Get-CimInstance Win32_Process -ErrorAction Stop |
+            Where-Object { $_.CommandLine -like "*$customizationScript*" } |
+            Select-Object -First 1
+        if ($existingProcess) { return $true }
+        if (Test-Path -LiteralPath "C:\staging\SysprepComplete.txt" -PathType Leaf) {
+            if (-not (Test-Path -LiteralPath "C:\staging\Customization.txt" -PathType Leaf)) {
+                throw 'Sysprep completion exists without the customization marker; inspect the guest.'
+            }
+            return $true
+        }
+        if (Test-Path -LiteralPath "C:\staging\Customization.txt" -PathType Leaf) {
+            throw 'Customization ended without a running customizer or final Sysprep completion; inspect the guest before restarting it.'
+        }
+        [IO.File]::WriteAllText($customizationScript, $Source, [Text.UTF8Encoding]::new($true))
         $powerShellPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
         $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$customizationScript`" -RunSysprep -DisableFirewall -RunOptional"
-        $process = Start-Process -FilePath $powerShellPath -ArgumentList $arguments -PassThru
+        $process = Start-Process -FilePath $powerShellPath -ArgumentList $arguments -PassThru -ErrorAction Stop
         if (-not $process) {
             throw "Failed to launch '$customizationScript'."
         }
-    }
-} -WhatIf:$WhatIf
+        return $true
+    } -WhatIf:$WhatIf
 if (-not $worked) {
-    Write-Log "Could not launch base-image customization in '$vmName'." -Failure
+    Write-Log "Could not start or observe base-image customization in '$vmName'; the guest is retained for diagnostics." -Failure
     return
 }
 
@@ -597,6 +622,25 @@ else {
         if (-not $sysprepValidation.Success) {
             throw "Offline Sysprep verification failed: $($sysprepValidation.Message)"
         }
+        if ($sysprepValidation.InstallationType -notin @('Client', 'Server', 'Server Core')) {
+            throw 'Offline verification did not identify a supported Windows installation type.'
+        }
+        if ($EnableFirstBootAutoLogon) {
+            if ($sysprepValidation.InstallationType -ne 'Client') { throw 'EnableFirstBootAutoLogon is supported only for Windows client staging images.' }
+            if (-not $Common.StagingVMPath -or -not $captureVm.Path) { throw 'The owned staging VM path could not be established.' }
+            $stagingRoot = [IO.Path]::GetFullPath($Common.StagingVMPath).TrimEnd('\') + '\'
+            $captureRoot = [IO.Path]::GetFullPath($captureVm.Path).TrimEnd('\') + '\'
+            if (-not $captureRoot.StartsWith($stagingRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                -not [IO.Path]::GetFullPath($osDiskPath).StartsWith($captureRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'First-boot configuration is restricted to the owned VM disk inside the staging VM directory, never the published image cache.'
+            }
+            $configured = @(Set-BaseImageFirstBootAutoLogon -VhdxPath $osDiskPath -UserName (($Common.LocalAdmin.UserName -split '\\')[-1]))
+            if ($configured.Count -ne 1 -or $configured[0].Configured -isnot [bool] -or -not $configured[0].Configured -or
+                $configured[0].DisableAfterFirstLogon -isnot [bool] -or -not $configured[0].DisableAfterFirstLogon) {
+                throw 'The bounded first-boot sign-in configuration was not verified.'
+            }
+            Write-Log 'Configured supported lab-administrator sign-in with first-logon autologon cleanup; the disposable clone must prove both OOBE completion and disabled autologon.' -Success
+        }
         foreach ($sysprepWarning in @($sysprepValidation.Warnings)) {
             Write-Log "Offline Sysprep provider warning: $sysprepWarning" -Warning
         }
@@ -610,16 +654,60 @@ else {
 
     Write-Log "OS disk: $osDiskPath (Size: $([math]::Round((Get-Item $osDiskPath).Length / 1GB, 2)) GB)"
 
-    $partialGoldImagePath = Join-Path $Common.AzureImagePath "_partial_${PID}_$vhdxFile"
+    $qualifiedHash = $null
+    if ($sysprepValidation.InstallationType -eq 'Client') {
+        Write-Log "Qualifying a disposable first-boot clone before golden-image publication..." -Activity
+        try {
+            $qualificationPath = Join-Path $Common.TempPath ("BaseImageQualification-" + [guid]::NewGuid().ToString('N'))
+            $qualificationTool = Join-Path $RootPath 'tools\Test-WindowsFirstLogonImage.ps1'
+            $qualificationResults = @(& $qualificationTool -VmName $vmName -SourceVhdxPath $osDiskPath `
+                -Destination $qualificationPath -GuestCredential $Common.LocalAdmin -TestVariant FirstBootQualification -Confirm:$false)
+            if ($qualificationResults.Count -ne 1 -or $qualificationResults[0].Status -ne 'Completed' -or
+                $qualificationResults[0].Qualified -isnot [bool] -or -not $qualificationResults[0].Qualified) {
+                throw 'The fresh clone did not pass the unchanged unattended deployment readiness checks.'
+            }
+            if (-not $qualificationResults[0].ArchivePath -or
+                -not (Test-Path -LiteralPath $qualificationResults[0].ArchivePath -PathType Leaf)) {
+                throw 'The fresh-clone qualification evidence archive is missing.'
+            }
+            if ($EnableFirstBootAutoLogon -and ($qualificationResults[0].AutoLogonDisabled -isnot [bool] -or
+                    -not $qualificationResults[0].AutoLogonDisabled -or $qualificationResults[0].OobeComplete -isnot [bool] -or
+                    -not $qualificationResults[0].OobeComplete -or $qualificationResults[0].InteractiveLabAccountObserved -isnot [bool] -or
+                    -not $qualificationResults[0].InteractiveLabAccountObserved)) {
+                throw 'The clone did not verify completed OOBE, an interactive lab administrator, and disabled autologon; publication is refused.'
+            }
+            $qualifiedHash = $qualificationResults[0].SourceHash
+            if ($qualifiedHash -notmatch '^[A-Fa-f0-9]{64}$' -or
+                (Get-FileHash -LiteralPath $osDiskPath -Algorithm SHA256 -ErrorAction Stop).Hash -ine $qualifiedHash) {
+                throw 'The source changed after first-boot qualification; publication is refused.'
+            }
+            Write-Log "Fresh first-boot clone qualified. Evidence: $($qualificationResults[0].ArchivePath)" -Success
+        }
+        catch {
+            Write-Log "First-boot qualification failed; the prior golden image is unchanged and '$vmName' is retained Off for diagnostics. $($_.Exception.Message)" -Failure
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
+            return
+        }
+    }
+    if (-not (Test-Path -LiteralPath $goldOutputDirectory -PathType Container)) {
+        New-Item -Path $goldOutputDirectory -ItemType Directory -ErrorAction Stop | Out-Null
+    }
+    $partialGoldImagePath = Join-Path $goldOutputDirectory "_partial_${PID}_$vhdxFile"
     $backupGoldImagePath = "$goldImagePath.backup.$PID"
     $goldHashPath = "$goldImagePath.MD5"
     $backupGoldHashPath = "$goldHashPath.backup.$PID"
+    $partialGoldHashPath = "$partialGoldImagePath.MD5"
+    $goldReceiptPath = "$goldImagePath.qualification.json"
+    $partialGoldReceiptPath = "$partialGoldImagePath.qualification.json"
+    $backupGoldReceiptPath = "$goldReceiptPath.backup.$PID"
     Remove-Item -LiteralPath $partialGoldImagePath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $backupGoldImagePath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $backupGoldHashPath -Force -ErrorAction SilentlyContinue
+    if (@($backupGoldImagePath, $backupGoldHashPath, $backupGoldReceiptPath | Where-Object { Test-Path -LiteralPath $_ }).Count) {
+        Write-Log "A prior image-publication backup exists. Inspect it before retrying; no existing image will be replaced." -Failure
+        return
+    }
 
     Write-Log "Copying the 'golden' image to a staging path..."
-    $worked = Get-File -Source $osDiskPath -Destination $partialGoldImagePath -DisplayName "Copying the 'golden' image to $($Common.AzureImagePath)" -Action "Copying"
+    $worked = Get-File -Source $osDiskPath -Destination $partialGoldImagePath -DisplayName "Copying the 'golden' image to $goldOutputDirectory" -Action "Copying"
     if (-not $worked -or -not (Test-Path $partialGoldImagePath -PathType Leaf)) {
         Remove-Item -LiteralPath $partialGoldImagePath -Force -ErrorAction SilentlyContinue
         Write-Log "Failed to copy the golden image from '$osDiskPath' to '$partialGoldImagePath'." -Failure
@@ -637,13 +725,33 @@ else {
         if ($goldVhd.VhdFormat -ne "VHDX") {
             throw "Copied disk is '$($goldVhd.VhdFormat)', not VHDX."
         }
+        if ($qualifiedHash -and (Get-FileHash -LiteralPath $partialGoldImagePath -Algorithm SHA256 -ErrorAction Stop).Hash -ine $qualifiedHash) {
+            throw 'The candidate copy does not match the qualified SHA-256.'
+        }
 
         Write-Log "Calculating MD5 for the verified golden image..."
         $goldHash = (Get-FileHash -LiteralPath $partialGoldImagePath -Algorithm MD5 -ErrorAction Stop).Hash
+        Set-Content -LiteralPath $partialGoldHashPath -Value $goldHash -Encoding ASCII -Force -ErrorAction Stop
+        if ($qualifiedHash) {
+            [pscustomobject]@{
+                Version = 1; Qualified = $true; SHA256 = $qualifiedHash
+                QualifiedAtUtc = [DateTime]::UtcNow.ToString('o')
+                EvidenceArchive = $qualificationResults[0].ArchivePath
+                Readiness = 'Two ready snapshots after passive setup settling; no forced completion flags'
+                FirstBootAutoLogon = [pscustomobject]@{
+                    EnabledInImage = [bool]$EnableFirstBootAutoLogon
+                    DisabledAfterSignInVerified = [bool]($EnableFirstBootAutoLogon -and $qualificationResults[0].AutoLogonDisabled)
+                    OobeCompleteVerified = [bool]($EnableFirstBootAutoLogon -and $qualificationResults[0].OobeComplete)
+                }
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $partialGoldReceiptPath -Encoding UTF8 -ErrorAction Stop
+        }
 
         $existingGoldMoved = $false
         $existingGoldHashMoved = $false
+        $existingGoldReceiptMoved = $false
         $newGoldMoved = $false
+        $newGoldHashMoved = $false
+        $newGoldReceiptMoved = $false
         try {
             if (Test-Path $goldImagePath -PathType Leaf) {
                 Move-Item -LiteralPath $goldImagePath -Destination $backupGoldImagePath -ErrorAction Stop
@@ -653,26 +761,58 @@ else {
                 Move-Item -LiteralPath $goldHashPath -Destination $backupGoldHashPath -ErrorAction Stop
                 $existingGoldHashMoved = $true
             }
+            if (Test-Path -LiteralPath $goldReceiptPath -PathType Leaf) {
+                Move-Item -LiteralPath $goldReceiptPath -Destination $backupGoldReceiptPath -ErrorAction Stop
+                $existingGoldReceiptMoved = $true
+            }
             Move-Item -LiteralPath $partialGoldImagePath -Destination $goldImagePath -ErrorAction Stop
             $newGoldMoved = $true
-            Set-Content -LiteralPath $goldHashPath -Value $goldHash -Encoding ASCII -Force -ErrorAction Stop
+            Move-Item -LiteralPath $partialGoldHashPath -Destination $goldHashPath -ErrorAction Stop
+            $newGoldHashMoved = $true
+            if ($qualifiedHash) {
+                Move-Item -LiteralPath $partialGoldReceiptPath -Destination $goldReceiptPath -ErrorAction Stop
+                $newGoldReceiptMoved = $true
+            }
         }
         catch {
+            $publicationError = $_
+            $rollbackErrors = @()
             if ($newGoldMoved) {
-                Remove-Item -LiteralPath $goldImagePath -Force -ErrorAction SilentlyContinue
-                Remove-Item -LiteralPath $goldHashPath -Force -ErrorAction SilentlyContinue
+                try { Remove-Item -LiteralPath $goldImagePath -Force -ErrorAction Stop }
+                catch { $rollbackErrors += $_.Exception.Message }
+            }
+            if ($newGoldHashMoved) {
+                try { Remove-Item -LiteralPath $goldHashPath -Force -ErrorAction Stop }
+                catch { $rollbackErrors += $_.Exception.Message }
+            }
+            if ($newGoldReceiptMoved) {
+                try { Remove-Item -LiteralPath $goldReceiptPath -Force -ErrorAction Stop }
+                catch { $rollbackErrors += $_.Exception.Message }
             }
             if ($existingGoldMoved -and (Test-Path $backupGoldImagePath -PathType Leaf)) {
-                Move-Item -LiteralPath $backupGoldImagePath -Destination $goldImagePath -ErrorAction Stop
+                try { Move-Item -LiteralPath $backupGoldImagePath -Destination $goldImagePath -ErrorAction Stop }
+                catch { $rollbackErrors += $_.Exception.Message }
             }
             if ($existingGoldHashMoved -and (Test-Path $backupGoldHashPath -PathType Leaf)) {
-                Move-Item -LiteralPath $backupGoldHashPath -Destination $goldHashPath -ErrorAction Stop
+                try { Move-Item -LiteralPath $backupGoldHashPath -Destination $goldHashPath -ErrorAction Stop }
+                catch { $rollbackErrors += $_.Exception.Message }
             }
-            throw
+            if ($existingGoldReceiptMoved -and (Test-Path $backupGoldReceiptPath -PathType Leaf)) {
+                try { Move-Item -LiteralPath $backupGoldReceiptPath -Destination $goldReceiptPath -ErrorAction Stop }
+                catch { $rollbackErrors += $_.Exception.Message }
+            }
+            if ($rollbackErrors.Count) {
+                throw "Publication failed: $($publicationError.Exception.Message). Rollback was incomplete; retained backups require inspection: $($rollbackErrors -join '; ')"
+            }
+            throw $publicationError
         }
 
-        Remove-Item -LiteralPath $backupGoldImagePath -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $backupGoldHashPath -Force -ErrorAction SilentlyContinue
+        foreach ($completedBackupPath in @($backupGoldImagePath, $backupGoldHashPath, $backupGoldReceiptPath)) {
+            if (Test-Path -LiteralPath $completedBackupPath -PathType Leaf) {
+                try { Remove-Item -LiteralPath $completedBackupPath -Force -ErrorAction Stop }
+                catch { Write-Log "The image was published but its backup '$completedBackupPath' could not be removed: $($_.Exception.Message)" -Warning }
+            }
+        }
         Write-Log "Golden image verified: $([math]::Round($goldSize / 1GB, 2)) GB, MD5 $goldHash"
     }
     catch {
@@ -681,9 +821,17 @@ else {
         Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return
     }
+    finally {
+        foreach ($stagedMetadataPath in @($partialGoldHashPath, $partialGoldReceiptPath)) {
+            if (Test-Path -LiteralPath $stagedMetadataPath -PathType Leaf) {
+                try { Remove-Item -LiteralPath $stagedMetadataPath -Force -ErrorAction Stop }
+                catch { Write-Log "Could not remove staged image metadata '$stagedMetadataPath': $($_.Exception.Message)" -Warning }
+            }
+        }
+    }
 }
 
-Write-Log "The 'golden' image $vhdxFile was copied to $($Common.AzureImagePath)." -Success
+Write-Log "The verified 'golden' image $vhdxFile was copied to $goldOutputDirectory." -Success
 Write-Log "Golden image capture complete. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
 
 # Delete VM
