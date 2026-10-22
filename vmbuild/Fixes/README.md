@@ -51,3 +51,19 @@ When dot-sourced, the file MUST:
 
 Load order within this folder is alphabetical, but **runtime execution order**
 is determined by `FixVersion` (sorted ascending), not load order.
+
+## Windows activation on air-gapped VMs
+
+[Fix_ActivateWindows.ps1](Fix_ActivateWindows.ps1) uses Azure KMS for unactivated
+Windows Pro/Enterprise VMs hosted in Azure. If resolving `azkms.core.windows.net`
+returns `DNS_ERROR_RCODE_REFUSED` (native DNS error 9005), the fix treats external
+KMS access as blocked by the air gap. It logs an explicit activation skip and
+returns success without further TCP probes or activation attempts. This does not
+mean Windows was activated.
+
+Other DNS errors, TCP connectivity failures, and unsuccessful activation retain
+the existing retry and failure behavior. Already activated VMs remain a no-op,
+and non-Azure hosts remain excluded.
+
+Validate with [Test-WindowsActivationMaintenance.ps1](../tools/Test-WindowsActivationMaintenance.ps1).
+The test mocks licensing and network commands; it does not change host activation.

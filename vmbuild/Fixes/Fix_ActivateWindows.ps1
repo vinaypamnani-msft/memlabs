@@ -116,6 +116,12 @@ $Fix_ActivateWindows = {
         }
         catch {
             Write-FixLog "DNS resolution of $atkmsHost failed: $($_.Exception.Message)"
+            if (($_.FullyQualifiedErrorId -split ',')[0] -eq 'DNS_ERROR_RCODE_REFUSED' -or
+                ($_.Exception -is [System.ComponentModel.Win32Exception] -and $_.Exception.NativeErrorCode -eq 9005)) {
+                $message = "DNS query for $atkmsHost was refused; external KMS access is blocked (air-gapped VM), activation skipped"
+                Write-FixLog $message
+                return [pscustomobject]@{ Success = $true; Message = $message }
+            }
         }
 
         $reachable = $false
@@ -161,7 +167,7 @@ $Fix_ActivateWindows = {
 if ($Common.IsAzureVM) {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_ActivateWindows"
-        FixVersion        = "260616"
+        FixVersion        = "261022"
         NeededOnFreshDeploy = $true
         AppliesToExisting   = $true
         AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
