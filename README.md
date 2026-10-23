@@ -1176,6 +1176,12 @@ Console maintenance takes its version from the **installed site's maintained
 console payload**, not stale or missing `cmOptions.Version`. It verifies the
 payload's console version and the site's required extension version. An external
 site upgrade therefore does not trigger a downgrade to the old deployment target.
+Phase 8 runs the same upgrader after site installation/update, before HTTP(S),
+roles, boundaries, or isolated client-package workers connect using the console.
+This runs on standalone Primaries, CAS sites, and child Primaries, including
+reruns with completed site setup. Console-upgrade failures stop dependent work
+instead of suppressing the provider's version-mismatch error; Phase 10 still
+rechecks the console during maintenance.
 A console newer than the live payload is preserved with a warning; exact
 compatibility is not claimed. Phase 11 uses the same live-target/no-downgrade
 policy. `Upgrade-Console.ps1 -CheckOnly` performs the read-only check.

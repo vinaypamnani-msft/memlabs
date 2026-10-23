@@ -31,7 +31,8 @@ $fixPath = Join-Path $RootPath 'Fixes\Fix-Upgrade-Console.ps1'
 $upgradePath = Join-Path $RootPath 'DSC\phases\Upgrade-Console.ps1'
 $validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
 $phaseJobsPath = Join-Path $RootPath 'common\Common.ScriptBlocks.ps1'
-$paths = @($fixPath, $upgradePath, $validationPath, $phaseJobsPath)
+$workflowPath = Join-Path $RootPath 'DSC\phases\ScriptWorkflow.ps1'
+$paths = @($fixPath, $upgradePath, $validationPath, $phaseJobsPath, $workflowPath)
 
 foreach ($path in $paths) {
     $tokens = $null
@@ -245,6 +246,26 @@ $aheadState = Get-ConsoleVersionState -SiteCode 'SPC' -ExpectedRelease '2509' -E
     -LiveSiteBuild 9141 -PayloadSiteBuild 9145
 Assert-ConsoleUpgrade ($aheadState.NewerThanSite -and -not $aheadState.Current -and -not $aheadState.SourceMatchesSite) `
     'a console matching setup media newer than the live site is preserved, not declared an exact site match'
+
+$savedConsoleSetupState = $script:ConsoleSetupState.PSObject.Copy()
+$savedExtensionSiteVersion = $script:ConsoleExtensionSiteVersion
+try {
+    $script:ConsoleExtensionSiteVersion = '5.0.9146.1000'
+    $cm2603State = Get-ConsoleVersionState -SiteCode 'PS1' -ExpectedRelease '2603' `
+        -ExpectedConsoleVersion ([version]'5.2603.1035.1000') -LiveSiteBuild 9146 -PayloadSiteBuild 9146
+    Assert-ConsoleUpgrade (-not $cm2603State.Current -and -not $cm2603State.NewerThanSite -and
+        -not $cm2603State.VersionMatches -and -not $cm2603State.ExtensionMatches) `
+        'ML02 2509 console and extension require upgrading after the site reaches 2603'
+    $script:ConsoleSetupState.AdminConsoleVersion = '5.2603.1035.1000'
+    $script:ConsoleSetupState.RequiredExtensionVersion = '5.0.9146.1000'
+    $cm2603State = Get-ConsoleVersionState -SiteCode 'PS1' -ExpectedRelease '2603' `
+        -ExpectedConsoleVersion ([version]'5.2603.1035.1000') -LiveSiteBuild 9146 -PayloadSiteBuild 9146
+    Assert-ConsoleUpgrade $cm2603State.Current 'ML02 console readiness requires the exact 2603 console and extension'
+}
+finally {
+    $script:ConsoleSetupState = $savedConsoleSetupState
+    $script:ConsoleExtensionSiteVersion = $savedExtensionSiteVersion
+}
 
 $payloadRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-console-payload-$([guid]::NewGuid().ToString('N'))"
 $payloadDirectory = Join-Path $payloadRoot 'Tools\ConsoleSetup'
@@ -474,6 +495,104 @@ catch { $caught = $_ }
 Assert-ConsoleUpgrade ($caught -and $caught.Exception.Message -match 'after 3 attempts' -and $script:ProcessCalls.Count -eq 4) `
     'permanent setup failure exhausts exactly three install attempts after one uninstall'
 Assert-ConsoleUpgrade (@($script:UpgradeSleeps | Where-Object { $_ -eq 7 }).Count -eq 2) 'retry exhaustion never sleeps after the final attempt'
+
+$workflowTokens = $null
+$workflowErrors = $null
+$workflowAst = [Management.Automation.Language.Parser]::ParseFile(
+    $workflowPath, [ref]$workflowTokens, [ref]$workflowErrors)
+$phase8Branches = @($workflowAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.IfStatementAst] -and
+        $_.Clauses[0].Item1.Extent.Text -in @('$scenario -eq "Standalone"', '$scenario -eq "Hierarchy"')
+    })
+Assert-ConsoleUpgrade ($workflowErrors.Count -eq 0 -and $phase8Branches.Count -eq 2) 'Phase 8 site-routing branches are available for execution'
+foreach ($routingCase in @(
+        [pscustomobject]@{ Name = 'standalone Primary'; Scenario = 'Standalone'; Role = 'Primary'; Parent = ''; Setup = 'InstallAndUpdateSCCM.ps1' }
+        [pscustomobject]@{ Name = 'CAS'; Scenario = 'Hierarchy'; Role = 'CAS'; Parent = ''; Setup = 'InstallAndUpdateSCCM.ps1' }
+        [pscustomobject]@{ Name = 'child Primary'; Scenario = 'Hierarchy'; Role = 'Primary'; Parent = 'CAS1'; Setup = 'InstallPSForHierarchy.ps1' }
+        [pscustomobject]@{ Name = 'existing child Primary'; Scenario = 'Hierarchy'; Role = 'Primary'; Parent = ''; Setup = '' }
+    )) {
+    foreach ($consoleFailure in @($false, $true)) {
+        foreach ($usePki in @($false, $true)) {
+            & {
+                param($RoutingCase, $ConsoleFailure, $UsePki)
+
+                $fixture = [pscustomobject]@{
+                    Calls = New-Object System.Collections.Generic.List[object]
+                    ConsoleVersion = '5.2509.1036.1200'
+                    Error = ''
+                }
+                function Write-DscStatus { param($Status, [switch]$NoStatus) }
+                function Set-Location { param($Path) }
+                function Join-Path { param($Path, $ChildPath); [IO.Path]::Combine('C:\fixture\phases', $ChildPath) }
+                function Invoke-DotSource {
+                    param($Script, $Arguments, [switch]$Rethrow)
+                    $name = Split-Path $Script -Leaf
+                    $fixture.Calls.Add([pscustomobject]@{ Name = $name; Arguments = @($Arguments); Rethrow = [bool]$Rethrow })
+                    if ($name -in @('InstallAndUpdateSCCM.ps1', 'InstallPSForHierarchy.ps1')) { return }
+                    if ($name -eq 'Upgrade-Console.ps1') {
+                        if ($ConsoleFailure) {
+                            if ($Rethrow) { throw 'synthetic console upgrade failure' }
+                            return
+                        }
+                        $fixture.ConsoleVersion = '5.2603.1035.1000'
+                        return [pscustomobject]@{ Success = $true }
+                    }
+                    if ($fixture.ConsoleVersion -ne '5.2603.1035.1000') {
+                        throw "A new version of the console is available (5.2603.1035.1000): $name connected before the console upgrade"
+                    }
+                }
+
+                $CurrentRole = $RoutingCase.Role
+                $ConfigFilePath = 'C:\fixture\deployConfig.json'
+                $LogPath = 'C:\fixture\logs'
+                $ThisVM = [pscustomobject]@{
+                    thisParams = [pscustomobject]@{ ParentSiteServer = $RoutingCase.Parent }
+                    cmOptions = [pscustomobject]@{ UsePKI = $UsePki }
+                }
+                $workflowVariables = @{
+                    scenario = $RoutingCase.Scenario
+                    deployConfig = [pscustomobject]@{ cmOptions = $ThisVM.cmOptions }
+                    Configuration = [pscustomobject]@{
+                        InstallDP = [pscustomobject]@{ Status = 'Completed' }
+                        ConfigureMPReplica = [pscustomobject]@{ Status = 'Completed' }
+                    }
+                    configuredPushTargets = @()
+                    parallelPassive = $false
+                    containsSecondary = $false
+                    firstRun = $false
+                }
+                foreach ($variable in $workflowVariables.GetEnumerator()) {
+                    Set-Variable -Name $variable.Key -Value $variable.Value
+                }
+                try {
+                    foreach ($branch in $phase8Branches) {
+                        $null = & ([scriptblock]::Create($branch.Extent.Text))
+                    }
+                }
+                catch { $fixture.Error = $_.Exception.Message }
+
+                $consoleCalls = @($fixture.Calls | Where-Object Name -eq 'Upgrade-Console.ps1')
+                $setupAndConsole = @($fixture.Calls | Where-Object {
+                        $_.Name -in @('InstallAndUpdateSCCM.ps1', 'InstallPSForHierarchy.ps1', 'Upgrade-Console.ps1')
+                    })
+                $expectedSetupAndConsole = @($RoutingCase.Setup | Where-Object { $_ }) + @('Upgrade-Console.ps1')
+                $routePassed = $consoleCalls.Count -eq 1 -and $consoleCalls[0].Rethrow -and
+                    ($consoleCalls[0].Arguments -join '|') -eq "$ConfigFilePath|$LogPath" -and
+                    ($setupAndConsole.Name -join '|') -eq ($expectedSetupAndConsole -join '|')
+                if ($ConsoleFailure) {
+                    $routePassed = $routePassed -and $fixture.Error -eq 'synthetic console upgrade failure' -and
+                        $fixture.Calls.Count -eq $expectedSetupAndConsole.Count
+                }
+                else {
+                    $lastScript = if ($CurrentRole -eq 'CAS') { 'ConfigureCMProxy.ps1' } else { 'InstallBoundaryGroups.ps1' }
+                    $routePassed = $routePassed -and -not $fixture.Error -and
+                        $fixture.Calls[-1].Name -eq $lastScript
+                }
+                Assert-ConsoleUpgrade $routePassed "Phase 8 $($RoutingCase.Name), PKI=$UsePki, consoleFailure=$ConsoleFailure gates dependent connections; calls=$($fixture.Calls.Name -join ','); error=$($fixture.Error)"
+            } $routingCase $consoleFailure $usePki
+        }
+    }
+}
 
 if ($failures -gt 0) { throw "$failures console-upgrade regression assertion(s) failed" }
 Write-Host 'PASS  console-upgrade routing and validation regression suite'

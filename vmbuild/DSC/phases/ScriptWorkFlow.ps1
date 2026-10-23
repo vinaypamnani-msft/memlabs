@@ -494,6 +494,12 @@ if ($scenario -eq "Standalone") {
     Set-Location $LogPath
     Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
+    # Fresh workers cannot reuse the console session loaded before the site upgrade.
+    Write-DscStatus "$scenario Running Upgrade-Console.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+    Set-Location $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
     # Enable HTTPS/eHTTP early so the site component manager has maximum
     # time to republish the updated OperationalXml (SecurityModeMaskEx) to
     # AD before PushClients runs. The flag file prevents double execution
@@ -598,6 +604,11 @@ if ($scenario -eq "Hierarchy") {
         Set-Location $LogPath
         Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
+        Write-DscStatus "$scenario Running Upgrade-Console.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
         # Enable HTTPS/eHTTP early on CAS too (same reasoning as Standalone).
         $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
         if (-not $cmoEarly.UsePKI) {
@@ -630,6 +641,11 @@ if ($scenario -eq "Hierarchy") {
             Set-Location $LogPath
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
         }
+
+        Write-DscStatus "$scenario Primary Running Upgrade-Console.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         # Enable HTTPS/eHTTP early on Primary too (same reasoning as Standalone).
         $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
