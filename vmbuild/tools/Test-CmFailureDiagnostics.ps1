@@ -33,6 +33,38 @@ function Assert-Equal {
 
 $collectorText = Get-Content -LiteralPath $collectorPath -Raw
 $commonText = Get-Content -LiteralPath $commonPath -Raw
+$manifestArrays = [ordered]@{
+    PrereqArtifacts = 'prereqArtifacts'
+    AdkArtifacts = 'artifacts'
+    CmArtifacts = 'cmArtifacts'
+    ProductLogInventory = 'productLogInventory'
+}
+foreach ($entry in $manifestArrays.GetEnumerator()) {
+    $field = if ($entry.Key -eq 'ProductLogInventory') { $entry.Key } else { '\$out\.' + $entry.Key }
+    $expression = [regex]::Match($definition[0].Extent.Text,
+        "(?m)^\s*$field\s*=\s*(?<Expression>[^\r\n]+)")
+    Assert-Equal $true $expression.Success "$($entry.Key) manifest expression exists"
+    if (-not $expression.Success) { continue }
+    $convert = [scriptblock]::Create(
+        "param(`$$($entry.Value))`n[pscustomobject]@{ Items = $($expression.Groups['Expression'].Value) }")
+    foreach ($count in @(0, 2)) {
+        $items = New-Object System.Collections.Generic.List[object]
+        for ($index = 0; $index -lt $count; $index++) {
+            $items.Add([pscustomobject]@{ Name = "evidence-$index.log"; Content = "evidence-$index" })
+        }
+        try { $converted = & $convert $items }
+        catch {
+            Assert-Equal '' $_.Exception.Message "$($entry.Key) converts $count artifact(s) without a binder failure: $($_.Exception.Message)"
+            continue
+        }
+        Assert-Equal $true ($converted.Items -is [object[]]) "$($entry.Key) preserves an object array for $count artifact(s)"
+        Assert-Equal $count @($converted.Items).Count "$($entry.Key) preserves the artifact count"
+        if ($count -gt 0) {
+            Assert-Equal 'evidence-0.log' $converted.Items[0].Name "$($entry.Key) preserves artifact metadata"
+            Assert-Equal 'evidence-1' $converted.Items[1].Content "$($entry.Key) preserves artifact content"
+        }
+    }
+}
 foreach ($logName in @('SMSProv.log', 'SMSProv.lo_', 'dmpdownloader.log', 'dmpdownloader.lo_', 'cmupdate.log', 'cmupdate.lo_', 'hman.log', 'hman.lo_', 'distmgr.log', 'smsexec.log', 'ConfigMgrPrereq.log', 'SmsAdminUI')) {
     Assert-Equal $true $collectorText.Contains($logName) "failure collector names $logName"
 }

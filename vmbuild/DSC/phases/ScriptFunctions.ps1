@@ -3078,12 +3078,14 @@ function Write-CMRoleProvisioningDiagnostics {
                 'C:\SMS\Logs\mpsetup.log',
                 'C:\Windows\Logs\DISM\dism.log',
                 'C:\Windows\Logs\CBS\CBS.log',
+                'C:\PBIRS\PBIRS\LogFiles\ReportingServicesService*.log',
                 'C:\Program Files\Microsoft Power BI Report Server\PBIRS\LogFiles\ReportingServicesService*.log'
             )
             $dpShare = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
             if ($dpShare) { $candidateLogs += (Join-Path $dpShare.Path 'sms\logs\smsdpprov.log') }
             foreach ($candidate in $candidateLogs) {
-                foreach ($log in @(Get-Item -Path $candidate -ErrorAction SilentlyContinue)) {
+                foreach ($log in @(Get-Item -Path $candidate -ErrorAction SilentlyContinue |
+                            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 2)) {
                     $lines = @(Get-Content -LiteralPath $log.FullName -Tail 30 -ErrorAction SilentlyContinue |
                             Where-Object { $_ -match 'error|fail|0x8|exception|fatal' } |
                             Select-Object -Last 5)

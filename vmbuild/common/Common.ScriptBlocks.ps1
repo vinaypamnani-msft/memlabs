@@ -2950,7 +2950,7 @@ function Save-CMSetupLogsFromVm {
                         Content          = $content
                     })
             }
-            $out.PrereqArtifacts = @($prereqArtifacts)
+            $out.PrereqArtifacts = $prereqArtifacts.ToArray()
         }
         if ($Mode -eq 'Failure' -and (Test-Path 'C:\staging\DSC\ADKSetupLogs' -PathType Container)) {
             $artifacts = New-Object System.Collections.Generic.List[object]
@@ -2978,7 +2978,7 @@ function Save-CMSetupLogsFromVm {
                         Content          = $content
                     })
             }
-            $out.AdkArtifacts = @($artifacts)
+            $out.AdkArtifacts = $artifacts.ToArray()
         }
         }
         if ($CollectCmEvidenceOnly -and $Mode -eq 'Failure' -and $Phase -eq 8) {
@@ -3110,7 +3110,7 @@ function Save-CMSetupLogsFromVm {
             if ($adminUiIndex -eq 0) {
                 $productLogInventory.Add([pscustomobject]@{ SourcePath = 'SmsAdminUI*.log'; Exists = $false; Collected = $false; Bytes = 0; Error = "No console trace was found in: $($adminUiDirectories -join '; ')" })
             }
-            $out.CmArtifacts = @($cmArtifacts)
+            $out.CmArtifacts = $cmArtifacts.ToArray()
 
             $updateDiagnostic = [ordered]@{
                 CapturedAtUtc       = (Get-Date).ToUniversalTime().ToString('o')
@@ -3122,7 +3122,7 @@ function Save-CMSetupLogsFromVm {
                 LogDirectory        = $cmLogDir
                 ConsoleSetup        = $null
                 ConsoleLogSearchDirectories = $adminUiDirectories
-                ProductLogInventory = @($productLogInventory)
+                ProductLogInventory = $productLogInventory.ToArray()
                 Services            = @()
                 ComponentRegistry   = @()
                 CollectorErrors     = @()

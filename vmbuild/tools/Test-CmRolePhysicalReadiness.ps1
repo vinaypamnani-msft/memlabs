@@ -172,6 +172,7 @@ $installMpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-MP'
 $installSupText = Get-TestFunctionText -Path $functionsPath -Name 'Install-SUP'
 $installSrpText = Get-TestFunctionText -Path $functionsPath -Name 'Install-SRP'
 $wsusPoolText = Get-TestFunctionText -Path $functionsPath -Name 'Confirm-CMWsusPoolHardening'
+$roleDiagnosticsText = Get-TestFunctionText -Path $functionsPath -Name 'Write-CMRoleProvisioningDiagnostics'
 $dpFeatures = @(Get-CMRoleRequiredWindowsFeatures -RoleName DP)
 $mpFeatures = @(Get-CMRoleRequiredWindowsFeatures -RoleName MP)
 foreach ($feature in @('Web-Server', 'Web-Windows-Auth', 'Web-WMI', 'Rdc', 'Web-Mgmt-Service')) {
@@ -247,9 +248,13 @@ Assert-True (([regex]::Matches($functionsText, 'Restart-CMRoleProvisioning -Role
 Assert-True ($functionsText -match 'function Write-CMRoleProvisioningDiagnostics') `
     'Physical-readiness failures no longer capture bounded producer/target diagnostics.'
 foreach ($targetEvidence in @('SMS_BOOTSTRAP.log', 'Windows\Logs\DISM\dism.log', 'Windows\Logs\CBS\CBS.log',
+        'C:\PBIRS\PBIRS\LogFiles\ReportingServicesService*.log',
+        'C:\Program Files\Microsoft Power BI Report Server\PBIRS\LogFiles\ReportingServicesService*.log',
         'FeatureReceipts', 'PendingReboot')) {
     Assert-True ($functionsText.Contains($targetEvidence)) "Role-target diagnostics dropped '$targetEvidence'."
 }
+Assert-True ($roleDiagnosticsText -match '(?s)Get-Item -Path \$candidate.+?Sort-Object LastWriteTimeUtc -Descending.+?Select-Object -First 2') `
+    'Role-target diagnostics no longer limit each log pattern to its two newest files.'
 Assert-True (([regex]::Matches($functionsText, 'Write-CMRoleProvisioningDiagnostics -RoleName').Count) -ge 5) `
     'Retry and terminal physical-readiness failures are not both diagnosed.'
 Assert-True ($installerText -match 'Get-CMDistributionPointReadiness.+?\.Ready') `

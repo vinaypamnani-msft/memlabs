@@ -18,6 +18,27 @@
         "dynamicMinRam": "2GB",
         "virtualProcs": 6
       }
+    },
+    {
+      "vmName": "CS1RPSUP1",
+      "role": "SiteSystem",
+      "changes": {
+        "memory": "8GB"
+      }
+    },
+    {
+      "vmName": "PS1DPMPSUP1",
+      "role": "SiteSystem",
+      "changes": {
+        "memory": "8GB"
+      }
+    },
+    {
+      "vmName": "FS1",
+      "role": "FileServer",
+      "changes": {
+        "memory": "3GB"
+      }
     }
   ]
 }

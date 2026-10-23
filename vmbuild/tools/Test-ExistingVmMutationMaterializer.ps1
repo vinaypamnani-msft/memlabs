@@ -11,6 +11,8 @@ $materializerPath = Join-Path $RootPath 'tools\New-ExistingVmMutationConfig.ps1'
 $runnerPath = Join-Path $RootPath 'tools\Invoke-MainToDevelopExpansionTest.ps1'
 $manifestPath = Join-Path $RootPath 'config\tests\mutations\CSTest3-D-MutateExistingSiteSystem.json'
 $baselinePath = Join-Path $RootPath 'config\tests\CSTest3-A-CSPS-CSHA.json'
+$expansionPath = Join-Path $RootPath 'config\tests\CSTest3-C-AddDPMP.json'
+$historyPath = Join-Path $RootPath 'tools\Common.TestHistory.ps1'
 
 function Import-TestFunction {
     param([string] $Path, [string] $Name)
@@ -44,6 +46,8 @@ function Assert-ThrowsLike {
 
 . (Import-TestFunction -Path $materializerPath -Name 'Set-MemLabsExistingVmMutation')
 . (Import-TestFunction -Path $materializerPath -Name 'Assert-MemLabsExistingVmMutationTopology')
+. (Import-TestFunction -Path $historyPath -Name 'ConvertTo-MemLabsMemoryGB')
+. (Import-TestFunction -Path $historyPath -Name 'Get-MemLabsFamilyMetadata')
 
 $vm = [pscustomobject]@{
     vmName = 'CT3-DPMP1'
@@ -118,8 +122,10 @@ Assert-Equal $true ([bool]($runnerSource -match 'generated-mutations')) `
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $baseline = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-Json
+$expansion = Get-Content -LiteralPath $expansionPath -Raw | ConvertFrom-Json
 Assert-Equal 1 ([int]$manifest.existingVmMutationVersion) 'Mutation manifest schema version changed unexpectedly.'
 Assert-Equal 'DPMP1' "$($manifest.virtualMachines[0].vmName)" 'Mutation fixture target changed unexpectedly.'
+Assert-Equal '8GB' $manifest.virtualMachines[0].changes.memory 'Mutated DP/MP/SUP memory differs from the test budget.'
 Assert-Equal 'dynamicMinRam,InstallSUP,memory,virtualProcs,wsusContentDir' `
     (@($manifest.virtualMachines[0].changes.PSObject.Properties.Name | Sort-Object) -join ',') `
     'Mutation fixture no longer covers the intended role and resource changes.'
@@ -131,4 +137,69 @@ Assert-Equal $false ([bool]$baselineTarget.installSUP) 'Main baseline target alr
 Assert-Equal $false ([bool]$baselineTarget.installRP) 'Main baseline target unexpectedly has the RP role.'
 Assert-Equal 'PS1' "$($baselineTarget.siteCode)" 'Mutation target is not owned by the Primary site.'
 
-Write-Host 'PASS -- declarative existing-VM mutations preserve supported-property, original-value, checkpoint, and replay semantics.'
+$reportingTargets = @($manifest.virtualMachines | Where-Object vmName -eq 'CS1RPSUP1')
+Assert-Equal 1 $reportingTargets.Count 'Mutation fixture does not resize the legacy CAS RP/SUP host.'
+$reportingTarget = $reportingTargets[0]
+Assert-Equal 'memory' (@($reportingTarget.changes.PSObject.Properties.Name) -join ',') `
+    'Legacy CAS RP/SUP recovery must change only memory, not its installed roles.'
+$baselineReportingTarget = $baseline.virtualMachines |
+    Where-Object vmName -eq $reportingTarget.vmName | Select-Object -First 1
+Assert-Equal '8GB' $baselineReportingTarget.memory 'The current CAS RP/SUP baseline sizing changed unexpectedly.'
+$legacyReportingVm = [pscustomobject]@{
+    vmName = 'CT3-CS1RPSUP1'
+    role = 'SiteSystem'
+    siteCode = 'CS1'
+    installRP = $true
+    installSUP = $true
+    memory = '3GB'
+}
+Set-MemLabsExistingVmMutation -Vm $legacyReportingVm -Changes $reportingTarget.changes -AllowedProperties $allowed
+Assert-MemLabsExistingVmMutationTopology -Vm $legacyReportingVm -Inventory $inventory -DomainName 'cstest3.com'
+Assert-Equal $baselineReportingTarget.memory $legacyReportingVm.memory 'Legacy CAS RP/SUP memory was not brought up to current sizing.'
+Assert-Equal '3GB' $legacyReportingVm.'memory-Original' 'Legacy CAS RP/SUP memory comparison was not retained.'
+Assert-Equal $true $legacyReportingVm.installRP 'Memory recovery changed the existing reporting role.'
+Assert-Equal $true $legacyReportingVm.installSUP 'Memory recovery changed the existing SUP role.'
+
+$resizes = @(
+    @{
+        Vm = $expansion.virtualMachines | Where-Object vmName -eq 'PS1DPMPSUP1' | Select-Object -First 1
+        Memory = '8GB'
+        OriginalMemory = '6GB'
+    },
+    @{
+        Vm = $baseline.virtualMachines | Where-Object vmName -eq 'FS1' | Select-Object -First 1
+        Memory = '3GB'
+        OriginalMemory = '2GB'
+    }
+)
+foreach ($resize in $resizes) {
+    $targets = @($manifest.virtualMachines | Where-Object vmName -eq $resize.Vm.vmName)
+    Assert-Equal 1 $targets.Count "Existing-VM mutation does not right-size '$($resize.Vm.vmName)'."
+    $target = $targets[0]
+    Assert-Equal 'memory' (@($target.changes.PSObject.Properties.Name) -join ',') `
+        "Right-sizing '$($resize.Vm.vmName)' must change only memory."
+    Assert-Equal $resize.Memory $resize.Vm.memory "Fresh '$($resize.Vm.vmName)' memory differs from the test budget."
+    Assert-Equal $resize.Vm.role $target.role "Right-sizing '$($resize.Vm.vmName)' changed its role."
+    $legacyVm = $resize.Vm | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $legacyVm.vmName = "CT3-$($legacyVm.vmName)"
+    $legacyVm.memory = $resize.OriginalMemory
+    Set-MemLabsExistingVmMutation -Vm $legacyVm -Changes $target.changes -AllowedProperties $allowed
+    Assert-MemLabsExistingVmMutationTopology -Vm $legacyVm -Inventory $inventory -DomainName 'cstest3.com'
+    Assert-Equal $resize.Memory $legacyVm.memory "Existing '$($legacyVm.vmName)' was not right-sized."
+    Assert-Equal $resize.OriginalMemory $legacyVm.'memory-Original' `
+        "Right-sizing '$($legacyVm.vmName)' lost the original memory comparison."
+    foreach ($roleProperty in @('installDP', 'installMP', 'installRP', 'installSUP')) {
+        Assert-Equal $resize.Vm.$roleProperty $legacyVm.$roleProperty `
+            "Right-sizing '$($legacyVm.vmName)' changed '$roleProperty'."
+    }
+}
+
+$ordinaryMetadata = Get-MemLabsFamilyMetadata -VmbuildRoot $RootPath -Family 'CSTest3'
+$mutationMetadata = Get-MemLabsFamilyMetadata -VmbuildRoot $RootPath -Family 'CSTest3' -IncludeMutations
+Assert-Equal 13 $mutationMetadata.VmCount 'Right-sizing changed the CSTest3 VM topology.'
+Assert-Equal 65 $ordinaryMetadata.EstimatedPeakMemoryGB 'Fresh CSTest3 fixtures exceed their memory budget.'
+Assert-Equal 70 $mutationMetadata.EstimatedPeakMemoryGB 'CSTest3 mutations exceed their memory budget.'
+Assert-Equal 78 $mutationMetadata.EstimatedRequiredGB 'CSTest3 preflight lost its 8 GB host reserve.'
+Assert-Equal $true ($mutationMetadata.EstimatedRequiredGB -le 100) 'CSTest3 exceeds the available 100 GB budget.'
+
+Write-Host 'PASS -- declarative existing-VM mutations preserve diff, replay, role, and resource-budget semantics.'

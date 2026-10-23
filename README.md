@@ -1201,6 +1201,40 @@ Validate with `vmbuild\tools\Test-MaintenanceFixRobustness.ps1`,
 `vmbuild\tools\Test-ConsoleUpgradeRouting.ps1`, and
 `vmbuild\tools\Test-Odbc18VersionEnforcement.ps1`.
 
+## Reporting Point and SUP resource readiness
+
+A running reporting service is not sufficient for Phase 8: its ReportServer
+endpoint must also respond. When an RP/SUP host reports HTTP 503 after WSUS
+out-of-memory errors, check its assigned memory and demand in the Phase 8
+timeline before retrying; passing DNS, RPC, SMB, and WinRM checks does not
+establish reporting-service health.
+
+The CSTest3 existing-VM mutation explicitly brings the CAS RP/SUP host to the
+current baseline's 8 GB allocation. Both DP/MP/SUP hosts use 8 GB each, and the
+file server uses 3 GB; SQL, site-server, and client allocations are unchanged.
+The complete 13-VM fixture budget is 70 GB, with an additional 8 GB host reserve
+included in the planner's 78 GB requirement, within the available 100 GB budget.
+
+Older main-built VM Notes can still specify 3 GB for the RP/SUP host, and prior
+reduced-memory configs may leave other VMs below their current allocations.
+Changing fresh-build fixtures alone does not update those Notes, so the mutation
+also includes memory-only updates for the existing RP/SUP host, added DP/MP/SUP
+host, and file server. Regenerate previously materialized mutation configs to
+include these changes. Phase 0 applies the resizes and restarts affected VMs;
+rerunning from Phase 3 then includes PBIRS verification in Phase 7 before
+ConfigMgr role setup.
+
+Role-target diagnostics read reporting-service logs from both MemLabs' configured
+PBIRS install directory and the default Program Files location, limiting each
+pattern to its two newest files. Failure-log manifests explicitly convert typed
+artifact lists to arrays so PowerShell's collection binder cannot discard the
+baseline evidence with `Argument types do not match`.
+
+Validate with
+[`Test-ExistingVmMutationMaterializer.ps1`](vmbuild/tools/Test-ExistingVmMutationMaterializer.ps1),
+[`Test-CmRolePhysicalReadiness.ps1`](vmbuild/tools/Test-CmRolePhysicalReadiness.ps1),
+and [`Test-CmFailureDiagnostics.ps1`](vmbuild/tools/Test-CmFailureDiagnostics.ps1).
+
 ## ConfigMgr SQL failure diagnostics
 
 Phase 8 SQL evidence collection also covers login/database-open errors 4060 and
