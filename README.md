@@ -157,6 +157,10 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   `Starting`/`Stopping` transitions are observed without reset or hard power-off.
   Each target has a ten-minute readiness budget, including bounded PowerShell
   Direct probes by VM GUID that verify computer, user, and DNS-domain identity.
+  The user comes from the authenticated Windows token, not a potentially stale
+  `USERNAME` environment variable. Identity mismatches report expected and actual
+  fields, the authenticated principal, environment username, result count, and
+  credential name instead of hiding which check failed.
   Saved, paused, critical, replaced, or persistently unready VMs fail explicitly.
   START/WAIT/PASS output records the target GUID and power/transport evidence;
   existing domain SID, secure-channel, DNS, disk, and maintenance checks still
@@ -168,7 +172,8 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   saved names fail explicitly; no DNS-label guess is used. Readiness timeouts
   retain the latest transport error and PowerShell error ID for every attempted
   credential across polls, even if the deadline interrupts the final credential
-  pass. The runner regression exercises this boundary with a controlled clock.
+  pass. The runner regression exercises this boundary with a controlled clock
+  and executes the guest identity probe in Windows PowerShell 5.1.
 - The host publishes and verifies the workflow RunId before launching DSC, not
   after a potentially long-running start call. Phase 8/9 cannot start without
   that verified identity. Workflow failures publish an atomic, RunId-bound

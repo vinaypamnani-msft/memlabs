@@ -1186,11 +1186,15 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     $script:ReadyId = $vmId
     $script:ReadyComputer = 'READY-SITE'
     $script:ReadyDomain = 'ready.test'
+    $script:ReadyIdentity = 'READY\admin'
+    $script:ReadyEnvironmentUserName = 'admin'
+    $script:ReadyProbeScript = $null
     $script:ReadyTimeouts = @()
     $script:ReadyStops = 0
     $script:ReadyRemovals = 0
     $script:ReadyTransientFailures = 0
     $script:ReadyEmptyProbe = $false
+    $script:ReadyProbeCopies = 1
     $script:ReadyNotes = '{"domain":"ready.test","adminName":"admin","domainNetBiosName":"READY"}'
     $script:ReadyRejectedUsers = @()
     $script:ReadyCredentialAttempts = @()
@@ -1225,6 +1229,7 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
             $script:ReadyTransientFailures--
             throw 'fixture: guest transport is still starting'
         }
+        $script:ReadyProbeScript = $ScriptBlock
         $job = [pscustomobject]@{ State = $script:ReadyOutcome }
         $job | Add-Member ScriptMethod StopJobAsync { $script:ReadyStops++ }
         return $job
@@ -1233,7 +1238,23 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     function Receive-Job {
         param($Job, $ErrorAction)
         if ($script:ReadyEmptyProbe) { return }
-        [pscustomobject]@{ ComputerName = $script:ReadyComputer; Domain = $script:ReadyDomain; UserName = 'admin' }
+        $previousEnvironment = @($env:COMPUTERNAME, $env:USERNAME, $env:USERDNSDOMAIN)
+        try {
+            $env:COMPUTERNAME = $script:ReadyComputer
+            $env:USERNAME = $script:ReadyEnvironmentUserName
+            $env:USERDNSDOMAIN = $script:ReadyDomain
+            # Execute the guest probe, substituting only the guest's Windows token.
+            $source = $script:ReadyProbeScript.ToString().Replace(
+                '[Security.Principal.WindowsIdentity]::GetCurrent().Name', '$script:ReadyIdentity')
+            for ($copy = 0; $copy -lt $script:ReadyProbeCopies; $copy++) {
+                & ([scriptblock]::Create($source))
+            }
+        }
+        finally {
+            $env:COMPUTERNAME = $previousEnvironment[0]
+            $env:USERNAME = $previousEnvironment[1]
+            $env:USERDNSDOMAIN = $previousEnvironment[2]
+        }
     }
     function Remove-Job { param($Job, [switch]$Force, $ErrorAction) $script:ReadyRemovals++ }
     function Start-Sleep { param($Seconds) [Threading.Thread]::Sleep(20) }
@@ -1244,6 +1265,39 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
     Assert-Equal 1 $script:ReadyStarts 'already Running retained VM is not started or rebooted again'
     Assert-Equal 2 $script:ReadyProbes 'already Running retained VM still proves PSDirect identity before domain validation'
+    $guestProbeTest = @'
+$ErrorActionPreference = 'Stop'
+$expectedIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$expectedUser = ($expectedIdentity -split '\\')[-1]
+$env:USERNAME = 'MemLabs-Stale-Environment-Fixture'
+$env:USERDNSDOMAIN = 'readiness.fixture.test'
+$result = @(& {
+__GUEST_PROBE__
+})
+if ($result.Count -ne 1 -or $result[0].Identity -ne $expectedIdentity -or
+    $result[0].UserName -ne $expectedUser -or $result[0].UserName -eq $env:USERNAME -or
+    $result[0].EnvironmentUserName -ne $env:USERNAME -or
+    $result[0].ComputerName -ne $env:COMPUTERNAME -or $result[0].Domain -ne $env:USERDNSDOMAIN) {
+    throw 'Guest readiness probe did not return the actual Windows token and environment evidence.'
+}
+Write-Output 'Guest readiness token verified'
+'@
+    $guestProbeTest = $guestProbeTest.Replace('__GUEST_PROBE__', $script:ReadyProbeScript.ToString())
+    $encodedProbeTest = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($guestProbeTest))
+    $guestEngine = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $guestProbeOutput = @(& $guestEngine -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedProbeTest 2>&1)
+    Assert-True ($LASTEXITCODE -eq 0 -and ($guestProbeOutput -join "`n") -eq 'Guest readiness token verified') `
+        'Windows PowerShell 5.1 executes the actual guest probe with a stale environment username' ($guestProbeOutput -join "`n")
+    $script:ReadyEnvironmentUserName = 'Administrator'
+    $identityError = $null
+    $startsBefore = $script:ReadyStarts
+    try {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    }
+    catch { $identityError = $_.Exception.Message }
+    Assert-True (-not $identityError) 'readiness accepts the authenticated user despite a stale environment username' $identityError
+    Assert-Equal $startsBefore $script:ReadyStarts 'stale environment username never restarts the retained VM'
+    $script:ReadyEnvironmentUserName = 'admin'
     foreach ($state in @('Stopping', 'Off', 'Starting', 'Running')) { $script:ReadyStates.Enqueue($state) }
     Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
     Assert-Equal 2 $script:ReadyStarts 'late completion of the previous shutdown is observed and the Off VM is started once'
@@ -1274,15 +1328,32 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     $script:ReadyComputer = 'WRONG-VM'
     Assert-ThrowsLike {
         Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
-    } '*readiness identity mismatch*' 'boot readiness rejects a different guest computer identity'
+    } "*readiness identity mismatch*expected computer='READY-SITE'*actual computer='WRONG-VM'*" `
+        'boot readiness rejects a different guest computer identity with expected and actual evidence'
     $script:ReadyComputer = 'READY-SITE'
     $script:ReadyState = 'Off'
     $script:ReadyDomain = 'wrong.test'
     Assert-ThrowsLike {
         Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
-    } '*readiness identity mismatch*' 'boot readiness rejects a different authenticated domain'
+    } "*readiness identity mismatch*expected*DNS domain='ready.test'*actual*DNS domain='wrong.test'*" `
+        'boot readiness rejects a different authenticated domain with expected and actual evidence'
     $script:ReadyDomain = 'ready.test'
     $script:ReadyState = 'Running'
+    $script:ReadyIdentity = 'READY\other-admin'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } "*readiness identity mismatch*expected*user='admin'*actual*user='other-admin'*identity='READY\other-admin'*USERNAME='admin'*" `
+        'readiness rejects the wrong authenticated user even when the environment username matches'
+    $script:ReadyIdentity = ''
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } '*readiness identity mismatch*' 'readiness rejects a missing authenticated Windows identity'
+    $script:ReadyIdentity = 'READY\admin'
+    $script:ReadyProbeCopies = 2
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } '*readiness identity mismatch*results=2*' 'readiness rejects duplicate identity results with the actual result count'
+    $script:ReadyProbeCopies = 1
     $script:ReadyEmptyProbe = $true
     Assert-ThrowsLike {
         Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1

@@ -987,10 +987,13 @@ function Wait-CrossRevisionRetainedVmReady {
                 $probe = @()
                 try {
                     $probeJob = Invoke-Command -VMId $expectedId -Credential $credential -AsJob -ErrorAction Stop -ScriptBlock {
+                        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
                         [pscustomobject]@{
                             ComputerName = $env:COMPUTERNAME
-                            UserName = $env:USERNAME
+                            Identity = $identity
+                            UserName = if ($identity -match '\\([^\\]+)$') { $Matches[1] } else { $null }
                             Domain = $env:USERDNSDOMAIN
+                            EnvironmentUserName = $env:USERNAME
                         }
                     }
                     $null = Wait-Job -Job $probeJob -Timeout ([Math]::Min(15, $remaining))
@@ -1021,9 +1024,13 @@ function Wait-CrossRevisionRetainedVmReady {
                     }
                 }
                 if ($probe.Count -gt 0) {
-                    if ($probe.Count -ne 1 -or $probe[0].ComputerName -ine $Target.Name -or
-                        $probe[0].Domain -ine $note.domain -or $probe[0].UserName -ine $account) {
-                        throw "Retained VM '$($Target.Name)' readiness identity mismatch; refusing validation."
+                    $sample = $probe[0]
+                    if ($probe.Count -ne 1 -or -not $sample.Identity -or $sample.ComputerName -ine $Target.Name -or
+                        $sample.Domain -ine $note.domain -or $sample.UserName -ine $account) {
+                        $detail = "expected computer='$($Target.Name)', user='$account', DNS domain='$($note.domain)'; " +
+                            "actual computer='$($sample.ComputerName)', user='$($sample.UserName)', DNS domain='$($sample.Domain)', " +
+                            "identity='$($sample.Identity)', USERNAME='$($sample.EnvironmentUserName)', results=$($probe.Count), credential='$($credential.UserName)'"
+                        throw "Retained VM '$($Target.Name)' readiness identity mismatch; $detail; refusing validation."
                     }
                     Write-Host "PASS: retained VM '$($Target.Name)' ($expectedId) is Running and PowerShell Direct domain identity is ready." -ForegroundColor Green
                     return
