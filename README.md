@@ -145,6 +145,9 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   use a fresh state root to requalify them.
 - Each develop fixture/pass gets independent readiness checks before being
   checkpointed complete. VM/disk lineage and domain SID checks remain enabled.
+  Domain health requires two consecutive healthy samples. A healthy first sample
+  logs `WAIT` with a passed-sample count while awaiting confirmation; each VM logs
+  an explicit `PASS` once confirmed. Only unhealthy samples log a stability retry.
   First-pass expansion VM/disk and applicable domain identities are persisted
   before maintenance gates and stage completion, so the second pass can verify
   the same machines. Resume validates saved identities instead of replacing
@@ -161,6 +164,11 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   `USERNAME` environment variable. Identity mismatches report expected and actual
   fields, the authenticated principal, environment username, result count, and
   credential name instead of hiding which check failed.
+  A wrong authenticated user/domain rejects that session and tries the remaining
+  exact credentials or a fresh session within the existing readiness budget; it
+  never accepts the wrong account. Wrong guest names or duplicate replies still
+  fail immediately. Persistent identity failures retain each credential's evidence
+  in the timeout, and success names the credential and principal actually verified.
   Saved, paused, critical, replaced, or persistently unready VMs fail explicitly.
   START/WAIT/PASS output records the target GUID and power/transport evidence;
   existing domain SID, secure-channel, DNS, disk, and maintenance checks still

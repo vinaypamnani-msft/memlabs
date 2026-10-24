@@ -1198,6 +1198,8 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     $script:ReadyComputer = 'READY-SITE'
     $script:ReadyDomain = 'ready.test'
     $script:ReadyIdentity = 'READY\admin'
+    $script:ReadyIdentitiesByCredential = @{}
+    $script:ReadyIdentitySequence = [Collections.Generic.Queue[string]]::new()
     $script:ReadyEnvironmentUserName = 'admin'
     $script:ReadyProbeScript = $null
     $script:ReadyTimeouts = @()
@@ -1230,7 +1232,7 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     }
     function Invoke-Command {
         param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
-        Assert-True ($AsJob -and "$VMId" -eq "$vmId") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
+        Assert-True ($AsJob -and "$VMId" -eq "$($target.Id)") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
         $script:ReadyProbes++
         $script:ReadyCredentialAttempts += $Credential.UserName
         if ($Credential.UserName -in $script:ReadyRejectedUsers) {
@@ -1241,7 +1243,7 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
             throw 'fixture: guest transport is still starting'
         }
         $script:ReadyProbeScript = $ScriptBlock
-        $job = [pscustomobject]@{ State = $script:ReadyOutcome }
+        $job = [pscustomobject]@{ State = $script:ReadyOutcome; CredentialUserName = $Credential.UserName }
         $job | Add-Member ScriptMethod StopJobAsync { $script:ReadyStops++ }
         return $job
     }
@@ -1251,12 +1253,21 @@ Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
         if ($script:ReadyEmptyProbe) { return }
         $previousEnvironment = @($env:COMPUTERNAME, $env:USERNAME, $env:USERDNSDOMAIN)
         try {
+            $injectedIdentity = $script:ReadyIdentitySequence.Count -gt 0 -or
+                $script:ReadyIdentitiesByCredential.ContainsKey("$($Job.CredentialUserName)")
+            $probeIdentity = if ($script:ReadyIdentitySequence.Count -gt 0) {
+                $script:ReadyIdentitySequence.Dequeue()
+            }
+            elseif ($script:ReadyIdentitiesByCredential.ContainsKey("$($Job.CredentialUserName)")) {
+                $script:ReadyIdentitiesByCredential[$Job.CredentialUserName]
+            }
+            else { $script:ReadyIdentity }
             $env:COMPUTERNAME = $script:ReadyComputer
-            $env:USERNAME = $script:ReadyEnvironmentUserName
+            $env:USERNAME = if ($injectedIdentity) { ($probeIdentity -split '\\')[-1] } else { $script:ReadyEnvironmentUserName }
             $env:USERDNSDOMAIN = $script:ReadyDomain
             # Execute the guest probe, substituting only the guest's Windows token.
             $source = $script:ReadyProbeScript.ToString().Replace(
-                '[Security.Principal.WindowsIdentity]::GetCurrent().Name', '$script:ReadyIdentity')
+                '[Security.Principal.WindowsIdentity]::GetCurrent().Name', '$probeIdentity')
             for ($copy = 0; $copy -lt $script:ReadyProbeCopies; $copy++) {
                 & ([scriptblock]::Create($source))
             }
@@ -1345,19 +1356,19 @@ Write-Output 'Guest readiness token verified'
     $script:ReadyState = 'Off'
     $script:ReadyDomain = 'wrong.test'
     Assert-ThrowsLike {
-        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
     } "*readiness identity mismatch*expected*DNS domain='ready.test'*actual*DNS domain='wrong.test'*" `
         'boot readiness rejects a different authenticated domain with expected and actual evidence'
     $script:ReadyDomain = 'ready.test'
     $script:ReadyState = 'Running'
     $script:ReadyIdentity = 'READY\other-admin'
     Assert-ThrowsLike {
-        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
     } "*readiness identity mismatch*expected*user='admin'*actual*user='other-admin'*identity='READY\other-admin'*USERNAME='admin'*" `
         'readiness rejects the wrong authenticated user even when the environment username matches'
     $script:ReadyIdentity = ''
     Assert-ThrowsLike {
-        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
     } '*readiness identity mismatch*' 'readiness rejects a missing authenticated Windows identity'
     $script:ReadyIdentity = 'READY\admin'
     $script:ReadyProbeCopies = 2
@@ -1400,6 +1411,76 @@ Write-Output 'Guest readiness token verified'
             Assert-Equal 'admin@ready.test|EXACT-NB\admin' ($script:ReadyCredentialAttempts -join '|') `
                 'missing legacy VM-note NetBIOS name uses the saved exact domain name after UPN transport rejection'
             Assert-Equal $startsBefore $script:ReadyStarts 'credential fallback never reboots the healthy retained VM'
+            $script:ReadyRejectedUsers = @()
+            $script:ReadyIdentitiesByCredential = @{
+                'admin@ready.test' = 'EXACT-NB\vmbuildadmin'
+                'EXACT-NB\admin' = 'EXACT-NB\admin'
+            }
+            foreach ($notes in @(
+                    '{"domain":"ready.test","adminName":"admin"}',
+                    '{"domain":"ready.test","adminName":"admin","domainNetBiosName":"EXACT-NB"}'
+                )) {
+                $script:ReadyNotes = $notes
+                $script:ReadyCredentialAttempts = @()
+                $fallbackError = $null
+                $fallbackLog = ''
+                try {
+                    $fallbackLog = @(Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile `
+                            -RetrySeconds 0 -TimeoutSeconds 5 6>&1) -join "`n"
+                }
+                catch { $fallbackError = $_.Exception.Message }
+                Assert-True (-not $fallbackError) 'a UPN job returning vmbuildadmin can recover only through a verified exact-admin alternate' $fallbackError
+                Assert-Equal 'admin@ready.test|EXACT-NB\admin' ($script:ReadyCredentialAttempts -join '|') `
+                    'authenticated UPN identity mismatch still tries the exact NetBIOS credential from notes or saved state'
+                Assert-True ($fallbackLog -like "*REJECT:*identity='EXACT-NB\vmbuildadmin'*credential='admin@ready.test'*" -and
+                    $fallbackLog -like "*PASS:*credential='EXACT-NB\admin'*identity='EXACT-NB\admin'*") `
+                    'readiness logs the rejected principal and the exact credential and principal that actually passed'
+            }
+            $script:ReadyNotes = '{"domain":"ready.test","adminName":"admin"}'
+            $script:ReadyIdentitiesByCredential.Clear()
+            foreach ($identity in @('EXACT-NB\vmbuildadmin', 'EXACT-NB\other-admin', 'EXACT-NB\admin')) {
+                $script:ReadyIdentitySequence.Enqueue($identity)
+            }
+            $script:ReadyCredentialAttempts = @()
+            $recoveryError = $null
+            try {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 5
+            }
+            catch { $recoveryError = $_.Exception.Message }
+            Assert-True (-not $recoveryError) 'wrong identities on the first poll can recover through a fresh verified session within the existing budget' $recoveryError
+            Assert-Equal 'admin@ready.test|EXACT-NB\admin|admin@ready.test' ($script:ReadyCredentialAttempts -join '|') `
+                'fresh-session recovery does not accept either rejected first-poll identity'
+            $script:ReadyIdentitySequence.Clear()
+            $script:ReadyIdentitiesByCredential = @{
+                'admin@ready.test' = 'EXACT-NB\vmbuildadmin'
+                'EXACT-NB\admin' = 'EXACT-NB\other-admin'
+            }
+            $script:ReadyCredentialAttempts = @()
+            $rejectedLog = [Collections.Generic.List[object]]::new()
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile `
+                    -RetrySeconds 1 -TimeoutSeconds 1 6>&1 | ForEach-Object { $rejectedLog.Add($_) }
+            } "*readiness timed out*identity='EXACT-NB\vmbuildadmin'*credential='admin@ready.test'*identity='EXACT-NB\other-admin'*credential='EXACT-NB\admin'*" `
+                'all wrong authenticated identities fail with both credential results preserved at the deadline'
+            Assert-True (($rejectedLog -join "`n") -notlike '*PASS: retained VM*') 'a wrong authenticated identity is never converted into readiness success'
+            Assert-Equal 'admin@ready.test|EXACT-NB\admin' (($script:ReadyCredentialAttempts | Select-Object -Unique) -join '|') `
+                'identity retries never guess another account or domain credential'
+            $script:ReadyIdentitiesByCredential.Clear()
+            $script:ReadyComputer = 'WRONG-VM'
+            $script:ReadyCredentialAttempts = @()
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+            } "*readiness identity mismatch*actual computer='WRONG-VM'*" 'a wrong guest identity remains immediately fatal even with alternate credentials available'
+            Assert-Equal 'admin@ready.test' ($script:ReadyCredentialAttempts -join '|') 'a wrong guest never triggers credential fallback'
+            $script:ReadyComputer = 'READY-SITE'
+            $script:ReadyProbeCopies = 2
+            $script:ReadyCredentialAttempts = @()
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+            } '*readiness identity mismatch*results=2*' 'malformed duplicate guest replies remain immediately fatal'
+            Assert-Equal 'admin@ready.test' ($script:ReadyCredentialAttempts -join '|') 'malformed guest replies never trigger credential fallback'
+            $script:ReadyProbeCopies = 1
+            Assert-Equal $startsBefore $script:ReadyStarts 'identity fallback and fresh-session retries never restart or reset the retained VM'
             $script:State.DevelopDomainIdentities.expansion = $script:State.DomainIdentities.baseline
             $script:State.DomainIdentities.Clear()
             Assert-Equal 'EXACT-NB' (Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name) `
@@ -1422,7 +1503,7 @@ Write-Output 'Guest readiness token verified'
                 }
                 function Invoke-Command {
                     param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
-                    Assert-True ($AsJob -and "$VMId" -eq "$vmId") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
+                    Assert-True ($AsJob -and "$VMId" -eq "$($target.Id)") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
                     $script:ReadyCredentialAttempts += $Credential.UserName
                     $attempt = $script:ReadyCredentialAttempts.Count
                     if ($attempt -eq 3) { $script:ReadyClock.Elapsed = [timespan]::FromSeconds(1) }
@@ -1441,10 +1522,42 @@ Write-Output 'Guest readiness token verified'
                     'readiness timeout preserves every credential transport error and error ID after a partial final poll'
                 Assert-Equal 'admin@ready.test|EXACT-NB\admin|admin@ready.test' ($script:ReadyCredentialAttempts -join '|') `
                     'readiness deadline prevents another credential probe after the budget expires'
+                $script:ReadyIdentitiesByCredential = @{ 'admin@ready.test' = 'EXACT-NB\vmbuildadmin' }
+                $script:ReadyCredentialAttempts = @()
+                function Invoke-Command {
+                    param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
+                    Assert-True ($AsJob -and "$VMId" -eq "$($target.Id)") 'identity retry remains an asynchronous GUID-scoped probe'
+                    $script:ReadyCredentialAttempts += $Credential.UserName
+                    $attempt = $script:ReadyCredentialAttempts.Count
+                    if ($attempt -eq 3) { $script:ReadyClock.Elapsed = [timespan]::FromSeconds(1) }
+                    if ($Credential.UserName -eq 'admin@ready.test') {
+                        $script:ReadyProbeScript = $ScriptBlock
+                        return [pscustomobject]@{ State = 'Completed'; CredentialUserName = $Credential.UserName }
+                    }
+                    throw [Management.Automation.ErrorRecord]::new(
+                        [InvalidOperationException]::new('fixture alternate transport failure'),
+                        'AlternateReadinessTransport', [Management.Automation.ErrorCategory]::ConnectionError, $Credential.UserName)
+                }
+                Assert-ThrowsLike {
+                    Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+                } "*readiness timed out*identity='EXACT-NB\vmbuildadmin'*credential='admin@ready.test'*EXACT-NB\admin*fixture alternate transport failure*errorId=AlternateReadinessTransport*" `
+                    'mixed identity and transport failures retain both results when the final credential poll is cut short'
+                Assert-Equal 'admin@ready.test|EXACT-NB\admin|admin@ready.test' ($script:ReadyCredentialAttempts -join '|') `
+                    'an identity mismatch cannot start another probe after the readiness deadline'
+                $script:ReadyIdentitiesByCredential.Clear()
             }
             $script:State.DevelopDomainIdentities.Clear()
             Assert-True ($null -eq (Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name)) `
                 'missing saved NetBIOS metadata does not guess from the DNS label'
+            $script:ReadyRejectedUsers = @()
+            $script:ReadyIdentitiesByCredential = @{ 'admin@ready.test' = 'EXACT-NB\vmbuildadmin' }
+            $script:ReadyCredentialAttempts = @()
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+            } "*readiness identity mismatch*identity='EXACT-NB\vmbuildadmin'*" 'a mismatched UPN cannot pass when no exact alternate domain credential exists'
+            Assert-Equal 'admin@ready.test' (($script:ReadyCredentialAttempts | Select-Object -Unique) -join '|') `
+                'missing NetBIOS metadata does not invent an identity fallback'
+            $script:ReadyIdentitiesByCredential.Clear()
         }
         finally {
             $script:State = $savedState
@@ -1705,8 +1818,13 @@ Assert-ThrowsLike -Action {
 } -Pattern '*incomplete*' -What 'string-valued false success cannot pass by truthiness'
 $script:MockVms['NOC-W11CLIENT1'].Notes = '{"success":true,"inProgress":false,"lastPhaseComplete":11}'
 try {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -RetrySeconds 0
+    $healthyLog = @(Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' `
+            -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0 6>&1) -join "`n"
     Write-TestResult -Passed $true -What 'domain member independently passes join, secure-channel, and DNS checks'
+    Assert-True ($healthyLog -like '*sample 1/2 passed (1/2 consecutive healthy samples*' -and
+        $healthyLog -notlike '*not yet stable*') 'a healthy first sample is logged as passed and awaiting confirmation, not as an unhealthy retry'
+    Assert-True ($healthyLog -like "*PASS: NOC-W11CLIENT1 domain convergence confirmed (2/2 consecutive healthy samples) for 'nocm.com'.*") `
+        'the final healthy domain sample prints an explicit per-VM confirmation'
 }
 catch {
     Write-TestResult -Passed $false -What 'domain member independently passes join, secure-channel, and DNS checks' -Detail $_.Exception.Message
@@ -1752,9 +1870,13 @@ $script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
         DnsAddresses = @('10.220.201.20')
     })
 try {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'transient-channel' `
-        -AdminCachePath $credentialPath -MaximumAttempts 4 -RetrySeconds 0
+    $transientLog = @(Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'transient-channel' `
+            -AdminCachePath $credentialPath -MaximumAttempts 4 -RetrySeconds 0 6>&1) -join "`n"
     Write-TestResult -Passed $true -What 'transient multi-DC secure-channel lag converges before runner failure'
+    Assert-True ($transientLog -like '*sample 1/4 is not yet stable*' -and
+        $transientLog -like '*sample 2/4 passed (1/2 consecutive healthy samples*' -and
+        $transientLog -like '*PASS: NOC-W11CLIENT1 domain convergence confirmed (2/2 consecutive healthy samples)*') `
+        'unhealthy retries and healthy confirmation progress remain distinct after a transient failure'
 }
 catch {
     Write-TestResult -Passed $false -What 'transient multi-DC secure-channel lag converges before runner failure' -Detail $_.Exception.Message
@@ -1772,6 +1894,14 @@ $script:MockDomainHealth = [pscustomobject]@{
     NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
     DnsAddresses = @('10.220.201.20')
 }
+$shortHealthLog = [Collections.Generic.List[object]]::new()
+Assert-ThrowsLike {
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'insufficient-confirmation' `
+        -AdminCachePath $credentialPath -MaximumAttempts 1 -RetrySeconds 0 6>&1 |
+        ForEach-Object { $shortHealthLog.Add($_) }
+} -Pattern '*without 2 consecutive healthy domain samples*' -What 'one healthy sample still cannot complete domain validation'
+Assert-True (($shortHealthLog -join "`n") -notlike '*PASS: NOC-W11CLIENT1 domain convergence confirmed*') `
+    'insufficient healthy samples never print a successful domain confirmation'
 Remove-Item -LiteralPath $credentialPath -Force -ErrorAction SilentlyContinue
 
 $specialConfig = [pscustomobject]@{

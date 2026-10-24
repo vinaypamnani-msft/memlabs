@@ -1025,14 +1025,21 @@ function Wait-CrossRevisionRetainedVmReady {
                 }
                 if ($probe.Count -gt 0) {
                     $sample = $probe[0]
-                    if ($probe.Count -ne 1 -or -not $sample.Identity -or $sample.ComputerName -ine $Target.Name -or
-                        $sample.Domain -ine $note.domain -or $sample.UserName -ine $account) {
+                    $wrongGuest = $probe.Count -ne 1 -or $sample.ComputerName -ine $Target.Name
+                    $wrongIdentity = -not $sample.Identity -or $sample.Domain -ine $note.domain -or $sample.UserName -ine $account
+                    if ($wrongGuest -or $wrongIdentity) {
                         $detail = "expected computer='$($Target.Name)', user='$account', DNS domain='$($note.domain)'; " +
                             "actual computer='$($sample.ComputerName)', user='$($sample.UserName)', DNS domain='$($sample.Domain)', " +
                             "identity='$($sample.Identity)', USERNAME='$($sample.EnvironmentUserName)', results=$($probe.Count), credential='$($credential.UserName)'"
-                        throw "Retained VM '$($Target.Name)' readiness identity mismatch; $detail; refusing validation."
+                        $message = "Retained VM '$($Target.Name)' readiness identity mismatch; $detail"
+                        if ($wrongGuest) { throw "$message; refusing validation." }
+                        if ($probeErrors[$credential.UserName] -cne $message) {
+                            Write-Host "REJECT: $message; trying only known domain credentials and fresh sessions within the readiness budget." -ForegroundColor Yellow
+                        }
+                        $probeErrors[$credential.UserName] = $message
+                        continue
                     }
-                    Write-Host "PASS: retained VM '$($Target.Name)' ($expectedId) is Running and PowerShell Direct domain identity is ready." -ForegroundColor Green
+                    Write-Host "PASS: retained VM '$($Target.Name)' ($expectedId) is Running and PowerShell Direct domain identity is ready (credential='$($credential.UserName)', identity='$($sample.Identity)')." -ForegroundColor Green
                     return
                 }
             }
@@ -1171,7 +1178,13 @@ function Assert-DomainJoinedVmHealth {
             }
             if ($attempt -lt $MaximumAttempts) {
                 $dcDetail = if ($health.TrustedDc) { $health.TrustedDc } else { "$($health.LogonServer)".TrimStart('\') }
-                Write-Host "WAIT: $vmName domain convergence sample $attempt/$MaximumAttempts is not yet stable (joined=$($health.PartOfDomain), Test-ComputerSecureChannel=$($health.SecureChannel), nltest=$($health.NltestHealthy), DC='$dcDetail', DNS=$(@($health.DnsAddresses).Count)); retrying in ${RetrySeconds}s." -ForegroundColor Yellow
+                $sampleDetail = "joined=$($health.PartOfDomain), Test-ComputerSecureChannel=$($health.SecureChannel), nltest=$($health.NltestHealthy), DC='$dcDetail', DNS=$(@($health.DnsAddresses).Count)"
+                if ($sampleHealthy) {
+                    Write-Host "WAIT: $vmName domain convergence sample $attempt/$MaximumAttempts passed ($stableSamples/$RequiredStableSamples consecutive healthy samples; $sampleDetail); confirming again in ${RetrySeconds}s." -ForegroundColor Cyan
+                }
+                else {
+                    Write-Host "WAIT: $vmName domain convergence sample $attempt/$MaximumAttempts is not yet stable ($sampleDetail); retrying in ${RetrySeconds}s." -ForegroundColor Yellow
+                }
                 if ($RetrySeconds -gt 0) { Start-Sleep -Seconds $RetrySeconds }
             }
         }
@@ -1191,6 +1204,7 @@ function Assert-DomainJoinedVmHealth {
         if ($stableSamples -lt $RequiredStableSamples) {
             throw "$FixtureName left '$vmName' without $RequiredStableSamples consecutive healthy domain samples after $MaximumAttempts attempts."
         }
+        Write-Host "PASS: $vmName domain convergence confirmed ($stableSamples/$RequiredStableSamples consecutive healthy samples) for '$domain'." -ForegroundColor Green
     }
 }
 
