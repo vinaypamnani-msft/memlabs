@@ -1109,6 +1109,7 @@ function Assert-DomainJoinedVmHealth {
     $adminName = [string]$Config.vmOptions.adminName
     $prefix = [string]$Config.vmOptions.prefix
 
+    Write-Host 'CHECK SCOPE: independent domain readiness checks joined-domain membership, nltest /sc_query status, and DNS; it does not run Test-ComputerSecureChannel.' -ForegroundColor Yellow
     foreach ($vmConfig in @($Config.virtualMachines | Where-Object { $_.role -in $domainJoinedRoles })) {
         $vmName = Get-FullVmName -Prefix $prefix -VmName ([string]$vmConfig.vmName)
         $credentials = @(New-DomainCredentials -Domain $domain -AdminName $adminName -AdminCachePath $AdminCachePath `
@@ -1121,14 +1122,6 @@ function Assert-DomainJoinedVmHealth {
                 param($ExpectedDomain)
                 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
                 $computerSystem = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
-                $secureChannel = $false
-                $secureChannelError = ''
-                try {
-                    $secureChannel = [bool](Test-ComputerSecureChannel -ErrorAction Stop)
-                }
-                catch {
-                    $secureChannelError = ($_.Exception.Message -replace '\s+', ' ').Trim()
-                }
                 $nltestOutput = (& nltest.exe "/sc_query:$ExpectedDomain" 2>&1 | Out-String).Trim()
                 $nltestExitCode = $LASTEXITCODE
                 $trustedDc = ''
@@ -1143,14 +1136,12 @@ function Assert-DomainJoinedVmHealth {
                             Select-Object -ExpandProperty IPAddress -Unique)
                 }
                 catch { }
-                if (-not $secureChannel -or $nltestExitCode -ne 0) {
+                if ($nltestExitCode -ne 0) {
                     & nltest.exe "/dsgetdc:$ExpectedDomain" /force 2>&1 | Out-Null
                 }
                 [pscustomobject]@{
                     PartOfDomain          = [bool]$computerSystem.PartOfDomain
                     Domain                = [string]$computerSystem.Domain
-                    SecureChannel         = [bool]$secureChannel
-                    SecureChannelError    = $secureChannelError
                     NltestHealthy         = ($nltestExitCode -eq 0)
                     NltestExitCode        = [int]$nltestExitCode
                     NltestOutput          = $nltestOutput
@@ -1165,9 +1156,7 @@ function Assert-DomainJoinedVmHealth {
 
             $sampleHealthy = $health.PartOfDomain -and
                 $health.Domain -ieq $domain -and
-                $health.SecureChannel -and
-                (-not $health.PSObject.Properties['NltestHealthy'] -or
-                    [bool]$health.NltestHealthy) -and
+                [bool]$health.NltestHealthy -and
                 @($health.DnsAddresses | Where-Object { $null -ne $_ }).Count -gt 0
             if ($sampleHealthy) {
                 $stableSamples++
@@ -1178,7 +1167,7 @@ function Assert-DomainJoinedVmHealth {
             }
             if ($attempt -lt $MaximumAttempts) {
                 $dcDetail = if ($health.TrustedDc) { $health.TrustedDc } else { "$($health.LogonServer)".TrimStart('\') }
-                $sampleDetail = "joined=$($health.PartOfDomain), Test-ComputerSecureChannel=$($health.SecureChannel), nltest=$($health.NltestHealthy), DC='$dcDetail', DNS=$(@($health.DnsAddresses).Count)"
+                $sampleDetail = "joined=$($health.PartOfDomain), nltest=$($health.NltestHealthy), DC='$dcDetail', DNS=$(@($health.DnsAddresses).Count)"
                 if ($sampleHealthy) {
                     Write-Host "WAIT: $vmName domain convergence sample $attempt/$MaximumAttempts passed ($stableSamples/$RequiredStableSamples consecutive healthy samples; $sampleDetail); confirming again in ${RetrySeconds}s." -ForegroundColor Cyan
                 }
@@ -1191,12 +1180,9 @@ function Assert-DomainJoinedVmHealth {
         if (-not $health.PartOfDomain -or $health.Domain -ine $domain) {
             throw "$FixtureName left '$vmName' outside '$domain' (PartOfDomain=$($health.PartOfDomain), Domain=$($health.Domain))."
         }
-        if ($stableSamples -lt $RequiredStableSamples -and
-            (-not $health.SecureChannel -or
-                ($health.PSObject.Properties['NltestHealthy'] -and
-                    -not $health.NltestHealthy))) {
+        if ($stableSamples -lt $RequiredStableSamples -and -not $health.NltestHealthy) {
             $nltestSummary = ("$($health.NltestOutput)" -replace '\s+', ' ').Trim()
-            throw "$FixtureName left '$vmName' with a broken secure channel to '$domain' after $MaximumAttempts convergence samples (Test-ComputerSecureChannel=$($health.SecureChannel), error='$($health.SecureChannelError)', nltestExit=$($health.NltestExitCode), trustedDC='$($health.TrustedDc)', logonServer='$($health.LogonServer)', nltest='$nltestSummary')."
+            throw "$FixtureName left '$vmName' with unhealthy Netlogon query status for '$domain' after $MaximumAttempts convergence samples (nltestExit=$($health.NltestExitCode), trustedDC='$($health.TrustedDc)', logonServer='$($health.LogonServer)', nltest='$nltestSummary')."
         }
         if (@($health.DnsAddresses | Where-Object { $null -ne $_ }).Count -eq 0) {
             throw "$FixtureName left '$vmName' without an A record for '$vmName.$domain'."

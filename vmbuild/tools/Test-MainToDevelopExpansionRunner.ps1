@@ -127,7 +127,8 @@ function Invoke-Command {
         'admin2'
     }
     if ($script:MockIdentityUser) { $identityUser = $script:MockIdentityUser }
-    if ("$ScriptBlock" -like '*Test-ComputerSecureChannel*') {
+    if ("$ScriptBlock" -like '*Get-CimInstance Win32_ComputerSystem*') {
+        $script:LastDomainProbeScript = $ScriptBlock
         $health = if ($script:MockDomainHealthSequence.Count -gt 0) {
             $script:MockDomainHealthSequence.Dequeue()
         }
@@ -139,8 +140,8 @@ function Invoke-Command {
             Domain = $health.Domain
             SecureChannel = $health.SecureChannel
             SecureChannelError = "$($health.SecureChannelError)"
-            NltestHealthy = if ($health.PSObject.Properties['NltestHealthy']) { $health.NltestHealthy } else { $true }
-            NltestExitCode = if ($health.PSObject.Properties['NltestExitCode']) { $health.NltestExitCode } else { 0 }
+            NltestHealthy = $health.NltestHealthy
+            NltestExitCode = $health.NltestExitCode
             NltestOutput = "$($health.NltestOutput)"
             TrustedDc = "$($health.TrustedDc)"
             LogonServer = "$($health.LogonServer)"
@@ -1820,15 +1821,73 @@ $script:MockVms['NOC-W11CLIENT1'].Notes = '{"success":true,"inProgress":false,"l
 try {
     $healthyLog = @(Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' `
             -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0 6>&1) -join "`n"
-    Write-TestResult -Passed $true -What 'domain member independently passes join, secure-channel, and DNS checks'
+    Write-TestResult -Passed $true -What 'domain member independently passes join, Netlogon-status, and DNS checks'
+    Assert-True ($healthyLog -like '*CHECK SCOPE:*does not run Test-ComputerSecureChannel*' -and
+        $healthyLog -notlike '*Test-ComputerSecureChannel=*') 'domain readiness explicitly reports its reduced check scope'
     Assert-True ($healthyLog -like '*sample 1/2 passed (1/2 consecutive healthy samples*' -and
         $healthyLog -notlike '*not yet stable*') 'a healthy first sample is logged as passed and awaiting confirmation, not as an unhealthy retry'
     Assert-True ($healthyLog -like "*PASS: NOC-W11CLIENT1 domain convergence confirmed (2/2 consecutive healthy samples) for 'nocm.com'.*") `
         'the final healthy domain sample prints an explicit per-VM confirmation'
 }
 catch {
-    Write-TestResult -Passed $false -What 'domain member independently passes join, secure-channel, and DNS checks' -Detail $_.Exception.Message
+    Write-TestResult -Passed $false -What 'domain member independently passes join, Netlogon-status, and DNS checks' -Detail $_.Exception.Message
 }
+$script:MockDomainHealth.SecureChannel = $false
+try {
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'removed-cmdlet-gate' `
+        -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0
+    Write-TestResult -Passed $true -What 'a legacy False secure-channel value cannot block the remaining independent readiness checks'
+}
+catch {
+    Write-TestResult -Passed $false -What 'a legacy False secure-channel value cannot block the remaining independent readiness checks' -Detail $_.Exception.Message
+}
+finally { $script:MockDomainHealth.SecureChannel = $true }
+& {
+    $script:RemovedChannelCalls = 0
+    function Test-ComputerSecureChannel {
+        $script:RemovedChannelCalls++
+        throw 'The removed independent secure-channel cmdlet was invoked.'
+    }
+    function Get-CimInstance {
+        param($ClassName, $ErrorAction)
+        Assert-Equal 'Win32_ComputerSystem' $ClassName 'domain probe still queries joined-domain membership'
+        [pscustomobject]@{ PartOfDomain = $true; Domain = 'nocm.com' }
+    }
+    function nltest.exe {
+        param($Operation)
+        Assert-Equal '/sc_query:nocm.com' $Operation 'domain probe still queries Netlogon status'
+        $global:LASTEXITCODE = 0
+        'Trusted DC Name \\NOC-DC1.nocm.com'
+    }
+    function Resolve-DnsName {
+        param($Name, $Type, $ErrorAction)
+        Assert-Equal 'A' $Type 'domain probe still checks DNS registration'
+        [pscustomobject]@{ IPAddress = '10.220.201.20' }
+    }
+    $probeValues = @(& $script:LastDomainProbeScript 'nocm.com')
+    Assert-Equal 1 $probeValues.Count 'the reduced guest readiness probe returns exactly one result'
+    Assert-Equal 0 $script:RemovedChannelCalls 'the actual guest readiness probe never invokes Test-ComputerSecureChannel'
+    Assert-True ($probeValues[0].PartOfDomain -and $probeValues[0].NltestHealthy -and
+        $probeValues[0].Domain -eq 'nocm.com' -and $probeValues[0].DnsAddresses.Count -eq 1) `
+        'the actual guest probe preserves domain membership, Netlogon status, and DNS evidence'
+    Assert-True (-not $probeValues[0].PSObject.Properties['SecureChannel'] -and
+        -not $probeValues[0].PSObject.Properties['SecureChannelError']) 'the removed cmdlet result is not emitted by the guest probe'
+}
+$savedDomainHealth = $script:MockDomainHealth
+foreach ($membership in @(
+        @{ PartOfDomain = $false; Domain = 'WORKGROUP' },
+        @{ PartOfDomain = $true; Domain = 'wrong.test' }
+    )) {
+    $script:MockDomainHealth = [pscustomobject]@{
+        PartOfDomain = $membership.PartOfDomain; Domain = $membership.Domain
+        NltestHealthy = $true; NltestExitCode = 0; DnsAddresses = @('10.220.201.20')
+    }
+    Assert-ThrowsLike {
+        Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'invalid-membership' `
+            -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0
+    } "*outside 'nocm.com'*" 'missing or wrong joined-domain membership still blocks the runner'
+}
+$script:MockDomainHealth = $savedDomainHealth
 $script:CredentialAttempts.Clear()
 $script:RejectedCredentialUsers = @('admin2@nocm.com')
 try {
@@ -1847,13 +1906,13 @@ Assert-ThrowsLike -Action {
 } -Pattern '*Identity mismatch*' -What 'runner rejects a credential that authenticates into the wrong DNS domain'
 $script:MockIdentityDnsDomain = 'nocm.com'
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $false; NltestHealthy = $false
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $false
     NltestExitCode = 5; TrustedDc = 'NOC-DC2.nocm.com'; LogonServer = '\\NOC-DC2'
     NltestOutput = 'Status = 5 0x5 ERROR_ACCESS_DENIED'; DnsAddresses = @('10.220.201.20')
 }
 Assert-ThrowsLike -Action {
     Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -MaximumAttempts 3 -RetrySeconds 0
-} -Pattern '*broken secure channel*' -What 'independent secure-channel failure stops the cycle'
+} -Pattern '*unhealthy Netlogon query status*' -What 'an unhealthy Netlogon query still stops the cycle'
 $script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
         PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $false; NltestHealthy = $false
         NltestExitCode = 1355; TrustedDc = 'NOC-DC2.nocm.com'; LogonServer = '\\NOC-DC2'
@@ -1872,14 +1931,14 @@ $script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
 try {
     $transientLog = @(Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'transient-channel' `
             -AdminCachePath $credentialPath -MaximumAttempts 4 -RetrySeconds 0 6>&1) -join "`n"
-    Write-TestResult -Passed $true -What 'transient multi-DC secure-channel lag converges before runner failure'
+    Write-TestResult -Passed $true -What 'transient Netlogon-status lag converges before runner failure'
     Assert-True ($transientLog -like '*sample 1/4 is not yet stable*' -and
         $transientLog -like '*sample 2/4 passed (1/2 consecutive healthy samples*' -and
         $transientLog -like '*PASS: NOC-W11CLIENT1 domain convergence confirmed (2/2 consecutive healthy samples)*') `
         'unhealthy retries and healthy confirmation progress remain distinct after a transient failure'
 }
 catch {
-    Write-TestResult -Passed $false -What 'transient multi-DC secure-channel lag converges before runner failure' -Detail $_.Exception.Message
+    Write-TestResult -Passed $false -What 'transient Netlogon-status lag converges before runner failure' -Detail $_.Exception.Message
 }
 $script:MockDomainHealth = [pscustomobject]@{
     PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true

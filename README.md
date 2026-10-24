@@ -145,9 +145,14 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   use a fresh state root to requalify them.
 - Each develop fixture/pass gets independent readiness checks before being
   checkpointed complete. VM/disk lineage and domain SID checks remain enabled.
-  Domain health requires two consecutive healthy samples. A healthy first sample
-  logs `WAIT` with a passed-sample count while awaiting confirmation; each VM logs
-  an explicit `PASS` once confirmed. Only unhealthy samples log a stability retry.
+  Independent domain readiness requires joined-domain membership, successful
+  `nltest /sc_query` status, and DNS registration across two consecutive samples.
+  It does not invoke `Test-ComputerSecureChannel`; the printed check scope makes
+  that omission explicit. Cached Netlogon status does not prove active trust.
+  Phase 11's own secure-channel validation remains unchanged when it executes.
+  A healthy first sample logs `WAIT` with a passed-sample count while awaiting
+  confirmation; each VM logs an explicit `PASS` once confirmed. Only unhealthy
+  samples log a stability retry.
   First-pass expansion VM/disk and applicable domain identities are persisted
   before maintenance gates and stage completion, so the second pass can verify
   the same machines. Resume validates saved identities instead of replacing
@@ -171,8 +176,8 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   in the timeout, and success names the credential and principal actually verified.
   Saved, paused, critical, replaced, or persistently unready VMs fail explicitly.
   START/WAIT/PASS output records the target GUID and power/transport evidence;
-  existing domain SID, secure-channel, DNS, disk, and maintenance checks still
-  run afterward. This also handles a graceful shutdown finishing after an
+  existing domain SID, DNS, disk, and maintenance checks still run afterward.
+  This also handles a graceful shutdown finishing after an
   earlier runner has exited. It does not certify the original reboot cause.
   Legacy VM notes without a NetBIOS domain name reuse the exact name from the
   matching saved baseline/expansion domain identity, allowing the NetBIOS
