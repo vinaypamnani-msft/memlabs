@@ -322,6 +322,7 @@ function Get-MemLabsDscArtifactState {
     $script:State = [ordered]@{ CompletedSteps = @(); CurrentStep = $null; MaintenanceReceipts = @{}; MaintenanceFamilyGates = @{} }
     $script:ChildCalls = 0
     $script:ReadiedTargets = 0
+    $script:ReadinessFailure = $false
     $script:BadChildReceipt = $false
     $script:MockRole = 'Primary'
     function Save-State {}
@@ -330,6 +331,7 @@ function Get-MemLabsDscArtifactState {
     function Wait-CrossRevisionRetainedVmReady {
         param($Target, $AdminCachePath)
         Assert-Qualification ($Target.Name -eq 'LAB-PRI' -and $Target.Id -eq '11111111-1111-1111-1111-111111111111') 'Maintenance readiness selected a VM outside the validated target scope.'
+        if ($script:ReadinessFailure) { throw 'Synthetic retained VM readiness failure.' }
         $script:ReadiedTargets++
     }
     function Get-VM {
@@ -344,6 +346,8 @@ function Get-MemLabsDscArtifactState {
         param($WorktreePath, $ScriptName, $Parameters, $Label)
         [void]$WorktreePath; [void]$Label
         Assert-Qualification ($ScriptName -eq 'tools\Invoke-MaintenanceQualification.ps1' -and $Parameters.RequireCleanSource) 'The gate did not invoke the pinned clean-source qualifier.'
+        $script:LastQualifierParameters = $Parameters
+        $script:LastQualifierWorktree = $WorktreePath
         $script:ChildCalls++
         $targets = Get-Content -LiteralPath $Parameters.TargetsPath -Raw | ConvertFrom-Json
         Assert-Qualification ($script:ReadiedTargets -eq @($targets).Count) 'Maintenance invoked the child before preparing every scoped target.'
@@ -546,6 +550,54 @@ function Get-MaintenanceQualificationCases {
             Get-PinnedMaintenanceQualificationCases -RepositoryRoot $RepositoryRoot -Revision $duplicateRevision -Mode Preflight
         } '*invalid or duplicate Preflight cases*'
     }
+
+    foreach ($entry in @(
+            @{ Stage = 'baseline'; Mode = 'Baseline'; Role = 'Primary' },
+            @{ Stage = 'post|2|CSTEST8-B-Other Domain and more.json'; Mode = 'Postconditions'; Role = 'Primary' },
+            @{ Stage = 'final'; Mode = 'Postconditions'; Role = 'Primary' },
+            @{ Stage = 'recovery'; Mode = 'Recovery'; Role = 'Primary' },
+            @{ Stage = 'recovery-na'; Mode = 'Recovery'; Role = 'DC' }
+        )) {
+        $family = "before-receipt-$($entry.Mode.ToLowerInvariant())-$($entry.Role.ToLowerInvariant())"
+        $earlyKey = "$family|maintenance|$($entry.Stage)|$developCommit"
+        $safeKey = $earlyKey -replace '[^A-Za-z0-9_.-]', '_'
+        $earlyReceiptPath = Join-Path $RepositoryRoot "vmbuild\logs\CrossRevision\Maintenance\$safeKey.qualification.log"
+        $earlyTargetsPath = Join-Path $StateRoot "maintenance-inputs\$safeKey.targets.json"
+        $script:MockRole = $entry.Role
+        $script:ReadinessFailure = $true
+        $beforeCalls = $script:ChildCalls
+        Assert-QualificationThrows {
+            Invoke-CrossRevisionMaintenanceGate -Key $earlyKey -Mode $entry.Mode -Family $family `
+                -Identity @($target) -WorktreePath 'C:\pinned' -RequireCmCoverage:($entry.Role -eq 'Primary')
+        } '*Synthetic retained VM readiness failure*'
+        Assert-Qualification ($script:State.CurrentStep -eq $earlyKey -and $script:ChildCalls -eq $beforeCalls -and
+            (Test-Path -LiteralPath $earlyTargetsPath) -and -not (Test-Path -LiteralPath $earlyReceiptPath) -and
+            -not $script:State.MaintenanceReceipts.Contains($earlyKey)) 'The fixture did not reproduce an interruption after scope persistence but before qualifier receipt creation.'
+        $script:ReadinessFailure = $false
+        Resume-CrossRevisionMaintenanceGate -WorktreePath 'C:\pinned' -AdminCachePath 'C:\cache\admin.txt'
+        Assert-Qualification ($script:ChildCalls -eq $beforeCalls + 1 -and -not $script:State.CurrentStep -and
+            $script:State.MaintenanceReceipts.Contains($earlyKey) -and
+            @($script:State.CompletedSteps | Where-Object { $_ -eq $earlyKey }).Count -eq 1) 'Pre-receipt maintenance did not complete its original gate exactly once.'
+        Assert-Qualification ($script:LastQualifierWorktree -eq 'C:\pinned' -and
+            $script:LastQualifierParameters.Mode -eq $entry.Mode -and
+            $script:LastQualifierParameters.DevelopRevision -ceq $developCommit -and
+            $script:LastQualifierParameters.AdminCachePath -eq 'C:\cache\admin.txt' -and
+            $script:State.MaintenanceReceipts[$earlyKey].HasCmTarget -eq ($entry.Role -eq 'Primary')) 'Pre-receipt resume changed the candidate, mode, credentials, or CM coverage.'
+    }
+    $script:MockRole = 'Primary'
+    $beforeCalls = $script:ChildCalls
+    foreach ($invalidKey in @(
+            "lab|maintenance|unknown|$developCommit",
+            "lab|maintenance|post|3|B.json|$developCommit",
+            "lab|maintenance|post|2|$developCommit",
+            "lab|maintenance|post|2|B.json|$('0' * 40)"
+        )) {
+        $script:State.CurrentStep = $invalidKey
+        Assert-QualificationThrows { Resume-CrossRevisionMaintenanceGate -WorktreePath 'C:\pinned' } '*invalid or mismatched maintenance checkpoint*'
+    }
+    $script:State.CurrentStep = "missing-scope|maintenance|baseline|$developCommit"
+    Assert-QualificationThrows { Resume-CrossRevisionMaintenanceGate -WorktreePath 'C:\pinned' } '*no scoped VM input*'
+    Assert-Qualification ($script:ChildCalls -eq $beforeCalls) 'Invalid or unscoped maintenance reached the qualifier.'
 
     $pendingKey = "lab|maintenance|recovery|$developCommit"
     $script:State.CurrentStep = $pendingKey

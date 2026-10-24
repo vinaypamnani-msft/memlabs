@@ -301,7 +301,7 @@ function Assert-CrossRevisionCheckpointCanAdvance {
         return
     }
     if ($stageType -eq 'maintenance') {
-        throw "Interrupted maintenance qualification '$currentStep' cannot advance candidates. Resume its pinned candidate, or deliberately remove/reset that family before advancing."
+        throw "Interrupted maintenance qualification '$currentStep' cannot advance candidates. Keep the current runner checkout and rerun the same selection with -DevelopRevision $oldDevelopCommit to finish its pinned qualification before advancing. Remove/reset the family only for deliberate requalification."
     }
     if ($stageType -ne 'develop' -or $parts.Count -lt 4) {
         throw "Active checkpoint step '$currentStep' is not a recognized develop stage."
@@ -1750,17 +1750,36 @@ function Resume-CrossRevisionMaintenanceGate {
     $key = "$($script:State.CurrentStep)"
     if ($key -notmatch '^([^|]+)\|maintenance\|') { return }
     $family = $Matches[1]
+    $parts = @($key -split '\|')
+    $kind = $parts[2]
+    $modes = @{ baseline = 'Baseline'; post = 'Postconditions'; final = 'Postconditions'; recovery = 'Recovery'; 'recovery-na' = 'Recovery' }
+    $expectedParts = if ($kind -eq 'post') { 6 } else { 4 }
+    if (-not $modes.ContainsKey($kind) -or $parts.Count -ne $expectedParts -or $parts[-1] -cne $developCommit -or
+        ($kind -eq 'post' -and ($parts[3] -notin @('1', '2') -or [string]::IsNullOrWhiteSpace($parts[4])))) {
+        throw "Interrupted maintenance has an invalid or mismatched maintenance checkpoint for candidate '$developCommit': $key"
+    }
+    $mode = $modes[$kind]
     $safe = $key -replace '[^A-Za-z0-9_.-]', '_'
     $targetsPath = Join-Path $StateRoot "maintenance-inputs\$safe.targets.json"
     $path = Join-Path $RepositoryRoot "vmbuild\logs\CrossRevision\Maintenance\$safe.qualification.log"
-    if (-not (Test-Path -LiteralPath $path) -or -not (Test-Path -LiteralPath $targetsPath)) {
-        throw "Interrupted maintenance has no scoped receipt/input; retain the family and use a fresh state root: $key"
+    if (-not (Test-Path -LiteralPath $targetsPath -PathType Leaf)) {
+        throw "Interrupted maintenance has no scoped VM input; retain the family and use a fresh state root: $key"
     }
-    $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -ErrorAction Stop
-    $identity = @(Get-Content -LiteralPath $targetsPath -Raw | ConvertFrom-Json -ErrorAction Stop)
-    $null = Invoke-CrossRevisionMaintenanceGate -Key $key -Mode $receipt.Mode -Family $family -Identity $identity `
+    $identity = @(Get-Content -LiteralPath $targetsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+    if (Test-Path -LiteralPath $path) {
+        $receipt = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($receipt.Mode -cne $mode) {
+            throw "Interrupted maintenance receipt mode '$($receipt.Mode)' does not match checkpoint '$key' mode '$mode'."
+        }
+    }
+    else {
+        Write-Host "RESUME: maintenance '$key' stopped before its qualifier receipt was created; retrying $mode with the saved $($identity.Count) VM identities." -ForegroundColor Yellow
+    }
+    $requireCmCoverage = $kind -eq 'recovery' -or
+        (Test-MaintenanceQualificationCmScope -Config ([pscustomobject]@{ virtualMachines = $identity }))
+    $null = Invoke-CrossRevisionMaintenanceGate -Key $key -Mode $mode -Family $family -Identity $identity `
         -WorktreePath $WorktreePath -AdminCachePath $AdminCachePath `
-        -RequireCmCoverage:($receipt.Mode -eq 'Recovery' -and [bool]$receipt.HasCmTarget) -AlwaysRun
+        -RequireCmCoverage:$requireCmCoverage -AlwaysRun
 }
 
 function Assert-CrossRevisionMaintenanceFamilyGate {
@@ -2302,13 +2321,11 @@ try {
                 Write-Host "RESUME: active checkpoint '$($activeCheckpoint.Path)' continues develop $developCommit at $step." -ForegroundColor Yellow
             }
             else {
+                Assert-CrossRevisionCheckpointCanAdvance -State $checkpointState -Plan $plan -NewDevelopCommit $developCommit
                 $checkpointToAdvance = $activeCheckpoint
                 Write-Host "ROLLING RESUME: preserving the exact-main baseline while advancing develop $checkpointDevelopCommit -> $requestedDevelopCommit at $step." -ForegroundColor Yellow
             }
         }
-    }
-    if ($checkpointToAdvance) {
-        Assert-CrossRevisionCheckpointCanAdvance -State $checkpointState -Plan $plan -NewDevelopCommit $developCommit
     }
 
     Write-CrossRevisionPlan -Plan $plan -MainCommit $mainCommit -DevelopCommit $developCommit

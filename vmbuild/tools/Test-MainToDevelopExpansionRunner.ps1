@@ -753,6 +753,14 @@ try {
 catch {
     Write-TestResult -Passed $false -What 'interrupted exact-main checkpoint advances to current develop recovery code' -Detail $_.Exception.Message
 }
+$rollingState.CurrentStep = "nocm|maintenance|post|2|NOCM-B-AddWin11.json|$rollingOldDevelop"
+Assert-ThrowsLike {
+    Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
+} -Pattern "*cannot advance candidates*current runner checkout*-DevelopRevision $rollingOldDevelop*" `
+    -What 'interrupted maintenance preserves the candidate and explains how to use the updated runner with the old pin'
+Assert-Equal $rollingOldDevelop $rollingState.DevelopRevision 'rejected maintenance advance preserves the pinned candidate'
+Assert-Equal "nocm|maintenance|post|2|NOCM-B-AddWin11.json|$rollingOldDevelop" $rollingState.CurrentStep `
+    'rejected maintenance advance preserves the exact interrupted qualification step'
 
 $familyResetState = [ordered]@{
     MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
@@ -840,6 +848,9 @@ Assert-True ($processGuardIndex -gt $mainLockIndex -and
 Assert-True ($runnerText -notmatch 'Move-Item -LiteralPath \$activeCheckpoint\.Path' -and
     $runnerText -match 'refusing to archive completed family progress') `
     'repeated reset cannot archive a checkpoint after its active family was already cleared'
+Assert-True ($runnerText.LastIndexOf('Assert-CrossRevisionCheckpointCanAdvance -State $checkpointState') -lt
+    $runnerText.LastIndexOf('Write-Host "ROLLING RESUME: preserving')) `
+    'rolling resume is announced only after candidate advancement has been permitted'
 $rollingState.CurrentStep = 'nocm|cleanup|nocm.com'
 try {
     Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop

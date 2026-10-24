@@ -231,8 +231,18 @@ second GUID that can exceed Windows PowerShell's legacy path limit.
 NOCM families record explicit `NotApplicable` recovery cases and **do not**
 qualify the CM recovery matrix. Include a CM family to claim that coverage.
 Interrupted maintenance resumes its original scoped stage before deployments
-continue; do not advance develop until that stage has completed. Interrupted
-deployments finish before new maintenance faults are injected. Older
+continue; do not advance its qualification candidate until that stage has
+completed. If a retry is blocked because develop has advanced, keep the current
+runner checkout and rerun the same selection with `-DevelopRevision` set to the
+saved checkpoint revision. This retains host-side runner fixes while pinning the
+qualification worktree and receipts to the interrupted candidate. Do not check
+out the old runner or reset a retained lab just to bypass the guard. `Start-Test`
+refreshes develop at the next family boundary as usual.
+An interruption during retained-VM readiness can precede qualifier receipt
+creation. Resume uses the original saved VM-name/GUID scope and checkpoint mode
+in that case; missing scope or a mismatched candidate still fails, and the full
+pinned qualification must pass before the step completes.
+Interrupted deployments finish before new maintenance faults are injected. Older
 checkpoints that have already expanded or cleaned a family cannot establish
 this coverage: remove the old family lab and use a fresh
 `-CrossRevisionStateRoot`. A rolling multi-revision burn-in remains diagnostic,
