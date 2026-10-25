@@ -89,6 +89,39 @@ an off target once when attached media needs to be enumerated.
 
 ## Main-to-develop maintenance qualification
 
+### Emergency deployment-only mode
+
+Use **`-SkipTests`** only when deployment scenarios must continue without test
+validation:
+
+```powershell
+.\vmbuild\Start-Test.ps1 -All -MainToDevelopExpansion -SkipTests
+.\vmbuild\Start-Test.ps1 -Test CSTEST8 -SkipTests
+```
+
+The switch also works with `-Suite`, `-Continuous`, and the direct expansion
+runner. It is separate from singular `-SkipTest`, which excludes named families.
+It skips VM-note compatibility, regression preflight, maintenance qualification
+and recovery/fault injection, guest/domain/stage validation, and deployment
+**Phase 11**. Deployments receive the existing `-SkipValidation -SkipPhase 11`
+options, including historical pinned revisions and automatic restarts/resumes.
+Actual deployment failures still fail; source pinning, required configuration
+materialization, saved VM/disk identity guards, mutation locks, and normal
+successful-scenario cleanup remain in effect.
+
+Existing checkpoints can be continued without resetting the lab. Interrupted
+auxiliary steps are recorded as **skipped**, not passed. A deployment already
+finished before its pending postcondition gate is retained without replaying it.
+If recovery was interrupted, injected faults may remain; emergency mode does not
+repair or certify them.
+
+Results/history are explicitly **unqualified**, and the checkpoint records
+`TestsSkipped`, `EmergencySkipTests`, and skipped steps. Continue such a checkpoint
+with `-SkipTests`; use a fresh state root for a fully qualified cycle. Returning
+to normal mode cannot silently turn emergency completion into passing coverage.
+
+### Normal qualification
+
 `Start-Test.ps1 -MainToDevelopExpansion` (also `-Suite Upgrade`) automatically
 qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
 

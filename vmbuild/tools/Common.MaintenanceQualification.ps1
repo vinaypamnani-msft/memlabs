@@ -82,7 +82,7 @@ function Get-MaintenanceQualificationSource {
     $changes = @(& git -C $repository status --porcelain --untracked-files=no 2>&1)
     if ($LASTEXITCODE -ne 0) { throw 'Could not determine candidate source cleanliness.' }
     $files = [ordered]@{}
-    foreach ($relative in @(
+    $relativeFiles = @(
             'Common.ps1', 'common\Common.ScriptBlocks.ps1', 'common\Common.Phases.ps1',
             'DSC\phases\ScriptFunctions.ps1', 'DSC\phases\ScriptWorkFlow.ps1', 'DSC\phases\WindowsSetupReadiness.ps1',
             'DSC\phases\Phase2DomainMember.ps1', 'DSC\phases\Phase2WorkgroupMember.ps1',
@@ -102,7 +102,12 @@ function Get-MaintenanceQualificationSource {
             'tools\Test-MaintenanceQualification.ps1', 'tools\Test-MainToDevelopExpansionRunner.ps1',
             'tools\Test-RemoteWorkflowDependency.ps1', 'tools\Test-Phase8DiagnosticTelemetry.ps1',
             'tools\Analyze-Phase8Diagnostics.ps1'
-        )) {
+        )
+    # Older pinned candidates must retain their original source digest.
+    if (Test-Path -LiteralPath (Join-Path $VmbuildRoot 'tools\Test-EmergencySkipTests.ps1') -PathType Leaf) {
+        $relativeFiles += @('tools\Test-EmergencySkipTests.ps1', 'tools\Common.TestHistory.ps1', 'tools\Invoke-MemLabsContinuousTests.ps1')
+    }
+    foreach ($relative in $relativeFiles) {
         $path = Join-Path $VmbuildRoot $relative
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Candidate qualification source is missing: $path" }
         $files[$relative] = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash

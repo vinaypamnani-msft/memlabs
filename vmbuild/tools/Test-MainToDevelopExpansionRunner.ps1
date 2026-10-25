@@ -2026,7 +2026,8 @@ Remove-Item -LiteralPath $script:StatePath -Force -ErrorAction SilentlyContinue
 foreach ($regression in @(
         @{ Name = 'Test-RemoteWorkflowDependency'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' },
         @{ Name = 'Test-RemoteWorkflowDependency'; Engine = (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'); Label = 'PS51' },
-        @{ Name = 'Test-Phase8DiagnosticTelemetry'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' }
+        @{ Name = 'Test-Phase8DiagnosticTelemetry'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' },
+        @{ Name = 'Test-EmergencySkipTests'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' }
     )) {
     & $regression.Engine -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
         -File (Join-Path $PSScriptRoot "$($regression.Name).ps1")

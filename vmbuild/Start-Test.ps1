@@ -209,6 +209,12 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'Suite')]
     [switch]$SkipVMNoteCompatibility,
 
+    [Parameter(HelpMessage = "Emergency deployment-only mode: skip auxiliary tests, validation, maintenance qualification/recovery, and Phase 11", ParameterSetName = 'ALL')]
+    [Parameter(HelpMessage = "Emergency deployment-only mode: skip auxiliary tests, validation, maintenance qualification/recovery, and Phase 11", ParameterSetName = 'TestName')]
+    [Parameter(HelpMessage = "Emergency deployment-only mode: skip auxiliary tests, validation, maintenance qualification/recovery, and Phase 11", ParameterSetName = 'Suite')]
+    [Parameter(HelpMessage = "Emergency deployment-only mode: skip auxiliary tests, validation, maintenance qualification/recovery, and Phase 11", ParameterSetName = 'Continuous')]
+    [switch]$SkipTests,
+
     [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'TestName')]
     [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'Suite')]
@@ -287,6 +293,7 @@ if ($Continuous.IsPresent) {
         '-RetentionDays', $RetentionDays
     )
     if ($ContinuousPlanOnly.IsPresent) { $continuousArguments += '-PlanOnly' }
+    if ($SkipTests.IsPresent) { $continuousArguments += '-SkipTests' }
     foreach ($skipTestName in $skipTestNames) { $continuousArguments += @('-SkipTest', $skipTestName) }
     if ($TestHistoryPath) { $continuousArguments += @('-HistoryPath', $TestHistoryPath) }
     if ($TestRetentionPath) { $continuousArguments += @('-RetentionPath', $TestRetentionPath) }
@@ -727,7 +734,8 @@ function Invoke-MainToDevelopExpansionCycle {
         [switch] $RunAll,
         [switch] $PlanOnly,
         [switch] $ResetState,
-        [switch] $RequireCleanSource
+        [switch] $RequireCleanSource,
+        [switch] $SkipTests
     )
 
     $runnerPath = Join-Path $PSScriptRoot 'tools\Invoke-MainToDevelopExpansionTest.ps1'
@@ -761,6 +769,7 @@ function Invoke-MainToDevelopExpansionCycle {
         if ($PlanOnly.IsPresent) { $arguments += '-PlanOnly' }
         if ($forwardResetState) { $arguments += '-ResetState' }
         if ($RequireCleanSource.IsPresent) { $arguments += '-RequireCleanSource' }
+        if ($SkipTests.IsPresent) { $arguments += '-SkipTests' }
         if ($StateRoot) { $arguments += @('-StateRoot', $StateRoot) }
 
         $global:LASTEXITCODE = 0
@@ -794,12 +803,20 @@ function Invoke-NewLab {
 
     $script:LastNewLabResumeCommand = $null
     $script:LastNewLabResumeInfo = $null
+    if ($SkipTests -and $StartPhase -eq 11) {
+        Write-Host "SKIP TESTS: Phase 11-only resume for '$ConfigFile' omitted; deployment phases are already complete. This is not a validated pass." -ForegroundColor Yellow
+        return 0
+    }
     $newLabParameters = [ordered]@{
         Configuration = $ConfigFile
         AutoSnapshot = $true
         KeepFailedVMs = $true
         ClearErrorHistoryOnExit = $true
         RequireCleanSource = $RequireCleanSource
+    }
+    if ($SkipTests) {
+        $newLabParameters.SkipValidation = $true
+        $newLabParameters.SkipPhase = @(11)
     }
     if ($StartPhase -gt 0) { $newLabParameters.StartPhase = $StartPhase }
     if ($Restore.IsPresent) { $newLabParameters.Restore = $true }
@@ -972,7 +989,8 @@ function Run-Test {
     param(
         [string]$Test
     )
-    Write-Host "Starting all tests for $Test"
+    if ($SkipTests) { Write-Host "Starting deployment scenarios for $Test with all validation tests skipped." -ForegroundColor Yellow }
+    else { Write-Host "Starting all tests for $Test" }
     $Test = $Test.ToLowerInvariant()
     $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object { $_.Name.ToLowerInvariant().StartsWith($Test) }
     $script:TestNetworkMap = @{}
@@ -1043,8 +1061,12 @@ function Run-Test {
             }
 
             if ($exitCode -eq 0) {
-                Write-Host "$testjson Completed Successfully ($passLabel)"
-                $global:history += "$testjson Completed Successfully ($passLabel)"
+                $completionText = if ($SkipTests) {
+                    "$testjson Deployment Completed ($passLabel; tests skipped, unqualified)"
+                }
+                else { "$testjson Completed Successfully ($passLabel)" }
+                Write-Host $completionText
+                $global:history += $completionText
                 continue
             }
 
@@ -1083,6 +1105,7 @@ function Invoke-RecordedTestFamily {
             StartedUtc = $startedUtc.ToString('o'); Commit = $startCommit
             Domains = @($metadata.Domains); CoverageTags = @($metadata.CoverageTags)
             RequiredMemoryGB = $metadata.EstimatedRequiredGB
+            TestsSkipped = [bool]$SkipTests
         })
     $success = $false
     $failureText = ''
@@ -1105,7 +1128,8 @@ function Invoke-RecordedTestFamily {
                 Commit = Get-MemLabsCurrentCommit -RepositoryRoot $repositoryRoot
                 StartCommit = $startCommit; Success = $success; ExitCode = $(if ($success) { 0 } else { 1 })
                 Error = $failureText; Domains = @($metadata.Domains)
-                CoverageTags = @($metadata.CoverageTags); NeedsRerun = -not $success
+                CoverageTags = @($metadata.CoverageTags); NeedsRerun = -not $success -or [bool]$SkipTests
+                TestsSkipped = [bool]$SkipTests; Qualified = $success -and -not [bool]$SkipTests
             })
     }
 }
@@ -1171,7 +1195,10 @@ else {
         Write-Host 'Mixed-revision plan-only mode uses the current committed HEAD without pulling.' -ForegroundColor DarkGray
     }
 }
-if ($SkipVMNoteCompatibility.IsPresent) {
+if ($SkipTests.IsPresent) {
+    Write-Host 'SKIP TESTS: emergency deployment-only mode; VM-note preflight, auxiliary qualification/recovery, validation, and Phase 11 are skipped. Results are unqualified.' -ForegroundColor Yellow
+}
+elseif ($SkipVMNoteCompatibility.IsPresent) {
     Write-Host 'WARNING: main-to-develop VM-note compatibility preflight skipped by request.' -ForegroundColor Yellow
 }
 elseif (-not (Invoke-VMNoteCompatibilityPreflight -PinnedMainRevision $MainRevision)) {
@@ -1215,7 +1242,8 @@ if ($runCrossRevision) {
         -StateRoot $CrossRevisionStateRoot `
         -PlanOnly:$CrossRevisionPlanOnly `
         -ResetState:$ResetCrossRevisionState `
-        -RequireCleanSource:$RequireCleanSource
+        -RequireCleanSource:$RequireCleanSource `
+        -SkipTests:$SkipTests
     exit $crossRevisionExit
 }
 
