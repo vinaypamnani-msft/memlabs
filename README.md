@@ -1115,6 +1115,22 @@ The existing certificate validity/private-key/trust policy and lab revocation
 behavior are unchanged. Validate with `vmbuild\tools\Test-PkiClientPrestage.ps1`
 and `vmbuild\tools\Test-PkiPrestageState.ps1`.
 
+Phase 11 domain-member Windows Time checks require a successful status query,
+synchronized leap/stratum values, a non-local-clock source, and a valid last-sync
+timestamp no older than 24 hours and no more than five minutes in the future.
+Unhealthy checks capture native command output/exit codes, `W32Time` service
+state/startup type, source/configuration/peers, and up to five time-service System
+events from the last hour before attempting recovery. Enabled stopped services
+are started without changing their startup type. One asynchronous
+`w32tm /resync /rediscover /nowait` request is followed by verification, with at
+most six status checks and five five-second polling delays. A successful request
+alone is not proof of synchronization. Disabled services and existing time-source
+configuration are preserved; unrecognized status output on a running service
+warns with diagnostics rather than triggering speculative repair. Only verified
+recovery reports `RECOVERED`; unresolved checks remain warnings, not deployment
+failures. Validate with `vmbuild\tools\Test-Phase11TimeSync.ps1` under PowerShell 7
+and Windows PowerShell 5.1.
+
 Existing provider-error diagnostics, bounded CIM-memory reboot recovery, Primary
 OSD/baseline payload repair, and physical/version-aware DP content checks remain
 enabled. A Pull DP distribution deadline is not cleared by assuming summarizer

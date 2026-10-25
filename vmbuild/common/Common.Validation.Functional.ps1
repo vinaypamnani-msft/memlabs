@@ -10077,20 +10077,156 @@ function Test-DomainMemberFunctionality {
             $results.Details.Add("FAIL: Secure channel did not stabilize after 12 samples and repair attempt (trustedDC='$scTrustedDc', nltest='$nltestSummary')")
         }
 
-        # Time sync
-        try {
-            $w32tm = & w32tm.exe /query /status 2>&1
-            $offsetLine = $w32tm | Where-Object { $_ -match 'Last Successful Sync Time' } | Select-Object -First 1
-            if ($offsetLine) {
-                $results.Details.Add("OK: w32tm reports last successful sync ($($offsetLine.Trim()))")
+        function Test-WindowsTimeSync {
+            param(
+                [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Details,
+                [Parameter(Mandatory)][string]$Activity
+            )
+
+            $invokeW32tm = {
+                param([string[]]$Arguments)
+                # Capture native stderr on Windows PowerShell as well as PowerShell 7.
+                $ErrorActionPreference = 'Continue'
+                try {
+                    $commandOutput = @(& w32tm.exe @Arguments 2>&1)
+                    $commandExitCode = $LASTEXITCODE
+                    return [pscustomobject]@{
+                        ExitCode = $commandExitCode
+                        Text     = ($commandOutput | ForEach-Object { "$_" }) -join "`n"
+                    }
+                }
+                catch {
+                    return [pscustomobject]@{ ExitCode = $null; Text = $_.Exception.Message }
+                }
             }
-            else {
-                $results.Details.Add("WARN: w32tm did not report a successful sync time")
+            $writeTimeDiagnostic = {
+                param([string[]]$Arguments, $CommandResult)
+                $exitText = if ($null -ne $CommandResult.ExitCode) { "$($CommandResult.ExitCode)" } else { 'unavailable (invocation failed)' }
+                $outputText = if ($CommandResult.Text) { $CommandResult.Text -replace '\r?\n', ' | ' } else { '<no output>' }
+                $Details.Add("DIAG: Windows Time w32tm $($Arguments -join ' ') exit=$exitText; output=$outputText")
             }
+
+            $statusArguments = @('/query', '/status', '/verbose')
+            $lastReason = ''
+            for ($attempt = 1; $attempt -le 6; $attempt++) {
+                Write-Progress -Activity $Activity -Status "Checking Windows Time (attempt $attempt/6)"
+                if ($attempt -gt 1) { Start-Sleep -Seconds 5 }
+                $status = & $invokeW32tm -Arguments $statusArguments
+                $unrecognizedStatus = $false
+                if ($null -eq $status.ExitCode -or $status.ExitCode -ne 0) {
+                    $lastReason = 'w32tm status query failed; see its exit code and output'
+                }
+                else {
+                    $lastSyncMatch = [regex]::Match($status.Text, '(?im)^[ \t]*Last Successful Sync Time:[ \t]*([^\r\n]*)')
+                    $leapMatch = [regex]::Match($status.Text, '(?im)^[ \t]*Leap Indicator:[ \t]*(\d{1,2})\b')
+                    $stratumMatch = [regex]::Match($status.Text, '(?im)^[ \t]*Stratum:[ \t]*(\d{1,2})\b')
+                    $sourceMatch = [regex]::Match($status.Text, '(?im)^[ \t]*Source:[ \t]*([^\r\n]*)')
+                    if (-not ($lastSyncMatch.Success -and $leapMatch.Success -and $stratumMatch.Success -and $sourceMatch.Success)) {
+                        $unrecognizedStatus = $true
+                        $lastReason = 'unrecognized or missing status fields (possibly localized output)'
+                    }
+                    else {
+                        $lastSyncText = $lastSyncMatch.Groups[1].Value.Trim()
+                        $source = $sourceMatch.Groups[1].Value.Trim()
+                        $leap = [int]$leapMatch.Groups[1].Value
+                        $stratum = [int]$stratumMatch.Groups[1].Value
+                        $problems = [System.Collections.Generic.List[string]]::new()
+                        if ($leap -ge 3) { $problems.Add("leap indicator $leap is unsynchronized") }
+                        if ($stratum -lt 1 -or $stratum -gt 15) { $problems.Add("stratum $stratum is not synchronized") }
+                        if (-not $source -or $source -match '^(Local CMOS Clock|Free-running System Clock)$' -or
+                            $status.Text -match '(?im)^[ \t]*ReferenceId:[ \t]*0x4c4f434c\b') {
+                            $problems.Add("source '$source' is missing or is the local clock")
+                        }
+                        $lastSync = [datetime]::MinValue
+                        $ageSeconds = 0
+                        if (-not [datetime]::TryParse($lastSyncText, [System.Globalization.CultureInfo]::CurrentCulture,
+                                [System.Globalization.DateTimeStyles]::AllowWhiteSpaces, [ref]$lastSync)) {
+                            $problems.Add("last successful sync '$lastSyncText' is unavailable or invalid")
+                        }
+                        else {
+                            $ageSeconds = ((Get-Date) - $lastSync).TotalSeconds
+                            if ($ageSeconds -gt 86400) { $problems.Add("last successful sync is older than 24 hours ($([long]$ageSeconds)s)") }
+                            if ($ageSeconds -lt -300) { $problems.Add("last successful sync is more than 5 minutes in the future ($([long]$ageSeconds)s)") }
+                        }
+                        if ($problems.Count -eq 0) {
+                            $prefix = if ($attempt -eq 1) { 'OK' } else { 'RECOVERED' }
+                            if ($attempt -gt 1) { & $writeTimeDiagnostic -Arguments $statusArguments -CommandResult $status }
+                            $Details.Add("${prefix}: Windows Time synchronized on attempt $attempt/6 (source='$source', stratum=$stratum, lastSync='$lastSyncText', age=$([long]$ageSeconds)s)")
+                            return
+                        }
+                        $lastReason = $problems -join '; '
+                    }
+                }
+
+                & $writeTimeDiagnostic -Arguments $statusArguments -CommandResult $status
+                $Details.Add("DIAG: Windows Time attempt $attempt/6: $lastReason")
+                if ($attempt -ne 1) { continue }
+
+                $timeService = $null
+                try {
+                    $timeService = Get-Service -Name 'W32Time' -ErrorAction Stop
+                    $Details.Add("DIAG: Windows Time service status=$($timeService.Status); startType=$($timeService.StartType)")
+                }
+                catch {
+                    $Details.Add("DIAG: Windows Time service query failed: $($_.Exception.Message)")
+                }
+                foreach ($query in @('source', 'configuration', 'peers')) {
+                    $queryArguments = @('/query', "/$query")
+                    $diagnostic = & $invokeW32tm -Arguments $queryArguments
+                    & $writeTimeDiagnostic -Arguments $queryArguments -CommandResult $diagnostic
+                }
+                try {
+                    $timeEvents = @(Get-WinEvent -FilterHashtable @{
+                            LogName      = 'System'
+                            ProviderName = 'Microsoft-Windows-Time-Service'
+                            StartTime    = (Get-Date).AddHours(-1)
+                        } -MaxEvents 5 -ErrorAction Stop)
+                    if ($timeEvents.Count -eq 0) { $Details.Add('DIAG: Windows Time has no System events in the last hour') }
+                    foreach ($timeEvent in $timeEvents) {
+                        $eventMessage = $timeEvent.Message -replace '\r?\n', ' | '
+                        $Details.Add("DIAG: Windows Time event id=$($timeEvent.Id); time=$($timeEvent.TimeCreated.ToString('o')); level=$($timeEvent.LevelDisplayName); message=$eventMessage")
+                    }
+                }
+                catch {
+                    if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') {
+                        $Details.Add('DIAG: Windows Time has no System events in the last hour')
+                    }
+                    else {
+                        $Details.Add("DIAG: Windows Time event query failed: $($_.Exception.Message)")
+                    }
+                }
+
+                if ($null -eq $timeService) {
+                    $Details.Add("WARN: Windows Time could not be verified: $lastReason; service state is unavailable, so recovery was not attempted")
+                    return
+                }
+                if ($timeService.StartType -eq 'Disabled') {
+                    $Details.Add("WARN: Windows Time could not be verified: $lastReason; W32Time is disabled and was not reconfigured")
+                    return
+                }
+                if ($unrecognizedStatus -and $timeService.Status -eq 'Running') {
+                    $Details.Add("WARN: Windows Time could not be verified: $lastReason; no speculative recovery was attempted")
+                    return
+                }
+                if ($timeService.Status -ne 'Running') {
+                    try {
+                        $null = Start-Service -Name 'W32Time' -ErrorAction Stop
+                        $Details.Add('DIAG: Windows Time started W32Time without changing its startup type')
+                    }
+                    catch {
+                        $Details.Add("WARN: Windows Time recovery could not start W32Time: $($_.Exception.Message); initial status: $lastReason")
+                        return
+                    }
+                }
+                # /nowait requests recovery without blocking on NTP; polling verifies it.
+                $resyncArguments = @('/resync', '/rediscover', '/nowait')
+                $resync = & $invokeW32tm -Arguments $resyncArguments
+                & $writeTimeDiagnostic -Arguments $resyncArguments -CommandResult $resync
+            }
+            $Details.Add("WARN: Windows Time could not be verified after 6 attempts (25s polling delay): $lastReason; see DIAG entries for command results, service state, source/configuration/peers, and recent events")
         }
-        catch {
-            $results.Details.Add("WARN: w32tm /query /status failed: $($_.Exception.Message)")
-        }
+
+        Test-WindowsTimeSync -Details $results.Details -Activity $progressActivity
 
         # PKI client authentication certificate (when UsePKI + pushClient)
         if ($checkPki) {
