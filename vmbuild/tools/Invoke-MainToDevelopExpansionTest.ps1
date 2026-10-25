@@ -1739,6 +1739,32 @@ function Get-CrossRevisionMaintenanceTargets {
     return @($targets)
 }
 
+function Get-CrossRevisionMaintenancePaths {
+    param([Parameter(Mandatory)][string]$Key)
+
+    $receiptDirectory = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'vmbuild\logs\CrossRevision\Maintenance'))
+    $inputDirectory = [IO.Path]::GetFullPath((Join-Path $StateRoot 'maintenance-inputs'))
+    $stem = $Key -replace '[^A-Za-z0-9_.-]', '_'
+    # Budget both artifacts for Windows PowerShell 5.1, including the path terminator.
+    $maximumStemLength = [Math]::Min(
+        259 - $receiptDirectory.Length - '\.qualification.log'.Length,
+        259 - $inputDirectory.Length - '\.targets.json'.Length)
+    if ($stem.Length -gt $maximumStemLength) {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Key)))).Replace('-', '') }
+        finally { $sha.Dispose() }
+        if ($maximumStemLength -lt $hash.Length) {
+            throw 'Maintenance artifact paths cannot fit the legacy Windows path limit; use a shorter RepositoryRoot or StateRoot.'
+        }
+        $prefixLength = $maximumStemLength - $hash.Length - 1
+        $stem = if ($prefixLength -gt 0) { "$($stem.Substring(0, $prefixLength))-$hash" } else { $hash }
+    }
+    [pscustomobject]@{
+        ReceiptPath = Join-Path $receiptDirectory "$stem.qualification.log"
+        TargetsPath = Join-Path $inputDirectory "$stem.targets.json"
+    }
+}
+
 function Invoke-CrossRevisionMaintenanceGate {
     param(
         [string]$Key,
@@ -1771,12 +1797,11 @@ function Invoke-CrossRevisionMaintenanceGate {
             -ExpectedSha256 $reference.Sha256 -RequireCmCoverage:$RequireCmCoverage
         if (-not $AlwaysRun) { return $reference }
     }
-    $safe = ($Key -replace '[^A-Za-z0-9_.-]', '_')
-    $logs = Join-Path $RepositoryRoot 'vmbuild\logs\CrossRevision\Maintenance'
-    $receiptPath = Join-Path $logs "$safe.qualification.log"
-    $inputDirectory = Join-Path $StateRoot 'maintenance-inputs'
+    $paths = Get-CrossRevisionMaintenancePaths -Key $Key
+    $receiptPath = $paths.ReceiptPath
+    $targetsPath = $paths.TargetsPath
+    $inputDirectory = Split-Path $targetsPath -Parent
     $null = New-Item -Path $inputDirectory -ItemType Directory -Force
-    $targetsPath = Join-Path $inputDirectory "$safe.targets.json"
     ConvertTo-Json -InputObject @($targets) -Depth 6 | Set-Content -LiteralPath $targetsPath -Encoding UTF8
     if ($AlwaysRun -and $script:State.MaintenanceReceipts.Contains($Key)) {
         $script:State.MaintenanceReceipts.Remove($Key)
@@ -1850,11 +1875,19 @@ function Resume-CrossRevisionMaintenanceGate {
         throw "Interrupted maintenance has an invalid or mismatched maintenance checkpoint for candidate '$developCommit': $key"
     }
     $mode = $modes[$kind]
-    $safe = $key -replace '[^A-Za-z0-9_.-]', '_'
-    $targetsPath = Join-Path $StateRoot "maintenance-inputs\$safe.targets.json"
-    $path = Join-Path $RepositoryRoot "vmbuild\logs\CrossRevision\Maintenance\$safe.qualification.log"
+    $paths = Get-CrossRevisionMaintenancePaths -Key $key
+    $targetsPath = $paths.TargetsPath
+    $path = $paths.ReceiptPath
     if (-not (Test-Path -LiteralPath $targetsPath -PathType Leaf)) {
-        throw "Interrupted maintenance has no scoped VM input; retain the family and use a fresh state root: $key"
+        $legacyStem = $key -replace '[^A-Za-z0-9_.-]', '_'
+        $legacyTargetsPath = Join-Path (Split-Path $targetsPath -Parent) "$legacyStem.targets.json"
+        if ($legacyTargetsPath -ne $targetsPath -and (Test-Path -LiteralPath $legacyTargetsPath -PathType Leaf)) {
+            $targetsPath = $legacyTargetsPath
+            $path = Join-Path (Split-Path $path -Parent) "$legacyStem.qualification.log"
+        }
+        else {
+            throw "Interrupted maintenance has no scoped VM input; retain the family and use a fresh state root: $key"
+        }
     }
     $identity = @(Get-Content -LiteralPath $targetsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
     if (Test-Path -LiteralPath $path) {

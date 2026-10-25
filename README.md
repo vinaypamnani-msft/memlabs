@@ -268,8 +268,14 @@ the failure. Missing VM identity entries fail explicitly before Hyper-V calls
 rather than surfacing an empty `Get-VM -Name` argument.
 
 Receipts use short, unique temporary names in the same directory for atomic
-replacement. Full revision and receipt names stay intact without appending a
-second GUID that can exceed Windows PowerShell's legacy path limit.
+replacement, without appending a second GUID to the destination filename.
+The runner budgets both scoped target-input and receipt paths to fewer than 260
+characters for Windows PowerShell 5.1. Existing readable filenames stay unchanged
+when both paths fit; longer names use a readable prefix (when space permits) and
+the full step key's SHA-256 hash. Full step keys and revisions remain in checkpoint
+state and receipt contents. Resume also recognizes legacy scoped input filenames
+and retains them when retrying with bounded paths. Roots too long to accommodate
+the hash fail explicitly with guidance to shorten the repository or state root.
 
 NOCM families record explicit `NotApplicable` recovery cases and **do not**
 qualify the CM recovery matrix. Include a CM family to claim that coverage.

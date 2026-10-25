@@ -33,7 +33,7 @@ function Import-QualificationRunnerFunction {
     $scriptRoot = (Split-Path $path -Parent).Replace("'", "''")
     return [scriptblock]::Create($found[0].Extent.Text.Replace('$PSScriptRoot', "'$scriptRoot'"))
 }
-foreach ($name in @('Initialize-CrossRevisionMaintenanceState', 'Get-CrossRevisionMaintenanceTargets',
+foreach ($name in @('Initialize-CrossRevisionMaintenanceState', 'Get-CrossRevisionMaintenanceTargets', 'Get-CrossRevisionMaintenancePaths',
         'Invoke-CrossRevisionMaintenanceGate', 'Invoke-CrossRevisionRecoveryGate', 'Resume-CrossRevisionMaintenanceGate',
         'Assert-CrossRevisionMaintenanceFamilyGate')) {
     . (Import-QualificationRunnerFunction $name)
@@ -360,6 +360,47 @@ function Get-MemLabsDscArtifactState {
         Write-MaintenanceQualificationReceipt $Parameters.ReceiptPath $receipt
         return 0
     }
+    & {
+        $RepositoryRoot = 'C:\repo'
+        $StateRoot = 'C:\state'
+        $pathKey = "lab|maintenance|baseline|$developCommit"
+        $legacyStem = $pathKey -replace '[^A-Za-z0-9_.-]', '_'
+        $paths = Get-CrossRevisionMaintenancePaths -Key $pathKey
+        Assert-Qualification ($paths.ReceiptPath -ceq "C:\repo\vmbuild\logs\CrossRevision\Maintenance\$legacyStem.qualification.log" -and
+            $paths.TargetsPath -ceq "C:\state\maintenance-inputs\$legacyStem.targets.json") 'Short legacy maintenance paths changed.'
+        $longKey = "lab|maintenance|post|2|$('x' * 300) other domain.json|$developCommit"
+        $longPaths = Get-CrossRevisionMaintenancePaths -Key $longKey
+        $samePaths = Get-CrossRevisionMaintenancePaths -Key $longKey
+        $otherPaths = Get-CrossRevisionMaintenancePaths -Key ($longKey.Replace(' ', '_'))
+        Assert-Qualification ($longPaths.ReceiptPath.Length -lt 260 -and $longPaths.TargetsPath.Length -lt 260 -and
+            $longPaths.TargetsPath -cmatch '-[A-F0-9]{64}\.targets\.json$' -and
+            [IO.Path]::GetFileNameWithoutExtension($longPaths.ReceiptPath) -ceq
+                ([IO.Path]::GetFileNameWithoutExtension($longPaths.TargetsPath) -replace '\.targets$', '.qualification')) `
+            'Long maintenance inputs and receipts do not share a bounded SHA-256 filename stem.'
+        Assert-Qualification ($longPaths.ReceiptPath -ceq $samePaths.ReceiptPath -and $longPaths.TargetsPath -ceq $samePaths.TargetsPath -and
+            $longPaths.TargetsPath -cne $otherPaths.TargetsPath) 'Shortened maintenance paths are unstable or collide after key sanitization.'
+
+        $RepositoryRoot += 'r' * (259 - $paths.ReceiptPath.Length)
+        $boundaryPaths = Get-CrossRevisionMaintenancePaths -Key $pathKey
+        Assert-Qualification ($boundaryPaths.ReceiptPath.Length -eq 259 -and
+            $boundaryPaths.ReceiptPath.EndsWith("\$legacyStem.qualification.log")) 'A valid 259-character maintenance path was unnecessarily shortened.'
+        $RepositoryRoot += 'r'
+        $boundaryPaths = Get-CrossRevisionMaintenancePaths -Key $pathKey
+        Assert-Qualification ($boundaryPaths.ReceiptPath.Length -eq 259 -and
+            [IO.Path]::GetFileName($boundaryPaths.ReceiptPath) -cmatch '^[A-F0-9]{64}\.qualification\.log$') `
+            'A 260-character maintenance receipt path was not shortened to its exact available budget.'
+        $RepositoryRoot += 'r'
+        Assert-QualificationThrows { Get-CrossRevisionMaintenancePaths -Key $pathKey } '*use a shorter RepositoryRoot or StateRoot*'
+
+        $RepositoryRoot = 'C:\repo'
+        $StateRoot += 's' * (260 - $paths.TargetsPath.Length)
+        $boundaryPaths = Get-CrossRevisionMaintenancePaths -Key $pathKey
+        Assert-Qualification ($boundaryPaths.TargetsPath.Length -eq 259 -and $boundaryPaths.ReceiptPath.Length -lt 260) `
+            'The maintenance filename budget ignored the target-input directory.'
+        $StateRoot += 's'
+        Assert-QualificationThrows { Get-CrossRevisionMaintenancePaths -Key $pathKey } '*use a shorter RepositoryRoot or StateRoot*'
+    }
+
     $key = "lab|maintenance|baseline|$developCommit"
     $null = Invoke-CrossRevisionMaintenanceGate -Key $key -Mode Baseline -Family 'lab' -Identity @($target) -WorktreePath 'C:\pinned' -AdminCachePath 'C:\cache\admin.txt'
     $null = Invoke-CrossRevisionMaintenanceGate -Key $key -Mode Baseline -Family 'lab' -Identity @($target) -WorktreePath 'C:\pinned'
@@ -560,9 +601,11 @@ function Get-MaintenanceQualificationCases {
         )) {
         $family = "before-receipt-$($entry.Mode.ToLowerInvariant())-$($entry.Role.ToLowerInvariant())"
         $earlyKey = "$family|maintenance|$($entry.Stage)|$developCommit"
-        $safeKey = $earlyKey -replace '[^A-Za-z0-9_.-]', '_'
-        $earlyReceiptPath = Join-Path $RepositoryRoot "vmbuild\logs\CrossRevision\Maintenance\$safeKey.qualification.log"
-        $earlyTargetsPath = Join-Path $StateRoot "maintenance-inputs\$safeKey.targets.json"
+        $earlyPaths = Get-CrossRevisionMaintenancePaths -Key $earlyKey
+        $earlyReceiptPath = $earlyPaths.ReceiptPath
+        $earlyTargetsPath = $earlyPaths.TargetsPath
+        Assert-Qualification ($earlyReceiptPath.Length -lt 260 -and $earlyTargetsPath.Length -lt 260) `
+            "Maintenance gate paths exceed the legacy Windows limit: receipt=$($earlyReceiptPath.Length); targets=$($earlyTargetsPath.Length)."
         $script:MockRole = $entry.Role
         $script:ReadinessFailure = $true
         $beforeCalls = $script:ChildCalls
@@ -585,6 +628,25 @@ function Get-MaintenanceQualificationCases {
             $script:State.MaintenanceReceipts[$earlyKey].HasCmTarget -eq ($entry.Role -eq 'Primary')) 'Pre-receipt resume changed the candidate, mode, credentials, or CM coverage.'
     }
     $script:MockRole = 'Primary'
+    & {
+        $RepositoryRoot = Join-Path $tempRoot 'l'
+        $legacyKey = "legacy|maintenance|baseline|$developCommit"
+        $legacyStem = $legacyKey -replace '[^A-Za-z0-9_.-]', '_'
+        $legacyReceiptPath = Join-Path $RepositoryRoot "vmbuild\logs\CrossRevision\Maintenance\$legacyStem.qualification.log"
+        $RepositoryRoot += 'r' * (260 - $legacyReceiptPath.Length)
+        $paths = Get-CrossRevisionMaintenancePaths -Key $legacyKey
+        $legacyTargetsPath = Join-Path $StateRoot "maintenance-inputs\$legacyStem.targets.json"
+        Assert-Qualification ($legacyTargetsPath.Length -lt 260 -and $legacyTargetsPath -cne $paths.TargetsPath) `
+            'The legacy resume fixture does not require filename migration.'
+        ConvertTo-Json -InputObject @($target) -Depth 6 | Set-Content -LiteralPath $legacyTargetsPath -Encoding UTF8
+        $script:State.CurrentStep = $legacyKey
+        $beforeCalls = $script:ChildCalls
+        Resume-CrossRevisionMaintenanceGate -WorktreePath 'C:\pinned'
+        Assert-Qualification ($script:ChildCalls -eq $beforeCalls + 1 -and -not $script:State.CurrentStep -and
+            $script:LastQualifierParameters.TargetsPath -ceq $paths.TargetsPath -and
+            $script:State.MaintenanceReceipts[$legacyKey].Path -ceq $paths.ReceiptPath -and
+            (Test-Path -LiteralPath $legacyTargetsPath)) 'Legacy maintenance scope did not resume into bounded paths while retaining its saved input.'
+    }
     $beforeCalls = $script:ChildCalls
     foreach ($invalidKey in @(
             "lab|maintenance|unknown|$developCommit",
@@ -629,4 +691,4 @@ finally {
     $global:LASTEXITCODE = $previousExitCode
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction Stop
 }
-Write-Host 'PASS -- Pinned historical/current case contracts, dual-engine preflight, receipt/source/identity integrity, N/A coverage, resume migration and cleanup gates.'
+Write-Host 'PASS -- Pinned historical/current case contracts, dual-engine preflight, bounded maintenance paths, receipt/source/identity integrity, N/A coverage, resume migration and cleanup gates.'
