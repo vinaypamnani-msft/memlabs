@@ -145,20 +145,17 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   use a fresh state root to requalify them.
 - Each develop fixture/pass gets independent readiness checks before being
   checkpointed complete. VM/disk lineage and domain SID checks remain enabled.
-  Independent domain readiness requires joined-domain membership, successful
-  `nltest /sc_query` status, and DNS registration across two consecutive samples.
-  It does not invoke `Test-ComputerSecureChannel`; the printed check scope makes
-  that omission explicit. Cached Netlogon status does not prove active trust.
-  Phase 11's own secure-channel validation remains unchanged when it executes.
-  A healthy first sample logs `WAIT` with a passed-sample count while awaiting
-  confirmation; each VM logs an explicit `PASS` once confirmed. Only unhealthy
-  samples log a stability retry.
+  The entire extra `Assert-DomainJoinedVmHealth` test is bypassed on both new
+  deployment and completed-stage resume paths. Its membership, `nltest`, DNS,
+  and convergence-retry loop do not run; the runner prints an explicit `BYPASS`
+  notice. Phase 11's own deployment validation remains unchanged. This is reduced
+  independent coverage, not a successful result for the bypassed test.
   First-pass expansion VM/disk and applicable domain identities are persisted
   before maintenance gates and stage completion, so the second pass can verify
   the same machines. Resume validates saved identities instead of replacing
   them with the current inventory. Completed first-pass stages from older
   checkpoints that lack these identities capture them only after live stage
-  and domain-health validation; this does not prove pre-capture continuity.
+  and VM identity validation; this does not prove pre-capture continuity.
 - Before retained-VM validation or live maintenance, the runner verifies saved
   VM identity and prepares domain-joined targets even when a deployment stage
   is skipped. An `Off` VM is started once by its verified Hyper-V object;

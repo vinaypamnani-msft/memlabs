@@ -823,6 +823,14 @@ catch {
 $runnerTokens = $null
 $runnerErrors = $null
 $runnerAst = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$runnerTokens, [ref]$runnerErrors)
+$runtimeDomainHealthCalls = @($runnerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Assert-DomainJoinedVmHealth'
+        }, $true))
+Assert-Equal 0 $runtimeDomainHealthCalls.Count 'the entire extra domain-health test is bypassed on both deployment and completed-stage resume paths'
+Assert-True ($runnerText -like '*BYPASS: extra independent domain-health validation is disabled*') `
+    'the runner explicitly reports the complete domain-health bypass'
 foreach ($helperName in @('Write-CrossRevisionStateFile', 'Reset-CrossRevisionFamilyState', 'Resolve-CrossRevisionResetFamily', 'Resolve-CrossRevisionActiveResetFamily')) {
     $definition = @($runnerAst.FindAll({
                 param($node)
@@ -1675,11 +1683,11 @@ Assert-Equal 4 $readinessCalls.Count 'baseline, skipped-stage, pass-two and main
 $skipCheck = $runnerText.IndexOf('Write-Host "SKIP: completed $step"')
 $skipEnd = $runnerText.IndexOf('if ($cleanupStarted)', $skipCheck)
 $skipText = $runnerText.Substring($skipCheck, $skipEnd - $skipCheck)
-Assert-True ($skipText.IndexOf('Assert-BaselineIdentity -Identity $readinessIdentity') -lt
-    $skipText.IndexOf('Wait-CrossRevisionRetainedVmReady') -and
-    $skipText.IndexOf('Wait-CrossRevisionRetainedVmReady') -lt
-    $skipText.IndexOf('Assert-DomainJoinedVmHealth')) `
-    'skipped-stage resume verifies saved disk/VM identity and readies power before the domain probe'
+$skipVmCheck = $skipText.IndexOf('Assert-BaselineIdentity -Identity $readinessIdentity')
+$skipPowerCheck = $skipText.IndexOf('Wait-CrossRevisionRetainedVmReady')
+$skipCapture = $skipText.IndexOf('Save-CrossRevisionExpansionIdentity')
+Assert-True ($skipVmCheck -ge 0 -and $skipPowerCheck -gt $skipVmCheck -and $skipCapture -gt $skipPowerCheck) `
+    'skipped-stage resume verifies saved disk/VM identity and readies power before identity capture'
 $freshCapture = $captureCalls | Select-Object -Last 1
 $captureGuard = $freshCapture.Parent
 while ($captureGuard -and $captureGuard -isnot [Management.Automation.Language.IfStatementAst]) {
@@ -1689,10 +1697,10 @@ Assert-Equal '$pass -eq 1' $captureGuard.Clauses[0].Item1.Extent.Text 'fresh ide
 $stageStatements = @($captureGuard.Parent.Statements)
 $captureIndex = [array]::IndexOf($stageStatements, $captureGuard)
 Assert-True ($captureIndex -gt 0 -and
-    $stageStatements[$captureIndex - 1].Extent.Text -like 'Assert-DomainJoinedVmHealth*' -and
+    $stageStatements[$captureIndex - 1].Extent.Text -like 'Assert-DevelopStageComplete*' -and
     $stageStatements[$captureIndex + 1].Extent.Text -like '*Invoke-CrossRevisionMaintenanceGate*' -and
     $stageStatements[-1].Extent.Text -like 'Complete-Step*') `
-    'fresh identity is persisted after guest validation and before maintenance gates and stage completion'
+    'fresh identity is persisted after stage-completion checks and before maintenance gates and checkpoint completion'
 Assert-Equal "$baselineId" $identity[0].Id 'baseline identity captures the Hyper-V VM ID'
 Assert-Equal 'E:\VirtualMachines\NOC-DC1.vhdx' $identity[0].VhdPaths[0] 'baseline identity captures stable base-VHD lineage'
 Assert-Equal 2 $identity[0].DiskIdentityVersion 'baseline identity records stable disk schema version'

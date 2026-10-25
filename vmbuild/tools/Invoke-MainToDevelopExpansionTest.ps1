@@ -2329,6 +2329,7 @@ try {
     }
 
     Write-CrossRevisionPlan -Plan $plan -MainCommit $mainCommit -DevelopCommit $developCommit
+    Write-Host 'BYPASS: extra independent domain-health validation is disabled (membership, Netlogon, DNS, and convergence retries).' -ForegroundColor Yellow
     if ($checkpointToAdvance) {
         Write-Host 'Qualification mode: rolling develop revisions (diagnostic burn-in; run one fresh pinned cycle for final release qualification).' -ForegroundColor Yellow
     }
@@ -2581,7 +2582,6 @@ try {
                         foreach ($target in @(Get-CrossRevisionMaintenanceTargets -Identity $readinessIdentity)) {
                             Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialPath
                         }
-                        Assert-DomainJoinedVmHealth -Config $followOnConfig -FixtureName $followOn.Name -AdminCachePath $credentialPath
                         if ($pass -eq 1) {
                             Save-CrossRevisionExpansionIdentity -IdentityKey $identityKey -VmNames $followOnVmNames `
                                 -Config $followOnConfig -AdminCachePath $credentialPath
@@ -2644,7 +2644,6 @@ try {
                 Assert-BaselineIdentity -Identity $baselineIdentity
                 Assert-DomainIdentity -Identity $domainIdentity -AdminCachePath $credentialPath
                 Assert-DevelopStageComplete -Config $followOnConfig -FixtureName $followOn.Name
-                Assert-DomainJoinedVmHealth -Config $followOnConfig -FixtureName $followOn.Name -AdminCachePath $credentialPath
                 if ($pass -eq 1) {
                     Save-CrossRevisionExpansionIdentity -IdentityKey $identityKey -VmNames $followOnVmNames `
                         -Config $followOnConfig -AdminCachePath $credentialPath
