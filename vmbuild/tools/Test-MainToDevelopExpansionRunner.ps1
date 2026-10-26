@@ -1767,6 +1767,140 @@ Assert-ThrowsLike -Action {
     -What 'legacy AVHDX identity still rejects a different base disk'
 $script:MockVhds.Remove($snapshotPath)
 
+function Test-CrossRevisionDiskIdentityRaces {
+    $basePath = 'E:\VirtualMachines\pstest2.com\PT2-SS2SITE\PT2-SS2SITE_DATA_0.vhdx'
+    $checkpointPath = 'E:\VirtualMachines\pstest2.com\PT2-SS2SITE\PT2-SS2SITE_DATA_0_453DA23E-9A6F-4CB5-A42F-33C1B82C6E0D.avhdx'
+    $raceParentPath = 'E:\VirtualMachines\pstest2.com\PT2-SS2SITE\parent.avhdx'
+    $osPath = 'E:\VirtualMachines\pstest2.com\PT2-SS2SITE\os.vhdx'
+    $replacementPath = 'E:\VirtualMachines\replacement.vhdx'
+    $vmId = '11111111-1111-1111-1111-111111111111'
+    function Get-VM {
+        [CmdletBinding()]
+        param([string]$Name)
+        [pscustomobject]@{ Name = $Name; Id = $vmId }
+    }
+    function Get-VMHardDiskDrive {
+        [CmdletBinding()]
+        param([string]$VMName)
+        if ($VMName -ne 'DISK-RACE') { throw "Unexpected disk inventory target '$VMName'." }
+        $script:DiskRaceInventoryReads++
+        $paths = @($script:DiskRaceLivePaths)
+        if ($script:DiskRaceScenario -eq 'stale-attachment' -and $script:DiskRaceInventoryReads -le 2) {
+            $paths = @($checkpointPath)
+        }
+        if ($script:DiskRaceScenario -eq 'unstable-attachments') {
+            $paths = @(if ($script:DiskRaceInventoryReads % 2) { $basePath } else { $replacementPath })
+        }
+        for ($slot = 0; $slot -lt $paths.Count; $slot++) {
+            [pscustomobject]@{
+                ControllerType = 'SCSI'; ControllerNumber = 0; ControllerLocation = $slot; Path = $paths[$slot]
+            }
+        }
+    }
+    function Get-VHD {
+        [CmdletBinding()]
+        param([string]$Path)
+        $script:DiskRaceVhdReads.Add($Path)
+        if ($Path -notin @($basePath, $checkpointPath, $raceParentPath, $osPath, $replacementPath)) {
+            throw "Unexpected VHD lookup '$Path'."
+        }
+        if ($Path -eq $checkpointPath) {
+            switch ($script:DiskRaceScenario) {
+                { $_ -in @('deleted-leaf', 'stale-attachment', 'partial-inventory', 'missing-checkpoint') } {
+                    $script:DiskRaceMissingPath = $Path
+                    if ($_ -ne 'missing-checkpoint') {
+                        $script:DiskRaceLivePaths = @(if ($_ -eq 'partial-inventory') { $osPath }; $basePath)
+                    }
+                    throw [IO.IOException]::new("Synthetic checkpoint disk '$Path' is not an existing virtual hard disk file.")
+                }
+                'access-denied' { throw [UnauthorizedAccessException]::new('Synthetic VHD access denied.') }
+                'deleted-parent' { return [pscustomobject]@{ ParentPath = $raceParentPath } }
+                'parent-cycle' { return [pscustomobject]@{ ParentPath = $checkpointPath } }
+            }
+            return [pscustomobject]@{ ParentPath = $basePath }
+        }
+        if ($Path -eq $raceParentPath) {
+            $script:DiskRaceMissingPath = $Path
+            $script:DiskRaceLivePaths = @($basePath)
+            throw [IO.IOException]::new("Synthetic checkpoint parent '$Path' disappeared.")
+        }
+        if ($Path -eq $basePath) {
+            if ($script:DiskRaceScenario -eq 'attachment-changed') { $script:DiskRaceLivePaths = @($basePath) }
+            if ($script:DiskRaceScenario -eq 'disk-replaced') { $script:DiskRaceLivePaths = @($replacementPath) }
+            if ($script:DiskRaceScenario -eq 'missing-base') {
+                throw [IO.FileNotFoundException]::new("Synthetic missing base disk '$Path'.", $Path)
+            }
+        }
+        [pscustomobject]@{ ParentPath = $null }
+    }
+    function Test-Path {
+        [CmdletBinding()]
+        param([string]$LiteralPath, [string]$PathType)
+        [void]$PathType
+        return $LiteralPath -ne $script:DiskRaceMissingPath
+    }
+    function Start-Sleep {
+        param([int]$Seconds)
+        $script:DiskRaceSleeps.Add($Seconds)
+    }
+    foreach ($case in @(
+            @{ Name = 'deleted-leaf'; Reads = 3; Sleeps = 1; Count = 1 },
+            @{ Name = 'stale-attachment'; Reads = 4; Sleeps = 2; Count = 1 },
+            @{ Name = 'deleted-parent'; Reads = 3; Sleeps = 1; Count = 1 },
+            @{ Name = 'attachment-changed'; Reads = 4; Sleeps = 1; Count = 1 },
+            @{ Name = 'partial-inventory'; Reads = 3; Sleeps = 1; Count = 2 },
+            @{ Name = 'disk-replaced'; Reads = 4; Sleeps = 1; Error = '*disk attachment paths changed*' },
+            @{ Name = 'missing-checkpoint'; Reads = 12; Sleeps = 11; Error = "*VM 'DISK-RACE'*12 attempts*453DA23E*not an existing virtual hard disk file*" },
+            @{ Name = 'unstable-attachments'; Reads = 24; Sleeps = 11; Error = "*VM 'DISK-RACE'*12 attempts*attachments changed*" },
+            @{ Name = 'missing-base'; Reads = 1; Sleeps = 0; Error = '*Synthetic missing base disk*' },
+            @{ Name = 'access-denied'; Reads = 1; Sleeps = 0; Error = '*Synthetic VHD access denied*' },
+            @{ Name = 'parent-cycle'; Reads = 1; Sleeps = 0; Error = '*parent chain contains a cycle*' }
+        )) {
+        $script:DiskRaceScenario = $case.Name
+        $script:DiskRaceInventoryReads = 0
+        $script:DiskRaceVhdReads = [Collections.Generic.List[string]]::new()
+        $script:DiskRaceSleeps = [Collections.Generic.List[int]]::new()
+        $script:DiskRaceMissingPath = $null
+        $script:DiskRaceLivePaths = @(if ($case.Name -eq 'partial-inventory') { $osPath }; $checkpointPath)
+        if ($case.Name -eq 'missing-base') { $script:DiskRaceLivePaths = @($basePath) }
+        $message = $null
+        $disks = @()
+        try {
+            if ($case.Name -eq 'disk-replaced') {
+                Assert-BaselineIdentity -Identity @([ordered]@{
+                        Name = 'DISK-RACE'; Id = $vmId
+                        Disks = @([ordered]@{
+                                ControllerType = 'SCSI'; ControllerNumber = 0; ControllerLocation = 0; BasePath = $basePath
+                            })
+                    })
+            }
+            else {
+                $disks = @(Get-CrossRevisionVmDiskIdentity -VmName 'DISK-RACE')
+            }
+        }
+        catch { $message = $_.Exception.Message }
+        if ($case.Error) {
+            Assert-True ($message -like $case.Error) "$($case.Name): disk identity fails closed" "actual=[$message]"
+        }
+        else {
+            Assert-True (-not $message -and $disks.Count -eq $case.Count) "$($case.Name): captures a complete stable disk identity" "actual=[$message]; disks=$($disks.Count)"
+            if (-not $message -and $disks.Count) {
+                Assert-Equal $basePath $disks[-1].BasePath "$($case.Name): resolves the verified base VHD"
+                Assert-Equal $basePath $disks[-1].AttachedPath "$($case.Name): discards the stale checkpoint attachment"
+                Assert-Equal ($case.Count - 1) $disks[-1].ControllerLocation "$($case.Name): retains the disk controller slot"
+            }
+        }
+        Assert-Equal $case.Reads $script:DiskRaceInventoryReads "$($case.Name): re-enumeration is bounded"
+        Assert-Equal $case.Sleeps $script:DiskRaceSleeps.Count "$($case.Name): only transient disk reads wait"
+        Assert-True (@($script:DiskRaceSleeps | Where-Object { $_ -ne 5 }).Count -eq 0) "$($case.Name): retry delay stays bounded"
+        if ($case.Name -eq 'partial-inventory') {
+            Assert-Equal 2 @($script:DiskRaceVhdReads | Where-Object { $_ -eq $osPath }).Count `
+                'partial-inventory: retries the entire inventory instead of leaking partially resolved disks'
+        }
+    }
+}
+Test-CrossRevisionDiskIdentityRaces
+
 Assert-ThrowsLike -Action {
     Assert-DomainsAbsent -Domains @('unrelated.test') -VmNames @('NOC-DC1')
 } -Pattern '*already exist*' -What 'VM-name collision fails even when domain-note matching cannot help'

@@ -706,7 +706,18 @@ function Resolve-CrossRevisionVhdBasePath {
         if (-not $visited.Add($currentPath)) {
             throw "VHD parent chain contains a cycle at '$currentPath'."
         }
-        $vhd = Get-VHD -Path $currentPath -ErrorAction Stop
+        try {
+            $vhd = Get-VHD -Path $currentPath -ErrorAction Stop
+        }
+        catch {
+            if ([IO.Path]::GetExtension($currentPath) -in @('.avhd', '.avhdx') -and
+                -not (Test-Path -LiteralPath $currentPath -PathType Leaf -ErrorAction Stop)) {
+                throw [IO.FileNotFoundException]::new(
+                    "Checkpoint disk '$currentPath' disappeared while reading its VHD parent chain: $($_.Exception.Message)",
+                    $currentPath, $_.Exception)
+            }
+            throw
+        }
         $parentPath = "$($vhd.ParentPath)".Trim()
         if ([string]::IsNullOrWhiteSpace($parentPath)) {
             return $currentPath
@@ -721,18 +732,52 @@ function Resolve-CrossRevisionVhdBasePath {
 function Get-CrossRevisionVmDiskIdentity {
     param([Parameter(Mandatory = $true)][string] $VmName)
 
-    return @(Get-VMHardDiskDrive -VMName $VmName -ErrorAction Stop |
-        Sort-Object ControllerType, ControllerNumber, ControllerLocation |
-        ForEach-Object {
-            $attachedPath = ConvertTo-CrossRevisionNormalizedPath -Path "$($_.Path)"
-            [ordered]@{
-                ControllerType     = "$($_.ControllerType)"
-                ControllerNumber   = [int]$_.ControllerNumber
-                ControllerLocation = [int]$_.ControllerLocation
-                BasePath           = Resolve-CrossRevisionVhdBasePath -Path $attachedPath
-                AttachedPath       = $attachedPath
+    $readAttachments = {
+        @(Get-VMHardDiskDrive -VMName $VmName -ErrorAction Stop |
+            Sort-Object ControllerType, ControllerNumber, ControllerLocation |
+            ForEach-Object {
+                [ordered]@{
+                    ControllerType     = "$($_.ControllerType)"
+                    ControllerNumber   = [int]$_.ControllerNumber
+                    ControllerLocation = [int]$_.ControllerLocation
+                    BasePath           = $null
+                    AttachedPath       = ConvertTo-CrossRevisionNormalizedPath -Path "$($_.Path)"
+                }
+            })
+    }
+    $maximumAttempts = 12
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
+        $disks = @(& $readAttachments)
+        $before = ConvertTo-Json -InputObject $disks -Depth 3 -Compress
+        $readError = $null
+        try {
+            foreach ($disk in $disks) {
+                $disk.BasePath = Resolve-CrossRevisionVhdBasePath -Path $disk.AttachedPath
             }
-        })
+        }
+        catch [IO.FileNotFoundException] {
+            if ([IO.Path]::GetExtension($_.Exception.FileName) -notin @('.avhd', '.avhdx')) { throw }
+            $readError = $_
+        }
+        if ($readError) {
+            $reason = $readError.Exception.Message
+        }
+        else {
+            $refreshed = @(& $readAttachments)
+            $after = ConvertTo-Json -InputObject $refreshed -Depth 3 -Compress
+            if ([string]::Equals($before, $after, [StringComparison]::OrdinalIgnoreCase)) {
+                return @($disks)
+            }
+            $reason = 'Disk attachments changed while resolving their VHD parent chains.'
+        }
+        if ($attempt -eq $maximumAttempts) {
+            $message = "Could not read stable disk identity for VM '$VmName' after $maximumAttempts attempts. $reason"
+            if ($readError) { throw [InvalidOperationException]::new($message, $readError.Exception) }
+            throw $message
+        }
+        Write-Host "WAIT: VM '$VmName' disk identity is changing (attempt $attempt/$maximumAttempts); refreshing in 5 seconds. $reason" -ForegroundColor Yellow
+        Start-Sleep -Seconds 5
+    }
 }
 
 function Test-CrossRevisionLegacySnapshotDiskMatch {

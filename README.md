@@ -178,6 +178,14 @@ qualifies maintenance as part of the pinned main-A / develop-B+ cycle:
   use a fresh state root to requalify them.
 - Each develop fixture/pass gets independent readiness checks before being
   checkpointed complete. VM/disk lineage and domain SID checks remain enabled.
+  Disk identity capture re-enumerates attachments around parent-chain resolution
+  because successful Phase 11 checkpoint deletion starts a live merge in the
+  background. Disappearing AVHD/AVHDX files or changing attachments retry the
+  entire inventory up to 12 times, with five seconds between attempts, rather
+  than retaining a stale path or a partially resolved inventory. Stable disks do
+  not wait. Missing base disks, unreadable existing disks, parent-chain cycles,
+  and persistent instability still fail; saved VM IDs, controller slots, and
+  resolved base-VHD lineage are never replaced by guessed filenames.
   The entire extra `Assert-DomainJoinedVmHealth` test is bypassed on both new
   deployment and completed-stage resume paths. Its membership, `nltest`, DNS,
   and convergence-retry loop do not run; the runner prints an explicit `BYPASS`
