@@ -27,9 +27,12 @@ function Get-GenericHelp {
         "UseDynamicMemory" { "Enable Dynamic Memory on each new VM. Can be overridden per VM via the dynamicMinRam setting" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
+        "EnableSUPOnSiteServers" { "Enabling this will automatically install the SUP role on CAS/Primary site servers, sharing SQL with the site server" }
         "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
         "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
         "PushCMClientToSiteSystems" { "Default value for the per-VM 'pushClient' flag on newly added site system VMs (Primary, CAS, Secondary, SiteSystem, PassiveSite). Off by default since site servers install the client locally during CM setup." }
+        "UseProxyForClients" { "Default value for the per-VM 'useProxy' flag on newly added non-site-system Windows VMs (clients + plain DomainMembers). When true, those VMs are configured to route HTTP/HTTPS through the domain's Linux Squid Proxy VM and the host blocks their direct Internet egress (requires a Proxy role VM in the config)." }
+        "UseProxyForCM" { "Default value for the per-VM 'useProxy' flag on newly added ConfigMgr site-system VMs (CAS/Primary/Secondary/SiteSystem/PassiveSite/WSUS/SQLAO/FileServer). When true, CM site roles (including SUP) are configured to use the Proxy for their outbound calls and the host blocks their direct Internet egress (requires a Proxy role VM in the config)." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
 
         # Global VM
@@ -74,13 +77,19 @@ function Get-GenericHelp {
         "BitLocker" { "Enable BitLocker encryption on this VM. Adds the computer to the ConfigMgr BLM collection so the BitLocker policy targets it. Requires tpmEnabled and cmOptions.EnableBLM." }
         "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
         "ForestTrust" { "This option allows you to create a Forest Trust between this domain, and another already deployed domain." }
+        "externalDomainJoinSiteCode" { "Site code in the trusted forest that manages clients in this domain. NONE leaves cross-forest client management disabled." }
         "Add Additional Disk" { "Adds another VHDX to this VM" }
         "Remove Last Additional Disk" { "Removes the last VHDX added to this machine" }
         "Remove this VM from config" { "'Deletes' the VM. Since it's not actually deployed yet, just prevents it from being deployed." }
         "SiteCode" { "Changes the sitecode for this site" }
         "InstallSSMS" { "SQL Server Management Studio will be installed on this VM" }
+        "InstallOffice" { "Select the Microsoft 365 Apps update channel deployed through ConfigMgr: Current, MonthlyEnterprise, or SemiAnnual. Disabled skips Office. Requires pushClient." }
         "InstallDP" { "Install the Distribution Point role on this VM" }
+        "EnablePullDP" { "Configure this Distribution Point as a Pull DP that downloads content from the DP selected in pullDPSourceDP instead of receiving pushed content." }
         "InstallMP" { "Install the Management Point role on this VM" }
+        "useDatabaseReplica" { "Use a SQL database replica for this dedicated SiteSystem Management Point on a Primary site instead of querying the site's database directly. Enabling this adds local SQL by default; replicaSqlServerVM selects the replica host." }
+        "replicaSqlServerVM" { "Select local SQL on this Management Point or another SQL VM to host its database replica. Must differ from the site's database server; SQL Server and SQL Agent must run as LocalSystem." }
+        "replicaDbName" { "Name of the site database replica used by this Management Point. Defaults to CM_<SiteCode> on the selected replica SQL host." }
         "InstallRP" { "Install SSRS and the Reporting point role on this VM" }
         "InstallSUP" { "Install WSUS and the Software Update Point role on this VM" }
         "InstallSMSProv" { "Install an additional SMS Provider on this machine (Along with the ADK)" }
