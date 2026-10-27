@@ -120,24 +120,22 @@ function Get-NetworkForVM {
             }
         }
         "PassiveSite" {
-            $SS = Get-SiteServerForSiteCode -siteCode $vm.SiteCode -deployConfig $ConfigToModify -type VM
+            $SS = Get-GenConfigSiteServer -SiteCode $vm.SiteCode -ConfigToModify $ConfigToModify
+            if (-not $SS) { return $null }
             if ($ss.network -ne $currentNetwork) {
                 return $ss.Network
             }
         }
         "SiteSystem" {
-            # sitesAndNetworks maps exactly one subnet per site code, so a DP/MP left
-            # on the default network sits inside another site's boundary.
-            # Get-SiteServerForSiteCode throws when the site code resolves to nothing.
-            try {
-                $SS = Get-SiteServerForSiteCode -siteCode $vm.SiteCode -deployConfig $ConfigToModify -type VM
+            $SS = Get-GenConfigSiteServer -SiteCode $vm.SiteCode -ConfigToModify $ConfigToModify
+            if (-not $SS) { return $null }
+            if (-not $ReturnIfNotNeeded) {
+                return Select-Subnet -config $ConfigToModify -CurrentNetworkIsValid:$true -CurrentVM $vm -CurrentValue $currentNetwork
             }
-            catch {
-                Write-Log "Get-NetworkForVM: no site server found for site code '$($vm.SiteCode)'; leaving $($vm.vmName) on $currentNetwork." -LogOnly
-                return $null
-            }
-            if ($ss.network -ne $currentNetwork) {
-                return $ss.Network
+            # Start new site systems on their site's subnet, but allow explicit moves.
+            $siteNetwork = if ($SS.network) { $SS.network } else { $ConfigToModify.vmOptions.network }
+            if ($siteNetwork -ne $currentNetwork) {
+                return $siteNetwork
             }
         }
         Default {
@@ -155,8 +153,12 @@ function Add-NewVMForRole {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Role")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [String] $Role,
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [String] $Domain,
         [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
         [object] $ConfigToModify = $global:config,
@@ -183,6 +185,11 @@ function Add-NewVMForRole {
     )
 
 
+    if ($null -eq $ConfigToModify -or [string]::IsNullOrWhiteSpace($Role) -or
+        [string]::IsNullOrWhiteSpace($Domain) -or [string]::IsNullOrWhiteSpace($ConfigToModify.vmOptions.prefix)) {
+        Add-ErrorMessage -property 'vmOptions' -Persist "A role, domain name, configuration and non-empty VM prefix are required before adding a VM."
+        return
+    }
     $oldConfig = $configToModify | ConvertTo-Json -Depth 5 | ConvertFrom-Json
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem SiteCode: $SiteCode ParentSiteCode: $parentSiteCode Network: $network"
 
@@ -978,10 +985,15 @@ function Clear-StaleValidationMessagesForVM {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string] $VmName
     )
 
-    if (-not $VmName) { return }
+    if ([string]::IsNullOrWhiteSpace($VmName)) {
+        Add-ErrorMessage -property 'vmName' -Persist "Cannot refresh VM validation messages because the VM name is empty."
+        return
+    }
     $needle = "[$VmName]"
 
     if ($global:GenConfigErrorMessages) {

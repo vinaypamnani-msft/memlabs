@@ -9,6 +9,9 @@ function select-PullDPMenu {
         [Parameter(Mandatory = $true, HelpMessage = "CurrentVM")]
         [object] $CurrentVM
     )
+    if (-not (Get-GenConfigSiteServer -ConfigToModify $ConfigToModify -SiteCode $CurrentVM.SiteCode)) {
+        return 'ESCAPE'
+    }
     #Get-PSCallStack | Out-Host
     $result = $null
     if ((Get-ListOfPossibleDPMP -Config $ConfigToModify -siteCode $CurrentVM.SiteCode).Count -eq 0) {
@@ -17,10 +20,11 @@ function select-PullDPMenu {
 
     $additionalOptions += @{ "N" = "Create a DP VM" }
 
-    while ([string]::IsNullOrWhiteSpace($result) -or $result -eq "ESCAPE") {
+    while ([string]::IsNullOrWhiteSpace($result)) {
         Write-Log -Activity "Pull DP Source DP selection" -NoNewLine
         $result = Get-Menu2 -MenuName "Pull DP Source DP selection" -prompt "Select Source DP VM" -optionArray $(Get-ListOfPossibleDPMP -Config $ConfigToModify -siteCode $CurrentVM.SiteCode) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
     }
+    if ($result -eq 'ESCAPE') { return 'ESCAPE' }
     switch ($result.ToLowerInvariant()) {
         "n" {
             $result = Add-NewVMForRole -Role "SiteSystem" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true -SiteCode $CurrentVM.SiteCode
@@ -29,6 +33,8 @@ function select-PullDPMenu {
             }
             else {
                 write-Log "Failed to add new DPMP for SiteCode $($currentVM.SiteCode)" -Failure
+                Add-ErrorMessage -property 'pullDPSourceDP' -Persist "Could not create a source DP for site '$($CurrentVM.SiteCode)'. The Pull DP source was not changed."
+                return 'ESCAPE'
             }
         }
     }
@@ -90,14 +96,12 @@ function select-ReplicaSQLMenu {
     # any config or domain SQL server (Get-ListOfPossibleSQLServers).
     $sqlList = @(Get-ListOfPossibleSQLServers -Config $ConfigToModify)
 
+    if (-not (Get-GenConfigSiteServer -ConfigToModify $ConfigToModify -SiteCode $CurrentVM.SiteCode)) {
+        return 'ESCAPE'
+    }
     if ($CurrentVM -and $CurrentVM.siteCode) {
         $siteSql = $null
-        try {
-            $siteSql = Get-SqlServerForSiteCode -deployConfig $ConfigToModify -SiteCode $CurrentVM.siteCode -type Name -SmartUpdate:$false
-        }
-        catch {
-            $siteSql = $null
-        }
+        $siteSql = Get-SqlServerForSiteCode -deployConfig $ConfigToModify -SiteCode $CurrentVM.siteCode -type Name -SmartUpdate:$false
         if ($siteSql) {
             $sqlList = @($sqlList | Where-Object { $_ -ne $siteSql })
         }
@@ -250,10 +254,16 @@ function Get-ListOfPossibleDPMP {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [object] $Config = $global:config,
         [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string] $siteCode
 
 
     )
+    if ([string]::IsNullOrWhiteSpace($siteCode)) {
+        Add-ErrorMessage -property 'siteCode' -Persist "Select a valid site code before choosing a Pull DP source."
+        return @()
+    }
     $FSList = @()
     $FS = $Config.virtualMachines | Where-Object { $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
     foreach ($item in $FS) {

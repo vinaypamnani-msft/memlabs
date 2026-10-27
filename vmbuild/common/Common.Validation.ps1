@@ -570,8 +570,9 @@ function Test-MachineNameExists {
 
     )
 
-    if (-not $name) {
-        throw "Test-ValidMachineName called without a VMName"
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        Add-ValidationMessage -Message "VM Validation: A referenced VM name cannot be empty." -ReturnObject $ReturnObject -Failure
+        return
     }
 
     write-log "Testing $name" -Verbose
@@ -580,7 +581,7 @@ function Test-MachineNameExists {
     $vm = Get-List2 -deployConfig $config -SmartUpdate | where-object { $_.vmName -eq $name -or $_.vmName -eq $nameWithPrefix }
 
     if (-not $vm) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid reference VM: $name. VM does not exist." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid reference VM: $name. VM does not exist." -ReturnObject $ReturnObject -Failure
     }
 }
 
@@ -592,8 +593,9 @@ function Test-ValidMachineName {
         [switch] $EnforceNetBios
     )
 
-    if (-not $name) {
-        throw "Test-ValidMachineName called without a VMName"
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        Add-ValidationMessage -Message "VM Validation: A VM or computer name cannot be empty." -ReturnObject $ReturnObject -Failure
+        return
     }
 
     write-log "Testing $name" -Verbose
@@ -706,11 +708,17 @@ function Test-ValidVmSupported {
         [object] $ReturnObject
     )
 
-    if (-not $VM) {
-        throw "No VM provided"
+    if ($null -eq $VM -or [string]::IsNullOrWhiteSpace($VM.vmName)) {
+        Add-ValidationMessage -Message "VM Validation: Each VM entry must contain a non-empty vmName." -ReturnObject $ReturnObject -Failure
+        return
     }
 
     $vmName = $VM.vmName
+    foreach ($reference in 'remoteSQLVM', 'replicaSqlServerVM', 'wsusDataBaseServer', 'fileServerVM', 'pullDPSourceDP', 'OtherNode', 'remoteContentLibVM', 'PatchMyPCFileServer') {
+        if ($VM.PSObject.Properties[$reference] -and [string]::IsNullOrWhiteSpace($VM.$reference)) {
+            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an empty '$reference' VM reference. Select a valid VM or remove the unused property." -ReturnObject $ReturnObject -Failure
+        }
+    }
 
     if (-not ($vmName.StartsWith( $($ConfigObject.vmOptions.prefix) ) ) ) {
         $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
@@ -1204,9 +1212,9 @@ function Test-ValidRoleSiteServer {
 
         $psInConfig = $ConfigObject.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $VM.parentSiteCode }
         if (-not $psInConfig) {
-            $primary = Get-SiteServerForSiteCode -deployConfig $ConfigObject -sitecode $VM.parentSiteCode -type VM
+            $primary = Get-List2 -deployConfig $ConfigObject | Where-Object { $_.Role -eq 'Primary' -and $_.SiteCode -eq $VM.parentSiteCode }
             if (-not $primary) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains parentSiteCode [$($VM.parentSiteCode)], but a primary site with this siteCode was not found." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains parentSiteCode [$($VM.parentSiteCode)], but a primary site with this siteCode was not found." -ReturnObject $ReturnObject -Failure
             }
         }
     }
@@ -1823,6 +1831,19 @@ function Test-Configuration {
         #         return $return
         #     }
         # }
+
+        $vmIndex = 0
+        foreach ($candidate in @($configObject.virtualMachines)) {
+            $vmIndex++
+            if ($null -eq $candidate -or [string]::IsNullOrWhiteSpace($candidate.vmName)) {
+                Add-ValidationMessage -Message "VM Validation: virtualMachines entry $vmIndex must contain a non-empty vmName." -ReturnObject $return -Failure
+            }
+        }
+        if ($return.Failures -gt 0) {
+            $return.DeployConfig = $configObject
+            $return.Message = $return.Message.ToString().Trim()
+            return $return
+        }
 
         # Get deployConfig without existing VM's for validation
         Write-Progress2 -Activity "Validating Configuration" -Status "Creating DeployConfig" -PercentComplete 5
@@ -2632,8 +2653,13 @@ function Test-Configuration {
 
             # Add thisParams
 
-            $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
-            $return.DeployConfig = $deployConfigEx
+            if ($return.Failures -eq 0) {
+                $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
+                $return.DeployConfig = $deployConfigEx
+            }
+            else {
+                $return.DeployConfig = $deployConfig
+            }
 
             # Disk space validation for VHDX copies (slow: disk I/O for file sizes, drive query)
             Write-Progress2 -Activity "Validating Configuration" -Status "Checking Disk Space" -PercentComplete 92
@@ -2668,9 +2694,9 @@ function Test-Configuration {
         return $return
     }
     catch {
-        $return.Message = $_
-        $return.Problems += 1
-        #$return.Failures += 1
+        $return.Valid = $false
+        Add-ValidationMessage -Message "Configuration validation could not complete: $($_.Exception.Message)" -ReturnObject $return -Failure
+        $return.Message = $return.Message.ToString().Trim()
         Write-Exception -ExceptionInfo $_
         Write-Progress2 -Activity "Validating Configuration"  -Completed        
         return $return

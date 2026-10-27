@@ -36,6 +36,7 @@ function Assert-Equal {
 . (Import-TestFunction -Path $cmMenusPath -Name 'Set-WsusMemoryFloor')
 . (Import-TestFunction -Path $cmMenusPath -Name 'Get-WsusDBName')
 . (Import-TestFunction -Path $validationPath -Name 'Get-AdditionalValidations')
+. (Import-TestFunction -Path $validationPath -Name 'Get-GenConfigSiteServer')
 
 function Get-ParentSiteServerForSiteCode {
     param($deployConfig, $siteCode, $type, [bool] $SmartUpdate)
@@ -44,7 +45,12 @@ function Get-ParentSiteServerForSiteCode {
 
 function Get-List2 {
     param($deployConfig)
-    @()
+    [pscustomobject]@{
+        vmName     = 'PS1SITE'
+        Role       = 'Primary'
+        SiteCode   = 'PS1'
+        InstallSUP = $script:ActiveSiteServer.InstallSUP
+    }
 }
 
 function Get-ActiveSiteServerForSiteCode {
@@ -114,6 +120,19 @@ $remoteSqlSup = [pscustomobject]@{
 Get-AdditionalValidations -property $remoteSqlSup -name 'installSUP' -CurrentValue $false
 Assert-Equal 'PS1SQL' $remoteSqlSup.wsusDataBaseServer 'Enabling a remote-SQL SUP selected the wrong database.'
 Assert-Equal '5GB' $remoteSqlSup.Memory 'A remote-SQL SUP did not retain the existing 5GB memory floor.'
+
+$script:SiteSqlServer = $null
+$missingSqlSup = [pscustomobject]@{
+    vmName          = 'PS1SUP4'
+    Role            = 'SiteSystem'
+    SiteCode        = 'PS1'
+    InstallSUP      = $true
+    Memory          = '4GB'
+    additionalDisks = [pscustomobject]@{ E = '250GB' }
+}
+Get-AdditionalValidations -property $missingSqlSup -name 'installSUP' -CurrentValue $false
+Assert-Equal 'WID' $missingSqlSup.wsusDataBaseServer 'Enabling a SUP with a missing site SQL VM selected an empty database server.'
+Assert-Equal '8GB' $missingSqlSup.Memory 'A SUP with a missing site SQL VM did not receive the WID memory floor.'
 
 $switchToWid = [pscustomobject]@{
     vmName             = 'PS1SUP3'

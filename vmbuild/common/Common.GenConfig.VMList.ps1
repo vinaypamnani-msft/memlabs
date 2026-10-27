@@ -350,7 +350,10 @@ function Select-Options {
                 continue MainLoop
             }
             "pullDPSourceDP" {
-                $property.pullDPSourceDP = select-PullDPMenu  -CurrentValue $value -CurrentVM $Property
+                $result = select-PullDPMenu -CurrentValue $value -CurrentVM $Property
+                if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne 'ESCAPE') {
+                    $property.pullDPSourceDP = $result
+                }
                 continue MainLoop
             }
             "fileServerVM" {
@@ -405,6 +408,11 @@ function Select-Options {
                 }
                 else {
                     $network = Select-Subnet -CurrentValue $property.Network
+                }
+
+                # Role-bound subnets and cancelled pickers can return no replacement.
+                if ([string]::IsNullOrWhiteSpace($network) -or $network -eq "ESCAPE") {
+                    continue MainLoop
                 }
 
                 if ($network -eq $global:config.vmOptions.network) {
@@ -1250,7 +1258,16 @@ function Select-VirtualMachines {
                 if ($i -eq $response -or ($machineName -and $machineName -eq $virtualMachine.vmName)) {
                     #if ($i -eq $response) {
                     Write-Log -Activity -NoNewLine "Remove $($virtualMachine.vmName) from current config"
-                    $response = Read-YesOrNoWithTimeout -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp -Default "y"
+                    $disableOfflineRoot = $virtualMachine.role -eq "StandaloneRootCA" -and $global:config.pkiOptions.UseOfflineRoot
+                    if ($disableOfflineRoot) {
+                        $response = Read-YesOrNoWithTimeout -Prompt "Disable Offline Root and remove $($virtualMachine.vmName) from the current configuration? (y/N)" -HideHelp -Default "n"
+                        if ($response -notin @("y", "yes")) {
+                            return
+                        }
+                    }
+                    else {
+                        $response = Read-YesOrNoWithTimeout -Prompt "Are you sure you want to remove $($virtualMachine.vmName)? (Y/n)" -HideHelp -Default "y"
+                    }
                     if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
                     }
                     else {
@@ -1291,6 +1308,11 @@ function Select-VirtualMachines {
                             }
                         }
                         if ($removeVM -eq $true) {
+                            if ($disableOfflineRoot) {
+                                $global:config.pkiOptions.UseOfflineRoot = $false
+                                $global:config.pkiOptions.OfflineRootCAVM = ""
+                                Write-Log "[OfflineRootCA] Offline Root disabled before removing '$($virtualMachine.vmName)' from config"
+                            }
                             if ($virtualMachine.role -eq "Proxy") {
                                 Invoke-ProxyOptInCleanup -ProxyVmName $virtualMachine.vmName
                             }
@@ -1317,9 +1339,15 @@ function Invoke-ProxyOptInCleanup {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Name of the Proxy VM being removed.")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string] $ProxyVmName
     )
 
+    if ([string]::IsNullOrWhiteSpace($ProxyVmName)) {
+        Add-ErrorMessage -property 'vmName' -Persist "Cannot remove proxy settings without a valid Proxy VM name."
+        return
+    }
     $flipped = @(Disable-ProxyOptIn -ConfigToModify $global:config)
     $summary = "Proxy VM $ProxyVmName removed."
     if ($flipped.Count -gt 0) {
@@ -1340,12 +1368,24 @@ function Remove-VMFromConfig {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Name of VM to remove.")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string] $vmName,
         [Parameter(Mandatory = $false, HelpMessage = "Config to modify")]
         [object] $configToModify = $global:config
     )
-    $DeletedVM = $null
-    $newvm = $configToModify.virtualMachines | ConvertTo-Json | ConvertFrom-Json
+    if ($null -eq $configToModify -or [string]::IsNullOrWhiteSpace($vmName)) {
+        Add-ErrorMessage -property 'vmName' -Persist "Cannot remove a VM without a non-empty VM name and configuration."
+        return
+    }
+    $matchesToRemove = @($configToModify.virtualMachines | Where-Object { $_.vmName -eq $vmName })
+    if ($matchesToRemove.Count -ne 1) {
+        Add-ErrorMessage -property 'vmName' -Persist "Cannot remove VM '$vmName': it must exist uniquely in the configuration. Found $($matchesToRemove.Count)."
+        return
+    }
+    $DeletedVM = $matchesToRemove[0]
+    # Keep the menu's VM object references attached to the live configuration.
+    $newvm = @($configToModify.virtualMachines)
     $configToModify.virtualMachines = @()
     foreach ($virtualMachine in $newvm) {
 

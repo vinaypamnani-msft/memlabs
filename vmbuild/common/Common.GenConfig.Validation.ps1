@@ -31,7 +31,9 @@ function Add-ErrorMessage {
         [Parameter(Mandatory = $false, HelpMessage = "Base Property Object")]
         [string] $property,
         [Parameter(Mandatory = $false, HelpMessage = "Current value")]
-        [switch] $Warning
+        [switch] $Warning,
+        [Parameter(Mandatory = $false, HelpMessage = "Keep the message through the next main-menu validation pass")]
+        [switch] $Persist
     )
 
     $level = "ERROR"
@@ -47,10 +49,17 @@ function Add-ErrorMessage {
         $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages)
     }
 
-    $global:GenConfigErrorMessages += [PSCustomObject]@{
+    $entry = [PSCustomObject]@{
         property = $property
         Level    = $level
         Message  = $message
+    }
+    $global:GenConfigErrorMessages += $entry
+    if ($Persist) {
+        $pending = @($global:PendingValidationErrors | Where-Object { $_ })
+        if (@($pending | Where-Object { $_.property -eq $property -and $_.Level -eq $level -and $_.Message -eq $message }).Count -eq 0) {
+            $global:PendingValidationErrors = @($pending) + $entry
+        }
     }
     Write-Verbose "Add-ErrorMessage $message"
 
@@ -80,6 +89,58 @@ function Add-ErrorMessage {
     }
 }
 
+function Get-GenConfigSiteServer {
+    [CmdletBinding()]
+    param (
+        [object] $ConfigToModify = $global:Config,
+        [string] $SiteCode
+    )
+
+    if ($null -eq $ConfigToModify -or [string]::IsNullOrWhiteSpace($SiteCode)) {
+        Add-ErrorMessage -property 'siteCode' -Persist "A valid site code is required before editing site-dependent roles or databases."
+        return
+    }
+    $siteServers = @($ConfigToModify.virtualMachines | Where-Object {
+            $_.SiteCode -eq $SiteCode -and $_.Role -in 'CAS', 'Primary', 'Secondary' -and -not $_.hidden
+        })
+    if ($siteServers.Count -eq 0) {
+        $siteServers = @(Get-List2 -deployConfig $ConfigToModify | Where-Object {
+                $_.SiteCode -eq $SiteCode -and $_.Role -in 'CAS', 'Primary', 'Secondary'
+            } | Sort-Object vmName -Unique)
+    }
+    if ($siteServers.Count -ne 1 -or [string]::IsNullOrWhiteSpace($siteServers[0].vmName)) {
+        Add-ErrorMessage -property 'siteCode' -Persist "Site code '$SiteCode' must identify one site server in the configuration or domain. Found $($siteServers.Count). Select a valid site code."
+        return
+    }
+    return $siteServers[0]
+}
+
+function Get-GenConfigSqlVM {
+    [CmdletBinding()]
+    param (
+        [object] $ConfigToModify = $global:Config,
+        [string] $VmName,
+        [string] $Property = 'remoteSQLVM'
+    )
+
+    if ($null -eq $ConfigToModify -or [string]::IsNullOrWhiteSpace($VmName)) {
+        Add-ErrorMessage -property $Property -Persist "A non-empty SQL VM name and configuration are required. No database settings were changed."
+        return
+    }
+    $sqlVMs = @($ConfigToModify.virtualMachines | Where-Object { $_.vmName -eq $VmName })
+    if ($sqlVMs.Count -eq 0) {
+        $sqlVMs = @(Get-VMFromList2 -deployConfig $ConfigToModify -vmName $VmName -SmartUpdate:$false)
+    }
+    if ($sqlVMs.Count -ne 1) {
+        Add-ErrorMessage -property $Property -Persist "SQL VM '$VmName' must exist uniquely in the configuration or domain. Found $($sqlVMs.Count). No database settings were changed."
+        return
+    }
+    if (-not $sqlVMs[0].sqlVersion) {
+        Add-ErrorMessage -property $Property -Persist "VM '$VmName' does not have SQL configured. Select a SQL VM before changing the database server."
+        return
+    }
+    return $sqlVMs[0]
+}
 
 function Get-AdditionalValidations {
     [CmdletBinding()]
@@ -89,9 +150,33 @@ function Get-AdditionalValidations {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
     $value = $property."$($Name)"
+    if ($property.Role -eq 'SQLAO' -and $name -in 'SqlServiceAccount', 'SqlAgentAccount', 'sqlVersion', 'sqlInstanceName', 'sqlPort', 'sqlInstanceDir', 'network') {
+        $partners = @($Global:Config.virtualMachines | Where-Object {
+                if ($property.OtherNode) { $_.vmName -eq $property.OtherNode }
+                else { $_.OtherNode -eq $property.vmName -and $_.vmName -ne $property.vmName }
+            })
+        if ($partners.Count -ne 1) {
+            $property.$name = $CurrentValue
+            Add-ErrorMessage -property 'OtherNode' -Persist "Cannot change '$name' on SQL Always On VM '$($property.vmName)': its cluster partner is missing or ambiguous. Restore the partner or switch the site to local SQL."
+            return
+        }
+    }
+    if ($name -in 'installMP', 'installDP', 'useDatabaseReplica', 'enablePullDP' -and $value -eq $true) {
+        if (-not (Get-GenConfigSiteServer -SiteCode $property.SiteCode)) {
+            $property.$name = $CurrentValue
+            return
+        }
+    }
+    if ($name -in 'E', 'F', 'G', 'memory', 'dynamicMinRam' -and [string]::IsNullOrWhiteSpace($CurrentValue) -and $value -notmatch '^\d+(GB|MB)$') {
+        $property.$name = $CurrentValue
+        Add-ErrorMessage -property $name -Persist "Specify '$name' with MB or GB when its previous value is empty."
+        return
+    }
     #$name = $($item.Name)
     Write-Verbose "[Get-AdditionalValidations] Prop:'$property' Name:'$name' Current:'$CurrentValue' New:'$value'"
     switch ($name) {
@@ -294,7 +379,7 @@ function Get-AdditionalValidations {
                 }
 
                 foreach ($sql in $SQLAO) {
-                    $sql.$name = $value
+                    $sql | Add-Member -MemberType NoteProperty -Name $name -Value $value -Force
                 }
             }
         }
@@ -308,7 +393,7 @@ function Get-AdditionalValidations {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
                 }
                 foreach ($sql in $SQLAO) {
-                    $sql.$name = $value
+                    $sql | Add-Member -MemberType NoteProperty -Name $name -Value $value -Force
                 }
             }
         }
@@ -322,24 +407,24 @@ function Get-AdditionalValidations {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
                 }
                 foreach ($sql in $SQLAO) {
-                    $sql.$name = $value
+                    $sql | Add-Member -MemberType NoteProperty -Name $name -Value $value -Force
                 }
             }
         }
         "sqlInstanceName" {
             if ($CurrentValue -eq "MSSQLSERVER") {
                 if ($Value -ne "MSSQLSERVER") {
-                    $property.sqlPort = "2433"
+                    $property | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value '2433' -Force
                 }
             }
             else {
                 if ($Value -eq "MSSQLSERVER") {
-                    $property.sqlPort = "1433"
+                    $property | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value '1433' -Force
                 }
             }
 
             if ($property.Role -eq "SQLAO") {
-                $property.sqlPort = "1433"
+                $property | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value '1433' -Force
                 $SQLAO = @($property)
                 if ($property.OtherNode) {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
@@ -348,15 +433,15 @@ function Get-AdditionalValidations {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
                 }
                 foreach ($sql in $SQLAO) {
-                    $sql.$name = $value
-                    $sql.sqlPort = $property.sqlPort
+                    $sql | Add-Member -MemberType NoteProperty -Name $name -Value $value -Force
+                    $sql | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value $property.sqlPort -Force
                 }
             }
 
         }
         "sqlPort" {
             if ($property.Role -eq "SQLAO") {
-                Add-ErrorMessage -property $name  "Sorry. When using SQLAO, port must remain 1433 due to a bug in SqlServerDSC issue #329."
+                Add-ErrorMessage -property $name -Persist "Sorry. When using SQLAO, port must remain 1433 due to a bug in SqlServerDSC issue #329."
                 $SQLAO = @($property)
                 if ($property.OtherNode) {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.OtherNode }
@@ -365,7 +450,7 @@ function Get-AdditionalValidations {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
                 }
                 foreach ($sql in $SQLAO) {
-                    $sql.$name = 1433
+                    $sql | Add-Member -MemberType NoteProperty -Name $name -Value 1433 -Force
                 }
             }
 
@@ -380,7 +465,7 @@ function Get-AdditionalValidations {
                     $SQLAO += $Global:Config.virtualMachines | Where-Object { $_.OtherNode -eq $property.vmName }
                 }
                 foreach ($sql in $SQLAO) {
-                    $sql.$name = $value
+                    $sql | Add-Member -MemberType NoteProperty -Name $name -Value $value -Force
                 }
             }
 
@@ -500,6 +585,12 @@ function Get-AdditionalValidations {
                     $property.PsObject.Members.Remove("wsusDataBaseServer")
                     $property.PsObject.Members.Remove("InstallPatchMyPC")
                     $property.PsObject.Members.Remove("PatchMyPCFileServer")
+                    Add-ErrorMessage -property 'siteCode' -Persist "Cannot enable a SUP without a valid site code."
+                    return
+                }
+                if (-not (Get-GenConfigSiteServer -SiteCode $property.SiteCode)) {
+                    $property.installSUP = $CurrentValue
+                    return
                 }
 
                 if ($property.ParentSiteCode -or $property.SiteCode) {
@@ -537,7 +628,7 @@ function Get-AdditionalValidations {
 
                         $sql = Get-SqlServerForSiteCode -siteCode $property.SiteCode -deployConfig $Global:Config -type VM
                         if (-not $ActiveVM.InstallSUP) {
-                            if (-not $sql.InstallSUP) {
+                            if ($sql -and -not $sql.InstallSUP) {
                                 $database = $($sql.vmName)
                             }
                         }
@@ -655,6 +746,10 @@ function Get-AdditionalValidations {
         "enablePullDP" {
             if ($value -eq $true) {
                 $server = select-PullDPMenu -CurrentVM $property
+                if ([string]::IsNullOrWhiteSpace($server) -or $server -eq 'ESCAPE') {
+                    $property.enablePullDP = $CurrentValue
+                    return
+                }
                 $property | Add-Member -MemberType NoteProperty -Name "pullDPSourceDP" -Value $server -Force
 
             }
@@ -734,6 +829,18 @@ function Get-AdditionalValidations {
                 Add-ErrorMessage -property $name -Warning "SiteCode must be exactly 3 characters long. Unable to change sitecode."                
                 $property.siteCode = $CurrentValue
                 return
+            }
+            if ($property.RemoteSQLVM) {
+                $remoteSql = @($Global:Config.virtualMachines | Where-Object { $_.vmName -eq $property.RemoteSQLVM })
+                $partner = @()
+                if ($remoteSql.Count -eq 1 -and $remoteSql[0].OtherNode) {
+                    $partner = @($Global:Config.virtualMachines | Where-Object { $_.vmName -eq $remoteSql[0].OtherNode })
+                }
+                if ($remoteSql.Count -ne 1 -or ($remoteSql[0].OtherNode -and $partner.Count -ne 1)) {
+                    $property.siteCode = $CurrentValue
+                    Add-ErrorMessage -property $name -Persist "Cannot rename site '$CurrentValue': remote SQL VM '$($property.RemoteSQLVM)' or its cluster partner is missing or ambiguous. Repair the SQL reference first."
+                    return
+                }
             }
             if ($property.RemoteSQLVM) {
                 $newSQLName = $value + "SQL"
@@ -872,6 +979,10 @@ Function Get-TestResult {
     }
     try {
         $c = Test-Configuration -InputObject $Config -Fast
+        if ($null -eq $c -or $c.Valid -isnot [bool] -or $null -eq $c.Failures) {
+            Add-ErrorMessage -property 'Configuration' -Persist "Configuration validation did not return a valid result. The configuration has not been validated."
+            return $false
+        }
         $valid = $c.Valid
         if ($valid -eq $false) {
             $messages = $($c.Message) -split "\r\n"
@@ -899,8 +1010,9 @@ Function Get-TestResult {
             $valid = $true
         }
     }
-    catch {
-        return $true
+    catch [System.Management.Automation.ParameterBindingException] {
+        Add-ErrorMessage -property 'Configuration' -Persist "Configuration validation could not complete because an argument is missing or invalid: $($_.Exception.Message)"
+        return $false
     }
     return $valid
 }

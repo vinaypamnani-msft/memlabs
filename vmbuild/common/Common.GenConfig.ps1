@@ -1324,6 +1324,22 @@ function ConvertTo-DeployConfigEx {
                 }
             }
 
+            # Remote DPs serve OSD even when neither they nor their clients use client push.
+            foreach ($vm in $siteInventory | Where-Object {
+                    $_.role -eq "SiteSystem" -and ($_.installDP -eq $true -or $_.enablePullDP -eq $true) -and
+                    (-not $_.domain -or $_.domain -eq $DomainName)
+                }) {
+                $vmSubnet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
+                if ([string]::IsNullOrWhiteSpace($vmSubnet) -or $vm.SiteCode -notin $bgEligibleSites.SiteCode) {
+                    throw "Cannot generate a boundary for DP '$($vm.vmName)': a subnet and a valid Primary or Secondary site code are required."
+                }
+                if ($vmSubnet -in $sitesAndNetworks.Subnet) { continue }
+                $sitesAndNetworks += [PSCustomObject]@{
+                    SiteCode = $vm.SiteCode
+                    Subnet   = $vmSubnet
+                }
+            }
+
             $thisParams | Add-Member -MemberType NoteProperty -Name "sitesAndNetworks" -Value $sitesAndNetworks -Force
         }
 

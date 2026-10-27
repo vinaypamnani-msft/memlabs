@@ -84,11 +84,17 @@ function Invoke-CMOptionsMenuForVM {
 Function Get-SupportedOperatingSystemsForRole {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "role")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string] $role,
         [Parameter(Mandatory = $false, HelpMessage = "vm")]
         [object] $vm = $null
     )
 
+    if ([string]::IsNullOrWhiteSpace($role)) {
+        Add-ErrorMessage -property 'role' -Persist "Select a valid VM role before choosing an operating system."
+        return @()
+    }
     $ServerList = $Common.Supported.OperatingSystems | Where-Object { $_ -like 'Server*' }
     $ClientList = $Common.Supported.OperatingSystems | Where-Object { $_ -notlike 'Server*' }
     $AllList = $Common.Supported.OperatingSystems
@@ -138,6 +144,8 @@ Function Get-OperatingSystemMenuClient {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
 
@@ -173,6 +181,8 @@ Function Get-OperatingSystemMenuServer {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
 
@@ -208,6 +218,8 @@ Function Get-OperatingSystemMenu {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
 
@@ -259,7 +271,7 @@ Function Get-ParentSiteCodeMenu {
         do {
             $result = Get-Menu2 -MenuName "Primary Server Parent Selection" -Prompt "Select CAS sitecode to connect primary to" -OptionArray $casSiteCodes -CurrentValue $CurrentValue -additionalOptions $additionalOptions -Test:$false
         } while (-not $result)
-        if ($result -and ($result.ToLowerInvariant() -eq "x") -or ($result.ToLowerInvariant() -eq "escape")) {
+        if ($result -in 'x', 'escape') {
             return $null
         }
         else {
@@ -292,6 +304,8 @@ Function Set-ParentSiteCodeMenu {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
     $valid = $false
@@ -341,7 +355,7 @@ Function Get-ValidSiteCodesForRP {
         }
         else {
             # No SiteCode prop means this is a remoteSQLVM for an existing or new primary/cas
-            $SiteServer = $list2 | Where-Object ($_.RemoteSQLVM -eq $rp.vmName -and $_.Role -in "CAS", "Primary")
+            $SiteServer = $list2 | Where-Object { $_.RemoteSQLVM -eq $rp.vmName -and $_.Role -in "CAS", "Primary" }
             if ($SiteServer) {
                 if ($SiteServer.SiteCode) {
                     $invalidSiteCodes += $SiteServer.SiteCode
@@ -415,7 +429,7 @@ Function Get-SiteCodeForWSUS {
     while (-not $result) {
         $result = Get-Menu2 -MenuName "Site Code selection for SUP" -Prompt "Select sitecode to connect SUP to" -OptionArray $siteCodes -CurrentValue $CurrentValue -AdditionalOptions $options -Test:$false -Split
     }
-    if ($result -and ($result.ToLowerInvariant() -eq "x") -or ($result.ToLowerInvariant() -eq "escape")) {
+    if ($result -in 'x', 'escape') {
         return $null
     }
     else {
@@ -481,6 +495,10 @@ Function Get-SiteCodeForDPMP {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [string] $Domain
     )
+    if ([string]::IsNullOrWhiteSpace($Domain)) {
+        Add-ErrorMessage -property 'domainName' -Persist "Select a valid domain before choosing a Site System site code."
+        return
+    }
     $valid = $false
     $ConfigToCheck = $Global:Config
     #Get-PSCallStack | out-host
@@ -524,6 +542,7 @@ Function Get-SiteCodeForDPMP {
             if ($siteCodes.Length -eq 0) {
                 Write-Host
                 write-host "No valid site codes are eligible to accept this Site System"
+                Add-ErrorMessage -property 'siteCode' -Persist "No valid site server is available for this Site System. Add or select a site server first."
                 return $null
             }
             else {
@@ -533,7 +552,7 @@ Function Get-SiteCodeForDPMP {
             while (-not $result) {
                 $result = Get-Menu2 -MenuName "Site System SiteCode Selection" -Prompt "Select sitecode to connect Site System to" -OptionArray $siteCodes -CurrentValue $CurrentValue -Test:$false -Split
             }
-            if ($result -and ($result.ToLowerInvariant() -eq "x") -or ($result.ToLowerInvariant() -eq "escape")) {
+            if ($result -in 'x', 'escape') {
                 return $null
             }
             else {
@@ -576,18 +595,13 @@ Function Get-SiteCodeMenu {
         $property | Add-Member -MemberType NoteProperty -Name $name -Value $result -Force
         #$property."$name" = $result
     }
-    try {
-        if ($test -and (Get-TestResult -config $configToCheck -SuccessOnWarning)) {
+    if ($test -and (Get-TestResult -config $configToCheck -SuccessOnWarning)) {
+        return
+    }
+    else {
+        if ($property."$name" -eq $CurrentValue) {
             return
         }
-        else {
-            if ($property."$name" -eq $CurrentValue) {
-                return
-            }
-        }
-    }
-    catch {
-        return
     }
 }
 
@@ -775,6 +789,8 @@ Function Get-SqlVersionMenu {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
 
@@ -804,6 +820,8 @@ Function Get-ForestTrustMenu {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
 
@@ -847,9 +865,15 @@ Function Get-TargetSitesForDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
         [Object] $property,
         [Parameter(Mandatory = $true, HelpMessage = "Domain To get Target Sites")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string] $Domain
     )
 
+    if ([string]::IsNullOrWhiteSpace($Domain)) {
+        Add-ErrorMessage -property 'ForestTrust' -Persist "Select a valid remote domain before choosing target sites."
+        return
+    }
     $targetPrimaries = @((Get-list -type vm -DomainName $Domain | Where-Object { $_.Role -eq "Primary" -or $_.Role -eq "Secondary" } ).SiteCode)
 
     if ($targetPrimaries) {
@@ -881,10 +905,15 @@ Function Set-SiteServerLocalSql {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Site Server VM Object")]
+        [AllowNull()]
         [Object] $virtualMachine
     )
 
     $ConfigToModify = $global:config
+    if ($null -eq $ConfigToModify -or $null -eq $virtualMachine -or [string]::IsNullOrWhiteSpace($virtualMachine.vmName)) {
+        Add-ErrorMessage -property 'vmName' -Persist "Cannot configure local SQL without a named site-server VM and configuration."
+        return
+    }
     if ($null -eq $virtualMachine.sqlVersion) {
 
         $SqlVersion = "SQL Server 2022"
@@ -924,15 +953,24 @@ Function Set-SiteServerLocalSql {
         }
     }
 
-    if ($null -ne $virtualMachine.remoteSQLVM) {
-        $SQLVM = $ConfigToModify.VirtualMachines | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
-        #$SQLVM = $virtualMachine.remoteSQLVM
-        $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
-        if ($SQLVM.OtherNode) {
-            Remove-VMFromConfig -vmName $SQLVM.OtherNode -Config $global:config
-        }
-        Remove-VMFromConfig -vmName $SQLVM.vmName -Config $global:config
+    $remoteSQLVMName = $virtualMachine.remoteSQLVM
+    $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
+    if (($remoteSQLVMName -and $virtualMachine.wsusDataBaseServer -eq $remoteSQLVMName) -or
+        ($virtualMachine.InstallSUP -and [string]::IsNullOrWhiteSpace($virtualMachine.wsusDataBaseServer))) {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusDataBaseServer' -Value $virtualMachine.vmName -Force
+    }
 
+    if (-not [string]::IsNullOrWhiteSpace($remoteSQLVMName)) {
+        $SQLVM = $ConfigToModify.VirtualMachines | Where-Object { $_.vmName -eq $remoteSQLVMName }
+        if ($SQLVM) {
+            if ($SQLVM.OtherNode) {
+                Remove-VMFromConfig -vmName $SQLVM.OtherNode -ConfigToModify $ConfigToModify
+            }
+            Remove-VMFromConfig -vmName $SQLVM.vmName -ConfigToModify $ConfigToModify
+        }
+        else {
+            Write-Log "Remote SQL VM '$remoteSQLVMName' is no longer in the configuration. Restored local SQL on '$($virtualMachine.vmName)'." -Warning
+        }
     }
 
 }
@@ -941,10 +979,24 @@ Function Set-SiteServerRemoteSQL {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Site Server VM Object")]
+        [AllowNull()]
         [Object] $virtualMachine,
         [Parameter(Mandatory = $true, HelpMessage = "VmName")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string] $vmName
     )
+
+    if ($null -eq $virtualMachine -or [string]::IsNullOrWhiteSpace($virtualMachine.vmName)) {
+        Add-ErrorMessage -property 'vmName' -Persist "Cannot configure remote SQL without a named site-server VM."
+        return
+    }
+    $newSQLVM = Get-GenConfigSqlVM -VmName $vmName
+    if (-not $newSQLVM) { return }
+    if ($newSQLVM.vmName -eq $virtualMachine.vmName) {
+        Add-ErrorMessage -property 'remoteSQLVM' -Persist "Remote SQL cannot point to the site server itself. Select Local SQL instead."
+        return
+    }
 
     if ($null -ne $virtualMachine.sqlVersion) {
         $virtualMachine.PsObject.Members.Remove('sqlVersion')
@@ -967,18 +1019,15 @@ Function Set-SiteServerRemoteSQL {
     }
     if ($null -ne $virtualMachine.remoteSQLVM) {
         $oldSQLVM = $global:Config.VirtualMachines | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
-        {
-            if ($oldSQLVM) {
-                $oldSQLVM.PsObject.Members.Remove('installRP')
-            }
+        if ($oldSQLVM) {
+            $oldSQLVM.PsObject.Members.Remove('installRP')
         }
         $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
     }
    
     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteSQLVM' -Value $vmName -force
-    $newSQLVM = $global:Config.VirtualMachines | Where-Object { $_.vmName -eq $vmName }
     if ($newSQLVM) {
-        if (-not $newSQLVM.InstallRP) {
+        if (($global:Config.VirtualMachines -contains $newSQLVM) -and -not $newSQLVM.InstallRP) {
             if ($newSQLVM.role -ne "SQLAO") {
                 $newSQLVM | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
                 $newSQLVM | Add-Member -MemberType NoteProperty -Name 'InstallSMSProv' -Value $false -force
@@ -1121,6 +1170,9 @@ Function Get-ReplicaSQLVM {
             if ([string]::IsNullOrWhiteSpace($result)) {
                 return
             }
+            if (-not (Get-GenConfigSqlVM -VmName $result -Property 'replicaSqlServerVM')) {
+                return
+            }
             Remove-MPReplicaLocalSql $property
             $property | Add-Member -MemberType NoteProperty -Name 'replicaSqlServerVM' -Value $result -Force
         }
@@ -1173,11 +1225,12 @@ Function Get-WsusDBName {
 
         $validVMs = @($Global:Config.virtualMachines | Where-Object { ($_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion) } | Select-Object -ExpandProperty vmName)
 
-        $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $Global:Config -SiteCode $property.siteCode -type VM
+        $ActiveVM = Get-GenConfigSiteServer -SiteCode $property.siteCode
+        if (-not $ActiveVM) { return 'REFRESH' }
 
         $sql = Get-SqlServerForSiteCode -siteCode $property.SiteCode -deployConfig $Global:Config -type VM
         if (-not $ActiveVM.InstallSUP) {
-            if (-not $sql.InstallSUP) {
+            if ($sql -and -not $sql.InstallSUP) {
                 $validVMs += $($sql.vmName)
             }
         }
@@ -1226,6 +1279,9 @@ Function Get-WsusDBName {
             Default {
                 if ([string]::IsNullOrWhiteSpace($result)) {
                     continue
+                }
+                if (-not (Get-GenConfigSqlVM -VmName $result -Property 'wsusDataBaseServer')) {
+                    return 'REFRESH'
                 }
                 $property."$name" = $result
                 $valid = $true
@@ -1310,6 +1366,10 @@ Function Get-remoteSQLVM {
         if (-not $result -or $result -eq "ESCAPE") {
             return
         }
+        if ($result -in 'n', 'a' -and [string]::IsNullOrWhiteSpace($property.SiteCode)) {
+            Add-ErrorMessage -property 'siteCode' -Persist "Select a valid site code before creating a remote SQL VM or SQL Always On cluster."
+            return
+        }
         switch ($result.ToLowerInvariant()) {
             "l" {
                 Set-SiteServerLocalSql $property
@@ -1321,7 +1381,7 @@ Function Get-remoteSQLVM {
             }
             "r" {
                 $sqlVMName = select-RemoteSQLMenu -ConfigToModify $global:config -currentValue $property.remoteSQLVM
-                if ($sqlVMName -eq "ESCAPE") {
+                if ([string]::IsNullOrWhiteSpace($sqlVMName) -or $sqlVMName -eq "ESCAPE") {
                     return
                 }
                 #$name = $($property.SiteCode) + "SQL"
@@ -1335,13 +1395,13 @@ Function Get-remoteSQLVM {
                 Set-SiteServerRemoteSQL $property $name1
             }
             "w" {
-                $virtualMachine.PsObject.Members.Remove('sqlVersion')
-                $virtualMachine.PsObject.Members.Remove('sqlInstanceName')
-                $virtualMachine.PsObject.Members.Remove('sqlPort')
-                $virtualMachine.PsObject.Members.Remove('sqlInstanceDir')
-                $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
+                $property.PsObject.Members.Remove('sqlVersion')
+                $property.PsObject.Members.Remove('sqlInstanceName')
+                $property.PsObject.Members.Remove('sqlPort')
+                $property.PsObject.Members.Remove('sqlInstanceDir')
+                $property.PsObject.Members.Remove('remoteSQLVM')
                 if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
+                    $property | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
                 }
 
             }
@@ -1527,6 +1587,8 @@ Function Get-CMVersionMenu {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
 
@@ -1604,9 +1666,16 @@ Function Get-RoleMenu {
         [Parameter(Mandatory = $true, HelpMessage = "Name of Notefield to Modify")]
         [string] $name,
         [Parameter(Mandatory = $true, HelpMessage = "Current value")]
+        [AllowNull()]
+        [AllowEmptyString()]
         [Object] $CurrentValue
     )
 
+    if ([string]::IsNullOrWhiteSpace($property.vmName) -or
+        @($global:config.virtualMachines | Where-Object { $_.vmName -eq $property.vmName }).Count -ne 1) {
+        Add-ErrorMessage -property 'vmName' -Persist "Cannot change the role of a missing, unnamed or ambiguous VM."
+        return $false
+    }
     $valid = $false
     while ($valid -eq $false) {
         $DC = Get-List -type VM -domain $global:config.vmOptions.domainName | Where-Object { $_.Role -eq "DC" }
@@ -1615,6 +1684,10 @@ Function Get-RoleMenu {
             if ($role -eq "ESCAPE") {
                 return
             }
+            if ([string]::IsNullOrWhiteSpace($role)) {
+                Add-ErrorMessage -property 'role' -Persist "Select a valid role before replacing a VM."
+                return $false
+            }
             $property."$name" = $role
         }
         else {
@@ -1622,6 +1695,10 @@ Function Get-RoleMenu {
             $role = Get-Menu2 -MenuName "Role Selection menu for $($property.VmName)" -prompt "Select Role" -optionArray $(Select-RolesForNewList) -currentValue $CurrentValue -Test:$false
             if ($role -eq "ESCAPE") {
                 return
+            }
+            if ([string]::IsNullOrWhiteSpace($role)) {
+                Add-ErrorMessage -property 'role' -Persist "Select a valid role before replacing a VM."
+                return $false
             }
             $property."$name" = $role
         }

@@ -2,6 +2,63 @@
 
 ARM Template and DSC configurations for deploying an Azure VM with Hyper-V, and for deploying ConfigMgr lab virtual machines on this Hyper-V host.
 
+## GenConfig: network editing
+
+For an OSDClient on a custom subnet, add a SiteSystem with `installDP` enabled,
+open its **network** row, and select the OSDClient's subnet. Site systems can
+use a different subnet from their site server. The missing-local-DP warning
+clears once a DP shares the OSDClient's subnet. Remote DP subnets are included
+in AD subnet and boundary-group generation even when client push is disabled.
+
+New site systems still start on their site's subnet; passive site servers
+retain their site-associated subnet rule. Cancelling a subnet selection or
+receiving no replacement subnet leaves the configuration unchanged and
+returns to the property menu instead of failing on a null `CurrentValue`.
+Validate the menu and custom-subnet OSD behavior with
+[`Test-GenConfigNetworkEdits.ps1`](vmbuild/tools/Test-GenConfigNetworkEdits.ps1).
+
+## GenConfig: switching back to local SQL
+
+For a new build, select the Primary or CAS, open **Select SQL**, and choose
+**Local SQL**. This restores local SQL settings and removes the previous remote
+SQL VM (both nodes for SQL Always On). If that VM was already deleted, GenConfig
+clears the stale reference and reports the recovery instead of stopping.
+The server's SUP database reference follows SQL back locally when it pointed to
+the removed VM; an explicit WID or unrelated WSUS SQL selection is preserved.
+Enabling a SUP while its site SQL VM is missing uses WID rather than an empty
+database-server name. These are configuration changes for a new build, not a
+database migration on an already deployed site.
+
+GenConfig reports missing or ambiguous VM references, empty VM names, missing
+site dependencies, and incomplete SQL Always On partners as **validation
+failures**, not parameter-binding crashes. Edits rejected for missing dependencies
+preserve the previous settings, and their errors remain visible through the next main-menu redraw.
+Validation failures block dependency enhancement; a validation exception cannot
+be treated as success merely because warnings are allowed. Unexpected
+implementation errors outside that validation boundary are not silently hidden.
+The main-menu action boundary also catches argument-binding errors from nested
+edit paths, logs their details, and returns to a validation banner instead of
+terminating GenConfig. This is a narrow safety net, not a blanket exception catch.
+
+Run the isolated regression checks without deploying a lab:
+
+```powershell
+.\vmbuild\tools\Test-GenConfigInvalidReferences.ps1
+.\vmbuild\tools\Test-GenConfigSqlTransitions.ps1
+.\vmbuild\tools\Test-GenConfigWsusMemoryDefaults.ps1
+```
+
+## GenConfig: removing an Offline Root CA
+
+Removing an Offline Root CA VM from the configuration while `UseOfflineRoot` is
+enabled asks whether to disable Offline Root and remove the VM. Choose **Yes** to
+disable `UseOfflineRoot`, clear `OfflineRootCAVM`, and remove the VM so it is not
+recreated on the next menu refresh. PKI infrastructure, the Issuing CA selection,
+and ConfigMgr HTTPS settings are preserved. **No** (the default) cancels both changes.
+
+Validate without deploying a lab:
+`.\vmbuild\tools\Test-GenConfigOfflineRootRemoval.ps1`.
+
 ## Windows Terminal settings safety
 
 Host appearance updates validate the existing Terminal settings, write and

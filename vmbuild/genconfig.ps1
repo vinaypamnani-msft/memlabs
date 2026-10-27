@@ -918,82 +918,88 @@ function Select-MainMenu {
         if (-not ($response -is [string])) {
             continue
         }
-        switch ($response.ToLowerInvariant()) {
-            "q" {
-                $global:DisableSmartUpdate = $false
-                exit(0)
-            }
-            "v" { 
-                Select-Options -MenuName "Global VM Options Menu" -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" -HelpFunction "Get-GenericHelp"
-            }
-            "c" { 
-                Invoke-CMOptionsMenu
-            }
-            "p" {
-                Select-PKIOptions
-            }
-            "d" {
-                Add-ModifiedExistingVMsToConfig
-                $global:DisableSmartUpdate = $false
-                return $true
-            }
-            "s" {
-                $global:DisableSmartUpdate = $false
-                return $false 
-            }
-            "r" {
-                Add-ModifiedExistingVMsToConfig
-                $c = Test-Configuration -InputObject $Global:Config
-                $global:DebugConfig = $c.DeployConfig
-                write-Host 'Debug Config stored in $global:DebugConfig'
-                $global:DisableSmartUpdate = $false
-                return $global:DebugConfig
-            }
-            "!" {
-                $r = Invoke-MainMenuExit -Mode StartOver
-                if ($r -eq 'PlainReturn') { return }
-                if ($r -eq $false) { return $false }
-            }
-            "*" {
-                $r = Invoke-MainMenuExit -Mode GoBack
-                if ($r -eq 'PlainReturn') { return }
-                if ($r -eq $false) { return $false }
-            }
-            "z" {
-                $i = 0
-                $filename = Save-Config $Global:Config
-                if (-not $filename) { continue }
-                #$creds = New-Object System.Management.Automation.PSCredential ($Global:Config.vmOptions.adminName, $Global:Common.LocalAdmin.GetNetworkCredential().Password)
-                $t = Test-Configuration -InputObject $Global:Config
-                $response = Get-Menu2 -MenuName "Generate DSC.Zip" -Prompt "Select menu option" -OptionArray $($t.DeployConfig.virtualMachines.vmName) -Test:$false
-                if ($response -eq "ESCAPE") {
-                    continue
+        try {
+            switch ($response.ToLowerInvariant()) {
+                "q" {
+                    $global:DisableSmartUpdate = $false
+                    exit(0)
                 }
-                $vmName = $response                
-
-                $params = @{configName = $filename; vmName = $vmName; Debug = $false }
-
-                write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"    
-                Add-CmdHistory ".\dsc\createGuestDscZip.ps1 -configName `"$fileName`" -vmName $vmName"
-                #Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
-                & ".\dsc\createGuestDscZip.ps1" @params | Out-Host
-                Set-Location $PSScriptRoot | Out-Null
-            }
-            "n" {
-                Select-VirtualMachines $response
-            }
-            default { 
-                # This will be a VM number, or 'N' for new VM
-
-                if ($response.StartsWith("-D")) {
-                    $response = $response.SubString(2)
-                    write-log -verbose "Deleting VM '$response' from config"
-                    Select-VirtualMachines $vmNameToNumberMap[$response] "Z"
+                "v" {
+                    Select-Options -MenuName "Global VM Options Menu" -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" -HelpFunction "Get-GenericHelp"
                 }
-                else {
-                    Select-VirtualMachines $vmNameToNumberMap[$response] 
+                "c" {
+                    Invoke-CMOptionsMenu
+                }
+                "p" {
+                    Select-PKIOptions
+                }
+                "d" {
+                    Add-ModifiedExistingVMsToConfig
+                    $global:DisableSmartUpdate = $false
+                    return $true
+                }
+                "s" {
+                    $global:DisableSmartUpdate = $false
+                    return $false
+                }
+                "r" {
+                    Add-ModifiedExistingVMsToConfig
+                    $c = Test-Configuration -InputObject $Global:Config
+                    $global:DebugConfig = $c.DeployConfig
+                    write-Host 'Debug Config stored in $global:DebugConfig'
+                    $global:DisableSmartUpdate = $false
+                    return $global:DebugConfig
+                }
+                "!" {
+                    $r = Invoke-MainMenuExit -Mode StartOver
+                    if ($r -eq 'PlainReturn') { return }
+                    if ($r -eq $false) { return $false }
+                }
+                "*" {
+                    $r = Invoke-MainMenuExit -Mode GoBack
+                    if ($r -eq 'PlainReturn') { return }
+                    if ($r -eq $false) { return $false }
+                }
+                "z" {
+                    $i = 0
+                    $filename = Save-Config $Global:Config
+                    if (-not $filename) { continue }
+                    #$creds = New-Object System.Management.Automation.PSCredential ($Global:Config.vmOptions.adminName, $Global:Common.LocalAdmin.GetNetworkCredential().Password)
+                    $t = Test-Configuration -InputObject $Global:Config
+                    $response = Get-Menu2 -MenuName "Generate DSC.Zip" -Prompt "Select menu option" -OptionArray $($t.DeployConfig.virtualMachines.vmName) -Test:$false
+                    if ($response -eq "ESCAPE") {
+                        continue
+                    }
+                    $vmName = $response
+
+                    $params = @{configName = $filename; vmName = $vmName; Debug = $false }
+
+                    write-host "& .\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName"
+                    Add-CmdHistory ".\dsc\createGuestDscZip.ps1 -configName `"$fileName`" -vmName $vmName"
+                    #Invoke-Expression  ".\dsc\createGuestDscZip.ps1 -configName ""$fileName"" -vmName $vmName -confirm:$false"
+                    & ".\dsc\createGuestDscZip.ps1" @params | Out-Host
+                    Set-Location $PSScriptRoot | Out-Null
+                }
+                "n" {
+                    Select-VirtualMachines $response
+                }
+                default {
+                    # This will be a VM number, or 'N' for new VM
+
+                    if ($response.StartsWith("-D")) {
+                        $response = $response.SubString(2)
+                        write-log -verbose "Deleting VM '$response' from config"
+                        Select-VirtualMachines $vmNameToNumberMap[$response] "Z"
+                    }
+                    else {
+                        Select-VirtualMachines $vmNameToNumberMap[$response]
+                    }
                 }
             }
+        }
+        catch [System.Management.Automation.ParameterBindingException] {
+            Add-ErrorMessage -property 'Configuration' -Persist "Cannot complete menu action '$response': a configuration argument is missing or invalid. $($_.Exception.Message)"
+            Write-Log "GenConfig menu action '$response' failed: $($_.Exception.Message)`r`n$($_.ScriptStackTrace)" -Failure -LogOnly
         }
     }
 }
