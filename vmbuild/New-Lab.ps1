@@ -175,6 +175,13 @@ if ($global:init_failed) {
     exit 1
 }
 
+try {
+    Initialize-RDCManAtStartup -WhatIf:$WhatIf
+}
+catch {
+    Write-Log "Could not prepare RDCMan at startup. $($_.Exception.Message)" -Warning
+}
+
 if ($DisableMouse) {
     $Global:Common.MouseEnabled = $false
 }

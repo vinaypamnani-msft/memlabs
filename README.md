@@ -59,6 +59,27 @@ and ConfigMgr HTTPS settings are preserved. **No** (the default) cancels both ch
 Validate without deploying a lab:
 `.\vmbuild\tools\Test-GenConfigOfflineRootRemoval.ps1`.
 
+## RDCMan startup preparation
+
+Launching `New-Lab.ps1` (including through `VMBuild.cmd`) or standalone
+`genconfig.ps1` prepares MemLabs' pinned RDCMan 3.12.0.0 before showing the menu.
+When installing the pin, when a newer client is running, or when `memlabs.rdg` is missing,
+invalid, or saved by a newer client, MemLabs automatically regenerates the RDCMan
+and mRemoteNG connection files. An already prepared client is not stopped or
+regenerated on every launch.
+
+The pinned executable is resolved from cache or configured storage before closing
+RDCMan. Normal close gets five seconds; a blocking dialog triggers force-kill,
+followed by confirmed exit before installing or writing files. A previously
+running client reopens using the pinned copy under `%ProgramData%\memlabs\RDCMan`,
+not the newer Sysinternals binary. If the pin is unavailable, startup warns and
+leaves the client and connection files unchanged. `New-Lab.ps1 -WhatIf` skips this
+preparation, initialization errors leave files untouched, and internal GenConfig
+calls do not repeat it.
+
+Validate with `vmbuild\tools\Test-RdcManStartup.ps1` and
+`vmbuild\tools\Test-RdcManEmptyFileRecovery.ps1`.
+
 ## Windows Terminal settings safety
 
 Host appearance updates validate the existing Terminal settings, write and

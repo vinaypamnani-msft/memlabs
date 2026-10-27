@@ -21,6 +21,15 @@ if (-not $InternalUseOnly.IsPresent) {
     # Dot source common
     . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
 
+    if (-not $global:init_failed) {
+        try {
+            Initialize-RDCManAtStartup
+        }
+        catch {
+            Write-Log "Could not prepare RDCMan at startup. $($_.Exception.Message)" -Warning
+        }
+    }
+
     Write-Host2 -ForegroundColor Cyan ""
 }
 
