@@ -69,6 +69,44 @@ function Test-ChocoAvailable {
     return ($null -ne (Get-Command choco -ErrorAction SilentlyContinue))
 }
 
+function New-MemLabsMaintenanceMutex {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Name
+    )
+
+    $security = [Security.AccessControl.MutexSecurity]::new()
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $callerSid = $identity.User }
+    finally { $identity.Dispose() }
+    foreach ($sid in @(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            $callerSid
+        )) {
+        $security.AddAccessRule([Security.AccessControl.MutexAccessRule]::new(
+                $sid, [Security.AccessControl.MutexRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow))
+    }
+
+    $created = $false
+    try {
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            return [Threading.MutexAcl]::Create($false, $Name, [ref]$created, $security)
+        }
+        return [Threading.Mutex]::new($false, $Name, [ref]$created, $security)
+    }
+    catch [UnauthorizedAccessException] {
+        # Existing mutexes may permit waiting/releasing without granting full control.
+        $rights = [Security.AccessControl.MutexRights]::Synchronize -bor [Security.AccessControl.MutexRights]::Modify
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            return [Threading.MutexAcl]::OpenExisting($Name, $rights)
+        }
+        return [Threading.Mutex]::OpenExisting($Name, $rights)
+    }
+}
+
 function Invoke-WithMemLabsMaintenanceMutex {
     [CmdletBinding()]
     param (
@@ -83,12 +121,12 @@ function Invoke-WithMemLabsMaintenanceMutex {
     $acquired = $false
     try {
         try {
-            $mutex = [System.Threading.Mutex]::new($false, $Name)
+            $mutex = New-MemLabsMaintenanceMutex -Name $Name
         }
         catch {
-            Write-LogMessage "Maintenance mutex is unavailable; running without serialization ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -Level 'WARNING'
-            & $ScriptBlock | Out-Host
-            return $true
+            Write-LogMessage "Maintenance mutex '$Name' is unavailable; skipping guarded maintenance ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -Level 'ERROR'
+            $script:MaintenanceHadFailure = $true
+            return $false
         }
 
         try {
@@ -130,10 +168,10 @@ function Invoke-WithMemLabsRuntimeUpgradeLease {
     $acquired = $false
     try {
         try {
-            $mutex = [System.Threading.Mutex]::new($false, $Name)
+            $mutex = New-MemLabsMaintenanceMutex -Name $Name
         }
         catch {
-            Write-LogMessage "The host mutation lease is unavailable; deferring runtime upgrades: $($_.Exception.Message)" -Level 'WARNING'
+            Write-LogMessage "The host mutation lease '$Name' is unavailable; deferring runtime upgrades: $($_.Exception.Message)" -Level 'WARNING'
             return $false
         }
 
@@ -1154,6 +1192,150 @@ function Get-InstalledEntry {
     return $found
 }
 
+function Save-WinGetFailureDiagnostics {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string] $WinGetPath,
+        [Parameter(Mandatory = $true)][string] $LogFile,
+        [Parameter(Mandatory = $true)][datetime] $Started,
+        [Parameter(Mandatory = $true)][datetime] $Finished,
+        [Parameter(Mandatory = $true)][string] $Failure
+    )
+
+    $logDirectory = Split-Path -Parent $LogFile
+    $directory = Join-Path $logDirectory "$([IO.Path]::GetFileNameWithoutExtension($LogFile)).diagnostics"
+    New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $warnings = [Collections.Generic.List[string]]::new()
+    $capturedFiles = [Collections.Generic.List[object]]::new()
+    try {
+        $olderDirectories = @(Get-ChildItem -LiteralPath $logDirectory -Directory -Filter 'WinGetUpgrade_*.diagnostics' -ErrorAction Stop |
+            Where-Object {
+                $_.FullName -ne $directory -and
+                $_.Name -match '^WinGetUpgrade_\d{8}_\d{6}_\d{3}_[0-9a-f]{8}\.diagnostics$' -and
+                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            } | Sort-Object CreationTimeUtc -Descending)
+        foreach ($oldDirectory in @($olderDirectories | Select-Object -Skip 2)) {
+            Remove-Item -LiteralPath $oldDirectory.FullName -Recurse -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        $warnings.Add("Could not prune older WinGet diagnostics: $($_.Exception.Message)")
+    }
+
+    $nativeDirectory = $null
+    $upgradeLogFound = $false
+    $totalBytes = 0L
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            throw 'LOCALAPPDATA is unavailable; the packaged WinGet native log directory cannot be located.'
+        }
+        $nativeDirectory = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir'
+        $sourceDirectory = Get-Item -LiteralPath $nativeDirectory -ErrorAction Stop
+        if (-not $sourceDirectory.PSIsContainer -or ($sourceDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The native diagnostic directory is not a regular directory: '$nativeDirectory'."
+        }
+        $nativeLogs = @(Get-ChildItem -LiteralPath $nativeDirectory -File -Filter '*.log' -ErrorAction Stop |
+            Where-Object {
+                $_.LastWriteTimeUtc -ge $Started.ToUniversalTime().AddSeconds(-2) -and
+                $_.LastWriteTimeUtc -le $Finished.ToUniversalTime().AddSeconds(2)
+            } | Sort-Object LastWriteTimeUtc -Descending)
+        if ($nativeLogs.Count -gt 10) {
+            $warnings.Add("Only the newest 10 of $($nativeLogs.Count) native logs overlapping the failed run will be collected.")
+        }
+        foreach ($file in @($nativeLogs | Select-Object -First 10)) {
+            $source = $null
+            $destination = $null
+            try {
+                if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    throw "Refusing to copy native diagnostic reparse point '$($file.FullName)'."
+                }
+                $source = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                    ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                $length = $source.Length
+                $headerBytes = [byte[]]::new(16384)
+                $headerLength = $source.Read($headerBytes, 0, $headerBytes.Length)
+                $header = [Text.Encoding]::UTF8.GetString($headerBytes, 0, $headerLength)
+                $commandLine = $null
+                if ($header -match '(?m)Command line Args:\s*([^\r\n]+)') {
+                    $commandLine = $Matches[1]
+                }
+                $matchesUpgrade = $commandLine -match '\bupgrade\s+--all\b'
+                $bytesToCopy = [Math]::Min($length, [Math]::Min(4MB, 32MB - $totalBytes))
+                if ($bytesToCopy -le 0 -and $length -gt 0) {
+                    $warnings.Add('The 32 MiB native diagnostic limit was reached; remaining logs were not copied.')
+                    break
+                }
+                [void]$source.Seek($length - $bytesToCopy, [IO.SeekOrigin]::Begin)
+                $destinationPath = Join-Path $directory $file.Name
+                $destination = [IO.File]::Open($destinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+                $totalBytes += $bytesToCopy
+                $buffer = [byte[]]::new(65536)
+                $copiedBytes = 0L
+                while ($copiedBytes -lt $bytesToCopy) {
+                    $read = $source.Read($buffer, 0, [int][Math]::Min($buffer.Length, $bytesToCopy - $copiedBytes))
+                    if ($read -eq 0) { break }
+                    $destination.Write($buffer, 0, $read)
+                    $copiedBytes += $read
+                }
+                if ($copiedBytes -lt $length) {
+                    $warnings.Add("Native log '$($file.Name)' was truncated; captured its last $copiedBytes of $length bytes.")
+                }
+                $capturedFiles.Add([pscustomobject]@{
+                        Source = $file.FullName
+                        File = $file.Name
+                        LastWriteTimeUtc = $file.LastWriteTimeUtc.ToString('o')
+                        OriginalBytes = $length
+                        CapturedBytes = $copiedBytes
+                        Truncated = ($copiedBytes -lt $length)
+                        CommandLine = $commandLine
+                        MatchesUpgradeCommand = $matchesUpgrade
+                    })
+                if ($matchesUpgrade) { $upgradeLogFound = $true }
+            }
+            catch {
+                $warnings.Add("Could not collect native log '$($file.FullName)': $($_.Exception.Message)")
+            }
+            finally {
+                if ($destination) { $destination.Dispose() }
+                if ($source) { $source.Dispose() }
+            }
+        }
+    }
+    catch {
+        $warnings.Add("Native WinGet diagnostic collection failed: $($_.Exception.Message)")
+    }
+    if (-not $upgradeLogFound) {
+        $warnings.Add('No native upgrade --all log was found for the failed run. Logs from concurrent commands do not establish that the failed upgrade initialized logging; verify the native log location with winget --info under the maintenance identity.')
+    }
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $identityName = $identity.Name }
+    finally { $identity.Dispose() }
+    $summaryPath = Join-Path $directory 'summary.json'
+    [ordered]@{
+        Failure = $Failure
+        Command = 'upgrade --all --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs'
+        Executable = $WinGetPath
+        Identity = $identityName
+        ProcessId = $PID
+        SessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+        PowerShellEdition = $PSVersionTable.PSEdition
+        WorkingDirectory = (Get-Location).Path
+        LocalAppData = $env:LOCALAPPDATA
+        Temp = $env:TEMP
+        Started = $Started.ToString('o')
+        Finished = $Finished.ToString('o')
+        NativeLogDirectory = $nativeDirectory
+        UpgradeLogFound = $upgradeLogFound
+        Files = @($capturedFiles.ToArray())
+        Warnings = @($warnings.ToArray())
+        Limits = @{ Files = 10; FileBytes = 4MB; TotalBytes = 32MB; RetainedRuns = 3 }
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8 -ErrorAction Stop
+
+    return [pscustomobject]@{ Directory = $directory; Warnings = @($warnings.ToArray()) }
+}
+
 function Invoke-WinGetMaintenance {
     param (
         [switch] $WaitForCompletion,
@@ -1176,7 +1358,8 @@ function Invoke-WinGetMaintenance {
         $wingetLogs | Select-Object -Skip 3 | Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
-    $wingetLogFile = Join-Path $LogDirectory ('WinGetUpgrade_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    $runId = '{0}_{1}' -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $wingetLogFile = Join-Path $LogDirectory "WinGetUpgrade_$runId.log"
 
     $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $winget) {
@@ -1192,7 +1375,8 @@ function Invoke-WinGetMaintenance {
         '--silent',
         '--accept-package-agreements',
         '--accept-source-agreements',
-        '--disable-interactivity'
+        '--disable-interactivity',
+        '--verbose-logs'
     )
 
     if (-not $WaitForCompletion) {
@@ -1200,8 +1384,15 @@ function Invoke-WinGetMaintenance {
         $wingetPath = "$($winget.Source)".Replace("'", "''")
         $escapedWingetLogFile = $wingetLogFile.Replace("'", "''")
         $scriptLines = @(
+            'function New-MemLabsMaintenanceMutex {'
+            ${function:New-MemLabsMaintenanceMutex}.ToString()
+            '}'
+            'function Save-WinGetFailureDiagnostics {'
+            ${function:Save-WinGetFailureDiagnostics}.ToString()
+            '}'
             '$Host.UI.RawUI.WindowTitle = "MemLabs - WinGet Upgrades"'
             "`$wingetLogFile = '$escapedWingetLogFile'"
+            "`$wingetPath = '$wingetPath'"
             '$transcriptStarted = $false'
             'try {'
             '    Start-Transcript -LiteralPath $wingetLogFile -Force -ErrorAction Stop | Out-Null'
@@ -1213,18 +1404,22 @@ function Invoke-WinGetMaintenance {
             "Write-Host 'Upgrading all WinGet-matched packages...' -ForegroundColor Cyan"
             '$mutex = $null'
             '$acquired = $false'
+            '$wingetStarted = $null'
+            '$wingetFailure = $null'
             'try {'
-            "    `$mutex = [System.Threading.Mutex]::new(`$false, '$UpgradeMutexName')"
+            "    `$mutex = New-MemLabsMaintenanceMutex -Name '$($UpgradeMutexName.Replace("'", "''"))'"
             '    try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(120)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }'
             "    if (-not `$acquired) { Write-Host 'Another package upgrade is already running. Skipping.' -ForegroundColor Yellow; exit 0 }"
-            "    & '$wingetPath' upgrade --all --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity"
+            '    $wingetStarted = Get-Date'
+            "    & '$wingetPath' upgrade --all --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs"
             '    $upgradeExitCode = $LASTEXITCODE'
             '    if ($upgradeExitCode -eq 0 -or $upgradeExitCode -eq -1978335189) {'
             "        Write-Host 'WinGet package maintenance completed successfully.' -ForegroundColor Green"
             '    } else {'
-            '        Write-Host "WinGet package maintenance failed (exit code: $upgradeExitCode)." -ForegroundColor Yellow'
+            '        $wingetFailure = "WinGet package maintenance failed (exit code: $upgradeExitCode)."'
+            '        Write-Host $wingetFailure -ForegroundColor Yellow'
             '        if ($upgradeExitCode -eq -1978335188) {'
-            "            `$vscodeQuery = @(& '$wingetPath' list --id Microsoft.VisualStudioCode --exact --source winget --upgrade-available --accept-source-agreements --disable-interactivity 2>&1)"
+            "            `$vscodeQuery = @(& '$wingetPath' list --id Microsoft.VisualStudioCode --exact --source winget --upgrade-available --accept-source-agreements --disable-interactivity --verbose-logs 2>&1)"
             "            if (`$vscodeQuery -match 'Microsoft\.VisualStudioCode') {"
             "                Write-Host 'VS Code still has an available update. Requesting a graceful close before retrying...' -ForegroundColor Cyan"
             '                $codeWindows = @(Get-Process -Name Code -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })'
@@ -1239,7 +1434,7 @@ function Invoke-WinGetMaintenance {
             '                    } while ($remainingCode.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)'
             '                    if ($remainingCode.Count -eq 0) {'
             "                        Write-Host 'VS Code exited cleanly. Retrying its update...' -ForegroundColor Cyan"
-            "                        & '$wingetPath' upgrade --id Microsoft.VisualStudioCode --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity"
+            "                        & '$wingetPath' upgrade --id Microsoft.VisualStudioCode --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs"
             '                        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq -1978335189) {'
             "                            Write-Host 'VS Code update completed successfully.' -ForegroundColor Green"
             '                        } else {'
@@ -1252,7 +1447,20 @@ function Invoke-WinGetMaintenance {
             '            }'
             '        }'
             '    }'
+            '} catch {'
+            '    $wingetFailure = "WinGet invocation failed: $_"'
+            '    Write-Host "WinGet package maintenance could not run safely: $_" -ForegroundColor Red'
+            '    exit 1'
             '} finally {'
+            '    if ($wingetFailure -and $wingetStarted) {'
+            '        try {'
+            '            $diagnostics = Save-WinGetFailureDiagnostics -WinGetPath $wingetPath -LogFile $wingetLogFile -Started $wingetStarted -Finished (Get-Date) -Failure $wingetFailure'
+            '            Write-Host "WinGet failure diagnostics: $($diagnostics.Directory)" -ForegroundColor Yellow'
+            '            foreach ($warningMessage in $diagnostics.Warnings) { Write-Host $warningMessage -ForegroundColor Yellow }'
+            '        } catch {'
+            '            Write-Host "WinGet diagnostic collection failed; original failure: $wingetFailure; collection error: $_" -ForegroundColor Red'
+            '        }'
+            '    }'
             '    if ($mutex) {'
             '        if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }'
             '        try { $mutex.Dispose() } catch {}'
@@ -1261,6 +1469,7 @@ function Invoke-WinGetMaintenance {
             "Write-Host ''"
             "Write-Host 'Done. This window will close in 10 seconds...' -ForegroundColor Cyan"
             'Start-Sleep -Seconds 10'
+            'if ($wingetFailure) { exit 1 }'
             '} finally {'
             '    if ($transcriptStarted) { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null }'
             '}'
@@ -1273,29 +1482,72 @@ function Invoke-WinGetMaintenance {
     }
 
     $wingetStarted = Get-Date
-    $output = @(& $winget.Source @arguments 2>&1)
-    $exitCode = $LASTEXITCODE
-    @(
-        "WinGet package maintenance started: $($wingetStarted.ToString('o'))"
-        "Command: winget $($arguments -join ' ')"
-        ''
-        @($output | ForEach-Object { "$_" })
-        ''
-        "Exit code: $exitCode"
-        "WinGet package maintenance completed: $(Get-Date -Format 'o')"
-    ) | Set-Content -LiteralPath $wingetLogFile -Encoding utf8
+    $output = @()
+    $exitCode = $null
+    $invocationError = $null
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $winget.Source @arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        $invocationError = $_.Exception.Message
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    $wingetFinished = Get-Date
+    $outputLogFailure = $null
+    try {
+        @(
+            "WinGet package maintenance started: $($wingetStarted.ToString('o'))"
+            "Executable: $($winget.Source)"
+            "Command: winget $($arguments -join ' ')"
+            ''
+            @($output | ForEach-Object { "$_" })
+            ''
+            "Exit code: $exitCode"
+            "Invocation error: $invocationError"
+            "WinGet package maintenance completed: $($wingetFinished.ToString('o'))"
+        ) | Set-Content -LiteralPath $wingetLogFile -Encoding utf8 -ErrorAction Stop
+    }
+    catch {
+        $outputLogFailure = $_.Exception.Message
+        Write-LogMessage "Could not save WinGet console output to '$wingetLogFile': $outputLogFailure" -Level 'WARNING'
+    }
 
     # WinGet uses this documented HRESULT when the installed build is already current.
-    if ($exitCode -eq -1978335189) {
+    if (-not $invocationError -and $exitCode -eq -1978335189 -and -not $outputLogFailure) {
         Write-LogMessage "All WinGet-matched packages are already current. Full output: $wingetLogFile"
         return $true
     }
 
-    if ($exitCode -ne 0) {
+    if ($invocationError -or ($exitCode -ne 0 -and $exitCode -ne -1978335189)) {
+        $failure = if ($invocationError) {
+            "winget upgrade --all invocation failed: $invocationError."
+        }
+        else {
+            "winget upgrade --all failed with exit code $exitCode."
+        }
+        try {
+            $diagnostics = Save-WinGetFailureDiagnostics -WinGetPath "$($winget.Source)" -LogFile $wingetLogFile `
+                -Started $wingetStarted -Finished $wingetFinished -Failure $failure
+            foreach ($warningMessage in $diagnostics.Warnings) {
+                Write-LogMessage $warningMessage -Level 'WARNING'
+            }
+            $failure += " Diagnostics: $($diagnostics.Directory)."
+        }
+        catch {
+            $failure += " Diagnostic collection failed: $($_.Exception.Message)."
+            Write-LogMessage $failure -Level 'WARNING'
+        }
+        if ($outputLogFailure) { $failure += " Console output could not be saved: $outputLogFailure." }
         $detail = (@($output | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' | ')
-        if ($detail) { throw "winget upgrade --all failed with exit code $exitCode. Full output: $wingetLogFile. $detail" }
-        throw "winget upgrade --all failed with exit code $exitCode. Full output: $wingetLogFile."
+        if ($detail) { throw "$failure Full output: $wingetLogFile. $detail" }
+        throw "$failure Full output: $wingetLogFile."
     }
+    if ($outputLogFailure) { throw "WinGet completed, but its console log could not be saved: $outputLogFailure" }
 
     Write-LogMessage "WinGet package upgrades completed successfully. Full output: $wingetLogFile"
     return $true
@@ -2194,7 +2446,7 @@ function Invoke-DailyUpgradesCore {
                 }
             }
             if (-not $upgradeRan) {
-                Write-LogMessage 'Another Chocolatey upgrade is already running; skipping this scheduled upgrade.'
+                Write-LogMessage 'The Chocolatey upgrade mutex is busy or unavailable; skipping this scheduled upgrade.'
             }
 
             Write-LogMessage 'Daily upgrades maintenance completed.'
@@ -2203,13 +2455,17 @@ function Invoke-DailyUpgradesCore {
 
         # Non-waiting callers retain the separate upgrade window.
         Write-LogMessage 'Launching Chocolatey upgrade all in new window...'
-        $scriptLines = @()
+        $scriptLines = @(
+            'function New-MemLabsMaintenanceMutex {'
+            ${function:New-MemLabsMaintenanceMutex}.ToString()
+            '}'
+        )
         $scriptLines += '$Host.UI.RawUI.WindowTitle = "MemLabs - Chocolatey Upgrades"'
         $scriptLines += "Write-Host 'Upgrading all Chocolatey packages...' -ForegroundColor Cyan"
         $scriptLines += '$mutex = $null'
         $scriptLines += '$acquired = $false'
         $scriptLines += 'try {'
-        $scriptLines += "    `$mutex = [System.Threading.Mutex]::new(`$false, '$UpgradeMutexName')"
+        $scriptLines += "    `$mutex = New-MemLabsMaintenanceMutex -Name '$($UpgradeMutexName.Replace("'", "''"))'"
         $scriptLines += '    try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(120)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }'
         $scriptLines += "    if (-not `$acquired) { Write-Host 'Another Chocolatey upgrade is already running. Skipping.' -ForegroundColor Yellow; exit 0 }"
 
@@ -2228,6 +2484,9 @@ function Invoke-DailyUpgradesCore {
         $scriptLines += '    } else {'
         $scriptLines += '        Write-Host "Chocolatey package upgrade failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
         $scriptLines += '    }'
+        $scriptLines += '} catch {'
+        $scriptLines += '    Write-Host "Chocolatey package maintenance could not run safely: $_" -ForegroundColor Red'
+        $scriptLines += '    exit 1'
         $scriptLines += '} finally {'
         $scriptLines += '    if ($mutex) {'
         $scriptLines += '        if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }'
@@ -2270,7 +2529,7 @@ function Invoke-DailyUpgrades {
         Invoke-DailyUpgradesCore -WaitForCompletion:$Wait -UpgradeMutexName $MutexName
     }
     if (-not $upgradeRan) {
-        Write-LogMessage 'A MemLabs test cycle is active; deferring daily upgrades so the live PowerShell runtime is not replaced.' -Level 'WARNING'
+        Write-LogMessage 'The host mutation lease is busy or unavailable; deferring daily upgrades so the live PowerShell runtime is not replaced.' -Level 'WARNING'
     }
 }
 
@@ -2365,10 +2624,10 @@ if ($BackgroundUpgradeWorker -or $UserWinGetTask) {
     }
 
     if (-not $workerRan) {
-        Write-LogMessage 'Another host maintenance run remained active for 120 seconds; skipping this background worker.' -Level 'WARNING'
+        Write-LogMessage 'The host maintenance mutex is busy or unavailable; skipping this background worker.' -Level 'WARNING'
     }
     elseif (-not $workerState.PackagePhasesRan) {
-        Write-LogMessage 'Another package operation remained active for 120 seconds; skipping this background worker.' -Level 'WARNING'
+        Write-LogMessage 'The package maintenance mutex is busy or unavailable; skipping this background worker.' -Level 'WARNING'
     }
 
     $workerStopwatch.Stop()
@@ -2441,18 +2700,18 @@ if (-not $ScheduledTask) {
 
 if (-not $maintenanceRan) {
     if ($ScheduledTask) {
-        Write-LogMessage 'Another maintenance run is active; skipping this scheduled run.'
+        Write-LogMessage 'The host maintenance mutex is busy or unavailable; skipping this scheduled run.'
     }
     else {
-        Write-LogMessage 'Another maintenance run remained active for 120 seconds; continuing VMBuild without starting overlapping maintenance.' -Level 'WARNING'
+        Write-LogMessage 'The host maintenance mutex is busy or unavailable; continuing VMBuild without starting overlapping maintenance.' -Level 'WARNING'
     }
 }
 elseif (-not $maintenanceRunState.PackagePhasesRan) {
     if ($ScheduledTask) {
-        Write-LogMessage 'Another Chocolatey operation is active; skipping this scheduled maintenance run.'
+        Write-LogMessage 'The Chocolatey upgrade mutex is busy or unavailable; skipping this scheduled maintenance run.'
     }
     else {
-        Write-LogMessage 'Another Chocolatey operation remained active for 120 seconds; continuing VMBuild without overlapping package maintenance.' -Level 'WARNING'
+        Write-LogMessage 'The Chocolatey upgrade mutex is busy or unavailable; continuing VMBuild without overlapping package maintenance.' -Level 'WARNING'
     }
 }
 

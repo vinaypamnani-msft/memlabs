@@ -67,11 +67,31 @@ runs two minutes after logon, at most once per 24 hours. Normal VMBuild launches
 dispatch due WinGet and daily package work to a visible background maintenance
 window instead of waiting before opening the app. Both background entry points
 run the final ASP.NET Core security check after their package work.
+Host and package maintenance mutexes explicitly allow SYSTEM, local Administrators,
+and their creator, including in separate WinGet/Chocolatey upgrade windows. Existing
+mutexes are opened with only the wait/release rights when full control is unavailable.
+If a maintenance mutex cannot be opened, guarded work is skipped and the run reports
+failure instead of running without serialization. An older process can retain an
+incompatible mutex ACL until its last handle closes; let that process finish, then
+rerun maintenance to create the lock with the updated permissions.
+WinGet maintenance enables verbose native logging. Failed invocations preserve a
+run-specific `WinGetUpgrade_*.diagnostics` directory alongside the console log,
+including `summary.json` with the original failure, executable, user/session,
+PowerShell version, environment paths, and native-log collection warnings. It copies
+packaged WinGet logs modified during the failed run from the maintenance user's
+`Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir`.
+Collection is limited to 10 files, the last 4 MiB per file, and 32 MiB per run;
+the newest three failure directories are retained. The summary distinguishes
+upgrade logs from concurrent commands and explicitly reports when no matching
+native upgrade log exists. Collection errors never replace the original WinGet
+failure or mark it successful. Native log collection does not search other user
+profiles; if WinGet uses a different location, check `winget --info` as that user.
 Applications already using a runtime may require restarting to load patched
 files, and a vulnerability report may not clear until its next inventory scan.
 Validate without changing host packages using
-`vmbuild\tools\Test-AspNetCoreMaintenance.ps1` under PowerShell 7 and Windows
-PowerShell 5.1.
+`vmbuild\tools\Test-AspNetCoreMaintenance.ps1`,
+`vmbuild\tools\Test-MaintenanceScheduledTask.ps1`, and
+`vmbuild\tools\Test-WinGetMaintenance.ps1` under PowerShell 7 and Windows PowerShell 5.1.
 
 ## Skipping an unreliable test family
 

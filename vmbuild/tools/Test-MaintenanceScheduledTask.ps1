@@ -53,6 +53,7 @@ $wantedFunctions = @(
     'Get-WindowsAdminCenterRemovalLockPath',
     'Install-MemLabsMaintenanceScheduledTask',
     'Install-MemLabsUserWinGetScheduledTask',
+    'New-MemLabsMaintenanceMutex',
     'Invoke-GitMaintenance',
     'Invoke-DailyUpgrades',
     'Invoke-DailyUpgradesCore',
@@ -151,6 +152,7 @@ function Get-ScheduledTask {
 function Write-LogMessage {
     param ([string] $Message, [string] $Level = 'INFO')
     $script:Captured.LogMessage = $Message
+    $script:Captured.LogLevel = $Level
 }
 
 function Test-ChocoAvailable { return $true }
@@ -269,6 +271,88 @@ try {
     Assert-Equal (Join-Path $fixtureRoot 'memlabs\wac-removal.pid') $wacLockPath 'WAC worker lock is shared under ProgramData'
     Assert-Equal $true (Test-Path -LiteralPath (Split-Path -Parent $wacLockPath) -PathType Container) 'WAC worker lock directory is created'
 
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $callerSid = $identity.User }
+    finally { $identity.Dispose() }
+    $aclMutex = New-MemLabsMaintenanceMutex -Name ('Global\MemLabs_MaintenanceAcl_Test_{0}' -f [guid]::NewGuid().ToString('N'))
+    try {
+        $security = if ($PSVersionTable.PSEdition -eq 'Core') {
+            [Threading.ThreadingAclExtensions]::GetAccessControl($aclMutex)
+        }
+        else { $aclMutex.GetAccessControl() }
+        $rules = @($security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $allowedSids = @('S-1-5-18', 'S-1-5-32-544', $callerSid.Value)
+        foreach ($sid in $allowedSids) {
+            $hasAccess = @($rules | Where-Object {
+                    $_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow' -and
+                    ($_.MutexRights -band [Security.AccessControl.MutexRights]::FullControl) -eq [Security.AccessControl.MutexRights]::FullControl
+                }).Count -gt 0
+            Assert-Equal $true $hasAccess "new maintenance mutex grants access to administrative participant $sid"
+        }
+        Assert-Equal 0 @($rules | Where-Object { $allowedSids -notcontains $_.IdentityReference.Value }).Count 'maintenance mutex does not grant access to unrelated users'
+    }
+    finally { $aclMutex.Dispose() }
+
+    $requiredRights = [Security.AccessControl.MutexRights]::Synchronize -bor [Security.AccessControl.MutexRights]::Modify
+    foreach ($case in @(
+            @{ Label = 'wait/release access'; Rights = $requiredRights; CanRun = $true },
+            @{ Label = 'wait-only access'; Rights = [Security.AccessControl.MutexRights]::Synchronize; CanRun = $false }
+        )) {
+        $restrictedName = 'Global\MemLabs_MaintenanceAccess_Test_{0}' -f [guid]::NewGuid().ToString('N')
+        $security = [Security.AccessControl.MutexSecurity]::new()
+        $security.AddAccessRule([Security.AccessControl.MutexAccessRule]::new(
+                $callerSid, $case.Rights, [Security.AccessControl.AccessControlType]::Allow))
+        $created = $false
+        $restrictedMutex = if ($PSVersionTable.PSEdition -eq 'Core') {
+            [Threading.MutexAcl]::Create($false, $restrictedName, [ref]$created, $security)
+        }
+        else { [Threading.Mutex]::new($false, $restrictedName, [ref]$created, $security) }
+        try {
+            if (-not $case.CanRun) {
+                Assert-Throws {
+                    $opened = [Threading.Mutex]::new($false, $restrictedName)
+                    $opened.Dispose()
+                } 'a legacy mutex ACL reproduces the reported constructor access denial'
+            }
+
+            $script:MaintenanceHadFailure = $false
+            $script:MutexBodyRan = $false
+            $script:Captured.LogMessage = $null
+            $mutexOutput = @(Invoke-WithMemLabsMaintenanceMutex -Name $restrictedName -TimeoutSeconds 0 -ScriptBlock {
+                    $script:MutexBodyRan = $true
+                    'guarded pipeline output'
+                })
+            Assert-Equal 1 $mutexOutput.Count "maintenance returns only one result with $($case.Label)"
+            Assert-Equal $case.CanRun $mutexOutput[0] "maintenance acquisition result respects $($case.Label)"
+            Assert-Equal $case.CanRun $script:MutexBodyRan "guarded maintenance respects $($case.Label)"
+            Assert-Equal (-not $case.CanRun) $script:MaintenanceHadFailure "unavailable maintenance mutex fails the run with $($case.Label)"
+            if (-not $case.CanRun) {
+                Assert-Equal 'ERROR' $script:Captured.LogLevel 'mutex access denial is logged as an error'
+                Assert-Equal $true $script:Captured.LogMessage.Contains($restrictedName) 'mutex access denial identifies the unavailable lock'
+            }
+
+            $script:MaintenanceHadFailure = $false
+            $leaseState = [pscustomobject]@{ Ran = $false; Argument = $null }
+            $leaseOutput = @(Invoke-WithMemLabsRuntimeUpgradeLease -Name $restrictedName -TimeoutSeconds 0 `
+                    -ArgumentList 'lease argument' -ScriptBlock {
+                    param ([string] $Value)
+                    $leaseState.Ran = $true
+                    $leaseState.Argument = $Value
+                })
+            Assert-Equal 1 $leaseOutput.Count "runtime lease returns only one result with $($case.Label)"
+            Assert-Equal $case.CanRun $leaseOutput[0] "runtime lease acquisition respects $($case.Label)"
+            Assert-Equal $case.CanRun $leaseState.Ran "runtime upgrades respect $($case.Label)"
+            Assert-Equal $false $script:MaintenanceHadFailure 'an unavailable runtime lease defers upgrades without failing maintenance'
+            if ($case.CanRun) {
+                Assert-Equal 'lease argument' $leaseState.Argument 'runtime lease preserves script block arguments'
+            }
+            else {
+                Assert-Equal 'WARNING' $script:Captured.LogLevel 'unavailable runtime lease is logged as a deferral'
+            }
+        }
+        finally { $restrictedMutex.Dispose() }
+    }
+
     $flagDirectory = Join-Path $fixtureRoot 'memlabs'
     $null = New-Item -Path $flagDirectory -ItemType Directory -Force
     $ps7Flag = Join-Path $flagDirectory 'ps7_upgrade.timestamp'
@@ -298,7 +382,18 @@ try {
         $holderJob = Start-Job -ArgumentList $mutexName, $mutexReady, $mutexRelease -ScriptBlock {
             param ($Name, $ReadyPath, $ReleasePath)
 
-            $mutex = [System.Threading.Mutex]::new($false, $Name)
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            try { $callerSid = $identity.User }
+            finally { $identity.Dispose() }
+            $security = [Security.AccessControl.MutexSecurity]::new()
+            $rights = [Security.AccessControl.MutexRights]::Synchronize -bor [Security.AccessControl.MutexRights]::Modify
+            $security.AddAccessRule([Security.AccessControl.MutexAccessRule]::new(
+                    $callerSid, $rights, [Security.AccessControl.AccessControlType]::Allow))
+            $created = $false
+            $mutex = if ($PSVersionTable.PSEdition -eq 'Core') {
+                [Threading.MutexAcl]::Create($false, $Name, [ref]$created, $security)
+            }
+            else { [Threading.Mutex]::new($false, $Name, [ref]$created, $security) }
             $acquired = $false
             try {
                 try { $acquired = $mutex.WaitOne(0) }
@@ -347,6 +442,7 @@ try {
         Set-Content -LiteralPath $mutexRelease -Value 'release' -Encoding ascii
         $null = Wait-Job -Job $holderJob -Timeout 10
         Assert-Equal 'Completed' $holderJob.State 'maintenance mutex holder exits cleanly'
+        $null = Receive-Job -Job $holderJob -ErrorAction Stop
 
         $script:MutexBodyRan = $false
         $mutexResult = Invoke-WithMemLabsMaintenanceMutex -Name $mutexName -TimeoutSeconds 1 -ScriptBlock {
@@ -420,6 +516,9 @@ try {
     Assert-Equal $true (Test-Path -LiteralPath $generatedScriptPath -PathType Leaf) 'interactive daily maintenance writes its child script'
     $generatedScript = [System.IO.File]::ReadAllText($generatedScriptPath)
     Assert-Equal $true $generatedScript.Contains('Global\MemLabs_ChocolateyUpgrade') 'interactive Chocolatey child uses the cross-session upgrade mutex'
+    Assert-Equal $true $generatedScript.Contains(${function:New-MemLabsMaintenanceMutex}.ToString()) 'interactive Chocolatey child embeds the shared cross-account mutex factory'
+    Assert-Equal $true $generatedScript.Contains('$mutex = New-MemLabsMaintenanceMutex -Name ') 'interactive Chocolatey child uses the shared mutex policy'
+    Assert-Equal $true $generatedScript.Contains('Chocolatey package maintenance could not run safely: $_') 'interactive Chocolatey child reports lock errors instead of running unlocked'
     Assert-Equal $true $generatedScript.Contains('$mutex.WaitOne([TimeSpan]::FromSeconds(120))') 'interactive Chocolatey child waits for its parent to release the mutex'
     $generatedParseErrors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseInput($generatedScript, [ref] $null, [ref] $generatedParseErrors)
