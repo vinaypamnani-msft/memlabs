@@ -1,0 +1,388 @@
+{
+  "vmOptions": {
+    "prefix": "BI-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "burnin.sandwich.lab",
+    "domainNetBiosName": "BURNIN",
+    "adminName": "admin",
+    "network": "10.77.10.0",
+    "timeZone": "Pacific Standard Time",
+    "locale": "en-US"
+  },
+  "domainDefaults": {
+    "DeploymentType": "CAS and Primary",
+    "CMVersion": "2509",
+    "DomainName": "burnin.sandwich.lab",
+    "Network": "10.77.10.0",
+    "DefaultClientOS": "Windows 11 25H2",
+    "DefaultServerOS": "Server 2025",
+    "DefaultSqlVersion": "SQL Server 2022",
+    "UseDynamicMemory": true,
+    "IncludeClients": true,
+    "IncludeSSMSOnNONSQL": true
+  },
+  "pkiOptions": {
+    "EnablePKI": true,
+    "IssuingCAVM": "ANCHOR",
+    "UseOfflineRoot": false
+  },
+  "cmOptions": {
+    "version": "2509",
+    "install": true,
+    "pushClientToDomainMembers": true,
+    "EVALVersion": false,
+    "UsePKI": true,
+    "EnableBLM": true,
+    "PrePopulateObjects": true,
+    "OfflineSCP": false,
+    "OfflineSUP": false
+  },
+  "virtualMachines": [
+    {
+      "vmName": "ANCHOR",
+      "role": "DC",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "InstallCA": true,
+      "UseOfflineRoot": false,
+      "ForestTrust": "NONE"
+    },
+    {
+      "vmName": "DEPOT",
+      "role": "FileServer",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "200GB"
+      }
+    },
+    {
+      "vmName": "CONTROL",
+      "role": "CAS",
+      "operatingSystem": "Server 2025",
+      "memory": "8GB",
+      "dynamicMinRam": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "HUB",
+      "siteName": "Burn-In CAS",
+      "remoteSQLVM": "CONTROLDB1",
+      "installSUP": true,
+      "installRP": true,
+      "wsusDataBaseServer": "WID",
+      "wsusContentDir": "E:\\WSUS"
+    },
+    {
+      "vmName": "CONTROLDB1",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "dynamicMinRam": "4GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "G:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "G": "250GB"
+      },
+      "OtherNode": "CONTROLDB2",
+      "fileServerVM": "DEPOT",
+      "ClusterName": "BURNCLUSTER",
+      "AlwaysOnGroupName": "HUB Availability Group",
+      "AlwaysOnListenerName": "HUBLISTENER",
+      "SqlServiceAccount": "BurnSqlSvc",
+      "SqlAgentAccount": "BurnSqlAgent",
+      "installRP": false,
+      "InstallSMSProv": false
+    },
+    {
+      "vmName": "CONTROLDB2",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "dynamicMinRam": "4GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "G:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "G": "250GB"
+      },
+      "SqlServiceAccount": "BurnSqlSvc",
+      "SqlAgentAccount": "BurnSqlAgent"
+    },
+    {
+      "vmName": "PRIMARY",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "10GB",
+      "dynamicMinRam": "4GB",
+      "virtualProcs": 8,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "network": "10.77.11.0",
+      "parentSiteCode": "HUB",
+      "siteCode": "PRI",
+      "siteName": "Burn-In Primary",
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "BURN",
+      "sqlInstanceDir": "H:\\SQL",
+      "sqlPort": "5433",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "600GB",
+        "H": "250GB"
+      },
+      "installSUP": true,
+      "installRP": true,
+      "wsusContentDir": "E:\\WSUS"
+    },
+    {
+      "vmName": "PRIMARY-P",
+      "role": "PassiveSite",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "network": "10.77.11.0",
+      "siteCode": "PRI",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "remoteContentLibVM": "DEPOT"
+    },
+    {
+      "vmName": "SOURCE",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022 November 2024",
+      "memory": "3GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "network": "10.77.11.0",
+      "additionalDisks": {
+        "E": "250GB",
+        "J": "200GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PRI"
+    },
+    {
+      "vmName": "PULL1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "network": "10.77.12.0",
+      "additionalDisks": {
+        "Q": "250GB"
+      },
+      "installDP": true,
+      "installMP": false,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PRI",
+      "enablePullDP": true,
+      "pullDPSourceDP": "SOURCE"
+    },
+    {
+      "vmName": "PULL2",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2019",
+      "memory": "3GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "network": "10.77.13.0",
+      "additionalDisks": {
+        "R": "250GB"
+      },
+      "installDP": true,
+      "installMP": false,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PRI",
+      "enablePullDP": true,
+      "pullDPSourceDP": "SOURCE"
+    },
+    {
+      "vmName": "SECONDARY",
+      "role": "Secondary",
+      "operatingSystem": "Server 2022 November 2024",
+      "memory": "8GB",
+      "dynamicMinRam": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "network": "10.77.12.0",
+      "parentSiteCode": "PRI",
+      "siteCode": "SEC",
+      "siteName": "Burn-In Secondary",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installSUP": true,
+      "wsusContentDir": "E:\\WSUS"
+    },
+    {
+      "vmName": "PROXY",
+      "role": "Proxy",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "2GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2
+    },
+    {
+      "vmName": "LINUX1",
+      "role": "LinuxServer",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "2GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2,
+      "network": "10.77.11.0",
+      "enableRDP": true
+    },
+    {
+      "vmName": "LINUX2",
+      "role": "LinuxServer",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "2GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2,
+      "network": "10.77.12.0"
+    },
+    {
+      "vmName": "LINUX3",
+      "role": "LinuxServer",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "2GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2,
+      "network": "10.77.13.0"
+    },
+    {
+      "vmName": "LINUX4",
+      "role": "LinuxServer",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "2GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2,
+      "network": "10.77.14.0"
+    },
+    {
+      "vmName": "DESKTOP",
+      "role": "LinuxClient",
+      "operatingSystem": "Ubuntu Desktop 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "4GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "network": "10.77.13.0"
+    },
+    {
+      "vmName": "CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 25H2",
+      "memory": "4GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "10.77.11.0",
+      "pushClient": "PRI",
+      "installOffice": "Current",
+      "useProxy": true,
+      "BitLocker": true,
+      "domainUser": "user1"
+    },
+    {
+      "vmName": "CLIENT2",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 24H2",
+      "memory": "4GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "10.77.12.0",
+      "pushClient": "SEC",
+      "useProxy": true,
+      "BitLocker": true,
+      "domainUser": "user2"
+    },
+    {
+      "vmName": "CLIENT3",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "dynamicMinRam": "1GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "network": "10.77.13.0",
+      "pushClient": "PRI",
+      "useFakeWSUSServer": true,
+      "domainUser": "user3",
+      "additionalDisks": {
+        "V": "100GB"
+      }
+    },
+    {
+      "vmName": "CLIENT4",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 25H2",
+      "memory": "4GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "10.77.14.0",
+      "pushClient": "SEC",
+      "installOffice": "Current",
+      "domainUser": "user4"
+    },
+    {
+      "vmName": "BOOT1",
+      "role": "OSDClient",
+      "memory": "2GB",
+      "dynamicMinRam": "1GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "10.77.11.0"
+    }
+  ]
+}

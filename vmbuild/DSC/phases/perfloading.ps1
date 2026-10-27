@@ -1,20 +1,13 @@
-#perfloading.ps1
+﻿#perfloading.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
 )
 
 $Tag = "[perfloading]"
+$perfloadingTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-$flagFile = "C:\staging\DSC\perfloading.flag"
-
-# Check if the flag file exists
-if (Test-Path $flagFile) {
-    Write-DscStatus "$Tag Flag file exists. Skipping execution."
-}
-else {
-
-    Write-DscStatus "$Tag Flag file does not exists. start execution."
+Write-DscStatus "$Tag Starting perfloading"
 
     if ( -not $ConfigFilePath) {
         $ConfigFilePath = "C:\staging\DSC\deployConfig.json"
@@ -23,8 +16,13 @@ else {
     # Read config json
     $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
+    # Resolve per-VM cmOptions: this runs on a specific top-level site server,
+    # so prefer its stamped block over the global mirror (multi-hierarchy safe).
+    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+    $cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
 
-    if ($deployConfig.cmOptions.PrePopulateObjects -ne $true) {
+    if ($cmo.PrePopulateObjects -ne $true) {
         return
     }
 
@@ -34,14 +32,17 @@ else {
     # Get required values from config
     $DomainFullName = $deployConfig.parameters.domainName
     $DN = 'DC=' + $DomainFullName.Replace('.', ',DC=')   
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
-    $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
-    $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
-    $DCName = $DCVM.vmName
+    # $ThisMachineName / $ThisVM / $cmo already resolved above (before PrePopulateObjects gate).
+    $CurrentRole = $ThisVM.role
+    # Top-level = CAS or standalone Primary (no parent). Child Primaries in a
+    # hierarchy cannot run hierarchy-level cmdlets (site features, default
+    # client settings, custom client setting creation/deployment).
+    $isTopLevel = ($CurrentRole -eq 'CAS') -or (-not $ThisVM.parentSiteCode)
     $CMInstallDir = $ThisVM.CMInstallDir
     # Read Site Code from registry
     #Write-DscStatus "$Tag Setting PS Drive for ConfigMgr" -NoStatus
     $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+    $HierarchySiteCode = if ($ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
     $ProviderMachineName = $ThisMachineName + "." + $DomainFullName # SMS Provider machine name
 
     # Get CM module path
@@ -62,7 +63,9 @@ else {
     while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
         $psDriveFailcount++
         if ($psDriveFailcount -gt 20) {
-            Write-DscStatus "$Tag Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log" -NoStatus
+            # -Failure, not -NoStatus: returning here skips EVERY object perfloading
+            # creates, and without JOBFAILURE the host records the phase as a success.
+            Write-DscStatus "$Tag Failed to get the PS Drive for site $SiteCode after 20 attempts. Install may have failed. Check C:\ConfigMgrSetup.log. No MEMLABS objects were created." -Failure
             return
         }
         Write-DscStatus "$Tag Retry in 10s to Set PS Drive" -NoStatus
@@ -73,106 +76,1270 @@ else {
     # Set the current location to be the site code.
     Set-Location "$($SiteCode):\" @initParams
 
-    #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumerating all DPs)
-    $DPGroupName = "ALL DPS"
-    $checkDP = Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name 
+    function Get-MemLabsManagedDistributionPointNames {
+        param (
+            [object[]] $VirtualMachines,
+            [string] $DefaultDomainName,
+            [string] $PrimarySiteCode,
+            [object[]] $AdditionalDistributionPointScopes
+        )
 
-    if ($DPGroupName -eq $checkDP) {
-
-        Write-DscStatus "$Tag DP group: $DPGroupName already exists"
-
+        $localVirtualMachines = @($VirtualMachines | Where-Object {
+                -not $_.domain -or "$($_.domain)" -eq $DefaultDomainName
+            })
+        $secondarySiteCodes = @($localVirtualMachines | Where-Object {
+                $_.role -eq 'Secondary' -and "$($_.parentSiteCode)" -eq $PrimarySiteCode
+            } | ForEach-Object { "$($_.siteCode)" } | Where-Object { $_ } | Select-Object -Unique)
+        $managedSiteCodes = @($PrimarySiteCode) + @($secondarySiteCodes)
+        $managedNames = @($localVirtualMachines | Where-Object {
+                "$($_.siteCode)" -in $managedSiteCodes -and
+                ($_.installDP -eq $true -or $_.enablePullDP -eq $true -or "$($_.role)" -eq 'Secondary')
+            } | ForEach-Object {
+                $vmName = "$($_.vmName)".Trim()
+                if (-not $vmName) { return }
+                if ($vmName.Contains('.')) { return $vmName }
+                $domainName = if ($_.domain) { "$($_.domain)".Trim() } else { $DefaultDomainName }
+                if ($domainName) { return "$vmName.$domainName" }
+                return $vmName
+            })
+        $additionalNames = @($AdditionalDistributionPointScopes | Where-Object {
+                "$($_.PrimarySiteCode)" -eq $PrimarySiteCode
+            } | ForEach-Object { @($_.DistributionPointNames) })
+        foreach ($additionalName in $additionalNames) {
+            $name = "$additionalName".Trim()
+            if (-not $name) { continue }
+            if (-not $name.Contains('.') -and $DefaultDomainName) { $name = "$name.$DefaultDomainName" }
+            $managedNames += $name
+        }
+        $managedNameKeys = @{}
+        @($managedNames | Where-Object {
+                $managedNameKey = $_.ToUpperInvariant()
+                if ($managedNameKeys.ContainsKey($managedNameKey)) { return $false }
+                $managedNameKeys[$managedNameKey] = $true
+                return $true
+            })
     }
-    else { 
-        $DPGroup = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
 
-        # Get all Distribution Points
-        $DistributionPoints = Get-CMDistributionPoint -AllSite
+    function Test-MemLabsDistributionPointGroupMember {
+        param (
+            [hashtable] $MemberKeys,
+            [string] $DistributionPointName
+        )
 
-        # Display each Distribution Point's name without the leading '\\'
-        $DistributionPoints | ForEach-Object {
-            $DPPath = $_.NetworkOSPath
-            $DPName = ($DPPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-            Write-DscStatus "$Tag Distribution Point Name: $DPName"
+        if (-not $DistributionPointName) { return $false }
+        return $MemberKeys.ContainsKey($DistributionPointName.ToUpperInvariant())
+    }
+
+    function Get-MemLabsOsdTargetingPlan {
+        param (
+            [object] $DeployConfig,
+            [string] $PrimarySiteCode,
+            [object[]] $LiveDistributionPoints
+        )
+
+        $defaultNetwork = "$($DeployConfig.vmOptions.network)"
+        $networkOf = {
+            param($vm)
+            if ($vm -and $vm.network) { return "$($vm.network)" }
+            if ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) { return "$($vm.thisParams.vmNetwork)" }
+            return $defaultNetwork
+        }
+        $scope = $DeployConfig.phase8ManagedDistributionPointScopes | Where-Object {
+            "$($_.PrimarySiteCode)" -eq $PrimarySiteCode
+        } | Select-Object -First 1
+        $scopeIsAuthoritative = $scope -and $scope.PSObject.Properties['DistributionPoints']
+        if ($scope -and $scope.PSObject.Properties['OsdClientSubnets']) {
+            $clientSubnets = @($scope.OsdClientSubnets)
+        }
+        else {
+            $clientSubnets = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' } |
+                    ForEach-Object { & $networkOf $_ })
+            $clientSubnets += @($DeployConfig.phase8OsdClientSubnets)
+        }
+        $clientSubnets = @($clientSubnets | Where-Object { $_ } | Select-Object -Unique)
+        $scopeRecords = @($scope.DistributionPoints)
+        $targets = @()
+        foreach ($liveDp in @($LiveDistributionPoints)) {
+            $fqdn = if ($liveDp.Fqdn) {
+                "$($liveDp.Fqdn)".TrimStart('\')
+            }
+            elseif ($liveDp.NetworkOSPath) {
+                "$($liveDp.NetworkOSPath)" -replace '^\\\\', ''
+            }
+            elseif ($liveDp.ServerName) {
+                "$($liveDp.ServerName)".TrimStart('\')
+            }
+            else { '' }
+            if (-not $fqdn) { continue }
+            $shortName = ($fqdn -split '\.')[0]
+            $vm = $DeployConfig.virtualMachines | Where-Object {
+                $_.vmName -ieq $shortName -or $_.vmName -ieq $fqdn
+            } | Select-Object -First 1
+            $record = $scopeRecords | Where-Object {
+                $_.Fqdn -ieq $fqdn -or $_.VmName -ieq $shortName
+            } | Select-Object -First 1
+            if ($scopeIsAuthoritative -and -not $record) { continue }
+            $role = if ($record -and $record.Role) { "$($record.Role)" } elseif ($vm) { "$($vm.role)" } else { '' }
+            $siteCode = if ($record -and $record.SiteCode) { "$($record.SiteCode)" } elseif ($vm -and $vm.siteCode) { "$($vm.siteCode)" } else { '' }
+            # An implicit Secondary DP is not configured for PXE by MemLabs.
+            if ($role -eq 'Secondary' -or $siteCode -ne $PrimarySiteCode) { continue }
+            $network = if ($record -and $record.Network) {
+                "$($record.Network)"
+            }
+            elseif ($vm -and $vm.network) {
+                "$($vm.network)"
+            }
+            elseif ($vm -and $vm.thisParams -and $vm.thisParams.vmNetwork) {
+                "$($vm.thisParams.vmNetwork)"
+            }
+            else {
+                $defaultNetwork
+            }
+            if (-not $network -or $clientSubnets -notcontains $network) { continue }
+            $targets += [pscustomobject]@{ Fqdn = $fqdn; Short = $shortName; Subnet = $network }
+        }
+        $targets = @($targets | Sort-Object Fqdn -Unique)
+        $coveredSubnets = @($targets | ForEach-Object { $_.Subnet } | Where-Object { $_ } | Select-Object -Unique)
+        [pscustomobject]@{
+            ClientSubnets      = @($clientSubnets)
+            DistributionPoints = @($targets)
+            UncoveredSubnets   = @($clientSubnets | Where-Object { $coveredSubnets -notcontains $_ })
+        }
+    }
+
+    function Get-MemLabsBootImageSourceVersionProblem {
+        param (
+            [string] $CurrentSourceVersion,
+            [string] $CurrentStoredVersion,
+            [bool] $CommandSupportChanged,
+            [AllowNull()]
+            [object] $CommandSupportPreviousSourceVersion,
+            [bool] $PublicationNeeded,
+            [bool] $PublicationStarted,
+            [AllowNull()]
+            [object] $PublicationPreviousSourceVersion
+        )
+
+        if (-not $CurrentSourceVersion) { return 'boot-image SourceVersion could not be read' }
+        if ($CommandSupportChanged -and
+            ($null -eq $CommandSupportPreviousSourceVersion -or [int]$CurrentSourceVersion -le [int]$CommandSupportPreviousSourceVersion)) {
+            return "boot-image SourceVersion has not advanced after enabling command support (still $CurrentSourceVersion, previous $CommandSupportPreviousSourceVersion)"
+        }
+        if ($PublicationNeeded -and -not $PublicationStarted) {
+            return 'boot-image publication was required but did not start'
+        }
+        if ($PublicationStarted -and
+            ($null -eq $PublicationPreviousSourceVersion -or [int]$CurrentSourceVersion -le [int]$PublicationPreviousSourceVersion)) {
+            return "boot-image SourceVersion has not advanced after publication started (still $CurrentSourceVersion, previous $PublicationPreviousSourceVersion)"
+        }
+        if (($CommandSupportChanged -or $PublicationNeeded) -and
+            (-not $CurrentStoredVersion -or [int]$CurrentStoredVersion -lt [int]$CurrentSourceVersion)) {
+            return "site boot-image content has not caught up to SourceVersion $CurrentSourceVersion (StoredPkgVersion=$CurrentStoredVersion)"
+        }
+        return $null
+    }
+
+    function Get-MemLabsDistributionPointGroup {
+        param (
+            [string] $SiteCode,
+            [string] $GroupName,
+            [string] $GroupId,
+            [switch] $AllowMissing
+        )
+
+        $namespace = "root\SMS\site_$SiteCode"
+        if ($GroupId) {
+            $escapedGroupId = $GroupId.Replace("'", "''")
+            $idGroups = @(Get-MemLabsProjectedCimRows -Namespace $namespace `
+                    -ClassName SMS_DistributionPointGroup -Filter "GroupID='$escapedGroupId'" `
+                    -Property @('Name', 'GroupID', 'SourceSite') -Attempts 6 -RetrySeconds 10)
+            if ($idGroups.Count -eq 0) {
+                if ($AllowMissing) { return $null }
+                throw "distribution point group ID '$GroupId' was not found"
+            }
+            if ($idGroups.Count -ne 1) { throw "distribution point group ID '$GroupId' resolved to $($idGroups.Count) rows" }
+            $selectedGroup = $idGroups[0]
+            if ($GroupName -and "$($selectedGroup.Name)" -ne $GroupName) {
+                throw "distribution point group ID '$GroupId' is named '$($selectedGroup.Name)', not '$GroupName'"
+            }
+            $GroupName = "$($selectedGroup.Name)"
+        }
+
+        $escapedGroupName = $GroupName.Replace("'", "''")
+        $groups = @(Get-MemLabsProjectedCimRows -Namespace $namespace `
+                -ClassName SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" `
+                -Property @('Name', 'GroupID', 'SourceSite') -Attempts 6 -RetrySeconds 10)
+        if ($groups.Count -eq 0) {
+            if ($AllowMissing) { return $null }
+            throw "distribution point group '$GroupName' was not found"
+        }
+
+        $identities = @($groups | ForEach-Object {
+                "GroupID=$($_.GroupID),SourceSite=$($_.SourceSite)"
+            }) -join '; '
+        if ($GroupId) {
+            $selectedRows = @($groups | Where-Object { "$($_.GroupID)" -eq $GroupId })
+            if ($selectedRows.Count -ne 1) {
+                throw "distribution point group ID '$GroupId' was not uniquely present among rows named '$GroupName' ($identities)"
+            }
+            $selectedGroup = $selectedRows[0]
+        }
+        else {
+            $localGroups = @($groups | Where-Object { "$($_.SourceSite)" -eq $SiteCode })
+            if ($localGroups.Count -eq 1) {
+                $selectedGroup = $localGroups[0]
+            }
+            elseif ($localGroups.Count -gt 1) {
+                throw "found $($localGroups.Count) distribution point groups named '$GroupName' owned by site $SiteCode ($identities)"
+            }
+            elseif ($groups.Count -eq 1) {
+                $selectedGroup = $groups[0]
+            }
+            else {
+                throw "found $($groups.Count) distribution point groups named '$GroupName', but none is owned by site $SiteCode ($identities)"
+            }
+        }
+
+        [pscustomobject]@{
+            Group      = $selectedGroup
+            MatchCount = $groups.Count
+            Identities = $identities
+        }
+    }
+
+    function Test-MemLabsShouldManageDistributionPointGroup {
+        param (
+            [string] $CurrentRole,
+            [string[]] $ManagedDistributionPointNames
+        )
+
+        $managedNames = @($ManagedDistributionPointNames | Where-Object { $_ })
+        return $CurrentRole -ne 'CAS' -or $managedNames.Count -gt 0
+    }
+
+    function Sync-MemLabsDistributionPointGroupMembership {
+        param (
+            [string] $SiteCode,
+            [string] $GroupName,
+            [string] $DistributionPointGroupId,
+            [string[]] $ExpectedDistributionPointNames,
+            [string] $StatusTag,
+            [int] $Attempts = 6,
+            [int] $RetrySeconds = 5
+        )
+
+        $expectedNames = @($ExpectedDistributionPointNames | Where-Object { $_ } | Select-Object -Unique)
+        if ($expectedNames.Count -eq 0) {
+            Write-DscStatus "$StatusTag '$GroupName' membership cannot be verified because no MemLabs-managed Distribution Points were identified. Content distribution was not requested." -Failure
+            return $false
+        }
+
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
             try {
-                Add-CMDistributionPointToGroup -DistributionPointGroupName "ALL DPS" -DistributionPointName $DPName 
-                Write-DscStatus "$Tag Successfully added Distribution Point: $DPName to Group: $($DPGroupName)"
+                $allDistributionPoints = @(Get-CMDistributionPoint -AllSite -ErrorAction Stop)
+                $liveDpNames = @{}
+                foreach ($liveDp in $allDistributionPoints) {
+                    $liveDpName = ($liveDp.NetworkOSPath -replace '^\\\\', '') -split '\\' | Select-Object -First 1
+                    if ($liveDpName) { $liveDpNames[$liveDpName.ToUpperInvariant()] = $liveDpName }
+                }
+                $groupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $GroupName -GroupId $DistributionPointGroupId
+                $group = $groupResolution.Group
+                $groupId = "$($group.GroupID)"
+                if (-not $groupId) { throw "distribution point group '$GroupName' has no GroupID" }
+
+                $readMembership = {
+                    $rows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$groupId'" -ErrorAction Stop)
+                    $keys = @{}
+                    foreach ($row in $rows) {
+                        $memberHostName = Get-MemLabsServerFromNalPath $row.DPNALPath
+                        if ($memberHostName) { $keys[$memberHostName.ToUpperInvariant()] = $true }
+                    }
+                    [pscustomobject]@{ Rows = @($rows); Keys = $keys }
+                }
+
+                $membership = & $readMembership
+                $addFailures = @()
+                $addAttempted = $false
+                foreach ($expectedName in $expectedNames) {
+                    $expectedKey = $expectedName.ToUpperInvariant()
+                    if (-not $liveDpNames.ContainsKey($expectedKey) -or $membership.Keys.ContainsKey($expectedKey)) { continue }
+                    $addAttempted = $true
+                    try {
+                        $null = Add-CMDistributionPointToGroup -DistributionPointGroupId $groupId -DistributionPointName $liveDpNames[$expectedKey] -ErrorAction Stop
+                        Write-DscStatus "$StatusTag Added Distribution Point '$($liveDpNames[$expectedKey])' to group '$GroupName' ($groupId)"
+                    }
+                    catch {
+                        $addFailures += "$expectedName ($($_.Exception.Message))"
+                    }
+                }
+                if ($addAttempted) { $membership = & $readMembership }
+
+                $missingLiveNames = @($expectedNames | Where-Object { -not $liveDpNames.ContainsKey($_.ToUpperInvariant()) })
+                $missingNames = @($expectedNames | Where-Object {
+                        -not (Test-MemLabsDistributionPointGroupMember -MemberKeys $membership.Keys -DistributionPointName $_)
+                    })
+                $managedLiveCount = @($expectedNames | Where-Object { $liveDpNames.ContainsKey($_.ToUpperInvariant()) }).Count
+                $externalDpCount = $allDistributionPoints.Count - $managedLiveCount
+                if ($missingLiveNames.Count -eq 0 -and $missingNames.Count -eq 0) {
+                    Write-DscStatus "$StatusTag Verified '$GroupName' membership: $($membership.Rows.Count) total DP(s), all $($expectedNames.Count) MemLabs-managed DP(s) are live and present; $externalDpCount external DP(s)/CMG(s) are left unchanged"
+                    return $true
+                }
+                $reason = if ($missingLiveNames.Count -gt 0) {
+                    "not registered as live DP(s): $($missingLiveNames -join ', ')"
+                }
+                elseif ($membership.Rows.Count -eq 0) {
+                    'the group is empty'
+                }
+                else {
+                    "missing from the group: $($missingNames -join ', ')"
+                }
+                if ($addFailures.Count -gt 0) { $reason += "; add failed: $($addFailures -join ', ')" }
             }
             catch {
-                Write-DscStatus "$Tag Failed to add Distribution Point: $DPName to Group: $($DPGroupName). Error: $_"
+                $reason = $_.Exception.Message
+            }
+            if ($attempt -lt $Attempts) {
+                Write-DscStatus "$StatusTag '$GroupName' membership is not ready ($reason); retry $attempt/$Attempts in ${RetrySeconds}s"
+                Start-Sleep -Seconds $RetrySeconds
+            }
+        }
+        Write-DscStatus "$StatusTag '$GroupName' membership could not be verified after $Attempts attempts ($reason). Content distribution was not requested." -Failure
+        return $false
+    }
+
+    function Get-MemLabsContentPackageIds {
+        param (
+            [ValidateSet('Application', 'Package', 'DeploymentPackage')]
+            [string] $ContentType,
+            [string] $ContentName,
+            [string] $PackageId,
+            [string] $SiteCode
+        )
+
+        switch ($ContentType) {
+            'Application' {
+                $applications = @(Get-CMApplication -Name $ContentName -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($applications.Count -ne 1) { throw "expected one application named '$ContentName', found $($applications.Count)" }
+                return @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_CIContentPackage -Filter "CI_ID='$($applications[0].CI_ID)'" -ErrorAction Stop |
+                    ForEach-Object { $_.PackageID } | Where-Object { $_ } | Select-Object -Unique)
+            }
+            'Package' {
+                if ($PackageId) { return @($PackageId) }
+                $packages = @(Get-CMPackage -Name $ContentName -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($packages.Count -ne 1) { throw "expected one package named '$ContentName', found $($packages.Count)" }
+                return @($packages[0].PackageID | Where-Object { $_ })
+            }
+            'DeploymentPackage' {
+                $packages = @(Get-CMSoftwareUpdateDeploymentPackage -Name $ContentName -ErrorAction Stop | Where-Object { $null -ne $_ })
+                if ($packages.Count -ne 1) { throw "expected one deployment package named '$ContentName', found $($packages.Count)" }
+                return @($packages[0].PackageID | Where-Object { $_ })
             }
         }
     }
 
+    function Invoke-MemLabsDistributionPointGroupPackageMethod {
+        param (
+            [object] $Group,
+            [ValidateSet('AddPackages', 'RemovePackages')]
+            [string] $MethodName,
+            [string[]] $PackageIds
+        )
 
-    #Enable Site features:
-    Write-DscStatus "$Tag Enabling Site features"
-    Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
+        $ids = @($PackageIds | Where-Object { $_ } | Select-Object -Unique)
+        if ($ids.Count -eq 0) { throw "distribution point group method '$MethodName' received no package IDs" }
+        $result = Invoke-WmiMethod -InputObject $Group -Name $MethodName -ArgumentList (, [string[]]$ids) -ErrorAction Stop
+        if ($null -ne $result.ReturnValue -and [int]$result.ReturnValue -ne 0) {
+            throw "distribution point group method '$MethodName' returned $($result.ReturnValue)"
+        }
+    }
 
-    #Applications and packages
+    function Test-MemLabsContentDistributionTarget {
+        param (
+            [ValidateSet('Application', 'Package', 'DeploymentPackage')]
+            [string] $ContentType,
+            [string] $ContentName,
+            [string] $PackageId,
+            [string] $DistributionPointGroupName,
+            [string] $DistributionPointGroupId,
+            [string] $SiteCode,
+            [string] $StatusTag,
+            [int] $Attempts = 6,
+            [int] $RetrySeconds = 5
+        )
 
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            try {
+                $contentPackageIds = @(Get-MemLabsContentPackageIds -ContentType $ContentType -ContentName $ContentName -PackageId $PackageId -SiteCode $SiteCode)
+                $groupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $DistributionPointGroupName -GroupId $DistributionPointGroupId
+                $group = $groupResolution.Group
+                $groupPackages = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupPackages -Filter "GroupID='$($group.GroupID)'" -ErrorAction Stop |
+                    Where-Object { $null -ne $_ })
+                $groupPackageKeys = @{}
+                foreach ($groupPackage in $groupPackages) { $groupPackageKeys["$($groupPackage.PkgID)"] = $true }
+                $missingPackages = @($contentPackageIds | Where-Object { -not $groupPackageKeys.ContainsKey("$_") })
+                if ($contentPackageIds.Count -gt 0 -and $missingPackages.Count -eq 0) { return $true }
+                $reason = if ($contentPackageIds.Count -eq 0) { 'content has no package IDs' } else { "missing package assignment(s): $($missingPackages -join ', ')" }
+            }
+            catch {
+                $reason = $_.Exception.Message
+            }
+            if ($attempt -lt $Attempts) {
+                Write-DscStatus "$StatusTag $ContentType '$ContentName' target '$DistributionPointGroupName' is not ready ($reason); retry $attempt/$Attempts in ${RetrySeconds}s"
+                Start-Sleep -Seconds $RetrySeconds
+            }
+        }
+        return $false
+    }
+
+    function Sync-MemLabsContentDistribution {
+        param (
+            [ValidateSet('Application', 'Package', 'DeploymentPackage')]
+            [string] $ContentType,
+            [string] $ContentName,
+            [string] $PackageId,
+            [string] $DistributionPointGroupName,
+            [string] $DistributionPointGroupId,
+            [string] $StatusTag,
+            [string] $SiteCode
+        )
+
+        try {
+            $targetResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $DistributionPointGroupName -GroupId $DistributionPointGroupId
+            $targetGroup = $targetResolution.Group
+            $targetIdentity = "$DistributionPointGroupName (GroupID=$($targetGroup.GroupID), SourceSite=$($targetGroup.SourceSite))"
+            $contentPackageIds = @(Get-MemLabsContentPackageIds -ContentType $ContentType -ContentName $ContentName -PackageId $PackageId -SiteCode $SiteCode)
+        }
+        catch {
+            Write-DscStatus "$StatusTag Failed to resolve $ContentType '$ContentName' distribution target '$DistributionPointGroupName': $($_.Exception.Message)" -Failure
+            return $false
+        }
+
+        $distributionError = $null
+        try {
+            if ($targetResolution.MatchCount -gt 1) {
+                Invoke-MemLabsDistributionPointGroupPackageMethod -Group $targetGroup -MethodName AddPackages -PackageIds $contentPackageIds
+                Write-DscStatus "$StatusTag Requested $ContentType '$ContentName' distribution to exact target '$targetIdentity'; same-name rows: $($targetResolution.Identities)"
+            }
+            else {
+                switch ($ContentType) {
+                    'Application' { $null = Start-CMContentDistribution -ApplicationName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                    'Package' {
+                        if ($PackageId) {
+                            $null = Start-CMContentDistribution -PackageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop
+                        }
+                        else {
+                            $null = Start-CMContentDistribution -PackageName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop
+                        }
+                    }
+                    'DeploymentPackage' { $null = Start-CMContentDistribution -DeploymentPackageName $ContentName -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                }
+                Write-DscStatus "$StatusTag Requested $ContentType '$ContentName' distribution to '$targetIdentity'"
+            }
+        }
+        catch {
+            $distributionError = $_.Exception.Message
+            if ($distributionError -notmatch 'No content destination was found|already been distributed') {
+                Write-DscStatus "$StatusTag Failed to distribute $ContentType '$ContentName' to '$targetIdentity': $distributionError" -Failure
+                return $false
+            }
+        }
+
+        if (-not (Test-MemLabsContentDistributionTarget -ContentType $ContentType -ContentName $ContentName -PackageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -DistributionPointGroupId "$($targetGroup.GroupID)" -SiteCode $SiteCode -StatusTag $StatusTag)) {
+            $detail = if ($distributionError) { $distributionError } else { 'the distribution request returned without an error, but the target assignment was not visible' }
+            Write-DscStatus "$StatusTag Failed to verify $ContentType '$ContentName' on '$targetIdentity': $detail" -Failure
+            return $false
+        }
+        Write-DscStatus "$StatusTag Verified $ContentType '$ContentName' targeting to '$targetIdentity'"
+        return $true
+    }
+
+    function Sync-MemLabsScriptLibrary {
+        param([string]$ScriptPath = 'C:\tools\Scripts')
+
+        $started = Get-Date
+        $approvalQueue = New-Object System.Collections.Generic.List[object]
+        $imported = 0
+        $alreadyPresent = 0
+        $importFailed = 0
+
+        # One provider read is both faster and a better instrument than 105
+        # independent existence probes. If this read fails, let ScriptWorkflow's
+        # whole-Perfloading retry handle the provider failure rather than treating
+        # an unknown inventory as an empty script library.
+        $existingByName = @{}
+        foreach ($existingScript in @(Get-CMScript -Fast -ErrorAction Stop)) {
+            if ($existingScript.ScriptName) {
+                $existingByName["$($existingScript.ScriptName)"] = $existingScript
+            }
+        }
+
+        foreach ($scriptFile in @(Get-ChildItem -Path $ScriptPath -Recurse -Filter '*.ps1')) {
+            $scriptName = 'MEMLABS-' + [System.IO.Path]::GetFileNameWithoutExtension($scriptFile.FullName)
+            $scriptObject = $existingByName[$scriptName]
+            if ($scriptObject) {
+                $alreadyPresent++
+            }
+            else {
+                try {
+                    $scriptContent = Get-Content -Path $scriptFile.FullName -Raw
+                    $scriptObject = New-CMScript -ScriptName $scriptName -ScriptText $scriptContent -Fast -ErrorAction Stop
+                    if (-not $scriptObject -or -not $scriptObject.ScriptGuid) {
+                        throw "New-CMScript returned no ScriptGuid"
+                    }
+                    $existingByName[$scriptName] = $scriptObject
+                    $imported++
+                    Write-DscStatus "$Tag Successfully imported: $scriptName"
+                }
+                catch {
+                    $importFailed++
+                    Write-DscStatus "$Tag Failed to import: $scriptName. Error: $($_.Exception.Message)" -Warning
+                    continue
+                }
+            }
+
+            $approvalState = 0
+            try { $approvalState = [int]$scriptObject.ApprovalState } catch {}
+            if ($approvalState -ne 3 -and $scriptObject.ScriptGuid) {
+                $approvalQueue.Add([pscustomobject]@{ Name = $scriptName; Guid = "$($scriptObject.ScriptGuid)" })
+            }
+        }
+
+        $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+        Write-DscStatus "$Tag Script library reconcile: $imported imported, $alreadyPresent already present, $importFailed import failed, $($approvalQueue.Count) awaiting approval in ${elapsed}s"
+        return [pscustomobject]@{
+            Imported       = $imported
+            AlreadyPresent = $alreadyPresent
+            ImportFailed    = $importFailed
+            ApprovalQueue   = $approvalQueue.ToArray()
+        }
+    }
+
+    # Extract the REAL SMS provider error from an approval failure. Approve-CMScript
+    # surfaces only "The SMS Provider reported an error" in $_.Exception.Message; the
+    # cause lives in the WMI ExtendedStatus / inner-exception chain / error id, which
+    # the old catch discarded -- so 105 failures said nothing. Walk it into one line.
+    function Get-CmProviderError {
+        param($ErrorRecord)
+        $parts = [System.Collections.Generic.List[string]]::new()
+        $ex = $ErrorRecord.Exception
+        $depth = 0
+        while ($ex -and $depth -lt 6) {
+            $parts.Add("[$($ex.GetType().Name)] $($ex.Message)")
+            foreach ($pn in 'ErrorCode', 'StatusCode', 'HResult') {
+                try { $pv = $ex.PSObject.Properties[$pn]; if ($pv -and $null -ne $pv.Value -and "$($pv.Value)" -ne '0') { $parts.Add("$pn=$($pv.Value)") } } catch {}
+            }
+            # SMS provider ManagementException carries an SMS_ExtendedStatus object.
+            try {
+                $ei = $ex.PSObject.Properties['ErrorInformation']
+                if ($ei -and $ei.Value) {
+                    $d = $ei.Value
+                    $desc = try { $d['Description'] } catch { $null }
+                    $op = try { $d['Operation'] } catch { $null }
+                    $code = try { $d['StatusCode'] } catch { $null }
+                    if ($desc -or $op -or $code) { $parts.Add("ExtStatus: Desc='$desc' Op='$op' StatusCode=$code") }
+                }
+            } catch {}
+            $ex = $ex.InnerException; $depth++
+        }
+        if ($ErrorRecord.FullyQualifiedErrorId) { $parts.Add("FQEID=$($ErrorRecord.FullyQualifiedErrorId)") }
+        return ($parts -join ' | ')
+    }
+
+    function Get-MemLabsServerFromNalPath {
+        param($NalPath)
+        if ("$NalPath" -match '\\([^\\"\]]+)') { return $Matches[1] }
+        return $null
+    }
+
+    function Get-MemLabsMissingContentTargets {
+        param(
+            [string] $PackageId,
+            [string[]] $ExpectedDistributionPointNames,
+            [string] $SiteCode
+        )
+
+        $targetKeys = @{}
+        foreach ($targetRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$PackageId'" -ErrorAction Stop)) {
+            $targetName = Get-MemLabsServerFromNalPath $targetRow.ServerNALPath
+            if (-not $targetName) { continue }
+            $targetKeys[$targetName.ToUpperInvariant()] = $true
+            $targetKeys[(($targetName -split '\.')[0]).ToUpperInvariant()] = $true
+        }
+        @($ExpectedDistributionPointNames | Where-Object {
+                $expectedName = "$_"
+                $expectedShort = ($expectedName -split '\.')[0]
+                -not ($targetKeys.ContainsKey($expectedName.ToUpperInvariant()) -or $targetKeys.ContainsKey($expectedShort.ToUpperInvariant()))
+            })
+    }
+
+    function Sync-MemLabsOsdContentDistribution {
+        param(
+            [ValidateSet('Package', 'OperatingSystemImage', 'OperatingSystemInstaller')]
+            [string] $ContentType,
+            [string] $PackageId,
+            [string] $ContentName,
+            [string] $DistributionPointGroupName,
+            [string[]] $ExpectedDistributionPointNames,
+            [string] $SiteCode,
+            [string] $StatusTag,
+            [int] $Attempts = 6,
+            [int] $RetrySeconds = 5
+        )
+
+        if (-not $PackageId) {
+            Write-DscStatus "$StatusTag Cannot distribute $ContentType '$ContentName' because its PackageID is empty." -Warning
+            return $false
+        }
+        $expectedNames = @($ExpectedDistributionPointNames | Where-Object { $_ } | Select-Object -Unique)
+        if ($expectedNames.Count -eq 0) {
+            Write-DscStatus "$StatusTag Cannot distribute $ContentType '$ContentName' because no OSD DP was resolved." -Warning
+            return $false
+        }
+
+        try {
+            $missingNames = @(Get-MemLabsMissingContentTargets -PackageId $PackageId -ExpectedDistributionPointNames $expectedNames -SiteCode $SiteCode)
+        }
+        catch {
+            Write-DscStatus "$StatusTag Could not read $ContentType '$ContentName' ($PackageId) targeting: $($_.Exception.Message). Continuing with the remaining OSD content; Phase 11 validation will measure this package independently." -Warning
+            return $false
+        }
+        if ($missingNames.Count -eq 0) {
+            Write-DscStatus "$StatusTag $ContentType '$ContentName' ($PackageId) is already targeted to every OSD DP -- skipping distribution request"
+            return $true
+        }
+
+        $distributionError = $null
+        try {
+            switch ($ContentType) {
+                'Package' { $null = Start-CMContentDistribution -PackageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                'OperatingSystemImage' { $null = Start-CMContentDistribution -OperatingSystemImageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+                'OperatingSystemInstaller' { $null = Start-CMContentDistribution -OperatingSystemInstallerId $PackageId -DistributionPointGroupName $DistributionPointGroupName -ErrorAction Stop }
+            }
+            Write-DscStatus "$StatusTag Requested $ContentType '$ContentName' ($PackageId) distribution to '$DistributionPointGroupName'"
+        }
+        catch {
+            $distributionError = $_.Exception.Message
+        }
+
+        $targetReadError = $null
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            try {
+                $missingNames = @(Get-MemLabsMissingContentTargets -PackageId $PackageId -ExpectedDistributionPointNames $expectedNames -SiteCode $SiteCode)
+                $targetReadError = $null
+            }
+            catch {
+                $targetReadError = $_.Exception.Message
+                $missingNames = @($expectedNames)
+            }
+            if ($missingNames.Count -eq 0) { break }
+            if ($attempt -lt $Attempts) { Start-Sleep -Seconds $RetrySeconds }
+        }
+        if ($missingNames.Count -eq 0) {
+            $errorNote = if ($distributionError) { " despite provider response '$distributionError'" } else { '' }
+            Write-DscStatus "$StatusTag Verified $ContentType '$ContentName' ($PackageId) is targeted to every OSD DP$errorNote"
+            return $true
+        }
+
+        $errorNote = if ($distributionError) { " Provider response: $distributionError" } elseif ($targetReadError) { " Target read failed: $targetReadError" } else { '' }
+        Write-DscStatus "$StatusTag $ContentType '$ContentName' ($PackageId) is still not targeted to $($missingNames -join ', ') after $Attempts reads.$errorNote Phase 11 validation will fail until targeting appears." -Warning
+        return $false
+    }
+
+    function Approve-MemLabsScriptQueue {
+        param([object[]]$Queue)
+
+        $started = Get-Date
+        $approved = 0
+        $failed = 0
+        $policyBlocked = 0
+        $diagDumped = $false
+        $approvalMaxAttempts = 3
+        $approvalRetrySeconds = 5
+        $stopApprovals = $false
+        for ($index = 0; $index -lt $Queue.Count; $index++) {
+            $entry = $Queue[$index]
+            for ($approvalAttempt = 1; $approvalAttempt -le $approvalMaxAttempts; $approvalAttempt++) {
+                try {
+                    # An approval can commit even when its provider response fails.
+                    # Read back before retrying so that case counts as success rather
+                    # than issuing a second mutation.
+                    if ($approvalAttempt -gt 1) {
+                        $alreadyApproved = Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction SilentlyContinue
+                        if ($alreadyApproved -and [int]$alreadyApproved.ApprovalState -eq 3) {
+                            $approved++
+                            Write-DscStatus "$Tag Script '$($entry.Name)' approval recovered after the provider failure: read-back is ApprovalState=3 before retry $approvalAttempt."
+                            break
+                        }
+                    }
+
+                    Approve-CMScript -ScriptGuid $entry.Guid -Comment 'MEMLABS auto approved' -ErrorAction Stop | Out-Null
+                    $readBack = Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction Stop
+                    if (-not $readBack -or [int]$readBack.ApprovalState -ne 3) {
+                        throw "approval returned without ApprovalState=3"
+                    }
+                    $approved++
+                    if ($approvalAttempt -gt 1) {
+                        Write-DscStatus "$Tag Script '$($entry.Name)' approval recovered on attempt $approvalAttempt of $approvalMaxAttempts."
+                    }
+                    break
+                }
+                catch {
+                    $approvalError = Get-CmProviderError $_
+                    if ($approvalError -match "Author can't approve their scripts") {
+                        # TwoKeyApproval is hierarchy policy and can lag the SCI write
+                        # on a fresh child. Every remaining call uses the same author
+                        # and policy, so more identical failures prove nothing.
+                        $policyBlocked = $Queue.Count - $index
+                        $stopApprovals = $true
+                        Write-DscStatus "$Tag Script approval deferred: provider still requires a different approver after the TwoKeyApproval write. Stopped after one policy-blocked call; $policyBlocked script(s) remain unapproved and will be retried on the next Phase 8 pass." -Warning
+                        break
+                    }
+
+                    $transientProviderFailure = $approvalError -match '(?i)\b1205\b|deadlock|Error waiting for query to return'
+                    if ($transientProviderFailure -and $approvalAttempt -lt $approvalMaxAttempts) {
+                        Write-DscStatus "$Tag Transient provider failure approving script '$($entry.Name)' (attempt $approvalAttempt of $approvalMaxAttempts); retrying in ${approvalRetrySeconds}s: $approvalError"
+                        Start-Sleep -Seconds $approvalRetrySeconds
+                        continue
+                    }
+
+                    # On the FIRST non-policy failure, dump the context ONCE so the log
+                    # names WHY: the effective TwoKeyApproval value in the master SCI
+                    # (FileType=2) and this script's live ApprovalState. A generic
+                    # provider error with TwoKeyApproval=1 points at the policy write;
+                    # with =0 it points elsewhere (and the ExtStatus above names it).
+                    if (-not $diagDumped) {
+                        $diagDumped = $true
+                        try {
+                            $sdInst = @(Get-CimInstance -ClassName SMS_SCI_SiteDefinition -Namespace "ROOT\SMS\site_$SiteCode" -Filter "FileType=2 AND SiteCode='$HierarchySiteCode'" -ErrorAction Stop) | Select-Object -First 1
+                            $tkVal = ($sdInst.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1).Value
+                            $asVal = (Get-CMScript -ScriptName $entry.Name -Fast -ErrorAction SilentlyContinue).ApprovalState
+                            Write-DscStatus "$Tag Approval DIAG: hierarchy site '$HierarchySiteCode' master SCI TwoKeyApproval='$tkVal'; script '$($entry.Name)' ApprovalState='$asVal'" -Warning
+                        }
+                        catch { Write-DscStatus "$Tag Approval DIAG read failed: $($_.Exception.Message)" -Warning }
+                    }
+                    $failed++
+                    Write-DscStatus "$Tag Failed to approve script '$($entry.Name)' after $approvalAttempt attempt(s): $approvalError" -Warning
+                    break
+                }
+            }
+            if ($stopApprovals) { break }
+        }
+
+        $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+        Write-DscStatus "$Tag Script approval reconcile: $approved approved, $failed failed, $policyBlocked policy-blocked in ${elapsed}s"
+        return [pscustomobject]@{
+            Approved      = $approved
+            Failed        = $failed
+            PolicyBlocked = $policyBlocked
+        }
+    }
+
+    $scriptApprovalQueue = @()
+
+    # Self-healing setup for the Office Install Targets collection. Called both
+    # before the Office app deployment is created (so the deployment has a real
+    # target on fresh labs) and again later for non-Office paths. Always runs:
+    # creates the collection if missing, replaces stale direct-membership rules
+    # (legacy) with a name-keyed WQL query rule, and updates the query expression
+    # when the VM list has changed. The query auto-evaluates on the collection
+    # schedule and survives ResourceID changes, so VMs added/re-discovered after
+    # collection creation become members without a rebuild.
+    function Set-OfficeInstallTargetsCollection {
+        param($OfficeTargetVMs)
+        if (-not $OfficeTargetVMs -or $OfficeTargetVMs.Count -eq 0) { return $null }
+        $colName = "MEMLABS-Office Install Targets"
+        $col = Get-CMDeviceCollection -Name $colName -ErrorAction SilentlyContinue
+        if (-not $col) {
+            try {
+                $col = New-CMDeviceCollection -Name $colName -LimitingCollectionName "All Systems" -Comment "VMs targeted for Microsoft 365 Apps install" -ErrorAction Stop
+                Write-DscStatus "$Tag Created collection: $colName"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Failed to create Office Install Targets collection: $($_.Exception.Message)"
+                return $null
+            }
+
+            # Move the new collection under the MEMLABS folder as a best-effort,
+            # cosmetic step. This function is called EARLY (before the Office app
+            # deployment is authored) -- ahead of the main collection loop that
+            # creates \DeviceCollection\MEMLABS -- so on a fresh lab the folder
+            # does not exist yet. Move-CMObject raises a TERMINATING error on a
+            # missing target folder, which -ErrorAction SilentlyContinue does NOT
+            # suppress; previously that bubbled into the catch above, produced a
+            # misleading "Failed to create Office Install Targets collection"
+            # warning, returned $null, and skipped adding the query membership
+            # rule -- leaving the Office deployment pointed at an empty collection.
+            # Ensure the folder exists first and keep the move non-fatal.
+            try {
+                if (-not (Get-CMFolder -FolderPath "\DeviceCollection\MEMLABS" -ErrorAction SilentlyContinue)) {
+                    New-CMFolder -Name "MEMLABS" -ParentFolderPath "\DeviceCollection" -ErrorAction SilentlyContinue | Out-Null
+                }
+                Move-CMObject -FolderPath "$SiteCode`:\DeviceCollection\MEMLABS" -ObjectId $col.CollectionID -ErrorAction SilentlyContinue
+            }
+            catch {
+                Write-DscStatus "$Tag Note: could not move '$colName' under the MEMLABS folder (cosmetic only): $($_.Exception.Message)"
+            }
+        }
+
+        $nameList = ($OfficeTargetVMs | ForEach-Object { "'$($_.vmName)'" }) -join ","
+        # Gate membership on Client=1 so a VM only joins the collection ONCE its CM
+        # client is installed. This eliminates the app-policy projection race: if a
+        # device is added while it is still a non-client, policypv snapshots it as
+        # non-client and never retroactively projects the Office assignment when it
+        # later becomes a client (a plain membership refresh does not re-drive the
+        # per-resource app policy -- the MP then answers 'No new assignments'
+        # forever). By requiring Client=1, the device becomes a BRAND-NEW member at
+        # the moment it becomes a client, and new-member adds are the path policypv
+        # projects app-deployment policy for reliably.
+        $desiredQuery = "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Client = 1 and SMS_R_System.Name in ($nameList)"
+        $ruleName = "Office Install Targets Rule"
+
+        # Remove any stale direct-membership rules left behind by older builds.
+        try {
+            $directRules = @(Get-CMDeviceCollectionDirectMembershipRule -CollectionId $col.CollectionID -ErrorAction SilentlyContinue)
+            foreach ($dr in $directRules) {
+                try {
+                    Remove-CMDeviceCollectionDirectMembershipRule -CollectionId $col.CollectionID -ResourceId $dr.ResourceID -Force -ErrorAction Stop
+                    Write-DscStatus "$Tag Removed legacy direct-membership rule (ResourceID $($dr.ResourceID)) from $colName"
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        # Ensure the query rule exists and matches the current VM list. CM
+        # normalizes the SELECT clause after the rule is created (expands to
+        # ResourceID,ResourceType,Name,...), so compare on the FROM/WHERE tail
+        # only to avoid pointlessly delete-and-recreating the rule every run.
+        try {
+            $existing = @(Get-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -ErrorAction SilentlyContinue) |
+                Where-Object { $_.RuleName -eq $ruleName }
+            $desiredTail = ($desiredQuery -split '(?i)\bfrom\b', 2)[1].Trim()
+            $existingTail = if ($existing) { ($existing.QueryExpression -split '(?i)\bfrom\b', 2)[1].Trim() } else { $null }
+            if ($existing) {
+                if ($existingTail -ne $desiredTail) {
+                    Remove-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -RuleName $ruleName -Force -ErrorAction SilentlyContinue
+                    Add-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -QueryExpression $desiredQuery -RuleName $ruleName -ErrorAction Stop
+                    Write-DscStatus "$Tag Updated query rule on $colName for: $(($OfficeTargetVMs | ForEach-Object { $_.vmName }) -join ', ')"
+                }
+            }
+            else {
+                Add-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -QueryExpression $desiredQuery -RuleName $ruleName -ErrorAction Stop
+                Write-DscStatus "$Tag Added query membership rule on $colName for: $(($OfficeTargetVMs | ForEach-Object { $_.vmName }) -join ', ')"
+            }
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to set Office Install Targets query rule: $($_.Exception.Message)"
+        }
+
+        Invoke-CMCollectionUpdate -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
+
+        # Enable incremental (delta) membership updates so a VM is added WITHIN
+        # MINUTES of its CM client coming online (Client=1 flipping to match the
+        # rule), instead of waiting for the periodic full-eval schedule. Paired
+        # with the Client=1 gate above, the device is a fresh member the instant it
+        # becomes a client, which is exactly when policypv will project the Office
+        # deployment to it.
+        try {
+            Set-CMCollection -CollectionId $col.CollectionID -RefreshType Both -ErrorAction Stop
+            Write-DscStatus "$Tag Enabled incremental membership updates on $colName"
+        }
+        catch { Write-DscStatus "$Tag WARNING: could not enable incremental updates on ${colName}: $($_.Exception.Message)" }
+
+        # With the Client=1 gate, a target VM only becomes a member once its CM
+        # client is installed. During setup some Office targets may not be clients
+        # yet (client install still in flight), so 0/partial membership here is
+        # EXPECTED, not an error -- incremental updates add each one the moment it
+        # becomes a client and policypv projects the deployment to it then (as a
+        # new member). Do a short best-effort wait only to catch the common case
+        # where the target clients are already up.
+        $expected = ($OfficeTargetVMs | Measure-Object).Count
+        $deadline = (Get-Date).AddSeconds(60)
+        $live = 0
+        do {
+            Start-Sleep -Seconds 5
+            $live = @(Get-CMCollectionMember -CollectionId $col.CollectionID -ErrorAction SilentlyContinue).Count
+        } while ($live -lt $expected -and (Get-Date) -lt $deadline)
+        if ($live -ge $expected) {
+            Write-DscStatus "$Tag Collection '$colName' eval complete: live members=$live/$expected (all Office targets are clients)"
+        }
+        else {
+            Write-DscStatus "$Tag Collection '$colName' has $live/$expected client member(s) so far; remaining Office target(s) will be added + projected automatically once their CM client is installed (Client=1 gate + incremental updates)"
+        }
+        return $col
+    }
+
+    # Force re-authoring of an existing application deployment's policy body.
+    # Required when a resource is added to the target collection AFTER the
+    # deployment was originally authored: ConfigMgr does not retroactively
+    # project pre-existing deployments to late-arriving collection members
+    # until the deployment itself is touched. Re-saves the deployment via
+    # SMS_ApplicationAssignment.Put() which bumps LastModifiedTime and causes
+    # site_comp / policypv to re-project the assignment for all members.
+    #
+    # Implemented against WMI directly because Set-CMApplicationDeployment's
+    # accepted parameters vary by SCCM build -- older SDKs reject both
+    # -DeployAction and -DeployPurpose, leaving no portable cmdlet-level way
+    # to force a Put(). WMI Put() works on every version.
+    function Update-OfficeDeploymentPolicy {
+        param([string]$AppName, [string]$CollectionName)
+        try {
+            $dep = Get-CMApplicationDeployment -Name $AppName -CollectionName $CollectionName -ErrorAction SilentlyContinue
+            if (-not $dep) { return }
+            $assignmentName = $dep.AssignmentName
+            if (-not $assignmentName) { return }
+
+            # Force a fresh collection eval and wait for live membership rows BEFORE
+            # the Put(). The toggle-Put() below re-projects the assignment against
+            # whatever members the site currently sees in v_FullCollectionMembership;
+            # if that table is still empty (cached MemberCount can read correct
+            # while the membership rows are not yet materialized), late-arriving
+            # members are silently skipped. Field repro: the manual recovery that
+            # finally got Office onto MOCHI was a second Invoke-CMCollectionUpdate
+            # followed by client policy reset -- nothing more.
+            $liveMembers = -1
+            try {
+                $tgtCol = Get-CMDeviceCollection -Name $CollectionName -ErrorAction SilentlyContinue
+                if ($tgtCol) {
+                    Invoke-CMCollectionUpdate -CollectionId $tgtCol.CollectionID -ErrorAction SilentlyContinue
+                    $deadline = (Get-Date).AddSeconds(300)
+                    $liveMembers = 0
+                    do {
+                        Start-Sleep -Seconds 5
+                        $liveMembers = @(Get-CMCollectionMember -CollectionId $tgtCol.CollectionID -ErrorAction SilentlyContinue).Count
+                    } while ($liveMembers -lt 1 -and (Get-Date) -lt $deadline)
+                    Write-DscStatus "$Tag Pre-Put '$CollectionName' live membership: $liveMembers"
+                }
+            }
+            catch { }
+
+            if ($liveMembers -eq 0) {
+                Write-DscStatus "$Tag WARNING: '$CollectionName' still has 0 live members after 5 minutes, so re-authoring the '$AppName' deployment would project it to nobody. Skipped the Put -- Office policy will NOT reach these clients until this runs against a populated collection (re-run Phase 8, or Invoke-CMCollectionUpdate then re-create the deployment). Phase 11 reports 'Office deployment policy not visible' until then."
+                return
+            }
+
+            $escaped = $assignmentName.Replace("'", "''")
+            $ass = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_ApplicationAssignment `
+                -Filter "AssignmentName='$escaped'" -ErrorAction Stop
+            if (-not $ass) { return }
+            # Toggle NotifyUser twice so each Put() registers an actual change
+            # (PowerShell's WMI wrapper skips Put() when the assigned value
+            # equals the existing value, so `$ass.NotifyUser = $ass.NotifyUser`
+            # is a silent no-op). End state is identical to start state, but
+            # LastModificationTime is bumped and the assignment is re-projected.
+            $ass.NotifyUser = -not $ass.NotifyUser
+            [void]$ass.Put()
+            Start-Sleep -Seconds 1
+            $ass.NotifyUser = -not $ass.NotifyUser
+            [void]$ass.Put()
+            Write-DscStatus "$Tag Re-authored deployment policy for '$AppName' -> '$CollectionName' (forces projection to late-added members)"
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to re-author Office deployment policy for '$AppName': $($_.Exception.Message)"
+        }
+    }
+
+    # Replicated hierarchy rows can expose the same group name from more than one
+    # source site. Select the row owned by this site (or the sole row) and pin its
+    # exact GroupID for every membership and content operation.
+    $DPGroupName = "ALL DPS"
+    $distributionPrimarySiteCode = if ($CurrentRole -eq 'Secondary' -and $ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
+    $managedDpNames = @(Get-MemLabsManagedDistributionPointNames -VirtualMachines $deployConfig.virtualMachines -DefaultDomainName $DomainFullName -PrimarySiteCode $distributionPrimarySiteCode -AdditionalDistributionPointScopes $deployConfig.phase8ManagedDistributionPointScopes)
+    $DPGroupId = ''
+    if (-not (Test-MemLabsShouldManageDistributionPointGroup -CurrentRole $CurrentRole -ManagedDistributionPointNames $managedDpNames)) {
+        Write-DscStatus "$Tag No CAS-local MemLabs-managed Distribution Points were identified; skipping empty CAS group creation. Child Primary workers create and reconcile their site-owned group."
+    }
+    else {
+        try {
+            $dpGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $DPGroupName -AllowMissing
+            if ($dpGroupResolution) {
+                Write-DscStatus "$Tag DP group: $DPGroupName already exists (GroupID=$($dpGroupResolution.Group.GroupID), SourceSite=$($dpGroupResolution.Group.SourceSite))"
+            }
+            else {
+                try {
+                    $null = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all MemLabs-managed Distribution Points for this site" -ErrorAction Stop
+                    Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
+                }
+                catch {
+                    Write-DscStatus "$Tag DP group '$DPGroupName' creation did not complete; membership reconciliation will re-query provider state: $($_.Exception.Message)"
+                }
+            }
+            for ($groupReadAttempt = 1; -not $dpGroupResolution -and $groupReadAttempt -le 6; $groupReadAttempt++) {
+                $dpGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $DPGroupName -AllowMissing
+                if ($dpGroupResolution) { break }
+                if ($groupReadAttempt -lt 6) { Start-Sleep -Seconds 5 }
+            }
+            if (-not $dpGroupResolution) { throw 'group was not visible after creation/reconciliation' }
+            if ($dpGroupResolution.MatchCount -gt 1) {
+                Write-DscStatus "$Tag WARNING: Found $($dpGroupResolution.MatchCount) groups named '$DPGroupName'. Using the site-owned exact row; remove stale duplicates after the build. $($dpGroupResolution.Identities)"
+            }
+            $DPGroupId = "$($dpGroupResolution.Group.GroupID)"
+        }
+        catch {
+            Write-DscStatus "$Tag Could not resolve DP group '$DPGroupName': $($_.Exception.Message). Content distribution was not requested." -Failure
+            return
+        }
+        if (-not (Sync-MemLabsDistributionPointGroupMembership -SiteCode $SiteCode -GroupName $DPGroupName -DistributionPointGroupId $DPGroupId -ExpectedDistributionPointNames $managedDpNames -StatusTag $Tag)) {
+            return
+        }
+    }
+
+
+    #Enable Site features (hierarchy-level — top-level site only)
+    if ($isTopLevel) {
+        Write-DscStatus "$Tag Enabling Site features"
+        try {
+            Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to enable site features: $_"
+        }
+    }
+
+    #Applications and packages — Primary only (content sources are local)
+    if ($CurrentRole -ne "CAS") {
 
     $apps = $deployconfig.Tools | where-object { $_.Appinstall -eq $True }
     $apps | ForEach-Object {
-    
-        Write-DscStatus "$Tag Creating a directory under c:\apps for the application $($_.Name)"
-        #create a directory for the application source files
-        new-item -ItemType Directory -Path "c:\Apps\$($_.Name)" -force
-        Write-DscStatus "$Tag Successfully created directory under c:\apps for the application $($_.Name)"
 
+        $appSourceDirectory = "C:\Apps\$($_.Name)"
+        $appSourceFile = "C:\tools\$($_.AppMsi)"
+        $appLinkPath = Join-Path $appSourceDirectory $_.AppMsi
+        if (-not (Test-Path -LiteralPath $appSourceDirectory)) {
+            New-Item -ItemType Directory -Path $appSourceDirectory -Force | Out-Null
+            Write-DscStatus "$Tag Created application source directory: $appSourceDirectory"
+        }
 
-        Write-DscStatus "$Tag Creating a Hardlink under c:\apps for the application $($_.Name) "
-        #create a hardlink for the source file (this is to save space on the C drive)
-        new-item -ItemType HardLink -Value "c:\tools\$($_.AppMsi)" -Path "C:\Apps\$($_.Name)\$($_.AppMsi)" -force
-        Write-DscStatus "$Tag Successfully created Hardlink under c:\apps for the application $($_.Name)"
+        $appLinkIsCurrent = $false
+        if (Test-Path -LiteralPath $appLinkPath) {
+            try {
+                $appLinkItem = Get-Item -LiteralPath $appLinkPath
+                $appLinkIsCurrent = $appLinkItem.LinkType -eq "HardLink" -and
+                    (Get-FileHash -LiteralPath $appSourceFile -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $appLinkPath -Algorithm SHA256).Hash
+            }
+            catch {
+                Write-DscStatus "$Tag Could not verify the application source hardlink for $($_.Name); recreating it: $($_.Exception.Message)"
+            }
+        }
+        if ($appLinkIsCurrent) {
+            Write-DscStatus "$Tag Application source link is already current for $($_.Name) -- skipping filesystem write"
+        }
+        else {
+            if (Test-Path -LiteralPath $appLinkPath) { Remove-Item -LiteralPath $appLinkPath -Force }
+            New-Item -ItemType HardLink -Value $appSourceFile -Path $appLinkPath -Force | Out-Null
+            Write-DscStatus "$Tag Created application source hardlink for $($_.Name)"
+        }
 
         #creating an application
-        $appname = "MEMLABS-" + "$($_.Name)" 
-        Write-DscStatus "$Tag Creating an MEMLABS application for $($_.Name) as App model"
-        New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
-        #remove an application
-        #Remove-CMApplication -Name "MEMLABS-*" -Force
+        $appname = "MEMLABS-" + "$($_.Name)"
 
-        Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as App model"
-        #create a deployment for each application (tim help on pulling the site server name)
-        Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
+        if (Get-CMApplication -Name "$appname" -Fast -ErrorAction SilentlyContinue) {
+            Write-DscStatus "$Tag Application '$appname' already exists, skipping"
+        }
+        else {
+            Write-DscStatus "$Tag Creating an MEMLABS application for $($_.Name) as App model"
+            New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
 
-        Write-DscStatus "$Tag Distributing MEMLABS application $($_.Name) to all DPs"
-        #distribute the content to All DPs
-        Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed MEMLABS application $($_.Name) to all DPs"
+            Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as App model"
+            Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
 
-        Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
-        #deploy apps to all systems
-        New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
+            Write-DscStatus "$Tag Distributing MEMLABS application $($_.Name) to all DPs"
+            if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $appname -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -StatusTag $Tag -SiteCode $SiteCode)) { return }
+            Write-DscStatus "$Tag Successfully distributed MEMLABS application $($_.Name) to all DPs"
 
-        Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as Package model"
-        # Create the Package
-        $Package = New-CMPackage -Name "MEMLABS-$($_.Name)" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
-        Write-DscStatus "$Tag Successfully created a MEMLABS application deployment for $($_.Name) as Package model"
-        #Remove a package
-        #Remove-CMPackage -Id "CS100023" -Force
+            Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
+            New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
+        }
 
-        Write-DscStatus "$Tag Creating an MEMLABS package deployment for $($_.Name) as Package model"
-        $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn"
-        # Create a Program for the Package
-        New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
-        Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
+        $pkgName = "MEMLABS-$($_.Name)"
 
-        Write-DscStatus "$Tag Distributing MEMLABS package $($_.Name) to all DPs"
-        #Distribute all packages to ALL DPs group
-        Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed MEMLABS package $($_.Name) to all DPs"
+        if (Get-CMPackage -Name "$pkgName" -Fast -ErrorAction SilentlyContinue) {
+            Write-DscStatus "$Tag Package '$pkgName' already exists, skipping"
+        }
+        else {
+            Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as Package model"
+            $Package = New-CMPackage -Name "$pkgName" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
+            Write-DscStatus "$Tag Successfully created a MEMLABS application deployment for $($_.Name) as Package model"
 
-        Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
-        #Deploy all packages to all systems
-        New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
-        Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
+            Write-DscStatus "$Tag Creating an MEMLABS package deployment for $($_.Name) as Package model"
+            $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn"
+            New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
+            Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
+
+            Write-DscStatus "$Tag Distributing MEMLABS package $($_.Name) to all DPs"
+            if (-not (Sync-MemLabsContentDistribution -ContentType Package -ContentName $pkgName -PackageId $Package.PackageID -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -StatusTag $Tag -SiteCode $SiteCode)) { return }
+            Write-DscStatus "$Tag Successfully distributed MEMLABS package $($_.Name) to all DPs"
+
+            Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
+            New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
+            Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
+        }
     }
 
+    #region Microsoft 365 Apps deployment via ODT (background download)
+    # Check if any VMs have installOffice configured
+    $officeDownloadJob = $null
+    $officeVMs = @($deployConfig.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false })
+    if ($officeVMs.Count -gt 0) {
+
+        $officeAppName = "MEMLABS-Microsoft365Apps"
+        $officeSourceRoot = "C:\OfficeSource"
+        $officeShareName = "OfficeSource$"
+        $odtPath = "C:\tools\odt"
+
+        if (Get-CMApplication -Name $officeAppName -Fast -ErrorAction SilentlyContinue) {
+            Write-DscStatus "$Tag Office application '$officeAppName' already exists, skipping Office deployment setup"
+        }
+        else {
+            Write-DscStatus "$Tag Configuring Microsoft 365 Apps deployment for $($officeVMs.Count) VM(s)"
+
+            # Determine unique channels needed
+            $channels = @($officeVMs | ForEach-Object { $_.installOffice } | Select-Object -Unique)
+            Write-DscStatus "$Tag Office channels requested: $($channels -join ', ')"
+
+            # Channel name to ODT Channel attribute mapping
+            $channelMap = @{
+                'Current'           = 'Current'
+                'MonthlyEnterprise' = 'MonthlyEnterprise'
+                'SemiAnnual'        = 'SemiAnnualPreview'
+            }
+
+            # Kick off the ODT bootstrapper + Office source download (~2-4 GB per
+            # channel) as a background job. This is pure filesystem work with no
+            # ConfigMgr dependency, so it overlaps with the boot image / OSD / task
+            # sequence / baseline work that follows. The matching join + ConfigMgr
+            # application creation happens after the baseline section below.
+            $officeDownloadScript = {
+                param($jobChannels, $jobChannelMap, $jobSourceRoot, $jobOdtPath)
+
+                $messages = New-Object System.Collections.Generic.List[string]
+                $channelResults = @{}
+                $odtOk = $false
+
+                try {
+                    if (-not (Test-Path "$jobOdtPath\setup.exe")) {
+                        $messages.Add("Downloading Office Deployment Tool")
+                        New-Item -ItemType Directory -Path $jobOdtPath -Force | Out-Null
+                        $odtUrl = "https://officecdn.microsoft.com/pr/wsus/setup.exe"
+                        try {
+                            Invoke-WebRequest -Uri $odtUrl -OutFile "$jobOdtPath\setup.exe" -UseBasicParsing -ErrorAction Stop
+                            $messages.Add("ODT downloaded successfully")
+                        }
+                        catch {
+                            $messages.Add("WARNING: Failed to download ODT: $_. Office deployment will be skipped.")
+                        }
+                    }
+
+                    if (Test-Path "$jobOdtPath\setup.exe") {
+                        $odtOk = $true
+
+                        foreach ($channel in $jobChannels) {
+                            $odtChannel = $jobChannelMap[$channel]
+                            if (-not $odtChannel) {
+                                $messages.Add("WARNING: Unknown Office channel '$channel', defaulting to Current")
+                                $odtChannel = 'Current'
+                            }
+
+                            $channelSourcePath = Join-Path $jobSourceRoot $channel
+                            New-Item -ItemType Directory -Path $channelSourcePath -Force | Out-Null
+
+                            # Generate download configuration.xml
+                            $downloadXml = @"
+<Configuration>
+  <Add SourcePath="$channelSourcePath" OfficeClientEdition="64" Channel="$odtChannel">
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+    </Product>
+  </Add>
+</Configuration>
+"@
+                            $downloadXmlPath = Join-Path $channelSourcePath "download.xml"
+                            $downloadXml | Set-Content -Path $downloadXmlPath -Encoding UTF8 -Force
+
+                            # Generate install configuration.xml
+                            $installXml = @"
+<Configuration>
+  <Add OfficeClientEdition="64" Channel="$odtChannel">
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+    </Product>
+  </Add>
+  <Display Level="None" AcceptEULA="TRUE" />
+  <Property Name="AUTOACTIVATE" Value="0" />
+  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />
+  <Updates Enabled="TRUE" />
+  <RemoveMSI />
+</Configuration>
+"@
+                            $installXmlPath = Join-Path $channelSourcePath "install.xml"
+                            $installXml | Set-Content -Path $installXmlPath -Encoding UTF8 -Force
+
+                            # Generate uninstall configuration.xml
+                            $uninstallXml = @"
+<Configuration>
+  <Remove>
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+    </Product>
+  </Remove>
+  <Display Level="None" AcceptEULA="TRUE" />
+  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />
+</Configuration>
+"@
+                            $uninstallXmlPath = Join-Path $channelSourcePath "uninstall.xml"
+                            $uninstallXml | Set-Content -Path $uninstallXmlPath -Encoding UTF8 -Force
+
+                            # Copy ODT setup.exe into the channel source folder
+                            Copy-Item "$jobOdtPath\setup.exe" -Destination $channelSourcePath -Force
+
+                            # Download Office source files (this pulls ~2-4 GB from officecdn.microsoft.com)
+                            if (-not (Test-Path (Join-Path $channelSourcePath "Office\Data"))) {
+                                $messages.Add("Downloading Office source files for channel '$channel' (this may take several minutes)...")
+                                $downloadProcess = Start-Process -FilePath "$channelSourcePath\setup.exe" -ArgumentList "/download `"$downloadXmlPath`"" -Wait -PassThru -NoNewWindow
+                                if ($downloadProcess.ExitCode -eq 0) {
+                                    $messages.Add("Office source download complete for channel '$channel'")
+                                    $channelResults[$channel] = $true
+                                }
+                                else {
+                                    $messages.Add("WARNING: ODT download for channel '$channel' exited with code $($downloadProcess.ExitCode)")
+                                    $channelResults[$channel] = $false
+                                }
+                            }
+                            else {
+                                $messages.Add("Office source files already present for channel '$channel', skipping download")
+                                $channelResults[$channel] = $true
+                            }
+                        }
+                    }
+                }
+                catch {
+                    $messages.Add("WARNING: Office download job exception: $_")
+                }
+
+                return [PSCustomObject]@{
+                    OdtOk          = $odtOk
+                    ChannelResults = $channelResults
+                    Messages       = $messages
+                }
+            }
+
+            $officeDownloadJob = Start-Job -Name "OfficeODTDownload" -ScriptBlock $officeDownloadScript -ArgumentList $channels, $channelMap, $officeSourceRoot, $odtPath
+            Write-DscStatus "$Tag Started background Office source download job (runs during OSD/TS/baseline setup)"
+        }
+    }
+    #endregion Microsoft 365 Apps deployment via ODT
+
+    } # end Primary-only apps/packages block
+
+    ## Hierarchy auto-approval (TwoKeyApproval) + CM-script library import.
+    ## Script import is Primary-tier: New-CMScript on a CAS in a hierarchy is
+    ## a no-op because the CAS has no script library role. TwoKeyApproval is a
+    ## hierarchy setting owned by the top-level site, even though approvals run
+    ## against each Primary's script library, so this block targets both scopes.
+    if ($CurrentRole -ne "CAS") {
 
     ## Changing the auto-approval setting on Hierarchy settings
 
@@ -181,11 +1348,20 @@ else {
 
     Write-DscStatus "$Tag Current namespace is: $namespace and class name is: $classname"
 
-    # Fetch the instance of the class
-    $instance = Get-CimInstance -ClassName $className -Namespace $namespace -Filter "SiteCode like '$SiteCode'"
+    # The provider enforces this hierarchy setting from the top-level site row.
+    # On a child Primary, writing its local row reads back cleanly but has no effect.
+    Write-DscStatus "$Tag TwoKeyApproval policy owner: hierarchy site '$HierarchySiteCode' (local site '$SiteCode')."
 
-    if ($instance -ne $null) {
-        Write-DscStatus "$Tag Instance found: modifying existing instance."
+    # Fetch the EDITABLE master copy. SMS_SCI_SiteDefinition has two rows per site
+    # -- FileType=1 (deployed, read-only) and FileType=2 (master, what the console/
+    # SDK edits and the provider compiles down). An unfiltered read can return BOTH
+    # and write the wrong one, so match the FileType=2 idiom used by EnableEHTTP/
+    # EnableHTTPS/InstallSecondarySiteServer, and VERIFY the write took effect
+    # (wacky ZZ-GYRO 2026-08-17: 105 script approvals failed on this child site).
+    $instance = @(Get-CimInstance -ClassName $className -Namespace $namespace -Filter "FileType=2 AND SiteCode='$HierarchySiteCode'" -ErrorAction SilentlyContinue) | Select-Object -First 1
+
+    if ($null -ne $instance) {
+        Write-DscStatus "$Tag Master SCI (FileType=2) found: reconciling TwoKeyApproval."
 
         # Get the Props array
         $propsArray = $instance.Props
@@ -195,93 +1371,216 @@ else {
         for ($i = 0; $i -lt $propsArray.Length; $i++) {
             if ($propsArray[$i].PropertyName -eq "TwoKeyApproval") {
                 $propertyFound = $true
-                Write-DscStatus "$Tag Current property name is: $propsArray[$i].PropertyName and its value is $propsArray[$i].Value"
-                Write-DscStatus "$Tag Setting the value to 0 to override the self-approval for author."
-                $propsArray[$i].Value = 0 # Set your desired value here
-
-                # Update the Props array in the instance
-                $instance.Props = $propsArray
-
-                # Save the modified instance back to the class
-                Set-CimInstance -InputObject $instance
-
-                Write-DscStatus "$Tag TwoKeyApproval value updated successfully."
+                Write-DscStatus "$Tag Current property name is: $($propsArray[$i].PropertyName) and its value is $($propsArray[$i].Value)"
+                if ([int]$propsArray[$i].Value -eq 0) {
+                    Write-DscStatus "$Tag TwoKeyApproval is already 0 -- skipping provider write"
+                }
+                else {
+                    Write-DscStatus "$Tag Setting TwoKeyApproval to 0 to allow author self-approval."
+                    $propsArray[$i].Value = 0
+                    $instance.Props = $propsArray
+                    try { Set-CimInstance -InputObject $instance -ErrorAction Stop; Write-DscStatus "$Tag TwoKeyApproval value updated." }
+                    catch { Write-DscStatus "$Tag WARNING: TwoKeyApproval Set-CimInstance failed: $($_.Exception.Message)" -Warning }
+                }
                 break
             }
         }
 
         if (-not $propertyFound) {
             Write-DscStatus "$Tag Property 'TwoKeyApproval' not found in existing instance. Adding it."
-      
+
             $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace $namespace
             $i = New-CimInstance -CimClass $class -Property @{PropertyName = "TwoKeyApproval"; Value = "0"; Value1 = $null; Value2 = $null }
             $propsArray += $i
             $instance.Props = $propsArray
-            Set-CimInstance -InputObject $instance
-            Write-DscStatus "$Tag TwoKeyApproval property added and value set successfully."
-
+            try { Set-CimInstance -InputObject $instance -ErrorAction Stop; Write-DscStatus "$Tag TwoKeyApproval property added." }
+            catch { Write-DscStatus "$Tag WARNING: TwoKeyApproval add Set-CimInstance failed: $($_.Exception.Message)" -Warning }
         }
-        
+
+        # Read the master SCI back and confirm the write took -- a silent no-op here
+        # is exactly what leaves author self-approval blocked and every Approve-CMScript
+        # failing later.
+        try {
+            $vInst = @(Get-CimInstance -ClassName $className -Namespace $namespace -Filter "FileType=2 AND SiteCode='$HierarchySiteCode'" -ErrorAction Stop) | Select-Object -First 1
+            $vProp = $vInst.Props | Where-Object { $_.PropertyName -eq 'TwoKeyApproval' } | Select-Object -First 1
+            if ($vProp -and [int]$vProp.Value -eq 0) { Write-DscStatus "$Tag TwoKeyApproval verified = 0 in master SCI (FileType=2)." }
+            else { Write-DscStatus "$Tag WARNING: TwoKeyApproval did NOT take -- master SCI shows '$(if ($vProp) { $vProp.Value } else { '<missing>' })'; author self-approval will be blocked." -Warning }
+        }
+        catch { Write-DscStatus "$Tag WARNING: TwoKeyApproval verify read failed: $($_.Exception.Message)" -Warning }
     }
     else {
-        Write-DscStatus "$Tag Instance not found. Manually approve the scripts"
+        Write-DscStatus "$Tag WARNING: master SCI (SMS_SCI_SiteDefinition FileType=2, SiteCode=$HierarchySiteCode) not found -- cannot disable TwoKeyApproval; script approval will need a different identity." -Warning
     }
-    Write-DscStatus "$Tag New instance created with TwoKeyApproval set to 0."
+    Write-DscStatus "$Tag TwoKeyApproval reconciliation complete."
 
 
-    ## Scripts ( used our scripts from Wiki)
+    $scriptLibraryResult = Sync-MemLabsScriptLibrary
+    $scriptApprovalQueue = @($scriptLibraryResult.ApprovalQueue)
 
-    # Get all PowerShell script files (.ps1) in the folder and its sub folders
-    $ScriptFiles = Get-ChildItem -Path C:\tools\Scripts -Recurse -Filter *.ps1
+    } # end Primary-only TwoKeyApproval + CM-script library block
 
-    # Loop through each script file and import it into SCCM
-    foreach ($ScriptFile in $ScriptFiles) {
-        $ScriptName = "MEMLABS-" + [System.IO.Path]::GetFileNameWithoutExtension($ScriptFile.FullName)
-        $ScriptContent = Get-Content -Path $ScriptFile.FullName -Raw
 
-        # Create a new script in SCCM using New-CMScript
+    ## Task sequences — Primary only (boot images, OSD content, local shares)
+    if ($CurrentRole -ne "CAS") {
+
+    #custom domain name in winPE (default client setting — top-level only)
+    if ($isTopLevel) {
         try {
+            Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to set branding title: $_"
+        }
+    }
 
-            #check if script already exists or else create it
-            if (-not (Get-CMScript -ScriptName $ScriptName -Fast)) {
-                $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
-                Write-DscStatus "$Tag Successfully imported: $ScriptName"
-                # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesn't have that feature yet) Tim help needed here
-                Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved" 
-
-                ##for testing if you want to remove all the scripts
-                #Remove-CMScript -ForceWildcardHandling -ScriptName * -Force
+    # --- OSD content targeting (save DP disk space) ---------------------------
+    # The multi-GB OSD content (boot images, OS images, OS upgrade packages, USMT)
+    # is only useful on a DP an OSDClient can actually PXE-boot from. PXE is a
+    # subnet-local DHCP broadcast, so an OSDClient can only boot from a DP on its
+    # OWN subnet (cross-subnet PXE would need an ip-helper/DHCP relay we don't set
+    # up). So: distribute OSD content ONLY to DP(s) that share a subnet with an
+    # OSDClient, and enable PXE on those DP(s). If the lab has NO OSDClient, OSD
+    # content is still created but NOT distributed anywhere (saves ~25GB per DP);
+    # add an OSDClient on a DP's subnet and re-run to distribute + enable PXE.
+    $OsdDpGroupName = "OSD DPS"
+    $osdTargetingPlan = Get-MemLabsOsdTargetingPlan -DeployConfig $deployConfig -PrimarySiteCode $SiteCode `
+        -LiveDistributionPoints @(Get-CMDistributionPoint -AllSite -ErrorAction SilentlyContinue)
+    $osdSubnets = @($osdTargetingPlan.ClientSubnets)
+    $osdDistTarget = $null
+    $hasOsdTargets = $false
+    if ($osdSubnets.Count -eq 0) {
+        Write-DscStatus "$Tag No OSDClient in this lab -- OSD content will be created but NOT distributed (saves DP disk space). Add an OSDClient on a DP's subnet and re-run to distribute + enable PXE."
+    }
+    else {
+        Write-DscStatus "$Tag OSDClient subnet(s): $($osdSubnets -join ', ') -- locating same-subnet DP(s) for OSD content + PXE"
+        $osdDps = @($osdTargetingPlan.DistributionPoints)
+        $uncoveredOsdSubnets = @($osdTargetingPlan.UncoveredSubnets)
+        if ($uncoveredOsdSubnets.Count -gt 0) {
+            # Was -Failure + return, which ended the script here and took the OSD share, the
+            # boot image, both OS packages, all seven task sequences, the collections, the
+            # baselines and the SUP/ADR work with it. Phase 11 owns this verdict: it compares
+            # the config's OSDClient subnets against 'OSD DPS' membership and FAILs.
+            Write-DscStatus "$Tag OSDClient subnet(s) have no live ConfigMgr DP: $($uncoveredOsdSubnets -join ', '). OSD content cannot reach those clients and PXE cannot work, so it is created but NOT distributed. Add/install a DP on every listed subnet, then re-run Phase 8. Phase 11 validation FAILS on this." -Warning
+        }
+        else {
+            $osdGrpWmi = $null
+            $osdGroupId = ''
+            $osdGroupNameAmbiguous = $false
+            try {
+                $osdGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $OsdDpGroupName -AllowMissing
+                if (-not $osdGroupResolution) {
+                    try {
+                        $null = New-CMDistributionPointGroup -Name $OsdDpGroupName -Description "DPs on an OSDClient subnet (OSD content + PXE)" -ErrorAction Stop
+                        Write-DscStatus "$Tag Created DP group '$OsdDpGroupName'"
+                    }
+                    catch {
+                        Write-DscStatus "$Tag DP group '$OsdDpGroupName' creation did not complete; membership reconciliation will re-query provider state: $($_.Exception.Message)"
+                    }
+                    $osdGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $OsdDpGroupName -AllowMissing
+                }
+                if (-not $osdGroupResolution) { throw 'group was not visible after creation/reconciliation' }
+                if ($osdGroupResolution.MatchCount -gt 1) {
+                    $osdGroupNameAmbiguous = $true
+                    Write-DscStatus "$Tag WARNING: Found $($osdGroupResolution.MatchCount) groups named '$OsdDpGroupName'. Using the site-owned exact row; remove stale duplicates after the build. $($osdGroupResolution.Identities)"
+                }
+                $osdGrpWmi = $osdGroupResolution.Group
+                $osdGroupId = "$($osdGrpWmi.GroupID)"
+            }
+            catch {
+                Write-DscStatus "$Tag Could not resolve OSD DP group '$OsdDpGroupName': $($_.Exception.Message). OSD content is not distributed; Phase 11 validation owns the OSD verdict." -Warning
+            }
+            if ($osdGrpWmi) {
+            $osdMemberKeys = @{}
+            $osdMembershipRead = $false
+            try {
+                if ($osdGrpWmi) {
+                    foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$osdGroupId'" -ErrorAction Stop)) {
+                        $memberHostName = Get-MemLabsServerFromNalPath $memberRow.DPNALPath
+                        if (-not $memberHostName) { continue }
+                        $osdMemberKeys[$memberHostName.ToUpperInvariant()] = $true
+                        $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpperInvariant()] = $true
+                    }
+                    $osdMembershipRead = $true
+                }
+            }
+            catch {
+                Write-DscStatus "$Tag Could not read existing '$OsdDpGroupName' membership; falling back to idempotent adds: $($_.Exception.Message)"
+            }
+            foreach ($d in $osdDps) {
+                # Add the DP to the group by its FQDN, NOT its short name. Add-CMDistributionPointToGroup
+                # resolves -DistributionPointName against the DP's ServerName (FQDN); passing the short
+                # name ('PL-PANCETTA') fails to match, the error is swallowed, and the group is left EMPTY
+                # -- so every Start-CMContentDistribution to 'OSD DPS' becomes a no-op and OSD content never
+                # lands (the Phase 11 'not on any DP' WARN). This mirrors the working 'ALL DPS' block above.
+                if ($osdMembershipRead -and ($osdMemberKeys.ContainsKey($d.Fqdn.ToUpperInvariant()) -or $osdMemberKeys.ContainsKey($d.Short.ToUpperInvariant()))) {
+                    Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' is already in '$OsdDpGroupName' -- skipping add"
+                }
+                else {
+                    try { $null = Add-CMDistributionPointToGroup -DistributionPointGroupId $osdGroupId -DistributionPointName $d.Fqdn -ErrorAction Stop; Write-DscStatus "$Tag Added OSD DP '$($d.Fqdn)' to '$OsdDpGroupName' ($osdGroupId)" }
+                    catch { Write-DscStatus "$Tag OSD DP '$($d.Fqdn)' not added to '$OsdDpGroupName' (likely already a member): $($_.Exception.Message)" }
+                }
+                # Enable PXE. Prefer the NonWDS PXE responder (no separate WDS role);
+                # fall back to plain EnablePxe if this build lacks -EnableNonWdsPxe.
+                try {
+                    Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableUnknownComputerSupport $true -EnableNonWdsPxe $true -ErrorAction Stop
+                    Write-DscStatus "$Tag Enabled PXE (NonWDS) with unknown-computer support on OSD DP '$($d.Short)'"
+                }
+                catch {
+                    try {
+                        Set-CMDistributionPoint -SiteSystemServerName $d.Fqdn -EnablePxe $true -AllowPxeResponse $true -EnableUnknownComputerSupport $true -ErrorAction Stop
+                        Write-DscStatus "$Tag Enabled PXE with unknown-computer support on OSD DP '$($d.Short)'"
+                    }
+                    catch { Write-DscStatus "$Tag WARNING: Failed to enable PXE on OSD DP '$($d.Short)': $($_.Exception.Message)" }
+                }
+            }
+            # VERIFY each OSD DP is actually a member (a silently-failed add leaves
+            # the group EMPTY and makes distribution to it a no-op -- exactly the bug
+            # that hid the boot image from the OSDClient-subnet DP). Check per-DP so a
+            # partial failure is caught, not just a fully-empty group.
+            try {
+                $missingOsdGroupMembers = @()
+                for ($osdGroupTry = 1; $osdGroupTry -le 6; $osdGroupTry++) {
+                    $osdGroupResolution = Get-MemLabsDistributionPointGroup -SiteCode $SiteCode -GroupName $OsdDpGroupName -GroupId $osdGroupId
+                    if ($osdGroupResolution.MatchCount -gt 1) { $osdGroupNameAmbiguous = $true }
+                    $osdGrpWmi = $osdGroupResolution.Group
+                    $osdMemberKeys = @{}
+                    if ($osdGrpWmi) {
+                        foreach ($memberRow in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DPGroupMembers -Filter "GroupID='$osdGroupId'" -ErrorAction Stop)) {
+                            $memberHostName = Get-MemLabsServerFromNalPath $memberRow.DPNALPath
+                            if (-not $memberHostName) { continue }
+                            $osdMemberKeys[$memberHostName.ToUpperInvariant()] = $true
+                            $osdMemberKeys[(($memberHostName -split '\.')[0]).ToUpperInvariant()] = $true
+                        }
+                    }
+                    $missingOsdGroupMembers = @($osdDps | Where-Object {
+                            -not ($osdMemberKeys.ContainsKey($_.Fqdn.ToUpperInvariant()) -or $osdMemberKeys.ContainsKey($_.Short.ToUpperInvariant()))
+                        })
+                    if ($missingOsdGroupMembers.Count -eq 0) { break }
+                    if ($osdGroupTry -lt 6) {
+                        Write-DscStatus "$Tag Waiting for '$OsdDpGroupName' membership to include: $(($missingOsdGroupMembers.Fqdn) -join ', ') (attempt $osdGroupTry/6)"
+                        Start-Sleep -Seconds 10
+                    }
+                }
+                if ($missingOsdGroupMembers.Count -gt 0) {
+                    Write-DscStatus "$Tag OSD DP(s) are not members of '$OsdDpGroupName' after 6 reads: $(($missingOsdGroupMembers.Fqdn) -join ', '). Distribution to the group would miss required OSDClient subnet(s), so OSD content is NOT distributed. Phase 11 validation FAILS on this." -Warning
+                }
+                else {
+                    Write-DscStatus "$Tag Verified every OSD DP is a member of '$OsdDpGroupName': $(($osdDps.Fqdn) -join ', ')"
+                    if ($osdGroupNameAmbiguous) {
+                        Write-DscStatus "$Tag OSD content is not distributed by the ambiguous group name '$OsdDpGroupName'. Remove stale duplicate groups and rerun Phase 8." -Warning
+                    }
+                    else {
+                        $osdDistTarget = $OsdDpGroupName
+                        $hasOsdTargets = $true
+                    }
+                }
+            }
+            catch {
+                Write-DscStatus "$Tag Could not verify '$OsdDpGroupName' membership, so OSD content is NOT distributed rather than reported as covered without measuring it: $($_.Exception.Message). Phase 11 validation FAILS on this." -Warning
+            }
             }
         }
-        catch {
-            Write-DscStatus "$Tag Failed to import: $ScriptName. Error: $_"
-        }
     }
-
-
-    ## Task sequences 
-
-    #custom domain name in winPE
-    Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
-
-    # Get all boot images
-    $BootImages = Get-CMBootImage
-
-    # Loop through each boot image and distribute it
-    foreach ($BootImage in $BootImages) {
-        try {
-            # Enable Command Support for the boot image
-            $BootImage | Set-CMBootImage -EnableCommandSupport $true
-            $packageId = $BootImage.PackageID
-            # Distribute the boot image
-            Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"        
-            Write-DscStatus "$Tag Successfully started distribution for boot image: $($BootImage.Name)"
-        }
-        catch {
-            Write-DscStatus "$Tag Failed to start distribution for boot image: $($BootImage.Name). Error: $_"
-        }
-    }
-
 
     #Tim is copying the iso directly at phase 1
     Write-DscStatus "$Tag ISO files are already copied from phase 1"
@@ -303,57 +1602,768 @@ else {
     }
 
     # Create the share with read access for "Everyone"
-    New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
+    if (-not (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue)) {
+        New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
+    }
 
     Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 
-    # Verify the share was created
-    #Get-SmbShare -Name $shareName
+    # Canary. This script runs on the CMSite provider drive, where a BARE UNC resolves
+    # through that provider and Test-Path returns false for a file that exists -- silently,
+    # since Test-Path throws nothing. The share was just created, so a bare probe that
+    # disagrees with the FileSystem::-qualified one is that bug and nothing else. Costs two
+    # Test-Path calls and turns an invisible false negative into a log line.
+    $uncCanary = "\\$ThisMachineName\$shareName"
+    $bareCanary = Test-Path -LiteralPath $uncCanary -ErrorAction SilentlyContinue
+    $qualifiedCanary = Test-Path -LiteralPath "FileSystem::$uncCanary" -ErrorAction SilentlyContinue
+    if (-not $qualifiedCanary) {
+        Write-DscStatus "$Tag UNC path resolution FAILED: FileSystem-qualified '$uncCanary' is not reachable after creating the share. Boot-image source paths under this share cannot be validated." -Warning
+    }
+    elseif ($bareCanary -ne $qualifiedCanary) {
+        Write-DscStatus "$Tag UNC path resolution note: bare '$uncCanary' reads $bareCanary while 'FileSystem::' reads $qualifiedCanary -- expected on the $((Get-Location).Provider.Name) provider. WMI ImagePath/PkgSourcePath probes are FileSystem-qualified."
+    }
+    else {
+        Write-DscStatus "$Tag UNC path resolution OK: bare and FileSystem:: probes of '$uncCanary' agree ($bareCanary); provider is $((Get-Location).Provider.Name)"
+    }
+
+    # --- Boot image: created here, owned by THIS site ---------------------------
+    # A CAS-owned boot image cannot be distributed from a child. Start-CMContentDistribution
+    # run at the child writes the destination row only to PkgServers_L, which is not a
+    # replicated article, so the owning CAS never learns the DP exists, never sends content,
+    # and never advances SourceVersion (measured 2026-08-20 on burnin.sandwich.lab and
+    # OSDTest-A -- 45 minutes burned each time, from opposite configurations). Sourcing from
+    # the local ADK WinPE makes owner == this site, exactly like the OS image and OS upgrade
+    # packages below, which have never shown the symptom. Standalone primaries take the same
+    # path on purpose: a branch that only runs in hierarchies only gets tested in hierarchies.
+    $memlabsBootImageName = "MEMLABS $SiteCode Boot Image (x64)"
+    $biName = $memlabsBootImageName
+    $packageId = ''
+    $commandSupportChanged = $false
+    $commandSupportPreviousSourceVersion = $null
+    $bootImagePublicationStarted = $false
+    $bootImagePublicationPreviousSourceVersion = $null
+    $bootTemplateRestored = $false
+    $pxeBootFlagSet = $false
+
+    # This staged WIM is the package's PERMANENT source. sspBootImagePackage.cpp:
+    # "the ImagePath and ImageIndex store the information of the source image file. the
+    # PkgSourcePath stores the path of the SMS copy." boot.<PackageID>.wim is only that
+    # copy; every RefreshPkgSource -- command support, optional components, drivers, and
+    # Update Distribution Points, which is what republishes the PXE payload -- re-copies
+    # ImagePath over it before injecting. Delete boot.wim and every rebuild from then on
+    # dies with "Failed to make a copy of source WIM file due to error 2" while
+    # distribution keeps reporting Installed from the stale copy.
+    # InstallADK runs in Phase 3/8/9 so the ADK FEATURE is guaranteed, but TemplateHelpDSC
+    # tests the 'Windows Preinstallation Environment' FOLDER, not this file. Directory
+    # existence is not file existence, so a miss here is a real site-install gap.
+    $adkWinPeWim = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\en-us\winpe.wim'
+    $bootStageDir = Join-Path $folderPath 'boot\x64'
+    $stagedBootWim = Join-Path $bootStageDir 'boot.wim'
+
+    function Get-MemLabsLegacyBootImageHealth {
+        param(
+            [Parameter(Mandatory = $true)][object[]] $TaskSequences,
+            [Parameter(Mandatory = $true)][string] $OwningSiteCode
+        )
+
+        $ids = @($TaskSequences | ForEach-Object { "$($_.BootImageID)" } |
+                Where-Object { $_ } | Select-Object -Unique)
+        $problems = [System.Collections.Generic.List[string]]::new()
+        if ($ids.Count -eq 0) {
+            $problems.Add('task sequences expose no readable BootImageID')
+        }
+        $allBootImages = @(Get-CMBootImage)
+        foreach ($id in $ids) {
+            $bootImage = @($allBootImages | Where-Object {
+                    "$($_.PackageID)" -ieq $id
+                }) | Select-Object -First 1
+            if (-not $bootImage) {
+                $problems.Add("boot image object '$id' is missing")
+                continue
+            }
+
+            $wmi = Get-WmiObject -Namespace "root\SMS\site_$OwningSiteCode" `
+                -Class SMS_BootImagePackage -Filter "PackageID='$id'" `
+                -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($wmi) { try { $wmi.Get() } catch { } }
+            $sourcePaths = @("$($wmi.ImagePath)", "$($wmi.PkgSourcePath)") |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+            if ($sourcePaths.Count -eq 0) {
+                $problems.Add("boot image '$id' has no readable ImagePath or PkgSourcePath")
+                continue
+            }
+            $sourcePresent = $false
+            foreach ($path in $sourcePaths) {
+                $probe = if ($path -like '\\*') { "FileSystem::$path" } else { $path }
+                try {
+                    if (Test-Path -LiteralPath $probe) {
+                        $sourcePresent = $true
+                        break
+                    }
+                }
+                catch { }
+            }
+            if (-not $sourcePresent) {
+                $problems.Add("boot image '$id' source is missing ($($sourcePaths -join ', '))")
+            }
+        }
+
+        return [pscustomobject]@{
+            Healthy  = $ids.Count -gt 0 -and $problems.Count -eq 0
+            PackageIds = [string[]]$ids
+            Problems = [string[]]$problems.ToArray()
+        }
+    }
+
+    $existingMemlabsTaskSequences = @(Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" })
+    $BootImage = @(Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName }) | Select-Object -First 1
+
+    if ($existingMemlabsTaskSequences.Count -gt 0 -and -not $BootImage) {
+        # Legacy lab. New-CMTaskSequence below is existence-guarded, so these task sequences
+        # keep referencing the boot image they were built with -- a new image nothing points
+        # at would be ~700MB of waste plus another object for Phase 11 to flag. Rebuild the
+        # lab rather than converting it: Set-CMTaskSequence -BootImagePackageId across five
+        # TSes fails in ways that leave a TS unusable.
+        $legacyHealth = Get-MemLabsLegacyBootImageHealth `
+            -TaskSequences $existingMemlabsTaskSequences -OwningSiteCode $SiteCode
+        $legacyIds = if ($legacyHealth.PackageIds.Count) {
+            $legacyHealth.PackageIds -join ', '
+        }
+        else {
+            '<none readable>'
+        }
+        if ($legacyHealth.Healthy) {
+            Write-DscStatus "$Tag $($existingMemlabsTaskSequences.Count) existing MEMLABS task sequence(s) intentionally retain healthy main-era boot image(s) $legacyIds. '$memlabsBootImageName' is not created because nothing references it."
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: $($existingMemlabsTaskSequences.Count) existing MEMLABS task sequence(s) pin legacy boot image(s) $legacyIds, but preservation health failed: $($legacyHealth.Problems -join '; '). '$memlabsBootImageName' is not created because the existing task sequences would still reference the unhealthy image." -Warning
+        }
+    }
+    elseif ($BootImage) {
+        $packageId = "$($BootImage.PackageID)"
+        Write-DscStatus "$Tag Boot image '$biName' ($packageId) already exists at this site -- skipping creation"
+        # Labs built before this was understood deleted the template, so every rebuild since
+        # has failed with error 2 and their OSD DP was never given a PXE payload. Restore it
+        # from the same pristine ADK source; the publication below then repairs the DP.
+        $existingImagePath = ''
+        try {
+            $existingBootWmi = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+            if ($existingBootWmi) {
+                try { $existingBootWmi.Get() } catch { }
+                $existingImagePath = "$($existingBootWmi.ImagePath)"
+            }
+        }
+        catch { Write-DscStatus "$Tag Could not read ImagePath for boot image '$biName' ($packageId): $($_.Exception.Message)" }
+
+        # This script runs with the current location on the CMSite provider drive
+        # (Set-Location "<site>:\" above), and a BARE UNC is resolved through whatever
+        # provider that is -- so Test-Path returns $false for a file that exists and
+        # Copy-Item fails with "Source and destination path did not resolve to the same
+        # provider". Drive-qualified paths like E:\OSD\... are immune because the drive
+        # names a FileSystem PSDrive. ImagePath comes back from WMI as a UNC, so it has
+        # to name the provider. fourthcoffee 2026-09-02: called missing at 09:42 by this
+        # code, read as present at 09:45 by Phase 11, which is not on a provider drive.
+        $stagedTail = 'boot\x64\boot.wim'
+        $localEquivalent = ''
+        if ($existingImagePath -and (($existingImagePath -replace '/', '\').ToLowerInvariant()).EndsWith($stagedTail)) {
+            $localEquivalent = $stagedBootWim
+        }
+        $foundImagePath = ''
+        foreach ($probe in @($existingImagePath, $localEquivalent)) {
+            if (-not $probe) { continue }
+            $resolvable = if ($probe -like '\\*') { "FileSystem::$probe" } else { $probe }
+            try { if (Test-Path -LiteralPath $resolvable) { $foundImagePath = $probe; break } } catch { }
+        }
+
+        if (-not $existingImagePath) {
+            Write-DscStatus "$Tag WARNING: boot image '$biName' ($packageId) has no readable ImagePath, so its source WIM could not be checked. If it is missing, every rebuild fails with error 2 and PXE has no payload." -Warning
+        }
+        elseif ($foundImagePath -and $foundImagePath -ne $existingImagePath) {
+            Write-DscStatus "$Tag Boot image source WIM is present at '$foundImagePath', but its ImagePath '$existingImagePath' did not resolve from here. The file exists, so nothing was restored."
+        }
+        elseif ($foundImagePath) {
+            Write-DscStatus "$Tag Boot image source WIM is present: '$foundImagePath'"
+        }
+        elseif (-not (Test-Path -LiteralPath $adkWinPeWim)) {
+            Write-DscStatus "$Tag WARNING: boot image '$biName' ($packageId) points at ImagePath '$existingImagePath', which does not exist, and the ADK WinPE source '$adkWinPeWim' is absent too. Every boot-image rebuild fails with error 2 and PXE has no payload until it is restored. Phase 11 validation FAILS on this." -Warning
+        }
+        else {
+            # Restore through the local path when we have one; otherwise name the provider,
+            # or Copy-Item resolves the UNC destination through the CMSite drive and fails.
+            $restoreTarget = if ($localEquivalent) { $localEquivalent } else { $existingImagePath }
+            $restoreParent = Split-Path -Path $restoreTarget -Parent
+            $restoreDest = if ($restoreTarget -like '\\*') { "FileSystem::$restoreTarget" } else { $restoreTarget }
+            $restoreParentPath = if ($restoreParent -and $restoreParent -like '\\*') { "FileSystem::$restoreParent" } else { $restoreParent }
+            try {
+                if ($restoreParentPath -and -not (Test-Path -LiteralPath $restoreParentPath)) { [void](New-Item -ItemType Directory -Path $restoreParentPath -Force -ErrorAction Stop) }
+                Copy-Item -LiteralPath $adkWinPeWim -Destination $restoreDest -Force -ErrorAction Stop
+                $bootTemplateRestored = $true
+                Write-DscStatus "$Tag Restored the missing boot-image source WIM at '$restoreTarget' from the ADK WinPE. Without it every rebuild -- command support, optional components, Update Distribution Points -- failed with error 2, so the DP had no PXE payload."
+            }
+            catch { Write-DscStatus "$Tag WARNING: could not restore the missing boot-image source WIM '$restoreTarget' from '$adkWinPeWim': $($_.Exception.Message). Boot-image rebuilds keep failing with error 2 and PXE has no payload. Phase 11 validation FAILS on this." -Warning }
+        }
+    }
+    else {
+        $bootStageError = $null
+        if (-not (Test-Path -LiteralPath $adkWinPeWim)) {
+            $bootStageError = "the ADK WinPE image is absent at '$adkWinPeWim' -- the ADK feature installed without its WinPE payload"
+        }
+        else {
+            try {
+                if (-not (Test-Path -LiteralPath $bootStageDir)) { [void](New-Item -ItemType Directory -Path $bootStageDir -Force -ErrorAction Stop) }
+                Copy-Item -LiteralPath $adkWinPeWim -Destination $stagedBootWim -Force -ErrorAction Stop
+                Write-DscStatus "$Tag Staged the ADK WinPE image to '$stagedBootWim' ($([math]::Round((Get-Item -LiteralPath $stagedBootWim).Length / 1MB))MB)"
+            }
+            catch { $bootStageError = "could not stage '$adkWinPeWim' to '$stagedBootWim': $($_.Exception.Message)" }
+        }
+        if ($bootStageError) {
+            Write-DscStatus "$Tag WARNING: no boot image was created because $bootStageError. No task sequence will have a boot image and Phase 11 validation FAILS on it." -Warning
+        }
+        else {
+            try {
+                $newBootImage = New-CMBootImage -Path "\\$ThisMachineName\$shareName\boot\x64\boot.wim" -Index 1 -Name $memlabsBootImageName -ErrorAction Stop
+                $packageId = "$($newBootImage.PackageID)"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: New-CMBootImage rejected the staged ADK WinPE image: $($_.Exception.Message). No boot image was created and Phase 11 validation FAILS on it." -Warning
+            }
+            if ($packageId) {
+                # The cmdlet's own return object is not evidence. Re-read from WMI and require
+                # SourceSite to be this site -- that is the entire premise of the design.
+                $createdBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $createdBootImage) {
+                    Write-DscStatus "$Tag WARNING: New-CMBootImage returned $packageId but SMS_BootImagePackage has no row for it -- treating the boot image as not created." -Warning
+                    $packageId = ''
+                }
+                elseif ("$($createdBootImage.SourceSite)" -ne $SiteCode) {
+                    # Discarding the package costs the site every task sequence, so confirm the
+                    # mismatch with a second read instead of acting on one enumeration.
+                    try { $createdBootImage.Get() } catch { }
+                    if ("$($createdBootImage.SourceSite)" -ne $SiteCode) {
+                        Write-DscStatus "$Tag WARNING: boot image $packageId reports SourceSite='$($createdBootImage.SourceSite)' on two reads, not this site '$SiteCode'. Distributing it from here would hit the same PkgServers_L dead end, so it is not usable." -Warning
+                        $packageId = ''
+                    }
+                }
+                if ($packageId) {
+                    try { $createdBootImage.Get() } catch { }
+                    Write-DscStatus "$Tag Created boot image '$biName' ($packageId) from the local ADK WinPE: SourceSite=$SiteCode SourceVersion=$($createdBootImage.SourceVersion) ImagePath='$($createdBootImage.ImagePath)' PkgSourcePath='$($createdBootImage.PkgSourcePath)'"
+                    # The staged template is kept on purpose -- see the ImagePath note above.
+                    if (-not (Test-Path -LiteralPath $stagedBootWim)) {
+                        Write-DscStatus "$Tag WARNING: the staged source WIM '$stagedBootWim' is gone after creation, but it is this package's permanent ImagePath. Every later rebuild will fail with error 2 and the DP will have no PXE payload. Phase 11 validation FAILS on this." -Warning
+                    }
+                    $BootImage = Get-CMBootImage -Id $packageId
+                }
+            }
+        }
+    }
+
+    if (-not $packageId) {
+        Write-DscStatus "$Tag No site-owned boot image is available -- skipping command support, distribution and the coverage wait."
+    }
+    else {
+
+        # Enable Command Support (F8 debug shell in WinPE)
+        if ([bool]$BootImage.EnableLabShell) {
+            Write-DscStatus "$Tag Command support already enabled for boot image: $biName ($packageId) -- skipping provider write"
+        }
+        else {
+            # A boot image the site created seconds ago can still be rejected as
+            # "legacy (WinPE 3.1 or earlier)" while the provider settles. Retry on a
+            # 12x30s budget instead of reading one answer as final.
+            $commandSupportError = $null
+            for ($csTry = 1; $csTry -le 12; $csTry++) {
+                try {
+                    $bootImageBeforeUpdate = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                    if (-not $bootImageBeforeUpdate -or -not "$($bootImageBeforeUpdate.SourceVersion)") {
+                        throw "Could not read the pre-update boot-image SourceVersion"
+                    }
+                    $commandSupportPreviousSourceVersion = [int]$bootImageBeforeUpdate.SourceVersion
+                    Set-CMBootImage -Id $packageId -EnableCommandSupport $true -ErrorAction Stop
+                    $commandSupportChanged = $true
+                    $commandSupportError = $null
+                    Write-DscStatus "$Tag Enabled command support for boot image: $biName ($packageId) on attempt $csTry"
+                    break
+                }
+                catch {
+                    $commandSupportError = "$_"
+                    if ($csTry -lt 12) {
+                        Write-DscStatus "$Tag Command support not accepted yet for boot image '$biName' ($packageId) (attempt $csTry/12): $commandSupportError"
+                        Start-Sleep -Seconds 30
+                    }
+                }
+            }
+            if ($commandSupportError) {
+                # F8 is a debugging convenience; PXE, distribution and OSD do not need it,
+                # so a fully installed site must not be failed over this.
+                Write-DscStatus "$Tag WARNING: Could not enable command support for boot image '$biName' ($packageId) after 12 attempts: $commandSupportError. The F8 shell will be unavailable in WinPE; boot image content and PXE are unaffected."
+            }
+        }
+
+        # AP_PACKAGE_PXE_BOOT (0x400) is what makes a DP extract the PXE payload at all.
+        # dpprovutils.cpp ExpandPXEImage tests it, and when it is clear with SccmPxe=1 the
+        # else branch does NOTHING -- no extraction, no removal, no log line -- so the
+        # package reports Installed on every DP and SMSBoot\<PackageID> is never created.
+        # ConfigMgr setup sets this bit on the DEFAULT boot images it creates
+        # (sutils.cpp: "Enable flag for PXE" -> PkgFlags = AP_PACKAGE_PXE_BOOT), which is why
+        # PXE worked while perfloading used Get-CMBootImage. a8d784a2 (2026-08-20) switched to
+        # building the image here, and New-CMBootImage does NOT set it -- only Set-CMBootImage
+        # -DeployFromPxeDistributionPoint does (SetBootImage.cs: PkgFlags |=
+        # PackageFlags.PxeBootImage). PXE has been broken since that commit, not forever.
+        $pxeBootFlag = 0x400
+        try {
+            $biFlags = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+            if (-not $biFlags) { throw "SMS_BootImagePackage has no row for $packageId" }
+            $currentFlags = [int]$biFlags.PkgFlags
+            if (($currentFlags -band $pxeBootFlag) -eq $pxeBootFlag) {
+                Write-DscStatus "$Tag Boot image '$biName' ($packageId) is already flagged for PXE deployment (PkgFlags=0x$('{0:X}' -f $currentFlags))"
+            }
+            else {
+                Set-CMBootImage -Id $packageId -DeployFromPxeDistributionPoint $true -ErrorAction Stop
+                $verifyFlags = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                $newFlags = if ($verifyFlags) { [int]$verifyFlags.PkgFlags } else { 0 }
+                if (($newFlags -band $pxeBootFlag) -eq $pxeBootFlag) {
+                    $pxeBootFlagSet = $true
+                    Write-DscStatus "$Tag Flagged boot image '$biName' ($packageId) for PXE deployment (PkgFlags 0x$('{0:X}' -f $currentFlags) -> 0x$('{0:X}' -f $newFlags)). Without this the DP silently never extracts SMSBoot\$packageId and nothing can PXE boot."
+                }
+                else {
+                    Write-DscStatus "$Tag WARNING: Set-CMBootImage -DeployFromPxeDistributionPoint reported success for '$biName' ($packageId) but PkgFlags is still 0x$('{0:X}' -f $newFlags) (needs 0x400). The DP will not extract a PXE payload and Phase 11 validation FAILS on this." -Warning
+                }
+            }
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: could not flag boot image '$biName' ($packageId) for PXE deployment: $($_.Exception.Message). Without AP_PACKAGE_PXE_BOOT the DP never extracts SMSBoot\$packageId, so PXE boot fails while every content check still reports Installed. Phase 11 validation FAILS on this." -Warning
+        }
+
+        # Distribute to the OSD DP group (the DP(s) that share an OSDClient's subnet).
+        # Only SKIP when the content is already on EVERY OSD DP -- verified per-DP, not
+        # "any row exists", because a single stale row for a removed DP used to read as
+        # "done" and leave the OSD DP PXE-enabled with no boot-image content.
+        if (-not $hasOsdTargets) {
+            Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing boot image '$biName' ($packageId) (saves space); it will distribute + PXE-enable when an OSDClient is added on a DP subnet"
+        }
+        else {
+            $osdDpFqdns = @($osdDps | ForEach-Object { "$($_.Fqdn)" } | Where-Object { $_ })
+            $distributedFqdns = @()
+            $dpTargets = @()
+            try {
+                $dpTargets = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
+                foreach ($t in $dpTargets) {
+                    # ServerNALPath looks like: ...["Display=\\PL-PANCETTA.domain\"]...\\PL-PANCETTA.domain\
+                    if ("$($t.ServerNALPath)" -match '\\\\([^\\"]+)') { $distributedFqdns += $matches[1] }
+                }
+            }
+            catch { }
+            $missingOsdDps = @($osdDpFqdns | Where-Object { $fq = $_; -not ($distributedFqdns | Where-Object { $_ -eq $fq }) })
+
+            if ($osdDpFqdns.Count -gt 0 -and $missingOsdDps.Count -eq 0) {
+                Write-DscStatus "$Tag Boot image already on all OSD DP(s) ($($osdDpFqdns -join ', ')): $biName ($packageId) -- skipping"
+            }
+            else {
+                $bootDistError = $null
+                try {
+                    Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName $osdDistTarget
+                    Write-DscStatus "$Tag Successfully started distribution for boot image '$biName' ($packageId) to '$osdDistTarget'$(if ($missingOsdDps.Count) { " (missing on: $($missingOsdDps -join ', '))" })"
+                }
+                catch {
+                    $bootDistError = "$_"
+                    if ($bootDistError -match 'already been distributed') {
+                        Write-DscStatus "$Tag Boot image already distributed: $biName ($packageId) -- skipping"
+                    }
+                    else {
+                        # 'No content destination was found' used to be treated as "already
+                        # distributed". It is the opposite -- what a child returns for a package
+                        # it cannot target -- and we only get here when a DP was missing.
+                        Write-DscStatus "$Tag WARNING: Failed to start distribution for boot image: $biName ($packageId). Error: $bootDistError"
+                    }
+                }
+            }
+
+            # Content is never installed to a DP with no targeting row, so if the required OSD
+            # DPs still have none, the coverage wait below is unwinnable. Confirm 3x first so a
+            # provider-write race is not mistaken for proof.
+            $unTargetedOsdDps = @()
+            for ($targetTry = 1; $targetTry -le 3; $targetTry++) {
+                if ($targetTry -gt 1) { Start-Sleep -Seconds 10 }
+                $targetedNow = @()
+                try {
+                    foreach ($t in @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)) {
+                        if ("$($t.ServerNALPath)" -match '\\\\([^\\"]+)') { $targetedNow += $matches[1] }
+                    }
+                }
+                catch { }
+                $unTargetedOsdDps = @($osdDpFqdns | Where-Object { $fq = $_; -not ($targetedNow | Where-Object { $_ -eq $fq }) })
+                if ($unTargetedOsdDps.Count -eq 0) { break }
+            }
+            if ($osdDpFqdns.Count -gt 0 -and $unTargetedOsdDps.Count -gt 0) {
+                Write-DscStatus "$Tag Boot image '$biName' ($packageId) has NO content destination on $($unTargetedOsdDps -join ', ') after 3 confirmations$(if ($bootDistError) { " (distribution error: $bootDistError)" }). Content is never installed to an untargeted DP, so the coverage wait cannot clear -- skipping it rather than spending the full budget. PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
+            }
+            else {
+                # A PXE flag that was ALREADY correct -- set by hand in the console, or by an
+                # earlier run -- arms nothing here, so a DP that never extracted would stay
+                # broken through every re-run. Probe the payload itself and republish when it
+                # is POSITIVELY absent. An unreachable DP is skipped rather than counted as
+                # missing, so no permission problem can trigger a pointless 350MB republish.
+                # FileSystem:: because this script runs on the CMSite provider drive, where a
+                # bare UNC reads as absent regardless of what is actually there.
+                $pxePayloadMissingOn = @()
+                if (-not $pxeBootFlagSet -and $osdDpFqdns.Count -gt 0) {
+                    foreach ($odp in $osdDpFqdns) {
+                        try {
+                            $dpBin = "FileSystem::\\$odp\SMS_DP`$\sms\bin"
+                            if (-not (Test-Path -LiteralPath $dpBin)) { continue }
+                            if (-not (Test-Path -LiteralPath "$dpBin\SMSBoot\$packageId")) { $pxePayloadMissingOn += $odp }
+                        }
+                        catch { }
+                    }
+                    if ($pxePayloadMissingOn.Count -gt 0) {
+                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is already flagged for PXE, but $($pxePayloadMissingOn -join ', ') has no SMSBoot\$packageId -- republishing so the DP extracts it."
+                    }
+                }
+
+                # Set-CMBootImage changes the provider property, but clients keep using
+                # the old WIM until Update Distribution Points rebuilds and republishes it.
+                # Publish only after the assignment above exists. A newly targeted DP also
+                # needs this update when command support was enabled on an earlier run that
+                # had no OSD targets yet.
+                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0 -or $missingOsdDps.Count -gt 0
+                if ($bootImagePublicationNeeded) {
+                    $bootImagePublicationError = $null
+                    $bootPublicationBaselineError = ''
+                    for ($baselineTry = 1; $baselineTry -le 3 -and $null -eq $bootImagePublicationPreviousSourceVersion; $baselineTry++) {
+                        if ($baselineTry -gt 1) { Start-Sleep -Seconds 5 }
+                        try {
+                            $bootImageBeforePublication = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction Stop | Select-Object -First 1
+                            if (-not $bootImageBeforePublication) { throw 'the boot-image provider row was not found' }
+                            try { $bootImageBeforePublication.Get() } catch { }
+                            if (-not "$($bootImageBeforePublication.SourceVersion)") { throw 'SourceVersion was empty' }
+                            $bootImagePublicationPreviousSourceVersion = [int]$bootImageBeforePublication.SourceVersion
+                        }
+                        catch { $bootPublicationBaselineError = $_.Exception.Message }
+                    }
+                    if ($null -eq $bootImagePublicationPreviousSourceVersion) {
+                        Write-DscStatus "$Tag Could not read boot image '$biName' ($packageId) SourceVersion before publication after 3 attempts: $bootPublicationBaselineError. The coverage wait will be skipped because a later version advance cannot be proven." -Warning
+                    }
+                    # Keep EVERY attempt's error, not just the last. Register() returns FALSE
+                    # only when the ContextID is already in the map (sspbootimagepackage.cpp
+                    # L747), and the failure paths above it never Delete the entry -- so a
+                    # first attempt that dies further in (e.g. the WIM copy) leaks the context
+                    # and every retry after it reports the registration failure instead. Only
+                    # keeping attempt 6 hid the first, real error in every build so far.
+                    $bootPublishErrors = New-Object System.Collections.Generic.List[string]
+                    for ($bootPublishTry = 1; $bootPublishTry -le 6 -and -not $bootImagePublicationStarted; $bootPublishTry++) {
+                        try {
+                            Update-CMDistributionPoint -BootImageId $packageId -Confirm:$false -ErrorAction Stop
+                            $bootImagePublicationStarted = $true
+                        }
+                        catch {
+                            $bootImagePublicationError = $_
+                            $attemptText = "$($_.Exception.Message)"
+                            $attemptDesc = if ($attemptText -match 'Description\s*=\s*"([^"]+)"') { $matches[1] } else { (($attemptText -replace '\s+', ' ').Trim()) }
+                            $attemptSite = if ($attemptText -match 'ObjectInfo\s*=\s*"([^"]+)"') { " at $($matches[1])" } else { '' }
+                            $bootPublishErrors.Add("attempt ${bootPublishTry}: $attemptDesc$attemptSite")
+                            if ($bootPublishTry -lt 6) { Start-Sleep -Seconds 10 }
+                        }
+                    }
+                    if (-not $bootImagePublicationStarted) {
+                        # A boot image problem must not cost the site its OSD content. Phase 11's
+                        # DP coverage check does NOT catch this -- coverage reads PkgSourcePath,
+                        # which still resolves to the last successfully built WIM. Phase 11's DP
+                        # PXE-payload check is what fails on the result.
+                        Write-DscStatus "$Tag Could not rebuild and publish boot image '$biName' ($packageId) after its OSD DP assignment was created. Per-attempt errors: $($bootPublishErrors -join ' | '). The DP keeps serving the previously built WIM and its PXE payload is NOT republished, so PXE may boot a stale image or nothing at all. Full last error: $bootImagePublicationError" -Warning
+                    }
+                    else {
+                        Write-DscStatus "$Tag Started boot image publication after OSD DP targeting: $biName ($packageId)"
+                    }
+                }
+
+                # A targeting row only proves that distribution was requested. Require
+                # every OSDClient-subnet DP to report Installed at the boot image's
+                # current source version before Phase 8 can claim usable PXE coverage.
+                # 15 minutes with no cross-site hop left in the path: the source WIM, the
+                # package owner and the DP are all reachable from here. The 45-minute
+                # escalation for hierarchies existed only for the CAS content transfer.
+                $bootCoverageWaitMinutes = 15
+                $bootCoverageDeadline = (Get-Date).AddMinutes($bootCoverageWaitMinutes)
+                $bootCoverageAttempt = 0
+                $bootCoverageProblems = @()
+                $bootCoverageObservedSourceVersion = ''
+                $bootCoverageLastArm = @{}
+                $bootStoredVersion = ''
+                $bootSourceVersion = ''
+                $bootCoverageTerminalProblem = if ($bootImagePublicationNeeded -and -not $bootImagePublicationStarted) {
+                    'boot-image publication was required but did not start'
+                }
+                elseif ($bootImagePublicationStarted -and $null -eq $bootImagePublicationPreviousSourceVersion) {
+                    'pre-publication SourceVersion was not measured, so the publication advance cannot be verified'
+                }
+                else {
+                    ''
+                }
+                do {
+                    $bootCoverageAttempt++
+                    $bootCoverageProblems = @()
+                    $bootIncompleteDps = @()
+                    if ($bootCoverageTerminalProblem) {
+                        $bootCoverageProblems += $bootCoverageTerminalProblem
+                        break
+                    }
+                    $currentBootImage = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_BootImagePackage -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    # Get() refreshes the instance and populates the lazy properties. The old
+                    # fallback read SMS_Package, a SIBLING of SMS_BootImagePackage under
+                    # SMS_PackageBaseclass, which can never return a boot image at all.
+                    if ($currentBootImage) { try { $currentBootImage.Get() } catch { } }
+                    $bootSourceVersion = if ($currentBootImage) { "$($currentBootImage.SourceVersion)" } else { '' }
+                    $bootStoredVersion = if ($currentBootImage) { "$($currentBootImage.StoredPkgVersion)" } else { '' }
+                    $bootSourceVersionProblem = Get-MemLabsBootImageSourceVersionProblem `
+                        -CurrentSourceVersion $bootSourceVersion `
+                        -CurrentStoredVersion $bootStoredVersion `
+                        -CommandSupportChanged $commandSupportChanged `
+                        -CommandSupportPreviousSourceVersion $commandSupportPreviousSourceVersion `
+                        -PublicationNeeded $bootImagePublicationNeeded `
+                        -PublicationStarted $bootImagePublicationStarted `
+                        -PublicationPreviousSourceVersion $bootImagePublicationPreviousSourceVersion
+                    if ($bootSourceVersionProblem) {
+                        $bootCoverageProblems += $bootSourceVersionProblem
+                    }
+                    else {
+                        if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
+                            $bootCoverageObservedSourceVersion = $bootSourceVersion
+                            $bootCoverageLastArm = @{}
+                        }
+                        $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
+                        foreach ($expectedDp in $osdDpFqdns) {
+                            $dpRow = @($bootDpRows | Where-Object { (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $expectedDp } | Select-Object -First 1)
+                            if ($dpRow.Count -eq 0) {
+                                $bootCoverageProblems += "$expectedDp (no status row)"
+                                $bootIncompleteDps += $expectedDp
+                            }
+                            elseif ([int]$dpRow[0].State -ne 0) {
+                                $bootCoverageProblems += "$expectedDp (State=$($dpRow[0].State), DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                $bootIncompleteDps += $expectedDp
+                            }
+                            elseif (-not "$($dpRow[0].SourceVersion)" -or [int]$dpRow[0].SourceVersion -lt [int]$bootSourceVersion) {
+                                $bootCoverageProblems += "$expectedDp (Installed but stale: DPVersion=$($dpRow[0].SourceVersion), RequiredVersion=$bootSourceVersion)"
+                                $bootIncompleteDps += $expectedDp
+                            }
+                        }
+                    }
+                    if ($bootCoverageProblems.Count -eq 0) { break }
+
+                    # ContentValidating can sit until ConfigMgr's 30-minute retry fires. Re-arm
+                    # the existing target without rebuilding the WIM or changing SourceVersion.
+                    foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
+                        $armKey = $incompleteDp.ToUpper()
+                        try {
+                            $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
+                                    Where-Object { (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $incompleteDp })
+                            if ($targetRows.Count -eq 0) {
+                                Start-CMContentDistribution -BootImageId $packageId -DistributionPointName $incompleteDp -ErrorAction Stop
+                                Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"
+                            }
+                            else {
+                                $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $null }
+                                if ($lastArm -and ((Get-Date) - $lastArm).TotalMinutes -lt 5) { continue }
+                                foreach ($targetRow in $targetRows) {
+                                    $targetRow.RefreshNow = $true
+                                    [void]$targetRow.Put()
+                                }
+                                Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow at SourceVersion=$bootSourceVersion (StoredPkgVersion=$bootStoredVersion)"
+                            }
+                            $bootCoverageLastArm[$armKey] = Get-Date
+                        }
+                        catch {
+                            Write-DscStatus "$Tag Boot image coverage: re-arm failed for $incompleteDp`: $($_.Exception.Message)"
+                        }
+                    }
+                    $remainingBootCoverageSec = [math]::Floor(($bootCoverageDeadline - (Get-Date)).TotalSeconds)
+                    if ($remainingBootCoverageSec -le 0) { break }
+                    Write-DscStatus "$Tag Waiting for boot image '$biName' ($packageId) on every OSD DP: $($bootCoverageProblems -join '; ') (SiteStoredVersion=$bootStoredVersion, attempt $bootCoverageAttempt, ${remainingBootCoverageSec}s remaining)"
+                    Start-Sleep -Seconds ([int][math]::Min(30, $remainingBootCoverageSec))
+                } while ((Get-Date) -lt $bootCoverageDeadline)
+
+                if ($bootCoverageProblems.Count -gt 0) {
+                    # Deliberately not -Failure: this used to end the script here, which also skipped
+                    # the OSD share, both OS packages and all five task sequences. Phase 11 owns the
+                    # failure -- it builds $requiredOsdCoverageProblems per expected OSD DP, so it
+                    # reports "(no status row)" and fails even with no summarizer or targeting row.
+                    $coverageTiming = if ($bootCoverageTerminalProblem) { 'without entering the timed coverage wait' } else { "within $bootCoverageWaitMinutes minutes" }
+                    Write-DscStatus "$Tag Boot image '$biName' ($packageId) did not reach every required OSD DP at the current source version ${coverageTiming}: $($bootCoverageProblems -join '; '). Continuing so the rest of perfloading runs; PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
+                }
+                else {
+                    Write-DscStatus "$Tag Verified boot image '$biName' ($packageId) SourceVersion=$bootSourceVersion is Installed on every OSD DP: $($osdDpFqdns -join ', ')"
+                }
+            }
+        }
+    }
 
 
-    #get OS upgrade package 
-    New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 
-    New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 
-    Write-DscStatus "$Tag Windows 10 and 11 OS upgrade packages created"
+    # Phase 1 seeds the Win10/Win11 OSD ISOs on every new Primary, and the Phase 8
+    # host preflight repairs inherited Primaries created by revisions that copied
+    # media only to the hierarchy's top-level site. By here a Primary MUST have the
+    # media. A miss means the host repair was skipped or failed -- capture exactly
+    # what's present so the next run shows which file is still missing.
+    $win11OsdPath = Join-Path $folderPath "Windows 11 24h2"
+    $win10OsdPath = Join-Path $folderPath "Windows 10 22h2"
+    $hasOsdMedia = (Test-Path "$win11OsdPath\sources\install.wim") -and (Test-Path "$win10OsdPath\sources\install.wim")
+
+    if (-not $hasOsdMedia) {
+        $w11 = Test-Path "$win11OsdPath\sources\install.wim"
+        $w10 = Test-Path "$win10OsdPath\sources\install.wim"
+        $cfgDrive = if ($CMInstallDir) { (Split-Path -Path $CMInstallDir -Qualifier) } else { '<unset>' }
+        $freeGB = try { [math]::Round((Get-PSDrive -Name ($DriveLetter.TrimEnd(':')) -ErrorAction Stop).Free / 1GB, 1) } catch { '?' }
+        Write-DscStatus "$Tag WARNING: OSD media missing under '$folderPath' -- skipping OS packages and task sequences. win11 install.wim=$w11; win10 install.wim=$w10; OSD drive '$DriveLetter' free=${freeGB}GB; config CMInstallDir drive '$cfgDrive'. The Phase 8 host preflight should repair this payload before perfloading; verify the host OS ISOs are available and rerun from Phase 8." -Warning
+        # Enumerate the OSD tree so a partial/misplaced copy or an emptied folder is visible.
+        try {
+            if (Test-Path $folderPath) {
+                $kids = @(Get-ChildItem -Path $folderPath -ErrorAction SilentlyContinue | Select-Object -First 20)
+                if ($kids.Count -eq 0) {
+                    Write-DscStatus "$Tag OSD DIAG: '$folderPath' exists but is EMPTY -- Phase 1's copy is gone (removed after copy, or a rerun skipped the copy after a wipe)." -Warning
+                }
+                else {
+                    foreach ($k in $kids) { Write-DscStatus "$Tag OSD DIAG: contains '$($k.Name)$(if ($k.PSIsContainer) { '\' })'" }
+                    $wims = @(Get-ChildItem -Path $folderPath -Recurse -Filter 'install.wim' -ErrorAction SilentlyContinue | Select-Object -First 8)
+                    if ($wims.Count -eq 0) { Write-DscStatus "$Tag OSD DIAG: no install.wim anywhere under '$folderPath' (recursive) -- the media never fully landed." }
+                    else { foreach ($w in $wims) { Write-DscStatus "$Tag OSD DIAG: install.wim at '$($w.FullName)' ($([math]::Round($w.Length / 1GB, 2))GB)" } }
+                }
+            }
+            else { Write-DscStatus "$Tag OSD DIAG: '$folderPath' does NOT exist." -Warning }
+        }
+        catch { Write-DscStatus "$Tag OSD DIAG enumeration failed: $($_.Exception.Message)" -Warning }
+    }
+    else {
+
+    #get OS upgrade package (guard existence so a re-run doesn't throw
+    # "An object with the specified name already exists" -- mirrors the OS
+    # image block below. Get-CMOperatingSystemUpgradePackage is the read-side
+    # cmdlet for the upgrade packages New-CMOperatingSystemInstaller creates.)
+    try {
+        $upgradePackageSpecs = @(
+            @{ Name = "Windows 11 upgrade"; Path = "\\$ThisMachineName\OSD\Windows 11 24h2"; Version = "10.0.26100" },
+            @{ Name = "Windows 10 upgrade"; Path = "\\$ThisMachineName\OSD\Windows 10 22h2"; Version = "10.0.19041" }
+        )
+        foreach ($upgradePackageSpec in $upgradePackageSpecs) {
+            if (Get-CMOperatingSystemUpgradePackage -Name $upgradePackageSpec.Name) {
+                Write-DscStatus "$Tag OS upgrade package '$($upgradePackageSpec.Name)' already exists -- skipping creation"
+            }
+            else {
+                New-CMOperatingSystemInstaller -Name $upgradePackageSpec.Name -Path $upgradePackageSpec.Path -Version $upgradePackageSpec.Version
+                Write-DscStatus "$Tag Created OS upgrade package '$($upgradePackageSpec.Name)'"
+            }
+        }
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Failed to create OS upgrade packages: $_"
+    }
 
     #get OS package
-    if (!(Get-CMOperatingSystemImage -Name "windows 11")) { New-CMOperatingSystemImage -Name "Windows 11" -Path "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim" -Version 10.0.26100 }
-    if (!(Get-CMOperatingSystemImage -Name "windows 10")) { New-CMOperatingSystemImage -Name "Windows 10" -Path "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim" -Version 10.0.19041 }
+    try {
+        $osImageSpecs = @(
+            @{ Name = "Windows 11"; Path = "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim"; Version = "10.0.26100" },
+            @{ Name = "Windows 10"; Path = "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim"; Version = "10.0.19041" }
+        )
+        foreach ($osImageSpec in $osImageSpecs) {
+            if (Get-CMOperatingSystemImage -Name $osImageSpec.Name) {
+                Write-DscStatus "$Tag OS image '$($osImageSpec.Name)' already exists -- skipping creation"
+            }
+            else {
+                New-CMOperatingSystemImage -Name $osImageSpec.Name -Path $osImageSpec.Path -Version $osImageSpec.Version
+                Write-DscStatus "$Tag Created OS image '$($osImageSpec.Name)'"
+            }
+        }
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Failed to create OS image packages: $_"
+    }
 
-    Write-DscStatus "$Tag Windows 10 and 11 OS packages created"
+    # Every site in a hierarchy has its own same-named client/USMT/OS content, so a bare
+    # -ExpandProperty PackageID yields an ARRAY and silently poisons every WQL filter,
+    # cmdlet argument and task-sequence reference built from it.
+    $resolveSitePackageId = {
+        param([string]$Label, $Candidates)
+        $rows = @($Candidates | Where-Object { $_ -and "$($_.PackageID)" })
+        if ($rows.Count -eq 0) {
+            Write-DscStatus "$Tag $Label was not found, so its PackageID is empty"
+            return ''
+        }
+        $local = @($rows | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
+        $chosen = if ($local.Count -gt 0) { $local[0] } else { $rows[0] }
+        if ($rows.Count -gt 1) {
+            Write-DscStatus "$Tag $Label resolved to $($chosen.PackageID) from $($rows.Count) same-named packages ($(if ($local.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
+        }
+        return "$($chosen.PackageID)"
+    }
+    $win11UpgradePackageID = & $resolveSitePackageId 'Windows 11 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade")
+    $win10UpgradePackageID = & $resolveSitePackageId 'Windows 10 upgrade package' (Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade")
+    $BootImagePackageID = & $resolveSitePackageId "Boot image ($memlabsBootImageName)" (Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName })
+    $win11OSimagepackageID = & $resolveSitePackageId 'Windows 11 OS image' (Get-CMOperatingSystemImage -Name "windows 11")
+    $win10OSimagepackageID = & $resolveSitePackageId 'Windows 10 OS image' (Get-CMOperatingSystemImage -Name "windows 10")
+    $ClientPackagePackageId = & $resolveSitePackageId 'Configuration Manager Client Package' (Get-CMPackage -Fast -Name "Configuration Manager Client Package")
+    $UserStateMigrationToolPackageId = & $resolveSitePackageId 'User State Migration Tool' (Get-CMPackage -Fast -Name "User State Migration Tool for Windows")
 
-    # Get all Task Sequences with names starting with the specified prefix
-    $taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" }
+    # Reconcile content targeting on every pass, independently of whether task sequences
+    # already exist. A rerun must be able to repair a missing DP assignment without deleting
+    # and recreating otherwise healthy task sequences.
+    if ($hasOsdTargets) {
+        $osdContentSpecs = @(
+            [pscustomobject]@{ Type = 'Package'; Id = $UserStateMigrationToolPackageId; Name = 'User State Migration Tool' }
+            [pscustomobject]@{ Type = 'OperatingSystemImage'; Id = $win11OSimagepackageID; Name = 'Windows 11' }
+            [pscustomobject]@{ Type = 'OperatingSystemImage'; Id = $win10OSimagepackageID; Name = 'Windows 10' }
+            [pscustomobject]@{ Type = 'OperatingSystemInstaller'; Id = $win11UpgradePackageID; Name = 'Windows 11 upgrade' }
+            [pscustomobject]@{ Type = 'OperatingSystemInstaller'; Id = $win10UpgradePackageID; Name = 'Windows 10 upgrade' }
+        )
+        $osdContentTargetFailures = @()
+        foreach ($osdContentSpec in $osdContentSpecs) {
+            $targeted = Sync-MemLabsOsdContentDistribution -ContentType $osdContentSpec.Type -PackageId $osdContentSpec.Id -ContentName $osdContentSpec.Name -DistributionPointGroupName $osdDistTarget -ExpectedDistributionPointNames $osdDpFqdns -SiteCode $SiteCode -StatusTag $Tag
+            if (-not $targeted) { $osdContentTargetFailures += "$($osdContentSpec.Id) '$($osdContentSpec.Name)'" }
+        }
+        if ($osdContentTargetFailures.Count -eq 0) {
+            Write-DscStatus "$Tag Verified OS image + upgrade + USMT targeting to every OSD DP"
+        }
+        else {
+            Write-DscStatus "$Tag OSD content targeting remains incomplete for: $($osdContentTargetFailures -join '; '). Continuing so the remaining MEMLABS objects are reconciled; Phase 11 validation will fail if the targets remain absent." -Warning
+        }
+    }
+    else {
+        Write-DscStatus "$Tag No OSDClient on a DP subnet -- NOT distributing OS image/upgrade/USMT content (saves space); will distribute when an OSDClient is added"
+    }
+
+    # Get all Task Sequences with names starting with the specified prefix.
+    # New-CMTaskSequence can hit a transient SQL deadlock (a SMS_PackageContentServerInfo
+    # query, error "waiting for query to return" / SQLStatus 1205) mid-block. Because
+    # every create shares one try/catch, a single deadlock abandons the WHOLE block and
+    # leaves zero MEMLABS task sequences -- Phase 11 then warns "No MEMLABS-* task
+    # sequences found". Retry the block on a transient deadlock, removing any partially
+    # created MEMLABS TSes first so the retry stays idempotent.
+    $tsAttempt = 0
+    $tsMaxAttempts = 3
+    while ($true) {
+    $tsAttempt++
+    # Task sequences are global objects: an unfiltered read at a child Primary also returns
+    # the ones another site created, which would make this site skip its own.
+    $taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" }
 
     if (!$taskSequences) {
+    try {
 
         # Define variables for TS
         #$TaskSequenceName = "Windows 11 In-Place Upgrade Task Sequence"
-        $win11UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade" | Select-Object -ExpandProperty PackageID
-        $win10UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade" | Select-Object -ExpandProperty PackageID
-        $BootImagePackageID = Get-CMBootImage | Where-Object { $_.Name -eq "Boot image (x64)" }  | Select-Object -ExpandProperty PackageID
-        $win11OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 11" | Select-Object -ExpandProperty PackageID
-        $win10OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 10" | Select-Object -ExpandProperty PackageID
-        $ClientPackagePackageId = Get-CMPackage -Fast -Name "Configuration Manager Client Package" | Select-Object -ExpandProperty PackageID
-        $UserStateMigrationToolPackageId = Get-CMPackage -Fast -Name "User State Migration Tool for Windows" | Select-Object -ExpandProperty PackageID
-        $win11UpgradeOperatingSystempath = "\\$ThisMachineName\osd\Windows 11 24h2"  
+        if (-not $BootImagePackageID) {
+            # Five of the seven task sequences take -BootImagePackageId. Creating the other two
+            # would leave a partial set that Phase 11 counts as present, so build none.
+            Write-DscStatus "$Tag WARNING: no boot image resolved for '$memlabsBootImageName', so NO task sequences are created -- a partial set would read as success. Fix the boot image (see the boot-image warnings above) and re-run Phase 8. Phase 11 validation FAILS on this." -Warning
+            break
+        }
         $win11UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 11 24h2\sources\install.wim"
         $win10UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
         $clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'
         $cm_svc_file = "C:\Staging\DSC\cm_svc.txt"
-        $domainshortname = $deployConfig.parameters.domainName -replace "\.com$", ""
 
         $tstimezone = [System.TimeZoneInfo]::FindSystemTimeZoneById($deployconfig.vmOptions.timeZone)
         if (Test-Path $cm_svc_file) {
             # Add cm_svc user as a CM Account
             $unencrypted = Get-Content $cm_svc_file
         }
-        #distribute the OS packages and upgrade packages 
-        Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS"
-        Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
-        Write-DscStatus "$Tag Successfully distributed for OS Image and upgrade packages"
-     
 
         # Create the in-place upgrade task sequence
         New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w11-In-Place Upgrade Task Sequence" -UpgradePackageId $win11UpgradePackageID -SoftwareUpdateStyle All
@@ -504,11 +2514,17 @@ else {
         New-CMTaskSequence @customTS
         Write-DscStatus "$Tag Successfully created MEMLABS-Custom TS Example"
 
-        # Get all task sequences with names starting with "MEMLABS"
-        $taskSequences = Get-CMTaskSequence -Fast | Where-Object { $_.Name -like "MEMLABS*" }
+        # Deploy only this site's task sequences: they replicate globally, so an unfiltered
+        # read deploys another Primary's, whose boot image is not on this site's DPs.
+        $taskSequences = Get-CMTaskSequence -Fast | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" }
 
         # Get the "All Unknown Computers" collection
         $unknownCollection = Get-CMDeviceCollection -Name "All Unknown Computers"
+        if (-not $unknownCollection -or -not "$($unknownCollection.CollectionID)") {
+            # -CollectionId $null does not error; it just deploys to nothing.
+            Write-DscStatus "$Tag WARNING: 'All Unknown Computers' did not resolve to a collection, so no task sequence can be deployed to it and PXE clients will boot with nothing to run. Phase 11 validation FAILS on this." -Warning
+            $taskSequences = @()
+        }
 
         foreach ($ts in $taskSequences) {
             # Check if a deployment already exists for this task sequence to this collection
@@ -518,71 +2534,459 @@ else {
                 Write-DscStatus "Skipping $($ts.Name) already deployed to $($unknownCollection.Name)"
             }
             else {
-                Write-DscStatus "Deploying Task Sequence: $($ts.Name)"
+                try {
+                    Write-DscStatus "Deploying Task Sequence: $($ts.Name)"
 
-                New-CMTaskSequenceDeployment `
-                    -TaskSequencePackageId $ts.PackageID `
-                    -CollectionId $unknownCollection.CollectionID `
-                    -DeployPurpose Available `
-                    -MakeAvailableTo ClientsMediaAndPxe
+                    New-CMTaskSequenceDeployment `
+                        -TaskSequencePackageId $ts.PackageID `
+                        -CollectionId $unknownCollection.CollectionID `
+                        -DeployPurpose Available `
+                        -MakeAvailableTo ClientsMediaAndPxe `
+                        -ErrorAction Stop
+                }
+                catch {
+                    Write-DscStatus "$Tag WARNING: Failed to deploy TS '$($ts.Name)': $_"
+                }
             }
 
         }
 
 
     }
+    catch {
+        $tsErr = "$_"
+        $tsTransient = ($tsErr -match 'deadlock') -or ($tsErr -match 'Error waiting for query to return') -or ($tsErr -match '\b1205\b')
+        if ($tsTransient -and $tsAttempt -lt $tsMaxAttempts) {
+            Write-DscStatus "$Tag WARNING: Transient deadlock creating task sequences (attempt $tsAttempt of $tsMaxAttempts); cleaning up partial TSes and retrying in 30s: $_"
+            # Scoped to this site's PackageIDs: an unfiltered sweep would delete the task
+            # sequences another Primary in the same hierarchy created.
+            try { Get-CMTaskSequence -Fast | Where-Object { $_.Name -like 'MEMLABS-*' -and "$($_.PackageID)" -like "$SiteCode*" } | ForEach-Object { Remove-CMTaskSequence -TaskSequencePackageId $_.PackageID -Force -ErrorAction SilentlyContinue } } catch {}
+            Start-Sleep -Seconds 30
+            continue
+        }
+        Write-DscStatus "$Tag WARNING: Failed to create task sequences: $_"
+        break
+    }
+    break
+    }
     else {
 
         Write-DscStatus "$Tag Task sequences were already created, skipping the duplicate creation"
+        break
 
     }
+    }
+
+    } # end hasOsdMedia
+
+    } # end Primary-only TS/OSD block
 
     ### CI and baselines 
 
     #expand archive for importing cab files
-    Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\" -Force
-
-    # Define the path to the CAB files
+    $baselineReconcileTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $baselinesZip = "C:\tools\baselines.zip"
     $baselineFolder = "C:\tools\baselines"
+    $baselineArchiveStamp = Join-Path $baselineFolder ".source.sha256"
 
-    # Get all .cab files in the folder
-    $ConfigNames = Get-ChildItem -Path $baselineFolder -Filter "*.cab"
+    # CIs/baselines are client-facing configuration that MEMLABS stages and
+    # imports on the Primary ONLY -- baselines.zip is copied solely to the
+    # Primary site server (Common.ScriptBlocks.ps1: role -eq 'Primary'). In a
+    # hierarchy the CAS holds no client resources, so this block was never meant
+    # to run there; because the zip is never present on a CAS it only produced a
+    # spurious "baselines.zip not found ... skipping CI/baseline import" WARNING
+    # on every run. Skip on CAS, matching the collections/Office CAS gates.
+    if ($CurrentRole -eq "CAS") {
+        Write-DscStatus "$Tag Skipping CI/baseline import on CAS (client-facing config is imported on the Primary)"
+    }
+    elseif (Test-Path $baselinesZip) {
+        $baselineZipHash = $null
+        try { $baselineZipHash = (Get-FileHash -LiteralPath $baselinesZip -Algorithm SHA256 -ErrorAction Stop).Hash }
+        catch { Write-DscStatus "$Tag WARNING: Could not hash baselines.zip; it will be expanded again: $($_.Exception.Message)" }
+        $expandedBaselineHash = if (Test-Path -LiteralPath $baselineArchiveStamp) { (Get-Content -LiteralPath $baselineArchiveStamp -Raw).Trim() } else { $null }
+        $haveBaselineCabs = (Test-Path -LiteralPath $baselineFolder) -and @(Get-ChildItem -LiteralPath $baselineFolder -Filter "*.cab" -File -ErrorAction SilentlyContinue).Count -gt 0
+        if ($baselineZipHash -and $haveBaselineCabs -and $expandedBaselineHash -eq $baselineZipHash) {
+            Write-DscStatus "$Tag baselines.zip is already expanded at the current hash -- skipping archive write"
+        }
+        else {
+            Expand-Archive -Path $baselinesZip -DestinationPath "C:\tools\" -Force
+            if ($baselineZipHash) { $baselineZipHash | Set-Content -LiteralPath $baselineArchiveStamp -Encoding ASCII -Force }
+            Write-DscStatus "$Tag Expanded baselines.zip (source changed or extraction was incomplete)"
+        }
+    }
+    else {
+        Write-DscStatus "$Tag WARNING: baselines.zip not found at $baselinesZip — skipping CI/baseline import"
+    }
+
+    $baselinesImported = 0
+    $baselinesSkipped = 0
+    $baselinesFailed = 0
+
+    # Get all .cab files in the folder (never on CAS -- see the gate above)
+    if ($CurrentRole -ne "CAS" -and (Test-Path $baselineFolder)) {
+    $ConfigNames = @(Get-ChildItem -Path $baselineFolder -Filter "*.cab")
+    $existingBaselineNames = @{}
+    $baselineInventoryLoaded = $false
+    try {
+        foreach ($existingBaseline in @(Get-CMBaseline -Fast -ErrorAction Stop)) {
+            if ($existingBaseline.LocalizedDisplayName) { $existingBaselineNames["$($existingBaseline.LocalizedDisplayName)"] = $true }
+        }
+        $baselineInventoryLoaded = $true
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Could not load baselines in one query; falling back to per-baseline checks: $($_.Exception.Message)"
+    }
 
     ForEach ($ConfigName in $ConfigNames) {
 
-
         $baselinename = [System.IO.Path]::GetFileNameWithoutExtension($ConfigName.Name)
 
-        if (!(Get-CMBaseline -Fast -Name $baselinename)) {
-
-            # Create a configuration item (we are importing the cab files directly here)
-            $filename = $baselineFolder + "\" + $ConfigName.Name
-            Write-DscStatus "$Tag Importing cab from $filename location"
-            Import-CMConfigurationItem -FileName $filename -Force
-            Write-DscStatus "$Tag Successfully created Configuration Item for $baselinename"
+        # Whole-iteration try/catch: the Get-CMBaseline guard below issues a WMI
+        # ExecQuery against the SMS provider, which can throw a transient
+        # ManagementException (e.g. WBEM_E_NOT_FOUND / 0x80041002 when the
+        # provider is momentarily busy right after site setup). That call used to
+        # sit OUTSIDE the try, so a single hiccup terminated the dot-sourced
+        # Perfloading.ps1 mid-run -- skipping everything after it, including the
+        # Office app/deployment creation and the end-of-run recovery sweep, which
+        # left the Office Install Targets collection with no deployment. Catch it
+        # per-baseline and continue so one flaky baseline can't sink the rest of
+        # perfloading.
+        try {
+            $baselineExists = if ($baselineInventoryLoaded) {
+                $existingBaselineNames.ContainsKey($baselinename)
+            }
+            else {
+                $null -ne (Get-CMBaseline -Fast -Name $baselinename -ErrorAction Stop)
+            }
+            if (-not $baselineExists) {
+                # Create a configuration item (we are importing the cab files directly here)
+                $filename = $baselineFolder + "\" + $ConfigName.Name
+                Write-DscStatus "$Tag Importing cab from $filename location"
+                Import-CMConfigurationItem -FileName $filename -Force
+                Write-DscStatus "$Tag Successfully created Configuration Item for $baselinename"
     
-            # Create the configuration baseline
-            New-CMBaseline -Name $baselinename -Description "MEMLABS auto imported" 
-            Write-DscStatus "$Tag Successfully created Configuration Baseline for $baselinename"
+                # Create the configuration baseline
+                New-CMBaseline -Name $baselinename -Description "MEMLABS auto imported" 
+                Write-DscStatus "$Tag Successfully created Configuration Baseline for $baselinename"
 
-            # Link the configuration item to the configuration baseline (we are using the same name for CI and baseline so using the same name here)
-            $ciinfo = Get-CMConfigurationItem -Name $baselinename -Fast
-            Set-CMBaseline -Name $baselinename -AddOSConfigurationItem $ciinfo.CI_ID 
-            Write-DscStatus "$Tag Successfully linked CI and CB for $baselinename"
+                # Link the configuration item to the configuration baseline (we are using the same name for CI and baseline so using the same name here)
+                $ciinfo = Get-CMConfigurationItem -Name $baselinename -Fast
+                Set-CMBaseline -Name $baselinename -AddOSConfigurationItem $ciinfo.CI_ID 
+                Write-DscStatus "$Tag Successfully linked CI and CB for $baselinename"
 
-            # Deploy the configuration baseline to a collection
-
-            New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
-            Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
-
+                # Deploy the configuration baseline to a collection
+                Write-DscStatus "$Tag Deploying baseline $baselinename to All Systems..."
+                New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
+                Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
+                $existingBaselineNames[$baselinename] = $true
+                $baselinesImported++
+            }
+            else {
+                $baselinesSkipped++
+            }
         }
-        else {
-            Write-DscStatus "Baseline $baselinename are already in place"
+        catch {
+            $baselinesFailed++
+            Write-DscStatus "$Tag WARNING: Failed to import/deploy baseline '$baselinename': $($_.Exception.Message)"
+        }
+    }
+    } # end if baselineFolder exists
+    $baselineReconcileTimer.Stop()
+    if ($CurrentRole -ne "CAS") {
+        Write-DscStatus "$Tag Baseline reconcile: $baselinesImported imported, $baselinesSkipped already present, $baselinesFailed failed in $([math]::Round($baselineReconcileTimer.Elapsed.TotalSeconds, 1))s"
+    }
 
+    ### Repro-only policy bulk + purpose-built tattoo CIs
+    # Reproduces case 2608010010000636. Two independent knobs, both opt-in via
+    # cmOptions; absent or 0 (every normal lab) skips the whole region.
+    #
+    #   ReproPolicyBulkCount  - contentless packages, purely to PAD the policy set
+    #   ReproTattooCICount    - OS script CIs + registry CIs that can actually be
+    #                           orphaned and reverted (the mechanism itself)
+    #
+    # Why this shape, from the real client logs: of 1333 UnintendInstance calls,
+    # 1309 were OperatingSystem CIs and 24 were CCM_RegistryValue_Setting_Integer.
+    # NOTHING else ever got reverted -- not Applications, not DeploymentTypes, not
+    # Baselines. So the tattoo vehicle must be an OS CI (New-CMConfigurationItem
+    # -CreationType WindowsOS maps to ConfigurationItemType.OperatingSystem) plus
+    # a registry value setting. The rest of the policy set only matters as volume,
+    # which is what the packages are for: the orphan window is the time between
+    # policy being purged and the projection refilling, so a bigger set = a wider
+    # window = a landable repro.
+    #
+    # The stock baselines.zip CIs are not used as the PRIMARY vehicle, but they are
+    # a valid secondary signal. Since the 2026-06 repair (manifest md5 7EB476C8...)
+    # all 7 emit their value to stdout and discover correctly; however only 2 of
+    # them ("Check windows firewall", "Check Windows update") carry a remediation
+    # script, and both remediate by starting a real service -- which leaves no
+    # attributable trace and has side effects on the lab. The CIs below instead
+    # give a controllable count, a remediation on EVERY CI, and a timestamped
+    # audit log, so "the remediation ran because the setting was un-intended" is
+    # directly observable rather than inferred.
+    $bulkCount = 0
+    $tattooCount = 0
+    if ($cmo.ReproPolicyBulkCount) { $bulkCount = [int]$cmo.ReproPolicyBulkCount }
+    if ($cmo.ReproTattooCICount) { $tattooCount = [int]$cmo.ReproTattooCICount }
+
+    if ($CurrentRole -eq "CAS" -and ($bulkCount -gt 0 -or $tattooCount -gt 0)) {
+        Write-DscStatus "$Tag Skipping repro objects on CAS (client policy is projected from the Primary)"
+    }
+    else {
+        # --- 1. Volume: contentless packages -----------------------------------
+        # No source path on purpose: no content, no DP distribution, no disk cost,
+        # but each deployment still projects real machine policy.
+        if ($bulkCount -gt 0) {
+            Write-DscStatus "$Tag Repro policy bulk: creating $bulkCount contentless package deployment(s) to pad the machine policy set"
+            $bulkMade = 0
+            $bulkSkipped = 0
+            $bulkFailed = 0
+
+            for ($i = 1; $i -le $bulkCount; $i++) {
+                $bulkName = "MEMLABS-PolicyBulk-{0:D4}" -f $i
+                try {
+                    if (Get-CMPackage -Name $bulkName -Fast -ErrorAction SilentlyContinue) {
+                        $bulkSkipped++
+                        continue
+                    }
+
+                    $bulkPkg = New-CMPackage -Name $bulkName -Description "MEMLABS repro: policy padding only, no content" -ErrorAction Stop
+                    New-CMProgram -PackageId $bulkPkg.PackageID -StandardProgramName "NoOp" -CommandLine "cmd.exe /c exit 0" -ErrorAction Stop | Out-Null
+                    New-CMPackageDeployment -StandardProgram -PackageId $bulkPkg.PackageID -ProgramName "NoOp" -CollectionName "All Systems" -DeployPurpose Available -ErrorAction Stop | Out-Null
+                    $bulkMade++
+
+                    if (($bulkMade % 25) -eq 0) {
+                        Write-DscStatus "$Tag Repro policy bulk: $bulkMade created so far (of $bulkCount)"
+                    }
+                }
+                catch {
+                    $bulkFailed++
+                    # Only surface the first few; a systemic failure repeats N times.
+                    if ($bulkFailed -le 3) {
+                        Write-DscStatus "$Tag WARNING: Repro policy bulk failed on '$bulkName': $($_.Exception.Message)"
+                    }
+                }
+            }
+            Write-DscStatus "$Tag Repro policy bulk complete: $bulkMade created, $bulkSkipped already present, $bulkFailed failed"
+        }
+
+        # --- 2. Mechanism: OS script CIs + registry CIs -------------------------
+        if ($tattooCount -gt 0) {
+            Write-DscStatus "$Tag Repro tattoo CIs: creating $tattooCount script CI(s) + $tattooCount registry CI(s)"
+
+            $reproDir = 'C:\ProgramData\MEMLABS-PolicyChurn'
+            $reproKey = 'SOFTWARE\MEMLABS\PolicyChurn'
+            $reproBaseline = 'MEMLABS-PolicyChurn-Repro'
+            $ciMade = 0
+            $ciSkipped = 0
+            $ciFailed = 0
+            $ciIds = @()
+
+            for ($i = 1; $i -le $tattooCount; $i++) {
+                $n = "{0:D3}" -f $i
+                $scriptCiName = "MEMLABS-Repro-Script-$n"
+                $regCiName = "MEMLABS-Repro-Registry-$n"
+
+                # Discovery MUST emit the value on STDOUT -- ConfigMgr uses stdout as
+                # the discovered value and IGNORES the exit code. Returning only an
+                # exit code yields DiscoveryFailure and the CI never establishes
+                # intent, so it can never be orphaned either.
+                $discoveryScript = @"
+`$marker = '$reproDir\marker-$n.txt'
+if (Test-Path `$marker) { Write-Output `$true } else { Write-Output `$false }
+"@
+
+                # Deliberately harmless: creates a marker and appends one audit line.
+                # It must NOT reboot or stop ccmexec -- that is the customer's bug, and
+                # doing it here would truncate the evaluation pass and hide the very
+                # signal we are trying to observe. The audit log is the proof the
+                # remediation ran because the setting was UN-INTENDED.
+                $remediationScript = @"
+`$dir = '$reproDir'
+if (-not (Test-Path `$dir)) { New-Item -ItemType Directory -Path `$dir -Force | Out-Null }
+Set-Content -Path "`$dir\marker-$n.txt" -Value 'present' -Force
+Add-Content -Path "`$dir\remediation-audit.log" -Value ("{0}`tremediation ran`t$scriptCiName" -f (Get-Date -Format 'o'))
+Write-Output `$true
+"@
+
+                try {
+                    # -- script CI (OperatingSystem type: the one that tattoos) --
+                    if (Get-CMConfigurationItem -Name $scriptCiName -Fast -ErrorAction SilentlyContinue) {
+                        $ciSkipped++
+                    }
+                    else {
+                        $sci = New-CMConfigurationItem -Name $scriptCiName -CreationType WindowsOS -Description "MEMLABS repro: orphan/tattoo observable" -ErrorAction Stop
+                        $sci | Add-CMComplianceSettingScript -Name "MarkerPresent-$n" -DataType Boolean `
+                            -DiscoveryScriptLanguage PowerShell -DiscoveryScriptText $discoveryScript `
+                            -RemediationScriptLanguage PowerShell -RemediationScriptText $remediationScript -Remediate `
+                            -ValueRule -ExpectedValue 'True' -ExpressionOperator IsEquals `
+                            -RuleName "MarkerPresent-$n" -NoncomplianceSeverity Informational -ErrorAction Stop | Out-Null
+                        $ciMade++
+                    }
+                    $sciObj = Get-CMConfigurationItem -Name $scriptCiName -Fast -ErrorAction SilentlyContinue
+                    if ($sciObj) { $ciIds += $sciObj.CI_ID }
+
+                    # -- registry value CI (CCM_RegistryValue_Setting_Integer) --
+                    if (Get-CMConfigurationItem -Name $regCiName -Fast -ErrorAction SilentlyContinue) {
+                        $ciSkipped++
+                    }
+                    else {
+                        $rci = New-CMConfigurationItem -Name $regCiName -CreationType WindowsOS -Description "MEMLABS repro: registry tattoo observable" -ErrorAction Stop
+                        $rci | Add-CMComplianceSettingRegistryKeyValue -Name "ReproValue-$n" -DataType Integer `
+                            -Hive LocalMachine -KeyName $reproKey -ValueName "ReproValue$n" `
+                            -ValueRule -ExpectedValue '1' -ExpressionOperator IsEquals -Remediate `
+                            -RuleName "ReproValue-$n" -NoncomplianceSeverity Informational -ErrorAction Stop | Out-Null
+                        $ciMade++
+                    }
+                    $rciObj = Get-CMConfigurationItem -Name $regCiName -Fast -ErrorAction SilentlyContinue
+                    if ($rciObj) { $ciIds += $rciObj.CI_ID }
+                }
+                catch {
+                    $ciFailed++
+                    if ($ciFailed -le 3) {
+                        Write-DscStatus "$Tag WARNING: Repro tattoo CI failed on '$scriptCiName': $($_.Exception.Message)"
+                    }
+                }
+            }
+
+            # One baseline carrying every repro CI. -AddOSConfigurationItem is the
+            # correct linker here because these ARE OS CIs (CreationType WindowsOS).
+            try {
+                if (-not (Get-CMBaseline -Fast -Name $reproBaseline -ErrorAction SilentlyContinue)) {
+                    New-CMBaseline -Name $reproBaseline -Description "MEMLABS repro: policy-churn orphan/tattoo observables" -ErrorAction Stop | Out-Null
+                    Write-DscStatus "$Tag Created baseline $reproBaseline"
+                }
+                foreach ($id in $ciIds) {
+                    try { Set-CMBaseline -Name $reproBaseline -AddOSConfigurationItem $id -ErrorAction Stop }
+                    catch { }   # already linked on a rerun
+                }
+                if (-not (Get-CMBaselineDeployment -Name $reproBaseline -ErrorAction SilentlyContinue)) {
+                    New-CMBaselineDeployment -Name $reproBaseline -CollectionName "All Systems" -EnableEnforcement $true -ErrorAction Stop | Out-Null
+                    Write-DscStatus "$Tag Deployed baseline $reproBaseline to All Systems with enforcement"
+                }
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Repro baseline setup failed: $($_.Exception.Message)"
+            }
+
+            Write-DscStatus "$Tag Repro tattoo CIs complete: $ciMade created, $ciSkipped already present, $ciFailed failed, $($ciIds.Count) linked to $reproBaseline"
+            Write-DscStatus "$Tag Watch for remediation on clients: $reproDir\remediation-audit.log"
         }
     }
 
+    #region Microsoft 365 Apps — join background download + create applications
+    # The Office source download was started as a background job at the top of the
+    # apps/packages section so it could run concurrently with the OSD/TS/baseline
+    # work above. Join it now and create the ConfigMgr applications. Guarded to
+    # Primary/standalone (non-CAS) — matching where the job was started.
+    if ($CurrentRole -ne "CAS" -and $officeDownloadJob) {
+        # The job's ODT `setup.exe /download` runs under Start-Process -Wait with
+        # no cap of its own, so bound the join: a wedged CDN fetch (or a dead job
+        # runspace) must not hang Phase 8 forever. On overrun we fall through with
+        # no result and the Office applications are simply skipped this pass.
+        $officeDownloadTimeout = 5400
+        Write-DscStatus "$Tag Waiting for background Office source download job to complete..."
+        $officeDownloadResult = $null
+        if (Wait-Job -Job $officeDownloadJob -Timeout $officeDownloadTimeout) {
+            $officeDownloadResult = Receive-Job -Job $officeDownloadJob
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: Office source download job did not finish within $officeDownloadTimeout s (state=$($officeDownloadJob.State)); skipping Office application creation this pass."
+            Stop-Job -Job $officeDownloadJob -ErrorAction SilentlyContinue
+        }
+        Remove-Job -Job $officeDownloadJob -Force -ErrorAction SilentlyContinue
+
+        # Replay the job's log messages through Write-DscStatus (the job ran silently)
+        if ($officeDownloadResult -and $officeDownloadResult.Messages) {
+            foreach ($officeMsg in $officeDownloadResult.Messages) {
+                Write-DscStatus "$Tag $officeMsg"
+            }
+        }
+
+        if ($officeDownloadResult -and $officeDownloadResult.OdtOk) {
+
+            # Create SMB share for Office source
+            if (-not (Get-SmbShare -Name $officeShareName -ErrorAction SilentlyContinue)) {
+                New-SmbShare -Name $officeShareName -Path $officeSourceRoot -FullAccess @("Administrators", "Everyone") -ErrorAction SilentlyContinue
+                Write-DscStatus "$Tag Created SMB share \\$ThisMachineName\$officeShareName"
+            }
+
+            # Ensure the Install Targets collection exists with an up-to-date query
+            # rule BEFORE creating any deployment. New-CMApplicationDeployment
+            # against a non-existent collection silently no-ops with
+            # -ErrorAction SilentlyContinue, which previously left fresh labs with
+            # an Office app but no deployment (the collection was created later in
+            # the script). Running this here also refreshes the rule on existing
+            # labs whose collection was built with legacy direct-membership rules.
+            Set-OfficeInstallTargetsCollection -OfficeTargetVMs $officeVMs | Out-Null
+
+            # Create one CM Application per channel
+            foreach ($channel in $channels) {
+                $channelSourcePath = Join-Path $officeSourceRoot $channel
+
+                # Only create the application if the source files actually downloaded
+                if (-not (Test-Path (Join-Path $channelSourcePath "Office\Data"))) {
+                    Write-DscStatus "$Tag WARNING: Office source files missing for channel '$channel' — skipping application creation"
+                    continue
+                }
+
+                $channelAppName = if ($channels.Count -eq 1) { $officeAppName } else { "$officeAppName-$channel" }
+                $contentUNC = "\\$ThisMachineName\$officeShareName\$channel"
+
+                if (Get-CMApplication -Name $channelAppName -Fast -ErrorAction SilentlyContinue) {
+                    Write-DscStatus "$Tag Application '$channelAppName' already exists, skipping"
+                    continue
+                }
+
+                Write-DscStatus "$Tag Creating application '$channelAppName'"
+                New-CMApplication -Name $channelAppName -Description "Microsoft 365 Apps ($channel channel)" -Publisher "Microsoft" -SoftwareVersion "Latest" -ErrorAction SilentlyContinue
+
+                # Script deployment type: ODT install/uninstall with registry detection
+                $installCmd = "setup.exe /configure install.xml"
+                $uninstallCmd = "setup.exe /configure uninstall.xml"
+                $detectScript = @'
+$ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
+'@
+                Add-CMScriptDeploymentType -ApplicationName $channelAppName `
+                    -DeploymentTypeName "ODT Install ($channel)" `
+                    -ContentLocation $contentUNC `
+                    -InstallCommand $installCmd `
+                    -UninstallCommand $uninstallCmd `
+                    -ScriptLanguage PowerShell `
+                    -ScriptText $detectScript `
+                    -LogonRequirementType WhetherOrNotUserLoggedOn `
+                    -UserInteractionMode Hidden `
+                    -InstallationBehaviorType InstallForSystem `
+                    -MaximumRuntimeMins 120 `
+                    -EstimatedRuntimeMins 30 `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+
+                Write-DscStatus "$Tag Distributing '$channelAppName' to all DPs"
+                if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $channelAppName -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -StatusTag $Tag -SiteCode $SiteCode)) { continue }
+
+                # Deploy as Required to target VMs
+                $officeCollectionName = "MEMLABS-Office Install Targets"
+                Write-DscStatus "$Tag Deploying '$channelAppName' as Required to collection '$officeCollectionName'"
+                New-CMApplicationDeployment -ApplicationName $channelAppName `
+                    -CollectionName $officeCollectionName `
+                    -DeployAction Install `
+                    -DeployPurpose Required `
+                    -UserNotification DisplayAll `
+                    -ErrorAction SilentlyContinue
+
+                Write-DscStatus "$Tag Office application '$channelAppName' deployment complete"
+            }
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: Office source download did not complete; skipping Office application creation"
+        }
+    }
+    #endregion Microsoft 365 Apps — join background download + create applications
+
     #we have to make powershell bypass for the baselines to work as expected
+    # Custom client settings — top-level site only (replicate to child sites)
+    if ($isTopLevel) {
     $customclientsetting = "MEMLABS-powershellbypass"
  
     if (!(Get-CMClientSetting -Name $customclientsetting)) {
@@ -595,6 +2999,792 @@ else {
 
         New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
         Write-DscStatus "$Tag Deployed the client setting to all systems collection"
+    }
+    } # end top-level client settings
+
+    function Get-WsusDiagnostics {
+        # Collect WSUS-native health signals for troubleshooting a stuck sync.
+        # Returns an array of human-readable diagnostic lines. Never throws.
+        $lines = @()
+
+        # 1. WSUS catalog state — the real "did a sync ever work" signal.
+        #    GetStatus().UpdateCount stays 0 until the first full sync completes,
+        #    even while CM reports the sync as "running".
+        try {
+            $wsusSrv = Get-WsusServer -ErrorAction Stop
+            $wStatus = $wsusSrv.GetStatus()
+            $lines += "WSUS UpdateCount=$($wStatus.UpdateCount), ApprovedUpdates=$($wStatus.ApprovedUpdateCount), Computers=$($wStatus.ComputerTargetCount)"
+            try {
+                $sub = $wsusSrv.GetSubscription()
+                $lastInfo = $sub.GetLastSynchronizationInfo()
+                $lines += "WSUS LastSync=$($sub.LastSynchronizationTime), Result=$($lastInfo.Result), Error=$($lastInfo.Error)"
+            }
+            catch { $lines += "WSUS subscription info unavailable: $($_.Exception.Message)" }
+        }
+        catch {
+            $lines += "WSUS GetStatus failed (server may be unreachable): $($_.Exception.Message)"
+        }
+
+        # 2. WsusPool app pool state + configured memory cap + queue length.
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            $poolPath = 'IIS:\AppPools\WsusPool'
+            if (Test-Path $poolPath) {
+                $poolState = (Get-WebAppPoolState -Name WsusPool -ErrorAction SilentlyContinue).Value
+                $memCap = (Get-ItemProperty -Path $poolPath -Name recycling.periodicRestart.privateMemory -ErrorAction SilentlyContinue).Value
+                $qLen = (Get-ItemProperty -Path $poolPath -Name queueLength -ErrorAction SilentlyContinue).Value
+                if ($memCap -eq 0) { $capDesc = 'UNCAPPED' } else { $capDesc = "$([math]::Round($memCap/1024,0)) MB cap" }
+                $lines += "WsusPool state=$poolState, privateMemory=$capDesc, queueLength=$qLen"
+            }
+            else {
+                $lines += "WsusPool app pool not found"
+            }
+        }
+        catch {
+            $lines += "WsusPool state query failed: $($_.Exception.Message)"
+        }
+
+        # 3. Actual w3wp working set for WsusPool (balloon/recycle detection).
+        try {
+            $w3wp = Get-WmiObject Win32_Process -Filter "Name='w3wp.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -match 'WsusPool' } | Select-Object -First 1
+            if ($w3wp) {
+                $wsMB = [math]::Round($w3wp.WorkingSetSize / 1MB, 0)
+                $lines += "WsusPool worker PID=$($w3wp.ProcessId) WorkingSet=$wsMB MB"
+            }
+            else {
+                $lines += "WsusPool worker process not running (no w3wp for WsusPool)"
+            }
+        }
+        catch {
+            $lines += "WsusPool worker query failed: $($_.Exception.Message)"
+        }
+
+        # 4. SoftwareDistribution.log tail — surface the real failure reason
+        #    (503, ODBC/database connect failures, pool recycles, OOM).
+        try {
+            $sdLog = 'C:\Program Files\Update Services\LogFiles\SoftwareDistribution.log'
+            if (Test-Path $sdLog) {
+                $hits = Get-Content $sdLog -Tail 400 -ErrorAction Stop |
+                    Where-Object { $_ -match '503|ODBC|unable to connect to its database|recycl|OutOfMemory|System.OutOfMemoryException' } |
+                    Select-Object -Last 5
+                if ($hits) {
+                    $lines += "SoftwareDistribution.log recent issues:"
+                    foreach ($h in $hits) { $lines += "  $($h.ToString().Trim())" }
+                }
+                else {
+                    $lines += "SoftwareDistribution.log: no 503/ODBC/recycle errors in last 400 lines"
+                }
+            }
+        }
+        catch {
+            $lines += "SoftwareDistribution.log read failed: $($_.Exception.Message)"
+        }
+
+        return $lines
+    }
+
+    function Write-WsusDiagnostics {
+        param([string]$Reason = "WSUS diagnostics")
+        Write-DscStatus "$Tag --- $Reason ---"
+        foreach ($supVm in @($Sups)) {
+            $supHost = "$($supVm.vmName).$DomainFullName"
+            try {
+                $lines = Invoke-CMRoleTargetCommand -ComputerName $supHost -ScriptBlock {
+                    param($diagnosticText)
+                    & ([scriptblock]::Create($diagnosticText))
+                } -ArgumentList @(${function:Get-WsusDiagnostics}.ToString())
+                foreach ($line in $lines) { Write-DscStatus "$Tag [$supHost] $line" }
+            }
+            catch {
+                Write-DscStatus "$Tag WSUS diagnostics on ${supHost} failed: $($_.Exception.Message)" -Warning
+            }
+        }
+        Write-DscStatus "$Tag --- end $Reason ---"
+    }
+
+    function Repair-WsusSync {
+        # Remediate a stuck/failed WSUS sync by restarting the IIS app pool
+        # and the SMS wsyncmgr component, then triggering a fresh sync.
+        # Typical cause: WsusPool hit its default ~1.8 GB private-memory recycle
+        # cap during the first full Microsoft Update category sync and recycled
+        # mid-sync, returning HTTP 503; wsyncmgr couldn't write the failure to
+        # SQL, leaving the sync status frozen at 6704 indefinitely.
+        # Capture WSUS-native health BEFORE remediation so the log shows WHY.
+        Write-WsusDiagnostics -Reason "WSUS health before repair"
+        foreach ($supVm in @($Sups)) {
+            $supHost = "$($supVm.vmName).$DomainFullName"
+            $repair = Invoke-CMRoleTargetCommand -ComputerName $supHost -ScriptBlock {
+                Import-Module WebAdministration -ErrorAction Stop
+                $poolPath = 'IIS:\AppPools\WsusPool'
+                if ((Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value -eq 'Started') {
+                    [void][Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                    $subscription = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer().GetSubscription()
+                    if ("$($subscription.GetSynchronizationStatus())" -eq 'Running') {
+                        return [pscustomobject]@{ Skipped = $true; Detail = 'Native WSUS sync is running; no service was restarted.' }
+                    }
+                }
+                foreach ($setting in @(
+                    @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
+                    @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
+                    @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
+                    @{ Name = 'queueLength'; Value = 25000 }
+                    @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
+                    @{ Name = 'startMode'; Value = 'AlwaysRunning' }
+                    @{ Name = 'failure.rapidFailProtection'; Value = $false }
+                )) {
+                    Set-ItemProperty -Path $poolPath -Name $setting.Name -Value $setting.Value -ErrorAction Stop
+                }
+                Restart-WebAppPool -Name WsusPool -ErrorAction Stop
+                [pscustomobject]@{ Skipped = $false; Detail = 'WsusPool hardened and restarted on the SUP.' }
+            }
+            if (-not $repair) { throw "WSUS repair on $supHost returned no result." }
+            Write-DscStatus "$Tag WSUS repair on ${supHost}: $($repair.Detail)"
+            if ($repair.Skipped) { return }
+        }
+        # Give the app pool time to fully initialize before wsyncmgr reconnects
+        Start-Sleep -Seconds 15
+        # Restart SMS_WSUS_SYNC_MANAGER by cycling SMS_EXECUTIVE. This clears
+        # any cached connection state and lets wsyncmgr pick up the fresh app pool.
+        Write-DscStatus "$Tag Restarting SMS_EXECUTIVE to cycle wsyncmgr..."
+        try {
+            Restart-Service SMS_EXECUTIVE -Force -ErrorAction Stop
+            Start-Sleep -Seconds 30
+            Write-DscStatus "$Tag SMS_EXECUTIVE restarted"
+        }
+        catch {
+            throw "Could not restart SMS_EXECUTIVE for WSUS recovery: $($_.Exception.Message)"
+        }
+        # Now trigger a fresh sync. Force the drop: the pool restart above just
+        # aborted any in-flight sync, so CM's lingering 'running' state is stale
+        # and the freshness guard must not suppress this re-trigger.
+        Invoke-FullSync -Force
+    }
+
+    function Invoke-FullSync {
+        # Skip if a sync is genuinely running — dropping full.syn during an
+        # active sync is harmless but pointless. However, if the "running" state
+        # is stale (>15 min unchanged), the sync is dead and we should proceed.
+        # -Force bypasses the freshness guard: callers that just restarted the
+        # WsusPool (Repair-WsusSync) have already killed any in-flight sync, so
+        # CM's lingering 'running' state is stale-by-definition and a fresh
+        # trigger MUST be dropped regardless of the reported timestamp.
+        param([switch]$Force)
+        if (-not $Force) {
+            $native = Get-WsusSyncLiveness
+            if (-not $native.ProbeSucceeded) {
+                throw "Cannot safely trigger WSUS sync: $($native.Detail)"
+            }
+            if ($native.WsusRunning) {
+                Write-DscStatus "$Tag Native WSUS sync is running on the configured SUP; skipping full.syn drop."
+                return
+            }
+        }
+        $currentSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $siteCode } | Select-Object -First 1
+        if (-not $Force -and $currentSync.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+            $syncStateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
+            $stateName = $syncStateNames[$currentSync.LastSyncState]
+            $stateAge = (Get-Date) - $currentSync.LastSyncStateTime
+            if ($stateAge.TotalMinutes -le 15) {
+                Write-DscStatus "$Tag Sync already in progress ($stateName, $([math]::Round($stateAge.TotalMinutes,1)) min) — skipping full.syn drop"
+                return
+            }
+            Write-DscStatus "$Tag Sync state $stateName is stale ($([math]::Round($stateAge.TotalMinutes,0)) min) — proceeding with full.syn drop"
+        }
+        $syncFolder = "$CMInstallDir\inboxes\wsyncmgr.box"
+        $syncFile = Join-Path $syncFolder "full.syn"
+        if (Test-Path $syncFolder) {
+            try {
+                New-Item -Path $syncFile -ItemType File -Force -ErrorAction Stop | Out-Null
+                Write-DscStatus "$Tag Triggered full WSUS sync (dropped full.syn)"
+            }
+            catch {
+                throw "Error creating '$syncFile': $($_.Exception.Message)"
+            }
+        }
+        else { throw "WSUS sync inbox '$syncFolder' was not found." }
+    }
+
+    function Get-WsusSyncLiveness {
+        # Probe WSUS-native signals to decide whether a sync that CM reports as
+        # "running" is GENUINELY alive, vs a zombie (CM stuck at 6704 while the
+        # WSUS engine underneath is dead). Never throws. Returns:
+        #   PoolUp         : WsusPool is Started AND a w3wp worker is alive. The
+        #                    classic root-cause fault is the pool recycling at its
+        #                    memory cap mid-sync, so a down pool is a hard fault.
+        #   WsusRunning    : WSUS subscription is actively synchronizing (Running).
+        #                    When this is true AND the pool is up, the sync is
+        #                    alive and must NEVER be restarted.
+        #   Phase          : NotProcessing / Categories / Updates (current phase).
+        #   TotalItems /   : sync progress. Per the WSUS source (spSetSubscription-
+        #   ProcessedItems   Progress), these ONLY advance during the Updates phase
+        #                    -- they are pinned at 0 for the entire Categories phase
+        #                    BY DESIGN, so a stalled count is NOT evidence of a hang.
+        #   LastResult     : result of the last completed sync
+        #                    (Succeeded/Failed/Canceled/NotProcessing).
+        #   UpdateCount    : SUSDB update count (informational only; 0 until the
+        #                    first full sync completes).
+        $r = [PSCustomObject]@{
+            ProbeSucceeded = $true
+            Detail         = ''
+            HasFailedIdleSync = $false
+            PoolUp         = $false
+            WsusRunning    = $false
+            Phase          = $null
+            TotalItems     = -1
+            ProcessedItems = -1
+            LastResult     = 'Unknown'
+            LastError      = ''
+            LastErrorText  = ''
+            UpdateCount    = -1
+        }
+        $states = @(
+            foreach ($supVm in @($Sups)) {
+                Invoke-CMWsusReplicaHealthCheck -ServerFQDN "$($supVm.vmName).$DomainFullName"
+            }
+        )
+        $r.ProbeSucceeded = $states.Count -gt 0 -and @($states | Where-Object { -not $_.ProbeSucceeded }).Count -eq 0
+        $r.PoolUp = $r.ProbeSucceeded -and @($states | Where-Object { -not $_.PoolUp }).Count -eq 0
+        $r.WsusRunning = @($states | Where-Object { $_.WsusRunning }).Count -gt 0
+        $failed = @($states | Where-Object { -not $_.WsusRunning -and $_.LastResult -in @('Failed', 'Canceled') })
+        $r.HasFailedIdleSync = $failed.Count -gt 0
+        if ($failed.Count) {
+            $r.LastResult = $failed[0].LastResult
+            $r.LastError = $failed[0].LastError
+            $r.LastErrorText = $failed[0].LastErrorText
+        }
+        elseif ($r.ProbeSucceeded -and @($states | Where-Object { $_.LastResult -ne 'Succeeded' }).Count -eq 0) {
+            $r.LastResult = 'Succeeded'
+        }
+        $r.Detail = (@($states | ForEach-Object { "$($_.Server): $($_.Detail)" }) -join ' | ')
+        $running = $states | Where-Object { $_.WsusRunning } | Select-Object -First 1
+        if ($running) {
+            $r.Phase = $running.Phase
+            $r.ProcessedItems = $running.ProcessedItems
+            $r.TotalItems = $running.TotalItems
+        }
+        return $r
+    }
+
+    function Wait-WsusSyncCompletion {
+        # Poll sync status up to $MaxAttempts times (30s apart). Returns $true
+        # if sync reaches 6702 (completed). On 6703 (failed), retries with
+        # Invoke-FullSync and escalates to Repair-WsusSync every 3rd failure.
+        #
+        # CRITICAL: we NEVER restart a sync that WSUS confirms is actively running
+        # (Get-WsusSyncLiveness.WsusRunning), especially during the Categories
+        # phase -- WSUS writes no progress and CM's state timestamp sits unchanged
+        # for many minutes BY DESIGN, so a stalled counter / stale CM timestamp is
+        # NOT evidence of a hang. A running sync is only ever repaired on a genuine
+        # HARD fault: the WsusPool worker actually crashed (PoolUp=false), or CM
+        # and WSUS are confirmably desynced (WSUS idle + last sync Failed/Canceled
+        # while CM still reports running) over several consecutive polls.
+        param(
+            [string]$Label = "Sync",
+            [int]$MaxAttempts = 40,
+            [switch]$TriggerFirst   # Drop full.syn before entering the wait loop
+        )
+
+        if ($TriggerFirst) {
+            Invoke-FullSync
+        }
+
+        # Hard-fault streaks. A running sync is NEVER restarted on stalled
+        # counters or a stale CM timestamp -- only on these confirmed faults,
+        # each requiring several consecutive polls to rule out a transient race:
+        #   poolDownStreak : WsusPool worker gone / pool stopped (crashed mid-sync)
+        #   desyncStreak   : WSUS idle + last sync Failed/Canceled while CM=running
+        $poolDownStreak = 0
+        $desyncStreak = 0
+        # Track 6702-with-Canceled-LastResult streaks separately: CM transitions to
+        # 6702 ("Completed") even when the underlying WSUS sync ended Canceled or
+        # Failed (CM treats "stopped" as "done"). A single 6702-Canceled poll could
+        # be a stale LastResult from a *previous* sync that hasn't been overwritten
+        # yet, so confirm over multiple polls before declaring this 6702 a false
+        # positive. Once confirmed, retry / repair like a real failure.
+        $falsePositive6702Streak = 0
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            Start-Sleep -Seconds 30
+            $status = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            $live = Get-WsusSyncLiveness
+            if (-not $live.ProbeSucceeded) {
+                Write-DscStatus "$Tag $Label native SUP health is unreadable (attempt $attempt of $MaxAttempts): $($live.Detail)" -Warning
+                continue
+            }
+            if ($live.WsusRunning) {
+                Write-DscStatus "$Tag $Label native sync is running (phase=$($live.Phase), items=$($live.ProcessedItems)/$($live.TotalItems)); preserving the active sync (CM state=$($status.LastSyncState), attempt $attempt of $MaxAttempts)."
+                $falsePositive6702Streak = 0
+                $poolDownStreak = 0
+                $desyncStreak = 0
+                continue
+            }
+
+            if ($status.LastSyncState -eq 6702) {
+                # Cross-check the WSUS-side LastResult before accepting CM's 6702.
+                # Canceled/Failed here means CM transitioned to 6702 but the WSUS
+                # catalog wasn't actually populated -- accepting this would cause
+                # Set-CMSoftwareUpdatePointComponent -AddProduct to silently no-op
+                # against an empty catalog later (every -AddProduct name is dropped
+                # unless it exists in SMS_UpdateCategoryInstance, which mirrors WSUS).
+                if ($live.LastResult -in @('Canceled', 'Failed')) {
+                    $falsePositive6702Streak++
+                    if ($falsePositive6702Streak -ge 2) {
+                        if ($attempt % 3 -eq 0) {
+                            Write-DscStatus "$Tag $($Label): CM state 6702 but WSUS LastResult=$($live.LastResult) ($falsePositive6702Streak polls) -- false-positive completion. Repairing WSUS... (attempt $attempt of $MaxAttempts)"
+                            Write-WsusDiagnostics -Reason "$Label false-positive 6702 ($($live.LastResult)) at attempt $attempt"
+                            Repair-WsusSync
+                        }
+                        else {
+                            Write-DscStatus "$Tag $($Label): CM state 6702 but WSUS LastResult=$($live.LastResult) -- treating as failed, retrying (attempt $attempt of $MaxAttempts)"
+                            Invoke-FullSync
+                        }
+                        $falsePositive6702Streak = 0
+                        $poolDownStreak = 0
+                        $desyncStreak = 0
+                        continue
+                    }
+                    else {
+                        Write-DscStatus "$Tag $($Label): CM state 6702 with WSUS LastResult=$($live.LastResult) (poll $falsePositive6702Streak) -- confirming before retry (attempt $attempt of $MaxAttempts)"
+                        continue
+                    }
+                }
+                if ($live.LastResult -eq 'Succeeded') {
+                    Write-DscStatus "$Tag $Label completed (attempt $attempt, WSUS LastResult=$($live.LastResult))"
+                    return $true
+                }
+                Write-DscStatus "$Tag $Label CM reports completion but native result is $($live.LastResult); waiting for measured success." -Warning
+            }
+            elseif ($status.LastSyncState -eq 6703) {
+                if ($attempt % 3 -eq 0) {
+                    Write-DscStatus "$Tag $Label failed $attempt times. Repairing WSUS services... (attempt $attempt of $MaxAttempts)"
+                    Write-WsusDiagnostics -Reason "$Label failed (6703) at attempt $attempt"
+                    Repair-WsusSync
+                }
+                else {
+                    Write-DscStatus "$Tag $Label failed (attempt $attempt of $MaxAttempts). Triggering retry..."
+                    Invoke-FullSync
+                }
+                $poolDownStreak = 0
+                $desyncStreak = 0
+            }
+            elseif ($status.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                $age = (Get-Date) - $status.LastSyncStateTime
+                if (-not $live.PoolUp) {
+                    # CM reports running but the WsusPool worker is gone / pool
+                    # stopped -- the pool crashed mid-sync (the classic memory-cap
+                    # recycle). A dead pool with the SUSDB sync phase frozen at
+                    # "Running" IS the zombie, so this overrides any stale Running
+                    # the DB still reports. Confirm over 2 polls (a deliberate
+                    # recycle is brief) then repair.
+                    $poolDownStreak++
+                    $desyncStreak = 0
+                    if ($poolDownStreak -ge 2) {
+                        Write-DscStatus "$Tag $($Label): CM reports running but WsusPool is down ($poolDownStreak polls) -- pool crashed mid-sync. Repairing WSUS... (attempt $attempt of $MaxAttempts)"
+                        Write-WsusDiagnostics -Reason "$Label WsusPool down at attempt $attempt"
+                        Repair-WsusSync
+                        $poolDownStreak = 0
+                    }
+                    else {
+                        Write-DscStatus "$Tag $($Label): WsusPool worker not detected (poll $poolDownStreak) -- confirming before repair (attempt $attempt of $MaxAttempts)"
+                    }
+                }
+                elseif ($live.WsusRunning) {
+                    # WSUS itself confirms the sync engine is actively running and
+                    # the pool is up. NEVER repair/restart a live sync -- during the
+                    # Categories phase WSUS legitimately shows no UpdateCount /
+                    # ProcessedItems movement and CM's state timestamp sits
+                    # unchanged for many minutes BY DESIGN. Just log progress.
+                    $poolDownStreak = 0
+                    $desyncStreak = 0
+                    $prog = ""
+                    if ($live.Phase) { $prog = ", phase=$($live.Phase)" }
+                    if ($live.ProcessedItems -ge 0) { $prog += ", items=$($live.ProcessedItems)/$($live.TotalItems)" }
+                    Write-DscStatus "$Tag $Label running (CM state $($status.LastSyncState)$prog, WSUS UpdateCount=$($live.UpdateCount), attempt $attempt of $MaxAttempts)"
+                }
+                elseif ($live.LastResult -in @('Failed', 'Canceled')) {
+                    # Pool is up but WSUS reports the subscription is NOT processing
+                    # and the last sync ended Failed/Canceled, while CM still reports
+                    # running. CM and WSUS are desynced -- the sync really stopped.
+                    # Confirm over 4 polls (WSUS may have just finished and CM hasn't
+                    # caught up) then repair.
+                    $desyncStreak++
+                    $poolDownStreak = 0
+                    if ($desyncStreak -ge 4) {
+                        Write-DscStatus "$Tag $($Label): CM reports running but WSUS not processing, last result=$($live.LastResult) ($desyncStreak polls) -- CM/WSUS desync. Repairing WSUS... (attempt $attempt of $MaxAttempts)"
+                        Write-WsusDiagnostics -Reason "$Label CM/WSUS desync ($($live.LastResult)) at attempt $attempt"
+                        Repair-WsusSync
+                        $desyncStreak = 0
+                    }
+                    else {
+                        Write-DscStatus "$Tag $($Label): WSUS not processing (last result=$($live.LastResult), poll $desyncStreak) -- confirming before repair (attempt $attempt of $MaxAttempts)"
+                    }
+                }
+                else {
+                    # Pool up, WSUS not processing, last result Succeeded /
+                    # NotProcessing -- WSUS is idle: it finished and CM hasn't
+                    # transitioned to 6702 yet, or a sync hasn't engaged. WSUS is
+                    # NOT running, so a gentle re-trigger is safe once CM has been
+                    # stale a long time; otherwise keep waiting.
+                    $poolDownStreak = 0
+                    $desyncStreak = 0
+                    if ($age.TotalMinutes -gt 20) {
+                        Write-DscStatus "$Tag $($Label): WSUS idle (last result=$($live.LastResult)) and CM state $($status.LastSyncState) stale $([math]::Round($age.TotalMinutes,0)) min -- re-triggering sync (attempt $attempt of $MaxAttempts)"
+                        Invoke-FullSync
+                    }
+                    else {
+                        Write-DscStatus "$Tag $($Label): WSUS idle (last result=$($live.LastResult)), waiting for CM (CM state $($status.LastSyncState), age $([math]::Round($age.TotalMinutes,0)) min, attempt $attempt of $MaxAttempts)"
+                    }
+                }
+            }
+            else {
+                Write-DscStatus "$Tag $Label unexpected state $($status.LastSyncState) (attempt $attempt of $MaxAttempts)"
+            }
+        }
+        Write-DscStatus "$Tag $Label did not complete after $MaxAttempts attempts."
+        Write-WsusDiagnostics -Reason "$Label final timeout diagnostics"
+        return $false
+    }
+
+    function Confirm-MemLabsWsusSyncHealth {
+        if (-not $Sups) { return }
+        $live = Get-WsusSyncLiveness
+        if (-not $live.ProbeSucceeded) {
+            throw "Cannot verify the configured SUP(s): $($live.Detail)"
+        }
+        if ($live.WsusRunning -and -not $live.HasFailedIdleSync) {
+            Write-DscStatus "$Tag WSUS sync remains in progress on the configured SUP(s); preserving background synchronization. $($live.Detail)"
+            return
+        }
+        $status = Get-CMSoftwareUpdateSyncStatus |
+            Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+        if ($live.LastResult -ne 'Succeeded' -or $status.LastSyncState -eq 6703) {
+            Write-WsusDiagnostics -Reason 'Final WSUS health requires recovery'
+            $completed = Wait-WsusSyncCompletion -Label 'Final WSUS recovery' -MaxAttempts 40 -TriggerFirst
+            $live = Get-WsusSyncLiveness
+            if (-not $live.ProbeSucceeded) {
+                throw "Cannot verify the configured SUP(s) after final WSUS recovery: $($live.Detail)"
+            }
+            if ($live.WsusRunning -and -not $live.HasFailedIdleSync) {
+                Write-DscStatus "$Tag Final WSUS recovery started a native sync that remains in progress; preserving background synchronization. Completion is pending, not proven. $($live.Detail)"
+                return
+            }
+            if (-not $completed -or $live.LastResult -ne 'Succeeded') {
+                throw "WSUS synchronization did not recover within the bounded final health check. $($live.Detail)"
+            }
+        }
+        else {
+            Write-DscStatus "$Tag Final WSUS native result=$($live.LastResult), CM state=$($status.LastSyncState). $($live.Detail)"
+        }
+    }
+
+    function Repair-DownstreamWsusReplicaSync {
+        param([object[]] $SoftwareUpdatePoints)
+
+        if ($isTopLevel -or -not $SoftwareUpdatePoints) { return $true }
+
+        $initialStates = [System.Collections.Generic.List[object]]::new()
+        foreach ($supVm in @($SoftwareUpdatePoints | Sort-Object vmName -Unique)) {
+            $supHost = "$($supVm.vmName)"
+            if ([string]::IsNullOrWhiteSpace($supHost)) { continue }
+            if (-not $supHost.Contains('.')) { $supHost = "$supHost.$DomainFullName" }
+            $state = Invoke-CMWsusReplicaHealthCheck -ServerFQDN $supHost `
+                -RepairContractMismatch
+            $initialStates.Add($state)
+        }
+
+        $unreadable = @($initialStates | Where-Object { -not $_.ProbeSucceeded })
+        $repairFailed = @($initialStates | Where-Object {
+                $_.ContractMismatch -and -not $_.RepairSucceeded -and -not $_.WsusRunning
+            })
+        if ($unreadable.Count -gt 0 -or $repairFailed.Count -gt 0) {
+            $bad = @($unreadable + $repairFailed | ForEach-Object {
+                    "$($_.Server): $($_.Detail)"
+                } | Select-Object -Unique)
+            Write-DscStatus "$Tag Downstream WSUS replica repair could not establish a healthy repair boundary: $($bad -join ' | ')" -Failure
+            return $false
+        }
+
+        $failed = @($initialStates | Where-Object {
+                $_.LastResult -in @('Failed', 'Canceled') -and -not $_.WsusRunning
+            })
+        if ($failed.Count -eq 0) {
+            Write-DscStatus "$Tag Downstream WSUS replicas do not have a failed native sync to recover."
+            return $true
+        }
+
+        $upstreamReady = $false
+        for ($attempt = 1; $attempt -le 40; $attempt++) {
+            $upstreamStatus = Get-CMSoftwareUpdateSyncStatus |
+                Where-Object { "$($_.SiteCode)" -ieq "$HierarchySiteCode" } |
+                Select-Object -First 1
+            if ($upstreamStatus -and [int]$upstreamStatus.LastSyncState -eq 6702) {
+                Write-DscStatus "$Tag Upstream site $HierarchySiteCode completed its SUP sync; downstream replica recovery may start."
+                $upstreamReady = $true
+                break
+            }
+            if ($upstreamStatus -and
+                [int]$upstreamStatus.LastSyncState -notin @(6701, 6704, 6705, 6706)) {
+                Write-DscStatus "$Tag Upstream site $HierarchySiteCode is not ready for replica recovery (state=$($upstreamStatus.LastSyncState), error=$($upstreamStatus.LastSyncErrorCode))." -Failure
+                return $false
+            }
+            $state = if ($upstreamStatus) { "$($upstreamStatus.LastSyncState)" } else { 'no-row' }
+            Write-DscStatus "$Tag Waiting for upstream site $HierarchySiteCode SUP sync before repairing child replicas (state=$state, attempt $attempt of 40)."
+            if ($attempt -lt 40) { Start-Sleep -Seconds 30 }
+        }
+        if (-not $upstreamReady) {
+            Write-DscStatus "$Tag Upstream site $HierarchySiteCode did not complete its SUP sync within 20 minutes; downstream replica retry was not started." -Failure
+            return $false
+        }
+
+        Write-DscStatus "$Tag Recovering failed downstream WSUS replica sync on $(@($failed.Server) -join ', ') after upstream/product convergence."
+        $syncRecovered = Wait-WsusSyncCompletion -Label 'Downstream replica recovery' `
+            -MaxAttempts 40 -TriggerFirst
+        if (-not $syncRecovered) {
+            Write-DscStatus "$Tag Downstream WSUS replica synchronization did not recover within the bounded retry window." -Failure
+            return $false
+        }
+
+        $deadline = (Get-Date).AddMinutes(2)
+        do {
+            $remainingFailures = [System.Collections.Generic.List[object]]::new()
+            foreach ($supVm in @($SoftwareUpdatePoints | Sort-Object vmName -Unique)) {
+                $supHost = "$($supVm.vmName)"
+                if ([string]::IsNullOrWhiteSpace($supHost)) { continue }
+                if (-not $supHost.Contains('.')) { $supHost = "$supHost.$DomainFullName" }
+                $state = Invoke-CMWsusReplicaHealthCheck -ServerFQDN $supHost
+                if (-not $state.ProbeSucceeded -or
+                    ($state.LastResult -ne 'Succeeded' -and -not $state.WsusRunning)) {
+                    $remainingFailures.Add($state)
+                }
+            }
+            if ($remainingFailures.Count -eq 0) {
+                Write-DscStatus "$Tag Every downstream WSUS replica is running or has a successful native sync."
+                return $true
+            }
+            if ((Get-Date) -lt $deadline) { Start-Sleep -Seconds 20 }
+        } while ((Get-Date) -lt $deadline)
+
+        $details = @($remainingFailures | ForEach-Object {
+                "$($_.Server): LastResult=$($_.LastResult), Running=$($_.WsusRunning), $($_.Detail)"
+            })
+        Write-DscStatus "$Tag ConfigMgr reported recovery, but downstream WSUS replicas remained unhealthy: $($details -join ' | ')" -Failure
+        return $false
+    }
+
+    # Resolve a curated product name to the ACTUAL CM/WSUS catalog title.
+    # Microsoft spells the same product differently across the WSUS
+    # (Get-WsusProduct.Title) and CM (Get-CMSoftwareUpdateCategory's
+    # LocalizedCategoryInstanceName) APIs and across releases, so an exact
+    # string compare silently drops valid products: Set-CMSoftwareUpdatePoint-
+    # Component ignores any -AddProduct name not present VERBATIM in
+    # SMS_UpdateCategoryInstance (no error, no warning). Observed live: the
+    # curated 'Microsoft SQL Server 2022' / 'Windows 11' never matched the
+    # catalog ('SQL Server 2022' / a version-qualified Windows 11 title), so
+    # they were reported 'missing from catalog' on every run and never
+    # subscribed.
+    #
+    # Strategy: exact (case-insensitive) match first; otherwise an all-token
+    # substring match using a per-product signature, picking the shortest
+    # (most generic parent) catalog title. Returns $null only when the product
+    # is genuinely absent from the supplied catalog (caller treats that as
+    # 'needs a sync' and re-resolves once the catalog is populated).
+    function Resolve-CMProductName {
+        param(
+            [Parameter(Mandatory)][string]$Desired,
+            [string[]]$Catalog
+        )
+        if (-not $Catalog -or $Catalog.Count -eq 0) { return $null }
+
+        # 1. Exact, case-insensitive.
+        $exact = @($Catalog | Where-Object { $_ -ieq $Desired })
+        if ($exact.Count -gt 0) { return $exact[0] }
+
+        # 2. Token signature for every curated name this script produces.
+        #    All tokens must appear (case-insensitive substring) in the title.
+        $tokenMap = @{
+            'Windows Server 2016'                        = @('windows server 2016')
+            'Windows Server 2019'                        = @('windows server 2019')
+            'Microsoft Server operating system-21H2'     = @('server operating system', '21h2')
+            'Microsoft Server Operating System-24H2'     = @('server operating system', '24h2')
+            'Windows 10, version 1903 and later'         = @('windows 10', '1903')
+            'Windows 11'                                 = @('windows 11')
+            'Microsoft SQL Server 2016'                  = @('sql server 2016')
+            'Microsoft SQL Server 2017'                  = @('sql server 2017')
+            'Microsoft SQL Server 2019'                  = @('sql server 2019')
+            'Microsoft SQL Server 2022'                  = @('sql server 2022')
+            'Microsoft SQL Server 2025'                  = @('sql server 2025')
+            'Microsoft 365 Apps/Office 2019/Office LTSC' = @('365 apps')
+        }
+        $tokens = $tokenMap[$Desired]
+        if (-not $tokens) { return $null }
+
+        $cands = @($Catalog | Where-Object {
+                $n = $_.ToLowerInvariant()
+                $missing = @($tokens | Where-Object { $n -notlike "*$($_.ToLowerInvariant())*" })
+                $missing.Count -eq 0
+            })
+        if ($cands.Count -eq 0) { return $null }
+        return ($cands | Sort-Object { $_.Length } | Select-Object -First 1)
+    }
+
+    # Kick off WSUS sync early so it runs in background while we create collections
+    $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
+    $syncNeeded = $false
+    $manageSupSubscription = [bool]($Sups -and $isTopLevel)
+
+    if ($cmo.OfflineSUP) {
+        $Sups = $false
+        $manageSupSubscription = $false
+        Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"
+    }
+    elseif ($Sups -and -not $isTopLevel) {
+        Write-DscStatus "$Tag Downstream SUP product subscriptions are owned by top-level site '$HierarchySiteCode'; retaining product demand for local ADRs but skipping subscription mutation and forced sync"
+    }
+
+    if ($Sups) {
+        $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
+
+        # Only consider VMs that actually receive CM client push -- those are the
+        # only machines whose OS/SQL versions need a SUP product subscription.
+        # Mirrors the pushable-VM filter used in Common.Phases.ps1 / Common.Config.ps1
+        # so a server marked pushClient=false (or a non-pushable role like DC,
+        # WSUS, SQLAO, WorkgroupMember, InternetClient, AADClient) is excluded
+        # and we don't pull thousands of irrelevant updates into the lab catalog.
+        $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+        $hierarchyTopSiteCode = if ($ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
+        $hierarchyDomain = if ($ThisVM.domain) { "$($ThisVM.domain)" } else { "$DomainFullName" }
+        $clientInventory = @($deployConfig.phase8SoftwareUpdateProductInventory | Where-Object {
+                "$($_.TopSiteCode)" -ieq $hierarchyTopSiteCode -and
+                (-not $_.TopSiteDomain -or "$($_.TopSiteDomain)" -ieq $hierarchyDomain)
+            })
+        $clientByName = @{}
+        foreach ($client in $clientInventory) {
+            $name = "$($client.vmName)".ToUpperInvariant()
+            if ($name) { $clientByName[$name] = $client }
+        }
+        foreach ($client in @($deployConfig.virtualMachines | Where-Object {
+                    $_.role -in $pushableRoles -and (Test-PushClientRequested -VM $_)
+                })) {
+            $name = "$($client.vmName)".ToUpperInvariant()
+            if ($name) { $clientByName[$name] = $client }
+        }
+        $clientVMs = @($clientByName.Values)
+
+        $products = @($clientVMs.operatingSystem | Select-Object -Unique) +
+            @($clientVMs.sqlversion | Select-Object -Unique)
+
+        # Filter out Linux OS names — WSUS has no products for Ubuntu/Linux
+        $products = @($products | Where-Object { $_ -and $_ -notmatch '^Ubuntu|^CentOS|^RHEL|^Debian|^Linux' })
+
+        # Rename products to match SUP naming convention.
+        # OS names may have date/variant suffixes (e.g. "Server 2019 March 2021")
+        # so anchors use .* instead of $ to match variants.
+        $products = $products -replace "^Server 2016\b.*$", "Windows Server 2016"
+        # Product names below match WSUS canonical titles exactly (the strings
+        # found in upd:Title on entries with CategoryType="Product" inside the
+        # cab's metadata.txt and in $wsus.GetUpdateCategories()). Microsoft is
+        # inconsistent across releases: Server 2022 ("21H2") ships as lowercase
+        # "operating system" while Server 2025 ("24H2") ships as Capital O+S
+        # "Operating System". SQL is uniformly capital "Server". CM's category
+        # lookup is case-insensitive (default SQL collation), so the AddProduct
+        # bind worked either way; matching canonical here keeps the perfloading
+        # log lines (and the 'Enabling missing products' warning) byte-identical
+        # to what shows up in WSUS / the cab.
+        $products = $products -replace "^Server 2019\b.*$", "Windows Server 2019"
+        $products = $products -replace "^Server 2022\b.*$", "Microsoft Server operating system-21H2"
+        $products = $products -replace "^Server 2025\b.*$", "Microsoft Server Operating System-24H2"
+        $products = $products -replace "^Windows 10\b.*$", "Windows 10, version 1903 and later"
+        $products = $products -replace "^Windows 11\b.*$", "Windows 11"
+        $products = $products -replace "^Sql Server 2016\b.*$", "Microsoft SQL Server 2016"
+        $products = $products -replace "^Sql Server 2017\b.*$", "Microsoft SQL Server 2017"
+        $products = $products -replace "^Sql Server 2019\b.*$", "Microsoft SQL Server 2019"
+        $products = $products -replace "^Sql Server 2022\b.*$", "Microsoft SQL Server 2022"
+        $products = $products -replace "^Sql Server 2025\b.*$", "Microsoft SQL Server 2025"
+
+        # Only subscribe to Office updates when a pushable client actually installs Office.
+        if (@($clientVMs | Where-Object { $_.installOffice -and $_.installOffice -ne $false }).Count -gt 0) {
+            $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
+        }
+
+        $products = @($products | Where-Object { $_ } | Select-Object -Unique)
+        Write-DscStatus "$Tag Dynamic SUP product set ($($products.Count)) from $($clientVMs.Count) pushable VMs: $($products -join ', ')"
+
+        # Map each curated product name to the ACTUAL CM catalog title so every
+        # downstream compare (subscribed / missing / in-catalog) and the
+        # AddProduct call use the exact string CM expects. Products not yet in
+        # the catalog keep their curated name here and are re-resolved after
+        # sync 1 at AddProduct time.
+        $allCatalogProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+        $resolvedProducts = @()
+        foreach ($p in $products) {
+            $actual = Resolve-CMProductName -Desired $p -Catalog $allCatalogProducts
+            if ($actual) {
+                if ($actual -ine $p) { Write-DscStatus "$Tag Product '$p' resolved to catalog title '$actual'" }
+                $resolvedProducts += $actual
+            }
+            else {
+                $resolvedProducts += $p
+            }
+        }
+        $products = @($resolvedProducts | Select-Object -Unique)
+
+        $missingproducts = @($products | Where-Object { $_ -notin $productclassifications })
+
+        # Check if the specific products we need exist as categories in the
+        # full catalog (not just subscribed). WSUS ships with built-in
+        # categories, so a generic count isn't meaningful. If our target
+        # products are present, sync 1 has populated the catalog and we can
+        # subscribe without waiting for the current sync. (Names are already
+        # resolved to actual catalog titles above.)
+        $productsInCatalog = @($products | Where-Object { $_ -in $allCatalogProducts })
+        # Gate Sync 1 on the *core* OS/SQL products only. Compound/aliased names
+        # (the Office bundle string) may never match a single catalog category,
+        # so requiring an exact full-set match means the gate is never satisfied
+        # and Sync 1 re-waits every build. Core OS/SQL categories only appear
+        # after a real Microsoft Update sync, so they're the reliable
+        # "catalog is populated" signal.
+        $coreProducts = @($products | Where-Object { $_ -notmatch '/' })
+        $coreInCatalog = @($coreProducts | Where-Object { $_ -in $allCatalogProducts })
+        $catalogHasOurProducts = ($coreProducts.Count -gt 0) -and ($coreInCatalog.Count -eq $coreProducts.Count)
+
+        if ($missingproducts.Count -gt 0) {
+            Write-DscStatus "$Tag SUP products missing ($($missingproducts.Count)): $($missingproducts -join ', ')"
+            if ($manageSupSubscription) {
+                $syncNeeded = $true
+                if ($catalogHasOurProducts) {
+                    # Our target products exist in the catalog from a previous sync —
+                    # no need to trigger or wait for sync 1. Skip straight to subscribing.
+                    Write-DscStatus "$Tag Target products found in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait"
+                }
+                else {
+                    # First run: catalog doesn't have our products yet, need sync 1.
+                    $missingFromCatalog = @($products | Where-Object { $_ -notin $allCatalogProducts })
+                    Write-DscStatus "$Tag Products missing from catalog ($($missingFromCatalog.Count)/$($products.Count)): $($missingFromCatalog -join ', ')"
+                    # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
+                    # will fail with 'WSUS server not configured' and block WCM from
+                    # finishing its subscription setup (deadlock).
+                    $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+                    try {
+                        $wcmEarlyState = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                    } catch { $wcmEarlyState = -1 }
+                    if ($wcmEarlyState -eq 2) {
+                        Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
+                        Invoke-FullSync
+                    }
+                    else {
+                        $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                        $wcmName = if ($wcmStateNames.ContainsKey($wcmEarlyState)) { $wcmStateNames[$wcmEarlyState] } else { "UNKNOWN($wcmEarlyState)" }
+                        Write-DscStatus "$Tag WCM state is $wcmName — skipping early sync to avoid blocking WCM"
+                    }
+                }
+            }
+            else {
+                Write-DscStatus "$Tag Downstream SUP inherits product subscriptions from '$HierarchySiteCode'; skipping local subscription mutation"
+            }
+        }
+        else {
+            Write-DscStatus "$Tag SUP products and classifications are already enabled ($($productclassifications.Count) subscribed)."
+        }
     }
 
     # Define additional device collection information
@@ -736,14 +3926,15 @@ SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SM
 FROM SMS_R_System
 WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 90
 "@
-        }
+        },
         @{
             Name  = "MEMLABS-Devices Missing Critical Updates"
             Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
-INNER JOIN SMS_G_System_UPDATE_STATUS ON SMS_G_System_UPDATE_STATUS.ResourceID = SMS_R_System.ResourceId
-WHERE SMS_G_System_UPDATE_STATUS.Status = 2 AND SMS_G_System_UPDATE_STATUS.UpdateType = 'Critical'
+INNER JOIN SMS_UpdateComplianceStatus ON SMS_UpdateComplianceStatus.MachineID = SMS_R_System.ResourceID
+INNER JOIN SMS_SoftwareUpdate ON SMS_SoftwareUpdate.CI_ID = SMS_UpdateComplianceStatus.CI_ID
+WHERE SMS_UpdateComplianceStatus.Status = 2 AND SMS_SoftwareUpdate.SeverityName = 'Critical'
 "@
         },
         @{
@@ -948,6 +4139,17 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     )
 
 
+    # MEMLABS-* device collections + the Office Install Targets collection +
+    # the Office deployment recovery sweep are all Primary-tier work. In a
+    # hierarchy the CAS holds no client resources (clients report to the
+    # Primary's MP) so creating these collections at the CAS scope produces
+    # nothing but empty collections + replication noise + colleval load. The
+    # apps/packages, OSD/TS and Office-app blocks above are already gated
+    # this same way; this block was missed and was running on CAS too.
+    if ($CurrentRole -ne "CAS") {
+
+    $collectionReconcileTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
         # Check if MEMLABS folder exists under Device Collections
     $folder = Get-CMFolder -FolderPath "\DeviceCollection\MEMLABS"
 
@@ -961,41 +4163,133 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     }
 
 
-    # Loop through each collection and create it in SCCM
+    # Loop through each collection and ensure it exists AND carries its query
+    # membership rule. Membership reconciliation must NOT be gated on the
+    # collection being newly created: on a re-run (or a prior partial run that
+    # created the collection but died before Add-CMDeviceCollectionQueryMembership-
+    # Rule) the collection exists but has no rule, and the old "if (-not Get-
+    # CMDeviceCollection)" guard skipped it -- leaving the collection permanently
+    # empty. Checking for existence is not a reason to skip populating members.
+    $existingCollectionsByName = @{}
+    # A failed inventory is UNKNOWN, not an empty site. Let ScriptWorkflow retry
+    # Perfloading instead of falling back to ambiguous per-collection absence.
+    foreach ($existingCollection in @(Get-CMDeviceCollection -ErrorAction Stop)) {
+        if ($existingCollection.Name) { $existingCollectionsByName["$($existingCollection.Name)"] = $existingCollection }
+    }
+    $collectionsCreated = 0
+    $collectionsSkipped = 0
+    $collectionRulesAdded = 0
+    $collectionRulesSkipped = 0
+    Write-DscStatus "$Tag Reconciling $($Collections.Count) MEMLABS collection definition(s) against $($existingCollectionsByName.Count) existing collection(s)"
     foreach ($Collection in $Collections) {
         $CollectionName = $Collection.Name
         $Query = $Collection.Query
-    
-        if (-not (Get-CMDeviceCollection -Name $CollectionName)) {
-            # Create the device collection
-            $NewCollection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
+        $ruleName = "$CollectionName Rule"
 
-            Write-DscStatus "$Tag Created collection: $CollectionName"
+        try {
+            # Ensure the collection exists.
+            $col = $existingCollectionsByName[$CollectionName]
+            if (-not $col) {
+                $col = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
+                $existingCollectionsByName[$CollectionName] = $col
+                $collectionsCreated++
+                Write-DscStatus "$Tag Created collection: $CollectionName"
+                Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $col.CollectionID -ErrorAction SilentlyContinue
+                Write-DscStatus "$Tag Moved collection '$CollectionName' under the folder MEMLABS"
+            }
+            else {
+                $collectionsSkipped++
+            }
 
-            # Add a query rule to the collection
-            Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
-    
-            Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
+            if (-not $col) {
+                Write-DscStatus "$Tag WARNING: Could not create or resolve collection '$CollectionName'; skipping rule"
+                continue
+            }
 
-            
+            # ALWAYS ensure the query membership rule is present -- add it when
+            # missing regardless of whether we just created the collection.
+            $existingRules = @(Get-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -ErrorAction SilentlyContinue)
+            $haveRule = @($existingRules | Where-Object { $_.RuleName -eq $ruleName }).Count -gt 0
+            if (-not $haveRule) {
+                Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName $ruleName -ErrorAction Stop
+                $collectionRulesAdded++
+                Write-DscStatus "$Tag Added collection query rule: $ruleName"
+                # Force membership evaluation so members appear immediately.
+                Invoke-CMCollectionUpdate -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
+            }
+            else {
+                $collectionRulesSkipped++
+            }
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to fully configure collection '$CollectionName': $($_.Exception.Message)"
+        }
+    }
+    $collectionReconcileTimer.Stop()
+    Write-DscStatus "$Tag Collection reconcile: $collectionsCreated created, $collectionsSkipped already present; $collectionRulesAdded rules added, $collectionRulesSkipped already present in $([math]::Round($collectionReconcileTimer.Elapsed.TotalSeconds, 1))s"
 
-            Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
+    # Office Install Targets collection: ensure it exists with a current query
+    # rule. The collection + deployment + members all belong on the Primary;
+    # this is reached only on Primary/standalone now (the outer CAS-skip
+    # gate above takes care of the hierarchy CAS path).
+    $officeTargetVMs = @($deployConfig.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false })
+    if ($officeTargetVMs.Count -gt 0) {
+        Set-OfficeInstallTargetsCollection -OfficeTargetVMs $officeTargetVMs | Out-Null
 
-            Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
-
-            Write-DscStatus "$Tag Moved collection under the folder MEMLABS"
-
+        # Self-heal missing Office deployments. The original perfloading flow
+        # created the deployment immediately after the app and short-circuits
+        # on re-runs ("application already exists, skipping"). If a prior run
+        # hit the order bug (deployment created against a not-yet-existing
+        # collection) the deployment was lost forever. Re-establish here.
+        $officeAppNameBase = "MEMLABS-Microsoft365Apps"
+        $officeChannels = @($officeTargetVMs | ForEach-Object { $_.installOffice } | Select-Object -Unique)
+        $officeColName = "MEMLABS-Office Install Targets"
+        foreach ($ch in $officeChannels) {
+            $appName = if ($officeChannels.Count -eq 1) { $officeAppNameBase } else { "$officeAppNameBase-$ch" }
+            if (-not (Get-CMApplication -Name $appName -Fast -ErrorAction SilentlyContinue)) { continue }
+            $existingDep = Get-CMApplicationDeployment -Name $appName -CollectionName $officeColName -ErrorAction SilentlyContinue
+            if (-not $existingDep) {
+                try {
+                    New-CMApplicationDeployment -ApplicationName $appName `
+                        -CollectionName $officeColName `
+                        -DeployAction Install `
+                        -DeployPurpose Required `
+                        -UserNotification DisplayAll `
+                        -ErrorAction Stop | Out-Null
+                    Write-DscStatus "$Tag Recovered missing Office deployment for '$appName' -> '$officeColName'"
+                }
+                catch {
+                    Write-DscStatus "$Tag WARNING: Failed to (re)create Office deployment for '$appName': $($_.Exception.Message)"
+                }
+            }
+            else {
+                # Deployment exists; force a policy re-author so any collection
+                # member added after the original deployment author time gets
+                # the assignment projected. Symptom this fixes: client's
+                # PolicyAgent RequestedConfig has 7-Zip / other assignments
+                # but not the Office assignment, even though the collection
+                # contains the client and the deployment targets it.
+                Update-OfficeDeploymentPolicy -AppName $appName -CollectionName $officeColName
+            }
         }
     }
 
+    } # end Primary-only collections + Office Install Targets block
+
     #install Endpoint protection role in hierarchy to support defender updates
     if (!(Get-CMEndpointProtectionPoint -AllSite)) {
-    
-        # this is needed for defender updates and management
-        Add-CMEndpointProtectionPoint -ProtectionService AdvancedMembership -SiteCode $SiteCode -SiteSystemServerName $ProviderMachineName
-        Write-DscStatus "$Tag Endpoint protection role to support defender patching is installed"
+        try {
+            # this is needed for defender updates and management
+            Add-CMEndpointProtectionPoint -ProtectionService AdvancedMembership -SiteCode $SiteCode -SiteSystemServerName $ProviderMachineName
+            Write-DscStatus "$Tag Endpoint protection role to support defender patching is installed"
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to install Endpoint Protection Point: $_"
+        }
     }
-    
+
+    # Client settings — top-level site only (replicate to child sites)
+    if ($isTopLevel) {
     if (!(Get-CMClientSetting -Name MEMLABS-Defender)) {
         New-CMClientSetting -Name MEMLABS-Defender -Description "Defender execution policy" -Type Device -ErrorAction SilentlyContinue
         Set-CMClientSettingEndpointProtection -Name MEMLABS-Defender -Enable $true -DisableFirstSignatureUpdate $true -ForceRebootHr $true -InstallEndpointProtectionClient $true -OverrideMaintenanceWindow $true -DefenderAgent MdeDownlevel -SuppressReboot $true -PersistInstallation $true 
@@ -1009,211 +4303,358 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         New-CMClientSettingDeployment -Name MEMLABS-Updates -CollectionId SMS00001
         Write-DscStatus "$Tag Client setting to support O365 patching is enabled"
     }
-    
-    $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
 
-    if ($deployConfig.cmOptions.OfflineSUP) {
-        $Sups = $false
-        Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"        
+    # Once the EP agent lands it owns HKLM\SOFTWARE\Policies\...\Windows Defender
+    # and sets LocalSettingOverride*=0 + DisableLocalAdminMerge=1, so everything
+    # Optimize-Defender.ps1 does locally stops taking effect. Put the same intent
+    # in the policy the agent honours. Every parameter below is an absolute set,
+    # so re-running perfloading converges instead of accumulating.
+    $amDefault = @(Get-CMAntimalwarePolicy -ErrorAction SilentlyContinue) |
+        Where-Object { $_.ObjectClass -eq 'SMS_AntimalwareSettingsDefault' -or $_.SmsProviderObjectPath -like 'SMS_AntimalwareSettingsDefault*' } |
+        Select-Object -First 1
+    if (-not $amDefault) {
+        Write-DscStatus "$Tag WARNING: Default antimalware policy not found; Defender stays at CM defaults and will override the local tuning"
     }
-
+    else {
+        # One call per parameter set -- Set-CMAntimalwarePolicy will not mix them.
+        $amEdits = @(
+            @{ Label = 'real-time protection off'; Args = @{ RealTimeProtectionOn = $false } }
+            @{ Label = 'scan scope reduced'; Args = @{ ScanArchive = $false; ScanEmail = $false; ScanNetworkDrive = $false; ScanRemovableStorage = $false } }
+            @{ Label = 'scheduled scan off'; Args = @{ EnableScheduledScan = $false } }
+            @{
+                Label = 'exclusions'
+                # All three must go in ONE call: the provider maps the excluded-settings group
+                # as a unit and defaults any property you omit to empty (AMGroup.cpp).
+                Args  = @{
+                    ExcludeFilePath = @(
+                        'C:\staging', 'C:\temp', 'C:\tools', 'C:\CMCB', 'C:\inetpub',
+                        'C:\Windows\System32\Configuration', 'C:\Windows\System32\inetsrv',
+                        'C:\Windows\CCM', 'C:\Windows\ccmcache', 'C:\Windows\ccmsetup',
+                        'C:\Windows\SoftwareDistribution\Download'
+                    )
+                    ExcludeFileType = @('.mdf', '.ldf', '.ndf', '.bak', '.trn', '.vhd', '.vhdx')
+                    ExcludeProcess  = @(
+                        'sqlservr.exe', 'sqlagent.exe', 'sqlwriter.exe', 'sqlceip.exe', 'fdhost.exe', 'fdlauncher.exe',
+                        'ReportingServicesService.exe',
+                        'smsexec.exe', 'sitecomp.exe', 'cmupdate.exe', 'smsdbmon.exe', 'smswriter.exe', 'smssqlbkup.exe',
+                        'smsdpmon.exe', 'CmRcService.exe',
+                        'CcmExec.exe', 'ccmsetup.exe', 'CcmRepair.exe', 'PolicyPv.exe',
+                        'w3wp.exe', 'WsusService.exe', 'wsusutil.exe'
+                    )
+                }
+            }
+        )
+        foreach ($amEdit in $amEdits) {
+            $amArgs = $amEdit.Args
+            try {
+                Set-CMAntimalwarePolicy -Name $amDefault.Name @amArgs -ErrorAction Stop
+                Write-DscStatus "$Tag Default antimalware policy: $($amEdit.Label)"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Default antimalware policy '$($amEdit.Label)' failed: $($_.Exception.Message)"
+            }
+        }
+    }
+    } # end top-level client settings
+    
+    # Now wait for WSUS sync that was triggered earlier (ran during collection creation)
     if (-not $Sups) {
         Write-DscStatus "$Tag No SUP installed for this site, skipping the SUP product check and sync"
     }
 
-    if ($Sups) {
+    if ($manageSupSubscription -and $syncNeeded) {
+        # Safety net: InstallRoles owns the cab import (launch +
+        # verify+retry). By the time perfloading runs, the state file
+        # is normally already removed and this call is a no-op. The
+        # call stays so that an InstallRoles pass that didn't reach
+        # the wait (early-return, exception before Wait, etc.) still
+        # gets caught here before perfloading triggers a CM-side sync
+        # on top of an in-flight or partial wsusutil import.
+        Wait-WsusBaselineImport -Tag $Tag
 
-        # Get the Software Update Point Component
-        $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
-    
-        # Get unique operating systems
-        $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
-
-        Write-DscStatus "$Tag the OS for this SCCM site are $products"
-    
-        # Rename products based on conditions
-        $products = $products -replace "^Server 2016$", "Windows Server 2016"
-        $products = $products -replace "^Server 2019$", "Windows Server 2019"
-        $products = $products -replace "^Server 2022.*$", "Microsoft Server operating system-21H2"
-        $products = $products -replace "^Server 2025$", "Microsoft Server operating system-24H2"
-        $products = $products -replace "^Windows 10.*$", "Windows 10, version 1903 and later"
-        $products = $products -replace "^Windows 11.*$", "Windows 11"
-        $products = $products -replace "^Sql Server 2016$", "Microsoft SQL server 2016"
-        $products = $products -replace "^Sql Server 2017$", "Microsoft SQL server 2017"
-        $products = $products -replace "^Sql Server 2019$", "Microsoft SQL server 2019"
-        $products = $products -replace "^Sql Server 2022$", "Microsoft SQL server 2022"
-    
-        # Add additional products for defender and Office 365
-        $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
-        $products += "Microsoft Defender for Endpoint"
-    
-        # Add double quotes around each product name as few products have commas in their name
-        $products = @($products | ForEach-Object { "$_" })
-
-        Write-DscStatus "$Tag modified OS names to match with SUP naming convention are $products"
-    
-        $missingproducts = $products -notmatch { $_ -notin $productclassifications }
-
-        Write-DscStatus "$Tag Are there any products not checked on SUP product? $missingproducts - if yes, please continue"
-        function Check-SyncSucceeded {
-            param (
-                [string]$SiteCode
-            )
-     
-            $syncFinished = $syncTimeout = $syncFailed = $false
-            $i = 0
-     
-            do {                    
-                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-    
-                if (-not $($syncState.WSUSServerName)) {
-                    start-sleep -Seconds 120
-                    $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-                     if (-not $($syncState.WSUSServerName)) {
-                        Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected. Exiting the sync check."
-                        $syncFailed = $true
-                        return $false
-                     }                 
-                }
-
-                if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                    Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
-                    Sync-CMSoftwareUpdate
-                    Start-Sleep -Seconds 120
-                } 
-                else {
-                    $syncStateString = "Unknown"
-                    switch ($($syncState.LastSyncState)) {
-                        "6700" { $syncStateString = "WSUS Sync Manager Error" }
-                        "6701" { $syncStateString = "WSUS Synchronization Started" }
-                        "6702" { $syncStateString = "WSUS Synchronization Done" }
-                        "6703" { $syncStateString = "WSUS Synchronization Failed" }
-                        "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
-                        "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
-                        "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
-                        "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
-                        "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
-                        "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
-                        "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
-                    }
-                    Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
-     
-                    if ($syncState.LastSyncState -eq 6702) {
-                        Write-DscStatus "SUM Sync finished successfully."
-                        return $true
-                    }
-     
-                    if (-not $syncFinished) {
-                        $i++
-                        Start-Sleep -Seconds 60
-                    }
-     
-                    if ($i -gt 60) {
-                        $syncTimeout = $true
-                        Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
-                        return $false
-                    }
-                }
-            }  until ($syncFinished -or $syncTimeout -or $syncFailed)
-     
-            return $false
-        }
-
-        function Invoke-finalfullsync {
-            $folderPath = "$CMInstallDir\inboxes\wsyncmgr.box"
-            $filePath = Join-Path $folderPath "full.syn"
-            Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to initialize a full synchronization"
-    
-            # Ensure the folder exists; create it if it doesn't
-            if (Test-Path $folderPath) {
-           
-                try {
-                    # Create the "full.syn" file (overwrites if it exists)
-                    New-Item -Path $filePath -ItemType File -Force | Out-Null
-                    Write-DscStatus "$Tag File 'full.syn' created successfully at $folderPath"
-                }
-                catch {
-                    Write-DscStatus "$Tag Error creating 'full.syn': $_"
-                }
-            }
-
-        }
-
-    
-        # Check if product classifications are already enabled for Critical updates or definition updates
-        if (!$missingproducts) {
-            Write-DscStatus "$Tag SUP products and classifications are already enabled. Skipping the update."
-        }
-        else {
-            Write-DscStatus "$Tag trying second time to see if 429 product classifications are enabled or not"
-            Invoke-finalfullsync
-            $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
-
-            if ($syncSuccess) {
-
-                Write-DscStatus "$Tag Found missing $products, enabling them now"
-                $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
-                $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
-    
-                # Get the language setting
-                $lang = $deployConfig.vmOptions.locale
-    
-                # Define language mappings
-                switch ($lang) {
-                    "en-us" { $addLang = "English" }
-                    "ja-jp" { $addLang = "Japanese" }
-                    "es-es" { $addLang = "Spanish" }
-                    "de-de" { $addLang = "German" }
-                    "fr-fr" { $addLang = "French" }
-                    default { $addLang = "English" }  # Fallback for unsupported languages is English and will add more languages as per adhoc request here
-                }
-    
-                # Output the result
-                Write-DscStatus "$Tag the locale language is $addLang"
-    
-                $parameters = @{
-                    InputObject                   = $supComp
-                    #DefaultWsusServer            = 'sup.contoso.com'
-                    SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
-                    #ReportingEvent               = 'CreateAllWsusReportingEvents'
-                    #RemoveUpdateClassification   = "Update Rollups"
-                    AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
-                    Schedule                      = $schedule
-                    EnableSyncFailureAlert        = $true
-                    ImmediatelyExpireSupersedence = $false
-                    AddLanguageUpdateFile         = $addLang
-                    AddLanguageSummaryDetails     = $addLang
-                    #RemoveLanguageUpdateFile     = $removeLang
-                    #RemoveLanguageSummaryDetails = $removeLang
-                    EnableCallWsusCleanupWizard   = $true
-                    WaitMonth                     = 3
-                    EnableThirdPartyUpdates       = $true
-                    EnableManualCertManagement    = $false
-                    AddProduct                    = $products
-                }
-    
-                Set-CMSoftwareUpdatePointComponent @parameters
-    
-    
-                #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
-                Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
-                Write-DscStatus "$Tag $productclassifications before enabling"
-                $productclassifications1 = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
-                Write-DscStatus "$Tag $productclassifications1 after enabling"
-                Write-DscStatus "$Tag !!Final !! sync after enabling products and classifications" 
-                Invoke-finalfullsync
-
+        # Two syncs are needed for WSUS to be fully operational:
+        #   Sync 1: Pulls in the product catalog so products can be subscribed
+        #   Sync 2: After subscribing to products, downloads update metadata
+        # InstallRoles already ran sync 1 and waited for it, plus we may have
+        # fired an early background sync above. Verify sync 1 completed before
+        # adding products — if not, wait for it (up to ~20 min).
+        #
+        # On re-run: if the product catalog is already populated (from a
+        # previous sync 1), skip the wait entirely — we can subscribe
+        # products immediately without waiting for any current sync.
+        $sync1Done = $false
+        if ($ThisVM.hidden) {
+            # This top-level site is hidden => it's an existing, already-deployed site
+            # server pulled into the config only so a *new* VM (e.g. a client added
+            # to an existing domain) can get PushClients re-run. There is no actual
+            # deployment happening to this site server, so blocking here for up to
+            # 40 attempts (~40 min) waiting on a WSUS sync is pure dead time. Kick a
+            # background sync off (only when the catalog still needs our products) so
+            # the catalog refreshes on its own, and proceed without monitoring it.
+            if ($catalogHasOurProducts) {
+                Write-DscStatus "$Tag Top-level site is hidden (re-run for a new VM) and products already in catalog — skipping sync 1 wait"
             }
             else {
-
-                Write-DscStatus "$Tag we were not able to sync the products and classifications so ADRs will not be created"
-                Invoke-finalfullsync
+                Write-DscStatus "$Tag Top-level site is hidden (re-run for a new VM) — triggering background sync 1 and NOT waiting"
+                Invoke-FullSync
+            }
+            $sync1Done = $true
+        }
+        elseif ($catalogHasOurProducts) {
+            Write-DscStatus "$Tag Target products already in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait, proceeding to subscribe"
+            $sync1Done = $true
+        }
+        else {
+            $syncStatus = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            if ($syncStatus.LastSyncState -eq 6702) {
+                Write-DscStatus "$Tag Sync 1 already completed (last: $($syncStatus.LastSyncStateTime)) — proceeding to add products"
+                $sync1Done = $true
+            }
+            elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                # Sync appears to be running — but check if the state is stale.
+                $syncAge = (Get-Date) - $syncStatus.LastSyncStateTime
+                if ($syncAge.TotalMinutes -gt 15) {
+                    Write-DscStatus "$Tag Sync 1 state $($syncStatus.LastSyncState) is stale ($([math]::Round($syncAge.TotalMinutes,0)) min old) — treating as failed. Repairing WSUS..."
+                    Repair-WsusSync
+                }
+                else {
+                    Write-DscStatus "$Tag Sync 1 is in progress (state $($syncStatus.LastSyncState), age $([math]::Round($syncAge.TotalMinutes,1)) min) — waiting for completion..."
+                }
+                $sync1Done = Wait-WsusSyncCompletion -Label "Sync 1"
+            }
+            else {
+                # No sync has run or last sync failed — trigger one and wait
+                Write-DscStatus "$Tag No completed sync found (state=$($syncStatus.LastSyncState)). Triggering sync 1..."
+                $sync1Done = Wait-WsusSyncCompletion -Label "Sync 1" -TriggerFirst
             }
         }
-       
-        # Define the collection where the updates will be deployed
-        $TargetCollection = Get-CMDeviceCollection -Name "All systems"
-    
+        if (-not $sync1Done) {
+            Write-DscStatus "$Tag WARNING: Sync 1 did not complete after 40 attempts. Adding products anyway — sync 2 may fail if catalog is incomplete."
+        }
+
+        # Re-resolve against the now-synced catalog. Products that weren't in the
+        # catalog at the early check kept their curated name; sync 1 has since
+        # populated the taxonomy, so map them to the real category title now —
+        # otherwise the AddProduct loop below would feed CM a name that isn't in
+        # SMS_UpdateCategoryInstance and it would be silently dropped.
+        $freshCatalog = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+        $resolvedForAdd = @()
+        foreach ($p in $products) {
+            $actual = Resolve-CMProductName -Desired $p -Catalog $freshCatalog
+            if ($actual) {
+                if ($actual -ine $p) { Write-DscStatus "$Tag Product '$p' resolved to catalog title '$actual' (post-sync)" }
+                $resolvedForAdd += $actual
+            }
+            else {
+                Write-DscStatus "$Tag WARNING: product '$p' is still not in the catalog after sync — it will be reported rejected below"
+                $resolvedForAdd += $p
+            }
+        }
+        $products = @($resolvedForAdd | Select-Object -Unique)
+
+        Write-DscStatus "$Tag Enabling missing products: $($products -join ', ')"
+        $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
+        $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
+
+        # Get the language setting
+        $lang = $deployConfig.vmOptions.locale
+
+        # Define language mappings
+        switch ($lang) {
+            "en-us" { $addLang = "English" }
+            "ja-jp" { $addLang = "Japanese" }
+            "es-es" { $addLang = "Spanish" }
+            "de-de" { $addLang = "German" }
+            "fr-fr" { $addLang = "French" }
+            default { $addLang = "English" }
+        }
+
+        Write-DscStatus "$Tag the locale language is $addLang"
+
+        $parameters = @{
+            InputObject                   = $supComp
+            SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
+            AddUpdateClassification       = "Critical Updates", "Security Updates", "Updates"
+            Schedule                      = $schedule
+            EnableSyncFailureAlert        = $true
+            ImmediatelyExpireSupersedence = $false
+            AddLanguageUpdateFile         = $addLang
+            AddLanguageSummaryDetails     = $addLang
+            EnableCallWsusCleanupWizard   = $true
+            WaitMonth                     = 3
+            EnableThirdPartyUpdates       = $true
+            EnableManualCertManagement    = $false
+        }
+
+        # Apply base config first (no products yet) so any error in the
+        # base parameters is isolated from the per-product additions
+        # below. Set-CMSoftwareUpdatePointComponent leaves existing
+        # subscribed products untouched when -AddProduct is omitted.
+        Set-CMSoftwareUpdatePointComponent @parameters
+
+        #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
+        Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
+
+        # Add products one at a time so a single malformed / catalog-missing
+        # name surfaces on its own log line instead of disappearing into a
+        # bulk silent-drop. Set-CMSoftwareUpdatePointComponent silently
+        # drops any -AddProduct name that doesn't exist in
+        # SMS_UpdateCategoryInstance (CM's mirror of WSUS dbo.UpdateCategories)
+        # — no error, no warning, just nothing happens. Per-product gives
+        # us "Added '<name>'" / "WARNING: '<name>' rejected (not in catalog)"
+        # so a typo or canonical-case mismatch (e.g. '24H2' vs the actual
+        # 'Microsoft Server Operating System – 24H2') is named explicitly.
+        $accepted = @()
+        $rejected = @()
+        foreach ($product in $products) {
+            $beforeSubscribed = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" |
+                Where-Object { $_.IsSubscribed } |
+                Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+            try {
+                Set-CMSoftwareUpdatePointComponent -InputObject $supComp -AddProduct $product -ErrorAction Stop | Out-Null
+            }
+            catch {
+                $rejected += $product
+                Write-DscStatus "$Tag WARNING: Add product '$product' threw: $($_.Exception.Message)"
+                continue
+            }
+            $afterSubscribed = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" |
+                Where-Object { $_.IsSubscribed } |
+                Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+            if ($product -in $afterSubscribed) {
+                $accepted += $product
+                if ($product -in $beforeSubscribed) {
+                    Write-DscStatus "$Tag Product '$product' already subscribed (no-op)"
+                }
+                else {
+                    Write-DscStatus "$Tag Added product '$product'"
+                }
+            }
+            else {
+                $rejected += $product
+                Write-DscStatus "$Tag WARNING: Product '$product' was silently rejected by SUP component (not in WSUS catalog — check exact name match against dbo.UpdateCategories)"
+            }
+        }
+        if ($accepted.Count -eq 0) {
+            # Was a bare return, which ended perfloading here and also skipped the ADR block,
+            # the All Unknown Computers update and the CM-script approval queue -- silently,
+            # because no JOBFAILURE was written.
+            Write-DscStatus "$Tag WARNING: 0 of $($products.Count) requested products were accepted by Set-CMSoftwareUpdatePointComponent -- the WSUS catalog has none of these names. This means Sync 1 didn't actually populate the catalog (cab import failed/skipped AND the MU categories sync didn't complete). Skipping the WCM wait and sync trigger -- there is nothing to push -- and continuing with the rest of perfloading. SUP will be subscribed to the 3 default classifications only ($($parameters.AddUpdateClassification -join ', ')); Phase 11 will WARN on subscription parity until the catalog is repaired. Rejected: $($rejected -join ', ')"
+        }
+        else {
+        if ($rejected.Count -gt 0) {
+            Write-DscStatus "$Tag WARNING: $($accepted.Count) of $($products.Count) requested products accepted; $($rejected.Count) rejected (not in WSUS catalog): $($rejected -join ', '). Continuing with the $($accepted.Count) that did bind."
+        }
+        else {
+            Write-DscStatus "$Tag All $($accepted.Count) requested products accepted by SUP component"
+        }
+
+        # Adding products triggers WCM reconfiguration (SUBSCRIPTION_PENDING).
+        # We must wait for WCM to reach SUCCESS before triggering a sync,
+        # otherwise wsyncmgr sees 'WSUS server not configured' and the sync
+        # blocks WCM from setting the subscription (deadlock).
+        #
+        # Budget 20 -> 8, sized from the outcome distribution over 181 guest logs:
+        # 71 successes across BOTH WCM waits, attempts 1-6, MAX 6. Attempts 7+ have
+        # never once produced a success, while a give-up costs ~570s. CS2-CS1SITE
+        # burned the full budget at SUBSCRIPTION_PENDING three times.
+        $wcmMaxAttempts = 8
+        Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
+
+        $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+        $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+        $wcmReady = $false
+        for ($wcmWait = 1; $wcmWait -le $wcmMaxAttempts; $wcmWait++) {
+            Start-Sleep -Seconds 30
+            try {
+                $wcmRegVal = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+            } catch { $wcmRegVal = -1 }
+            $wcmName = if ($wcmStateNames.ContainsKey($wcmRegVal)) { $wcmStateNames[$wcmRegVal] } else { "UNKNOWN($wcmRegVal)" }
+            if ($wcmRegVal -eq 2) {
+                Write-DscStatus "$Tag WCM reached SUCCESS after product update (attempt $wcmWait)"
+                $wcmReady = $true
+                break
+            }
+            if ($wcmRegVal -eq 3 -and ($wcmWait % 5 -eq 0)) {
+                Write-DscStatus "$Tag WCM state is FAILED. Restarting WsusService to trigger reconfiguration (attempt $wcmWait of $wcmMaxAttempts)"
+                Restart-Service -Name WsusService -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 30
+            }
+            else {
+                Write-DscStatus "$Tag WCM state: $wcmName (attempt $wcmWait of $wcmMaxAttempts)"
+            }
+        }
+        if ($wcmReady) {
+            # Verify products are actually subscribed before triggering sync
+            $postProducts = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
+            $stillMissing = @($products | Where-Object { $_ -notin $postProducts })
+            if ($stillMissing.Count -gt 0) {
+                Write-DscStatus "$Tag WARNING: Products still not subscribed after WCM SUCCESS ($($stillMissing.Count)): $($stillMissing -join ', ')"
+                Write-DscStatus "$Tag Subscribed products ($($postProducts.Count)): $($postProducts -join ', ')"
+            }
+            else {
+                Write-DscStatus "$Tag All $($products.Count) products confirmed subscribed"
+            }
+
+            Write-DscStatus "$Tag Requesting sync with new products..."
+            Invoke-FullSync
+
+            # Verify the sync is running or completed — if not, log diagnostics
+            Start-Sleep -Seconds 15
+            $postSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            $syncRunning = $postSync.LastSyncState -in @(6701, 6704, 6705, 6706)
+            $syncDone = $postSync.LastSyncState -eq 6702
+            if ($syncRunning) {
+                Write-DscStatus "$Tag Sync is running (state $($postSync.LastSyncState)) — continuing, it will finish in background"
+            }
+            elseif ($syncDone -and $postSync.LastSyncStateTime -and ((Get-Date) - $postSync.LastSyncStateTime).TotalMinutes -lt 5) {
+                Write-DscStatus "$Tag Sync already completed (finished $([math]::Round(((Get-Date) - $postSync.LastSyncStateTime).TotalMinutes, 1)) min ago)"
+            }
+            else {
+                # Sync didn't start — log diagnostics
+                $diag = @()
+                $diag += "SyncState=$($postSync.LastSyncState) ErrorCode=$($postSync.LastSyncErrorCode) LastTime=$($postSync.LastSyncStateTime)"
+                $wsusSvc = Get-Service -Name WsusService -ErrorAction SilentlyContinue
+                $w3svc = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
+                $diag += "WsusService=$($wsusSvc.Status) W3SVC=$($w3svc.Status)"
+                try {
+                    $wcmRegVal2 = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                    $diag += "WCM=$($wcmStateNames[$wcmRegVal2])"
+                } catch { $diag += "WCM=unreadable" }
+                $synFile = Join-Path $CMInstallDir 'inboxes\wsyncmgr.box\full.syn'
+                $diag += "full.syn=$(if (Test-Path $synFile) { 'present (not yet picked up)' } else { 'gone (picked up or never created)' })"
+                Write-DscStatus "$Tag WARNING: Sync did not start after full.syn drop. Diag: $($diag -join ' | ')"
+                Write-DscStatus "$Tag Dropping full.syn again as remediation..."
+                Invoke-FullSync
+            }
+        }
+        else {
+            Write-DscStatus "$Tag WCM did not reach SUCCESS after $wcmMaxAttempts attempts. Skipping sync trigger — wsyncmgr will sync on schedule."
+            # Log diagnostics so we can investigate
+            $diag = @()
+            try {
+                $wcmRegVal2 = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                $diag += "WCM=$($wcmStateNames[$wcmRegVal2])"
+            } catch { $diag += "WCM=unreadable" }
+            $wsusSvc = Get-Service -Name WsusService -ErrorAction SilentlyContinue
+            $diag += "WsusService=$($wsusSvc.Status)"
+            $wcmLog = Join-Path $CMInstallDir "Logs\WCM.log"
+            if (Test-Path $wcmLog) {
+                $wcmTail = @(Get-Content $wcmLog -Tail 3 -ErrorAction SilentlyContinue)
+                foreach ($line in $wcmTail) {
+                    if ($line -match 'LOG\[(.+?)\]LOG') { $diag += "WCM.log: $($Matches[1].Substring(0, [Math]::Min(120, $Matches[1].Length)))" }
+                }
+            }
+            Write-DscStatus "$Tag WCM timeout diag: $($diag -join ' | ')"
+        }
+        } # end accepted-products block
+    }
+    if ($Sups -and -not $isTopLevel) {
+        if (-not (Repair-DownstreamWsusReplicaSync -SoftwareUpdatePoints @($Sups))) {
+            throw 'Downstream WSUS replica recovery did not converge.'
+        }
+    }
+    if ($Sups) {
         # Define ADR Names
         $ADRNames = @{
             "Client"   = "MEMLABS-ADR-Windows-10/11"
@@ -1222,7 +4663,8 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             "office"   = "MEMLABS-ADR-O365patching"
         }
 
-        # Define the folder path and share name
+        # Define the folder path and share name — Primary only (local shares)
+        if ($CurrentRole -ne "CAS") {
         $folderPath1 = "$DriveLetter\updatePkgs"
         $shareName1 = "updatePkgs"
 
@@ -1239,7 +4681,9 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         }
 
         # Create the share with read access for "Everyone"
-        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone")
+        if (-not (Get-SmbShare -Name $shareName1 -ErrorAction SilentlyContinue)) {
+            New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone")
+        }
 
         Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"
 
@@ -1264,7 +4708,9 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 try {
                     New-CMSoftwareUpdateDeploymentPackage -Name $PackageName -Path $PackagePath -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created package: $PackageName"
-                    Start-CMContentDistribution -DeploymentPackageName $PackageName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+                    if (-not (Sync-MemLabsContentDistribution -ContentType DeploymentPackage -ContentName $PackageName -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -StatusTag $Tag -SiteCode $SiteCode)) {
+                        throw "content targeting failed for deployment package '$PackageName'"
+                    }
                     Write-DscStatus "$Tag Successfully distributed MEMLABS $PackageName to all DPs"
                     New-CMSoftwareUpdateGroup -Name $PackageName -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created SUG $PackageName"
@@ -1307,11 +4753,10 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                     $success = $true
                 }
                 catch {
-                    Write-DscStatus "$Tag An error occurred while creating the ADR for Windows 10 and 11 Security Updates"
-                    Check-SyncSucceeded -SiteCode $SiteCode
+                    Write-DscStatus "$Tag An error occurred while creating the ADR for Windows 10 and 11 Security Updates: $_"
                     $attempt++
                     Write-DscStatus "$Tag Retrying ADR creation, attempt $attempt of $maxAttempts"
-                    Start-Sleep -Seconds 10  # Pause before retrying
+                    Start-Sleep -Seconds 30
                 }
             }
         
@@ -1321,7 +4766,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         
             try {
                 New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Server `
-                    -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server operating system-24H2" -Architecture X64 `
+                    -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server Operating System-24H2" -Architecture X64 `
                     -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
                     -DeploymentPackageName $Packages[1].Name -Description "MEMLABS autocreated ADR for win server patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
     
@@ -1354,24 +4799,45 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 Write-DscStatus "$Tag An error occurred while creating the ADR for O365 Updates"
             }
             ##this sync will take a long time as it will almost pull 3k-5k updates down so don't wait for the process to finish
-            Invoke-finalfullsync
+            # Only FORCE a full sync on a TOP-LEVEL SUP (standalone Primary / CAS)
+            # that syncs from Microsoft Update directly. On a DOWNSTREAM child
+            # Primary the SUP is a replica that pulls its catalog from the upstream
+            # CAS, so forcing a sync here -- while the CAS is typically still doing
+            # its multi-thousand-item initial MU sync -- just produces a
+            # superseded/Canceled cycle (surfaced later as the Phase 11 'WSUS last
+            # sync Result=Canceled' warning). The downstream catalog replicates
+            # automatically on WCM's schedule once the upstream completes, so on a
+            # child Primary we skip the forced trigger.
+            if ($isTopLevel) {
+                Invoke-FullSync
+            }
+            else {
+                Write-DscStatus "$Tag Downstream SUP (parent=$($ThisVM.parentSiteCode)) - skipping forced full WSUS sync; catalog replicates from the upstream SUP once its sync completes"
+            }
         }
 
+        } # end Primary-only update packages/ADR block
     }
 
-    $collection = Get-CMCollection -Name "All Unknown Computers"
-    if ($Collection -and $Collection.CollectionID) {
-        Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID
-    }    
+    Confirm-MemLabsWsusSyncHealth
 
-    # Create the flag file
-    New-Item -ItemType File -Path $flagFile -Force | Out-Null
-    Write-DscStatus "$Tag $flagFile the perf loading the environment created"
+    try {
+        $collection = Get-CMCollection -Name "All Unknown Computers" -ErrorAction Stop
+        if ($collection -and $collection.CollectionID) {
+            Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Could not refresh All Unknown Computers: $($_.Exception.Message)" -Warning
+    }
 
-    Write-DscStatus "$Tag Completed the perf loading the environment"
+    # Delay approval until the other provider operations have given the
+    # TwoKeyApproval write time to become effective on a new hierarchy child.
+    if ($scriptApprovalQueue.Count -gt 0) {
+        $null = Approve-MemLabsScriptQueue -Queue $scriptApprovalQueue
+    }
+
+    $perfloadingTimer.Stop()
+    Write-DscStatus "$Tag Completed the perf loading the environment in $($perfloadingTimer.Elapsed.ToString('hh\:mm\:ss'))"
     Write-DscStatus "$Tag ******************************************" -NoStatus
     Write-DscStatus "$Tag ******************************************" -NoStatus
-
-
-
-}

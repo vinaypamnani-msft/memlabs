@@ -1,0 +1,187 @@
+{
+  "vmOptions": {
+    "prefix": "X1X-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "oddball.nebula.xyz",
+    "domainNetBiosName": "COSMOS",
+    "adminName": "spaceman",
+    "network": "10.99.42.0",
+    "timeZone": "Tokyo Standard Time",
+    "locale": "en-US"
+  },
+  "cmOptions": {
+    "version": "2409",
+    "install": true,
+    "pushClientToDomainMembers": false,
+    "EVALVersion": true,
+    "UsePKI": false,
+    "EnableBLM": false,
+    "PrePopulateObjects": false,
+    "OfflineSCP": true,
+    "OfflineSUP": true
+  },
+  "virtualMachines": [
+    {
+      "vmName": "PULSAR",
+      "role": "DC",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "InstallCA": true,
+      "ForestTrust": "NONE"
+    },
+    {
+      "vmName": "COMET",
+      "role": "Primary",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "F:\\CM",
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "300GB"
+      },
+      "siteCode": "SPC",
+      "installSUP": true,
+      "installRP": false,
+      "siteName": "Interstellar Primary",
+      "wsusContentDir": "E:\\WsusContent",
+      "remoteSQLVM": "METEOR"
+    },
+    {
+      "vmName": "METEOR",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2019",
+      "memory": "8GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "CRATER",
+      "sqlInstanceDir": "G:\\SQLData",
+      "sqlPort": "9433",
+      "additionalDisks": {
+        "G": "250GB"
+      },
+      "SqlServiceAccount": "LocalSystem",
+      "SqlAgentAccount": "LocalSystem",
+      "installRP": false
+    },
+    {
+      "vmName": "NEBULA",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2025",
+      "memory": "8GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "F": "400GB"
+      },
+      "installDP": false,
+      "installMP": false,
+      "installSUP": true,
+      "installRP": true,
+      "siteCode": "SPC",
+      "wsusDataBaseServer": "WID",
+      "wsusContentDir": "F:\\Updates"
+    },
+    {
+      "vmName": "QUASAR",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022 November 2024",
+      "memory": "3GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "additionalDisks": {
+        "J": "1000GB"
+      },
+      "installDP": true,
+      "installMP": false,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "SPC"
+    },
+    {
+      "vmName": "AURORA",
+      "role": "WSUS",
+      "operatingSystem": "Server 2025",
+      "memory": "8GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "wsusContentDir": "H:\\WsusStore",
+      "additionalDisks": {
+        "H": "500GB"
+      },
+      "wsusDataBaseServer": "WID",
+      "network": "10.99.43.0"
+    },
+    {
+      "vmName": "MARS",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 RTM",
+      "memory": "4GB",
+      "virtualProcs": 16,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "domainUser": "user3"
+    },
+    {
+      "vmName": "VENUS",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 2004 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 1,
+      "tpmEnabled": true,
+      "domainUser": "user4",
+      "dynamicMinRam": "512MB"
+    },
+    {
+      "vmName": "SATURN",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022 21H2 February 2024",
+      "memory": "12GB",
+      "virtualProcs": 8,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "RINGS",
+      "sqlInstanceDir": "I:\\DB",
+      "sqlPort": "7433",
+      "additionalDisks": {
+        "F": "500GB",
+        "G": "10GB",
+        "I": "250GB"
+      }
+    },
+    {
+      "vmName": "PLUTO",
+      "role": "WorkgroupMember",
+      "operatingSystem": "Windows 10 22H2 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true
+    },
+    {
+      "vmName": "JUPITER",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 20H2 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "domainUser": "user5"
+    },
+    {
+      "vmName": "CERES",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 21H2 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "domainUser": "user6"
+    }
+  ]
+}

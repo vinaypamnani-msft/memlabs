@@ -26,7 +26,7 @@
       "vmName": "CS1RPSUP1",
       "role": "SiteSystem",
       "operatingSystem": "Server 2022",
-      "memory": "3GB",
+      "memory": "8GB",
       "virtualProcs": 4,
       "tpmEnabled": true,
       "installSSMS": true,
@@ -144,7 +144,7 @@
       "vmName": "W11Client2",
       "role": "DomainMember",
       "operatingSystem": "Windows 11 Latest",
-      "memory": "2GB",
+      "memory": "4GB",
       "virtualProcs": 2
     }
   ]

@@ -1,12 +1,114 @@
-# ScriptWorkflow.ps1
+﻿# ScriptWorkflow.ps1
 param(
     [string]$ConfigFilePath,
-    [string]$LogPath
+    [string]$LogPath,
+    [switch]$DownloadOnly
 )
 
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
+$ExpectedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.expected.runid'
+$CompletedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.completed.runid'
+$FailedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.failed.json'
+$ScriptWorkflowRunId = $null
+
+# Publish the captured invocation's failure, never a later deployment's RunId.
+trap {
+    $workflowError = $_
+    try {
+        "ScriptWorkflow TERMINATING ERROR: $($_.Exception.Message)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        "  Type  : $($_.Exception.GetType().FullName)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        "  At    : $($_.InvocationInfo.ScriptName) line $($_.InvocationInfo.ScriptLineNumber)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        "  Line  : $("$($_.InvocationInfo.Line)".Trim())" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        "  Stack : $($_.ScriptStackTrace)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+    }
+    catch { }
+    # A death before ScriptWorkflow.json exists leaves no evidence the DSC watchdog
+    # (TemplateHelpDSC WaitForEvent) or the host can reach, so drop one here.
+    try {
+        $crumbScript = try { Split-Path "$($_.InvocationInfo.ScriptName)" -Leaf } catch { 'ScriptWorkflow.ps1' }
+        $crumbText = "{0} line {1}: {2}" -f $crumbScript, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message
+        ($crumbText -replace '\s+', ' ').Trim() | Out-File -FilePath 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Force
+    }
+    catch { }
+    if ($ScriptWorkflowRunId) {
+        try {
+            Write-ScriptWorkflowFailureReceipt -RunId $ScriptWorkflowRunId `
+                -Message "$($workflowError.InvocationInfo.ScriptName) line $($workflowError.InvocationInfo.ScriptLineNumber): $($workflowError.Exception.Message)"
+        }
+        catch {
+            Write-Warning "ScriptWorkflow could not publish its terminal failure receipt: $($_.Exception.Message)"
+        }
+    }
+    break
+}
+
+if (Test-Path -LiteralPath $ExpectedRunIdFile) {
+    $ScriptWorkflowRunId = (Get-Content -LiteralPath $ExpectedRunIdFile -Raw -ErrorAction Stop).Trim()
+    Write-DscStatus "ScriptWorkflow.ps1 RunId for this deploy: $ScriptWorkflowRunId"
+}
+if (Test-Path -LiteralPath $FailedRunIdFile) {
+    Remove-Item -LiteralPath $FailedRunIdFile -Force -ErrorAction Stop
+}
+
+# The breadcrumb must describe the MOST RECENT run, not an earlier one.
+Remove-Item 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Force -ErrorAction SilentlyContinue
+
+# Banner: emit a clearly-delimited start-of-run marker into InstallCMLog.log
+# so multiple ScriptWorkflow invocations on the same VM (reruns, retries,
+# DSC re-applies) are easy to tell apart when scrolling the log.
+try {
+    $bannerPid    = $PID
+    $bannerHost   = $env:COMPUTERNAME
+    $bannerUser   = "$($env:USERDOMAIN)\$($env:USERNAME)"
+    $bannerPSVer  = $PSVersionTable.PSVersion.ToString()
+    $bannerOS     = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { '<unknown>' }
+    # Last boot time + uptime. Logging this in every ScriptWorkflow banner makes
+    # a mid-run reboot trivial to spot: if a later banner shows a fresh boot time
+    # (low uptime) the box restarted between runs -- a common cause of half-
+    # finished work (e.g. an orphaned background download whose join never ran).
+    $bannerBoot   = try {
+        $lbt = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+        $up  = (Get-Date) - $lbt
+        '{0:yyyy-MM-dd HH:mm:ss} (up {1}d {2}h {3}m)' -f $lbt, $up.Days, $up.Hours, $up.Minutes
+    } catch { '<unknown>' }
+    $bannerStart  = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $bannerCwd    = (Get-Location).Path
+    $bannerScript = $MyInvocation.MyCommand.Path
+    try {
+        $bannerCmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).CommandLine
+    } catch { $bannerCmdLine = '<unavailable>' }
+    try {
+        $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId
+        $parent    = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction Stop
+        $bannerParent = "$($parent.Name) (PID $parentPid)"
+    } catch { $bannerParent = '<unavailable>' }
+
+    '' | Write-StatusLogEntry -Component 'ScriptWorkflow' -AllowBlank
+    '' | Write-StatusLogEntry -Component 'ScriptWorkflow' -AllowBlank
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ' ScriptWorkflow.ps1 - START'                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Started      : $bannerStart"                                            | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  PID          : $bannerPid"                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Parent       : $bannerParent"                                           | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Host         : $bannerHost"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  User         : $bannerUser"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  OS           : $bannerOS"                                               | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  LastBoot     : $bannerBoot"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  PowerShell   : $bannerPSVer"                                            | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Script       : $bannerScript"                                           | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Cwd          : $bannerCwd"                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  CommandLine  : $bannerCmdLine"                                          | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  ConfigFile   : $ConfigFilePath"                                         | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  LogPath      : $LogPath"                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+}
+catch {
+    # Don't let banner failure stop the workflow
+    "ScriptWorkflow banner failed: $_" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 2
+}
 
 Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
 
@@ -14,6 +116,74 @@ Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
 $CurrentRole = $ThisVM.role
+$configuredPushTargets = @()
+if ($ThisVM -and $ThisVM.thisParams -and $ThisVM.thisParams.ClientPush) {
+    $configuredPushTargets = @($ThisVM.thisParams.ClientPush | Where-Object { $_ -and "$_" -ne $ThisVM.vmName })
+}
+
+# -DownloadOnly: Phase 3 "ScriptWorkflow Download" pre-warm. Run ONLY the
+# ConfigMgr setup pre-req download (setupdl.exe) so the redist folder is warm
+# by the time Phase 8 runs. We deliberately do NOT touch the ScriptWorkflow.json
+# state machine or run any other workflow step -- this returns before the real
+# workflow begins. Phase 8 (InstallAndUpdateSCCM.ps1 -> Stop-CMSetupPrereqPrewarm)
+# stops this task and kills any running setupdl.exe before its own download, so
+# the two never race. Best-effort: any failure just exits and Phase 8's robust
+# download finishes/verifies. The setupdl loop is single-sourced in
+# ScriptFunctions.ps1 (Invoke-CMSetupPrereqDownload).
+if ($DownloadOnly) {
+    # Repoint the status file so pre-warm progress (which may run during
+    # phases 3-7) doesn't stomp the per-phase DSC_Status.txt the orchestrator
+    # watches. Progress still flows to InstallCMLog.log + the host console.
+    $global:StatusFile = "C:\staging\DSC\DSC_Status_Download.txt"
+    Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: pre-warming ConfigMgr setup pre-req download only (no workflow steps will run)."
+    try {
+        # Don't pre-warm if ConfigMgr is already installed on this site server
+        # -- there's nothing to download for. The SMS Identification 'Site Code'
+        # registry value is the same local "CM installed" signal that
+        # InstallAndUpdateSCCM's ground-truth check uses.
+        $regSiteCode = $null
+        $identificationPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
+        if (Test-Path -LiteralPath $identificationPath) {
+            try {
+                $identification = Get-ItemProperty -LiteralPath $identificationPath -ErrorAction Stop
+                $siteCodeProperty = $identification.PSObject.Properties['Site Code']
+                if ($siteCodeProperty) { $regSiteCode = $siteCodeProperty.Value }
+            }
+            catch { }
+        }
+        if ($regSiteCode) {
+            Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: ConfigMgr already installed on this site server (Site Code '$regSiteCode'); skipping pre-req pre-warm."
+            return
+        }
+
+        $cmoDl = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $CMDl = if ($cmoDl.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+        $CMDirDl = "c:\$CMDl"
+        foreach ($sub in @("cd.retail", "cd.retail.LN", "cd.preview")) {
+            $cand = Join-Path "c:\$CMDl" $sub
+            if (Test-Path $cand -PathType Container) { $CMDirDl = $cand; break }
+        }
+        $CMSetupDLDl = "$CMDirDl\SMSSETUP\BIN\X64\Setupdl.exe"
+        $CMRedistDl = "C:\$CMDl\REdist"
+        $CMLogDl = "C:\ConfigMgrSetup.log"
+        if (-not (Test-Path $CMRedistDl)) { New-Item $CMRedistDl -ItemType Directory -Force | Out-Null }
+        if (-not (Test-Path $CMSetupDLDl)) {
+            Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: '$CMSetupDLDl' not found (CM media not extracted yet); nothing to pre-warm. Exiting."
+            return
+        }
+        $dlOk = Invoke-CMSetupPrereqDownload -CMSetupDL $CMSetupDLDl -CMRedist $CMRedistDl -CMLog $CMLogDl -MaxTries 20
+        if ($dlOk) {
+            Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: pre-req download complete. REdist is warm for Phase 8."
+        }
+        else {
+            Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: pre-req download did not fully complete; Phase 8 will finish/verify it. Exiting."
+        }
+    }
+    catch {
+        Write-DscStatus "ScriptWorkflow.ps1 -DownloadOnly: pre-warm threw '$($_.Exception.Message)'; Phase 8 download is unaffected. Exiting."
+    }
+    return
+}
 
 $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
@@ -36,14 +206,83 @@ else {
     $containsSecondary = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" -and $_.parentSiteCode -eq $ThisVM.siteCode }
 }
 
+# Parallel passive install (Phase 8 critical-path speedup, measured from
+# InstallCMLog: on a child primary the secondary (~1h08) and passive (~56m)
+# installs ran strictly back-to-back on this single workflow thread). Launch the
+# passive as a background job (Start-ParallelPassiveJob) so it overlaps whatever
+# the main thread does next -- the secondary install when there is one, otherwise
+# InstallRoles + ConfigureMPReplica + ConfigureCMProxy + InstallBoundaryGroups --
+# and join it at the block below, before Perfloading.
+#
+# The gate used to also require $containsSecondary. A lone passive is the common
+# shape (17 of the 21 configs that define a PassiveSite have no Secondary) and it
+# was pure serial tail: 2026-08-22 measured InstallPassiveSiteServer.ps1 at 971s
+# (CS6-PS1SITE) / 1,015s (CT5-PS1SITE) sitting after InstallBoundaryGroups on the
+# Phase 8 critical path, against 867s / 1,171s of main-thread work it could have
+# hidden behind. The passive install runs on a DIFFERENT machine and needs nothing
+# those steps produce. Set $ParallelPassiveInstall = $false to revert to
+# fully-serial behavior.
+$ParallelPassiveInstall = $true
+$parallelPassive = [bool]($ParallelPassiveInstall -and $containsPassive)
+$passiveJob = $null
+
 
 # Script Workflow json file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $firstRun = $true
 
 if (Test-Path -Path $ConfigurationFile) {
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $firstRun = $false
+    # Immediately reset status so WaitForEvent won't find stale "Completed" from a previous run
+    if ($Configuration.ScriptWorkflow -and $Configuration.ScriptWorkflow.Status -eq "Completed") {
+        $Configuration.ScriptWorkflow.Status = "Running"
+        $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    }
+
+    # Add-to-existing: the deployConfig may contain new SiteSystem VMs that
+    # need DP/MP/SUP installed, but the previous deploy already marked
+    # InstallDP/InstallSUP as Completed. Reset those statuses when the
+    # current deployConfig has SiteSystem VMs requesting those roles so the
+    # installer scripts actually run.
+    $newSiteSystemVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' })
+    if ($newSiteSystemVMs.Count -gt 0) {
+        $needsDP  = @($newSiteSystemVMs | Where-Object { $_.installDP }).Count -gt 0
+        $needsMP  = @($newSiteSystemVMs | Where-Object { $_.installMP }).Count -gt 0
+        $needsSUP = @($newSiteSystemVMs | Where-Object { $_.installSUP -or $_.installRP }).Count -gt 0
+        if (($needsDP -or $needsMP) -and $Configuration.InstallDP -and $Configuration.InstallDP.Status -eq 'Completed') {
+            Write-DscStatus "Resetting InstallDP status (new SiteSystem VMs with DP/MP found)"
+            $Configuration.InstallDP.Status = 'NotStart'
+            $Configuration.InstallDP.StartTime = ''
+            $Configuration.InstallDP.EndTime = ''
+            if ($Configuration.InstallMP) {
+                $Configuration.InstallMP.Status = 'NotStart'
+                $Configuration.InstallMP.StartTime = ''
+                $Configuration.InstallMP.EndTime = ''
+            }
+        }
+        if ($needsSUP -and $Configuration.InstallSUP -and $Configuration.InstallSUP.Status -eq 'Completed') {
+            Write-DscStatus "Resetting InstallSUP status (new SiteSystem VMs with SUP found)"
+            $Configuration.InstallSUP.Status = 'NotStart'
+            $Configuration.InstallSUP.StartTime = ''
+            $Configuration.InstallSUP.EndTime = ''
+        }
+        $needsReplica = @($newSiteSystemVMs | Where-Object { $_.installMP -and $_.useDatabaseReplica }).Count -gt 0
+        if ($needsReplica -and $Configuration.PSObject.Properties.Name -notcontains 'ConfigureMPReplica') {
+            # Add-to-existing: this ScriptWorkflow.json predates the MP replica
+            # feature. Add the step so the dot-source guard runs it.
+            Write-DscStatus "Adding ConfigureMPReplica step (new SiteSystem MPs with database replica found)"
+            $Configuration | Add-Member -NotePropertyName 'ConfigureMPReplica' -NotePropertyValue ([pscustomobject]@{ Status = 'NotStart'; StartTime = ''; EndTime = '' }) -Force
+            Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+        }
+        if ($needsReplica -and $Configuration.ConfigureMPReplica -and $Configuration.ConfigureMPReplica.Status -eq 'Completed') {
+            Write-DscStatus "Resetting ConfigureMPReplica status (new SiteSystem MPs with database replica found)"
+            $Configuration.ConfigureMPReplica.Status = 'NotStart'
+            $Configuration.ConfigureMPReplica.StartTime = ''
+            $Configuration.ConfigureMPReplica.EndTime = ''
+        }
+    }
 }
 if (-not ($configuration.ScriptWorkflow)) {
     $Configuration = $null
@@ -67,6 +306,11 @@ if (-not $Configuration) {
                 EndTime   = ''
             }
             InstallMP      = @{
+                Status    = 'NotStart'
+                StartTime = ''
+                EndTime   = ''
+            }
+            ConfigureMPReplica = @{
                 Status    = 'NotStart'
                 StartTime = ''
                 EndTime   = ''
@@ -110,7 +354,7 @@ if (-not $Configuration) {
                     StartTime = ''
                     EndTime   = ''
                 }
-                $propName = propName = "PSReadyToUse" + $psvm.VmName
+                $propName = "PSReadyToUse" + $psvm.VmName
                 $Actions.Add($propName, $PSReadytoUse)
             }
         }
@@ -132,6 +376,11 @@ if (-not $Configuration) {
                     EndTime   = ''
                 }
                 InstallMP                    = @{
+                    Status    = 'NotStart'
+                    StartTime = ''
+                    EndTime   = ''
+                }
+                ConfigureMPReplica           = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
@@ -182,29 +431,58 @@ if (-not $Configuration.InstallSUP) {
     $Configuration | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $item -force
 }
 
+if (-not $Configuration.ConfigureCMProxy) {
+    $item = [PSCustomObject]@{
+        Status    = 'NotStart'
+        StartTime = ''
+        EndTime   = ''
+    }
+    $Configuration | Add-Member -MemberType NoteProperty -Name "ConfigureCMProxy" -Value $item -Force
+}
+
 $Configuration.ScriptWorkflow.Status = "Running"
 $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
-# Force AD Replication
-$domainControllers = Get-ADDomainController -Filter *
-if ($domainControllers.Count -gt 1) {
-    Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
-    $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
-    Start-Sleep -Seconds 3
+# Force AD Replication (only on first run)
+if ($firstRun) {
+    $domainControllers = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
+    if ($domainControllers.Count -gt 1) {
+        Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
+        # Run repadmin in a job with a hard timeout. If a DC's NTDS is still
+        # initializing (e.g. BDC just promoted), repadmin /syncall can hang
+        # indefinitely waiting for RPC. A job + Wait-Job is the only reliable
+        # kill switch in PS 5.1.
+        $dcNames = @($domainControllers.Name)
+        $domainDistinguishedName = (Get-ADDomain).DistinguishedName
+        $replJob = Start-Job -ScriptBlock {
+            param($dcNames, $dn)
+            $dcNames | ForEach-Object { repadmin /syncall $_ $dn /AdeP 2>&1 | Out-Null }
+        } -ArgumentList $dcNames, $domainDistinguishedName
+        $null = Wait-Job $replJob -Timeout 60
+        if ($replJob.State -eq 'Running') {
+            Stop-Job $replJob -ErrorAction SilentlyContinue
+        }
+        Remove-Job $replJob -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+    }
 }
 
 if ($scenario -eq "MultiDomain") {
     Write-DscStatus "$scenario Running InstallMultiDomainPKI.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallMultiDomainPKI.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $Configuration.ScriptWorkflow.Status = "Completed"
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     Write-DscStatus "Complete!"
+    # Stamp completion RunId for the orchestrator's race-proof completion check
+    if ($ScriptWorkflowRunId) {
+        try { Set-Content -Path $CompletedRunIdFile -Value $ScriptWorkflowRunId -Force -Encoding ASCII } catch {}
+    }
     return
 }
 
@@ -214,33 +492,105 @@ if ($scenario -eq "Standalone") {
     Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+    # Fresh workers cannot reuse the console session loaded before the site upgrade.
+    Write-DscStatus "$scenario Running Upgrade-Console.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+    Set-Location $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+    # Enable HTTPS/eHTTP early so the site component manager has maximum
+    # time to republish the updated OperationalXml (SecurityModeMaskEx) to
+    # AD before PushClients runs. The flag file prevents double execution
+    # if this already ran inside InstallAndUpdateSCCM's update loop.
+    $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+    if (-not $cmoEarly.UsePKI) {
+        Write-DscStatus "$scenario Early EnableEHTTP.ps1"
+        Invoke-DotSource -Script "$PSScriptRoot\EnableEHTTP.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
+    }
+    else {
+        Write-DscStatus "$scenario Early EnableHTTPS.ps1"
+        Invoke-DotSource -Script "$PSScriptRoot\EnableHTTPS.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
+    }
 
     #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
-    Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+    if ($Configuration.InstallDP.Status -ne "Completed") {
+        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
+        if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
+            Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
+            return
+        }
+    }
+    else {
+        Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
+    }
+
+    # Start AD Discovery early only when there are push targets whose DDRs need
+    # processing time before PushClients. No targets means this is duplicate work.
+    if ($configuredPushTargets.Count -gt 0) {
+        try {
+            Set-Location $LogPath
+            . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+            $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
+            Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
+            Invoke-CMSystemDiscovery
+            Write-DscStatus "AD System Discovery invoked early for $($configuredPushTargets.Count) client-push target(s)"
+        }
+        catch {
+            Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-DscStatus "Skipping early AD System Discovery: no client-push targets"
+    }
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+
+    if ($parallelPassive -and -not $passiveJob) {
+        $passiveJob = Start-ParallelPassiveJob -ConfigFilePath $ConfigFilePath -LogPath $LogPath -ScriptRoot $PSScriptRoot -ConfigurationFile $ConfigurationFile
+    }
 
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
         Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
     }
-
 
     Write-DscStatus "$scenario Running InstallRoles.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+    # Configure MP database replicas (SQL transactional replication + Service
+    # Broker). Runs after InstallRoles so the MP roles exist. Self-skips when no
+    # MP in this site uses a database replica.
+    if ($Configuration.ConfigureMPReplica -and $Configuration.ConfigureMPReplica.Status -ne "Completed") {
+        Write-DscStatus "$scenario Running ConfigureMPReplica.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureMPReplica.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    }
+
+    # ConfigureCMProxy is cheap and idempotent; always run it so latched
+    # Completed state from a deploy that ran before the Proxy was hydrated
+    # into deployConfig can self-heal on the next pass. The script itself
+    # short-circuits when there's no Proxy or no opted-in clients.
+    Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+    Set-Location $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
     Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
 }
 
@@ -252,12 +602,34 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+        Write-DscStatus "$scenario Running Upgrade-Console.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+        # Enable HTTPS/eHTTP early on CAS too (same reasoning as Standalone).
+        $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        if (-not $cmoEarly.UsePKI) {
+            Write-DscStatus "$scenario CAS Early EnableEHTTP.ps1"
+            Invoke-DotSource -Script "$PSScriptRoot\EnableEHTTP.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
+        }
+        else {
+            Write-DscStatus "$scenario CAS Early EnableHTTPS.ps1"
+            Invoke-DotSource -Script "$PSScriptRoot\EnableHTTPS.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
+        }
 
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+        # ConfigureCMProxy is cheap and idempotent; always run.
+        Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     }
     elseif ($CurrentRole -eq "Primary") {
@@ -267,96 +639,1056 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
             Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+        }
+
+        Write-DscStatus "$scenario Primary Running Upgrade-Console.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+        # Enable HTTPS/eHTTP early on Primary too (same reasoning as Standalone).
+        $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        if (-not $cmoEarly.UsePKI) {
+            Write-DscStatus "$scenario Primary Early EnableEHTTP.ps1"
+            Invoke-DotSource -Script "$PSScriptRoot\EnableEHTTP.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
+        }
+        else {
+            Write-DscStatus "$scenario Primary Early EnableHTTPS.ps1"
+            Invoke-DotSource -Script "$PSScriptRoot\EnableHTTPS.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
         }
 
         #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
-        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        if ($Configuration.InstallDP.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+            Set-Location $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+            $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
+            if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
+                Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
+                return
+            }
+        }
+        else {
+            Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
+        }
+
+        # Start AD Discovery early only when there are push targets whose DDRs need
+        # processing time before PushClients. No targets means this is duplicate work.
+        if ($configuredPushTargets.Count -gt 0) {
+            try {
+                Set-Location $LogPath
+                . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+                $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
+                Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
+                Invoke-CMSystemDiscovery
+                Write-DscStatus "AD System Discovery invoked early for $($configuredPushTargets.Count) client-push target(s)"
+            }
+            catch {
+                Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+            }
+        }
+        else {
+            Write-DscStatus "Skipping early AD System Discovery: no client-push targets"
+        }
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
                
+        if ($parallelPassive -and -not $passiveJob) {
+            $passiveJob = Start-ParallelPassiveJob -ConfigFilePath $ConfigFilePath -LogPath $LogPath -ScriptRoot $PSScriptRoot -ConfigurationFile $ConfigurationFile
+        }
+
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
             Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
             Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
         }
 
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+        # Configure MP database replicas (SQL transactional replication + Service
+        # Broker). Runs after InstallRoles so the MP roles exist. Self-skips when no
+        # MP in this site uses a database replica. Not run on CAS.
+        if ($Configuration.ConfigureMPReplica -and $Configuration.ConfigureMPReplica.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running ConfigureMPReplica.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureMPReplica.ps1"
+            Set-Location $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        }
+
+        # ConfigureCMProxy is cheap and idempotent; always run.
+        Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
          #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
         Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     }
 }
 
+# Off the site PSDrive, a CM cmdlet throws a TERMINATING "This command cannot be
+# run from the current drive" that -ErrorAction cannot suppress, so the top-level
+# trap kills the workflow (CT1-CS1SITE, Phase 8: died at the Get-CMSiteRole
+# below). Nothing above leaves us on that drive: every branch ends with
+# Set-Location $LogPath, and the dot-sourced scripts that would connect it
+# (InstallRoles / ConfigureCMProxy) early-return when they have no work to do.
+function Get-PassiveSiteServerRole {
+    param([string]$Fqdn, [ref]$QueryFailed)
+
+    if ($QueryFailed) { $QueryFailed.Value = $false }
+    try {
+        # Child scope so a 'return' inside Connect-CMSite.ps1 (drive never came up)
+        # exits the script block instead of returning from ScriptWorkflow itself.
+        # Out-Null: New-PSDrive writes the drive object to the pipeline.
+        & { . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[PassiveCheck]" } | Out-Null
+        Get-CMSiteRole -SiteSystemServerName $Fqdn -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+    }
+    catch {
+        # A role that is genuinely absent returns nothing WITHOUT throwing, so reaching
+        # here means the answer is UNKNOWN -- which is not the same as 'not present'.
+        if ($QueryFailed) { $QueryFailed.Value = $true }
+        Write-DscStatus "Passive check: could not query the SMS Site Server role on $Fqdn ($($_.Exception.Message)); the answer is UNKNOWN." -Warning
+    }
+}
+
 if ($containsPassive) {
-    # Install Passive Site Server
-    Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    $passiveRan = $false
+
+    if ($passiveJob) {
+        # Parallel mode: the passive install was launched as a background job
+        # BEFORE the secondary install / role + boundary-group block
+        # (Start-ParallelPassiveJob), so the two overlapped. Join it now. The job
+        # ran with -SkipStatusFileUpdate, so the main thread owns the
+        # InstallPassive status (Running stamped at launch; Completed stamped
+        # below, gated on the role actually being present).
+        # InstallPassiveSiteServer.ps1 is internally bounded (75-min stall
+        # watchdog + 2 RetryInstallation attempts), so 4h is pure backstop: it
+        # only fires when the JOB itself is wedged, which an unbounded Wait-Job
+        # would turn into a permanently hung phase. Completion is verified from
+        # the site (Get-CMSiteRole) below regardless of how the join ended.
+        $passiveJobTimeout = 14400
+        Write-DscStatus "Waiting for parallel InstallPassiveSiteServer.ps1 job to complete"
+        $passiveJoinSw = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            if (Wait-Job -Job $passiveJob -Timeout $passiveJobTimeout) {
+                # The job writes its own status/log to disk via Write-DscStatus; just
+                # drain the pipeline. A terminating failure rethrows on Receive-Job.
+                Receive-Job -Job $passiveJob | Out-Null
+            }
+            else {
+                Write-DscStatus "Parallel passive job did not finish within $passiveJobTimeout s (state=$($passiveJob.State)) -- abandoning it; the role check below decides whether to stamp Completed." -Warning
+                Stop-Job -Job $passiveJob -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+            Write-DscStatus "Parallel passive job: $_" -Warning
+        }
+        $passiveJoinSw.Stop()
+
+        # waited ~0 means the overlap hid the whole passive install; anything larger is
+        # the residual that the surrounding work was too short to cover. Read BEFORE
+        # Remove-Job. -1, never 0, when the launch stamp is missing.
+        $passiveWaitedSec = [math]::Round($passiveJoinSw.Elapsed.TotalSeconds, 1)
+        $passiveJobTotalSec = if ($passiveJob.PSObject.Properties['MemlabsStartedAt']) { [math]::Round(((Get-Date) - $passiveJob.MemlabsStartedAt).TotalSeconds, 1) } else { -1 }
+        Write-DscStatus "Parallel passive: join waited=$($passiveWaitedSec)s; job ran $($passiveJobTotalSec)s in total"
+        Remove-Job -Job $passiveJob -Force -ErrorAction SilentlyContinue
+
+        # Ground-truth completion: only stamp Completed if the passive role is
+        # actually present, so a failed/partial job leaves InstallPassive
+        # != Completed and a re-run retries it.
+        $DomainFullName = $deployConfig.vmOptions.domainName
+        $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
+        $passiveExists = Get-PassiveSiteServerRole -Fqdn $passiveFQDN
+        if ($passiveExists) {
+            $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime
+            Write-DscStatus "Parallel passive: InstallPassiveSiteServer.ps1 completed; passive role present on $($containsPassive.vmName)."
+        }
+        else {
+            Write-DscStatus "WARNING: parallel passive job finished but the passive SMS Site Server role is not present on $passiveFQDN yet; InstallPassive left not-Completed for retry." -Warning
+        }
+        $passiveRan = $true
+    }
+    else {
+        $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
+        $DomainFullName = $deployConfig.vmOptions.domainName
+        $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
+        $passiveQueryFailed = $false
+        $passiveExists = Get-PassiveSiteServerRole -Fqdn $passiveFQDN -QueryFailed ([ref]$passiveQueryFailed)
+
+        # The role existing + InstallPassive=Completed is NOT sufficient: CM can
+        # report a transient Ready state (so the first install stamped Completed)
+        # and then regress to a FAILED category (0x0001FFFF SiteServerInstallationFailed
+        # / 0x0002FFFF PREREQ_ERROR) after the async Stage 14/15 work
+        # (install SMS_FAILOVER_MANAGER, validate access to remote site systems)
+        # fails. CM never self-heals that. Read the authoritative ServerState so a
+        # re-run RE-INVOKES InstallPassiveSiteServer.ps1 (whose early-exit drives
+        # RetryInstallation) instead of skipping a genuinely-broken passive.
+        $passiveFailed = $false
+        try {
+            $pSite = "$($containsPassive.siteCode)"
+            $pNode = Get-WmiObject -Namespace "root\SMS\site_$pSite" -Class SMS_SCI_SysResUse `
+                -Filter "RoleName = 'SMS Site Server' AND SiteCode = '$pSite' AND SiteSystemStatus = 0" -ErrorAction Stop | Select-Object -First 1
+            if ($pNode -and $null -ne $pNode.ServerState) {
+                $ps = [int]$pNode.ServerState
+                $passiveFailed = ($ps -gt 0 -and ('{0:X4}' -f ($ps % 65536)).Substring(0, 1) -eq 'F')
+                if ($passiveFailed) { Write-DscStatus ("ContainsPassive: passive $($containsPassive.vmName) is present but ConfigMgr reports a FAILED ServerState (0x{0:X8}); will re-run InstallPassiveSiteServer.ps1 to drive RetryInstallation." -f $ps) }
+            }
+        }
+        catch {}
+
+        if ($passiveQueryFailed -and $Configuration.InstallPassive.Status -eq "Completed") {
+            Write-DscStatus "ContainsPassive: the passive role query failed on $passiveFQDN, so presence is unknown; InstallPassive is already Completed, so NOT re-running the install on an unknown answer."
+        }
+        $passiveMissing = ((-not $passiveExists) -and (-not $passiveQueryFailed))
+
+        if ($Configuration.InstallPassive.Status -ne "Completed" -or $passiveMissing -or $passiveFailed) {
+            Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
+            Set-Location $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+            $passiveRan = $true
+        }
+        else {
+            Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified + ServerState healthy on $($containsPassive.vmName))"
+        }
+    }
+
+    if ($passiveRan) {
+        # Wait for SMS_EXECUTIVE to start on the passive node before proceeding.
+        # InstallPassiveSiteServer.ps1 exits at SubStageId 917515, but the
+        # SMS_EXECUTIVE service may still be starting on the passive node.
+        $passiveSmsSvc = $null
+        $maxPassiveWait = 10
+        $passiveWaitDelay = 30
+        for ($pw = 1; $pw -le $maxPassiveWait; $pw++) {
+            try {
+                $passiveSmsSvc = Get-Service -ComputerName $containsPassive.vmName -Name 'SMS_EXECUTIVE' -ErrorAction Stop
+                if ($passiveSmsSvc.Status -eq 'Running') {
+                    Write-DscStatus "SMS_EXECUTIVE is Running on $($containsPassive.vmName) (attempt $pw)"
+                    break
+                }
+                Write-DscStatus "SMS_EXECUTIVE on $($containsPassive.vmName): $($passiveSmsSvc.Status) (attempt $pw/$maxPassiveWait)"
+            }
+            catch {
+                Write-DscStatus "SMS_EXECUTIVE not yet reachable on $($containsPassive.vmName): $($_.Exception.Message) (attempt $pw/$maxPassiveWait)"
+            }
+            if ($pw -lt $maxPassiveWait) { Start-Sleep -Seconds $passiveWaitDelay }
+        }
+        if (-not $passiveSmsSvc -or $passiveSmsSvc.Status -ne 'Running') {
+            Write-DscStatus "WARNING: SMS_EXECUTIVE not Running on $($containsPassive.vmName) after $maxPassiveWait attempts" -Warning
+        }
+    }
+
+    # Authoritative passive completion gate (runs for BOTH the parallel-join and
+    # the synchronous-dot-source paths above). InstallPassiveSiteServer.ps1 can
+    # abort EARLY -- before it ever reaches its own install-monitoring loop --
+    # e.g. when the remote content-library file server isn't ready yet, or a
+    # remote-session call throws and is swallowed by Invoke-DotSource. In that
+    # case there is nothing for the join/Wait-Job to wait on, the passive node is
+    # left empty, and Phase 8 would otherwise stamp Completed on a broken passive
+    # (Phase 11 then fails on the missing SMS_EXECUTIVE). Verify the ground truth
+    # here and self-heal with ONE inline retry before Phase 8 moves on; if it
+    # still isn't healthy, leave InstallPassive not-Completed so the next Phase 8
+    # pass retries it (InstallPassiveSiteServer.ps1 is idempotent).
+    $DomainFullName = $deployConfig.vmOptions.domainName
+    $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
+
+    $passiveHealthy = {
+        $role = Get-PassiveSiteServerRole -Fqdn $passiveFQDN
+        if (-not $role) { return $false }
+        # CM-authoritative failure gate. Role present + SMS_EXECUTIVE Running is
+        # NECESSARY but NOT SUFFICIENT: CM can report the passive add "Installation
+        # failed" (SMS_SCI_SysResUse.ServerState low word starts with 'F', e.g.
+        # 0x0001FFFF SiteServerInstallationFailed / 0x0002FFFF PREREQ_ERROR) while
+        # the service is up -- proven live (transient RegAsm DLL-registration
+        # failure on the passive node). Treat a CM-failed ServerState as NOT healthy
+        # so the inline retry below fires instead of stamping Completed on a broken
+        # passive. Best-effort: if ServerState is unavailable (older/remote
+        # provider) fall through to the role+SMS_EXECUTIVE signal so we don't regress.
+        try {
+            $passiveSci = Get-WmiObject -Namespace "root\SMS\site_$($ThisVM.siteCode)" -Class SMS_SCI_SysResUse `
+                -Filter "RoleName = 'SMS Site Server' AND SiteSystemStatus = 0" -ErrorAction Stop | Select-Object -First 1
+            if ($passiveSci -and ($null -ne $passiveSci.ServerState)) {
+                $ss = [int]$passiveSci.ServerState
+                if ($ss -gt 0 -and (('{0:X4}' -f ($ss % 65536)).Substring(0, 1) -eq 'F')) { return $false }
+            }
+        }
+        catch { }
+        try {
+            $svc = Get-Service -ComputerName $containsPassive.vmName -Name 'SMS_EXECUTIVE' -ErrorAction Stop
+            return ($svc.Status -eq 'Running')
+        }
+        catch { return $false }
+    }
+
+    if (-not (& $passiveHealthy)) {
+        Write-DscStatus "Passive site server on $($containsPassive.vmName) is not healthy after install (SMS Site Server role and/or SMS_EXECUTIVE missing). Retrying InstallPassiveSiteServer.ps1 once before completing Phase 8." -Warning
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+
+        # Settle wait for SMS_EXECUTIVE to come up after the retry (5 min).
+        for ($pw = 1; $pw -le 10; $pw++) {
+            if (& $passiveHealthy) { break }
+            Start-Sleep -Seconds 30
+        }
+    }
+
+    if (& $passiveHealthy) {
+        $null = Set-ScriptWorkflowStep -ConfigurationFile $ConfigurationFile -Step 'InstallPassive' -Status 'Completed' -StampEndTime
+        Write-DscStatus "Passive site server verified healthy on $($containsPassive.vmName) (SMS Site Server role present, SMS_EXECUTIVE Running)."
+    }
+    else {
+        Write-DscStatus "WARNING: passive site server on $($containsPassive.vmName) still not healthy after an inline retry; InstallPassive left not-Completed so the next Phase 8 pass retries it." -Warning
+    }
 }
 
 Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
 if ($CurrentRole -eq "CAS") {
     #If we are on the CAS, we can mark this early, to allow the primary to start while we run other tasks.
     # Mark ScriptWorkflow completed for DSC to move on.
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $Configuration.ScriptWorkflow.Status = "Completed"
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 }
 
 
-if (-not $deployConfig.cmOptions.UsePKI) {
+# Per-VM cmOptions (multi-hierarchy safe).
+$cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+if (-not $cmo.UsePKI) {
     # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
     Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
-    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+    try {
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
+    }
+    catch {
+        Write-DscStatus "EnableEHTTP.ps1 failed: $_" -Warning
+    }
 }
 else {
     Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
-    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+    try {
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
+    }
+    catch {
+        Write-DscStatus "EnableHTTPS.ps1 failed: $_" -Warning
+    }
 }
 
-if ($TopLevelSiteServer) {
+# Object pre-population (perfloading) runs FIRST, while the only SMS Provider
+# is the one CM setup installed on this site server and is therefore stable.
+# It MUST NOT overlap the additional/remote SMS Provider install below:
+# setupwpf /SDKINST registers a provider, which recycles the site's SMS
+# Provider host / root\SMS\site_<code> WMI namespace, and perfloading makes
+# heavy WMI calls into that namespace. Running them concurrently crashed
+# perfloading mid-run with a terminating WBEM critical error (the SMS_Collection
+# ExecQuery for 'MEMLABS-Office Install Targets' threw 0x8004108A, preceded by
+# 5 baseline imports failing 'The SMS Provider reported an error'), which left
+# the ~50 MEMLABS device collections and the Office Install Targets collection
+# uncreated on every hierarchy Primary. So: perfloading to completion first,
+# provider install strictly after.
+if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateObjects -eq $true) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
+    try {
+        Assert-MemLabsPerfloadingContract -Script $ScriptFile
+    }
+    catch {
+        Write-DscStatus "Perfloading preflight failed before object creation: $($_.Exception.Message)" -Failure
+        return
+    }
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
-
+    # Retry the whole perfloading run: it is idempotent (every create is guarded
+    # by a Get-CM* existence check / already-subscribed check), so a re-run picks
+    # up wherever a transient SMS Provider / WMI hiccup aborted the prior pass.
+    $perfMaxAttempts = 3
+    for ($perfAttempt = 1; $perfAttempt -le $perfMaxAttempts; $perfAttempt++) {
+        try {
+            if ($perfAttempt -gt 1) {
+                Write-DscStatus "Retrying perfloading (attempt $perfAttempt of $perfMaxAttempts)"
+            }
+            # -Rethrow: Invoke-DotSource normally swallows a script's runtime
+            # exception (logs a WARNING and returns). We OWN the retry here, so
+            # ask it to re-throw on failure -- otherwise the loop could never see
+            # an aborted perfloading run and would 'succeed' on the first pass
+            # even when perfloading died partway (e.g. the SMS Provider/WMI crash).
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow -CallerOwnsRetry
+            break
+        }
+        catch {
+            Write-DscStatus "Perfloading.ps1 failed (attempt $perfAttempt of $perfMaxAttempts): $_" -Warning
+            if ($perfAttempt -lt $perfMaxAttempts) {
+                Start-Sleep -Seconds 30
+            }
+            else {
+                Write-DscStatus "Perfloading.ps1 did not complete after $perfMaxAttempts attempts. Refusing to report Phase 8 success with incomplete MEMLABS pre-population. Last error: $($_.Exception.Message)" -Failure
+                return
+            }
+        }
+    }
 }
 
-  # Install Providers
-  Write-DscStatus "Running InstallProvider.ps1"
-  $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
-  Set-Location $LogPath
-  . $ScriptFile $ConfigFilePath $LogPath
-  
-# Mark ScriptWorkflow completed for DSC to move on.
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-$Configuration.ScriptWorkflow.Status = "Completed"
-$Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-Write-DscStatus "Complete!"
+# Additional/remote SMS Provider installs (InstallProvider.ps1) run strictly
+# after perfloading. Do not create an isolated job when the config requests none.
+$installProviderCount = @($deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true }).Count
+if ($installProviderCount -eq 0) {
+    Write-DscStatus "Skipping InstallProvider.ps1: no VM in this config has InstallSMSProv=true"
+}
+else {
+$installProviderFailed = $false
+$installProviderJob = Start-Job -Name "InstallProvider" -ScriptBlock {
+    param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
+    # Dot-source ScriptFunctions.ps1 so InstallProvider.ps1 can call Write-DscStatus.
+    . (Join-Path -Path $jobScriptRoot -ChildPath "ScriptFunctions.ps1")
+    Set-Location $jobLogPath
+    & (Join-Path -Path $jobScriptRoot -ChildPath "InstallProvider.ps1") -ConfigFilePath $jobConfigFilePath -LogPath $jobLogPath
+} -ArgumentList $ConfigFilePath, $LogPath, $PSScriptRoot
+Write-DscStatus "Started InstallProvider.ps1 job (after perfloading)"
 
-if ($ThisVM.role -ne "CAS") {
-    Write-DscStatus "Always Running PushClients.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+  # Install Providers — join the background job started above.
+  # InstallProvider.ps1 self-bounds every provider it installs: 2 attempts of
+  # (10m stale-setupwpf + 60m setupwpf + 5m drain + 5m verify) plus 15m of site
+  # recovery between them. Budget that per provider over a floor. An unbounded
+    # join hung Phase 8 for hours when the job itself failed to run.
+  $installProviderTimeout = 600 + (10800 * $installProviderCount)
+  Write-DscStatus "Waiting for InstallProvider.ps1 job to complete (up to $([int]($installProviderTimeout / 60)) min)"
+  $installProviderWaitStart = Get-Date
+  try {
+      if (Wait-Job -Job $installProviderJob -Timeout $installProviderTimeout) {
+          # Write-DscStatus writes status/log to disk from the job runspace, so the
+          # pipeline output isn't needed here; discard it. -ErrorAction Stop is what
+          # actually turns a throw inside the job into a catchable terminating error;
+          # by default Receive-Job only emits it as a non-terminating error record.
+          Receive-Job -Job $installProviderJob -ErrorAction Stop | Out-Null
+          # Close the "Waiting ..." line out. Without it the last thing in the log is
+          # an open-ended wait with a 5-min cap, which reads as a stall no matter how
+          # fast the join actually was.
+          $installProviderElapsed = [math]::Round(((Get-Date) - $installProviderWaitStart).TotalSeconds, 1)
+          if ($installProviderJob.State -eq 'Failed') {
+              Write-DscStatus "InstallProvider.ps1 job FAILED (state=Failed) after $($installProviderElapsed)s -- see the [InstallProv] lines above; any flagged provider is NOT installed."
+              $installProviderFailed = $true
+          }
+          else {
+              Write-DscStatus "InstallProvider.ps1 job finished (state=$($installProviderJob.State)) in $($installProviderElapsed)s"
+          }
+      }
+      else {
+          Write-DscStatus "InstallProvider.ps1 job did not finish within $installProviderTimeout s (state=$($installProviderJob.State)) -- abandoning it." -Warning
+          $installProviderFailed = $true
+          Stop-Job -Job $installProviderJob -ErrorAction SilentlyContinue
+      }
+  }
+  catch {
+      Write-DscStatus "InstallProvider.ps1 failed: $_" -Warning
+      $installProviderFailed = $true
+  }
+  finally {
+      Remove-Job -Job $installProviderJob -Force -ErrorAction SilentlyContinue
+  }
+  if ($installProviderFailed) {
+      Write-DscStatus "Additional SMS Provider installation did not converge. Stopping Phase 8 before workflow completion." -Failure
+      return
+  }
+}
+  
+# CAS already marked JSON Completed above to unblock DSC phases.
+# Signal Complete! now so the host advances CAS past Phase 8 while
+# PushClients, EnableBLM, etc. continue running in the background.
+# Non-CAS: defer Complete! until after all post-install work finishes
+# so Phase 11 validates a stable, fully-configured site.
+if ($CurrentRole -eq "CAS") {
     Write-DscStatus "Complete!"
 }
 
+# PushClients first so auto-push has maximum time to install the agent on
+# all targets while EnableBLM configures policies and collections.
+if ($ThisVM.role -ne "CAS") {
+    # Cross-tier PKI pre-stage handshake. ScriptWorkflow runs inside the guest
+    # and cannot PSDirect into the client VMs, but the HOST monitor can. Emit a
+    # sentinel status the host watches for, then wait for its matching receipt to
+    # pulse + verify the offline-root/sub-CA chain into every push client's
+    # LocalMachine cert stores BEFORE auto-push runs ccmsetup. Without the full
+    # chain the client fails GetDPLocations (0x87d00454) over HTTPS.
+    #
+    # Only request the verified host pre-stage
+    # when there is actually a push target that is NOT yet a registered client.
+    # The Primary IS the site server, so we query our own SMS provider: if every
+    # push target already shows SMS_R_System.Client = 1 the agent is already
+    # installed -- which over HTTPS means ccmsetup already built the chain
+    # successfully -- so pulsing would be wasted work (and a wasted 60s) on every
+    # redeploy. A target with no row or Client != 1 still needs ccmsetup to run,
+    # so we want the host to pre-stage its certs first. Non-PKI deploys, and any
+    # query failure, skip/fall-through safely. 
+    if ($cmo.UsePKI) {
+        $needCertPulse = $true
+        try {
+            $pushTargets = @()
+            if ($ThisVM.thisParams -and $ThisVM.thisParams.ClientPush) {
+                $pushTargets = @($ThisVM.thisParams.ClientPush | Where-Object { $_ -and $_ -ne $ThisVM.vmName })
+            }
+            if ($pushTargets.Count -eq 0) {
+                $needCertPulse = $false
+                Write-DscStatus "No push targets configured; skipping host cert pre-stage."
+            }
+            elseif ($ThisVM.siteCode) {
+                $cpNs = "root\sms\site_$($ThisVM.siteCode)"
+                $notYetClient = @()
+                foreach ($t in $pushTargets) {
+                    $isClient = $false
+                    $rows = @(Get-WmiObject -Namespace $cpNs -Class SMS_R_System -Filter "Name='$t'" -ErrorAction SilentlyContinue)
+                    foreach ($row in $rows) {
+                        if ($row -and ([int]$row.Client -eq 1)) { $isClient = $true; break }
+                    }
+                    if (-not $isClient) { $notYetClient += $t }
+                }
+                if ($notYetClient.Count -eq 0) {
+                    $needCertPulse = $false
+                    Write-DscStatus "All $($pushTargets.Count) push target(s) already report Client=1; skipping host cert pre-stage."
+                }
+                else {
+                    Write-DscStatus "$($notYetClient.Count) of $($pushTargets.Count) push target(s) not yet client ($($notYetClient -join ', ')); requesting host cert pre-stage."
+                }
+            }
+        }
+        catch {
+            $needCertPulse = $true
+            Write-DscStatus "Client-state check failed ($($_.Exception.Message)); requesting host cert pre-stage to be safe." -Warning
+        }
+        if ($needCertPulse) {
+            try {
+                Wait-MemLabsClientCertificatePrestage -RunId $ScriptWorkflowRunId -Targets $pushTargets
+            }
+            catch {
+                Write-DscStatus "PKI pre-stage failed before client push: $($_.Exception.Message)" -Failure
+                return
+            }
+        }
 
+        # A fresh HTTPS flip leaves each MP's RUNNING http.sys/Schannel/IIS holding
+        # PRE-HTTPS TLS state, so the MP's DeviceCertAuthModule cannot negotiate the
+        # client PKI cert on /ccm_system (NegotiateClientCertificate -> fNegotiated=
+        # false -> HTTP 403.7 "Client certificate required"). The client then fails
+        # ccmsetup GetDPLocations with 0x87d00454 and the agent never installs.
+        # EnableHTTPS only flips the SITE to HTTPS-only; the MP boxes keep serving
+        # the stale TLS state until they are cycled. Proven root cause + fix: a COLD
+        # BOOT of the MP makes Schannel re-read the cert binding + trusted-issuer set
+        # and the push succeeds. (Single-MP sites happen to get cycled at the right
+        # moment; a SECOND MP that never gets a post-HTTPS restart keeps failing
+        # deterministically -- the multi-MP delta we hit.) So bounce every MP in
+        # THIS site once, right before auto-push:
+        #   - remote MPs: full reboot (flushes http.sys SSL cache AND the
+        #     LSASS/Schannel trusted-issuer cache, which iisreset alone does not),
+        #   - the local site-server MP: iisreset + CcmExec restart (we run inside
+        #     this box's ScriptWorkflow task and cannot reboot ourselves).
+        # Gated by $needCertPulse (only when push targets aren't yet Client=1 -- if
+        # every target already installed, the MP already negotiated certs fine) and
+        # a one-shot flag so retries / -StartPhase re-runs don't re-bounce.
+        $mpBounceFlag = Join-Path -Path $LogPath -ChildPath "MPCertNegotiationBounce.flag"
+        if ($needCertPulse -and -not (Test-Path $mpBounceFlag)) {
+            $siteMPs = @()
+            try {
+                $siteMPs = @($deployConfig.virtualMachines | Where-Object { $_.installMP -and $_.siteCode -eq $ThisVM.siteCode })
+            }
+            catch {
+                Write-DscStatus "MP TLS bounce: failed to enumerate MPs ($($_.Exception.Message)); skipping" -Warning
+                $siteMPs = @()
+            }
+            if ($siteMPs.Count -gt 0) {
+                Write-DscStatus "MP TLS bounce: refreshing client-cert negotiation on $($siteMPs.Count) MP(s) in site $($ThisVM.siteCode) before client push"
+                foreach ($mp in $siteMPs) {
+                    if ($mp.vmName -eq $ThisVM.vmName) {
+                        # Local site-server MP -- cannot reboot mid-workflow.
+                        Write-DscStatus "MP TLS bounce: local iisreset + CcmExec restart on $($mp.vmName)"
+                        try { & iisreset.exe /restart | Out-Null }
+                        catch { Write-DscStatus "MP TLS bounce: iisreset on $($mp.vmName) failed: $($_.Exception.Message)" -Warning }
+                        try { Restart-Service -Name CcmExec -Force -ErrorAction SilentlyContinue } catch {}
+                        continue
+                    }
+                    # Remote MP -- full reboot to clear stale TLS state.
+                    Write-DscStatus "MP TLS bounce: rebooting MP $($mp.vmName) to refresh TLS client-cert state"
+                    try {
+                        Restart-Computer -ComputerName $mp.vmName -Force -ErrorAction Stop
+                    }
+                    catch {
+                        Write-DscStatus "MP TLS bounce: reboot of $($mp.vmName) failed ($($_.Exception.Message)); skipping" -Warning
+                        continue
+                    }
+                    # Let the box actually go down before polling, so we don't read
+                    # the pre-reboot 'Running' state and exit early.
+                    Start-Sleep -Seconds 45
+                    $mpHealthy = $false
+                    for ($i = 1; $i -le 20; $i++) {
+                        try {
+                            $w3 = Get-Service -ComputerName $mp.vmName -Name 'W3SVC' -ErrorAction Stop
+                            if ($w3.Status -eq 'Running') {
+                                Write-DscStatus "MP TLS bounce: $($mp.vmName) back up (W3SVC Running, attempt $i)"
+                                $mpHealthy = $true
+                                break
+                            }
+                        }
+                        catch {}
+                        Start-Sleep -Seconds 30
+                    }
+                    if (-not $mpHealthy) {
+                        Write-DscStatus "MP TLS bounce: $($mp.vmName) not confirmed healthy after reboot; continuing (auto-push will retry)" -Warning
+                    }
+                }
+            }
+            try { Set-Content -Path $mpBounceFlag -Value "bounced $(Get-Date -Format s)" -Force -Encoding ASCII } catch {}
+        }
+
+        # The one-shot TLS bounce flag survives later phase reruns, and W3SVC can
+        # be Running while an MP pool is rapid-fail disabled. Exercise the real
+        # MPLIST endpoint every time we are about to push a not-yet-client VM.
+        # If unhealthy, reset the shared WAS/W3SVC listener stack once and retry.
+        # Do not launch client push into a known-broken MP: ccmsetup otherwise
+        # parks every target in an HTTP 503 retry loop for ten minutes at a time.
+        if ($needCertPulse) {
+            $probeMpEndpoint = {
+                param([string]$PoolName)
+                try { Import-Module WebAdministration -ErrorAction Stop | Out-Null }
+                catch { return "UNHEALTHY|WebAdministration import failed: $($_.Exception.Message)" }
+
+                $pool = Get-WebAppPoolState -Name $PoolName -ErrorAction SilentlyContinue
+                $poolState = if ($pool) { "$($pool.Value)" } else { 'not found' }
+                if ($poolState -ne 'Started') {
+                    # A stopped pool IS the fault, so capture the cause HERE. Phase 11 owns
+                    # the full WAS/5139 forensics but never runs if Phase 8 fails first, and
+                    # a bare 'pool=Stopped' says nothing about why WAS killed it.
+                    $wasWhy = @()
+                    try {
+                        $wasEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = (Get-Date).AddHours(-2) } -MaxEvents 200 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ProviderName -match 'WAS|W3SVC' -and $_.Message -match [regex]::Escape($PoolName) } |
+                                Select-Object -First 6)
+                        foreach ($ev in $wasEvents) {
+                            $errText = ''
+                            try {
+                                [xml]$evXml = $ev.ToXml()
+                                $hex = "$($evXml.Event.EventData.Binary)".Trim()
+                                if ($hex.Length -ge 8 -and $hex -match '^[0-9A-Fa-f]+$') {
+                                    $bytes = [byte[]]@(0, 2, 4, 6 | ForEach-Object { [Convert]::ToByte($hex.Substring($_, 2), 16) })
+                                    $hr = [BitConverter]::ToUInt32($bytes, 0)
+                                    $errText = " err=0x$($hr.ToString('X8'))"
+                                    if ((($hr -shr 16) -band 0x1FFF) -eq 7) {
+                                        $win32 = [int]($hr -band 0xFFFF)
+                                        $errText += " ($((New-Object System.ComponentModel.Win32Exception -ArgumentList $win32).Message))"
+                                    }
+                                }
+                            }
+                            catch { }
+                            $wasWhy += "$($ev.TimeCreated.ToString('HH:mm:ss')) id=$($ev.Id)$errText"
+                        }
+                    }
+                    catch { $wasWhy += "WAS event read failed: $($_.Exception.Message)" }
+                    $wasSummary = if ($wasWhy.Count) { "; WAS: $($wasWhy -join ' | ')" } else { '; no WAS/W3SVC events naming the pool in 2h' }
+
+                    # 5139 err=0x8007007E (ERROR_MOD_NOT_FOUND) means w3wp could not load a
+                    # DLL. IIS names the offending path itself in Application event 2280
+                    # ("The Module DLL <path> failed to load"), so read that rather than
+                    # guess; only if nothing named it, fall back to proving every registered
+                    # globalModule image still exists. Pool bitness is included because a
+                    # bitness64 module in a 32-bit pool fails the same way.
+                    $modWhy = @()
+                    try {
+                        $poolCfg = Get-Item "IIS:\AppPools\$PoolName" -ErrorAction SilentlyContinue
+                        if ($poolCfg) { $modWhy += "pool runtime=$($poolCfg.managedRuntimeVersion) 32bit=$($poolCfg.enable32BitAppOnWin64) identity=$($poolCfg.processModel.identityType)" }
+                    }
+                    catch { }
+                    $namedDll = @()
+                    try {
+                        $appEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddHours(-2) } -MaxEvents 300 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ProviderName -match 'IIS|W3SVC|Application Error' -and $_.Id -in 2280, 2282, 2214, 1000 } |
+                                Select-Object -First 3)
+                        foreach ($ev in $appEvents) {
+                            $msg = (($ev.Message -replace '\s+', ' ').Trim())
+                            $namedDll += "$($ev.TimeCreated.ToString('HH:mm:ss')) id=$($ev.Id): $($msg.Substring(0, [Math]::Min(140, $msg.Length)))"
+                        }
+                    }
+                    catch { }
+                    if ($namedDll.Count -eq 0) {
+                        try {
+                            $ahc = [xml](Get-Content "$env:windir\system32\inetsrv\config\applicationHost.config" -Raw -ErrorAction Stop)
+                            foreach ($gm in $ahc.configuration.'system.webServer'.globalModules.add) {
+                                $img = [Environment]::ExpandEnvironmentVariables("$($gm.image)")
+                                if ($img -and -not (Test-Path -LiteralPath $img)) { $namedDll += "globalModule '$($gm.name)' image MISSING: $img" }
+                            }
+                            if ($namedDll.Count -eq 0) { $namedDll += 'no IIS 2280/2282 event and every globalModule image exists on disk' }
+                        }
+                        catch { $namedDll += "applicationHost.config read failed: $($_.Exception.Message)" }
+                    }
+                    $modWhy += $namedDll
+                    $modSummary = if ($modWhy.Count) { "; MODULES: $($modWhy -join ' | ')" } else { '' }
+                    return "UNHEALTHY|pool=$poolState$wasSummary$modSummary"
+                }
+
+                $domain = (Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue).Domain
+                $fqdn = if ($domain) { "$env:COMPUTERNAME.$domain" } else { $env:COMPUTERNAME }
+                $lastResult = 'no response'
+                # http is NOT optional here. On a PKI site the SMS_MP vdir carries
+                # sslFlags=Ssl,SslNegotiateCert, and .NET Framework's HttpWebRequest cannot do
+                # mid-request client-cert negotiation over TLS 1.3 (renegotiation does not exist
+                # in 1.3), so HTTPS throws a connection-level error against a PERFECTLY HEALTHY
+                # MP. Measured on PL-PATTYDP: a raw SslStream handshake succeeded (Tls13/Aes256)
+                # with the expected cert bound while Invoke-WebRequest reported "the underlying
+                # connection was closed", and http answered 403 (SSL required) from a live
+                # worker. Probing https only would fail the gate on every healthy PKI lab.
+                foreach ($scheme in @('https', 'http')) {
+                    $url = "$scheme`://$fqdn/sms_mp/.sms_aut?MPLIST"
+                    try {
+                        if ($scheme -eq 'https') {
+                            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                        }
+                        $request = [System.Net.HttpWebRequest]::Create($url)
+                        $request.Timeout = 15000
+                        $request.UseDefaultCredentials = $true
+                        $request.AllowAutoRedirect = $false
+                        $response = $request.GetResponse()
+                        $statusCode = [int]$response.StatusCode
+                        $response.Close()
+                        return "HEALTHY|$url returned HTTP $statusCode"
+                    }
+                    catch [System.Net.WebException] {
+                        $statusCode = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                        # Any status at all proves a worker answered. 503 is the one fault this
+                        # gate exists for (rapid-fail-disabled pool), so only 503 stays unhealthy.
+                        if ($statusCode -and $statusCode -ne 503) {
+                            return "HEALTHY|$url returned HTTP $statusCode (a worker answered)"
+                        }
+                        $lastResult = if ($statusCode) { "$url returned HTTP $statusCode" } else { "$url failed: $($_.Exception.Message)" }
+                    }
+                    catch { $lastResult = "$url failed: $($_.Exception.Message)" }
+                }
+
+                $pool = Get-WebAppPoolState -Name $PoolName -ErrorAction SilentlyContinue
+                $poolState = if ($pool) { "$($pool.Value)" } else { 'not found' }
+                return "UNHEALTHY|pool=$poolState; $lastResult"
+            }
+
+            $resetMpListener = {
+                param([string]$PoolName)
+                try {
+                    Import-Module WebAdministration -ErrorAction Stop | Out-Null
+                    Stop-Service -Name W3SVC -Force -ErrorAction SilentlyContinue
+                    Restart-Service -Name WAS -Force -ErrorAction Stop
+                    Start-Service -Name W3SVC -ErrorAction Stop
+                    $null = Start-WebAppPool -Name $PoolName -ErrorAction Stop
+                    Start-Sleep -Seconds 15
+                    $pool = Get-WebAppPoolState -Name $PoolName -ErrorAction SilentlyContinue
+                    $poolState = if ($pool) { "$($pool.Value)" } else { 'not found' }
+                    return "RESET|pool=$poolState"
+                }
+                catch { return "RESET-FAILED|$($_.Exception.Message)" }
+            }
+
+            $siteMPsForHealth = @($deployConfig.virtualMachines | Where-Object { $_.installMP -and $_.siteCode -eq $ThisVM.siteCode })
+            foreach ($mp in $siteMPsForHealth) {
+                $endpointHealthy = $false
+                $lastHealth = 'UNHEALTHY|not probed'
+                for ($healthAttempt = 1; $healthAttempt -le 10; $healthAttempt++) {
+                    try {
+                        if ($mp.vmName -eq $ThisVM.vmName) {
+                            $healthOutput = @(& $probeMpEndpoint 'SMS Management Point Pool')
+                        }
+                        else {
+                            $healthOutput = @(Invoke-Command -ComputerName $mp.vmName -ScriptBlock $probeMpEndpoint -ArgumentList 'SMS Management Point Pool' -ErrorAction Stop)
+                        }
+                        if ($healthOutput.Count -gt 0) { $lastHealth = "$($healthOutput[-1])" }
+                    }
+                    catch { $lastHealth = "UNHEALTHY|probe threw: $($_.Exception.Message)" }
+
+                    if ($lastHealth -like 'HEALTHY|*') {
+                        Write-DscStatus "MP pre-push health: $($mp.vmName) $lastHealth (attempt $healthAttempt)"
+                        $endpointHealthy = $true
+                        break
+                    }
+
+                    if ($healthAttempt -eq 1) {
+                        Write-DscStatus "MP pre-push health: $($mp.vmName) $lastHealth; resetting WAS/W3SVC listener stack" -Warning
+                        try {
+                            if ($mp.vmName -eq $ThisVM.vmName) {
+                                $resetOutput = @(& $resetMpListener 'SMS Management Point Pool')
+                            }
+                            else {
+                                $resetOutput = @(Invoke-Command -ComputerName $mp.vmName -ScriptBlock $resetMpListener -ArgumentList 'SMS Management Point Pool' -ErrorAction Stop)
+                            }
+                            if ($resetOutput.Count -gt 0) {
+                                Write-DscStatus "MP pre-push health: $($mp.vmName) $($resetOutput[-1])"
+                            }
+                        }
+                        catch { Write-DscStatus "MP pre-push health: $($mp.vmName) listener reset threw: $($_.Exception.Message)" -Warning }
+                    }
+                    elseif ($healthAttempt -eq 10) {
+                        # Attempts 2..9 are deliberately quiet; the last one records what the
+                        # endpoint still looked like after the reset had 2+ minutes to hold.
+                        Write-DscStatus "MP pre-push health: $($mp.vmName) still $lastHealth on final attempt $healthAttempt" -Warning
+                    }
+                    Start-Sleep -Seconds 15
+                }
+
+                if (-not $endpointHealthy) {
+                    # NEVER throw here. This is top-level in the scheduled-task script, so a
+                    # throw exits ScriptWorkflow, the liveness watchdog restarts it, and the
+                    # entire post-install sequence replays -- forever, because a rapid-fail
+                    # disabled MP pool never recovers on its own.
+                    $mpPrePushHealthy = $false
+                    Write-DscStatus "MP pre-push health failed for $($mp.vmName) after 10 attempts: $lastHealth" -Warning
+                }
+            }
+        }
+    }
+    if ($mpPrePushHealthy -eq $false) {
+        Write-DscStatus "Skipping PushClients.ps1: no healthy MP endpoint in site $($ThisVM.siteCode). ccmsetup would park every target in an HTTP 503 retry loop; fix the MP and re-run Phase 8." -Warning
+    }
+    else {
+        Write-DscStatus "Always Running PushClients.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
+        Set-Location $LogPath
+        try {
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        }
+        catch {
+            Write-DscStatus "PushClients.ps1 failed: $_" -Warning
+        }
+    }
+}
+
+# EnableBLM only needs AD-discovered devices (not pushed clients) for its
+# collection query rules, so it is safe to run after PushClients kicks off
+# auto-push. If PushClients fails, EnableBLM still runs.
+if ($CurrentRole -eq "Primary") {
+    Write-DscStatus "Running EnableBLM.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
+    Set-Location $LogPath
+    try {
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    }
+    catch {
+        Write-DscStatus "EnableBLM.ps1 failed: $_" -Warning
+    }
+}
+
+# Reset SMS component status counts on site servers. New installs accumulate
+# transient warnings/errors from components that started before all their
+# dependencies were ready (SMS_DATABASE_NOTIFICATION_MONITOR,
+# SMS_DISCOVERY_DATA_MANAGER, etc.). Once the site is fully wired these
+# components are healthy but their status counters still show the startup
+# noise, which Phase 11 validation flags as WARN. This is the same request the
+# console's "Reset Counts" action and Clear-CMComponentStatusMessageCount send.
+# Run it once per site: repeating it on every Phase 8 pass would erase real
+# post-install evidence.
+if ($CurrentRole -in @("Primary", "CAS", "Secondary")) {
+    try {
+        $svrSiteCode = $ThisVM.siteCode
+        if ($svrSiteCode) {
+            $componentResetFlag = "C:\staging\DSC\ComponentStatusCountsReset.$svrSiteCode.flag"
+            if (Test-Path -LiteralPath $componentResetFlag) {
+                Write-DscStatus "SMS component startup counts were already reset for site $svrSiteCode -- skipping"
+            }
+            else {
+                $ns = "root\sms\site_$svrSiteCode"
+                $sums = @(Get-WmiObject -Namespace $ns -Class SMS_ComponentSummarizer -ErrorAction Stop)
+                $sumsToReset = @($sums | Where-Object { [int]$_.Errors -gt 0 -or [int]$_.Warnings -gt 0 -or [int]$_.Infos -gt 0 })
+                if ($sumsToReset.Count -eq 0) {
+                    Write-DscStatus "No SMS component startup counts to reset for site $svrSiteCode"
+                    Set-Content -LiteralPath $componentResetFlag -Value (Get-Date -Format o) -Encoding ASCII -Force
+                }
+                else {
+                    Write-DscStatus "Requesting SMS component status count reset for site $svrSiteCode ($($sumsToReset.Count) summarizer rows carry startup noise)"
+                    # SMS_COMPONENT_STATUS_SUMMARIZER owns these counters and only honors a
+                    # "Reset SMS_COMPONENT_STATUS_SUMMARIZER:<epochSeconds>" property list in the
+                    # proposed site control file. Values[0..3] identify the requester (status
+                    # message text only); Values[4..] are the targets, where C/M/T accept "*".
+                    # SMS_ComponentSummarizer.DeleteStatistics() is NOT this: it is declared
+                    # static (so it is absent from Get-WmiObject instances) and its provider
+                    # body only stamps Summarizer_Components.Replicate = -1.
+                    $resetEpoch = [int64]([datetime]::UtcNow - [datetime]::new(1970, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)).TotalSeconds
+                    $propList = ([wmiclass]("\\.\{0}:SMS_SCI_PropertyList" -f $ns)).CreateInstance()
+                    $propList.PropertyListName = "Reset SMS_COMPONENT_STATUS_SUMMARIZER:$resetEpoch"
+                    $propList.SiteCode = $svrSiteCode
+                    $propList.FileType = 2   # proposed site control file
+                    $propList.Values = [string[]]@(
+                        $svrSiteCode
+                        $env:COMPUTERNAME
+                        "$env:USERDOMAIN\$env:USERNAME"
+                        'MemLabs Phase 8'
+                        'C=*,M=*,T=*,I=0,W=0,E=0'
+                    )
+                    $putPath = $propList.Put()
+                    Set-Content -LiteralPath $componentResetFlag -Value (Get-Date -Format o) -Encoding ASCII -Force
+                    # Applied on the summarizer's next cycle, not by this call. If it never
+                    # lands, Phase 11 validation still reports the counts it was meant to clear.
+                    Write-DscStatus "Queued component count reset for site $svrSiteCode in the proposed site control file ($($putPath.RelativePath)); the summarizer applies it on its next cycle"
+                }
+            }
+        }
+    }
+    catch {
+        Write-DscStatus "WARNING: Failed to reset SMS component status counts: $($_.Exception.Message)"
+    }
+}
+
+# Non-CAS: wait for site components to stabilize before signaling completion.
+# After E-HTTP/HTTPS, PushClients, EnableBLM, and component resets, many
+# SMS_EXECUTIVE components are still starting. Polling here prevents Phase 11
+# from failing on "27 components not Started" race conditions.
+if ($CurrentRole -ne "CAS" -and $CurrentRole -in @("Primary", "Secondary")) {
+    $stabSiteCode = $ThisVM.siteCode
+    if ($stabSiteCode) {
+        # Same ignore list as Phase 11 (Common.Validation.Functional.ps1)
+        # Conditionally ignore WSUS/SRS components only when those roles
+        # aren't installed for this site (checked via $deployConfig).
+        $hasSUP = $deployConfig.virtualMachines | Where-Object {
+            ($_.installSUP -or $_.InstallSUP) -and $_.siteCode -eq $stabSiteCode
+        } | Select-Object -First 1
+        $hasRP = $deployConfig.virtualMachines | Where-Object {
+            $_.InstallRP -and $_.siteCode -eq $stabSiteCode
+        } | Select-Object -First 1
+        $ignoredComponents = @(
+            'SMS_WSUS_CONFIGURATION_MANAGER'         # Until SUP is fully configured
+            'SMS_MIGRATION_MANAGER'
+            'SMS_SITE_SQL_BACKUP'
+            'SMS_SITE_BACKUP'
+            'SMS_SITE_VSS_WRITER'
+            'SMS_OFFLINE_SERVICING_MANAGER'
+            'CONFIGURATION_MANAGER_UPDATE'
+            'SMS_MP_DEVICE_MANAGER'
+            'SMS_TEM'
+            'SMS_PROVIDERS'
+            'SMS_AD_SYSTEM_DISCOVERY_AGENT'
+            'SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT'
+            'SMS_AD_USER_DISCOVERY_AGENT'
+            'SMS_AD_FOREST_DISCOVERY_MANAGER'
+            'SMS_WINNT_SERVER_DISCOVERY_AGENT'
+            'SMS_NETWORK_DISCOVERY'
+        )
+        if (-not $hasSUP) {
+            $ignoredComponents += 'SMS_WSUS_CONTROL_MANAGER'
+            $ignoredComponents += 'SMS_WSUS_SYNC_MANAGER'
+        }
+        if (-not $hasRP) {
+            $ignoredComponents += 'SMS_SRS_REPORTING_POINT'
+        }
+        $stabMaxAttempts = 10
+        $stabDelay = 30
+        $stabThreshold = 5  # allow up to this many non-Started components
+        Write-DscStatus "Waiting for site components to stabilize (up to $([math]::Round($stabMaxAttempts * $stabDelay / 60)) min)"
+        for ($stabAttempt = 1; $stabAttempt -le $stabMaxAttempts; $stabAttempt++) {
+            try {
+                $ns = "root\sms\site_$stabSiteCode"
+                $allComps = @(Get-WmiObject -Namespace $ns -Class SMS_ComponentSummarizer `
+                    -Filter "TallyInterval='0001128000100008' AND SiteCode='$stabSiteCode'" -ErrorAction Stop)
+                if ($allComps.Count -eq 0) {
+                    Write-DscStatus "  Component stabilization attempt $stabAttempt/$stabMaxAttempts`: no data yet"
+                    if ($stabAttempt -lt $stabMaxAttempts) { Start-Sleep -Seconds $stabDelay }
+                    continue
+                }
+                $checkable = @($allComps | Where-Object { $_.ComponentName -notin $ignoredComponents })
+                $notStarted = @($checkable | Where-Object { $_.State -ne 1 })
+                if ($notStarted.Count -le $stabThreshold) {
+                    Write-DscStatus "Components stabilized: $($checkable.Count - $notStarted.Count)/$($checkable.Count) Started (attempt $stabAttempt)"
+                    break
+                }
+                $names = ($notStarted | Select-Object -First 5 | ForEach-Object { $_.ComponentName }) -join ', '
+                Write-DscStatus "  Attempt $stabAttempt/$stabMaxAttempts`: $($notStarted.Count) components not Started ($names...)" -RetrySeconds $stabDelay
+            }
+            catch {
+                Write-DscStatus "  Component stabilization attempt $stabAttempt failed: $($_.Exception.Message)"
+            }
+            if ($stabAttempt -lt $stabMaxAttempts) { Start-Sleep -Seconds $stabDelay }
+        }
+    }
+}
+
+# Force a FULL collection re-evaluation on every MEMLABS-* device collection
+# (plus All Unknown Computers) when this site has client-push targets and
+# PushClients + auto-push + first-contact
+# Heartbeat Discovery have had time to register the agent and flip
+# SMS_R_System.Client to 1 for every freshly-pushed VM. Without this,
+# SMS_FullCollectionMembership.IsClient is the value colleval snapshotted
+# when the resource was FIRST added to the collection -- typically before
+# its DDR was processed -- and the stale IsClient=False cache causes CM to
+# skip projecting per-resource application deployment policy
+# (CCM_ApplicationCIAssignment) to those members. Observed symptom:
+# Phase 11 DomainMember check WARNs "Office deployment policy not visible
+# after 3 min of polling" on a client that IS in MEMLABS-Office Install
+# Targets and IS a healthy registered CM client, purely because the
+# membership snapshot was stale. A single RequestRefresh($false) rewrites
+# every IsClient cell on the next colleval pass.
+if ($CurrentRole -in @("Primary", "Secondary")) {
+    if ($configuredPushTargets.Count -eq 0) {
+        Write-DscStatus "Skipping collection IsClient refresh sweep: no client-push targets"
+    }
+    else {
+        $refSiteCode = $ThisVM.siteCode
+        if ($refSiteCode) {
+        try {
+            $ns = "root\sms\site_$refSiteCode"
+            # CollectionType=2 is Device. Filter to MEMLABS-* + All Unknown
+            # Computers in PowerShell (WQL -Filter doesn't reliably accept
+            # SQL LIKE with %). Built-in collections (All Systems, All
+            # Users, etc.) are excluded -- CM evals those on its own
+            # schedule and we don't deploy MEMLABS apps to them directly.
+            $allCols = @(Get-WmiObject -Namespace $ns -Class SMS_Collection -Filter "CollectionType=2" -ErrorAction Stop)
+            $targetCols = @($allCols | Where-Object { $_.Name -like 'MEMLABS-*' -or $_.Name -eq 'All Unknown Computers' })
+            if ($targetCols.Count -gt 0) {
+                Write-DscStatus "Refreshing $($targetCols.Count) collection(s) to update IsClient snapshots after PushClients"
+                $refOk = 0
+                foreach ($c in $targetCols) {
+                    try {
+                        [void]([wmi]$c.__PATH).RequestRefresh($false)
+                        $refOk++
+                    }
+                    catch {
+                        Write-DscStatus "  WARN: RequestRefresh on '$($c.Name)' ($($c.CollectionID)) failed: $($_.Exception.Message)"
+                    }
+                }
+                Write-DscStatus "  Requested re-eval on $refOk of $($targetCols.Count) collection(s); colleval will process them in the background"
+            }
+            else {
+                Write-DscStatus "No MEMLABS-* device collections found to refresh (perfloading may not have run)"
+            }
+        }
+        catch {
+            Write-DscStatus "WARNING: Failed to enumerate collections for refresh sweep: $($_.Exception.Message)"
+        }
+        }
+    }
+}
+
+# Non-CAS: mark completion now that PushClients, EnableBLM, component
+# resets, and component stabilization are done.
+if ($CurrentRole -ne "CAS") {
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
+    $Configuration.ScriptWorkflow.Status = "Completed"
+    $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    Write-DscStatus "Complete!"
+}
+
+# Stamp the completion RunId as the very last action. The orchestrator's
+# monitoring loop treats a matching RunId as authoritative completion,
+# which is bulletproof against any later status writes from background
+# work or future phase additions.
+if ($ScriptWorkflowRunId) {
+    try {
+        Set-Content -Path $CompletedRunIdFile -Value $ScriptWorkflowRunId -Force -Encoding ASCII
+        Write-DscStatus "ScriptWorkflow.ps1 stamped completion RunId: $ScriptWorkflowRunId"
+    }
+    catch {
+        Write-DscStatus "ScriptWorkflow.ps1 WARNING: failed to stamp completion RunId: $($_.Exception.Message)"
+    }
+}

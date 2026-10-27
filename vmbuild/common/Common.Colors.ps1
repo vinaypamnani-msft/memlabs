@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 try {
     # Load System.Drawing (maybe needed for PS5)
     [reflection.assembly]::LoadWithPartialName( "System.Drawing") | Out-Null
@@ -28,12 +29,25 @@ function Set-BackgroundImage {
         return 
     }
     
+    $settingsLock = $null
+    $temporaryPath = $null
     try {
         $LocalAppData = $env:LOCALAPPDATA
         $SettingsJson = (Join-Path $LocalAppData "Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json")
         if (-not (Test-Path $SettingsJson)) {
             return 
         }
+        $settingsLock = [IO.File]::Open("$SettingsJson.memlabs.lock", [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $originalBytes = [IO.File]::ReadAllBytes($SettingsJson)
+        $originalText = [Text.Encoding]::UTF8.GetString($originalBytes).TrimStart([char]0xFEFF)
+        $document = ConvertFrom-Json -InputObject ('{"settings":' + $originalText + '}') -ErrorAction Stop
+        $a = $document.settings
+        if ($a -isnot [pscustomobject]) { throw 'Terminal settings must contain a JSON object.' }
+        if (-not $a.PSObject.Properties.Match('profiles').Count) {
+            $a | Add-Member -MemberType NoteProperty -Name 'profiles' -Value ([pscustomobject]@{})
+        }
+        if ($a.profiles -isnot [pscustomobject]) { throw 'Terminal profiles must contain a JSON object.' }
 
         if ($opacityPercent -lt 5) {
             $opacityPercent = 5        
@@ -45,9 +59,41 @@ function Set-BackgroundImage {
 
     
 
-        $a = Get-Content $SettingsJson | ConvertFrom-Json   
         $a | Add-Member -MemberType NoteProperty -Name "tabWidthMode" -Value "titleLength" -Force
-    
+        $a | Add-Member -MemberType NoteProperty -Name "initialRows" -Value 40 -Force
+        $a | Add-Member -MemberType NoteProperty -Name "initialCols" -Value 140 -Force
+
+        # --- Active-tab highlight theme -------------------------------------------------
+        # Make the focused tab visually distinct from inactive tabs/tab-row.
+        # tab.background  = active tab (lighter)
+        # tab.unfocusedBackground / tabRow.* = inactive tabs + bar (darker)
+        $themeName = "MemLabsActiveTab"
+        $tabTheme = [PSCustomObject]@{
+            name      = $themeName
+            tab       = [PSCustomObject]@{
+                background            = "#264F78FF"   # active tab (VS Code accent blue)
+                unfocusedBackground   = "#1F1F1FFF"   # inactive tabs
+                showCloseButton       = "always"
+            }
+            tabRow    = [PSCustomObject]@{
+                background            = "#0C0C0CFF"   # tab strip
+                unfocusedBackground   = "#0C0C0CFF"
+            }
+            window    = [PSCustomObject]@{
+                applicationTheme = "dark"
+            }
+        }
+
+        if (-not $a.PSObject.Properties.Match('themes').Count) {
+            $a | Add-Member -MemberType NoteProperty -Name "themes" -Value @($tabTheme) -Force
+        }
+        else {
+            $existing = @($a.themes | Where-Object { $_.name -ne $themeName })
+            $a.themes = @($existing + $tabTheme)
+        }
+        $a | Add-Member -MemberType NoteProperty -Name "theme" -Value $themeName -Force
+        # --------------------------------------------------------------------------------
+
         if (-not $a.profiles.defaults) {
             $defaults = [PSCustomObject]@{
                 backgroundImage            = $file
@@ -55,6 +101,7 @@ function Set-BackgroundImage {
                 backgroundImageOpacity     = ($opacityPercent / 100)
                 backgroundImageStretchMode = $stretchMode
                 antialiasingMode           = "cleartype"
+                historySize                = 32768
             }
             $a.profiles | Add-Member -MemberType NoteProperty -Name "defaults" -Value $defaults -Force
         }
@@ -64,12 +111,40 @@ function Set-BackgroundImage {
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageOpacity" -Value ($opacityPercent / 100) -Force
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageStretchMode" -Value $stretchMode -Force
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "antialiasingMode" -Value "cleartype" -Force
+            $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "historySize" -Value 32768 -Force
     
         }
     
-        $a | ConvertTo-Json -Depth 100 | Out-File -encoding utf8 $SettingsJson
+        $json = $a | ConvertTo-Json -Depth 100 -ErrorAction Stop
+        $temporaryPath = "$SettingsJson.memlabs-$([guid]::NewGuid().ToString('N')).tmp"
+        $encoding = [Text.UTF8Encoding]::new($true)
+        $bytes = $encoding.GetPreamble() + $encoding.GetBytes($json)
+        $stream = [IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        }
+        finally { $stream.Dispose() }
+        $null = Get-Content -LiteralPath $temporaryPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($SettingsJson)) -cne
+            [Convert]::ToBase64String($originalBytes)) {
+            throw 'Terminal settings changed during the update; refusing to overwrite the newer settings.'
+        }
+        # Never truncate the live file: replacement and last-good backup are one filesystem operation.
+        [IO.File]::Replace($temporaryPath, $SettingsJson, "$SettingsJson.memlabs.bak")
     }
-    catch {}
+    catch {
+        Write-Warning "Windows Terminal appearance update skipped; existing settings were not overwritten: $($_.Exception.Message)" -WarningAction Continue
+    }
+    finally {
+        if ($temporaryPath -and [IO.File]::Exists($temporaryPath)) {
+            try { [IO.File]::Delete($temporaryPath) }
+            catch { Write-Warning "Could not remove Terminal settings staging file '$temporaryPath': $($_.Exception.Message)" -WarningAction Continue }
+        }
+        if ($settingsLock) { $settingsLock.Dispose() }
+    }
 }
 function Get-Animate {
     # Clear the screen
@@ -93,7 +168,28 @@ function Get-Animate {
     # Calculate the start position for centering the text
     $startRow = [math]::Max(0, [math]::Floor(($rows - $lines.Length) / 2))
     $startCol = [math]::Max(0, [math]::Floor(($columns - $lines[0].Length) / 2))
-    $colorCode = "`e[38;2;0;127;255m"  # RGB 0, 127, 255 (Azure Blue)
+
+    # Show red if local branch is behind remote (unpulled changes) or has uncommitted edits
+    $hasPendingChanges = $false
+    try {
+        $repoDir = Split-Path $Global:Common.CachePath
+        # Check for commits on remote not yet pulled
+        $behind = & git -C $repoDir rev-list HEAD..@{u} --count 2>$null
+        if ($behind -and [int]$behind -gt 0) { $hasPendingChanges = $true }
+        # Check for uncommitted local changes
+        if (-not $hasPendingChanges) {
+            $gitStatus = & git -C $repoDir status --porcelain 2>$null
+            if ($gitStatus) { $hasPendingChanges = $true }
+        }
+    }
+    catch {}
+
+    if ($hasPendingChanges) {
+        $colorCode = "`e[38;2;255;50;50m"  # RGB 255, 50, 50 (Red - pending git changes)
+    }
+    else {
+        $colorCode = "`e[38;2;0;127;255m"  # RGB 0, 127, 255 (Azure Blue)
+    }
     $resetCode = "`e[0m"               # Reset ANSI formatting
     # Animation function to reveal characters one at a time
     
@@ -166,9 +262,12 @@ function Get-Colors {
         GenConfigVMRemoteServer    = "DodgerBlue"
 
         GenConfigSQLProp           = "LightSeaGreen"
-        GenConfigSiteCode          = "LightCoral"
+        GenConfigSiteCode          = "DarkOrange"
         GenConfigTrue              = "LightGreen"
         GenConfigFalse             = "FireBrick"
+        # Softer "off" tone for editable False booleans in the modify-existing-VM menu,
+        # where a hard red read as an error rather than a simple off/on toggle.
+        GenConfigFalseSoft         = "Silver"
 
         # ---- Errors
         #Configuration is not valid. Saving is not advised. Proceed with caution. Hit CTRL-C to exit
@@ -191,6 +290,9 @@ function Get-Colors {
         #Tips
         #"Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
         GenConfigTip               = "Violet"
+
+        # Mouse hover highlight (paired with dark background in Set-MouseHoverHighlight)
+        GenConfigHover             = "SkyBlue"
 
         # Prompt
         GenConfigPrompt            = "SkyBlue"
@@ -252,6 +354,35 @@ function Convert-RGBtoAnsi {
     }
 }
 
+# OSC 8 hyperlink support — makes URLs and file paths ctrl+clickable in Windows Terminal / VS Code
+# $global:, not $script:: these are set at dot-source time but read from functions running on
+# other script scopes' call chains (e.g. genconfig.ps1 -InternalUseOnly), where $script: is $null.
+$global:_hyperlinkSupport = ($null -ne $env:WT_SESSION) -or ($env:TERM_PROGRAM -eq 'vscode')
+$global:_hyperlinkEsc = [char]0x1B
+$global:_hyperlinkPattern = '(https?://[^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]]|[A-Za-z]:\\[^\s<>"\x1B]{2,}[^\s<>"\x1B.,;:!?\)\]]|\\\\[A-Za-z][^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]])'
+
+function ConvertTo-Hyperlinks {
+    param([string]$Text)
+    if (-not $global:_hyperlinkSupport -or -not $Text) { return $Text }
+    if ($Text -notmatch 'https?://|[A-Za-z]:\\|\\\\[A-Za-z]') { return $Text }
+    $e = $global:_hyperlinkEsc
+    return [regex]::Replace($Text, $global:_hyperlinkPattern, {
+        param($m)
+        $link = $m.Value
+        if ($link -match '^https?://') {
+            "${e}]8;;${link}${e}\${link}${e}]8;;${e}\"
+        }
+        elseif ($link -match '^\\\\') {
+            $uri = "file:$($link -replace '\\','/')"
+            "${e}]8;;${uri}${e}\${link}${e}]8;;${e}\"
+        }
+        else {
+            $uri = "file:///$($link -replace '\\','/')"
+            "${e}]8;;${uri}${e}\${link}${e}]8;;${e}\"
+        }
+    })
+}
+
 function Write-Host2 {
     param(
         [Alias('Msg', 'Message')]
@@ -262,12 +393,13 @@ function Write-Host2 {
 
     #if ($Global:Common.PS7) {
     if ($ForegroundColor) {
-        $ansi = Get-RGB $ForegroundColor | Convert-RGBtoAnsi
+        $ansi = Get-AnsiColorCached $ForegroundColor
         if ($ansi) {
             $Object = "$($ansi)$Object$($PSStyle.Reset)"
         }
     }
     #}
+    $Object = ConvertTo-Hyperlinks $Object
     if ($NoNewLine) {
         Write-Host $Object -NoNewline
     }
@@ -343,4 +475,70 @@ Function Get-DrawingColor {
         Write-Warning "No valid colors found."
     }
     Write-Verbose "Ending $($MyInvocation.MyCommand)"
+}
+# --- Helpers for color-coded, truncatable single-line option summaries ---
+function Get-AnsiColorCached {
+    param([string]$ColorName)
+    if (-not $script:_ansiColorCache) { $script:_ansiColorCache = @{} }
+    if (-not $script:_ansiColorCache.ContainsKey($ColorName)) {
+        try {
+            $script:_ansiColorCache[$ColorName] = (Get-RGB $ColorName | Convert-RGBtoAnsi)
+        }
+        catch {
+            $script:_ansiColorCache[$ColorName] = ""
+        }
+    }
+    return $script:_ansiColorCache[$ColorName]
+}
+
+function Format-OptionToken {
+    # Returns "<ANSI><text>" — no trailing reset, since the next token will set its own color
+    # (or Write-Host2 will append PSStyle.Reset at the end).
+    param(
+        [Parameter(Mandatory)]
+        [string]$Color,
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+    return "$(Get-AnsiColorCached $Color)$Text"
+}
+
+function Get-VisibleLengthAnsi {
+    param([string]$Text)
+    if (-not $Text) { return 0 }
+    return ($Text -replace "`e\[[0-9;]*m", "").Length
+}
+
+function Limit-AnsiString {
+    # Truncate an ANSI-tagged string to a max VISIBLE length, preserving embedded color codes.
+    param(
+        [string]$Text,
+        [int]$MaxVisible
+    )
+    if (-not $Text -or $MaxVisible -le 0) { return $Text }
+    $visibleLen = Get-VisibleLengthAnsi $Text
+    if ($visibleLen -le $MaxVisible) { return $Text }
+
+    $reset = if ($Global:Common.PS7) { $PSStyle.Reset } else { "$([char]27)[0m" }
+    $sb = New-Object System.Text.StringBuilder
+    $visible = 0
+    $i = 0
+    $limit = [Math]::Max(1, $MaxVisible - 3)   # leave room for "..."
+    while ($i -lt $Text.Length -and $visible -lt $limit) {
+        $ch = $Text[$i]
+        if ($ch -eq [char]27) {
+            $end = $Text.IndexOf('m', $i)
+            if ($end -lt 0) { break }
+            [void]$sb.Append($Text.Substring($i, $end - $i + 1))
+            $i = $end + 1
+        }
+        else {
+            [void]$sb.Append($ch)
+            $visible++
+            $i++
+        }
+    }
+    [void]$sb.Append("$reset...")
+    return $sb.ToString()
 }

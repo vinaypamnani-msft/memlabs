@@ -1,4 +1,4 @@
-configuration Phase3
+﻿configuration Phase3
 {
     param
     (
@@ -18,6 +18,17 @@ configuration Phase3
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
     $NetBiosDomainName = $deployConfig.vmoptions.domainNetBiosName
+
+    # Log share + CM admin credential, used by the Phase 3 "ScriptWorkflow
+    # Download" pre-warm task (RegisterTaskScheduler). Mirrors Phase8.ps1 so
+    # the pre-warm runs ScriptWorkflow.ps1 with the same identity/args the real
+    # Phase 8 workflow uses.
+    $DomainAdminName = $deployConfig.vmOptions.adminName
+    $LogFolder = "DSC"
+    $LogPath = "c:\staging\$LogFolder"
+    $AdminUserName = $Admincreds.UserName
+    if ($AdminUserName -match '\\') { $AdminUserName = ($AdminUserName -split '\\', 2)[1] }
+    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
     $l = $ConfigurationData.LocaleSettings
 
@@ -53,39 +64,37 @@ configuration Phase3
             }
         }
 
-        $AddIISCert = $false
-        # Install feature roles
+        # Install feature roles. (The PKI IIS web-server cert request that used
+        # to be gated off $AddIISCert here was relocated to Phase 8 -- the
+        # Enterprise CA is now published by the post-Phase-3 PKI orchestrator, so
+        # requesting it in Phase 3 dead-locked with "No Certificate Authority
+        # could be found". See the per-node "PKI IIS web-server certificate"
+        # blocks in Phase8.ps1.)
         $featureRoles = @($ThisVM.role)
         if ($ThisVM.role -in "CAS", "Primary", "Secondary", "PassiveSite") {
             $featureRoles += "Site Server"
-            $AddIISCert = $true
+        }
+        if ($ThisVM.role -in "CAS", "Primary", "Secondary") {
+            $featureRoles += @("Distribution point", "Management point")
+        }
+
+        if ($ThisVM.installDP -eq $true -or $ThisVM.enablePullDP -eq $true) {
+            $featureRoles += "Distribution point"
+        }
+
+        if ($ThisVM.installMP -eq $true) {
+            $featureRoles += "Management point"
         }
 
         if ($ThisVM.installSUP -eq $true -and $ThisVM.role -ne "WSUS") {
             $featureRoles += "WSUS"
-            $AddIISCert = $true
         }
 
-        if ($ThisVM.installRP -eq $true) {
-            $AddIISCert = $true
-        }
+        $featureRoles = @($featureRoles | Select-Object -Unique)
 
-        if ($ThisVM.installMP -eq $true) {
-            $AddIISCert = $true
-        }
-
-        if ($ThisVM.installDP -eq $true) {
-            $AddIISCert = $true
-        }
-
-        $DCVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
-        if (-not $DCVM.InstallCA) {
-            $AddIISCert = $false
-        }
-
-        if (-not $deployConfig.cmOptions.UsePKI) {
-            $AddIISCert = $false
-        }
+        # Per-VM cmOptions (multi-hierarchy safe); $cmo is reused below for the
+        # CM source-folder ($CM) selection.
+        $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
 
         WriteStatus AddLocalAdmin {
             Status = "Adding required accounts [$($ThisVM.thisParams.LocalAdminAccounts -join ',')] to Administrators group"
@@ -103,14 +112,58 @@ configuration Phase3
             $addUserDependency += "[AddUserToLocalAdminGroup]$DscNodeName"
         }
 
+        # Phase 2 DSC (SetWindowsProxy resource) configures WinHTTP, machine.config
+        # <defaultProxy>, and registry. However, .NET reads machine.config once per
+        # AppDomain — if the Phase 3 WmiPrvSE process reuses a cached AppDomain,
+        # DefaultWebProxy may still be empty. Read WinHTTP (guaranteed set by Phase 2)
+        # and stamp DefaultWebProxy in this AppDomain so all download resources
+        # (InstallVCRedist, InstallOleDb, InstallADK, etc.) inherit the proxy.
+        Script EnsureProcessProxy {
+            DependsOn  = $addUserDependency
+            GetScript  = { @{ Result = "$([System.Net.WebRequest]::DefaultWebProxy)" } }
+            TestScript = {
+                try {
+                    $output = & netsh winhttp show proxy 2>$null
+                    if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                        $current = [System.Net.WebRequest]::DefaultWebProxy
+                        if ($current) {
+                            $resolved = $current.GetProxy([System.Uri]"https://aka.ms")
+                            if ($resolved -and $resolved.Host -ne 'aka.ms') { return $true }
+                        }
+                        return $false
+                    }
+                } catch {}
+                return $true   # No WinHTTP proxy configured; not a proxy client
+            }
+            SetScript  = {
+                $output = & netsh winhttp show proxy 2>$null
+                if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                    $proxyAddr = $Matches[1].Trim()
+                    $bypass = ''
+                    if ($output -match 'Bypass List\s*:\s*(.+)') { $bypass = $Matches[1].Trim() }
+                    $wp = New-Object System.Net.WebProxy("http://$proxyAddr", $true)
+                    if ($bypass -and $bypass -ne '(none)') {
+                        $wp.BypassList = @($bypass -split ';' | ForEach-Object {
+                            $e = $_.Trim()
+                            if ($e -and $e -ne '<local>') { '^' + ([Regex]::Escape($e) -replace '\\\*','.*') + '$' }
+                        } | Where-Object { $_ })
+                        $wp.BypassProxyOnLocal = $true
+                    }
+                    [System.Net.WebRequest]::DefaultWebProxy = $wp
+                    Write-Verbose "EnsureProcessProxy: set DefaultWebProxy to http://$proxyAddr"
+                }
+            }
+        }
+
         WriteStatus InstallFeature {
-            DependsOn = $addUserDependency
+            DependsOn = '[Script]EnsureProcessProxy'
             Status    = "Installing required windows features for role $featureRoles"
         }
 
         InstallFeatureForSCCM InstallFeature {
             Name      = "DummyName"
             Role      = $featureRoles
+            InstallCA = [bool]$ThisVM.InstallCA
             DependsOn = "[WriteStatus]InstallFeature"
         }
 
@@ -132,8 +185,11 @@ configuration Phase3
             # Check if false, for older configs that didn't have this prop
 
             $ssmsDownloadUrl = $deployConfig.URLS.SSMS
-            if ($l.LanguageTag -ne "en-US") {
-                $ssmsDownloadUrl = $ssmsDownloadUrl + "?clcid=" + $l.LanguageID
+            if ($l -and $l.LanguageTag -and $l.LanguageTag -ne "en-US" -and $l.LanguageID) {
+                # Use & when the URL already has a query string (e.g. go.microsoft.com/fwlink/?linkid=...),
+                # otherwise ? (e.g. a bare aka.ms link). Appending a 2nd ? would corrupt the fwlink.
+                $clcidSep = if ($ssmsDownloadUrl -like "*`?*") { "&" } else { "?" }
+                $ssmsDownloadUrl = $ssmsDownloadUrl + $clcidSep + "clcid=" + $l.LanguageID
             }
 
             WriteStatus SSMS {
@@ -179,7 +235,7 @@ configuration Phase3
             #Find the toplevel site server that is newly being deployed
             if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden -and $ThisVM.Role -in ("CAS", "Primary")) {
 
-                $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+                $CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
                 $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
                 if ($CM -eq "CMTP") {
                     $CMDownloadStatus = "Downloading Configuration Manager technical preview"
@@ -187,6 +243,12 @@ configuration Phase3
 
                
 
+                # URL-download CM versions extract to C:\CMCB (DownloadSCCM) and
+                # share C:\CMCB for schema extension. ISO CM versions are mounted
+                # on-demand by the host right before Phase 8 (Mount-CmIsoForPhase
+                # in Common.Phases.ps1), which also creates the CMCB share pointing
+                # at the DVD and installs directly from it -- so there is nothing to
+                # download, pre-warm, or share here for the ISO case.
                 if ($ThisVM.thisParams.cmDownloadVersion.downloadUrl) {
 
                     WriteStatus DownLoadSCCM {
@@ -201,15 +263,14 @@ configuration Phase3
                         DependsOn     = $prevDepend
                     }
                     $prevDepend = "[DownLoadSCCM]DownLoadSCCM"
-                }
 
-                FileReadAccessShare CMSourceSMBShare {
-                    Name      = $CM
-                    Path      = "c:\$CM"
-                    DependsOn = $prevDepend
+                    FileReadAccessShare CMSourceSMBShare {
+                        Name      = $CM
+                        Path      = "c:\$CM"
+                        DependsOn = $prevDepend
+                    }
+                    $nextDepend = @($nextDepend, "[FileReadAccessShare]CMSourceSMBShare")
                 }
-                $nextDepend = @($nextDepend, "[FileReadAccessShare]CMSourceSMBShare")
-                #$nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
             }
         }
 
@@ -242,24 +303,32 @@ configuration Phase3
         InstallSQLClient SQLClientInstall {
             DependsOn = "[WriteStatus]SQLClientInstall"
             URL       = $deployConfig.URLS.SQLClient
-            Path      = "C:\temp\sqlncli.msi"
+            Path      = "C:\Windows\Temp\sqlncli.msi"
             Ensure    = "Present"
         }
 
-        WriteStatus ODBCDriverInstall {
-            DependsOn = "[InstallSQLClient]SQLClientInstall"
-            Status    = "Downloading and installing ODBC driver"
-        }
+        $nextDepend = "[InstallSQLClient]SQLClientInstall"
+        $cmServerRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'DPMP')
+        $odbcRequired = $ThisVM.role -in $cmServerRoles -or
+            $ThisVM.role -eq 'WSUS' -or
+            -not [string]::IsNullOrWhiteSpace("$($ThisVM.sqlVersion)")
+        if ($odbcRequired) {
+            WriteStatus ODBCDriverInstall {
+                DependsOn = $nextDepend
+                Status    = "Downloading and installing ODBC driver"
+            }
 
-        InstallODBCDriver ODBCDriverInstall {
-            DependsOn = "[WriteStatus]ODBCDriverInstall"
-            URL       = $deployConfig.URLS.ODBC
-            ODBCPath  = "C:\temp\msodbcsql.msi"
-            Ensure    = "Present"
+            InstallODBCDriver ODBCDriverInstall {
+                DependsOn = "[WriteStatus]ODBCDriverInstall"
+                URL       = $deployConfig.URLS.ODBC
+                ODBCPath  = "C:\temp\msodbcsql.msi"
+                Ensure    = "Present"
+            }
+            $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
         }
 
         WriteStatus OleDbDriverInstall {
-            DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
+            DependsOn = $nextDepend
             Status    = "Downloading and installing OleDB driver"
         }
 
@@ -296,90 +365,11 @@ configuration Phase3
             $nextDepend = "[Registry]RAMDiskTFTPBlockSize"
         }
 
-        if ($AddIISCert) {
-
-
-            WriteStatus RebootNow {
-                Status    = "Rebooting to get Group Membership"
-                DependsOn = $nextDepend
-            }
-
-            RebootNow RebootNow {
-                FileName  = 'C:\Temp\IISGroupReboot.txt'
-                DependsOn = $nextDepend
-            }
-            $nextDepend = "[RebootNow]RebootNow"
-
-            WriteStatus RequestIISCerts {
-                Status    = "Requesting IIS Certificate for PKI"
-                DependsOn = $nextDepend
-            }
-            $subject = $ThisVM.vmName + "." + $DomainName
-            $friendlyName = 'ConfigMgr WebServer Certificate'
-            CertReq SSLCert {
-                Subject             = $subject
-                SubjectAltName      = "DNS=" + $subject + "&DNS=" + $($ThisVM.VmName)
-                KeyLength           = '2048'
-                Exportable          = $false
-                ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
-                #OID                 = '1.3.6.1.5.5.7.3.1'
-                #KeyUsage            = '0xa0'
-                CertificateTemplate = 'ConfigMgrWebServerCertificate'
-                AutoRenew           = $true
-                FriendlyName        = $friendlyName
-                #Credential          = $Credential
-                #UseMachineContext   = $true
-                KeyType             = 'RSA'
-                RequestType         = 'CMC'
-                DependsOn           = $nextDepend
-            }
-            $nextDepend = "[CertReq]SSLCert"
-
-            WriteStatus AddIISCerts {
-                Status    = "Adding IIS Certificate for PKI"
-                DependsOn = $nextDepend
-            }
-            AddCertificateToIIS AddCert {
-                FriendlyName = $friendlyName
-                DependsOn    = $nextDepend
-            }
-            $nextDepend = "[AddCertificateToIIS]AddCert"
-
-            if ($ThisVM.role -eq "Primary") {
-
-                $friendlyName = 'ConfigMgr Client DistributionPoint Certificate'
-                CertReq SSLCert2 {
-                    Subject             = "Client DistributionPoint Cert"
-                    #SubjectAltName      = "DNS=" + $subject
-                    KeyLength           = '2048'
-                    Exportable          = $true
-                    ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
-                    #OID                 = '1.3.6.1.5.5.7.3.1'
-                    #KeyUsage            = '0xa0'
-                    CertificateTemplate = 'ConfigMgrClientDistributionPointCertificate'
-                    AutoRenew           = $true
-                    FriendlyName        = $friendlyName
-                    #Credential          = $Credential
-                    #UseMachineContext   = $true
-                    KeyType             = 'RSA'
-                    RequestType         = 'CMC'
-                    DependsOn           = $nextDepend
-                }
-                $nextDepend = "[CertReq]SSLCert2"
-
-                CertificateExport SSLCert {
-                    Type         = 'PFX'
-                    FriendlyName = $friendlyName
-                    Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
-                    Password     = $Admincreds
-                    DependsOn    = $nextDepend
-                }
-                $nextDepend = "[CertificateExport]SSLCert"
-            }
-        }
-
-
-        #  }
+        # PKI IIS web-server cert request relocated to Phase 8 (per site-server
+        # node). It ran here in Phase 3 previously, but the Enterprise CA is now
+        # published by the post-Phase-3 PKI orchestrator, so requesting a cert in
+        # Phase 3 dead-locked ("No Certificate Authority could be found"). See the
+        # "PKI IIS web-server certificate" blocks in Phase8.ps1.
 
         WriteStatus Complete {
             DependsOn = $nextDepend

@@ -1,9 +1,15 @@
-#enableEHTTP.ps1
+﻿#enableEHTTP.ps1
 param(
     [string]$configFilePath,
     [string]$logPath,
     [bool]$firstRun
 )
+
+$flagFile = "C:\staging\DSC\EnableEHTTPorHTTPS.flag"
+if (Test-Path -LiteralPath $flagFile) {
+    Write-DscStatus "EHTTP already enabled. Flag file exists. Skipping execution."
+    return
+}
 
 # Read config json
 $deployConfig = Get-Content $configFilePath | ConvertFrom-Json
@@ -59,12 +65,16 @@ if (-not (Test-Path $modulePath)) {
     return
 }
 
-# Connect to the site's drive if it is not already present
-try {
-    New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providerMachineName @initParams
-} catch {
-    Write-DscStatus "Failed to create PS Drive for site $siteCode. Error: $_" -NoStatus
-    return
+# Connect to the site's global drive without shadowing it in this script's child
+# scope. Leaving Set-Location bound to a child-scoped drive after this script
+# returns makes the next ConfigMgr cmdlet fail while initializing its connection.
+if (-not (Get-PSDrive -Name $siteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+    try {
+        New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providerMachineName -Scope Global @initParams -ErrorAction Stop | Out-Null
+    } catch {
+        Write-DscStatus "Failed to create PS Drive for site $siteCode. Error: $_" -NoStatus
+        return
+    }
 }
 
 # Validate PS Drive creation
@@ -78,7 +88,7 @@ while ($null -eq (Get-PSDrive -Name $siteCode -PSProvider CMSite -ErrorAction Si
     Write-DscStatus "Retry in 10s to Set PS Drive" -NoStatus
     Start-Sleep -Seconds 10
     try {
-        New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providerMachineName @initParams
+        New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providerMachineName -Scope Global @initParams -ErrorAction Stop | Out-Null
     } catch {
         Write-DscStatus "Failed to create PS Drive for site $siteCode during retry. Error: $_" -NoStatus
     }
@@ -90,9 +100,8 @@ Set-Location "$($siteCode):\" @initParams
 
 $prop = Get-CMSiteComponent -SiteCode $siteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
 
-$flagFile = "C:\staging\DSC\EnableEHTTPorHTTPS.flag"
-
-# Check if the flag file exists
+# Re-check after provider initialization in case another workflow invocation
+# completed EHTTP while this one was connecting.
 if (Test-Path $flagFile) {
     Write-DscStatus "EHTTP already enabled. Flag file exists. Skipping execution."
 }
@@ -103,6 +112,10 @@ else {
     $enabled = $false
     $attempts = 0
     $maxAttempts = 40
+    # Don't stop on the first success -- site component manager can flip it back while
+    # roles are still installing. Stop once it has held for a few consecutive checks.
+    $stableChecks = 0
+    $requiredStableChecks = 3
 
     if (-not $firstRun) {
         Write-DscStatus "Not the first run.. Skipping e-HTTP setup."
@@ -162,6 +175,7 @@ else {
 
             if (-not $component) {
                 Write-DscStatus "WMI query returned no results for CAS during e-HTTP enabling. Ensure the site code and namespace are correct. Retrying..." -NoStatus
+                $stableChecks = 0
                 Start-Sleep -Seconds 10
                 continue
             }
@@ -188,12 +202,13 @@ else {
             }
         }
 
-        Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
+        Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Write-StatusLogEntry
         Start-Sleep 10
         $prop = Get-CMSiteComponent -SiteCode $siteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
         $enabled = ($prop.Value -band 1024) -eq 1024
-        Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 15 -NoStatus
-    } until ($attempts -ge $maxAttempts)
+        if ($enabled) { $stableChecks++ } else { $stableChecks = 0 }
+        Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled (stable $stableChecks/$requiredStableChecks, attempt $attempts/$maxAttempts)" -RetrySeconds 15 -NoStatus
+    } until ($stableChecks -ge $requiredStableChecks -or $attempts -ge $maxAttempts)
 
     if (-not $enabled) {
         Write-DscStatus "e-HTTP not enabled after trying $attempts times, skip." 

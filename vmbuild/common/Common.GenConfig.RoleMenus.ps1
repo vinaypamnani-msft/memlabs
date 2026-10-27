@@ -1,0 +1,376 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function select-PullDPMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null,
+        [Parameter(Mandatory = $true, HelpMessage = "CurrentVM")]
+        [object] $CurrentVM
+    )
+    if (-not (Get-GenConfigSiteServer -ConfigToModify $ConfigToModify -SiteCode $CurrentVM.SiteCode)) {
+        return 'ESCAPE'
+    }
+    #Get-PSCallStack | Out-Host
+    $result = $null
+    if ((Get-ListOfPossibleDPMP -Config $ConfigToModify -siteCode $CurrentVM.SiteCode).Count -eq 0) {
+        $result = "n"
+    }
+
+    $additionalOptions += @{ "N" = "Create a DP VM" }
+
+    while ([string]::IsNullOrWhiteSpace($result)) {
+        Write-Log -Activity "Pull DP Source DP selection" -NoNewLine
+        $result = Get-Menu2 -MenuName "Pull DP Source DP selection" -prompt "Select Source DP VM" -optionArray $(Get-ListOfPossibleDPMP -Config $ConfigToModify -siteCode $CurrentVM.SiteCode) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
+    }
+    if ($result -eq 'ESCAPE') { return 'ESCAPE' }
+    switch ($result.ToLowerInvariant()) {
+        "n" {
+            $result = Add-NewVMForRole -Role "SiteSystem" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true -SiteCode $CurrentVM.SiteCode
+            if ($result) {
+                write-Log "Added new DPMP '$result' for SiteCode $($currentVM.SiteCode)" -Success
+            }
+            else {
+                write-Log "Failed to add new DPMP for SiteCode $($currentVM.SiteCode)" -Failure
+                Add-ErrorMessage -property 'pullDPSourceDP' -Persist "Could not create a source DP for site '$($CurrentVM.SiteCode)'. The Pull DP source was not changed."
+                return 'ESCAPE'
+            }
+        }
+    }
+    return $result
+}
+function select-RemoteSQLMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null
+    )
+    #Get-PSCallStack | Out-Host
+    $result = $null
+    if ((Get-ListOfPossibleSQLServers -Config $ConfigToModify).Count -eq 0) {
+        $result = "n"
+    }
+
+    $additionalOptions = @{}
+
+    $additionalOptions += @{ 
+        "N"  = "Create new SQL Server" 
+        "HN" = "Adds a new SQL VM to configuration"
+    }
+
+    while ([string]::IsNullOrWhiteSpace($result)) {
+        Write-Log -Activity -NoNewLine "Remote SQL Server Selection"
+        $result = Get-Menu2 -MenuName "Remote SQL Server Selection" -prompt "Select SQL VM" -optionArray $(Get-ListOfPossibleSQLServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
+    }
+    if ($result -eq "ESCAPE") {
+        return "ESCAPE"
+    }
+    switch ($result.ToLowerInvariant()) {
+        "n" {
+            $result = Add-NewVMForRole -Role "SqlServer" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+        }
+    }
+    return $result
+}
+
+function select-ReplicaSQLMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null,
+        [Parameter(Mandatory = $true, HelpMessage = "MP VM the replica belongs to")]
+        [object] $CurrentVM
+    )
+
+    # Eligible replica SQL hosts = any SQL VM EXCEPT the site's own SQL server (the
+    # replica must not live on the site database) and EXCEPT this MP itself (hosting
+    # on this MP is offered as the separate "Local SQL" option).
+    #
+    # Existing/already-deployed SQL is eligible: Phase 4 adds the required SQL
+    # 'Replication' feature to it (Phase4.ps1 EnsureSqlReplication). So the list is
+    # any config or domain SQL server (Get-ListOfPossibleSQLServers).
+    $sqlList = @(Get-ListOfPossibleSQLServers -Config $ConfigToModify)
+
+    if (-not (Get-GenConfigSiteServer -ConfigToModify $ConfigToModify -SiteCode $CurrentVM.SiteCode)) {
+        return 'ESCAPE'
+    }
+    if ($CurrentVM -and $CurrentVM.siteCode) {
+        $siteSql = $null
+        $siteSql = Get-SqlServerForSiteCode -deployConfig $ConfigToModify -SiteCode $CurrentVM.siteCode -type Name -SmartUpdate:$false
+        if ($siteSql) {
+            $sqlList = @($sqlList | Where-Object { $_ -ne $siteSql })
+        }
+    }
+    if ($CurrentVM -and $CurrentVM.vmName) {
+        $sqlList = @($sqlList | Where-Object { $_ -ne $CurrentVM.vmName })
+    }
+
+    $additionalOptions = [ordered]@{
+        "L"  = "Local SQL (Replica DB hosted on this MP)"
+        "HL" = "Adds a SQL instance to this MP VM to host the replica database"
+    }
+    $additionalOptions += [ordered]@{
+        "N"  = "Create new Remote SQL Server"
+        "HN" = "Adds a new dedicated SQL VM to the configuration to host the replica database"
+    }
+
+    $result = $null
+    while ([string]::IsNullOrWhiteSpace($result)) {
+        Write-Log -Activity -NoNewLine "MP Replica SQL Server Selection"
+        $result = Get-Menu2 -MenuName "MP Replica SQL Server Selection" -prompt "Select SQL VM to host the replica database" -optionArray $sqlList -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
+    }
+    if ($result -eq "ESCAPE") {
+        return "ESCAPE"
+    }
+    switch ($result.ToLowerInvariant()) {
+        "n" {
+            # Create a new dedicated SQL VM in this domain to host the replica DB.
+            $result = Add-NewVMForRole -Role "SqlServer" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+            if ([string]::IsNullOrWhiteSpace($result)) {
+                return "ESCAPE"
+            }
+        }
+    }
+    return $result
+}
+
+function select-FileServerMenu {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Display HA message")]
+        [bool] $HA = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Config to Modify")]
+        [object] $ConfigToModify = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "CurrentValue")]
+        [string] $CurrentValue = $null
+    )
+    #Get-PSCallStack | Out-Host
+    $result = $null
+    if (((Get-ListOfPossibleFileServers -Config $ConfigToModify).Count -eq 0) -and [string]::IsNullOrWhiteSpace($CurrentValue)) {
+        $result = "n"
+    }
+
+    $additionalOptions = @{}
+    if ($HA) {
+        $additionalOptions += @{ 
+            "N"  = "Create new FileServer to host Content Library (Needed for HA)"
+            "HN" = "ContentLib must be moved to a remote server to enable High Availability"
+        }
+    }
+    else {
+        $additionalOptions += @{
+            "N"  = "Create a New FileServer VM"
+            "HN" = "SQL Always On needs a quorum share. This will be stored on a FileServer" 
+        }
+    }
+    while ([string]::IsNullOrWhiteSpace($result) ) {
+        #Allow ESCAPE to pass thru.. handled by caller
+        $result = Get-Menu2 -MenuName "Fileserver selection.  FileServer is needed for Remote ContentLib (HA), and Quorum for SQLAO" -prompt "Select FileServer VM" -optionArray $(Get-ListOfPossibleFileServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
+    }
+    switch ($result.ToLowerInvariant()) {
+        "n" {
+            $result = Add-NewVMForRole -Role "FileServer" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+        }
+    }
+    return $result
+}
+
+function Get-ListOfPossibleSQLServers {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $Config = $global:config
+    )
+    $SQLList = @()
+    $SQL = $Config.virtualMachines | Where-Object { $_.sqlVersion }
+    foreach ($item in $SQL) {
+        $existing = @()
+        $existing += $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item.vmName -eq $_.vmName) }
+        if (-not $existing) {
+            $SQLList += $item.vmName
+        }
+    }
+    $domain = $Config.vmOptions.DomainName
+    if ($null -ne $domain) {
+        $SQLFromList = get-list -type VM -domain $domain | Where-Object { $_.sqlVersion }
+        foreach ($item in $SQLFromList) {
+            $existing = @()
+            $existing += get-list -type VM -domain $domain | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item.vmName -eq $_.vmName) }
+            $existing += $Config.virtualMachines | Where-Object { ($_.Role -eq "WSUS" -and ($_.RemoteSQLVM -eq $item.vmName)) -or ($_.InstallSUP -and $item -eq $_.vmName) }
+            if (-not $existing) {
+                $SQLList += $item.vmName
+            }
+        }
+    }
+    else {
+        if ($null -ne $Config ) {
+            Write-Verbose $Config | ConvertTo-Json | Out-Host
+        }
+        else {
+            write-host "Config was null!"
+            Get-PSCallStack | Out-Host
+        }
+    }
+    return $SQLList
+}
+function Get-ListOfPossibleFileServers {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $Config = $global:config
+    )
+    $FSList = @()
+    $FS = $Config.virtualMachines | Where-Object { $_.role -eq "FileServer" }
+    foreach ($item in $FS) {
+        $FSList += $item.vmName
+    }
+    $domain = $Config.vmOptions.DomainName
+    if ($null -ne $domain) {
+        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.role -eq "FileServer" }
+        foreach ($item in $FSFromList) {
+            $FSList += $item.vmName
+        }
+    }
+    else {
+        if ($null -ne $Config ) {
+            Write-Verbose $Config | ConvertTo-Json | Out-Host
+        }
+        else {
+            write-host "Config was null!"
+            Get-PSCallStack | Out-Host
+        }
+    }
+    return $FSList
+}
+
+function Get-ListOfPossibleDPMP {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $Config = $global:config,
+        [Parameter(Mandatory = $true, HelpMessage = "SiteCode")]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $siteCode
+
+
+    )
+    if ([string]::IsNullOrWhiteSpace($siteCode)) {
+        Add-ErrorMessage -property 'siteCode' -Persist "Select a valid site code before choosing a Pull DP source."
+        return @()
+    }
+    $FSList = @()
+    $FS = $Config.virtualMachines | Where-Object { $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
+    foreach ($item in $FS) {
+
+        $FSList += $item.vmName
+
+    }
+    $domain = $Config.vmOptions.DomainName
+    if ($null -ne $domain) {
+        $FSFromList = get-list -type VM -domain $domain | Where-Object { $_.InstallDP -eq $true -and -not $_.enablePullDP -and $_.SiteCode -eq $SiteCode }
+        foreach ($item in $FSFromList) {
+            $FSList += $item.vmName
+        }
+    }
+    else {
+        if ($null -ne $Config ) {
+            Write-Verbose $Config | ConvertTo-Json | Out-Host
+        }
+        else {
+            write-host "Config was null!"
+            Get-PSCallStack | Out-Host
+        }
+    }
+    return $FSList
+}
+
+
+function show-NewVMMenu {
+
+    param (
+        [string]$role,
+        [string]$SiteCode
+    )
+
+    write-log -Verbose "show-NewVMMenu called with role='$role' siteCode='$SiteCode'"
+    if (-not $role) {
+        $role = Select-RolesForExisting -enhance:$true
+        if (-not $role) {
+            return
+        }
+        if ($role -eq "H") {
+            $role = "PassiveSite"
+        }
+    }
+
+    $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName
+
+    if ($role -eq "Secondary") {
+        if (-not $parentSiteCode) {
+            return
+        }
+    }
+
+    if ($role -eq "PassiveSite") {
+        $existingPassive = @()
+        $existingSS = @()
+
+
+        $existingPassive += Get-List2 -deployConfig $global:config | Where-Object { $_.Role -eq "PassiveSite" }
+        $existingSS += Get-List2 -deployConfig $global:config | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
+
+        $existingSS = $existingSS | Where-Object { $_ }
+        $existingPassive = $existingPassive | Where-Object { $_ }
+
+        $PossibleSS = @()
+        foreach ($item in $existingSS) {
+            if ($existingPassive.SiteCode -contains $item.Sitecode) {
+                continue
+            }
+            $PossibleSS += $item
+        }
+
+        if ($PossibleSS.Count -eq 0) {
+            Write-Host
+            Write-Host "No siteservers found that are eligible for HA"
+            return
+        }
+        if (-not $SiteCode) {
+            $result = Get-Menu2 -MenuName "Enable CM High Availability" -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
+            if ([string]::IsNullOrWhiteSpace($result) -or $result -eq "ESCAPE") {
+                return
+            }
+            $SiteCode = $result
+        }
+    }
+    #$os = Select-OSForNew -Role $role
+
+    $machineName = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config  -parentSiteCode $parentSiteCode -SiteCode $siteCode -ReturnMachineName $true
+    if ($role -eq "DC") {
+        while ($true) {
+            $domain = select-NewDomainName
+            if (-not [string]::IsNullOrEmpty($domain) -and $domain -ne "ESCAPE") {   
+                $Global:Config.vmOptions.domainName = $domain
+            }
+            else {
+                continue
+            }
+            $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
+            $netbiosName = $Global:Config.vmOptions.domainName.Split(".")[0]
+            $Global:Config.vmOptions.DomainNetBiosName = $netbiosName
+            break
+        }
+    }
+    Get-TestResult -SuccessOnError | out-null
+    if (-not $machineName) {
+        return
+    }
+    write-log -verbose "show-NewVMMenu returned machineName '$machineName' for role '$role'"
+    return $machineName
+}

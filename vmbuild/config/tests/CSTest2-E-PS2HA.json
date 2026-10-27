@@ -15,6 +15,7 @@
       "role": "FileServer",
       "operatingSystem": "Server 2022",
       "memory": "3GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "additionalDisks": {
         "E": "500GB",
@@ -26,6 +27,7 @@
       "role": "PassiveSite",
       "operatingSystem": "Server 2022",
       "memory": "4GB",
+      "dynamicMinRam": "1GB",
       "virtualProcs": 4,
       "siteCode": "PS1",
       "cmInstallDir": "E:\\ConfigMgr",

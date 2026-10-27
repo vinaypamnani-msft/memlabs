@@ -1,0 +1,55 @@
+{
+  "vmOptions": {
+    "prefix": "CT5-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "cstest5.com",
+    "adminName": "admin",
+    "network": "192.168.50.0",
+    "timeZone": "Eastern Standard Time",
+    "domainNetBiosName": "cstest5",
+    "locale": "en-US"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "PROXY1",
+      "role": "Proxy",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "2GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2
+    },
+    {
+      "vmName": "LINUX1",
+      "role": "LinuxServer",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "2GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 2,
+      "enableRDP": true,
+      "joinDomain": true,
+      "useProxy": true
+    },
+    {
+      "vmName": "LINUXDESK1",
+      "role": "LinuxClient",
+      "operatingSystem": "Ubuntu Desktop 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "4GB",
+      "dynamicMinRam": "2GB",
+      "virtualProcs": 4,
+      "useProxy": true
+    },
+    {
+      "vmName": "W11PROXY1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 Latest",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "useProxy": true
+    }
+  ]
+}

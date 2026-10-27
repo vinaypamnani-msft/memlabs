@@ -1,0 +1,494 @@
+#requires -Version 5.1
+[CmdletBinding()]
+param([string]$RootPath)
+
+$ErrorActionPreference = 'Stop'
+if (-not $RootPath) { $RootPath = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+$collectorPath = Join-Path $RootPath 'vmbuild\common\Common.ScriptBlocks.ps1'
+$commonPath = Join-Path $RootPath 'vmbuild\Common.ps1'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($collectorPath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) { throw "$collectorPath has $($errors.Count) parse error(s)." }
+$definition = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-CMSetupLogsFromVm'
+        }, $true))
+if ($definition.Count -ne 1) { throw "Expected one Save-CMSetupLogsFromVm function, found $($definition.Count)." }
+. ([scriptblock]::Create($definition[0].Extent.Text))
+$sqlDefinition = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-CMSetupSqlFailureEvidence'
+        }, $true))
+if ($sqlDefinition.Count -ne 1) { throw "Expected one Save-CMSetupSqlFailureEvidence function, found $($sqlDefinition.Count)." }
+. ([scriptblock]::Create($sqlDefinition[0].Extent.Text))
+
+$script:Failures = 0
+function Assert-Equal {
+    param($Expected, $Actual, [string]$What)
+    $passed = "$Expected" -eq "$Actual"
+    if (-not $passed) { $script:Failures++ }
+    Write-Host ('{0}  {1}' -f $(if ($passed) { 'PASS' } else { 'FAIL' }), $What)
+}
+
+$collectorText = Get-Content -LiteralPath $collectorPath -Raw
+$commonText = Get-Content -LiteralPath $commonPath -Raw
+$manifestArrays = [ordered]@{
+    PrereqArtifacts = 'prereqArtifacts'
+    AdkArtifacts = 'artifacts'
+    CmArtifacts = 'cmArtifacts'
+    ProductLogInventory = 'productLogInventory'
+}
+foreach ($entry in $manifestArrays.GetEnumerator()) {
+    $field = if ($entry.Key -eq 'ProductLogInventory') { $entry.Key } else { '\$out\.' + $entry.Key }
+    $expression = [regex]::Match($definition[0].Extent.Text,
+        "(?m)^\s*$field\s*=\s*(?<Expression>[^\r\n]+)")
+    Assert-Equal $true $expression.Success "$($entry.Key) manifest expression exists"
+    if (-not $expression.Success) { continue }
+    $convert = [scriptblock]::Create(
+        "param(`$$($entry.Value))`n[pscustomobject]@{ Items = $($expression.Groups['Expression'].Value) }")
+    foreach ($count in @(0, 2)) {
+        $items = New-Object System.Collections.Generic.List[object]
+        for ($index = 0; $index -lt $count; $index++) {
+            $items.Add([pscustomobject]@{ Name = "evidence-$index.log"; Content = "evidence-$index" })
+        }
+        try { $converted = & $convert $items }
+        catch {
+            Assert-Equal '' $_.Exception.Message "$($entry.Key) converts $count artifact(s) without a binder failure: $($_.Exception.Message)"
+            continue
+        }
+        Assert-Equal $true ($converted.Items -is [object[]]) "$($entry.Key) preserves an object array for $count artifact(s)"
+        Assert-Equal $count @($converted.Items).Count "$($entry.Key) preserves the artifact count"
+        if ($count -gt 0) {
+            Assert-Equal 'evidence-0.log' $converted.Items[0].Name "$($entry.Key) preserves artifact metadata"
+            Assert-Equal 'evidence-1' $converted.Items[1].Content "$($entry.Key) preserves artifact content"
+        }
+    }
+}
+foreach ($logName in @('SMSProv.log', 'SMSProv.lo_', 'dmpdownloader.log', 'dmpdownloader.lo_', 'cmupdate.log', 'cmupdate.lo_', 'hman.log', 'hman.lo_', 'distmgr.log', 'smsexec.log', 'ConfigMgrPrereq.log', 'SmsAdminUI')) {
+    Assert-Equal $true $collectorText.Contains($logName) "failure collector names $logName"
+}
+foreach ($className in @(
+        'SMS_CM_UpdatePackages',
+        'SMS_CM_UpdatePackDownloadMonitoring',
+        'SMS_CM_UpdatePackTopLevelMonitoring',
+        'SMS_CM_UpdatePackDetailedMonitoring',
+        'SMS_DistributionPointGroup',
+        'SMS_DPGroupMembers',
+        'SMS_DPGroupPackages',
+        'SMS_DPGroupCollections',
+        'SMS_DistributionPointInfo'
+    )) {
+    Assert-Equal $true $collectorText.Contains("'$className'") "failure snapshot queries $className"
+}
+Assert-Equal $true ($collectorText -match "Mode -eq 'Failure'[\s\S]+CmArtifacts") 'ConfigMgr product diagnostics are failure-only'
+Assert-Equal $true ($collectorText.Contains('$Mode -eq ''Failure'' -and $Phase -eq 8')) 'product diagnostics are scoped to Phase 8 failure'
+Assert-Equal $true ($collectorText -match "-AsJob -TimeoutSeconds 120 -SessionMaxRetries 1 -SuppressLog -DisplayName 'Capture ConfigMgr provider state'") 'provider snapshot runs separately with a hard host timeout'
+Assert-Equal $true ($collectorText -match "-AsJob -TimeoutSeconds 180 -SessionMaxRetries 1 -SuppressLog -DisplayName 'Pull ConfigMgr failure diagnostics'") 'large product-log transfer is isolated and bounded'
+Assert-Equal $true ($collectorText -match 'OperationTimeoutSec 10') 'each direct provider query has a bounded operation timeout'
+Assert-Equal $true ($collectorText -match 'DirectCimErrors') 'provider snapshot records per-class failures'
+Assert-Equal $true ($collectorText -match 'DirectCimClassStats') 'provider snapshot records per-class capture metadata'
+Assert-Equal $true ($collectorText -match 'Select-Object -First 251') 'provider snapshot detects bounded-query truncation'
+Assert-Equal $true ($collectorText -match 'MinimumTotalRows') 'provider snapshot reports a lower bound when rows are truncated'
+Assert-Equal $true ($collectorText -match 'ProductLogInventory') 'static snapshot inventories missing and unreadable product logs'
+Assert-Equal $true ($collectorText -match 'tailLines=4000') 'product-log transfer uses bounded 4000-line tails'
+Assert-Equal $true ($collectorText -match 'Get-CMSiteUpdate -Fast -ErrorAction Stop') 'provider snapshot replays the broad cmdlet query'
+Assert-Equal $true ($collectorText -match 'Get-CMSiteUpdate -Name \$packageName -Fast -ErrorAction Stop') 'provider snapshot replays the name-filtered cmdlet query'
+Assert-Equal $true ($collectorText.Contains("Join-Path `$_ 'AdminUILog'")) 'console trace search includes the registered UI installation directory'
+Assert-Equal $true ($collectorText -match 'systemprofile\\AppData\\Local\\Temp') 'console trace search includes the LocalSystem temp directory'
+Assert-Equal 0 @([regex]::Matches($collectorText, '(?:\||^)\s*Invoke-CMSiteUpdateDownload\s', [Text.RegularExpressions.RegexOptions]::Multiline)).Count 'diagnostic provider probe invokes no mutating download command'
+Assert-Equal $true ($collectorText -match 'DownloadParameterSets') 'provider snapshot records installed download parameter sets without invoking them'
+Assert-Equal $true ($collectorText -match 'Remove-PSDrive -Name \$probe\.SiteCode') 'provider probe removes the CMSite drive it creates'
+Assert-Equal $true ($collectorText -match 'Remove-Module -ModuleInfo \$module') 'provider probe removes the ConfigurationManager module it imports'
+Assert-Equal $true ($collectorText -match 'HostSerializationFailed.+BaselineCapture') 'baseline fallback survives host JSON serialization failure'
+Assert-Equal $true ($collectorText -match 'HostSerializationFailed.+ConfigMgrProductLogs') 'product-log fallback survives host JSON serialization failure'
+Assert-Equal $true ($collectorText -match '-AsJob -TimeoutSeconds 180[\s\S]{0,200}-DisplayName "Package CM setup logs \(\$Mode\)"') 'baseline packaging has a 180-second hard timeout'
+Assert-Equal $true ($collectorText -match 'Copy-ItemFromVmBounded[\s\S]{0,300}-TimeoutSeconds 180') 'baseline ZIP uses the bounded external copy worker'
+Assert-Equal $true ($collectorText -match 'finally \{[\s\S]{0,500}\$out\.SetupContent = \$null[\s\S]{0,500}\$artifact\.Content = \$null') 'guest packaging failures return only a small manifest'
+Assert-Equal $true ($collectorText -match "'ReadConfigMgrSetup'|'ReadInstallCMLog'|'CompressArchive'") 'guest packaging writes durable stage checkpoints'
+Assert-Equal $true ($collectorText -match 'PackagingStatus\.json') 'host pulls packaging status after a timeout'
+Assert-Equal $true ($collectorText -match 'CMLog capture:[^\r\n]+-Warning -OutputStream') 'capture failures flow into phase warning stats'
+Assert-Equal $true ($commonText -match 'function Copy-ItemFromVmBounded') 'bounded guest-to-host copy helper exists'
+Assert-Equal $true ($commonText -match 'Copy-Item -FromSession') 'bounded copy helper uses PSDirect file transfer'
+Assert-Equal $true ($commonText -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)') 'bounded copy helper enforces its process timeout'
+Assert-Equal $true ($commonText -match 'Stop-Process -Id \$process\.Id') 'bounded copy helper terminates only its known worker PID'
+Assert-Equal $true ($commonText -match 'Hyper-V lookup diagnostics: \$lookupText') 'missing VM reports host-side lookup diagnostics'
+Assert-Equal $true ($commonText -match 'ComputerName = \$env:COMPUTERNAME[\s\S]{0,250}VmmsState') 'missing VM diagnostic identifies the host and VMMS state'
+Assert-Equal $false ($collectorText -match '\$selfExplainedErrors\s*=\s*@\([^)]*(?:4060|18456)') 'SQL login/database-open failures are not treated as self-explaining'
+Assert-Equal $true ($collectorText -match '\$collectSqlState\s*=\s*\(\$sqlErrNum -in @\(4060, 18456\)\)') 'SQL login/database-open errors trigger a bounded state snapshot'
+Assert-Equal $true ($collectorText -match 'DatabaseStates\s*=\s*@\(\)') 'SQL evidence result includes database/AG state'
+Assert-Equal $true ($collectorText -match 'synchronization_health_desc') 'SQL state snapshot includes AG synchronization health'
+Assert-Equal $true ($collectorText -match 'site\.\?control') 'post-database site-control failures trigger SQL evidence'
+Assert-Equal $true ($collectorText -match '\\\[\(4060\|18456\)\\\]') 'numbered login/database-open errors trigger SQL evidence'
+
+$workDir = Join-Path ([IO.Path]::GetTempPath()) ('cm-failure-diag-' + [guid]::NewGuid().ToString('N'))
+$null = New-Item -ItemType Directory -Path $workDir
+try {
+    $script:Common = [pscustomobject]@{ LogPath = Join-Path $workDir 'VMBuild.test.log' }
+    $script:CollectorMessages = New-Object System.Collections.Generic.List[string]
+    $script:CollectorInvocations = New-Object System.Collections.Generic.List[object]
+    $script:CollectorCopies = New-Object System.Collections.Generic.List[object]
+    $script:FailBaselineCapture = $false
+    $script:FailProductCapture = $false
+    $script:EmptyProductCapture = $false
+    $script:FailProviderCapture = $false
+    $script:UseBundleCapture = $false
+    $script:FailBundleCopy = $false
+    $script:CorruptBundleCopy = $false
+    $bundleSourceDir = Join-Path $workDir 'bundle-source'
+    $null = New-Item -ItemType Directory -Path $bundleSourceDir
+    [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'ConfigMgrSetup.log'), 'synthetic setup evidence')
+    $contractEvidence = 'Perfloading preflight failed before object creation: Perfloading contract invalid: path=C:\Windows\temp\ProvisionScript\Perfloading.ps1; sha256=FIXTURE; PowerShell=5.1; helpers=Confirm-MemLabsWsusSyncHealth(lines=3507,scriptScope=0,total=1)'
+    $wrapperEvidence = "synthetic wrapper evidence`r`n$contractEvidence"
+    [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'InstallCMLog.log'), $wrapperEvidence)
+    [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'DSC_Log.log'), 'synthetic DSC evidence')
+    [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'ClientPackageTimeline.jsonl'), '{"Classification":"Installed"}')
+    $script:BundleTemplate = Join-Path $workDir 'synthetic-cm-logs.zip'
+    Compress-Archive -LiteralPath @(Get-ChildItem -LiteralPath $bundleSourceDir -File | Select-Object -ExpandProperty FullName) `
+        -DestinationPath $script:BundleTemplate -Force
+
+    function Write-Log {
+        param([string]$Message, [switch]$Warning, [switch]$OutputStream)
+        $script:CollectorMessages.Add($Message)
+    }
+    function Invoke-VmCommand {
+        param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, [switch]$SuppressLog, $DisplayName, [switch]$AsJob, [int]$TimeoutSeconds, [int]$SessionMaxRetries)
+        $script:CollectorInvocations.Add([pscustomobject]@{ DisplayName = $DisplayName; AsJob = $AsJob.IsPresent; TimeoutSeconds = $TimeoutSeconds; SessionMaxRetries = $SessionMaxRetries })
+        if ($script:UseSqlFailureEvidence -and $DisplayName -eq 'Read ConfigMgrSetup.log tail for SQL error') {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = $script:SqlFailureTail
+            }
+        }
+        if ($script:UseSqlFailureEvidence -and $DisplayName -eq 'Collect SQL evidence from SQL-A') {
+            $script:SqlEvidenceArguments = $ArgumentList
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = [pscustomobject]@{
+                    ErrorLogPath = $null
+                    ErrorLog = $null
+                    LogScan = @('ERRORLOG | Error: 18456, Severity: 14, State: 38.')
+                    LogScanNote = 'scanned one ERRORLOG generation'
+                    Assertions = @()
+                    DumpFiles = @()
+                    DumpNote = '0 dumps'
+                    SuspectPages = @()
+                    DatabaseStates = @(
+                        [pscustomobject]@{
+                            DbName = 'CM_PRI'
+                            StateDesc = 'ONLINE'
+                            RoleDesc = 'PRIMARY'
+                            SynchronizationState = 'SYNCHRONIZED'
+                            SynchronizationHealth = 'HEALTHY'
+                            IsSuspended = '0'
+                            SuspendReason = ''
+                        }
+                    )
+                    Checks = @()
+                    Error = $null
+                }
+            }
+        }
+        if ($DisplayName -eq 'Capture ConfigMgr provider state') {
+            if ($script:FailProviderCapture) {
+                return [pscustomobject]@{
+                    ScriptBlockFailed = $true
+                    ScriptBlockOutput = $null
+                    TimedOut          = $true
+                    ErrorDetails      = @('synthetic provider timeout')
+                }
+            }
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = '{"ProbeStatus":"Completed","DirectCimErrors":{"SMS_CM_UpdatePackages":"synthetic provider error"}}'
+                TimedOut          = $false
+                ErrorDetails      = @()
+            }
+        }
+        if ($DisplayName -eq 'Pull ConfigMgr failure diagnostics' -and $script:FailProductCapture) {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $true
+                ScriptBlockOutput = $null
+                TimedOut          = $true
+                ErrorDetails      = @('synthetic product-log timeout')
+            }
+        }
+        if ($DisplayName -eq 'Pull ConfigMgr failure diagnostics' -and $script:EmptyProductCapture) {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = [pscustomobject]@{
+                    CmArtifacts = @()
+                    UpdateDiagnostics = $null
+                }
+                TimedOut          = $false
+                ErrorDetails      = @()
+            }
+        }
+        if ($DisplayName -like 'Package CM setup logs*' -and $script:FailBaselineCapture) {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $true
+                ScriptBlockOutput = $null
+                TimedOut          = $true
+                ErrorDetails      = @('synthetic baseline timeout')
+            }
+        }
+        if ($DisplayName -like 'Package CM setup logs*' -and $script:UseBundleCapture) {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                TimedOut          = $false
+                ErrorDetails      = @()
+                ScriptBlockOutput = [pscustomobject]@{
+                    SetupExists = $true; SetupBytes = 24; SetupTail = $false; SetupContent = $null
+                    SetupBundleName = 'ConfigMgrSetup.log'
+                    WrapperExists = $true; WrapperBytes = 26; WrapperContent = $null
+                    WrapperBundleName = 'InstallCMLog.log'
+                    DscLogExists = $true; DscLogBytes = 22; DscLogContent = $null
+                    DscLogBundleName = 'DSC_Log.log'
+                    ClientPackageTimelineExists = $true; ClientPackageTimelineBytes = 30
+                    ClientPackageTimelineContent = $null; ClientPackageTimelineTail = $false
+                    ClientPackageTimelineBundleName = 'ClientPackageTimeline.jsonl'
+                    AdkArtifacts = @()
+                    BundlePath = 'C:\Windows\Temp\MemLabs-CMLogs-test\CMLogs.zip'
+                    BundleBytes = (Get-Item -LiteralPath $script:BundleTemplate).Length
+                    BundleError = $null
+                }
+            }
+        }
+        $output = [pscustomobject]@{
+            ScriptBlockFailed = $false
+            ScriptBlockOutput = [pscustomobject]@{
+                SetupExists      = $false
+                WrapperExists    = $false
+                DscLogExists     = $false
+                AdkArtifacts     = @()
+                CmArtifacts      = @(
+                    [pscustomobject]@{ Name = 'SMSProv.log'; Bytes = 2048; TailLines = 8000; Content = 'provider method evidence' }
+                    [pscustomobject]@{ Name = 'dmpdownloader.log'; Bytes = 4096; TailLines = 8000; Content = 'download engine evidence' }
+                    [pscustomobject]@{ Name = 'cmupdate.log'; Bytes = 1024; TailLines = 8000; Content = 'update engine evidence' }
+                )
+                UpdateDiagnostics = '{"SiteCode":"PS1","ConsoleLogSearchDirectories":["E:\\ConfigMgr\\AdminConsole\\AdminUILog"],"ProductLogInventory":[{"SourcePath":"E:\\ConfigMgr\\Logs\\SMSProv.log","Exists":true,"Collected":true,"Bytes":2048,"Error":""}]}'
+            }
+        }
+        return $output
+    }
+    function Copy-ItemFromVmBounded {
+        param($Path, $Destination, $VMName, $VMDomainName, [int]$TimeoutSeconds)
+        $script:CollectorCopies.Add([pscustomobject]@{
+                Path = $Path; Destination = $Destination; VMName = $VMName
+                DomainName = $VMDomainName; TimeoutSeconds = $TimeoutSeconds
+            })
+        if ($Path -like '*.status.json') {
+            [pscustomobject]@{
+                CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+                ComputerName = $VMName
+                Stage = 'CompressArchive'
+                SourcePath = 'C:\Windows\Temp\synthetic.zip'
+                Bytes = 4096
+                Error = $null
+            } | ConvertTo-Json | Set-Content -LiteralPath $Destination -Encoding UTF8
+            return $true
+        }
+        if ($script:FailBundleCopy) { return $false }
+        Copy-Item -LiteralPath $script:BundleTemplate -Destination $Destination -Force
+        if ($script:CorruptBundleCopy) { Add-Content -LiteralPath $Destination -Value 'corrupt' -NoNewline }
+        return $true
+    }
+
+    $script:UseSqlFailureEvidence = $true
+    $script:SqlFailureTail = @(
+        '*** EXEC sp_configure ''show advanced options'', 1'
+        '*** [HY000][18456]Login failed for user cstest5\admin. Cannot open database requested by the login.'
+        'Failed to set Service Broker certificate.'
+    ) -join "`n"
+    $sqlFailureMessageStart = $script:CollectorMessages.Count
+    Save-CMSetupSqlFailureEvidence -VmName 'CM-SITE' -DomainName 'example.test' -Phase 8 -DeployConfig ([pscustomobject]@{
+        virtualMachines = @(
+            [pscustomobject]@{ vmName = 'CM-SITE'; remoteSQLVM = 'SQL-A' },
+            [pscustomobject]@{ vmName = 'SQL-A'; OtherNode = $null }
+        )
+    })
+    $script:UseSqlFailureEvidence = $false
+    Assert-Equal $true ($script:SqlEvidenceArguments.Count -ge 5 -and $script:SqlEvidenceArguments[3] -eq $false -and $script:SqlEvidenceArguments[4] -eq $true) '18456 triggers SQL database/AG state collection without CHECKDB'
+    Assert-Equal $true ((@($script:CollectorMessages | Select-Object -Skip $sqlFailureMessageStart) -join "`n") -match 'CM database state on SQL-A: CM_PRI state=ONLINE, role=PRIMARY, sync=SYNCHRONIZED, health=HEALTHY') 'SQL failure log reports current CM database and AG state'
+
+    Save-CMSetupLogsFromVm -VmName 'DIAG-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    $baseInvocation = @($script:CollectorInvocations | Where-Object DisplayName -like 'Package CM setup logs*')
+    Assert-Equal 1 $baseInvocation.Count 'baseline logs use their independent packaging command'
+    if ($baseInvocation.Count -eq 1) {
+        Assert-Equal $true $baseInvocation[0].AsJob 'baseline log packaging uses the bounded job path'
+        Assert-Equal 180 $baseInvocation[0].TimeoutSeconds 'baseline log packaging has a 180-second hard timeout'
+        Assert-Equal 1 $baseInvocation[0].SessionMaxRetries 'baseline log packaging does not repeat the full connection ladder'
+    }
+    $productInvocation = @($script:CollectorInvocations | Where-Object DisplayName -eq 'Pull ConfigMgr failure diagnostics')
+    Assert-Equal 1 $productInvocation.Count 'product logs use a second independent transfer'
+    if ($productInvocation.Count -eq 1) {
+        Assert-Equal $true $productInvocation[0].AsJob 'product-log transfer uses the bounded job path'
+        Assert-Equal 180 $productInvocation[0].TimeoutSeconds 'product-log transfer has a 180-second hard timeout'
+        Assert-Equal 1 $productInvocation[0].SessionMaxRetries 'product-log transfer does not repeat the full connection ladder'
+    }
+    foreach ($name in @('SMSProv.log', 'dmpdownloader.log', 'cmupdate.log')) {
+        $files = @(Get-ChildItem -LiteralPath $workDir -Filter "DIAG-PS1SITE-Phase8-*-$name" -File)
+        Assert-Equal 1 $files.Count "host collector writes $name"
+    }
+    $snapshot = @(Get-ChildItem -LiteralPath $workDir -Filter 'DIAG-PS1SITE-Phase8-*-ConfigMgrUpdateDiagnostics.json' -File)
+    Assert-Equal 1 $snapshot.Count 'host collector writes the structured update snapshot'
+    if ($snapshot.Count -eq 1) {
+        $snapshotJson = Get-Content -LiteralPath $snapshot[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'PS1' $snapshotJson.SiteCode 'structured snapshot content survives host transfer'
+        Assert-Equal 'E:\ConfigMgr\AdminConsole\AdminUILog' $snapshotJson.ConsoleLogSearchDirectories[0] 'structured snapshot preserves console-log search locations'
+        Assert-Equal $true $snapshotJson.ProductLogInventory[0].Collected 'structured snapshot preserves product-log collection status'
+    }
+    $providerSnapshot = @(Get-ChildItem -LiteralPath $workDir -Filter 'DIAG-PS1SITE-Phase8-*-ConfigMgrProviderState.json' -File)
+    Assert-Equal 1 $providerSnapshot.Count 'host collector writes the independently bounded provider snapshot'
+    if ($providerSnapshot.Count -eq 1) {
+        $providerJson = Get-Content -LiteralPath $providerSnapshot[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'synthetic provider error' $providerJson.DirectCimErrors.SMS_CM_UpdatePackages 'provider snapshot preserves provider-query errors'
+    }
+    $providerInvocation = @($script:CollectorInvocations | Where-Object DisplayName -eq 'Capture ConfigMgr provider state')
+    Assert-Equal 1 $providerInvocation.Count 'collector invokes the provider snapshot independently'
+    if ($providerInvocation.Count -eq 1) {
+        Assert-Equal $true $providerInvocation[0].AsJob 'provider snapshot uses the bounded job path'
+        Assert-Equal 120 $providerInvocation[0].TimeoutSeconds 'provider snapshot has a 120-second hard timeout'
+        Assert-Equal 1 $providerInvocation[0].SessionMaxRetries 'provider snapshot does not repeat the full connection ladder'
+    }
+    $messages = @($script:CollectorMessages) -join "`n"
+    Assert-Equal $true ($messages -match 'Pulled ConfigMgr diagnostic SMSProv\.log') 'collector reports product-log capture'
+    Assert-Equal $true ($messages -match 'Pulled ConfigMgr update/provider state') 'collector reports snapshot capture'
+    Assert-Equal $true ($messages -match 'Captured bounded ConfigMgr provider state') 'collector reports independently bounded provider capture'
+
+    $script:CollectorInvocations.Clear()
+    $script:CollectorMessages.Clear()
+    $script:EmptyProductCapture = $true
+    Save-CMSetupLogsFromVm -VmName 'EMPTY-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    $emptySnapshot = @(Get-ChildItem -LiteralPath $workDir -Filter 'EMPTY-PS1SITE-Phase8-*-ConfigMgrUpdateDiagnostics.json' -File)
+    Assert-Equal 1 $emptySnapshot.Count 'empty product probe writes a durable inventory status'
+    if ($emptySnapshot.Count -eq 1) {
+        $emptySnapshotJson = Get-Content -LiteralPath $emptySnapshot[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'GuestReturnedNoProductLogInventory' $emptySnapshotJson.CaptureStatus 'empty product probe records its capture status'
+        Assert-Equal 0 $emptySnapshotJson.ArtifactsReturned 'empty product probe records returned artifact count'
+    }
+    $script:EmptyProductCapture = $false
+
+    $bundleWorkDir = Join-Path $workDir 'bundle-success'
+    $null = New-Item -ItemType Directory -Path $bundleWorkDir
+    $script:Common.LogPath = Join-Path $bundleWorkDir 'VMBuild.test.log'
+    $script:CollectorInvocations.Clear()
+    $script:CollectorCopies.Clear()
+    $script:CollectorMessages.Clear()
+    $script:UseBundleCapture = $true
+    Save-CMSetupLogsFromVm -VmName 'BUNDLE-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Success'
+    Assert-Equal 1 $script:CollectorCopies.Count 'baseline artifacts use one bounded ZIP transfer'
+    if ($script:CollectorCopies.Count -eq 1) {
+        Assert-Equal 180 $script:CollectorCopies[0].TimeoutSeconds 'bundle transfer has a 180-second hard timeout'
+    }
+    foreach ($expected in @(
+            @{ Name = 'ConfigMgrSetup.log'; Text = 'synthetic setup evidence' },
+            @{ Name = 'InstallCMLog.log'; Text = $wrapperEvidence },
+            @{ Name = 'DSC_Log.log'; Text = 'synthetic DSC evidence' },
+            @{ Name = 'ClientPackageTimeline.jsonl'; Text = '{"Classification":"Installed"}' }
+        )) {
+        $files = @(Get-ChildItem -LiteralPath $bundleWorkDir -Filter "BUNDLE-PS1SITE-Phase8-*-$($expected.Name)" -File)
+        Assert-Equal 1 $files.Count "bundle materializes $($expected.Name)"
+        if ($files.Count -eq 1) {
+            Assert-Equal $expected.Text ([IO.File]::ReadAllText($files[0].FullName).Trim()) "$($expected.Name) content survives bundle transfer"
+        }
+    }
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $bundleWorkDir -Filter '*-BaselineCaptureStatus.json' -File).Count 'successful bundle writes no fallback status'
+
+    $script:Common.LogPath = Join-Path $bundleWorkDir 'VMBuild.test.log'
+    Save-CMSetupLogsFromVm -VmName 'CONTRACTFAIL-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    $contractLogs = @(Get-ChildItem -LiteralPath $bundleWorkDir -Filter 'CONTRACTFAIL-PS1SITE-Phase8-*-InstallCMLog.log' -File)
+    Assert-Equal 1 $contractLogs.Count 'Phase 8 contract failure collects the full guest install log'
+    if ($contractLogs.Count -eq 1) {
+        Assert-Equal $wrapperEvidence ([IO.File]::ReadAllText($contractLogs[0].FullName).Trim()) 'contract failure source hash, engine, helper location and scope survive ZIP transport'
+    }
+
+    $bundleMismatchWorkDir = Join-Path $workDir 'bundle-size-mismatch'
+    $null = New-Item -ItemType Directory -Path $bundleMismatchWorkDir
+    $script:Common.LogPath = Join-Path $bundleMismatchWorkDir 'VMBuild.test.log'
+    $script:CollectorCopies.Clear()
+    $script:CollectorMessages.Clear()
+    $script:CorruptBundleCopy = $true
+    Save-CMSetupLogsFromVm -VmName 'BUNDLEMISMATCH-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Success'
+    $mismatchStatus = @(Get-ChildItem -LiteralPath $bundleMismatchWorkDir -Filter 'BUNDLEMISMATCH-PS1SITE-Phase8-*-BaselineCaptureStatus.json' -File)
+    Assert-Equal 1 $mismatchStatus.Count 'bundle size mismatch writes a self-describing status artifact'
+    if ($mismatchStatus.Count -eq 1) {
+        $mismatchJson = Get-Content -LiteralPath $mismatchStatus[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'BundleTransferFailed' $mismatchJson.CaptureStatus 'bundle size mismatch is a transfer failure'
+        Assert-Equal $true ("$($mismatchJson.Error)" -match 'bundle size mismatch') 'bundle size mismatch records both byte counts'
+    }
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath $bundleMismatchWorkDir -Filter 'BUNDLEMISMATCH-PS1SITE-Phase8-*-CMLogs.failed.zip' -File).Count 'mismatched bundle is preserved for diagnosis'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $bundleMismatchWorkDir -Filter 'BUNDLEMISMATCH-PS1SITE-Phase8-*-ConfigMgrSetup.log' -File).Count 'mismatched bundle materializes no trusted artifacts'
+    $script:CorruptBundleCopy = $false
+
+    $bundleFailureWorkDir = Join-Path $workDir 'bundle-copy-failure'
+    $null = New-Item -ItemType Directory -Path $bundleFailureWorkDir
+    $script:Common.LogPath = Join-Path $bundleFailureWorkDir 'VMBuild.test.log'
+    $script:CollectorCopies.Clear()
+    $script:CollectorMessages.Clear()
+    $script:FailBundleCopy = $true
+    Save-CMSetupLogsFromVm -VmName 'BUNDLEFAIL-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Success'
+    $bundleFailure = @(Get-ChildItem -LiteralPath $bundleFailureWorkDir -Filter 'BUNDLEFAIL-PS1SITE-Phase8-*-BaselineCaptureStatus.json' -File)
+    Assert-Equal 1 $bundleFailure.Count 'bundle copy failure writes a self-describing status artifact'
+    if ($bundleFailure.Count -eq 1) {
+        $bundleFailureJson = Get-Content -LiteralPath $bundleFailure[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'BundleTransferFailed' $bundleFailureJson.CaptureStatus 'bundle copy failure is classified separately from guest packaging'
+        Assert-Equal $false $bundleFailureJson.TimedOut 'external copy failure does not masquerade as an Invoke-VmCommand timeout'
+    }
+    Assert-Equal $true ((@($script:CollectorMessages) -join "`n") -match 'phase success is unchanged') 'success-mode copy failure cannot change the phase result'
+    $script:FailBundleCopy = $false
+    $script:UseBundleCapture = $false
+
+    $failureWorkDir = Join-Path $workDir 'baseline-failure'
+    $null = New-Item -ItemType Directory -Path $failureWorkDir
+    $script:Common.LogPath = Join-Path $failureWorkDir 'VMBuild.test.log'
+    $script:CollectorInvocations.Clear()
+    $script:CollectorMessages.Clear()
+    $script:FailBaselineCapture = $true
+    Save-CMSetupLogsFromVm -VmName 'FAIL-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    Assert-Equal 1 @($script:CollectorInvocations | Where-Object DisplayName -eq 'Pull ConfigMgr failure diagnostics').Count 'baseline failure does not suppress product-log capture'
+    Assert-Equal 1 @($script:CollectorInvocations | Where-Object DisplayName -eq 'Capture ConfigMgr provider state').Count 'baseline failure does not suppress provider-state capture'
+    $baselineFailure = @(Get-ChildItem -LiteralPath $failureWorkDir -Filter 'FAIL-PS1SITE-Phase8-*-BaselineCaptureStatus.json' -File)
+    Assert-Equal 1 $baselineFailure.Count 'baseline failure writes a self-describing status artifact'
+    if ($baselineFailure.Count -eq 1) {
+        $baselineFailureJson = Get-Content -LiteralPath $baselineFailure[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'HostInvocationFailed' $baselineFailureJson.CaptureStatus 'baseline fallback records invocation failure'
+        Assert-Equal $true $baselineFailureJson.TimedOut 'baseline fallback records timeout state'
+        Assert-Equal 'synthetic baseline timeout' $baselineFailureJson.ErrorDetails[0] 'baseline fallback retains host error details'
+        Assert-Equal $true ("$($baselineFailureJson.Error)" -match 'lastStage=CompressArchive') 'baseline timeout records the last guest packaging stage'
+    }
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath $failureWorkDir -Filter 'FAIL-PS1SITE-Phase8-*-PackagingStatus.json' -File).Count 'baseline timeout preserves guest packaging status'
+    Assert-Equal 1 @(Get-ChildItem -LiteralPath $failureWorkDir -Filter 'FAIL-PS1SITE-Phase8-*-SMSProv.log' -File).Count 'baseline failure still preserves product logs'
+
+    $diagnosticFailureWorkDir = Join-Path $workDir 'diagnostic-failure'
+    $null = New-Item -ItemType Directory -Path $diagnosticFailureWorkDir
+    $script:Common.LogPath = Join-Path $diagnosticFailureWorkDir 'VMBuild.test.log'
+    $script:CollectorInvocations.Clear()
+    $script:CollectorMessages.Clear()
+    $script:FailBaselineCapture = $false
+    $script:FailProductCapture = $true
+    $script:FailProviderCapture = $true
+    Save-CMSetupLogsFromVm -VmName 'TIMEOUT-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    $productFailure = @(Get-ChildItem -LiteralPath $diagnosticFailureWorkDir -Filter 'TIMEOUT-PS1SITE-Phase8-*-ConfigMgrUpdateDiagnostics.json' -File)
+    Assert-Equal 1 $productFailure.Count 'product-log timeout writes a self-describing fallback artifact'
+    if ($productFailure.Count -eq 1) {
+        $productFailureJson = Get-Content -LiteralPath $productFailure[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'HostInvocationFailed' $productFailureJson.CaptureStatus 'product-log fallback records invocation failure'
+        Assert-Equal $true $productFailureJson.TimedOut 'product-log fallback records timeout state'
+        Assert-Equal 'synthetic product-log timeout' $productFailureJson.ErrorDetails[0] 'product-log fallback retains host error details'
+    }
+    $providerFailure = @(Get-ChildItem -LiteralPath $diagnosticFailureWorkDir -Filter 'TIMEOUT-PS1SITE-Phase8-*-ConfigMgrProviderState.json' -File)
+    Assert-Equal 1 $providerFailure.Count 'provider timeout writes a self-describing fallback artifact'
+    if ($providerFailure.Count -eq 1) {
+        $providerFailureJson = Get-Content -LiteralPath $providerFailure[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'HostInvocationFailed' $providerFailureJson.ProbeStatus 'provider fallback records invocation failure'
+        Assert-Equal $true $providerFailureJson.TimedOut 'provider fallback records timeout state'
+        Assert-Equal 'synthetic provider timeout' $providerFailureJson.ErrorDetails[0] 'provider fallback retains host error details'
+    }
+}
+finally {
+    Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+if ($script:Failures -gt 0) { throw "$script:Failures ConfigMgr failure-diagnostic assertion(s) failed." }
+Write-Host 'ALL CONFIGMGR FAILURE-DIAGNOSTIC TESTS PASSED'

@@ -37,9 +37,26 @@
     if ($ThisVM.role -eq "SiteSystem") {
         $firewallRoles += @("Management Point", "Distribution Point", "Software Update Point", "Reporting Services Point")
     }
+    if ($ThisVM.sqlVersion -and ("SQL Server" -notin $firewallRoles)) {
+        $firewallRoles += "SQL Server"
+    }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+
+    $clientSetupGet = { @{ Result = 'Read-only Windows client setup guard' } }
+    $clientSetupTest = {
+        . 'C:\staging\DSC\phases\WindowsSetupReadiness.ps1'
+        $state = Get-MemLabsWindowsClientSetupState
+        return ($state.Ready -is [bool] -and $state.Ready)
+    }
+    $clientSetupSet = {
+        . 'C:\staging\DSC\phases\WindowsSetupReadiness.ps1'
+        $state = Get-MemLabsWindowsClientSetupState
+        if ($state.Ready -isnot [bool] -or -not $state.Ready) {
+            throw "Windows client setup is not complete; refusing rename/domain join. $($state.Detail)"
+        }
+    }
 
     Node localhost
     {
@@ -48,7 +65,14 @@
             RebootNodeIfNeeded = $true
         }
 
+        Script ClientSetupBeforeRename {
+            GetScript = $clientSetupGet
+            TestScript = $clientSetupTest
+            SetScript = $clientSetupSet
+        }
+
         WriteStatus Rename {
+            DependsOn = '[Script]ClientSetupBeforeRename'
             Status = "Renaming the computer to $ThisMachineName"
         }
 
@@ -76,32 +100,60 @@
             MaximumSize = $PageFileSize
         }
         
-        WriteStatus WaitDomain {
+        WriteStatus DisableWU {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
-            Status    = "Waiting for domain to be ready (Trying to ping the DC)"
+            Status    = "Disabling Windows Update"
         }
 
-        WaitForDomainReady WaitForDomain {
-            DependsOn  = "[WriteStatus]WaitDomain"
-            Ensure     = "Present"
-            DomainName = $DomainName
-            DCName     = $DCName
+        # Disable Windows Update before domain join reboot so WU doesn't fire on restart
+        Script DisableWindowsUpdate {
+            DependsOn  = "[WriteStatus]DisableWU"
+            GetScript  = { @{ Result = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name NoAutoUpdate -ErrorAction SilentlyContinue).NoAutoUpdate } }
+            TestScript = {
+                $val = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name NoAutoUpdate -ErrorAction SilentlyContinue
+                return ($val -and $val.NoAutoUpdate -eq 1)
+            }
+            SetScript  = {
+                $wuPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+                $auPath = "$wuPath\AU"
+                New-Item -Path $auPath -Force | Out-Null
+                New-ItemProperty -Path $auPath -Name 'NoAutoUpdate' -PropertyType DWord -Value 1 -Force | Out-Null
+                New-ItemProperty -Path $wuPath -Name 'DoNotConnectToWindowsUpdateInternetLocations' -PropertyType DWord -Value 1 -Force | Out-Null
+                New-ItemProperty -Path $wuPath -Name 'DisableWindowsUpdateAccess' -PropertyType DWord -Value 1 -Force | Out-Null
+                $service = Get-Service -Name wuauserv -ErrorAction SilentlyContinue
+                if ($service -and $service.Status -ne 'Stopped') {
+                    $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
+                    try {
+                        $service.Stop()
+                        $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+                    }
+                    catch {
+                        $service.Refresh()
+                        Write-Warning "wuauserv did not stop within 30 seconds. Current status: $($service.Status). Error: $_"
+                    }
+                    finally {
+                        $stopWatch.Stop()
+                        Write-Verbose "wuauserv stop attempt completed in $([math]::Round($stopWatch.Elapsed.TotalSeconds, 1)) seconds."
+                    }
+                }
+            }
         }
 
-        WriteStatus DomainJoin {
-            DependsOn = "[WaitForDomainReady]WaitForDomain"
-            Status    = "Joining computer to the domain"
-        }
-
-        JoinDomain JoinDomain {
-            DomainName = $DomainName
-            Credential = $DomainCreds
-            DependsOn  = "[WriteStatus]DomainJoin"
-        }
-
+        # ---------------------------------------------------------------------
+        # Domain-independent local OS configuration — run BEFORE the domain
+        # wait/join, not after the post-join reboot.
+        #
+        # None of these resources need AD membership (pure local icacls/takeown,
+        # a local SMB share, local firewall rules, a local registry value). On a
+        # fresh deploy the member otherwise sits idle in WaitForDomainReady while
+        # the DC promotes; doing this local work first overlaps it with that
+        # wait. After the join reboot DSC just re-Tests these (fast no-op), so the
+        # expensive Sets stay off the post-join critical path. All of them persist
+        # across the domain-join reboot.
+        # ---------------------------------------------------------------------
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = "[JoinDomain]JoinDomain"
+            DependsOn = "[Script]DisableWindowsUpdate"
         }
 
         File ShareFolder {
@@ -123,9 +175,277 @@
             Role      = $firewallRoles
         }
 
-        WriteStatus Complete {
+        # Disable UAC remote restrictions so PSDirect sessions from the host
+        # get a full (elevated) admin token. Without this, post-DSC host-to-VM
+        # commands (Set-WindowsClientProxy, etc.) fail with "Requested registry
+        # access is not allowed" on Windows client SKUs (Win10/Win11) because
+        # UAC filters remote admin tokens.
+        Registry DisableUACRemoteRestrictions {
             DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
-            Status    = "Complete!"
+            Ensure    = "Present"
+            Key       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            ValueName = "LocalAccountTokenFilterPolicy"
+            ValueType = "Dword"
+            ValueData = "1"
+        }
+
+        # Confirm the rename actually applied to the ACTIVE computer name before
+        # we join the domain. The stock 'Computer NewName' resource's Test trusts
+        # the PENDING-rename registry value, so if Windows re-ran its specialize
+        # pass or its OOBE watchdog re-arms setup, the ACTIVE name can still be
+        # the random DESKTOP-* even
+        # though Computer.Test reported success. Joining the domain under that
+        # transient name permanently breaks the rename ("the specified computer
+        # account could not be found") and strands the config. Gate here: if the
+        # active name isn't the target yet, (re)stage the rename and reboot so the
+        # name lands FIRST. The box is still in a workgroup at this point, so a
+        # plain Rename-Computer needs no domain credential. A genuinely stuck
+        # re-specialize loop now parks on this gate (a clean, detectable failure)
+        # instead of silently joining under the wrong name and bricking the VM.
+        Script ConfirmComputerName {
+            DependsOn  = "[Registry]DisableUACRemoteRestrictions"
+            GetScript  = {
+                return @{ Result = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' `
+                            -Name ComputerName -ErrorAction Stop).ComputerName }
+            }
+            TestScript = [string]"
+                `$activeName = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction Stop).ComputerName
+                return (`$activeName -eq '$ThisMachineName')
+            "
+            SetScript  = [string]"
+                `$activeName = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction Stop).ComputerName
+                `$pendingPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName'
+                `$pendingName = (Get-ItemProperty -LiteralPath `$pendingPath -Name ComputerName -ErrorAction Stop).ComputerName
+                if ([string]::IsNullOrWhiteSpace(`$activeName) -or [string]::IsNullOrWhiteSpace(`$pendingName)) {
+                    throw 'Active or pending computer name could not be verified before domain join.'
+                }
+                if (`$activeName -ne '$ThisMachineName') {
+                    if (`$pendingName -ne '$ThisMachineName') {
+                        Rename-Computer -NewName '$ThisMachineName' -Force -ErrorAction Stop
+                        `$pendingName = (Get-ItemProperty -LiteralPath `$pendingPath -Name ComputerName -ErrorAction Stop).ComputerName
+                        if (`$pendingName -ne '$ThisMachineName') {
+                            throw 'The requested computer rename was not reflected in the pending-name registry value.'
+                        }
+                    }
+                    `$global:DSCMachineStatus = 1
+                }
+            "
+        }
+
+        WriteStatus WaitDomain {
+            DependsOn = "[Script]ConfirmComputerName"
+            Status    = "Waiting for domain $DomainName to be ready (Trying to ping the DC)"
+        }
+
+        WaitForDomainReady WaitForDomain {
+            DependsOn  = "[WriteStatus]WaitDomain"
+            Ensure     = "Present"
+            DomainName = $DomainName
+            DCName     = $DCName
+        }
+
+        WriteStatus DomainJoin {
+            DependsOn = "[WaitForDomainReady]WaitForDomain"
+            Status    = "Joining computer to the domain"
+        }
+
+        Script ClientSetupBeforeJoin {
+            GetScript = $clientSetupGet
+            TestScript = $clientSetupTest
+            SetScript = $clientSetupSet
+            DependsOn = '[WriteStatus]DomainJoin'
+        }
+
+        JoinDomain JoinDomain {
+            DomainName = $DomainName
+            Credential = $DomainCreds
+            DependsOn  = '[Script]ClientSetupBeforeJoin'
+        }
+
+        # Validate secure channel after the post-JoinDomain reboot. If the machine
+        # secret drifted (e.g. JoinDomain's retry loop fired Add-Computer twice
+        # against a half-promoted DC), try non-destructive password repairs before
+        # any downstream resource depends on AD auth. A full rejoin remains the
+        # final recovery after stable PDC readiness and repeated failure checks.
+        TestDomainJoin TestDomainJoin {
+            DomainName = $DomainName
+            DCName     = $DCName
+            Credential = $DomainCreds
+            DependsOn  = "[JoinDomain]JoinDomain"
+        }
+
+        # Configure system proxy if this VM is a proxy client. Runs as SYSTEM
+        # so there are no UAC/PSDirect elevation issues. Sets WinHTTP, machine
+        # env vars, HKLM/HKU\.DEFAULT registry, and machine.config <defaultProxy>
+        # with retry logic. By the time Phase 3 DSC starts, all proxy layers are
+        # in place and downloads go through Squid.
+        #
+        # Chains off TestDomainJoin (not DisableUACRemoteRestrictions, which now
+        # runs before the domain wait) so the proxy is configured after the box
+        # is joined and its secure channel validated — keeping the join path free
+        # of any proxy interference.
+        $proxyDepend = '[TestDomainJoin]TestDomainJoin'
+        if ($ThisVM.useProxy -eq $true) {
+            $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+            if ($proxyVm) {
+                $proxyFqdn = "$($proxyVm.vmName).$DomainName"
+                $proxyServer = "${proxyFqdn}:3128"
+                $bypassEntries = @('<local>', "*.$DomainName", $proxyFqdn)
+                # Bypass the proxy for THIS VM's own subnet, not the domain
+                # default network — a member on a secondary network must bypass
+                # for its own subnet, not vmOptions.network.
+                $network = if ($ThisVM.network) { $ThisVM.network } else { $deployConfig.vmOptions.network }
+                if ($network) {
+                    $base = ($network -replace '\.0$', '')
+                    if ($base -match '^\d+\.\d+\.\d+$') { $bypassEntries += "$base.*" }
+                }
+                $proxyBypass = ($bypassEntries | Select-Object -Unique) -join ';'
+
+                WriteStatus ConfigureProxy {
+                    DependsOn = '[TestDomainJoin]TestDomainJoin'
+                    Status    = "Configuring system proxy: $proxyServer"
+                }
+
+                SetWindowsProxy ConfigureProxy {
+                    DependsOn   = '[WriteStatus]ConfigureProxy'
+                    ProxyServer = $proxyServer
+                    BypassList  = $proxyBypass
+                }
+                $proxyDepend = '[SetWindowsProxy]ConfigureProxy'
+            }
+        }
+
+        # Pre-seed TPM protector for BitLocker VMs
+        # Windows 11 24H2 on Hyper-V 512e disks cannot add a NumericalPassword as the first protector.
+        # The ConfigMgr BLM handler calls ProtectKeyWithNumericalPassword first, which fails with 0x8007001f.
+        # Pre-adding a TPM protector works around this by ensuring the volume already has a protector.
+        if ($ThisVM.BitLocker -eq $true) {
+            WriteStatus SeedTPM {
+                DependsOn = $proxyDepend
+                Status    = "Adding TPM protector for BitLocker"
+            }
+
+            # On Server OS, the BitLocker feature (and its PowerShell module) must be installed
+            # before Get-BitLockerVolume and Enable-BitLocker are available. On client OS
+            # (Windows 10/11) the cmdlets are always present.
+            Script InstallBitLockerFeature {
+                DependsOn  = "[WriteStatus]SeedTPM"
+                GetScript  = { @{ Result = "N/A" } }
+                TestScript = {
+                    # ProductType 1 = Workstation (client OS) — BitLocker cmdlets built-in
+                    $productType = (Get-CimInstance Win32_OperatingSystem).ProductType
+                    if ($productType -eq 1) { return $true }
+                    # Server OS — check if the BitLocker feature is installed
+                    $feat = Get-WindowsFeature -Name BitLocker -ErrorAction SilentlyContinue
+                    return ($feat -and $feat.Installed)
+                }
+                SetScript  = {
+                    Install-WindowsFeature -Name BitLocker -IncludeManagementTools -ErrorAction Stop
+                    if ((Get-WindowsFeature -Name BitLocker).InstallState -eq 'InstallPending') {
+                        $global:DSCMachineStatus = 1
+                    }
+                }
+            }
+
+            # Prevent Windows 11 24H2 automatic device encryption on first login.
+            # We want ConfigMgr BLM to manage encryption, not the OS auto-trigger.
+            Registry PreventDeviceEncryption {
+                DependsOn = "[Script]InstallBitLockerFeature"
+                Ensure    = "Present"
+                Key       = "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker"
+                ValueName = "PreventDeviceEncryption"
+                ValueType = "Dword"
+                ValueData = "1"
+            }
+
+            # Cancel the auto-device-encryption flow if it was already initiated before
+            # PreventDeviceEncryption was set. The KeyBackupMonitor flags cause
+            # UserOOBEBroker to retry encryption at every logon.
+            # Note: AutoDE\HSTI is TrustedInstaller-protected and cannot be deleted even as SYSTEM.
+            Script CancelAutoDeviceEncryption {
+                DependsOn = "[Registry]PreventDeviceEncryption"
+                GetScript  = { @{ Result = "N/A" } }
+                TestScript = {
+                    $monitor = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker\KeyBackupMonitor" -ErrorAction SilentlyContinue
+                    return (-not $monitor -or $monitor.IsKeyBackupMonitorStarted -eq 0)
+                }
+                SetScript  = {
+                    # Clear the key backup monitor that retries encryption at each logon
+                    $monPath = "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker\KeyBackupMonitor"
+                    if (Test-Path $monPath) {
+                        Set-ItemProperty $monPath -Name "IsKeyBackupMonitorStarted" -Value 0 -ErrorAction SilentlyContinue
+                        Set-ItemProperty $monPath -Name "IsKeyBackupMonitorStartedLocal" -Value 0 -ErrorAction SilentlyContinue
+                    }
+                    # Remove BDESVC service trigger so it doesn't auto-start and launch fvenotify.exe
+                    sc.exe triggerinfo BDESVC delete 2>&1 | Out-Null
+                    # Stop BDESVC now (prevents fvenotify popup until ConfigMgr BLM starts it)
+                    Stop-Service BDESVC -Force -ErrorAction SilentlyContinue
+                    # Disable scheduled tasks as belt-and-suspenders
+                    Get-ScheduledTask -TaskPath "\Microsoft\Windows\BitLocker\" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.State -ne "Disabled" } |
+                        Disable-ScheduledTask -ErrorAction SilentlyContinue
+                }
+            }
+
+            Script SeedTPMProtector {
+                DependsOn  = "[Script]CancelAutoDeviceEncryption"
+                GetScript  = { @{ Result = (Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue).KeyProtector.Count } }
+                TestScript = {
+                    $vol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
+                    if (-not $vol) { return $false }
+                    # If a TPM protector exists, we're done (encryption may be in progress or complete)
+                    $tpmProtector = $vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "Tpm" }
+                    return ($null -ne $tpmProtector)
+                }
+                SetScript  = {
+                    $vol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
+
+                    # If auto-device-encryption was triggered before PreventDeviceEncryption was set, cancel it
+                    if ($vol -and $vol.VolumeStatus -ne "FullyDecrypted") {
+                        manage-bde -off C: 2>&1 | Out-Null
+                        do {
+                            Start-Sleep -Seconds 2
+                            $vol = Get-BitLockerVolume -MountPoint "C:"
+                        } while ($vol.VolumeStatus -ne "FullyDecrypted")
+                    }
+
+                    # Remove any existing protectors from failed auto-encryption
+                    if ($vol -and $vol.KeyProtector.Count -gt 0) {
+                        $hasTpm = $vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "Tpm" }
+                        if (-not $hasTpm) {
+                            foreach ($kp in $vol.KeyProtector) {
+                                Remove-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $kp.KeyProtectorId -ErrorAction SilentlyContinue
+                            }
+                        }
+                    }
+
+                    # Provision TPM ownership (Hyper-V virtual TPMs are not auto-provisioned)
+                    $initResult = Initialize-Tpm -ErrorAction SilentlyContinue
+                    if ($initResult -and $initResult.RestartRequired) {
+                        # TPM provisioning needs a reboot before the TPM can be used
+                        $global:DSCMachineStatus = 1
+                        return
+                    }
+
+                    # Start encryption with TPM protector. Using Enable-BitLocker rather than
+                    # just adding the protector because MBAM's enforcement engine requires an
+                    # interactive user session (0x800703f0) to start encryption on its own.
+                    # -SkipHardwareTest avoids a reboot before encryption begins.
+                    # BLM will later add a NumericalPassword protector and escrow it.
+                    Enable-BitLocker -MountPoint "C:" -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop
+                }
+            }
+
+            WriteStatus Complete {
+                DependsOn = "[Script]SeedTPMProtector"
+                Status    = "Complete!"
+            }
+        }
+        else {
+            WriteStatus Complete {
+                DependsOn = $proxyDepend
+                Status    = "Complete!"
+            }
         }
     }
 }

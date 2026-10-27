@@ -1,0 +1,20 @@
+{
+  "vmOptions": {
+    "prefix": "OT1-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "osdtest.com",
+    "adminName": "admin",
+    "network": "192.168.60.0",
+    "timeZone": "Eastern Standard Time",
+    "domainNetBiosName": "osdtest",
+    "locale": "en-US"
+  },
+  "virtualMachines": [
+    {
+      "vmName": "OSD2",
+      "role": "OSDClient",
+      "memory": "2GB",
+      "virtualProcs": 4
+    }
+  ]
+}

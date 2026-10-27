@@ -15,6 +15,7 @@
       "role": "Secondary",
       "operatingSystem": "Server 2019",
       "memory": "6GB",
+      "dynamicMinRam": "4GB",
       "virtualProcs": 4,
       "parentSiteCode": "PS2",
       "siteCode": "SS2",

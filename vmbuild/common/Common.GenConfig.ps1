@@ -1,36 +1,19 @@
-Function Get-SupportedOperatingSystemsForRole {
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "role")]
-        [string] $role
-    )
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function Test-ConfigMgrRemoteRoleRequested {
+    param([object] $VM)
 
-    $ServerList = $Common.Supported.OperatingSystems | Where-Object { $_ -like 'Server*' }
-    $ClientList = $Common.Supported.OperatingSystems | Where-Object { $_ -notlike 'Server*' }
-    $AllList = $Common.Supported.OperatingSystems
-    switch ($role) {
-        "DC" { return $ServerList }
-        "BDC" { return $ServerList }
-        "CAS" { return $ServerList }
-        "CAS and Primary" { return $ServerList }
-        "Primary" { return $ServerList }
-        "Secondary" { return $ServerList }
-        "FileServer" { return $ServerList }
-        "SQLAO" { return $ServerList }
-        "SiteSystem" { return $ServerList }
-        "DomainMember" { return $AllList }
-        "DomainMember (Server)" { return $ServerList }
-        "DomainMember (Client)" { return $ClientList }
-        "WorkgroupMember" { return $AllList }
-        "InternetClient" { return $ClientList }
-        "AADClient" { return $ClientList }
-        "OSDClient" { return $null }
-        default {
-            return $AllList
-        }
-    }
-    return $AllList
+    if (-not $VM) { return $false }
+    return [bool](
+        $VM.installDP -eq $true -or
+        $VM.enablePullDP -eq $true -or
+        $VM.installMP -eq $true -or
+        $VM.installSUP -eq $true -or
+        $VM.installRP -eq $true -or
+        $VM.installSMSProv -eq $true
+    )
 }
-function Get-ValidSubnets {
+
+Function Get-ValidSubnets {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
@@ -63,6 +46,14 @@ function Get-ValidSubnets {
     $subnetlist = @()
     if ($vmToCheck) {
         $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck
+    }
+
+    # An OSDClient can only PXE-boot from a DP on its own subnet, so
+    # Get-ValidNetworksForVM already limited the list to subnets that have a DP.
+    # Do NOT append brand-new empty subnets for it (a fresh subnet has no DP and
+    # can never do OSD/PXE); return the DP-restricted list as-is.
+    if ($vmToCheck -and $vmToCheck.Role -eq 'OSDClient') {
+        return @($subnetlist | Where-Object { $_ } | Sort-Object -Property { [System.Version]$_ } | Get-Unique)
     }
 
     $usedSubnets += $subnetList
@@ -134,7 +125,11 @@ function Get-ValidDomainNames {
         "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ;
         "lamnahealthcare.com" = "LAM-"  ; "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
         "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-";
-        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "CTP-" #techpreview.com is reserved for tech preview CM Installs (no longer needed)
+        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-"
+        # techpreview.com / "CTP-" intentionally omitted -- ConfigMgr Tech Preview
+        # builds are no longer supported, and leaving it in this dict caused the
+        # New Domain wizard to default to techpreview.com once shorter domains
+        # got consumed by other deployments.
     }
     foreach ($domain in (Get-DomainList)) {
         if ($domain) {
@@ -435,263 +430,6 @@ function Read-YesOrNoWithTimeout {
 
 
 
-function Get-CriticalVMs {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
-        [string] $domain,
-        [Parameter(Mandatory = $false, HelpMessage = "VMs to bucketize, names only")]
-        [object] $vmNames = $null
-    )
-
-    $return = [pscustomObject]@{
-        DC      = @()
-        FS      = @()
-        SQL     = @()
-        CAS     = @()
-        PRI     = @()
-        ALLCRIT = @()
-        NONCRIT = @()
-    }
-
-    $allvms = @()
-    if ($vmNames) {
-        write-log -LogOnly "[Get-CriticalVMs] Found $vmNames"
-        $allvms += get-list -type vm -SmartUpdate
-    }
-    else {
-        $allvms += get-list -type vm -DomainName $domain -SmartUpdate
-    }
-
-    $vms = @()
-    if ($vmNames) {
-        #foreach ($vm in $vmNames) {
-        $vms += $allvms | Where-Object { $_.vmName -in $vmNames }
-        write-log -verbose "[Get-CriticalVMs] Adding $($vms.VmName)"
-        #}
-    }
-    else {
-        $vms += $allvms
-    }
-
-
-    $return.dc += $vms | Where-Object { $_.Role -eq "DC" }
-    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "DC" }
-    $vms = $vms | Where-Object { $_.Role -ne "DC" }
-
-    #$sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
-    $sqlServerNames = ($vms | Where-Object { $_.remoteSQLVM }).remoteSQLVM | Select-Object -Unique
-
-    foreach ($sqlName in $sqlServerNames) {
-        $thisSql = $vms | Where-Object { $_.vmName -eq $sqlName }
-        $vms = $vms | Where-Object { $_.vmName -ne $sqlName }
-        $return.SQL += $thisSql
-        $return.ALLCRIT += $thisSql
-        if ($thisSql.OtherNode) {
-            $return.SQL += $vms | Where-Object { $_.vmName -eq $thisSql.OtherNode }
-            $return.ALLCRIT += $vms | Where-Object { $_.vmName -eq $thisSql.OtherNode }
-            $vms = $vms | Where-Object { $_.vmName -ne $thisSql.OtherNode }
-        }
-    }
-
-
-    $fileServerNames = @()
-    $fileServerNames += ($vms | Where-Object { $_.remoteContentLibVM }).remoteContentLibVM
-    $fileServerNames += ($vms | Where-Object { $_.fileServerVM }).fileServerVM
-    $fileServerNames += ($vms | Where-Object { $_.patchMyPCFileServer }).patchMyPCFileServer
-    $fileServerNames = $fileServerNames | Select-Object -Unique
-
-    foreach ($fsName in $fileServerNames) {
-        $thisfs = $vms | Where-Object { $_.vmName -eq $fsName }
-        $vms = $vms | Where-Object { $_.vmName -ne $fsName }
-        $return.FS += $thisfs
-        $return.ALLCRIT += $thisfs
-    }
-
-    $return.CAS += $vms | Where-Object { $_.Role -eq "CAS" }
-    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "CAS" }
-    $vms = $vms | Where-Object { $_.Role -ne "CAS" }
-    $return.PRI += $vms | Where-Object { $_.Role -eq "Primary" }
-    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "Primary" }
-    $vms = $vms | Where-Object { $_.Role -ne "Primary" }
-    $return.NONCRIT += $vms
-
-    #$return | ConvertTo-Json | Out-Host
-    return $return
-}
-
-function Invoke-SmartStartVMs {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "VMs To Start, from Get-CriticalVMs")]
-        [psCustomObject] $CritList,
-        [Parameter(Mandatory = $false, HelpMessage = "Critical Only")]
-        [switch] $CriticalOnly = $false,
-        [Parameter(Mandatory = $false, HelpMessage = "Non Critical Only")]
-        [switch] $NonCriticalOnly = $false,
-        [Parameter(Mandatory = $false, HelpMessage = "quiet mode")]
-        [bool] $quiet = $false
-    )
-    $waitSecondsDC = 20
-    $waitSeconds = 10
-
-    function invoke-StartVM {
-        param(
-            [object] $vm,
-            [bool] $quiet,
-            [int] $wait = 0
-        )
-
-        $worked = $true
-        $returnWait = $null
-        if ($vm.State -ne "Running") {
-            if (-not $quiet ) { Show-StatusEraseLine "$($vm.Role) [$($vm.vmName)] state is [$($vm.State)]. Starting VM" -indent }
-            $worked = start-vm2 $vm.vmName -PassThru
-            if (-not $quiet) {
-                if ($worked) {
-                    if ($wait -ne 0) {
-                        Write-GreenCheck "VM [$($vm.vmName)] has been started. Waiting $wait Seconds.                                                                "
-                        $returnWait = $wait
-                    }
-                    else {
-                        Write-GreenCheck "VM [$($vm.vmName)] has been started.                                                                 "
-                    }
-                }
-                else {
-                    Write-Redx "VM [$($vm.vmName)] could not be started."
-                }
-
-            }
-        }
-        if (-not $worked) {
-            if ($quiet) {
-                Write-Log -Failure "Failed to start $($vm.vmName)" -LogOnly
-            }
-            else {
-                Write-Log -Failure "Failed to start $($vm.vmName)"
-            }
-        }
-        if ($returnWait) {
-            return $returnWait
-        }
-        else {
-            return $worked
-        }
-    }
-
-
-    $worked = $true
-    $failures = 0
-    if ($NonCriticalOnly) {
-        foreach ($vm in $CritList.NONCRIT) {
-            $worked = invoke-StartVM -vm $vm -quiet:$quiet
-            if (-not $worked) {
-                $failures++
-            }
-            if ($worked -is [int]) {
-                $sleepSecs = $worked
-            }
-        }
-        return $failures
-    }
-
-    $sleepSecs = $null
-    if ($CritList.DC) {
-        foreach ($dc in $CritList.DC) {
-            $worked = invoke-StartVM -vm $dc -quiet:$quiet -wait $waitSecondsDC
-            if (-not $worked) {
-                $failures++
-            }
-            else {
-                if ($worked -is [int]) {
-                    $sleepSecs = $worked
-                }
-            }
-        }
-        if ($sleepSecs) {
-            start-Sleep -Seconds $sleepSecs
-        }
-    }
-    $sleepSecs = $null
-    if ($CritList.FS) {
-        foreach ($fs in $CritList.FS) {
-            $worked = invoke-StartVM -vm $fs -quiet:$quiet -wait $waitSeconds
-            if (-not $worked) {
-                $failures++
-            }
-            else {
-                if ($worked -is [int]) {
-                    $sleepSecs = $worked
-                }
-            }
-        }
-        if ($sleepSecs) {
-            start-Sleep -Seconds $sleepSecs
-        }
-    }
-    $sleepSecs = $null
-    if ($CritList.SQL) {
-        foreach ($sql in $CritList.SQL) {
-            $worked = invoke-StartVM -vm $sql -quiet:$quiet -wait $waitSeconds
-            if (-not $worked) {
-                $failures++
-            }
-            else {
-                if ($worked -is [int]) {
-                    $sleepSecs = $worked
-                }
-            }
-        }
-        if ($sleepSecs) {
-            start-Sleep -Seconds $sleepSecs
-        }
-    }
-    $sleepSecs = $null
-    if ($CritList.CAS) {
-        foreach ($ss in $CritList.CAS) {
-            $worked = invoke-StartVM -vm $ss -quiet:$quiet -wait $waitSeconds
-            if (-not $worked) {
-                $failures++
-            }
-            else {
-                if ($worked -is [int]) {
-                    $sleepSecs = $worked
-                }
-            }
-        }
-        if ($sleepSecs) {
-            start-Sleep -Seconds $sleepSecs
-        }
-    }
-    $sleepSecs = $null
-    if ($CritList.PRI) {
-        foreach ($ss in $CritList.PRI) {
-            $worked = invoke-StartVM -vm $ss -quiet:$quiet -wait $waitSeconds
-            if (-not $worked) {
-                $failures++
-            }
-            else {
-                if ($worked -is [int]) {
-                    $sleepSecs = $worked
-                }
-            }
-        }
-        if ($sleepSecs) {
-            start-Sleep -Seconds $sleepSecs
-        }
-    }
-    if ($CriticalOnly -eq $false) {
-        foreach ($vm in $CritList.NONCRIT) {
-            $worked = invoke-StartVM -vm $vm -quiet:$quiet
-            if (-not $worked) {
-                $failures++
-            }
-        }
-    }
-    get-list -type VM -SmartUpdate | out-null
-    return $failures
-}
-
 function Invoke-StopVMs {
     [CmdletBinding()]
     param (
@@ -707,6 +445,7 @@ function Invoke-StopVMs {
     if (-not $vmList) {
         $vmList = get-list -type vm -DomainName $domain -SmartUpdate
     }
+    $vmNames = @()
     foreach ($vm in $vmList) {
         $vm2 = $null
         if ($vm -is [String]) {
@@ -720,35 +459,452 @@ function Invoke-StopVMs {
             if (-not $quiet) {
                 Write-GreenCheck "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
             }
+            $vmNames += $vm2.Name
             stop-vm -VM $VM2 -force -AsJob | Out-Null
         }
     }
 
-    Show-JobsProgress -Activity "Stopping VMs"
+    # Show-JobsProgress but break out early when all target VMs are actually off.
+    # Stop-VM jobs can hang even after the VM has stopped (Hyper-V WMI quirk).
+    $jobs = get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" }
+    [int]$total = $jobs.count -as [int]
+    if ($total -gt 0) {
+        $stallCheck = [System.Diagnostics.Stopwatch]::StartNew()
+        [int]$lastRunning = $total
+        while ($true) {
+            [int]$runningjobs = (get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" }).Count -as [int]
+            if ($runningjobs -eq 0) { break }
+
+            $percent = [math]::Round((($total - $runningjobs) / $total * 100), 2)
+            Write-Progress2 -activity "Stopping VMs" -status "Progress: $percent%" -percentcomplete $percent
+
+            # Reset stall timer whenever a job finishes
+            if ($runningjobs -lt $lastRunning) {
+                $lastRunning = $runningjobs
+                $stallCheck.Restart()
+            }
+
+            # If no job has finished in 30 seconds, check whether the VMs are actually off
+            if ($stallCheck.Elapsed.TotalSeconds -ge 30 -and $vmNames.Count -gt 0) {
+                $stillRunning = @($vmNames | ForEach-Object { Get-VM2 -Name $_ -ErrorAction SilentlyContinue } | Where-Object { $_.State -eq "Running" })
+                if ($stillRunning.Count -eq 0) {
+                    # All VMs are off; stop the zombie jobs and break out
+                    get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" } | Stop-Job -ErrorAction SilentlyContinue
+                    break
+                }
+                $stallCheck.Restart()
+            }
+
+            Start-Sleep -Milliseconds 500
+        }
+        Write-Progress2 -activity "Stopping VMs" -Completed
+    }
 
     try {
-        get-job | remove-job | Out-Null
+        get-job | remove-job -Force | Out-Null
     }
     catch {}
+    # Invalidate the Get-List cache so the refresh below picks up
+    # the new VM states without being blocked by the throttle.
+    $global:vm_List_LastUpdate = $null
     get-list -type VM -SmartUpdate | out-null
 }
 
+function Complete-PendingVMOperation {
+    <#
+    .SYNOPSIS
+        Checks whether any background Stop/Start VM operations have finished
+        and displays the results. Only consumes (removes) completed ops when
+        ALL ops are done, so completed domains stay visible in the banner
+        while other ops are still running.
+    .OUTPUTS
+        $true if any completed operations were consumed, $false otherwise.
+    #>
+    if (-not $global:PendingVMOperations -or $global:PendingVMOperations.Count -eq 0) { return $false }
 
-
-Function Show-StatusEraseLine {
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "role")]
-        [string] $data,
-        [Parameter(Mandatory = $false, HelpMessage = "role")]
-        [switch] $indent
-    )
-    if ($indent) {
-        Write-Host "  " -NoNewline
+    # Check if any ops are still active
+    $hasActive = $false
+    foreach ($domainKey in @($global:PendingVMOperations.Keys)) {
+        $op = $global:PendingVMOperations[$domainKey]
+        if (-not $op.Completed) {
+            # Check for vanished jobs
+            $job = Get-Job -Name $op.JobName -ErrorAction SilentlyContinue
+            if (-not $job) {
+                Write-Log "Background $($op.Type) operation for '$domainKey': job disappeared unexpectedly." -Warning
+                $op.Completed = $true
+                $op.Failures = $op.VMCount
+                $op.Elapsed = (Get-Date) - $op.StartTime
+            }
+            else {
+                $hasActive = $true
+            }
+        }
     }
-    Write-Host $data -NoNewline
-    #start-Sleep -seconds 2 | out-null
-    Write-Host "`r" -NoNewline
-    #Write-GreenCheck "Check Point Complete for ADA-DC1" -ForeGroundColor Green
+
+    # Don't consume yet if some ops are still running — keep completed
+    # ops in the hashtable so the banner can show them with a checkmark.
+    if ($hasActive) { return $false }
+
+    # All ops are done — consume and display results for each
+    $consumed = $false
+    foreach ($domainKey in @($global:PendingVMOperations.Keys)) {
+        $op = $global:PendingVMOperations[$domainKey]
+        if ($op.Completed) {
+            Write-Host
+            if ($op.Failures -eq 0) {
+                Write-GreenCheck "Background $($op.Type): All $($op.VMCount) VM(s) in '$($op.Domain)' completed successfully. ($([math]::Round($op.Elapsed.TotalSeconds))s)"
+            }
+            else {
+                Write-RedX "Background $($op.Type): $($op.Failures) of $($op.VMCount) VM(s) in '$($op.Domain)' had issues. ($([math]::Round($op.Elapsed.TotalSeconds))s)" -ForegroundColor Red
+            }
+            # Clean up the job
+            $job = Get-Job -Name $op.JobName -ErrorAction SilentlyContinue
+            if ($job) {
+                try { Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null } catch {}
+                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            $consumed = $true
+        }
+    }
+
+    if ($consumed) {
+        $global:PendingVMOperations = @{}
+        $global:vm_List_Dirty = $true
+    }
+    return $consumed
+}
+
+function Invoke-StopVMsBackground {
+    <#
+    .SYNOPSIS
+        Non-blocking wrapper around Invoke-StopVMs. Fires Stop-VM for
+        each target VM and monitors completion in a background ThreadJob.
+        Returns immediately so the caller can continue rendering the menu.
+    .DESCRIPTION
+        If Start-ThreadJob is not available (PS5), falls back to the
+        synchronous Invoke-StopVMs so behaviour is never worse than today.
+        Only one background VM operation may be active at a time.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string] $domain,
+        [Parameter(Mandatory = $false)] [object[]] $vmList = $null
+    )
+
+    # Guard: only one background operation per domain
+    if (-not $global:PendingVMOperations) { $global:PendingVMOperations = @{} }
+    $existingOp = $global:PendingVMOperations[$domain]
+    if ($existingOp -and -not $existingOp.Completed) {
+        Write-OrangePoint "A background $($existingOp.Type) operation is already in progress for '$domain'."
+        return
+    }
+
+    # Fallback: if ThreadJob is unavailable, run synchronously
+    if (-not (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
+        Invoke-StopVMs -domain $domain -vmList $vmList
+        return
+    }
+
+    # Resolve VM list and collect names
+    if (-not $vmList) {
+        $vmList = get-list -type vm -DomainName $domain -SmartUpdate
+    }
+    $targetNames = @()
+    foreach ($vm in $vmList) {
+        if ($vm -is [string]) { $targetNames += $vm }
+        elseif ($vm.vmName)   { $targetNames += $vm.vmName }
+    }
+    if ($targetNames.Count -eq 0) { return }
+
+    $jobName = "MemLabs-StopVMs-$(Get-Date -Format 'HHmmss')"
+    $global:PendingVMOperations[$domain] = @{
+        Type         = "Stop"
+        Domain       = $domain
+        VMNames      = $targetNames
+        VMCount      = $targetNames.Count
+        StillActive  = $targetNames.Count
+        StateChanged = $false
+        StartTime    = Get-Date
+        Completed    = $false
+        Failures     = 0
+        Elapsed      = $null
+        JobName      = $jobName
+    }
+
+    # Capture the hashtable reference so the ThreadJob can modify it.
+    # ThreadJobs run in a separate runspace — $global: variables and
+    # custom functions (Get-VM2, Write-Log, etc.) are NOT available.
+    # Only built-in / module cmdlets (Get-VM, Stop-VM) work.
+    $opRef = $global:PendingVMOperations[$domain]
+
+    $null = Start-ThreadJob -Name $jobName -ScriptBlock {
+        $op = $using:opRef
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            # Issue Stop-VM for each running target VM (in parallel via -AsJob)
+            foreach ($name in $op.VMNames) {
+                $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                if ($vm -and $vm.State -eq "Running") {
+                    Stop-VM -VM $vm -Force -AsJob | Out-Null
+                }
+            }
+
+            # Poll until all target VMs reach Off/Saved or hard timeout
+            $previousActive = $op.VMCount
+            while ($sw.Elapsed.TotalMinutes -lt 10) {
+                Start-Sleep -Seconds 2
+                $stillActive = 0
+                foreach ($name in $op.VMNames) {
+                    $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                    if ($vm -and $vm.State -notin @("Off", "Saved")) {
+                        $stillActive++
+                    }
+                }
+                $op.StillActive = $stillActive
+                if ($stillActive -ne $previousActive) { $op.StateChanged = $true }
+                $previousActive = $stillActive
+                if ($stillActive -eq 0) { break }
+            }
+
+            # Don't Remove-Job on Hyper-V WMI jobs — disposing them can crash
+            # the process (PSObjectDisposedException on a threadpool callback).
+            # They'll be cleaned up when the ThreadJob's runspace is torn down.
+
+            # Count failures
+            $failures = 0
+            foreach ($name in $op.VMNames) {
+                $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                if ($vm -and $vm.State -notin @("Off", "Saved")) { $failures++ }
+            }
+            $op.Failures = $failures
+        }
+        catch {
+            $op.Failures = $op.VMCount
+        }
+        finally {
+            $op.Elapsed = $sw.Elapsed
+            $op.Completed = $true
+        }
+    }
+
+    Write-Log "Background Stop: launched job '$jobName' for $($targetNames.Count) VM(s) in '$domain'" -LogOnly
+}
+
+function Invoke-SmartStartVMsBackground {
+    <#
+    .SYNOPSIS
+        Non-blocking wrapper around Invoke-SmartStartVMs. Starts VMs in
+        dependency order (DC → FS → SQL → CAS → PRI → NONCRIT) inside a
+        background ThreadJob and returns immediately.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]  [psCustomObject] $CritList,
+        [Parameter(Mandatory = $false)] [switch] $CriticalOnly,
+        [Parameter(Mandatory = $true)]  [string] $domain
+    )
+
+    # Guard: only one background operation per domain
+    if (-not $global:PendingVMOperations) { $global:PendingVMOperations = @{} }
+    $existingOp = $global:PendingVMOperations[$domain]
+    if ($existingOp -and -not $existingOp.Completed) {
+        Write-OrangePoint "A background $($existingOp.Type) operation is already in progress for '$domain'."
+        return
+    }
+
+    # Fallback: if ThreadJob is unavailable, run synchronously
+    if (-not (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
+        return Invoke-SmartStartVMs -CritList $CritList -CriticalOnly:$CriticalOnly
+    }
+
+    # Count total VMs
+    $allNames = @()
+    foreach ($bucket in @('DC', 'FS', 'SQL', 'CAS', 'PRI')) {
+        $allNames += @($CritList.$bucket | ForEach-Object { $_.vmName }) | Where-Object { $_ }
+    }
+    if (-not $CriticalOnly) {
+        $allNames += @($CritList.NONCRIT | ForEach-Object { $_.vmName }) | Where-Object { $_ }
+    }
+    if ($allNames.Count -eq 0) { return }
+
+    $jobName = "MemLabs-StartVMs-$(Get-Date -Format 'HHmmss')"
+    $global:PendingVMOperations[$domain] = @{
+        Type         = "Start"
+        Domain       = $domain
+        VMNames      = $allNames
+        VMCount      = $allNames.Count
+        StillActive  = $allNames.Count
+        StateChanged = $false
+        StartTime    = Get-Date
+        Completed    = $false
+        Failures     = 0
+        Elapsed      = $null
+        JobName      = $jobName
+    }
+
+    # Capture references for the ThreadJob via $using:.
+    # ThreadJobs run in a separate runspace — $global: variables and
+    # custom functions (Start-VM2, Invoke-SmartStartVMs, Write-Log, etc.)
+    # are NOT available. Only built-in / module cmdlets work.
+    $opRef = $global:PendingVMOperations[$domain]
+    $critListCopy = $CritList
+    $critOnlyCopy = [bool]$CriticalOnly
+
+    $null = Start-ThreadJob -Name $jobName -ScriptBlock {
+        $op = $using:opRef
+        $crit = $using:critListCopy
+        $critOnly = $using:critOnlyCopy
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $failures = 0
+            $waitSecondsDC = 20
+            $waitSeconds = 10
+
+            # Start VMs in dependency order: DC > FS > SQL > CAS > PRI > NONCRIT
+            $buckets = @('DC', 'FS', 'SQL', 'CAS', 'PRI')
+            if (-not $critOnly) { $buckets += 'NONCRIT' }
+            $startedNames = @()  # Track VMs where Start-VM succeeded
+
+            # Live-refresh the banner's progress counter from the ACTUAL running
+            # state of every target VM. Called repeatedly while VMs are still
+            # being issued Start-VM so the count climbs as each VM powers on,
+            # instead of staying pinned at 0/N until the whole start loop (which
+            # includes ~60s of inter-bucket sleeps and can take minutes to issue
+            # Start-VM for every VM on a loaded host) finishes.
+            $updateActive = {
+                $runningNow = 0
+                foreach ($n in $op.VMNames) {
+                    $v = Get-VM -Name $n -ErrorAction SilentlyContinue
+                    if ($v -and $v.State -eq "Running") { $runningNow++ }
+                }
+                $newActive = $op.VMCount - $runningNow
+                if ($newActive -ne $op.StillActive) {
+                    $op.StillActive = $newActive
+                    $op.StateChanged = $true
+                }
+            }
+
+            foreach ($bucket in $buckets) {
+                $vms = @($crit.$bucket | Where-Object { $_ })
+                if ($vms.Count -eq 0) { continue }
+                $waitSecs = if ($bucket -eq 'DC') { $waitSecondsDC } elseif ($bucket -ne 'NONCRIT') { $waitSeconds } else { 0 }
+                $startedAny = $false
+
+                foreach ($vm in $vms) {
+                    $hvVm = Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue
+                    if ($hvVm -and $hvVm.State -eq "Running") {
+                        # Already running — not a failure, just skip
+                        $startedNames += $vm.vmName
+                    }
+                    elseif ($hvVm) {
+                        try {
+                            Start-VM -Name $vm.vmName -ErrorAction Stop
+                            $startedAny = $true
+                            $startedNames += $vm.vmName
+                        }
+                        catch {
+                            $failures++
+                        }
+                    }
+                    else {
+                        $failures++  # VM doesn't exist
+                    }
+                    # Reflect the new running count in the banner as we go.
+                    & $updateActive
+                }
+
+                if ($startedAny -and $waitSecs -gt 0) {
+                    # Refresh the counter across the inter-bucket wait so VMs
+                    # that finish powering on during the sleep show up promptly.
+                    for ($w = 0; $w -lt $waitSecs; $w++) {
+                        Start-Sleep -Seconds 1
+                        & $updateActive
+                    }
+                }
+            }
+
+            # Poll only VMs where Start-VM succeeded until they reach Running.
+            # VMs that failed Start-VM are already counted as failures.
+            $pendingNames = @($startedNames | Where-Object {
+                $v = Get-VM -Name $_ -ErrorAction SilentlyContinue
+                $v -and $v.State -ne "Running"
+            })
+            $op.StillActive = $pendingNames.Count + $failures
+            $previousActive = $op.StillActive
+            if ($pendingNames.Count -gt 0) {
+                while ($sw.Elapsed.TotalMinutes -lt 10) {
+                    Start-Sleep -Seconds 2
+                    $stillActive = 0
+                    foreach ($name in $pendingNames) {
+                        $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                        if ($vm -and $vm.State -ne "Running") {
+                            $stillActive++
+                        }
+                    }
+                    $op.StillActive = $stillActive + $failures
+                    if (($stillActive + $failures) -ne $previousActive) { $op.StateChanged = $true }
+                    $previousActive = $stillActive + $failures
+                    if ($stillActive -eq 0) { break }
+                }
+            }
+
+            # Count final failures (VMs that never reached Running)
+            foreach ($name in $startedNames) {
+                $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                if ($vm -and $vm.State -ne "Running") { $failures++ }
+            }
+            $op.Failures = $failures
+        }
+        catch {
+            $op.Failures = $op.VMCount
+        }
+        finally {
+            $op.Elapsed = $sw.Elapsed
+            $op.Completed = $true
+        }
+    }
+
+    Write-Log "Background Start: launched job '$jobName' for $($allNames.Count) VM(s) in '$domain'" -LogOnly
+}
+
+function Resolve-DeployUrlCatalog {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$AzureFileList)
+
+    $deployUrls = @($AzureFileList.Urls | ConvertTo-Json -Depth 6 | ConvertFrom-Json)[0]
+    if (-not $deployUrls) { $deployUrls = [pscustomobject]@{} }
+    $urlMetadata = if ($AzureFileList.UrlsMeta) {
+        $AzureFileList.UrlsMeta | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+    }
+    else {
+        [pscustomobject]@{}
+    }
+    $odbcMetaVersion = "$($urlMetadata.ODBC.version)".Trim()
+    $odbcMetaFwlink = "$($urlMetadata.ODBC.fwlink)".Trim()
+    [version]$parsedOdbcVersion = $null
+    [int]$parsedOdbcFwlink = 0
+    if (-not ([version]::TryParse($odbcMetaVersion, [ref]$parsedOdbcVersion) -and
+            [int]::TryParse($odbcMetaFwlink, [ref]$parsedOdbcFwlink) -and $parsedOdbcFwlink -gt 0)) {
+        if ($null -ne $urlMetadata.ODBC) {
+            Write-Warning "ODBC UrlsMeta is incomplete or invalid; using compatibility pair 18.6.2.1/linkid=2358430."
+        }
+        $odbcMetaVersion = '18.6.2.1'
+        $parsedOdbcFwlink = 2358430
+        $odbcFallback = [pscustomobject]@{
+            fwlink       = $parsedOdbcFwlink
+            version      = $odbcMetaVersion
+            released     = '2026-03-31'
+            releaseNotes = 'https://learn.microsoft.com/sql/connect/odbc/windows/release-notes-odbc-sql-server-windows'
+        }
+        $urlMetadata | Add-Member -MemberType NoteProperty -Name ODBC -Value $odbcFallback -Force
+    }
+    # Keep URL and required version atomic. This also upgrades an older cached
+    # main-branch file list whose ODBC URL still points at the 18.4 fwlink.
+    $deployUrls | Add-Member -MemberType NoteProperty -Name ODBC -Value "https://go.microsoft.com/fwlink/?linkid=$parsedOdbcFwlink" -Force
+    return [pscustomobject]@{
+        Urls     = $deployUrls
+        Metadata = $urlMetadata
+    }
 }
 
 function ConvertTo-DeployConfigEx {
@@ -772,6 +928,7 @@ function ConvertTo-DeployConfigEx {
             throw "VM with no vmName property found."
 
         }
+        $DomainName = if ($thisVM.domain) { "$($thisVM.domain)" } else { "$($deployConfig.vmOptions.domainName)" }
         $cm_svc = "cm_svc"
         $accountLists = [pscustomobject]@{
             SQLSysAdminAccounts = @()
@@ -782,6 +939,7 @@ function ConvertTo-DeployConfigEx {
             SchemaAdmins        = @($deployConfig.vmOptions.adminName)
         }
         $thisParams = [pscustomobject]@{}
+        $pushInventory = $null
         if ($thisVM.domainUser) {
             $accountLists.LocalAdminAccounts += $thisVM.domainUser
             $accountLists.SQLSysAdminAccounts += $deployConfig.vmOptions.domainNetBiosName + "\" + $thisVM.domainUser
@@ -825,7 +983,14 @@ function ConvertTo-DeployConfigEx {
 
                             $DomainAccountsUPN += @($sql.SqlServiceAccount, $sql.SqlAgentAccount)
 
+                            # Prestage both the CNO (cluster name) and the VCO
+                            # (listener) as disabled computer objects so the
+                            # cluster service doesn't need Create Computer Objects
+                            # permission on the container.
                             $DomainComputers += @($ClusterName)
+                            if ($sql.AlwaysOnListenerName) {
+                                $DomainComputers += @($sql.AlwaysOnListenerName)
+                            }
                         }
                     }
                 }
@@ -853,23 +1018,38 @@ function ConvertTo-DeployConfigEx {
 
                 if ($thisVM.externalDomainJoinSiteCode) {
 
-                    $OtherDC = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" })
-                    if ($OtherDC.InstallCA) {
+                    $OtherCAVM = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.InstallCA })
+                    if ($OtherCAVM) {
                         #ADA-DC1.adatum.com\adatum-ADA-DC1-CA
                         $OtherDomainShort = $($ThisVM.ForestTrust).Split(".")[0]
-                        $OtherRootCA = "$($OtherDc.VmName).$($ThisVM.ForestTrust)\$($OtherDomainShort)-$($OtherDc.VmName)-CA"
+                        $OtherRootCA = "$($OtherCAVM.VmName).$($ThisVM.ForestTrust)\$($OtherDomainShort)-$($OtherCAVM.VmName)-CA"
                         $thisParams | Add-Member -MemberType NoteProperty -Name "RootCA" -Value $OtherRootCA -Force
+
+                        # RootCA above is only a best-effort GUESS (assumes the CA
+                        # lives on the InstallCA VM and that its CN follows
+                        # <netbios>-<vm>-CA). With multi-tier PKI the issuing CA can
+                        # live on any member server with a custom CN, so the DSC
+                        # resource AUTHORITATIVELY rediscovers it from the remote
+                        # forest's AD Enrollment Services container. Give it the
+                        # remote DC to query and a host hint to disambiguate when
+                        # multiple Enterprise issuing CAs are published.
+                        $OtherDCForCA = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1)
+                        if ($OtherDCForCA) {
+                            $thisParams | Add-Member -MemberType NoteProperty -Name "RootCADC" -Value "$($OtherDCForCA.VmName).$($ThisVM.ForestTrust)" -Force
+                        }
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "IssuingCAHint" -Value "$(($OtherCAVM | Select-Object -First 1).VmName)" -Force
                     }
 
                     if ($thisVM.externalDomainJoinSiteCode -ne "NONE") {
                         $RemoteSS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.externalDomainJoinSiteCode -DomainName $thisVM.ForestTrust -type VM
                         if (-not $RemoteSS.VmName) {
-                            Write-log "Could not find a site server with SiteCode $($thisVM.externalDomainJoinSiteCode) in domain $($thisVM.ForestTrust)" -Failure -OutputStream
+                            Write-log "Could not find a site server with SiteCode $($thisVM.externalDomainJoinSiteCode) in domain $($thisVM.ForestTrust)" -Failure
                             return $false
                         }
                         $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
                         $ExternalTopLevelSiteServer = $ExternalSiteServer
-                        $otherDC = "$($OtherDc.VmName).$($ThisVM.ForestTrust)"
+                        $OtherDCVM = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" })
+                        $otherDC = "$($OtherDCVM.VmName).$($ThisVM.ForestTrust)"
                         $thisParams | Add-Member -MemberType NoteProperty -Name "OtherDC" -Value $otherDC -Force
 
                         $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force
@@ -894,7 +1074,9 @@ function ConvertTo-DeployConfigEx {
                     if ($vm.Role -eq "Primary") {
                         $thisPSName = $vm.vmName
                         if ($vm.ParentSiteCode) {
-                            $thisCSName = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $vm.ParentSiteCode
+                            $vmDomainName = if ($vm.domain) { "$($vm.domain)" } else { "$($deployConfig.vmOptions.domainName)" }
+                            $thisCSName = Get-SiteServerForSiteCode -deployConfig $deployConfig `
+                                -SiteCode $vm.ParentSiteCode -DomainName $vmDomainName
                         }
                     }
                     if ($vm.Role -eq "CAS") {
@@ -909,20 +1091,21 @@ function ConvertTo-DeployConfigEx {
                 if ($thisCSName) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $thisCSName -Force
                 }
-                if ($thisVM.hidden) {
-                    $DC = get-list -type VM -DomainName $deployConfig.vmOptions.DomainName | Where-Object { $_.Role -eq "DC" }
-                    $addr = $dc.Network.Substring(0, $dc.Network.LastIndexOf(".")) + ".1"
-                    $gateway = $dc.Network.Substring(0, $dc.Network.LastIndexOf(".")) + ".200"
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "DCDefaultGateway" -Value $gateway  -Force
+                $dcExists = Get-VM2 -Name $thisVM.vmName -Fallback -ErrorAction SilentlyContinue
+                if ($dcExists) {
+                    $dcNetwork = Get-VmDomainNetworkFromSwitch -VmName $thisVM.vmName
+                    if (-not $dcNetwork) {
+                        throw "Existing DC '$($thisVM.vmName)' is not attached to one IPv4-named domain switch; refusing to derive its address from config or notes."
+                    }
                 }
                 else {
-                    #This is Okay.. since the vmOptions.network for the DC is correct
-                    $addr = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
-                    $gateway = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".200"
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "DCDefaultGateway" -Value $gateway  -Force
+                    $dcNetwork = if ($thisVM.network) { [string]$thisVM.network } else { [string]$deployConfig.vmOptions.network }
                 }
+
+                $addr = $dcNetwork -replace '\.0$', '.1'
+                $gateway = $dcNetwork -replace '\.0$', '.200'
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DCIPAddress" -Value $addr  -Force
+                $thisParams | Add-Member -MemberType NoteProperty -Name "DCDefaultGateway" -Value $gateway  -Force
 
             }
             "SQLAO" {
@@ -934,7 +1117,7 @@ function ConvertTo-DeployConfigEx {
 
             }
             "PassiveSite" {
-                $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+                $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
                 if ($ActiveVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "ActiveNode" -Value $ActiveVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $ActiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
@@ -942,7 +1125,7 @@ function ConvertTo-DeployConfigEx {
                         $primaryVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.parentSiteCode -eq $ActiveVM.siteCode -and (-not $_.Domain -or $_.Domain -eq $DomainName) }
                         if ($primaryVM) {
                             Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
-                            $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                            $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM -DomainName $DomainName
                             if ($PassiveVM) {
                                 Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                             }
@@ -951,18 +1134,20 @@ function ConvertTo-DeployConfigEx {
                 }
             }
             "SiteSystem" {
-                if ($thisVM.InstallSUP) {
-                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                if (Test-ConfigMgrRemoteRoleRequested -VM $thisVM) {
+                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM -DomainName $DomainName
                     Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
 
-                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM -DomainName $DomainName
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
                     }
+                }
 
-                    $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+                if ($thisVM.InstallSUP) {
+                    $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
 
-                    $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    $sql = Get-SqlServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM -DomainName $DomainName
                     if (-not $ActiveVM.InstallSUP) {
                         if (-not $sql.InstallSUP) {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "WSUSSqlServer" -Value $($sql.vmName)  -Force
@@ -977,10 +1162,10 @@ function ConvertTo-DeployConfigEx {
             }
             "WSUS" {
                 if ($thisVM.InstallSUP) {
-                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM
+                    $SS = Get-SiteServerForSiteCode -siteCode $thisVM.SiteCode -deployConfig $deployConfig -type VM -DomainName $DomainName
                     Add-VMToAccountLists -thisVM $thisVM -VM $SS -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
 
-                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM -DomainName $DomainName
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts
                     }
@@ -991,12 +1176,13 @@ function ConvertTo-DeployConfigEx {
                 if ($primaryVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
-                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM -DomainName $DomainName
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
                     }
                 }
-                $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                $effectiveCmOptions = if ($thisVM.cmOptions) { $thisVM.cmOptions } else { $deployConfig.cmOptions }
+                $url = Get-CMBaselineVersion -CMVersion $effectiveCmOptions.version
                 $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
             }
             "Primary" {
@@ -1031,27 +1217,46 @@ function ConvertTo-DeployConfigEx {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "CSName" -Value $CASVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
 
-                    $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM
+                    $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM -DomainName $DomainName
                     if ($CASPassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                     }
                 }
                 else {
-                    $url = Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version
+                    $effectiveCmOptions = if ($thisVM.cmOptions) { $thisVM.cmOptions } else { $deployConfig.cmOptions }
+                    $url = Get-CMBaselineVersion -CMVersion $effectiveCmOptions.version
                     $thisParams | Add-Member -MemberType NoteProperty -Name "cmDownloadVersion" -Value $url  -Force
                 }
 
                 # --- ClientPush
                 $thisVMNetwork = $thisVMObject.Network
 
-                $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "DomainMember" -and -not ($_.SqlVersion) }
+                # Push to any DomainMember (incl. SQL) or site system VM whose
+                # pushClient TARGET SITE is this Primary's site or one of its
+                # reporting Secondaries. pushClient is now a site code string
+                # (the site to push from) or $false (no push). Resolve-PushClientSite
+                # turns legacy $true / stale values into a concrete site code, so
+                # a client on ANY subnet lands on the correct site (subnet no
+                # longer has to match the site server's own subnet).
+                $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+                $pushInventory = @(get-list2 -DeployConfig $deployConfig)
+                $eligiblePushSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName -Inventory $pushInventory)
+                $ClientNames = $pushInventory | Where-Object {
+                    $_.role -in $pushableRoles -and (Test-PushClientRequested -VM $_)
+                }
+                # Site codes this Primary is responsible for pushing: its own
+                # site + any child Secondary (a Secondary has no client-push
+                # workflow of its own; the parent Primary pushes its clients).
+                $myPushSiteCodes = @($thisVM.siteCode)
+                $myPushSiteCodes += ($pushInventory | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }).siteCode
+                $myPushSiteCodes = @($myPushSiteCodes | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
+
                 $clientPush = @()
-                $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMNetwork }).vmName
-
-
-                $Secondaries = get-list2 -deployConfig $deployConfig | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $thisVM.siteCode }
-                foreach ($second in $Secondaries) {
-                    $clientPush += ($ClientNames | Where-Object { $_.network -eq $second.network }).vmName
+                foreach ($cn in $ClientNames) {
+                    $targetSite = Resolve-PushClientSite -VM $cn -Config $deployConfig -Domain $DomainName -EligibleSites $eligiblePushSites
+                    if ($targetSite -and ($myPushSiteCodes -contains $targetSite)) {
+                        $clientPush += $cn.vmName
+                    }
                 }
                 $clientPush = ($clientPush | Where-Object { $_ -and $_.Trim() } | select-object -unique)
                 if ($clientPush) {
@@ -1064,7 +1269,7 @@ function ConvertTo-DeployConfigEx {
                 if ($primaryVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
-                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                    $PassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM -DomainName $DomainName
                     if ($PassiveVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassiveVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
                     }
@@ -1075,8 +1280,14 @@ function ConvertTo-DeployConfigEx {
         #add the SiteCodes and Subnets so DC can add ad sites, and primary can setup BG's
         if ($thisVM.Role -eq "DC" -or $thisVM.Role -eq "Primary") {
             $sitesAndNetworks = @()
+            $siteInventory = if ($thisVM.Role -eq "Primary" -and $null -ne $pushInventory) {
+                @($pushInventory)
+            }
+            else {
+                @(get-list2 -DeployConfig $deployConfig)
+            }
 
-            foreach ($vm in get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -in "Primary", "Secondary" }) {
+            foreach ($vm in $siteInventory | Where-Object { $_.role -in "Primary", "Secondary" }) {
                 if ($vm.SiteCode -in $sitesAndNetworks.siteCode) {
                     Write-Log "Warning: $($vm.vmName) has a sitecode already in use by another Primary or Secondary" -Warning
                     continue
@@ -1090,6 +1301,45 @@ function ConvertTo-DeployConfigEx {
                     Subnet   = $vm.network
                 }
             }
+
+            # Client-subnet boundaries: a pushed client can live on a subnet that
+            # hosts no site server (e.g. 172.16.1.0). Add a (pushTargetSite,
+            # clientSubnet) pair for every distinct pushed subnet not already
+            # mapped, so InstallBoundaryGroups builds the boundary in the right
+            # site's BG and the DC creates the matching AD subnet. Without this a
+            # client on a standalone subnet gets no boundary and never assigns.
+            $bgPushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+            $bgEligibleSites = @(Get-EligiblePushSites -Config $deployConfig -Domain $DomainName -Inventory $siteInventory)
+            foreach ($vm in $siteInventory | Where-Object { $_.role -in $bgPushableRoles -and (Test-PushClientRequested -VM $_) }) {
+                $targetSite = Resolve-PushClientSite -VM $vm -Config $deployConfig -Domain $DomainName -EligibleSites $bgEligibleSites
+                if (-not $targetSite) { continue }
+                $vmSubnet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
+                if (-not $vmSubnet) { continue }
+                # Skip if this subnet is already mapped (to its own site server,
+                # or already added for another pushed VM on the same subnet).
+                if ($vmSubnet -in $sitesAndNetworks.Subnet) { continue }
+                $sitesAndNetworks += [PSCustomObject]@{
+                    SiteCode = $targetSite
+                    Subnet   = $vmSubnet
+                }
+            }
+
+            # Remote DPs serve OSD even when neither they nor their clients use client push.
+            foreach ($vm in $siteInventory | Where-Object {
+                    $_.role -eq "SiteSystem" -and ($_.installDP -eq $true -or $_.enablePullDP -eq $true) -and
+                    (-not $_.domain -or $_.domain -eq $DomainName)
+                }) {
+                $vmSubnet = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
+                if ([string]::IsNullOrWhiteSpace($vmSubnet) -or $vm.SiteCode -notin $bgEligibleSites.SiteCode) {
+                    throw "Cannot generate a boundary for DP '$($vm.vmName)': a subnet and a valid Primary or Secondary site code are required."
+                }
+                if ($vmSubnet -in $sitesAndNetworks.Subnet) { continue }
+                $sitesAndNetworks += [PSCustomObject]@{
+                    SiteCode = $vm.SiteCode
+                    Subnet   = $vmSubnet
+                }
+            }
+
             $thisParams | Add-Member -MemberType NoteProperty -Name "sitesAndNetworks" -Value $sitesAndNetworks -Force
         }
 
@@ -1119,7 +1369,7 @@ function ConvertTo-DeployConfigEx {
             #}
 
             $DomainAdminName = $deployConfig.vmOptions.adminName
-            $DomainName = $deployConfig.vmOptions.domainName
+            $DomainName = if ($thisVM.domain) { "$($thisVM.domain)" } else { "$($deployConfig.vmOptions.domainName)" }
             #$DName = $DomainName.Split(".")[0]
             $DName = $deployConfig.vmOptions.domainNetBiosName
             $cm_admin = "$DNAME\$DomainAdminName"
@@ -1156,7 +1406,7 @@ function ConvertTo-DeployConfigEx {
             }
 
             if (-not $SiteServerVM -and $thisVM.Role -eq "Secondary") {
-                $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
+                $SiteServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM -DomainName $DomainName
             }
             if (-not $SiteServerVM -and $thisVM.Role -in "Primary", "CAS") {
                 $SiteServerVM = $thisVM
@@ -1174,7 +1424,7 @@ function ConvertTo-DeployConfigEx {
             foreach ($SSVM in $SiteServerVM) {
                 if ($SSVM -and $SSVM.SiteCode) {
                     Add-VMToAccountLists -thisVM $thisVM -VM $SSVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                    $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SSVM.siteCode -type VM
+                    $passiveNodeVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $SSVM.siteCode -type VM -DomainName $DomainName
                     if ($passiveNodeVM) {
                         Add-VMToAccountLists -thisVM $thisVM -VM $passiveNodeVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
                     }
@@ -1184,7 +1434,7 @@ function ConvertTo-DeployConfigEx {
                         if ($CASVM) {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "CAS" -Value $CASVM.vmName -Force
                             Add-VMToAccountLists -thisVM $thisVM -VM $CASVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                            $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM
+                            $CASPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $CASVM.siteCode -type VM -DomainName $DomainName
                             if ($CASPassiveVM) {
                                 Add-VMToAccountLists -thisVM $thisVM -VM $CASPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
                             }
@@ -1196,7 +1446,7 @@ function ConvertTo-DeployConfigEx {
                         if ($primaryVM) {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "Primary" -Value $primaryVM.vmName -Force
                             Add-VMToAccountLists -thisVM $thisVM -VM $primaryVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts -LocalAdminAccounts -WaitOnDomainJoin
-                            $primaryPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM
+                            $primaryPassiveVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $primaryVM.siteCode -type VM -DomainName $DomainName
                             if ($primaryPassiveVM) {
                                 Add-VMToAccountLists -thisVM $thisVM -VM $primaryPassiveVM -accountLists $accountLists -deployConfig $deployconfig -SQLSysAdminAccounts  -LocalAdminAccounts   -WaitOnDomainJoin
                             }
@@ -1210,21 +1460,21 @@ function ConvertTo-DeployConfigEx {
 
         #Get the SiteServer this VM's SiteCode reports to.  If it has a passive node, get that as -P
         if ($thisVM.siteCode -and -not $thisVM.Hidden) {
-            $SiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+            $SiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
             $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer" -Value $SiteServerVM.vmName -Force
             Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
-            $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM
+            $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
             if ($passiveSiteServerVM) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServerPassive" -Value $passiveSiteServerVM.vmName -Force
                 Add-VMToAccountLists -thisVM $thisVM -VM $passiveSiteServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
             }
             #If we report to a Secondary, get the Primary as well, and passive as -P
             if ((get-RoleForSitecode -ConfigTocheck $deployConfig -siteCode $thisVM.siteCode) -eq "Secondary") {
-                $PrimaryServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM
+                $PrimaryServerVM = Get-PrimarySiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.SiteCode -type VM -DomainName $DomainName
                 if ($PrimaryServerVM) {
                     $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServer" -Value $PrimaryServerVM.vmName -Force
                     Add-VMToAccountLists -thisVM $thisVM -VM $PrimaryServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -WaitOnDomainJoin
-                    $PassivePrimaryVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -siteCode $PrimaryServerVM.SiteCode -type VM
+                    $PassivePrimaryVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -siteCode $PrimaryServerVM.SiteCode -type VM -DomainName $DomainName
                     if ($PassivePrimaryVM) {
                         $thisParams | Add-Member -MemberType NoteProperty -Name "PrimarySiteServerPassive" -Value $PassivePrimaryVM.vmName -Force
                         Add-VMToAccountLists -thisVM $thisVM -VM $PassivePrimaryVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
@@ -1235,9 +1485,9 @@ function ConvertTo-DeployConfigEx {
         }
         #Get the VM Name of the Parent Site Code Site Server
         if ($thisVM.parentSiteCode -and -not $thisVM.Hidden) {
-            $parentSiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
+            $parentSiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM -DomainName $DomainName
             $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServer" -Value $parentSiteServerVM.vmName -Force
-            $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM
+            $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM -DomainName $DomainName
             if ($passiveSiteServerVM) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServerPassive" -Value $passiveSiteServerVM.vmName -Force
             }
@@ -1289,7 +1539,9 @@ function ConvertTo-DeployConfigEx {
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "DNSForwarders" -Value $IPAddresses -Force
     # Add Apps
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
-    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
+    $urlCatalog = Resolve-DeployUrlCatalog -AzureFileList $Common.AzureFileList
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $urlCatalog.Urls -Force
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLMetadata" -Value $urlCatalog.Metadata -Force
 
     return $deployConfigEx
 }
@@ -1361,4 +1613,3 @@ namespace Api
         $Win32ShowWindowAsync::ShowWindowAsync($window.WinHwnd, 6) | Out-Null
     }
 }
-

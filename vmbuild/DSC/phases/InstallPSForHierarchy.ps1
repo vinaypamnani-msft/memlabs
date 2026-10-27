@@ -1,4 +1,4 @@
-# InstallPSForHierarchy.ps1
+﻿# InstallPSForHierarchy.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -7,10 +7,12 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $DomainFullName = $deployConfig.parameters.domainName
-$CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CSName = $ThisVM.thisParams.ParentSiteServer
+# Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -19,6 +21,8 @@ if ($ThisVM.cmInstallDir) {
 }
 
 # SQL FQDN
+$installToAO = $false
+$sqlAoMaxDopParameters = $null
 if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
@@ -31,6 +35,13 @@ if ($ThisVM.remoteSQLVM) {
     }
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
+        $sqlNode2Vm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $SQLVM.OtherNode }
+        $sqlAoMaxDopParameters = @{
+            Node1 = $SQLVM.vmName
+            Node2 = $SQLVM.OtherNode
+            Node1Port = "$sqlPort"
+            Node2Port = $(if ($sqlNode2Vm.sqlPort) { "$($sqlNode2Vm.sqlPort)" } else { "$sqlPort" })
+        }
         $sqlServerName = $SQLVM.AlwaysOnListenerName
         $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
         $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
@@ -55,54 +66,98 @@ if ($ThisVM.siteCode) {
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+$Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile `
+    -RequiredSteps @('WaitingForCASFinishedInstall', 'InstallSCCM')
+
+if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
 # Set Install action as Running
 $Configuration.WaitingForCASFinishedInstall.Status = 'Running'
 $Configuration.WaitingForCASFinishedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 # Read Actions file on CAS
 $LogFolder = Split-Path $LogPath -Leaf
 $CSFilePath = "\\$CSName\$LogFolder"
 $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.json"
+$casWorkflowFileWaitMaxMinutes = 60
+$casDependencyWaitMaxMinutes = 240
+
+function Assert-CasWorkflowStepCanContinue {
+    param(
+        [Parameter(Mandatory)]$CasConfiguration,
+        [Parameter(Mandatory)][string]$Step
+    )
+
+    $status = "$($CasConfiguration.$Step.Status)"
+    if ($status -in @('Error', 'Failed', 'Failure')) {
+        throw "$CSName reported $Step=$status in '$CSConfigurationFile'. Stopping the primary before dependent setup; inspect the CAS Phase 8 diagnostics."
+    }
+}
 
 # Wait for ScriptWorkflow.json to exist on CAS
 Write-DscStatus "Waiting for $CSName to begin installation"
+$casBeginStart = Get-Date
 while (!(Test-Path $CSConfigurationFile)) {
-    Write-DscStatus "Waiting for $CSName to begin installation" -RetrySeconds 30
+    # Elapsed goes in the TEXT: the host only records status CHANGES, so a constant
+    # message is indistinguishable from a hang for the whole wait.
+    $casBeginMin = [int]((Get-Date) - $casBeginStart).TotalMinutes
+    if ($casBeginMin -ge $casWorkflowFileWaitMaxMinutes) {
+        throw "$CSName did not publish '$CSConfigurationFile' within $casWorkflowFileWaitMaxMinutes minutes."
+    }
+    Write-DscStatus "Waiting for $CSName to begin installation (${casBeginMin}m elapsed)" -RetrySeconds 30
     Start-Sleep -Seconds 30
 }
 
 # Read CAS actions file, wait for install to finish
 Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr"
-$CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-while ($CSConfiguration.$("InstallSCCM").Status -ne "Completed") {
-    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr" -NoLog -RetrySeconds 30
+$casInstallStart = Get-Date
+$CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+    -RequiredSteps @('InstallSCCM', 'UpgradeSCCM')
+while ($CSConfiguration.InstallSCCM.Status -ne "Completed") {
+    Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step 'InstallSCCM'
+    $casInstallMin = [int]((Get-Date) - $casInstallStart).TotalMinutes
+    if ($casInstallMin -ge $casDependencyWaitMaxMinutes) {
+        throw "$CSName did not finish InstallSCCM within $casDependencyWaitMaxMinutes minutes (last state: $($CSConfiguration.InstallSCCM.Status))."
+    }
+    $casInstallState = "$($CSConfiguration.InstallSCCM.Status)"
+    Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr (${casInstallMin}m elapsed, CAS InstallSCCM=$casInstallState)" -RetrySeconds 30
     Start-Sleep -Seconds 30
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+        -RequiredSteps @('InstallSCCM', 'UpgradeSCCM')
 }
+Write-DscStatus "$CSName finished installing ConfigMgr ($([int]((Get-Date) - $casInstallStart).TotalMinutes)m elapsed)."
 
 # Read CAS actions file, wait for upgrade to finish
 Write-DscStatus "Checking if $CSName is upgrading ConfigMgr"
-$CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
-    Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr" -NoLog -RetrySeconds 30
+$casUpgradeStart = Get-Date
+$CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+    -RequiredSteps @('UpgradeSCCM')
+while ($CSConfiguration.UpgradeSCCM.Status -ne "Completed") {
+    Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step 'UpgradeSCCM'
+    $casUpgradeMin = [int]((Get-Date) - $casUpgradeStart).TotalMinutes
+    if ($casUpgradeMin -ge $casDependencyWaitMaxMinutes) {
+        throw "$CSName did not finish UpgradeSCCM within $casDependencyWaitMaxMinutes minutes (last state: $($CSConfiguration.UpgradeSCCM.Status))."
+    }
+    $casUpgradeState = "$($CSConfiguration.UpgradeSCCM.Status)"
+    Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr (${casUpgradeMin}m elapsed, CAS UpgradeSCCM=$casUpgradeState)" -RetrySeconds 30
     Start-Sleep -Seconds 30
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+        -RequiredSteps @('UpgradeSCCM')
 }
+Write-DscStatus "$CSName finished upgrading ConfigMgr ($([int]((Get-Date) - $casUpgradeStart).TotalMinutes)m elapsed)."
 
 # Write actions file, wait finished
 $Configuration.WaitingForCASFinishedInstall.Status = 'Completed'
-$Configuration.WaitingForCASFinishedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+$Configuration.WaitingForCASFinishedInstall.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
 
     # Set Install action as Running
     $Configuration.InstallSCCM.Status = 'Running'
     $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
     # Create $CM dir, before creating the ini
     if (!(Test-Path C:\$CM)) {
@@ -170,7 +225,7 @@ CurrentBranch=1
     $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
     $productID = "EVAL"
     if ($CM -ne "CMTP") {
-        if (-not $($deployConfig.cmOptions.EVALVersion)) {
+        if (-not $($cmo.EVALVersion)) {
             if ($($deployConfig.parameters.ProductID)) {
                 $productID = $($deployConfig.parameters.ProductID)
             }
@@ -221,10 +276,37 @@ CurrentBranch=1
     # Install CM
     $CMInstallationFile = "$cmsourcepath\SMSSETUP\BIN\X64\Setup.exe"
 
+    # ConfigMgr seeds the AG secondary through this share, and its RESTORE LOG names no
+    # backup set, so it reads the FIRST one in the file. A .bak/.trn left by a previous
+    # build is restored instead of the one setup just wrote, and SQL rejects it with 3154
+    # -- surfaced only as the generic 3013. Phase 5 creates the share with a DSC File
+    # resource set to Ensure=Present, which never purges, so nothing else clears it.
+    if ($installToAO -and $agBackupShare) {
+        try {
+            $staleSeed = @(Get-ChildItem -Path (Join-Path $agBackupShare '*') -Include '*.bak', '*.trn' -File -ErrorAction Stop)
+            if ($staleSeed.Count -eq 0) {
+                Write-DscStatus "AG seeding share '$agBackupShare' holds no leftover backups."
+            }
+            foreach ($s in $staleSeed) {
+                try {
+                    Remove-Item -LiteralPath $s.FullName -Force -ErrorAction Stop
+                    Write-DscStatus "Deleted stale AG seeding backup '$($s.Name)' ($([int]($s.Length / 1MB))MB, written $($s.LastWriteTime.ToString('yyyy-MM-dd HH:mm')))"
+                }
+                catch {
+                    Write-DscStatus "WARNING: could not delete stale AG seeding backup '$($s.Name)': $($_.Exception.Message). If it predates this build, Init_Database will fail with SQL 3154."
+                }
+            }
+        }
+        catch {
+            Write-DscStatus "WARNING: could not read AG seeding share '$agBackupShare': $($_.Exception.Message). A leftover .trn there fails Init_Database with SQL 3154."
+        }
+    }
+
     # Write Setup entry, which causes the job on host to overwrite status with entries from ConfigMgrSetup.log
     Write-DscStatusSetup
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+    if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
     Write-DscStatus "Installation finished."
     Start-Sleep -Seconds 5
@@ -233,26 +315,29 @@ CurrentBranch=1
     # Remove-Item $CMINIPath
 
     # Wait for Site ready
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-    Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
     $propName = "PSReadyToUse" + $ThisVm.VmName
-    $i = 0
+    $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+        -RequiredSteps @($propName)
+    Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
+    # This is the largest single wait in Phase 8 (1,217-2,219s measured over 10 child-primary
+    # installs) - it is the CAS waiting for the CAS<->child DRS link to activate. Elapsed goes in
+    # the TEXT at the poll cadence, like the three CAS waits above: the host only records status
+    # CHANGES, and at the old 600s -NoLog cadence the guest log carried ONE line for the whole wait.
+    $psReadyStart = Get-Date
     while ($CSConfiguration.$propName.Status -ne "Completed") {
-        if ($i -eq 0) {
-            Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use" -NoLog -RetrySeconds 600
-            $i++
+        Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step $propName
+        $psReadyMin = [int]((Get-Date) - $psReadyStart).TotalMinutes
+        if ($psReadyMin -ge $casDependencyWaitMaxMinutes) {
+            throw "$CSName did not mark $propName Completed within $casDependencyWaitMaxMinutes minutes (last state: $($CSConfiguration.$propName.Status))."
         }
-        else {
-            $i++
-            if ($i -gt 20) {
-                $i = 0
-            }
-        }
+        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use (${psReadyMin}m elapsed)" -RetrySeconds 30
         Start-Sleep -Seconds 30
-        $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+        $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+            -RequiredSteps @($propName)
     }
+    Write-DscStatus "$CSName reports Primary is ready to use ($([int]((Get-Date) - $psReadyStart).TotalMinutes)m elapsed)."
 
     $Configuration.InstallSCCM.Status = 'Completed'
     $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }

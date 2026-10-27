@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "suites": {
+    "Core": {
+      "mode": "Standard",
+      "description": "Representative daily coverage without the largest stress labs.",
+      "families": [
+        "NOCM",
+        "PSTest2",
+        "CSTest2",
+        "CSTest3",
+        "CSTest5",
+        "CSTEST8"
+      ]
+    },
+    "Upgrade": {
+      "mode": "CrossRevision",
+      "description": "Exact-main baselines followed by representative develop additions and mutations.",
+      "families": [
+        "NOCM",
+        "PSTest2",
+        "PSTest3",
+        "CSTest2",
+        "CSTest3",
+        "CSTest5",
+        "CSTEST8"
+      ]
+    },
+    "Specialized": {
+      "mode": "Standard",
+      "description": "Targeted topology, legacy-version, offline, reporting, and SQL/OS variation coverage.",
+      "families": [
+        "CSTest1",
+        "CSTest4",
+        "CSTest6",
+        "CSTest7",
+        "Mega",
+        "MpReplicaTest",
+        "Oddball",
+        "Offline",
+        "OSDTest",
+        "PSTest1",
+        "PSTest3",
+        "PSTest4",
+        "PSTest5",
+        "PSTest6",
+        "ReportingTest",
+        "ReportingTest2"
+      ]
+    },
+    "Stress": {
+      "mode": "Standard",
+      "description": "Large reliability, multi-subnet, proxy/Linux, pull-DP, and kitchen-sink labs.",
+      "families": [
+        "BurnIn",
+        "PushTest",
+        "Wacky"
+      ]
+    },
+    "Full": {
+      "mode": "Standard",
+      "description": "Every ordinary top-level test family.",
+      "includeAll": true
+    }
+  }
+}

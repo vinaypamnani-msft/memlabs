@@ -1,13 +1,27 @@
 @ECHO OFF
 REM VmBuild.cmd
-pushd "%~dp0"
+SETLOCAL EnableExtensions DisableDelayedExpansion
 
-REM ============================================================
-REM Register file association
-REM (use ^" so embedded quotes are not seen as terminators by cmd /c)
-REM ============================================================
-cmd /c ftype MemLabs.Run=^"%~f0^" %%1
-cmd /c assoc .memlabs=MemLabs.Run
+REM Run from an immutable snapshot. The git pull below can replace VMBuild.cmd,
+REM and cmd.exe would otherwise resume reading the new file at the old byte offset.
+IF /I "%~f0"=="%MEMLABS_VMBUILD_SNAPSHOT%" GOTO RunStableLauncher
+
+SET "MEMLABS_VMBUILD_ROOT=%~dp0"
+SET "MEMLABS_VMBUILD_SNAPSHOT=%TEMP%\MemLabs-VMBuild-%RANDOM%-%RANDOM%.cmd"
+FOR %%I IN ("%MEMLABS_VMBUILD_SNAPSHOT%") DO SET "MEMLABS_VMBUILD_SNAPSHOT=%%~fI"
+COPY /Y "%~f0" "%MEMLABS_VMBUILD_SNAPSHOT%" >NUL
+IF ERRORLEVEL 1 (
+    ECHO ERROR: Could not create a stable launcher copy at:
+    ECHO        %MEMLABS_VMBUILD_SNAPSHOT%
+    EXIT /B 1
+)
+
+REM Keep the call, cleanup, and exit on one parsed line. The live file may change
+REM while the snapshot runs, so this process must not read another line from it.
+CALL "%MEMLABS_VMBUILD_SNAPSHOT%" %* & IF ERRORLEVEL 1 (DEL /Q "%MEMLABS_VMBUILD_SNAPSHOT%" >NUL 2>&1 & EXIT /B 1) ELSE (DEL /Q "%MEMLABS_VMBUILD_SNAPSHOT%" >NUL 2>&1 & EXIT /B 0)
+
+:RunStableLauncher
+pushd "%MEMLABS_VMBUILD_ROOT%"
 cls
 
 REM ============================================================
@@ -36,8 +50,96 @@ REM ============================================================
 @ECHO ON
 git config --global --add safe.directory E:\Memlabs
 git config --global --add safe.directory E:/memlabs
+@ECHO OFF
+
+REM Prevent inline auto-gc during fetch/pull. On Windows gc.autoDetach
+REM defaults to false (no fork), so gc runs synchronously and tries to
+REM rewrite pack files while fetch still holds handles -- causing
+REM "Unlink of file '.git/objects/pack/...' failed" hangs.
+REM Explicit gc runs in Invoke-Maintenance.ps1 instead.
+git config --local gc.auto 0 2>NUL
+
+REM ------------------------------------------------------------
+REM Move the user back to develop when their current branch is either
+REM   (a) deleted from origin (a feature branch that was merged + pruned), or
+REM   (b) RETIRED: still on origin (kept for history/reference) but no longer
+REM       worked on. Add retired branch names to RETIRED_BRANCHES below,
+REM       each wrapped in semicolons, so anyone still sitting on one is
+REM       moved to develop without having to delete the branch from origin.
+REM       e.g. SET "RETIRED_BRANCHES=;feature/foo;feature/bar;"
+REM ------------------------------------------------------------
+git fetch --prune origin 2>NUL
+FOR /F "tokens=*" %%B IN ('git rev-parse --abbrev-ref HEAD 2^>NUL') DO SET CURBRANCH=%%B
+
+SET "RETIRED_BRANCHES=;feature/mouse-menu-support;feature/pushclient-sitecode;"
+
+SET "SWITCHREASON="
+IF "%CURBRANCH%"=="" GOTO AfterBranchRedirect
+IF /I "%CURBRANCH%"=="develop" GOTO AfterBranchRedirect
+IF /I "%CURBRANCH%"=="main" GOTO AfterBranchRedirect
+IF /I "%CURBRANCH%"=="master" GOTO AfterBranchRedirect
+
+REM (a) current branch deleted from origin
+git ls-remote --exit-code --heads origin "%CURBRANCH%" >NUL 2>&1
+IF ERRORLEVEL 1 SET "SWITCHREASON=no longer exists on origin"
+
+REM (b) current branch retired but kept on origin
+IF NOT DEFINED SWITCHREASON (
+    ECHO %RETIRED_BRANCHES% | find /I ";%CURBRANCH%;" >NUL 2>&1
+    IF NOT ERRORLEVEL 1 SET "SWITCHREASON=has been merged to develop and retired"
+)
+
+IF NOT DEFINED SWITCHREASON GOTO AfterBranchRedirect
+
+ECHO.
+ECHO ============================================================
+ECHO  Branch "%CURBRANCH%" %SWITCHREASON%.
+ECHO  Switching back to develop...
+ECHO ============================================================
+@ECHO ON
+git checkout develop
+@ECHO OFF
+IF ERRORLEVEL 1 (
+    ECHO.
+    ECHO WARNING: Failed to checkout develop. You may have uncommitted
+    ECHO changes on "%CURBRANCH%". Resolve manually then re-run.
+    ECHO Press any key to continue with current branch...
+    PAUSE > NUL
+) ELSE (
+    @ECHO ON
+    git pull
+    @ECHO OFF
+)
+
+:AfterBranchRedirect
+
+REM ------------------------------------------------------------
+REM Clean up local branches whose remote tracking branch was pruned
+REM (merged + deleted on GitHub). Uses -d (not -D) so unmerged
+REM work is never lost. Skips develop/main/master and current branch.
+REM ------------------------------------------------------------
+FOR /F "tokens=1,2" %%A IN ('git for-each-ref --format="%%(refname:short) %%(upstream:track)" refs/heads/ 2^>NUL') DO (
+    IF "%%B"=="[gone]" (
+        IF /I NOT "%%A"=="develop" (
+            IF /I NOT "%%A"=="main" (
+                IF /I NOT "%%A"=="master" (
+                    ECHO  Removing stale branch: %%A
+                    git branch -d "%%A" 2>NUL
+                )
+            )
+        )
+    )
+)
+
+@ECHO ON
 git pull
 @ECHO OFF
+IF ERRORLEVEL 1 (
+    ECHO  git pull failed -- running git gc and retrying...
+    git gc 2>NUL
+    timeout /t 5 /nobreak >NUL
+    git pull
+)
 IF ERRORLEVEL 1 (
     ECHO.
     ECHO ============================================================
@@ -70,93 +172,53 @@ IF ERRORLEVEL 1 (
 )
 
 REM ============================================================
-REM Prefer System32 curl and remove Chocolatey curl when present
+REM Run maintenance operations
 REM ============================================================
-SET SYS32_CURL=%WINDIR%\System32\curl.exe
-IF EXIST "%SYS32_CURL%" (
-    ECHO System32 curl detected at "%SYS32_CURL%".
-    ECHO Removing Chocolatey curl package to avoid non-System32 curl usage...
-    choco uninstall curl -y
-    IF ERRORLEVEL 1 (
-        ECHO INFO: Chocolatey curl package may already be absent.
-    )
-)
-
-REM ============================================================
-REM Check/install Windows Terminal
-REM ============================================================
-SET WT=0
-where /q wt
+powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -File ".\Invoke-Maintenance.ps1"
 IF ERRORLEVEL 1 (
-    ECHO Windows Terminal not installed, attempting to install...
-    choco install microsoft-ui-xaml -y
-    IF ERRORLEVEL 1 ECHO WARNING: Failed to install microsoft-ui-xaml.
-    choco install microsoft-windows-terminal -y
-    IF ERRORLEVEL 1 ECHO WARNING: Failed to install Windows Terminal.
+    ECHO WARNING: Maintenance script reported one or more errors.
 )
-where /q wt
-IF NOT ERRORLEVEL 1 SET WT=1
+
+REM RDCMan 3.21 prompts to trust a certificate for every lab VM, so MemLabs prefers
+REM 3.12.0.0 from its own ProgramData copy. C:\tools belongs to the chocolatey
+REM sysinternals package and is left alone so sysinternals can keep updating.
+REM Falling back to that copy is supported, so this only reports -- it never blocks.
+powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -Command "$pin=[version]'3.12.0.0'; $dir=Join-Path $env:ProgramData 'memlabs\RDCMan'; $exe=Join-Path $dir 'RDCMan.exe'; $sys='C:\tools\RDCMan.exe'; $cache=Join-Path (Get-Location).Path 'cache\RDCMan-3.12.0.0.exe'; function V($x){ if(-not (Test-Path -LiteralPath $x)){return $null}; try{ [version](Get-Item -LiteralPath $x).VersionInfo.ProductVersion }catch{ $null } }; if((V $cache) -ne $pin){ foreach($c in @($exe,$sys)){ if((V $c) -eq $pin){ try{ $cd=Split-Path -Parent $cache; if(-not (Test-Path $cd)){ New-Item -Path $cd -ItemType Directory -Force | Out-Null }; Copy-Item -LiteralPath $c -Destination $cache -Force -ErrorAction Stop; Write-Host ('  Rescued RDCMan ' + $pin + ' from ' + $c) }catch{}; break } } }; if((V $exe) -ne $pin -and (V $cache) -eq $pin){ try{ if(-not (Test-Path $dir)){ New-Item -Path $dir -ItemType Directory -Force | Out-Null }; Copy-Item -LiteralPath $cache -Destination $exe -Force -ErrorAction Stop }catch{} }; $use=if((V $exe) -eq $pin){ $exe }else{ $sys }; $uv=V $use; if(-not $uv){ Write-Host '  RDCMan: not found in ProgramData or C:\tools.' }elseif($uv -gt $pin){ Write-Host ('  RDCMan: using ' + $uv + ' from ' + $use + ' - MemLabs will pre-trust VM certificates in the .rdg.') }else{ Write-Host ('  RDCMan: using pinned ' + $uv + ' from ' + $use + '.') }"
 
 REM ============================================================
+REM Prune logs / temp / cache older than 7 days
+REM ============================================================
+powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -File ".\Clean-OldLogs.ps1"
+IF ERRORLEVEL 1 (
+    ECHO WARNING: Clean-OldLogs reported an error.
+)
+
+REM ============================================================
+REM Remove the winget 'msstore' source to stop Microsoft Store
+REM "This content is blocked by your IT admin" toast spam.
+REM The msstore source background-refreshes against
+REM storeedgefd/displaycatalog.mp.microsoft.com, which Defender
+REM Network Protection blocks -- firing a toast each time. MemLabs
+REM only ever uses the 'winget' source (New-LinuxBaseImage.ps1),
+REM so removing msstore has no functional impact. Guarded so it
+REM only runs when winget exists AND msstore is still present,
+REM making it a silent no-op on every subsequent launch.
+REM ============================================================
+where winget >NUL 2>&1
+IF NOT ERRORLEVEL 1 (
+    winget source list 2>NUL | findstr /I "msstore" >NUL 2>&1
+    IF NOT ERRORLEVEL 1 (
+        ECHO Removing winget 'msstore' source to suppress Store block-page toasts...
+        winget source remove msstore >NUL 2>&1
+    )
+)
+
+REM ============================================================
+REM Determine launch prerequisites after maintenance
+REM ============================================================
+
 REM Use quoted %ProgramFiles% to avoid "C:\Program not found"
-REM ============================================================
 SET PS7="%ProgramFiles%\PowerShell\7\pwsh.exe"
-SET PS7_FLAG=%TEMP%\memlabs_ps7_upgrade.flag
-SET CHOCO_ALL_FLAG=%TEMP%\memlabs_choco_all_upgrade.flag
-
-REM ============================================================
-REM Weekly upgrades (PowerShell 7 and all Chocolatey packages)
-REM ============================================================
-SETLOCAL ENABLEDELAYEDEXPANSION
-
-REM Get current week number
-FOR /F "tokens=*" %%W IN ('powershell -NoLogo -NonInteractive -Command "Write-Output (Get-Date -UFormat '%%Y-%%V')"') DO SET CURRENT_WEEK=%%W
-
-REM --- Upgrade PowerShell 7 (once per week) ---
-SET DO_PS7_UPGRADE=1
-IF EXIST "%PS7_FLAG%" (
-    FOR /F "tokens=*" %%C IN ('type "%PS7_FLAG%"') DO SET LAST_WEEK=%%C
-    IF "!LAST_WEEK!"=="!CURRENT_WEEK!" SET DO_PS7_UPGRADE=0
-)
-
-IF "!DO_PS7_UPGRADE!"=="1" (
-    ECHO Upgrading PowerShell 7 ^(week !CURRENT_WEEK!^)...
-    choco upgrade pwsh -y
-    SET CHOCO_RC=!ERRORLEVEL!
-    REM Treat 0, 1641 and 3010 as success ^(reboot codes^)
-    IF "!CHOCO_RC!"=="0" (SET PS7_OK=1) ELSE IF "!CHOCO_RC!"=="1641" (SET PS7_OK=1) ELSE IF "!CHOCO_RC!"=="3010" (SET PS7_OK=1) ELSE (SET PS7_OK=0)
-    IF "!PS7_OK!"=="1" (
-        powershell -NoLogo -NonInteractive -Command "'!CURRENT_WEEK!' | Out-File '!PS7_FLAG!' -Encoding ascii -NoNewline"
-    ) ELSE (
-        ECHO WARNING: Failed to upgrade PowerShell 7 ^(exit !CHOCO_RC!^).
-    )
-) ELSE (
-    ECHO PowerShell 7 upgrade skipped ^(already checked week !CURRENT_WEEK!^).
-)
-
-REM --- Upgrade all Chocolatey packages (once per week) ---
-SET DO_CHOCO_UPGRADE=1
-IF EXIST "%CHOCO_ALL_FLAG%" (
-    FOR /F "tokens=*" %%C IN ('type "%CHOCO_ALL_FLAG%"') DO SET LAST_CHOCO_WEEK=%%C
-    IF "!LAST_CHOCO_WEEK!"=="!CURRENT_WEEK!" SET DO_CHOCO_UPGRADE=0
-)
-
-IF "!DO_CHOCO_UPGRADE!"=="1" (
-    ECHO Upgrading all Chocolatey packages ^(week !CURRENT_WEEK!^)...
-    choco upgrade all -y --ignore-checksums
-    SET CHOCO_RC=!ERRORLEVEL!
-    REM Treat 0, 1641 and 3010 as success ^(reboot codes^)
-    IF "!CHOCO_RC!"=="0" (SET CHOCO_OK=1) ELSE IF "!CHOCO_RC!"=="1641" (SET CHOCO_OK=1) ELSE IF "!CHOCO_RC!"=="3010" (SET CHOCO_OK=1) ELSE (SET CHOCO_OK=0)
-    IF "!CHOCO_OK!"=="1" (
-        powershell -NoLogo -NonInteractive -Command "'!CURRENT_WEEK!' | Out-File '!CHOCO_ALL_FLAG!' -Encoding ascii -NoNewline"
-    ) ELSE (
-        ECHO WARNING: choco upgrade all failed ^(exit !CHOCO_RC!^).
-    )
-) ELSE (
-    ECHO Chocolatey upgrade all skipped ^(already checked week !CURRENT_WEEK!^).
-)
-
-ENDLOCAL
 
 REM ============================================================
 REM Check PowerShell 7 is available
@@ -172,7 +234,7 @@ REM ============================================================
 :PS7
 timeout 1
 IF "%~1"=="" (
-    IF "%WT%"=="1" (
+    IF DEFINED WT_SESSION (
         wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (
@@ -180,7 +242,7 @@ IF "%~1"=="" (
         IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
     )
 ) ELSE (
-    IF "%WT%"=="1" (
+    IF DEFINED WT_SESSION (
         wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (

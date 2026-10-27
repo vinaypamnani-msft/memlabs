@@ -22,17 +22,25 @@
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
 
+    # DC-level provisioning (PKI cert templates, CM content pre-pop, BLM cert
+    # templates) is shared across every hierarchy in this domain. Use OR-across-
+    # top-levels: if ANY top-level site server (CAS or standalone Primary) has
+    # the flag set, the DC publishes it. Over-provisioning is harmless; under-
+    # provisioning breaks the hierarchy that needed it. Falls back to the
+    # rehydrated global block when no per-VM cmOptions are present yet (mid-
+    # migration shape) or when no site servers are in this deploy.
     $usePKI = $false
     $prePopulate = $false
-    if ($deployConfig.cmOptions) {
-        if ($deployConfig.cmOptions.UsePKI) {
-            $usePKI = $deployConfig.cmOptions.UsePKI
-        }
-        if ($deployConfig.cmOptions.PrePopulateObjects) {
-            $prePopulate = $deployConfig.cmOptions.PrePopulateObjects
-        }
+    $topLevelCmOptions = @($deployConfig.virtualMachines | Where-Object {
+            $_.Role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and $_.cmOptions
+        }).cmOptions
+    if (-not $topLevelCmOptions -and $deployConfig.cmOptions) {
+        $topLevelCmOptions = @($deployConfig.cmOptions)
     }
-
+    foreach ($cmo in $topLevelCmOptions) {
+        if ($cmo.UsePKI) { $usePKI = $true }
+        if ($cmo.PrePopulateObjects) { $prePopulate = $true }
+    }
 
     # This VM
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -96,7 +104,6 @@
             $waitOnDomainJoin += $member.vmName
         }
     }
-
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -165,14 +172,36 @@
             Status    = "Installing required windows features"
         }
 
+        # NEVER stage the ADCS (Certificate Server) role BEFORE the DC promotion.
+        # Install-ADDSForest/Install-ADDSDomainController refuses to promote a
+        # machine that already has a Certificate Server installed, failing with
+        # "Verification of prerequisites for Domain Controller promotion failed.
+        # Certificate Server is installed." When this DC is ALSO the issuing CA
+        # ($thisVM.InstallCA), the CA role BINARIES are staged AFTER the promotion
+        # (InstallCAFeature below), so the post-Phase2 PKI orchestrator still finds
+        # CertSvc pre-staged and only has to CONFIGURE the CA.
         InstallFeatureForSCCM InstallFeature {
             Name      = 'DC'
             Role      = 'DC'
+            InstallCA = $false
             DependsOn = "[InitializeDisks]InitDisks"
         }
 
+        # Configure the custom page file BEFORE promoting the DC and suppress its
+        # own reboot. The page-file change only needs *a* reboot to take effect,
+        # and the ADDomain promotion below always reboots — so it applies the new
+        # page file for free, eliminating a dedicated post-promotion reboot.
+        $PageFileSize = ($thisVM.memory) / 2MB
+        SetCustomPagingFile PagingSettings {
+            DependsOn      = "[InstallFeatureForSCCM]InstallFeature"
+            Drive          = 'C:'
+            InitialSize    = $PageFileSize
+            MaximumSize    = $PageFileSize
+            SuppressReboot = $true
+        }
+
         WriteStatus FirstDS {
-            DependsOn = "[InstallFeatureForSCCM]InstallFeature"
+            DependsOn = "[SetCustomPagingFile]PagingSettings"
             Status    = "Configuring ADDS and setting up the domain. The computer will reboot a couple of times."
         }
 
@@ -188,16 +217,61 @@
             DomainNetBiosName             = $netbiosName
         }
 
-        $PageFileSize = ($thisVM.memory) / 2MB
-        SetCustomPagingFile PagingSettings {
-            DependsOn   = "[ADDomain]FirstDS"
-            Drive       = 'C:'
-            InitialSize = $PageFileSize
-            MaximumSize = $PageFileSize
+        # Stage the ADCS (Certificate Server) role binaries for a DC that is ALSO
+        # the issuing/subordinate CA -- but ONLY after the promotion above (a CA
+        # present pre-promotion fails dcpromo; see InstallFeature comment). This
+        # lays down the CA role while Phase 2 DSC is still running, so the serial
+        # post-Phase2 PKI orchestrator (Install-PKI) finds CertSvc pre-staged and
+        # only CONFIGURES the CA instead of running a ServerManager install inside
+        # its fragile, heavily-loaded window.
+        if ($ThisVM.InstallCA) {
+            InstallFeatureForSCCM InstallCAFeature {
+                Name      = 'DCCA'
+                Role      = 'DC'
+                InstallCA = $true
+                DependsOn = "[ADDomain]FirstDS"
+            }
+        }
+
+        # Set the KDC default encryption types so all accounts (even those
+        # without msDS-SupportedEncryptionTypes) get AES tickets. Without this,
+        # Windows Server 2025 issues only RC4 tickets for accounts that lack
+        # the attribute, and SQL Server rejects them — causing NTLM fallback
+        # and transient 18452 errors during setup.
+        # Value 28 = RC4_HMAC (4) + AES128 (8) + AES256 (16)
+        Registry KdcDefaultEncryptionTypes {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\KDC'
+            ValueName = 'DefaultDomainSupportedEncTypes'
+            ValueType = 'Dword'
+            ValueData = '28'
+            DependsOn = '[ADDomain]FirstDS'
+        }
+
+        # Reduce intra-site replication notification delay from 15s to 0s.
+        # In a lab environment this makes AD changes replicate to partner DCs
+        # near-instantly, avoiding races where parallel DSC nodes read stale
+        # data from different DCs.
+        Registry ReplNotifyPauseAfterModify {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+            ValueName = 'Replicator notify pause after modify (secs)'
+            ValueType = 'Dword'
+            ValueData = '0'
+            DependsOn = '[ADDomain]FirstDS'
+        }
+
+        Registry ReplNotifyPauseBetweenDSAs {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+            ValueName = 'Replicator notify pause between DSAs (secs)'
+            ValueType = 'Dword'
+            ValueData = '0'
+            DependsOn = '[ADDomain]FirstDS'
         }
 
         WriteStatus CreateAccounts {
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            DependsOn = "[Registry]ReplNotifyPauseBetweenDSAs"
             Status    = "Creating user accounts and groups"
         }
 
@@ -257,7 +331,29 @@
         }
 
         $nextDepend = "[Service]ADWS"
-        $waitOnDependency = "[Service]ADWS"
+
+        # The ADWS *service* being "Running" does NOT mean the AD Web Services
+        # *endpoint* is answering directory queries yet. Right after the ADDomain
+        # promotion reboot, ADWS reports Running but Get-ADUser/Get-ADComputer
+        # still throw "Unable to find a default server with Active Directory Web
+        # Services running" for the first several seconds/minutes while ADWS
+        # discovers the directory. Running the ADUser/ADComputer resources in
+        # that window makes their Test-TargetResource throw, DSC records the
+        # failure, the pending.mof is retained, and the LCM strands in
+        # PendingConfiguration (no reboot owed) until the host watchdog resumes
+        # it. Gate the AD-object resources behind a real readiness probe -- the
+        # same WaitForADDomain pattern Phase2BDC already uses -- so they only run
+        # once ADWS actually serves the domain.
+        WaitForADDomain WaitForADWSReady {
+            DomainName              = $DomainName
+            Credential              = $DomainCreds
+            WaitForValidCredentials = $true
+            WaitTimeout             = 900
+            DependsOn               = $nextDepend
+        }
+
+        $nextDepend = "[WaitForADDomain]WaitForADWSReady"
+        $waitOnDependency = "[WaitForADDomain]WaitForADWSReady"
 
         $adObjectDependency = @($nextDepend)
         $i = 0
@@ -293,6 +389,49 @@
            
         }
        
+        # Stamp msDS-SupportedEncryptionTypes = 28 (RC4 + AES128 + AES256) on
+        # every domain user/service account created above, then reset each
+        # account's password (to the SAME credential ADUser already set) so
+        # the DC regenerates AES long-term keys with the attribute in place.
+        #
+        # Why both steps?  On Windows Server 2025 the KDC issues RC4-only
+        # SERVICE tickets for accounts without this attribute (it won't
+        # assume AES long-term keys), causing SQL to fall back to NTLM.
+        # The KdcDefaultEncryptionTypes registry only fixes TGTs.  Setting
+        # the attribute alone may not regenerate the AES long-term keys
+        # stored in supplementalCredentials — a password reset is the only
+        # documented way to guarantee the DC derives and stores them.
+        $allDomainUserAccounts = @($DomainAccounts) + @($DomainAccountsUPN) | Where-Object { $_ } | Select-Object -Unique
+        $cvUserAccountList = ($allDomainUserAccounts | ForEach-Object { "'$_'" }) -join ','
+        $cvEncPassB64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Admincreds.GetNetworkCredential().Password))
+        Script SetUserKerberosEncryptionTypes {
+            DependsOn  = $adObjectDependency
+            GetScript  = { return @{ Result = (Get-Date).ToString() } }
+            TestScript = [string]"
+                `$accounts = @($cvUserAccountList)
+                foreach (`$a in `$accounts) {
+                    `$u = Get-ADUser -Identity `$a -Properties 'msDS-SupportedEncryptionTypes' -ErrorAction SilentlyContinue
+                    if (`$u -and `$u.'msDS-SupportedEncryptionTypes' -ne 28) { return `$false }
+                }
+                return `$true
+            "
+            SetScript  = [string]"
+                `$pass = [System.Text.Encoding]::Unicode.GetString(
+                             [Convert]::FromBase64String('$cvEncPassB64'))
+                `$secPass = ConvertTo-SecureString `$pass -AsPlainText -Force
+                `$accounts = @($cvUserAccountList)
+                foreach (`$a in `$accounts) {
+                    try {
+                        Set-ADUser -Identity `$a -KerberosEncryptionType AES128,AES256,RC4 -ErrorAction Stop
+                        Set-ADAccountPassword -Identity `$a -Reset -NewPassword `$secPass -ErrorAction Stop
+                    }
+                    catch {
+                        Write-Verbose ""Failed to set Kerberos encryption types on `$a : `$(`$_.Exception.Message)""
+                    }
+                }
+            "
+        }
+        $adObjectDependency += "[Script]SetUserKerberosEncryptionTypes"
 
         $i = 0
         foreach ($computer in $DomainComputers) {
@@ -324,43 +463,109 @@
             MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
             DependsOn        = "[ADGroup]AddToDomainAdmin"
         }
-        $nextDepend = "[ADGroup]AddToSchemaAdmin"
+
+        ADGroup AddToEnterpriseAdmin {
+            GroupName        = "Enterprise Admins"
+            MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
+            DependsOn        = "[ADGroup]AddToSchemaAdmin"
+        }
+        $nextDepend = "[ADGroup]AddToEnterpriseAdmin"
 
 
 
+        # sitesAndNetworks can carry MULTIPLE entries with the SAME SiteCode but
+        # different subnets: the first (Primary/Secondary) pass maps each site
+        # server's own subnet, while the client-subnet-boundary pass adds a
+        # (pushTargetSite, clientSubnet) pair for every distinct pushed subnet --
+        # which can reuse a SiteCode already present. ADReplicationSite and
+        # ADReplicationSiteLink are keyed on SiteCode (Name), so emitting them
+        # per-entry produced duplicate DSC resources with the same key ->
+        # 'A conflict was detected between resources [ADReplicationSiteLink]...'.
+        # Emit the site + site link ONCE per unique SiteCode, and one subnet
+        # resource per entry (subnets are already de-duped upstream, each mapped
+        # to its owning site).
         $adSiteDependency = @($nextDepend)
+        $emittedSiteCodes = @{}
         $i = 0
         foreach ($site in $adsites) {
             $i++
-            ADReplicationSite "ADSite$($i)" {
-                Ensure    = 'Present'
-                Name      = $site.SiteCode
-                DependsOn = $nextDepend
+            if (-not $emittedSiteCodes.ContainsKey($site.SiteCode)) {
+                $emittedSiteCodes[$site.SiteCode] = $i
+
+                ADReplicationSite "ADSite$($i)" {
+                    Ensure    = 'Present'
+                    Name      = $site.SiteCode
+                    DependsOn = $nextDepend
+                }
+
+                ADReplicationSiteLink "HQSiteLink$($i)" {
+                    Name                          = "SiteLink Default-First-Site-Name to $($site.SiteCode) 2-way"
+                    SitesIncluded                 = @('Default-First-Site-Name', $site.SiteCode)
+                    Cost                          = 99
+                    ReplicationFrequencyInMinutes = 1
+                    Ensure                        = 'Present'
+                    OptionChangeNotification      = $true
+                    OptionTwoWaySync              = $true
+                    DependsOn                     = "[ADReplicationSite]ADSite$($i)"
+                }
+                $adSiteDependency += "[ADReplicationSiteLink]HQSiteLink$($i)"
             }
+
+            # The AD site this subnet belongs to (the index of the entry that
+            # first emitted the ADReplicationSite for this SiteCode).
+            $siteResIndex = $emittedSiteCodes[$site.SiteCode]
 
             ADReplicationSubnet "ADSubnet$($i)" {
                 Name        = "$($site.Subnet)/24"
                 Site        = $site.SiteCode
                 Location    = $site.SiteCode
                 Description = 'Created by vmbuild'
-                DependsOn   = "[ADReplicationSite]ADSite$($i)"
+                DependsOn   = "[ADReplicationSite]ADSite$($siteResIndex)"
             }
-
-            ADReplicationSiteLink "HQSiteLink$($i)" {
-                Name                          = "SiteLink Default-First-Site-Name to $($site.SiteCode) 2-way"
-                SitesIncluded                 = @('Default-First-Site-Name', $site.SiteCode)
-                Cost                          = 99
-                ReplicationFrequencyInMinutes = 1
-                Ensure                        = 'Present'
-                OptionChangeNotification      = $true
-                OptionTwoWaySync              = $true
-                DependsOn                     = "[ADReplicationSite]ADSite$($i)"
-            }
-            $adSiteDependency += "[ADReplicationSiteLink]HQSiteLink$($i)"
             $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
             $nextDepend = $adSiteDependency
         }
       
+        # Reverse lookup zones: one AD-integrated /24 in-addr.arpa zone per
+        # distinct VM network in this deployment. Provides PTR records for
+        # every host the DC serves (Windows clients via Secure dynamic update,
+        # Linux via Register-LinuxVmDns). Idempotent: DnsServerADZone is a
+        # no-op when the zone already exists.
+        $reverseZoneNames = @{}
+        # Always include the deployment's DEFAULT network. VMs that sit on it
+        # inherit vmOptions.network and have NO explicit .network property, so
+        # the per-VM loop below skips them (-not $vm.network) and the default
+        # subnet's reverse zone would never be created -- which breaks PTR
+        # creation for anything on it (e.g. SQLAO cluster/AG listener IPs, where
+        # Phase 5's PTR TestScript then throws 'zone was not found').
+        if ($deployConfig.vmOptions.network) {
+            $defOct = $deployConfig.vmOptions.network.Split('.')
+            if ($defOct.Count -eq 4) {
+                $reverseZoneNames["$($defOct[2]).$($defOct[1]).$($defOct[0]).in-addr.arpa"] = $true
+            }
+        }
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if (-not $vm.network) { continue }
+            $oct = $vm.network.Split('.')
+            if ($oct.Count -ne 4) { continue }
+            $reverseZoneNames["$($oct[2]).$($oct[1]).$($oct[0]).in-addr.arpa"] = $true
+        }
+        $revIdx = 0
+        $reverseZoneDeps = @($nextDepend)
+        foreach ($zoneName in $reverseZoneNames.Keys) {
+            $revIdx++
+            DnsServerADZone "ReverseZone$revIdx" {
+                Name             = $zoneName
+                DynamicUpdate    = 'Secure'
+                ReplicationScope = 'Domain'
+                Ensure           = 'Present'
+                DependsOn        = $nextDepend
+            }
+            $reverseZoneDeps += "[DnsServerADZone]ReverseZone$revIdx"
+        }
+        if ($revIdx -gt 0) {
+            $nextDepend = $reverseZoneDeps
+        }
 
         if ($OtherDC) {
             DnsServerConditionalForwarder 'Forwarder1' {
@@ -489,61 +694,15 @@
             }
         }
 
-        if ($ThisVM.InstallCA) {
 
+
+        if ($ThisVM.InstallCA) {
+            # CA installation is handled by the host-driven PKI orchestrator
+            # (Install-PKI) after Phase2 completes. This ensures consistent
+            # behavior regardless of whether the CA is on a DC or member server.
             WriteStatus ADCS {
                 DependsOn = $waitOnDependency
-                Status    = "Installing Certificate Authority"
-            }
-
-            if ($ThisVM.ThisParams.RootCA) {
-                InstallCA InstallCA {
-                    DependsOn     = $waitOnDependency
-                    HashAlgorithm = "SHA256"
-                    #RootCa        = $ThisVM.ThisParams.RootCA
-                }
-            }
-            else {
-                InstallCA InstallCA {
-                    DependsOn     = $waitOnDependency
-                    HashAlgorithm = "SHA256"
-                }
-            }
-            $nextDepend = "[InstallCA]InstallCA"
-
-            if ($usePKI) {
-                
-                WriteStatus ImportCertificateTemplate {
-                    DependsOn = $nextDepend
-                    Status    = "Importing Template to Domain"
-                }
-
-                $waitOnDependency = @($nextDepend)
-
-                if ($iisCount) {
-                    ImportCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                        DNPath       = $DNName
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
-
-                    ImportCertificateTemplate ConfigMgrWebServerCertificate {
-                        TemplateName = "ConfigMgrWebServerCertificate"
-                        DNPath       = $DNName
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrWebServerCertificate"
-                }
-                ImportCertificateTemplate ConfigMgrClientCertificate {
-                    TemplateName = "ConfigMgrClientCertificate"
-                    DNPath       = $DNName
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientCertificate"
-            }
-            else {
-                $waitOnDependency = $nextDepend
+                Status    = "Skipping CA install (will be configured post-Phase2 by PKI orchestrator)"
             }
         }
 
@@ -585,7 +744,9 @@
 
             $waitOnDependency += "[DelegateControl]Add$server"
         }
-      
+
+
+
         if ($sitecount) {
 
             ADGroup ConfigMgrSiteServers {
@@ -615,6 +776,13 @@
         }
 
 
+        # Apply the "Certificate AutoEnrollment" GPO UNCONDITIONALLY (matches main).
+        # AEPolicy=7 only ENABLES machine autoenrollment; it is a harmless no-op
+        # unless a cert template grants this domain's computers AutoEnroll. Gating
+        # it on $usePKI under-detected the cross-forest case (clients enroll their
+        # client-auth cert from a REMOTE forest's CA and this domain runs no CM
+        # site, so $usePKI was false), which starved those clients of the
+        # autoenrollment policy -> no client cert -> ccmsetup CCM_E_NO_CLIENT_PKI_CERT.
         WriteStatus GroupPolicyStatus {
             DependsOn = $waitOnDependency
             Status    = "Installing Auto Enrollment Group Policy"
@@ -661,50 +829,9 @@
         }
         $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
         $waitOnDependency = $nextDepend
-        
 
-        if ($ThisVM.InstallCA) {
-
-
-            WriteStatus CertTemplates {
-                DependsOn = $waitOnDependency
-                Status    = "Installing Certificate Templates"
-            }
-
-            ModuleAdd PSPKI {
-                Key             = 'Always'
-                CheckModuleName = 'PSPKI'
-                DependsOn       = $waitOnDependency
-            }
-            $nextDepend = "[ModuleAdd]PSPKI"
-            $waitOnDependency = @("[ModuleAdd]PSPKI")
-            if ($usePKI) {
-                if ($iisCount) {
-                    AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                        GroupName    = 'ConfigMgr IIS Servers'
-                        Permissions  = 'Read, Enroll'
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
-
-                    AddCertificateTemplate ConfigMgrWebServerCertificate {
-                        TemplateName = "ConfigMgrWebServerCertificate"
-                        GroupName    = 'ConfigMgr IIS Servers'
-                        Permissions  = 'Read, Enroll'
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
-                }
-                AddCertificateTemplate ConfigMgrClientCertificate {
-                    TemplateName = "ConfigMgrClientCertificate"
-                    GroupName    = 'Domain Computers'
-                    Permissions  = 'Read, Enroll, AutoEnroll'
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
-            }
-        }
+        # Certificate template import and publishing is handled by the
+        # host-driven PKI orchestrator (Install-PKI) after Phase2 completes.
 
         if ($ThisVM.externalDomainJoinSiteCode -and $ThisVM.externalDomainJoinSiteCode -ne "NONE") {
             [System.Management.Automation.PSCredential]$groupCreds = New-Object System.Management.Automation.PSCredential ("$($ThisVM.ForestTrust)\Admin", $Admincreds.Password)
@@ -715,11 +842,12 @@
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = $ThisVM.ThisParams.ExternalTopLevelSiteServer
-                ExtFolder   = "CMCB"
-                Ensure      = "Present"
-                DependsOn   = $waitOnDependency
-                AdminCreds  = $groupCreds
+                MachineName          = $ThisVM.ThisParams.ExternalTopLevelSiteServer
+                ExtFolder            = "CMCB"
+                Ensure               = "Present"
+                DependsOn            = $waitOnDependency
+                AdminCreds           = $groupCreds
+                PsDscRunAsCredential = $DomainCreds
             }
             $waitOnDependency = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
 
@@ -734,6 +862,8 @@
                 Ensure         = "Present"
                 DependsOn      = $waitOnDependency
                 IsGroup        = $true
+                RemoteCreds    = $groupCreds
+                RemoteServer   = $ThisVM.ThisParams.RootCADC
             }
             $waitOnDependency = "[DelegateControl]AddremoteIISGroup"
         }
@@ -760,15 +890,19 @@
                 $waitOnDependency = "[AddToAdminGroup]AddCertPublisher"
 
                 InstallRootCertificate InstallRootCertificate {
-                    CAName    = $ThisVM.ThisParams.RootCA
-                    DependsOn = $waitOnDependency
+                    CAName         = $ThisVM.ThisParams.RootCA
+                    RemoteForestDC = $ThisVM.ThisParams.RootCADC
+                    IssuingCAHint  = $ThisVM.ThisParams.IssuingCAHint
+                    RemoteCreds    = $groupCreds
+                    DependsOn      = $waitOnDependency
                 }
                 $waitOnDependency = "[InstallRootCertificate]InstallRootCertificate"
 
                 RunPkiSync RunPkiSync {
-                    SourceForest = $ThisVM.ForestTrust
-                    TargetForest = $DomainName
-                    DependsOn    = $waitOnDependency
+                    SourceForest        = $ThisVM.ForestTrust
+                    TargetForest        = $DomainName
+                    DependsOn           = $waitOnDependency
+                    PsDscRunAsCredential = $DomainCreds
                 }
                 $waitOnDependency = "[RunPkiSync]RunPkiSync"
             }

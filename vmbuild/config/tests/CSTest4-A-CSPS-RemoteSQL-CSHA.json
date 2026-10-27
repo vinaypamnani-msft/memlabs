@@ -23,23 +23,6 @@
       "virtualProcs": 4
     },
     {
-      "vmName": "CS1DPMP1",
-      "role": "SiteSystem",
-      "operatingSystem": "Server 2022",
-      "memory": "3GB",
-      "virtualProcs": 4,
-      "tpmEnabled": true,
-      "installSSMS": true,
-      "additionalDisks": {
-        "E": "250GB"
-      },
-      "installDP": true,
-      "installMP": true,
-      "installSUP": false,
-      "installRP": false,
-      "siteCode": "CS1"
-    },
-    {
       "vmName": "CS1SITE",
       "role": "CAS",
       "siteCode": "CS1",
@@ -86,7 +69,7 @@
       "vmName": "CS1SUP1",
       "role": "SiteSystem",
       "operatingSystem": "Server 2022",
-      "memory": "3GB",
+      "memory": "8GB",
       "virtualProcs": 4,
       "tpmEnabled": true,
       "installSSMS": true,
@@ -169,7 +152,7 @@
       "vmName": "W11Client2",
       "role": "DomainMember",
       "operatingSystem": "Windows 11 Latest",
-      "memory": "2GB",
+      "memory": "4GB",
       "virtualProcs": 2
     }
   ]

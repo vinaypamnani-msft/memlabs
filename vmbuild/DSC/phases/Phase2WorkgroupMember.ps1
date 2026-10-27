@@ -24,6 +24,23 @@
     # Admin Name
     $AdminName = $deployConfig.vmOptions.adminName
 
+    $clientSetupTest = {
+        . 'C:\staging\DSC\phases\WindowsSetupReadiness.ps1'
+        $state = Get-MemLabsWindowsClientSetupState
+        return ($state.Ready -is [bool] -and $state.Ready)
+    }
+    $clientSetupSet = {
+        . 'C:\staging\DSC\phases\WindowsSetupReadiness.ps1'
+        $state = Get-MemLabsWindowsClientSetupState
+        if ($state.Ready -isnot [bool] -or -not $state.Ready) {
+            throw "Windows client setup is not complete; refusing workgroup rename. $($state.Detail)"
+        }
+    }
+    if ($ThisVM.role -eq 'AADClient') {
+        $clientSetupTest = { return $true }
+        $clientSetupSet = {}
+    }
+
     Node localhost
     {
         LocalConfigurationManager {
@@ -31,12 +48,20 @@
             RebootNodeIfNeeded = $true
         }
 
+        Script ClientSetupBeforeRename {
+            GetScript = { @{ Result = 'Read-only Windows client setup guard' } }
+            TestScript = $clientSetupTest
+            SetScript = $clientSetupSet
+        }
+
         WriteStatus Rename {
+            DependsOn = '[Script]ClientSetupBeforeRename'
             Status = "Renaming the computer to $ThisMachineName"
         }
 
         Computer NewName {
             Name = $ThisMachineName
+            DependsOn = '[WriteStatus]Rename'
         }
 
         WriteStatus InitDisks {
@@ -134,9 +159,11 @@
         }
 
         InstallFeatureForSCCM InstallFeature {
-            Name      = "WorkgroupMember"
-            Role      = "WorkgroupMember"
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            Name            = "WorkgroupMember"
+            Role            = "WorkgroupMember"
+            InstallCA       = [bool]$thisVM.InstallCA
+            IsOfflineRootCA = ($thisVM.role -eq 'StandaloneRootCA')
+            DependsOn       = "[SetCustomPagingFile]PagingSettings"
         }
 
         WriteStatus Complete {

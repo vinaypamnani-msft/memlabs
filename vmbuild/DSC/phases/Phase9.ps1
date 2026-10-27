@@ -1,4 +1,4 @@
-Configuration Phase9
+﻿Configuration Phase9
 {
     param
     (
@@ -8,7 +8,7 @@ Configuration Phase9
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'xFailOverCluster', 'AccessControlDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'FailoverClusterDsc', 'AccessControlDsc', 'SqlServerDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -20,12 +20,19 @@ Configuration Phase9
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
 
-    # CM Share Folder
-    $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+    # $CM (CMTP vs CMCB source folder) is resolved per-Node from the owning
+    # VM's cmOptions so multi-hierarchy deploys with mixed CM versions stamp
+    # the correct folder on each node. See CAS/Primary and DC Node blocks.
+
+    # Strip domain prefix from credential username if present (the multi-node
+    # DSC compilation path pre-prefixes with NetBIOS name, which would create
+    # an invalid double-prefix like "FQDN\NetBIOS\user")
+    $AdminUserName = $Admincreds.UserName
+    if ($AdminUserName -match '\\') { $AdminUserName = ($AdminUserName -split '\\', 2)[1] }
 
     # Domain Creds
     $DomainName = $deployConfig.parameters.domainName
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
 
@@ -61,7 +68,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Disable-AgentJob-Set.sql"
@@ -108,14 +115,14 @@ Configuration Phase9
                 Status    = "Waiting on $($WaitFor -join ",") to Complete"
             }
 
-            WaitForAll WaitSCCM {
-                ResourceName     = '[WaitForEvent]WorkflowComplete'
-                NodeName         = $WaitFor
-                RetryIntervalSec = 15
-                RetryCount       = 1200
-                DependsOn        = $nextDepend
+            WaitForWorkflowReceipt WaitSCCM {
+                MachineName         = @($WaitFor)[0]
+                LogFolder           = $LogFolder
+                Ensure              = 'Present'
+                PsDscRunAsCredential = $CMAdmin
+                DependsOn           = $nextDepend
             }
-            $nextDepend = '[WaitForAll]WaitSCCM'
+            $nextDepend = '[WaitForWorkflowReceipt]WaitSCCM'
         }
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Enable-AgentJob-Set.sql"
@@ -154,7 +161,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.PSName
         $CSName = $ThisVM.thisParams.CSName
@@ -186,16 +193,44 @@ Configuration Phase9
         $nextDepend = $waitOnDependency
 
         if ($CSName -or $PSName) {
+            # AD schema extensions are cumulative -- a single extension by the
+            # highest-version top-level site server in this domain covers every
+            # hierarchy. Prefer tech-preview (newer schema) over current-branch.
+            # Falls back to legacy $CSName/$PSName if no top-levels are visible
+            # in this deployConfig snapshot.
+            $dcDomain = if ($ThisVM.Domain) { $ThisVM.Domain } else { $deployConfig.parameters.domainName }
+            $domainTops = @($deployConfig.virtualMachines | Where-Object {
+                    $_.Role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and
+                    (-not $_.Domain -or $_.Domain -eq $dcDomain)
+                })
+            $schemaServer = $domainTops | Where-Object {
+                $vmCmo = if ($_.cmOptions) { $_.cmOptions } else { $deployConfig.cmOptions }
+                $vmCmo.version -eq 'tech-preview'
+            } | Select-Object -First 1
+            if (-not $schemaServer) { $schemaServer = $domainTops | Select-Object -First 1 }
+
+            if ($schemaServer) {
+                $parentName = $schemaServer.vmName
+                $parentCmo = if ($schemaServer.cmOptions) { $schemaServer.cmOptions } else { $deployConfig.cmOptions }
+            }
+            else {
+                $parentName = if ($CSName) { $CSName } else { $PSName }
+                $parentVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $parentName } | Select-Object -First 1
+                $parentCmo = if ($parentVM.cmOptions) { $parentVM.cmOptions } else { $deployConfig.cmOptions }
+            }
+            $CM = if ($parentCmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+
             WriteStatus WaitExtSchema {
                 DependsOn = $nextDepend
                 Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = if ($CSName) { $CSName } else { $PSName }
-                ExtFolder   = $CM
-                Ensure      = "Present"
-                DependsOn   = "[WriteStatus]WaitExtSchema"
+                MachineName          = $parentName
+                ExtFolder            = $CM
+                Ensure               = "Present"
+                DependsOn            = "[WriteStatus]WaitExtSchema"
+                PsDscRunAsCredential = $DomainCreds
             }
         }
 
@@ -215,7 +250,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.ParentSiteServer
 
@@ -226,14 +261,12 @@ Configuration Phase9
             Status = "Waiting for Site Server $PSName to finish configuration."
         }
 
-        WaitForEvent WaitPrimary {
-            MachineName   = $PSName
-            LogFolder     = $LogFolder
-            FileName      = "ScriptWorkflow"
-            ReadNode      = "ScriptWorkflow"
-            ReadNodeValue = "Completed"
-            Ensure        = "Present"
-            DependsOn     = "[WriteStatus]WaitPrimary"
+        WaitForWorkflowReceipt WaitPrimary {
+            MachineName         = $PSName
+            LogFolder           = $LogFolder
+            Ensure              = 'Present'
+            PsDscRunAsCredential = $CMAdmin
+            DependsOn           = "[WriteStatus]WaitPrimary"
         }
 
         WriteEvent WriteConfigFinished {
@@ -241,7 +274,7 @@ Configuration Phase9
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WaitForEvent]WaitPrimary"
+            DependsOn = "[WaitForWorkflowReceipt]WaitPrimary"
         }
 
         WriteStatus ODBCDriverInstall {
@@ -271,8 +304,13 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+
+        # Resolve per-VM CM version so each hierarchy uses its own source
+        # folder when multiple top-level site servers are deployed together.
+        $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
         WriteStatus ADKInstall {
             Status = "Downloading and installing ADK"
@@ -325,15 +363,19 @@ Configuration Phase9
                     DependsOn     = "[WriteStatus]DownLoadSCCM"
                 }
                 $nextDepend = "[DownLoadSCCM]DownLoadSCCM"
-            }
 
-            FileReadAccessShare CMSourceSMBShare {
-                Name      = $CM
-                Path      = "c:\$CM"
-                DependsOn = $nextDepend
-            }
+                # URL-download CM: share the extracted C:\CMCB tree. For ISO CM the
+                # host has already mounted the CM ISO and created the CMCB share
+                # pointing at the DVD (Mount-CmIsoForPhase), so we must NOT re-point
+                # it back at C:\CMCB here.
+                FileReadAccessShare CMSourceSMBShare {
+                    Name      = $CM
+                    Path      = "c:\$CM"
+                    DependsOn = $nextDepend
+                }
 
-            $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
+                $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
+            }
         }
 
         WriteStatus RunScriptWorkflow {
@@ -357,18 +399,15 @@ Configuration Phase9
             DependsOn      = "[WriteFileOnce]CMSvc"
         }
 
-        WaitForEvent WorkflowComplete {
-            MachineName   = $ThisMachineName
-            LogFolder     = $LogFolder
-            FileName      = "ScriptWorkflow"
-            ReadNode      = "ScriptWorkflow"
-            ReadNodeValue = "Completed"
-            Ensure        = "Present"
-            DependsOn     = "[RegisterTaskScheduler]RunScriptWorkflow"
+        WaitForWorkflowReceipt WorkflowComplete {
+            MachineName = $ThisMachineName
+            LogFolder   = $LogFolder
+            Ensure      = 'Present'
+            DependsOn   = "[RegisterTaskScheduler]RunScriptWorkflow"
         }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForEvent]WorkflowComplete"
+            DependsOn = "[WaitForWorkflowReceipt]WorkflowComplete"
             Status    = "Complete!"
         }
     }
@@ -382,7 +421,7 @@ Configuration Phase9
         if ($ThisVM.Domain) {
             $DomainName = $ThisVM.Domain
         }
-        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$AdminUserName", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         WriteStatus ADKInstall {
@@ -403,16 +442,16 @@ Configuration Phase9
             DependsOn = '[InstallADK]ADKInstall'
         }
 
-        WaitForAll ActiveNode {
-            ResourceName     = '[WriteStatus]Complete'
-            NodeName         = $ThisVM.thisParams.ActiveNode
-            RetryIntervalSec = 15
-            RetryCount       = 1200
-            DependsOn        = '[WriteStatus]WaitActive'
+        WaitForWorkflowReceipt ActiveNode {
+            MachineName         = $ThisVM.thisParams.ActiveNode
+            LogFolder           = $LogFolder
+            Ensure              = 'Present'
+            PsDscRunAsCredential = $CMAdmin
+            DependsOn           = '[WriteStatus]WaitActive'
         }
 
         WriteStatus Complete {
-            DependsOn = "[WaitForAll]ActiveNode"
+            DependsOn = "[WaitForWorkflowReceipt]ActiveNode"
             Status    = "Complete!"
         }
 

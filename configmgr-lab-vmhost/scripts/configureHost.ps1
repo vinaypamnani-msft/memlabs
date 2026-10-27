@@ -1,3 +1,8 @@
+param(
+    [ValidateSet('NTFS', 'ReFS')]
+    [string]$FileSystem = 'NTFS'
+)
+
 # Logging
 $logFile = "$env:windir\temp\configureHost.log"
 
@@ -75,21 +80,23 @@ else {
 }
 
 # Format virtual disks
-Write-HostLog "Formatting Virtual Disk $virtualDiskName"
+Write-HostLog "Formatting Virtual Disk $virtualDiskName as $FileSystem"
 $vol = Get-Volume -ErrorAction SilentlyContinue -filesystemlabel $virtualdiskName
 if (-not $vol) {
-    Get-VirtualDisk -FriendlyName $virtualDiskName | Get-Disk | Initialize-Disk -Passthru | New-Partition -DriveLetter E -UseMaximumSize | Format-Volume -NewFileSystemLabel $virtualDiskName -AllocationUnitSize 4KB -FileSystem NTFS
+    # 64K is the Hyper-V guidance for ReFS; it is also the ReFS block-clone granularity.
+    $allocationUnit = if ($FileSystem -eq 'ReFS') { 64KB } else { 4KB }
+    Get-VirtualDisk -FriendlyName $virtualDiskName | Get-Disk | Initialize-Disk -Passthru | New-Partition -DriveLetter E -UseMaximumSize | Format-Volume -NewFileSystemLabel $virtualDiskName -AllocationUnitSize $allocationUnit -FileSystem $FileSystem
     $vol = Get-Volume -ErrorAction SilentlyContinue -filesystemlabel $virtualdiskName
-    if ($vol.filesystem -EQ 'NTFS') {
-        Write-HostLog "$virtualDiskName disk volume created."
+    if ($vol.filesystem -EQ $FileSystem) {
+        Write-HostLog "$virtualDiskName disk volume created ($FileSystem, $($allocationUnit / 1KB)K clusters)."
     }
     else {
-        Write-HostLog "$virtualDiskName disk volume was not created. Exiting."
+        Write-HostLog "$virtualDiskName disk volume was not created as $FileSystem (got '$($vol.filesystem)'). Exiting."
         return
     }
 }
 else {
-    Write-HostLog "$virtualDiskName disk volume already exists"
+    Write-HostLog "$virtualDiskName disk volume already exists ($($vol.FileSystem))"
 }
 
 # Install choco

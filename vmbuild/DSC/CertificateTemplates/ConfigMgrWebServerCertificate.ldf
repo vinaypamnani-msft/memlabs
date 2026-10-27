@@ -1,3 +1,13 @@
+dn: CN=6231105.4618715,CN=OID,CN=Public Key Services,CN=Services,CN=Configuration,DC=TEMPLATE,DC=com
+changetype: add
+objectClass: msPKI-Enterprise-Oid
+cn: 6231105.4618715
+displayName: ConfigMgrWebServerCertificate
+msPKI-Cert-Template-OID:
+ 1.3.6.1.4.1.311.21.8.5616737.12267755.3555977.7424861.9094410.141.6231105.4618
+ 715
+flags: 2
+
 dn: CN=ConfigMgrWebServerCertificate,CN=Certificate Templates,CN=Public Key Services,CN=Services,CN=Configuration,DC=TEMPLATE,DC=com
 changetype: add
 cn: ConfigMgrWebServerCertificate
@@ -29,7 +39,7 @@ pKICriticalExtensions: 2.5.29.15
 pKIDefaultCSPs: 2,Microsoft DH SChannel Cryptographic Provider
 pKIDefaultCSPs: 1,Microsoft RSA SChannel Cryptographic Provider
 pKIDefaultKeySpec: 1
-pKIExpirationPeriod:: AIByDl3C/f8=
+pKIExpirationPeriod:: AEAepOhl+v8=
 pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.1
 pKIKeyUsage:: oAA=
 pKIMaxIssuingDepth: 0

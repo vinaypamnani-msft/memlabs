@@ -1,15 +1,208 @@
-#InstallBoundaryGroups.ps1
+﻿#InstallBoundaryGroups.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
 )
+
+. (Join-Path $PSScriptRoot 'ProcessFunctions.ps1')
+
+function Write-MemLabsClientPackageTimelineRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Record
+    )
+
+    $parent = Split-Path -Parent $Path
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        [void](New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop)
+    }
+    $line = $Record | ConvertTo-Json -Depth 10 -Compress -ErrorAction Stop -WarningAction SilentlyContinue
+    [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Invoke-MemLabsClientPackageDiagnosticProbe {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][scriptblock]$ProbeScript,
+        [hashtable]$Variables = @{},
+        [hashtable]$Parameters = @{},
+        [ValidateRange(1, 300)][int]$TimeoutSeconds = 60
+    )
+
+    Invoke-MemLabsBoundedPowerShell -ProbeScript $ProbeScript -Variables $Variables `
+        -Parameters $Parameters -TimeoutSeconds $TimeoutSeconds
+}
+
+function Set-MemLabsClientPackageProgress {
+    param(
+        [string]$Stage,
+        [datetime]$DeadlineUtc,
+        [string]$Message,
+        [string]$Outcome,
+        [string]$PackageId,
+        [string[]]$RequiredDistributionPoints
+    )
+
+    $state = $script:MemLabsCoverageProgressState
+    if (-not $state -or -not $script:MemLabsCoverageProgressPath) {
+        throw 'Client-package progress was not initialized.'
+    }
+    foreach ($name in @('Stage', 'Message', 'Outcome', 'PackageId', 'RequiredDistributionPoints')) {
+        if ($PSBoundParameters.ContainsKey($name)) { $state[$name] = $PSBoundParameters[$name] }
+    }
+    if ($PSBoundParameters.ContainsKey('DeadlineUtc')) { $state.DeadlineUtc = $DeadlineUtc.ToUniversalTime().ToString('o') }
+    $state.UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+    Write-MemLabsProcessProgress -Path $script:MemLabsCoverageProgressPath -Record $state
+}
+
+function Invoke-MemLabsClientPackageCoverage {
+    param(
+        [Parameter(Mandatory)][scriptblock]$CoverageScript,
+        [Parameter(Mandatory)][hashtable]$Variables,
+        [Parameter(Mandatory)][string]$ScriptRoot,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+
+    $progressPath = Join-Path $LogPath 'ClientPackageCoverage.progress.json'
+    $expectedRunIdPath = Join-Path $LogPath 'ScriptWorkflow.expected.runid'
+    $workflowRunId = if ([IO.File]::Exists($expectedRunIdPath)) { [IO.File]::ReadAllText($expectedRunIdPath).Trim() } else { '' }
+    $state = @{
+        Id = [guid]::NewGuid().ToString('N')
+        WorkflowRunId = $workflowRunId
+        UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        Stage = 'initialize'
+        DeadlineUtc = [DateTime]::UtcNow.AddMinutes(5).ToString('o')
+        Message = 'Initializing isolated client-package coverage'
+        Status = 'Running'
+        Outcome = 'Unverified'
+        PackageId = ''
+        RequiredDistributionPoints = @()
+    }
+    Write-MemLabsProcessProgress -Path $progressPath -Record $state
+    $definitions = @{}
+    foreach ($name in @(
+            'Write-MemLabsClientPackageTimelineRecord', 'Invoke-MemLabsClientPackageDiagnosticProbe',
+            'Get-MemLabsDpVmMetadataMap', 'Test-MemLabsLocalComputerName',
+            'Set-MemLabsClientPackageProgress'
+        )) {
+        $definitions[$name] = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).Definition
+    }
+    $Variables.MemLabsCoverageProgressPath = $progressPath
+    $Variables.MemLabsCoverageProgressState = $state
+    $Variables.coverageFunctionDefinitions = $definitions
+    $Variables.coverageScriptText = $CoverageScript.ToString()
+    $Variables.guestScriptRoot = $ScriptRoot
+    $worker = {
+        . (Join-Path $guestScriptRoot 'ProcessFunctions.ps1')
+        . (Join-Path $guestScriptRoot 'ScriptFunctions.ps1')
+        foreach ($entry in $coverageFunctionDefinitions.GetEnumerator()) {
+            Set-Item -Path "Function:\$($entry.Key)" -Value ([scriptblock]::Create($entry.Value))
+        }
+        Set-MemLabsClientPackageProgress -Message 'Connecting the coverage worker to the SMS Provider'
+        Import-Module -Name $configurationManagerModulePath -ErrorAction Stop
+        if (-not (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+            $null = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $siteProviderHost -ErrorAction Stop
+        }
+        Set-Location "$($SiteCode):"
+        $clearStuckDistmgrWedge = [scriptblock]::Create($clearStuckDistmgrWedge)
+        $failureSequence = [int]$global:MemLabsFailureSequence
+        $null = & ([scriptblock]::Create($coverageScriptText))
+        if ([int]$global:MemLabsFailureSequence -gt $failureSequence) {
+            throw "Client-package coverage reported failure: $global:MemLabsLastFailureStatus"
+        }
+        return [pscustomobject]$script:MemLabsCoverageProgressState
+    }
+    $reportProgress = {
+        param($Report)
+        $checkpoint = $Report.Progress
+        if ($checkpoint.Message -like 'JOBFAILURE:*') { return }
+        $remaining = if ($checkpoint.DeadlineUtc) {
+            [math]::Max(0, [math]::Round((([datetime]$checkpoint.DeadlineUtc).ToUniversalTime() - [DateTime]::UtcNow).TotalSeconds))
+        }
+        else { 'unknown' }
+        Write-DscStatus "Client pkg coverage: worker PID $($Report.ProcessId), stage=$($checkpoint.Stage), elapsed=$($Report.ElapsedSeconds)s, checkpointAge=$($Report.IdleSeconds)s, stageRemaining=${remaining}s; $($checkpoint.Message)"
+    }
+    $result = Invoke-MemLabsBoundedPowerShell -ProbeScript $worker -Variables $Variables `
+        -TimeoutSeconds 7200 -ProgressPath $progressPath -ProgressId $state.Id `
+        -StallTimeoutSeconds 300 -ProgressIntervalSeconds 30 -OnProgress $reportProgress
+    $lastState = if ($result.Output) { $result.Output } elseif ($result.Progress) { $result.Progress } else { [pscustomobject]$state }
+    $lastState.Status = if ($result.TimedOut) { 'TimedOut' } elseif ($result.Error) { 'Failed' } else { 'Completed' }
+    $lastState | Add-Member -NotePropertyName Error -NotePropertyValue $result.Error -Force
+    Write-MemLabsProcessProgress -Path $progressPath -Record $lastState
+    $classification = if ($result.TimedOut) { 'CoverageTimedOut' } elseif ($result.Error) { 'CoverageWorkerFailed' } else { "$($lastState.Outcome)" }
+    Write-MemLabsClientPackageTimelineRecord -Path (Join-Path $LogPath 'ClientPackageTimeline.jsonl') -Record ([ordered]@{
+            SchemaVersion = 2; Type = 'ClientPackageCoverage'; CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+            RunId = $state.Id; Trigger = 'coverage-worker-finished'; Classification = $classification
+            SiteCode = $Variables.SiteCode; PackageId = $lastState.PackageId
+            Stage = $lastState.Stage; ElapsedSeconds = $result.ElapsedSeconds
+            RequiredDistributionPoints = @($lastState.RequiredDistributionPoints)
+            Package = $null; Targeting = @(); Summarizer = @(); Replication = @()
+            NodeStateIncluded = $false; SourceNode = $null; Nodes = @()
+            Errors = @($result.Error | Where-Object { $_ })
+        })
+    if ($result.TimedOut) {
+        Write-DscStatus "Client pkg coverage: stopped bounded worker at stage '$($lastState.Stage)'; coverage outcome=$($lastState.Outcome). $($result.Error) Continuing Phase 8 with a warning; Phase 11 must verify required DP coverage." -Warning
+    }
+    elseif ($result.Error) {
+        Write-DscStatus "Client pkg coverage worker failed: $($result.Error)" -Failure
+    }
+    elseif ($lastState.Outcome -notin @('Covered', 'NotRequired')) {
+        Write-DscStatus "Client pkg coverage: required coverage remains unverified. Continuing Phase 8 with a warning; Phase 11 must verify it." -Warning
+    }
+}
+
+function Get-MemLabsDpVmMetadataMap {
+    param([Parameter(Mandatory = $true)] $DeployConfig)
+
+    $result = @{}
+    foreach ($vm in @($DeployConfig.virtualMachines)) {
+        $vmName = "$($vm.vmName)".Trim()
+        if ($vmName) { $result[$vmName.ToUpperInvariant()] = $vm }
+    }
+    foreach ($record in @($DeployConfig.phase8ManagedDistributionPointScopes |
+            ForEach-Object { @($_.DistributionPoints) })) {
+        $vmName = "$($record.VmName)".Trim()
+        if (-not $vmName -and $record.Fqdn) {
+            $vmName = ("$($record.Fqdn)" -split '\.')[0]
+        }
+        if (-not $vmName) { continue }
+        $key = $vmName.ToUpperInvariant()
+        if ($result.ContainsKey($key)) { continue }
+        $result[$key] = [pscustomobject]@{
+            vmName   = $vmName
+            role     = "$($record.Role)"
+            siteCode = "$($record.SiteCode)"
+            network  = "$($record.Network)"
+            hidden   = $true
+            projectedPhase8Metadata = $true
+        }
+    }
+    return $result
+}
+
+function Test-MemLabsLocalComputerName {
+    param(
+        [Parameter(Mandatory = $true)][string] $Candidate,
+        [string] $LocalComputerName = $env:COMPUTERNAME
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Candidate) -or
+        [string]::IsNullOrWhiteSpace($LocalComputerName)) {
+        return $false
+    }
+    $candidateShort = ($Candidate.Trim() -split '\.')[0]
+    return $Candidate.Trim().Equals(
+        $LocalComputerName.Trim(), [StringComparison]::OrdinalIgnoreCase) -or
+        $candidateShort.Equals(
+            $LocalComputerName.Trim(), [StringComparison]::OrdinalIgnoreCase)
+}
 
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get required values from config
 $DomainFullName = $deployConfig.vmOptions.domainName
-$DomainName = $DomainFullName.Split(".")[0]
 $NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -19,8 +212,12 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMach
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
 $ClientNames = $thisVM.thisParams.ClientPush
 $cm_svc = "$NetbiosDomainName\cm_svc"
-$pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
-$usePKI = $deployConfig.cmOptions.UsePKI
+# Push is now per-VM (pushClient property). thisParams.ClientPush only contains
+# VMs that have opted in, so an empty list means nothing to push.
+$pushClients = [bool]$ClientNames
+# Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
 }
@@ -28,12 +225,110 @@ if (-not $usePKI) {
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
+$clientPackageDiagCredential = $null
+$cmSvcPasswordPath = Join-Path $LogPath 'cm_svc.txt'
+if (Test-Path -LiteralPath $cmSvcPasswordPath -PathType Leaf) {
+    try {
+        $cmSvcPassword = Get-Content -LiteralPath $cmSvcPasswordPath -Raw -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace($cmSvcPassword)) {
+            $securePassword = ConvertTo-SecureString $cmSvcPassword.Trim() -AsPlainText -Force
+            $clientPackageDiagCredential = New-Object System.Management.Automation.PSCredential(
+                "$NetbiosDomainName\cm_svc", $securePassword)
+        }
+    }
+    catch {
+        Write-DscStatus "Client pkg coverage diagnostics: could not construct explicit source-site credential: $($_.Exception.Message)"
+    }
+}
+
 # Read Site Code from registry
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
 if (-not $SiteCode) {
     Write-DscStatus "Failed to get 'Site Code' from SOFTWARE\Microsoft\SMS\Identification. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
     return
 }
+
+# --- Recovery for a WEDGED distmgr (stuck cancel/shutdown flag) -------------------
+# A distmgr whose internal cancel flag (m_bShutdownRequest) is stuck TRUE stays
+# RUNNING but aborts EVERY content operation with 0x800704d3 (CopyFileExW cancelled /
+# TakeContentSnapshot aborted), silently blocking ALL content distribution for the
+# site (nothing snapshots -> nothing replicates to child sites or DPs).
+# Verified in CM source, not inferred:
+#   * distmgr.cpp declares it STATIC -- `BOOL CDistributionManager::m_bShutdownRequest
+#     = FALSE;` at namespace scope, so it is initialised once per PROCESS LOAD. That is
+#     the ONLY assignment of FALSE in the file; constructing a new CDistributionManager
+#     does not clear it either.
+#   * It is set TRUE in the main process-thread loop immediately after printing
+#     "Exiting SMS_DISTRIBUTION_MANAGER Process Thread..." (on WAIT_EXIT_THREAD).
+#   * All three bundle paths hand it to the copy as the cancel flag
+#     (SetCancelFlag(&m_bShutdownRequest)), and smsdp/Files.cpp FileCopy polls it every
+#     8KB -> "FileCopy cancelled" + ERROR_REQUEST_ABORTED.
+# So a component/thread-only restart leaves it TRUE for the life of the process, and
+# only a FRESH PROCESS clears it. A full SMS_EXECUTIVE restart is the proven cure
+# (confirmed on pushlab HA/remote content library: content flowed within seconds).
+# The SMS Provider is hosted by WMI (smsprov), NOT SMS_EXECUTIVE, so this recycles
+# distmgr without dropping the provider connected below.
+# Fire only on the confirmed signature (many 0x800704d3 aborts, ZERO sends since the
+# last one, executive up a while so it isn't a fresh/normal start -- which also
+# prevents a restart loop).
+#
+# It is a SCRIPTBLOCK because one shot at phase start is not enough: the wedge is created by
+# whatever stops distmgr, which can happen at any time, INCLUDING after this check has already
+# run and found nothing. burnin 2026-08-24: this ran clean at 15:57, distmgr was signalled to
+# stop at 16:23:36, the 16:24:59 restart was thread-only so the flag survived, and the HUB00004
+# bundle for site SEC aborted at 16:29:30 -- 24 minutes after the only check. The coverage wait
+# below re-runs it for exactly that reason.
+$clearStuckDistmgrWedge = {
+    param([string]$When)
+    try {
+        $imDir = $null
+        foreach ($ik in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+            try { $imDir = (Get-ItemProperty -Path $ik -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+            if ($imDir) { break }
+        }
+        $dmLog = if ($imDir) { Join-Path $imDir 'Logs\distmgr.log' } else { $null }
+        if (-not ($dmLog -and (Test-Path $dmLog))) { return $false }
+        # Chronological, not windowed. A fixed tail cannot see this: the aborts cluster right
+        # after the thread exit and then one content-cleanup burst emits hundreds of
+        # "permanently deleting <hash>" lines that flush them out, while the wedge persists.
+        # Widening the tail does not help either -- it only makes the success veto easier to
+        # trip. Ask instead "did a real send happen AFTER the last abort?".
+        # 'Removing retry key for package' is BOOKKEEPING, logged next to "will retry 99 more
+        # times", so counting it as success vetoes the gate on a site that is completely dead.
+        # Only 'Created minijob to send compressed copy' is a real send.
+        $dmTail = @(Get-Content $dmLog -Tail 4000 -ErrorAction SilentlyContinue)
+        $dmAborts = 0
+        $dmLastAbort = -1
+        $dmLastSend = -1
+        for ($dmI = 0; $dmI -lt $dmTail.Count; $dmI++) {
+            $dmLn = $dmTail[$dmI]
+            if ($dmLn -match '0x800704d3' -and $dmLn -match 'CopyFileExW|CreatePackageBundle|TakeContentSnapshot|AddContentToBundle|SnapshotPackage|BundleLegacyContentFiles') {
+                $dmLastAbort = $dmI
+                $dmAborts++
+            }
+            if ($dmLn -match 'Created minijob to send compressed copy') { $dmLastSend = $dmI }
+        }
+        $exeUpMin = 999
+        try {
+            $exeSvc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+            if ($exeSvc.ProcessId -gt 0) { $exeProc = Get-Process -Id $exeSvc.ProcessId -ErrorAction SilentlyContinue; if ($exeProc) { $exeUpMin = ((Get-Date) - $exeProc.StartTime).TotalMinutes } }
+        }
+        catch {}
+        if ($dmAborts -ge 5 -and $dmLastAbort -gt $dmLastSend -and $exeUpMin -gt 20) {
+            Write-DscStatus "distmgr WEDGED [$When]: $dmAborts x 0x800704d3 content aborts and NO send since the last one, SMS_EXECUTIVE up $([int]$exeUpMin)m -- a stuck distmgr cancel state is blocking ALL content distribution for this site. Restarting SMS_EXECUTIVE ONCE to clear it (the cancel flag is only reset by a fresh process)." -Warning
+            try {
+                Restart-Service -Name SMS_EXECUTIVE -Force -ErrorAction Stop
+                Write-DscStatus "Restarted SMS_EXECUTIVE to clear the wedged distmgr; waiting 90s for components to resume."
+                Start-Sleep -Seconds 90
+                return $true
+            }
+            catch { Write-DscStatus "Could not restart SMS_EXECUTIVE to clear the wedged distmgr: $($_.Exception.Message)" -Warning }
+        }
+    }
+    catch {}
+    return $false
+}
+$null = & $clearStuckDistmgrWedge 'phase start'
 
 # Provider
 $smsProvider = Get-SMSProvider -SiteCode $SiteCode
@@ -55,6 +350,2077 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
+$boundaryNamespace = "root\SMS\site_$SiteCode"
+$getMissingBoundaryGroupSiteSystems = {
+    param($BoundaryGroup, [string[]]$DesiredSiteSystems)
+
+    if (-not $BoundaryGroup -or -not $DesiredSiteSystems -or $DesiredSiteSystems.Count -eq 0) { return @() }
+    try {
+        $currentSiteSystems = @{}
+        foreach ($siteSystemLink in @(Get-WmiObject -Namespace $boundaryNamespace -Class SMS_BoundaryGroupSiteSystems -Filter "GroupID='$($BoundaryGroup.GroupID)'" -ErrorAction Stop)) {
+            if ("$($siteSystemLink.ServerNALPath)" -match '\\([^\\"\]]+)') {
+                $currentSiteSystems[$Matches[1].ToUpper()] = $true
+            }
+        }
+        return @($DesiredSiteSystems | Where-Object { -not $currentSiteSystems.ContainsKey("$_".ToUpper()) })
+    }
+    catch {
+        Write-DscStatus "Could not read current site-system membership for Boundary Group '$($BoundaryGroup.Name)'; falling back to idempotent adds: $($_.Exception.Message)" -Warning
+        return @($DesiredSiteSystems)
+    }
+}
+
+# Ensure the client package is Installed (State 0) on EVERY DP that serves a client
+# boundary group -- not just "at least one". A client whose boundary group's only DP
+# is still validating/pending/failed (e.g. a Secondary DP stuck at ContentValidating)
+# can't get client content and loops forever in ccmsetup GetDPLocations (empty
+# <LocationRecords/> / 0x87d00215). Defined as a scriptblock so it runs on BOTH the
+# fresh-deploy path AND the "BGs already exist" early-return path below -- i.e. a
+# Phase 8 re-run self-heals a stuck DP, not just a first deploy. Phase 8 is the right
+# home for this (content-distribution context + a generous wait budget).
+$ensureClientPkgCoverageCore = {
+    # Get-CMPackage returns one client package PER SITE in a hierarchy, so an unfiltered
+    # read makes $PackageID an array and every WQL filter built from it matches nothing.
+    $allClientPkgs = @(Get-CMPackage -Fast -Name 'Configuration Manager Client Package')
+    if ($allClientPkgs.Count -eq 0) { Write-DscStatus "Client pkg coverage: client package not found."; return }
+    $localClientPkgs = @($allClientPkgs | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
+    $PackageID = if ($localClientPkgs.Count -gt 0) { "$($localClientPkgs[0].PackageID)" } else { "$($allClientPkgs[0].PackageID)" }
+    Set-MemLabsClientPackageProgress -PackageId $PackageID -Message "Resolved client package $PackageID"
+    if ($allClientPkgs.Count -gt 1) {
+        Write-DscStatus "Client pkg coverage: chose $PackageID from $($allClientPkgs.Count) same-named packages ($(if ($localClientPkgs.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
+    }
+    $ns = "root\SMS\site_$SiteCode"
+    $fqdnOf = { param($nal) if ("$nal" -match '\\([^\\"\]]+)') { $Matches[1] } else { $null } }
+    $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
+    $coverageTimelinePath = Join-Path $LogPath 'ClientPackageTimeline.jsonl'
+    $coverageRunId = $script:MemLabsCoverageProgressState.Id
+    $coverageTimelineState = @{ Disabled = $false }
+
+    $collectNodeContentState = {
+        param($PkgId, $ProviderSiteCode)
+
+        $node = [ordered]@{
+            CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+            ComputerName  = $env:COMPUTERNAME
+            ContentRoot   = ''
+            ContentRemote = $false
+            ContentReachable = $false
+            PkgLibFiles   = @()
+            SmsExecutive  = $null
+            Queues        = @()
+            Logs          = [ordered]@{}
+            SiteProvider  = $null
+            Errors        = @()
+        }
+        try {
+            $contentRoot = ''
+            try {
+                $contentRoot = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath)"
+            }
+            catch {}
+            if (-not $contentRoot) {
+                foreach ($candidate in @('E:\SCCMContentLib', 'D:\SCCMContentLib', 'F:\SCCMContentLib', 'C:\SCCMContentLib')) {
+                    if (Test-Path (Join-Path $candidate 'PkgLib')) { $contentRoot = $candidate; break }
+                }
+            }
+            if ($contentRoot) {
+                $node.ContentRoot = $contentRoot
+                $node.ContentRemote = $contentRoot.StartsWith('\\')
+                $pkgLib = Join-Path $contentRoot 'PkgLib'
+                $node.ContentReachable = Test-Path -LiteralPath $pkgLib
+                if ($node.ContentReachable) {
+                    $node.PkgLibFiles = @((Get-ChildItem -LiteralPath $pkgLib -Filter "$PkgId*.INI" -ErrorAction SilentlyContinue).Name)
+                }
+            }
+
+            $smsDir = ''
+            foreach ($key in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                try { $smsDir = "$((Get-ItemProperty -Path $key -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory')" }
+                catch {}
+                if ($smsDir) { break }
+            }
+            if ($smsDir) {
+                foreach ($relativePath in @(
+                        'inboxes\distmgr.box',
+                        'inboxes\distmgr.box\incoming',
+                        'inboxes\replmgr.box',
+                        'inboxes\schedule.box',
+                        'inboxes\despoolr.box\receive'
+                    )) {
+                    $queuePath = Join-Path $smsDir $relativePath
+                    if (-not (Test-Path -LiteralPath $queuePath)) { continue }
+                    try {
+                        $queueFileCount = 0
+                        [long]$queueTotalBytes = 0
+                        $queueOldestUtc = $null
+                        foreach ($queueFilePath in [IO.Directory]::EnumerateFiles(
+                                $queuePath, '*', [IO.SearchOption]::TopDirectoryOnly)) {
+                            try {
+                                $queueFile = [IO.FileInfo]::new($queueFilePath)
+                                $queueFileCount++
+                                $queueTotalBytes += $queueFile.Length
+                                if (-not $queueOldestUtc -or
+                                    $queueFile.LastWriteTimeUtc -lt $queueOldestUtc) {
+                                    $queueOldestUtc = $queueFile.LastWriteTimeUtc
+                                }
+                            }
+                            catch { }
+                        }
+                        $node.Queues += [ordered]@{
+                            Path          = $relativePath
+                            FileCount     = $queueFileCount
+                            TotalBytes    = $queueTotalBytes
+                            OldestFileUtc = if ($queueOldestUtc) { $queueOldestUtc.ToString('o') } else { $null }
+                        }
+                    }
+                    catch { $node.Errors += "Queue '$relativePath': $($_.Exception.Message)" }
+                }
+                $logRoot = Join-Path $smsDir 'Logs'
+                foreach ($logName in @('distmgr.log', 'sender.log', 'despool.log', 'PkgXferMgr.log', 'smsdpprov.log', 'hman.log', 'SMSProv.log')) {
+                    $logFile = Join-Path $logRoot $logName
+                    if (-not (Test-Path -LiteralPath $logFile)) { continue }
+                    try {
+                        $logMatches = @(Get-Content -LiteralPath $logFile -Tail 2500 -ErrorAction Stop |
+                            Where-Object { $_ -match "$([regex]::Escape($PkgId))|0x800704d3|ContentValidating|Created minijob|not an active site|STATMSG|RefreshNow|error|failed" } |
+                            Select-Object -Last 12)
+                        $node.Logs[$logName] = @($logMatches)
+                    }
+                    catch { $node.Errors += "Log '$logName': $($_.Exception.Message)" }
+                }
+            }
+
+            try {
+                $service = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+                $started = $null
+                if ($service.ProcessId -gt 0) {
+                    $process = Get-Process -Id $service.ProcessId -ErrorAction SilentlyContinue
+                    if ($process) { $started = $process.StartTime.ToUniversalTime().ToString('o') }
+                }
+                $node.SmsExecutive = [ordered]@{ State = "$($service.State)"; ProcessId = $service.ProcessId; StartedAtUtc = $started }
+            }
+            catch { $node.Errors += "SMS_EXECUTIVE: $($_.Exception.Message)" }
+
+            if ($ProviderSiteCode) {
+                try {
+                    $providerNamespace = "root\SMS\site_$ProviderSiteCode"
+                    $providerPackage = Get-WmiObject -Namespace $providerNamespace -Class SMS_Package -Filter "PackageID='$PkgId'" -ErrorAction Stop |
+                        Select-Object -First 1
+                    $providerTargets = @(Get-WmiObject -Namespace $providerNamespace -Class SMS_DistributionPoint -Filter "PackageID='$PkgId'" -ErrorAction Stop |
+                        ForEach-Object {
+                            [ordered]@{
+                                ServerNALPath   = "$($_.ServerNALPath)"
+                                SiteCode        = "$($_.SiteCode)"
+                                RefreshNow      = $_.RefreshNow
+                                LastRefreshTime = "$($_.LastRefreshTime)"
+                            }
+                        })
+                    $providerSummaries = @(Get-WmiObject -Namespace $providerNamespace -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PkgId'" -ErrorAction Stop |
+                        ForEach-Object {
+                            [ordered]@{
+                                ServerNALPath = "$($_.ServerNALPath)"
+                                State         = $_.State
+                                SourceVersion = "$($_.SourceVersion)"
+                                LastUpdate    = "$($_.LastUpdateDate)"
+                            }
+                        })
+                    $node.SiteProvider = [ordered]@{
+                        SiteCode         = $ProviderSiteCode
+                        SourceSite       = "$($providerPackage.SourceSite)"
+                        SourceVersion    = "$($providerPackage.SourceVersion)"
+                        StoredPkgVersion = "$($providerPackage.StoredPkgVersion)"
+                        Targeting        = $providerTargets
+                        Summarizer       = $providerSummaries
+                    }
+                }
+                catch { $node.Errors += "Site provider '$ProviderSiteCode': $($_.Exception.Message)" }
+            }
+        }
+        catch { $node.Errors += $_.Exception.Message }
+        return [pscustomobject]$node
+    }
+
+    $collectCoverageSnapshot = {
+        param(
+            [Parameter(Mandatory)][string]$Trigger,
+            [string[]]$DistributionPoints = @(),
+            [string[]]$ReplicationSites = @(),
+            [bool]$IncludeNodeState = $false
+        )
+
+        $collectNodeContentState = [scriptblock]::Create($collectNodeContentState)
+        $fqdnOf = [scriptblock]::Create($fqdnOf)
+        Set-Item -Path Function:\Test-MemLabsLocalComputerName `
+            -Value ([scriptblock]::Create($localComputerNameFunction))
+        if ($ReplicationSites.Count -gt 0) {
+            Import-Module -Name $configurationManagerModulePath -ErrorAction Stop
+            if (-not (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                $null = New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $siteProviderHost -ErrorAction Stop
+            }
+            Set-Location "$($SiteCode):"
+        }
+        try {
+            $capturedAt = [DateTime]::UtcNow
+            $errors = [System.Collections.Generic.List[string]]::new()
+            $providerStateReadable = $true
+            $package = $null
+            try {
+                # Optional probes must not request the workflow's CIM reboot recovery.
+                $package = Get-CimInstance -Namespace $ns `
+                    -ClassName SMS_Package -Filter "PackageID='$PackageID'" `
+                    -Property @('SourceSite', 'SourceVersion', 'StoredPkgVersion', 'SourceDate') `
+                    -OperationTimeoutSec 15 -ErrorAction Stop |
+                    Select-Object -First 1
+            }
+            catch {
+                $providerStateReadable = $false
+                $errors.Add("SMS_Package: $($_.Exception.Message)")
+            }
+
+            $targetingRows = [System.Collections.Generic.List[object]]::new()
+            try {
+                foreach ($row in @(Get-CimInstance -Namespace $ns `
+                        -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
+                        -Property @('ServerNALPath', 'SiteCode', 'RefreshNow') `
+                        -OperationTimeoutSec 15 -ErrorAction Stop)) {
+                    $targetingRows.Add([ordered]@{
+                            Server        = & $fqdnOf $row.ServerNALPath
+                            SiteCode      = "$($row.SiteCode)"
+                            RefreshNow    = $row.RefreshNow
+                        })
+                }
+            }
+            catch {
+                $providerStateReadable = $false
+                $errors.Add("SMS_DistributionPoint: $($_.Exception.Message)")
+            }
+
+            $summarizerRows = [System.Collections.Generic.List[object]]::new()
+            try {
+                foreach ($row in @(Get-CimInstance -Namespace $ns `
+                        -ClassName SMS_PackageStatusDistPointsSummarizer `
+                        -Filter "PackageID='$PackageID'" `
+                        -Property @('ServerNALPath', 'State', 'SourceVersion') `
+                        -OperationTimeoutSec 15 -ErrorAction Stop)) {
+                    $rowState = [int]$row.State
+                    $summarizerRows.Add([ordered]@{
+                            Server        = & $fqdnOf $row.ServerNALPath
+                            State         = $rowState
+                            StateName     = if ($stateName.ContainsKey("$rowState")) { $stateName["$rowState"] } else { "State$rowState" }
+                            SourceVersion = "$($row.SourceVersion)"
+                        })
+                }
+            }
+            catch {
+                $providerStateReadable = $false
+                $errors.Add("SMS_PackageStatusDistPointsSummarizer: $($_.Exception.Message)")
+            }
+
+            $linkRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($site in @($ReplicationSites | Where-Object { $_ } | Select-Object -Unique)) {
+                try {
+                    $link = Get-CMDatabaseReplicationStatus -Site2 $site -ErrorAction Stop
+                    $linkRows.Add([ordered]@{
+                            Site                     = $site
+                            LinkStatus               = $link.LinkStatus
+                            Site1ToSite2GlobalState   = $link.Site1ToSite2GlobalState
+                            Site2ToSite1GlobalState   = $link.Site2ToSite1GlobalState
+                            Site1ToSite2SiteState     = $link.Site1ToSite2SiteState
+                            Site2ToSite1SiteState     = $link.Site2ToSite1SiteState
+                        })
+                }
+                catch {
+                    $providerStateReadable = $false
+                    $errors.Add("Replication link '$site': $($_.Exception.Message)")
+                }
+            }
+
+            $nodeRows = [System.Collections.Generic.List[object]]::new()
+            if ($IncludeNodeState) {
+                foreach ($dp in @($DistributionPoints | Where-Object { $_ } | Select-Object -Unique)) {
+                    $dpHost = ("$dp" -split '\.')[0]
+                    $dpVm = @($deployConfig.virtualMachines | Where-Object { $_.vmName -ieq $dpHost }) | Select-Object -First 1
+                    $dpSiteCode = if ($dpVm) { "$($dpVm.siteCode)" } else { '' }
+                    $dpProviderSiteCode = if ($dpVm -and
+                        ($dpVm.role -in @('CAS', 'Primary', 'Secondary') -or $dpVm.InstallSMSProv -eq $true)) {
+                        $dpSiteCode
+                    }
+                    else { '' }
+                    try {
+                        $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 15000
+                        $nodeState = if ($dpHost -ieq $env:COMPUTERNAME) {
+                            & $collectNodeContentState $PackageID $dpProviderSiteCode
+                        }
+                        else {
+                            Invoke-Command -ComputerName $dpHost -ScriptBlock $collectNodeContentState -ArgumentList $PackageID, $dpProviderSiteCode `
+                                -SessionOption $sessionOption -ErrorAction Stop
+                        }
+                        $nodeRows.Add([ordered]@{ DistributionPoint = $dp; State = $nodeState })
+                    }
+                    catch {
+                        $nodeRows.Add([ordered]@{ DistributionPoint = $dp; Error = $_.Exception.Message })
+                    }
+                }
+            }
+
+            $sourceNode = $null
+            if ($IncludeNodeState -and $package -and $package.SourceSite) {
+                $sourceVm = @($deployConfig.virtualMachines | Where-Object {
+                        "$($_.siteCode)" -ieq "$($package.SourceSite)" -and "$($_.role)" -in @('CAS', 'Primary')
+                    }) | Select-Object -First 1
+                if ($sourceVm -and $sourceVm.vmName) {
+                    $sourceHost = "$($sourceVm.vmName)"
+                    if ($ThisVM.thisParams.ParentSiteServer -and "$($package.SourceSite)" -ine "$SiteCode") {
+                        $sourceHost = "$($ThisVM.thisParams.ParentSiteServer)"
+                    }
+                    elseif (-not $sourceHost.Contains('.')) {
+                        $sourceDomain = if ($sourceVm.domain) { "$($sourceVm.domain)" } else { "$DomainFullName" }
+                        if ($sourceDomain) { $sourceHost = "$sourceHost.$sourceDomain" }
+                    }
+                    try {
+                        $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 15000
+                        $sourceState = if (Test-MemLabsLocalComputerName -Candidate $sourceHost) {
+                            & $collectNodeContentState $PackageID "$($package.SourceSite)"
+                        }
+                        else {
+                            $sourceInvoke = @{
+                                ComputerName = $sourceHost
+                                ScriptBlock  = $collectNodeContentState
+                                ArgumentList = @($PackageID, "$($package.SourceSite)")
+                                SessionOption = $sessionOption
+                                ErrorAction  = 'Stop'
+                            }
+                            if ($clientPackageDiagCredential) {
+                                $sourceInvoke.Credential = $clientPackageDiagCredential
+                            }
+                            Invoke-Command @sourceInvoke
+                        }
+                        $sourceNode = [ordered]@{ Server = $sourceHost; State = $sourceState }
+                    }
+                    catch { $sourceNode = [ordered]@{ Server = $sourceHost; Error = $_.Exception.Message } }
+                }
+            }
+
+            $validatingServers = @($summarizerRows | Where-Object { $_.StateName -eq 'ContentValidating' } | ForEach-Object { "$($_.Server)" })
+            $classification = 'AwaitingStateTransition'
+            if (-not $providerStateReadable) {
+                $classification = 'ProviderStateUnreadable'
+            }
+            elseif (-not $package) {
+                $classification = 'PackageUnavailable'
+            }
+            elseif ($linkRows.Count -gt 0 -and @($linkRows | Where-Object {
+                        [int]$_.LinkStatus -ne 2 -or [int]$_.Site1ToSite2GlobalState -ne 2 -or [int]$_.Site2ToSite1GlobalState -ne 2
+                    }).Count -gt 0) {
+                $classification = 'ReplicationLinkInactive'
+            }
+            elseif ($package -and [int]$package.StoredPkgVersion -lt 1) {
+                $classification = 'ParentContentPending'
+            }
+            elseif (@($DistributionPoints | Where-Object {
+                        $wanted = "$_"
+                        -not @($targetingRows | Where-Object { $_.Server -ieq $wanted }).Count
+                    }).Count -gt 0) {
+                $classification = 'MissingTargetingRow'
+            }
+            elseif ($IncludeNodeState -and @($nodeRows | Where-Object {
+                        $_.DistributionPoint -in $validatingServers -and @($_.State.PkgLibFiles).Count -gt 0
+                    }).Count -gt 0) {
+                $classification = 'StatusAcknowledgementLag'
+            }
+            elseif ($IncludeNodeState -and @($nodeRows | Where-Object {
+                        -not $_.Error -and @($_.State.PkgLibFiles).Count -eq 0
+                    }).Count -gt 0) {
+                $classification = 'ContentTransferPending'
+            }
+            elseif (@($summarizerRows | Where-Object {
+                        $_.State -eq 0 -and $_.Server -in $DistributionPoints
+                    }).Count -eq @($DistributionPoints).Count) {
+                $classification = 'Installed'
+            }
+
+            $record = [ordered]@{
+                SchemaVersion = 2
+                CapturedAtUtc = $capturedAt.ToString('o')
+                RunId         = $coverageRunId
+                Trigger       = $Trigger
+                Classification = $classification
+                SiteCode      = $SiteCode
+                PackageId     = $PackageID
+                Package       = if ($package) {
+                    [ordered]@{
+                        SourceSite       = "$($package.SourceSite)"
+                        SourceVersion    = "$($package.SourceVersion)"
+                        StoredPkgVersion = "$($package.StoredPkgVersion)"
+                        SourceDate       = "$($package.SourceDate)"
+                    }
+                }
+                else { $null }
+                Targeting      = $targetingRows.ToArray()
+                Summarizer     = $summarizerRows.ToArray()
+                Replication    = $linkRows.ToArray()
+                NodeStateIncluded = $IncludeNodeState
+                SourceNode     = $sourceNode
+                Nodes          = $nodeRows.ToArray()
+                Errors         = $errors.ToArray()
+            }
+            return [pscustomobject]$record
+        }
+        catch {
+            throw "Snapshot '$Trigger' failed: $($_.Exception.Message)"
+        }
+    }
+
+    $writeCoverageSnapshot = {
+        param(
+            [Parameter(Mandatory)][string]$Trigger,
+            [string[]]$DistributionPoints = @(),
+            [string[]]$ReplicationSites = @(),
+            [bool]$IncludeNodeState = $false,
+            [bool]$ForceWrite = $false
+        )
+
+        if ($coverageTimelineState.Disabled -and -not $ForceWrite) { return }
+        $capturedAt = [DateTime]::UtcNow
+        try {
+            $variables = @{
+                ns                        = $ns
+                SiteCode                  = $SiteCode
+                PackageID                 = $PackageID
+                coverageRunId             = $coverageRunId
+                stateName                 = $stateName
+                collectNodeContentState   = $collectNodeContentState.ToString()
+                fqdnOf                    = $fqdnOf.ToString()
+                localComputerNameFunction = ${function:Test-MemLabsLocalComputerName}.ToString()
+                deployConfig              = $deployConfig
+                ThisVM                    = $ThisVM
+                DomainFullName            = $DomainFullName
+                clientPackageDiagCredential = $clientPackageDiagCredential
+            }
+            if ($ReplicationSites.Count -gt 0) {
+                $module = Get-Module -Name ConfigurationManager | Select-Object -First 1
+                if (-not $module) { throw 'The ConfigurationManager module is not loaded for replication diagnostics.' }
+                $variables.configurationManagerModulePath = $module.Path
+                $variables.siteProviderHost = (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Stop).Root
+            }
+            $parameters = @{
+                Trigger            = $Trigger
+                DistributionPoints = $DistributionPoints
+                ReplicationSites   = $ReplicationSites
+                IncludeNodeState   = $IncludeNodeState
+            }
+            Write-DscStatus "Client pkg coverage diagnostics: collecting '$Trigger' (60s wall-clock limit)." -NoStatus
+            $probe = Invoke-MemLabsClientPackageDiagnosticProbe -ProbeScript $collectCoverageSnapshot `
+                -Variables $variables -Parameters $parameters -TimeoutSeconds 60
+            if ($probe.Error) {
+                $diagnosticStatus = if ($probe.TimedOut) { 'TimedOut' } else { 'Failed' }
+                Write-DscStatus "Client pkg coverage diagnostics: snapshot '$Trigger' ${diagnosticStatus}: $($probe.Error)" -NoStatus -Warning
+                $record = [ordered]@{
+                    SchemaVersion     = 2
+                    CapturedAtUtc     = $capturedAt.ToString('o')
+                    RunId             = $coverageRunId
+                    Trigger           = $Trigger
+                    Classification    = "Diagnostic$diagnosticStatus"
+                    DiagnosticStatus  = $diagnosticStatus
+                    SiteCode          = $SiteCode
+                    PackageId         = $PackageID
+                    Package           = $null
+                    Targeting         = @()
+                    Summarizer        = @()
+                    Replication       = @()
+                    NodeStateIncluded = $false
+                    SourceNode        = $null
+                    Nodes             = @()
+                    Errors            = @($probe.Error)
+                }
+                $coverageTimelineState.Disabled = $true
+            }
+            else {
+                if (@($probe.Output).Count -ne 1 -or $probe.Output.SchemaVersion -ne 2 -or
+                    $probe.Output.PackageId -ne $PackageID -or $probe.Output.Trigger -ne $Trigger) {
+                    throw "Snapshot '$Trigger' returned an invalid diagnostic record."
+                }
+                $record = $probe.Output
+                $record | Add-Member -NotePropertyName DiagnosticStatus -NotePropertyValue 'Completed' -Force
+                $coverageTimelineState.Disabled = $false
+            }
+            Write-MemLabsClientPackageTimelineRecord -Path $coverageTimelinePath -Record $record
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage diagnostics: snapshot '$Trigger' failed: $($_.Exception.Message)" -NoStatus -Warning
+            $coverageTimelineState.Disabled = $true
+        }
+    }
+
+    # Version-proof per-DP (re)distribute. The ConfigMgr cmdlet surface for
+    # targeting a SINGLE DP is inconsistent across builds and was breaking here:
+    #   * Invoke-CMContentRedistribution has NO -PackageId on this build
+    #     ("A parameter cannot be found that matches parameter name 'PackageId'").
+    #   * Update-CMDistributionPoint has no -DistributionPointName (all-DP only).
+    #   * Start-CMContentDistribution throws "No content destination was found ...
+    #     already been distributed" when a distribution row already exists.
+    # The SMS_DistributionPoint targeting instance is the reliable path: if the
+    # package is already targeted at the DP, flip RefreshNow=$true + Put() to force
+    # a redistribute (works even for a DP wedged at ContentValidating/Failed); only
+    # when there is NO targeting row do we create one with Start-CMContentDistribution.
+    # Deciding on the targeting table (not the lagging summarizer) also avoids the
+    # "already distributed" throw when the summarizer row hasn't appeared yet.
+    $redistOrDistribute = {
+        param($dpFqdn)
+        $targetingInstances = @()
+        try {
+            $targetingInstances = @(Get-WmiObject -Namespace $ns -Class SMS_DistributionPoint `
+                    -Filter "PackageID='$PackageID'" -ErrorAction Stop |
+                    Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dpFqdn })
+            if ($targetingInstances.Count -gt 0) {
+                foreach ($targetingInstance in $targetingInstances) {
+                    $targetingInstance.RefreshNow = $true
+                    [void]$targetingInstance.Put()
+                }
+                return 'redistributed'
+            }
+        }
+        finally {
+            foreach ($targetingInstance in @($targetingInstances)) {
+                if ($targetingInstance -is [System.IDisposable]) {
+                    try { $targetingInstance.Dispose() } catch { }
+                }
+            }
+        }
+        Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dpFqdn -ErrorAction Stop
+        return 'distributed'
+    }
+
+    # Which boundary-group site systems are DPs has to be resolved against the
+    # SITE DATABASE views (SMS_BoundaryGroupSiteSystems / SMS_DistributionPointInfo),
+    # and hman populates those a minute or more AFTER a role is committed to the
+    # site control file. A single read taken seconds after Install-DP can show a DP
+    # this very phase just created as absent. On 2026-08-14 that failed a whole
+    # Phase 8 (PT2/PRI: Get-CMDistributionPoint confirmed the DP at 10:12:28, this
+    # gate declared the group DP-less at 10:13:25). So: re-read on a budget, union a
+    # second instrument that is NOT DB-lagged, and never let a failed query become a
+    # negative answer. Reliability over speed -- the wait only happens when
+    # something looks missing.
+    $expectedBgNames = @($bgs.SiteCode | Where-Object { $_ } | Select-Object -Unique)
+    $shortOf = { param($name) ("$name" -split '\.')[0].ToUpper() }
+    $configDpHosts = @{}
+    foreach ($v in @($deployConfig.virtualMachines)) {
+        # KEEP IN SYNC with Phase 11's owned-DP rule (Common.Validation.Functional.ps1, the
+        # $ownedDpNames filter). When the two disagree this gate exits clean on a DP that Phase 11
+        # then fails: burnin 2026-08-24 excluded BI-SECONDARY here as "not declared installDP" --
+        # a Secondary carries an implicit DP and declares no installDP -- while Phase 11 counted it
+        # as 1 of 4 owned DPs and failed on BI-SECONDARY=ContentValidating.
+        $isDp = ($v.installDP -eq $true -or $v.enablePullDP -eq $true -or "$($v.role)" -eq 'Secondary')
+        if ($isDp -and $v.vmName) { $configDpHosts[(& $shortOf $v.vmName)] = $true }
+    }
+
+    $resolveDeadline = (Get-Date).AddMinutes(10)
+    Set-MemLabsClientPackageProgress -Stage 'resolve-DPs' -DeadlineUtc $resolveDeadline -Message 'Resolving boundary-group distribution points'
+    $bgDpFqdns = @()
+    $bgLinks = @()
+    $expectedBgObjects = @()
+    $dpHostSet = @{}
+    $groupsWithoutDps = @()
+    $dpSources = ''
+    while ($true) {
+        try {
+            $expectedBgObjects = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop |
+                Where-Object { $expectedBgNames -contains $_.Name })
+            $expectedBgIds = @($expectedBgObjects | ForEach-Object { $_.GroupID })
+            $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop |
+                Where-Object { $expectedBgIds -contains $_.GroupID })
+            $bgDpFqdns = @($bgLinks |
+                    ForEach-Object { & $fqdnOf $_.ServerNALPath } | Where-Object { $_ } | Select-Object -Unique)
+        }
+        catch { Write-DscStatus "Client pkg coverage: could not enumerate boundary-group site systems: $($_.Exception.Message)"; return }
+
+        # SMS_DistributionPointInfo is the DB view (authoritative, lagged).
+        # SMS_SystemResourceList is derived from the site control file and flips as
+        # soon as Add-CMDistributionPoint commits -- the same source that told
+        # Install-DP the role was registered. Either one seeing the server is proof
+        # it holds the DP role; keys are short host names because the two classes
+        # disagree on FQDN vs NetBIOS.
+        $dpHostSet = @{}
+        $dpSources = @()
+        $dpQueryErrors = @()
+        foreach ($q in @(
+                @{ Name = 'SMS_DistributionPointInfo'; Class = 'SMS_DistributionPointInfo'; Filter = $null },
+                @{ Name = 'SMS_SystemResourceList'; Class = 'SMS_SystemResourceList'; Filter = "RoleName='SMS Distribution Point'" }
+            )) {
+            try {
+                $seen = 0
+                foreach ($d in @(Get-WmiObject -Namespace $ns -Class $q.Class -Filter $q.Filter -ErrorAction Stop)) {
+                    $df = & $fqdnOf $d.NALPath
+                    if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
+                    if ($df) { $dpHostSet[(& $shortOf $df)] = $true; $seen++ }
+                }
+                $dpSources += "$($q.Name)=$seen"
+            }
+            catch { $dpQueryErrors += "$($q.Name): $($_.Exception.Message)" }
+        }
+        $dpSources = ($dpSources + $dpQueryErrors) -join ' '
+
+        $existingExpectedBgNames = @($expectedBgObjects | ForEach-Object { $_.Name })
+        $groupsWithoutDps = @($expectedBgNames | Where-Object { $existingExpectedBgNames -notcontains $_ })
+        foreach ($expectedBg in $expectedBgObjects) {
+            $linkedDps = @($bgLinks | Where-Object { $_.GroupID -eq $expectedBg.GroupID } |
+                    ForEach-Object { & $fqdnOf $_.ServerNALPath } |
+                    Where-Object { $_ -and $dpHostSet.ContainsKey((& $shortOf $_)) } |
+                    Select-Object -Unique)
+            if ($linkedDps.Count -eq 0) { $groupsWithoutDps += $expectedBg.Name }
+        }
+        if ($groupsWithoutDps.Count -eq 0 -or (Get-Date) -ge $resolveDeadline) { break }
+
+        $remainMin = [int][math]::Ceiling((New-TimeSpan -Start (Get-Date) -End $resolveDeadline).TotalMinutes)
+        Write-DscStatus "Client pkg coverage: boundary group(s) $($groupsWithoutDps -join ', ') show no DP yet [$dpSources] -- the site DB view trails role registration, re-reading in 30s [~${remainMin}m left]"
+        Start-Sleep -Seconds 30
+    }
+
+    # Budget spent. Only now can "no DP" be a claim about the world rather than
+    # about the view's lag -- and only for a group this deploy never gave a DP.
+    if ($groupsWithoutDps.Count -gt 0) {
+        $configCovered = @()
+        foreach ($groupName in @($groupsWithoutDps | Select-Object -Unique)) {
+            $bgObj = @($expectedBgObjects | Where-Object { $_.Name -eq $groupName })
+            if ($bgObj.Count -eq 0) { continue }
+            $cfgDps = @($bgLinks | Where-Object { $_.GroupID -eq $bgObj[0].GroupID } |
+                    ForEach-Object { & $fqdnOf $_.ServerNALPath } |
+                    Where-Object { $_ -and $configDpHosts.ContainsKey((& $shortOf $_)) } |
+                    Select-Object -Unique)
+            if ($cfgDps.Count -eq 0) { continue }
+            $configCovered += $groupName
+            foreach ($cfgDp in $cfgDps) { $dpHostSet[(& $shortOf $cfgDp)] = $true }
+        }
+        if ($configCovered.Count -gt 0) {
+            Write-DscStatus "Client pkg coverage: boundary group(s) $($configCovered -join ', ') still show no DP in WMI after 10 min [$dpSources], but this deploy declares installDP on their site system(s) -- proceeding on the config and letting the content wait below decide. Phase 11 re-validates DP registration." -Warning
+        }
+        $stillEmpty = @($groupsWithoutDps | Where-Object { $configCovered -notcontains $_ } | Select-Object -Unique)
+        if ($stillEmpty.Count -gt 0) {
+            Write-DscStatus "Client pkg coverage: boundary group(s) have NO Distribution Point after 10 min of re-reads, and this deploy declares none for them: $($stillEmpty -join ', ') [$dpSources]. Clients in these groups cannot locate the client package." -Failure
+            return
+        }
+    }
+
+    # SMS_BoundaryGroupSiteSystems lists ALL site systems in a boundary group --
+    # DPs, MPs AND SUPs (memlabs adds all three). The client PACKAGE is DP content
+    # and only ever reports Installed on a DISTRIBUTION POINT, so a site system with
+    # no DP role (e.g. an HA Primary whose content library is remote) can never
+    # satisfy this check and would run to the coverage deadline and warn.
+    #
+    # But "no DP role right now" and "will never be a DP" are different. A Secondary is
+    # installed by an ASYNC job, so its DP role registers long after this runs: on 2026-08-24
+    # the job started 01:01:58 and BI-SECONDARY was excluded at 01:13:09, which took the one DP
+    # that mattered out of scope for the whole phase and let coverage exit "Installed on all 3".
+    # deployConfig knows the difference, so trust it over a WMI read that is merely early.
+    $nonDp = @($bgDpFqdns | Where-Object { -not $dpHostSet.ContainsKey((& $shortOf $_)) })
+    $pendingDp = @($nonDp | Where-Object { $configDpHosts.ContainsKey((& $shortOf $_)) })
+    $neverDp = @($nonDp | Where-Object { -not $configDpHosts.ContainsKey((& $shortOf $_)) })
+    if ($neverDp.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: excluding $($neverDp.Count) boundary-group site system(s) that hold no DP role and are not declared installDP (no client-package content lands there): $($neverDp -join ', ')"
+    }
+    if ($pendingDp.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: KEEPING $($pendingDp.Count) boundary-group site system(s) whose DP role has not registered yet but which this deploy declares installDP (a Secondary installs asynchronously and registers late): $($pendingDp -join ', ')"
+    }
+    $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpHostSet.ContainsKey((& $shortOf $_)) -or $configDpHosts.ContainsKey((& $shortOf $_)) })
+    if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems in expected boundary groups to cover." -Failure; return }
+
+    # A SECONDARY-site DP only receives the client package via slow inter-site
+    # content replication (parent Primary -> secondary despool -> secondary distmgr),
+    # and only AFTER the secondary is fully installed + its replication link is Active
+    # -- which frequently isn't true yet when this Phase 8 gate runs, so waiting on it
+    # burns the whole budget and warns. That wait is only worth taking when a client
+    # actually DEPENDS on that secondary's DP. So: if any push client is assigned to
+    # the secondary (its resolved pushClient site code == the secondary's site code,
+    # or a legacy pushClient=$true client sits on the secondary's own subnet), WAIT
+    # for it as before; if NONE are, give it only a short optional grace (the
+    # parent-Primary DPs still cover every boundary, and the content will arrive
+    # through normal inter-site replication). The Secondary creation pass validates
+    # its implicit DP/MP roles; subsequent Phase 8 passes measure optional package
+    # convergence again. Non-secondary DPs are always waited on.
+    #
+    # Partial follow-on configs may omit an unchanged Secondary from virtualMachines.
+    # Use the authoritative host-projected DP records as the fallback identity source,
+    # otherwise an omitted Secondary is misclassified as a required non-secondary DP.
+    $vmByHost = Get-MemLabsDpVmMetadataMap -DeployConfig $deployConfig
+    # Grace is charged only AFTER every DP something depends on is Installed, because until
+    # then the loop is polling anyway and these cost nothing. Sized from measurement, not
+    # taste: on wacky 08-17 and 08-25 08:26 the unneeded secondary DP was already Installed
+    # within 95s and 58s of Phase 8 ending while the gate was not even waiting on it.
+    $optionalGraceMinutes = 5
+    $secOptionalDps = @()
+    $keptDpFqdns = @()
+    $secKeptDps = @()
+    foreach ($dp in $bgDpFqdns) {
+        $dpHost = ("$dp" -split '\.')[0].ToUpper()
+        $dpVm = $vmByHost[$dpHost]
+        if (-not $dpVm -or $dpVm.role -ne 'Secondary') { $keptDpFqdns += $dp; continue }   # not a secondary -> always cover
+        $secSite = "$($dpVm.siteCode)"
+        $secNet = "$($dpVm.network)"
+        $assigned = @($deployConfig.virtualMachines | Where-Object {
+                (Test-PushClientRequested -VM $_) -and (
+                    ("$($_.pushClient)" -eq $secSite) -or
+                    (($_.pushClient -eq $true) -and $secNet -and ("$($_.network)" -eq $secNet))
+                )
+            })
+        if ($assigned.Count -gt 0) { $keptDpFqdns += $dp; $secKeptDps += "$dp" }             # clients depend on it -> wait on the full budget
+        else { $keptDpFqdns += $dp; $secOptionalDps += "$dp" }                              # no clients -> wait, but only for free
+    }
+    $bgDpFqdns = @($keptDpFqdns)
+    $optionalDpFqdns = @($secOptionalDps)
+    Set-MemLabsClientPackageProgress -RequiredDistributionPoints @($bgDpFqdns | Where-Object { $_ -notin $optionalDpFqdns })
+    if ($optionalDpFqdns.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: $($optionalDpFqdns.Count) secondary-site DP(s) have NO push clients assigned, so nothing is blocked if they lag: $($optionalDpFqdns -join ', '). They are still waited on -- for free while any other DP is outstanding -- and only get ${optionalGraceMinutes} extra minute(s) once every other DP is Installed."
+    }
+    if ($bgDpFqdns.Count -eq 0) {
+        Set-MemLabsClientPackageProgress -Outcome 'NotRequired'
+        Write-DscStatus "Client pkg coverage: no DP site systems require client-package coverage."
+        return
+    }
+
+    # We ARE covering one or more secondary-site DPs (clients depend on them).
+    # Content can't land on a secondary DP until that secondary's replication link
+    # to this parent is Active -- until then the parent's distmgr logs "...is not an
+    # active site, ignore it" and sends nothing, so spinning the content escalations
+    # is pointless. Gate the content wait on link activation, 30 min max (a secondary
+    # that just finished installing still needs DRS init + link Active). If the link
+    # is still not Active after 30 min, warn and fall through: the parent-Primary DPs
+    # still serve every boundary, and Phase 11 re-checks + collects link diagnostics.
+    # $secLinkSites drives only the LINK wait, so it needs a resolvable site code. The
+    # retry BUDGET must not: PT1-SS1SITE/PT1-SS2SITE were covered as secondary DPs but
+    # contributed no site code here, so the budget stayed at 24 tries (720s) and the gate
+    # gave up twice at exactly 742/743/744s. Track the covered secondary DPs themselves.
+    $secLinkSites = @{}   # secondary siteCode -> $true (for kept secondary DPs)
+    foreach ($dp in $secKeptDps) {
+        $dpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
+        if ($dpVm -and $dpVm.siteCode) { $secLinkSites["$($dpVm.siteCode)"] = $true }
+    }
+    $null = & $writeCoverageSnapshot -Trigger 'scope-resolved' `
+        -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+        -IncludeNodeState $false
+    if ($secLinkSites.Count -gt 0) {
+        $linkDeadline = (Get-Date).AddMinutes(30)
+        Set-MemLabsClientPackageProgress -Stage 'replication-links' -DeadlineUtc $linkDeadline -Message 'Waiting for secondary replication links'
+        $pendingLink = @($secLinkSites.Keys)
+        $lastLinkTimelineCapture = $null
+        while ($pendingLink.Count -gt 0 -and (Get-Date) -lt $linkDeadline) {
+            $stillPending = @()
+            foreach ($sc in $pendingLink) {
+                $isActive = $false
+                try {
+                    $rs = Get-CMDatabaseReplicationStatus -Site2 $sc -ErrorAction SilentlyContinue
+                    # LinkStatus/GlobalState enum: 2 = Active (both directions must be Active).
+                    if ($rs -and [int]$rs.LinkStatus -eq 2 -and [int]$rs.Site1ToSite2GlobalState -eq 2 -and [int]$rs.Site2ToSite1GlobalState -eq 2) { $isActive = $true }
+                }
+                catch {}
+                if ($isActive) { Write-DscStatus "Client pkg coverage: secondary '$sc' replication link is Active -- client-package content can now flow." }
+                else { $stillPending += $sc }
+            }
+            $pendingLink = @($stillPending)
+            if ($pendingLink.Count -gt 0) {
+                if (-not $lastLinkTimelineCapture -or ((Get-Date) - $lastLinkTimelineCapture).TotalMinutes -ge 5) {
+                    $lastLinkTimelineCapture = Get-Date
+                    $null = & $writeCoverageSnapshot -Trigger 'replication-link-wait' `
+                        -DistributionPoints $bgDpFqdns -ReplicationSites $pendingLink `
+                        -IncludeNodeState $true
+                }
+                $remainMin = [int]((($linkDeadline) - (Get-Date)).TotalMinutes)
+                if ($remainMin -lt 0) { $remainMin = 0 }
+                Write-DscStatus "Client pkg coverage: waiting for secondary replication link(s) to be Active before the client-package wait: $($pendingLink -join ', ') [~${remainMin}m left of 30m]"
+                Start-Sleep -Seconds 30
+            }
+        }
+        if ($pendingLink.Count -gt 0) {
+            $null = & $writeCoverageSnapshot -Trigger 'replication-link-deadline' `
+                -DistributionPoints $bgDpFqdns -ReplicationSites $pendingLink `
+                -IncludeNodeState $true
+            Write-DscStatus "Client pkg coverage: secondary replication link(s) still NOT Active after 30 min: $($pendingLink -join ', '). Proceeding with the client-package wait anyway (content can't arrive until the link activates; Phase 11 re-checks and collects link diagnostics)." -Warning
+        }
+        else {
+            $null = & $writeCoverageSnapshot -Trigger 'replication-link-active' `
+                -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+                -IncludeNodeState $true
+        }
+    }
+
+    # Remediation per DP is deliberately NON-destructive: keep the SMS_DistributionPoint
+    # (PkgServers) targeting row alive and flip RefreshNow on it so distmgr re-processes
+    # the package now instead of waiting out its 3600s sleep / 30-min retry backoff.
+    $lastArm = @{}   # DP-upper -> when RefreshNow was last flipped for that DP
+    # A pending Secondary now STAYS in scope (see the $pendingDp split above), so the distribute
+    # must be gated on the DP role actually existing or it fires at a non-existent DP every 30s
+    # for the ~30 min a secondary takes to install. Once a DP registers it stays registered, so
+    # the positive is cached and never re-queried; negatives are re-checked on a slow cadence.
+    $dpRoleKnown = @{}
+    $dpRoleLastCheck = @{}
+    $dpWaitLogged = @{}
+    $dpPendingSince = @{}
+    $contentCurrentCheckedAt = @{}
+    $contentCurrentLogged = @{}
+    # DP-upper -> when this DP was first seen not-Installed while THIS site already held the
+    # content. Feeds $isSendUnowned; cleared whenever content is still coming from the parent,
+    # so the clock only ever measures time in which a send was actually possible.
+    $dpUnownedSince = @{}
+    # Reported alongside the wait so it is never silent: if both numbers sit still while a DP is
+    # pending, the registration is stuck rather than slow, and that is visible without a re-run.
+    $dpRoleSourceCounts = {
+        $parts = @()
+        foreach ($q in @(
+                @{ Name = 'SMS_DistributionPointInfo'; Class = 'SMS_DistributionPointInfo'; Filter = $null },
+                @{ Name = 'SMS_SystemResourceList'; Class = 'SMS_SystemResourceList'; Filter = "RoleName='SMS Distribution Point'" }
+            )) {
+            try { $parts += "$($q.Name)=$(@(Get-WmiObject -Namespace $ns -Class $q.Class -Filter $q.Filter -ErrorAction Stop).Count)" }
+            catch { $parts += "$($q.Name)=UNREADABLE" }
+        }
+        return ($parts -join ' ')
+    }
+    $isDpRoleLive = {
+        param($DpFqdn)
+        $k = ("$DpFqdn" -split '\.')[0].ToUpper()
+        if ($dpRoleKnown.ContainsKey($k)) { return $true }
+        if ($dpRoleLastCheck.ContainsKey($k) -and ((Get-Date) - $dpRoleLastCheck[$k]).TotalSeconds -lt 120) { return $false }
+        $dpRoleLastCheck[$k] = Get-Date
+        foreach ($q in @(
+                @{ Class = 'SMS_DistributionPointInfo'; Filter = $null },
+                @{ Class = 'SMS_SystemResourceList'; Filter = "RoleName='SMS Distribution Point'" }
+            )) {
+            try {
+                foreach ($d in @(Get-WmiObject -Namespace $ns -Class $q.Class -Filter $q.Filter -ErrorAction Stop)) {
+                    $df = & $fqdnOf $d.NALPath
+                    if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
+                    if ($df -and ((("$df" -split '\.')[0]).ToUpper()) -eq $k) { $dpRoleKnown[$k] = $true; return $true }
+                }
+            }
+            catch { }
+        }
+        return $false
+    }
+    $extendedCoverageWait = $false
+    # A CAS/parent-owned package (e.g. the client package under a child primary) has NO
+    # local content yet (StoredPkgVersion=0); its content must first replicate DOWN from
+    # the parent before it can land on a local DP. That inter-site transfer is slow, so
+    # give it a much larger budget and (below) never tear down the targeting meanwhile.
+    $normalWaitMinutes = 12
+    $contentPendingWaitMinutes = 45
+    # A secondary-site DP needs that same budget even when THIS site already holds the
+    # content, because it is one MORE inter-site hop (parent distmgr -> secondary
+    # despool -> secondary distmgr -> secondary DP) and the StoredPkgVersion escalation
+    # below only sees a missing LOCAL copy. Measured on fabrikam: replication link went
+    # Active at 23:20:30, the secondary stored the package at 23:31:11 and finished
+    # adding it to its own DP at 23:31:55 -- the 24-try (~12 min) budget ran out at
+    # 23:32:25, so this warned about a DP that had just gone healthy. The loop still
+    # breaks the moment every DP reports Installed, so the larger budget only costs
+    # wall-clock when the content genuinely has not landed.
+    if ($secKeptDps.Count -gt 0) {
+        $extendedCoverageWait = $true
+        $secWhere = if ($secLinkSites.Count -gt 0) { @($secLinkSites.Keys) -join ', ' } else { $secKeptDps -join ', ' }
+        Write-DscStatus "Client pkg coverage: covering secondary-site DP(s) $secWhere -- content needs an extra parent->secondary hop, so using the ${contentPendingWaitMinutes}-minute wall-clock deadline."
+    }
+
+    # MEASURED 2026-08-14 (cstest2 PS2, DRSSentMessages capture covering the whole wait): the parent
+    # does NOT already have our targeting change. The child sent no PkgServers_G row at all until
+    # 19:11:50 -- 2107s into the wait -- and once it did, the CAS had it 3s later and decided to send
+    # the package 8s after that. Inter-site replication cost ~11s of a 2107s wait; the rest was the
+    # CHILD not writing the row. Both wake paths below therefore poke a parent that has nothing to
+    # act on, which is consistent with neither of them ever having moved the outcome ([wake-ROW] at
+    # 19:12:43 fired AFTER the row had already replicated).
+    # They are kept because what DID write the row at 19:11:50 is still unidentified -- the row
+    # carried RefreshTrigger=1/UpdateMask=4, the signature of the RefreshNow Put() below, but no
+    # re-arm status was observed and Write-DscStatus is a single-line file the host samples every
+    # ~31s, so that absence proves nothing. SMSProv.log on the CHILD names the caller; get that
+    # before removing either path.
+    # The earlier claim here -- that distmgr sleeps out a 3600s FindFirstChangeNotification timeout
+    # and that this "is the whole delay" -- was wrong twice over: the child's distmgr processed the
+    # package every ~10 minutes throughout (18:30, 18:37, 18:47, 18:57, 19:07), each time logging
+    # "No action specified ... however there may be package server changes" and doing nothing.
+    # SMS_Package.AddChangeNotification() is a no-argument provider method whose entire
+    # body is AddNotification(pkgid, priority, PKG_NOTIF_TYPE_PKG) (SspPackage.cpp) -- it
+    # changes no package property, bumps no SourceVersion, and re-snapshots no content
+    # (unlike RefreshPkgSource, which would re-send the whole 673MB package). Best-effort:
+    # on failure the parent's own timer still owns the outcome, exactly as before.
+    # MEASURED on cstest2 PS3 2026-08-15: the child had written its PkgServers_G row and held it for
+    # ~20 min; a 60s control window confirmed it was not about to move. One call to
+    # spDRSSendChangesForGroup put it at the CAS in 27s. So the extraction works and change tracking
+    # sees the row -- nothing was INVOKING the extraction. DRSSentMessages on the child stayed frozen
+    # at its post-init burst the whole time while the scan timestamps kept advancing, which is what a
+    # group that is never queued looks like.
+    # Pushing 'Configuration Data' alone does NOT shorten the wait -- measured at +8s, +17min and
+    # never, giving 37m52s / ~38m / 41m53s. That is because the CAS was never blocked on the
+    # PkgServers row at all:
+    #   CDistributionSrcSQL::FindFirstPkgServer (basesvr/distsrc.cpp) reads
+    #     PkgServers psrv JOIN DistributionPoints dp ON dp.NALPath = psrv.NALPath ... dp.DPFlags<>1
+    #   With no DistributionPoints row for the child's DP the PkgServers row is not returned, the
+    #   child site never enters arrReplGroups, and the send loop never evaluates it -- which is why
+    #   the decline was silent: no decision was ever made.
+    #   CAS hman writes that row from the child's SITE CONTROL data
+    #   (CHierarchyManager::UpdateSysResList iterates CSCItem_SysResUse and CRCs the DP list).
+    #   hman -> "Needs to send" is NOT tightly coupled: measured 21s / 2m02s / 5m15s across three
+    #   sites. An earlier "within 15s, measured twice" note here was an over-read of n=2.
+    # So the group that matters is 'Site Control Data', not 'Configuration Data'. Both are pushed:
+    # the child's DRS sender is known not to self-schedule, so either can sit unsent indefinitely.
+    # VERIFIED 2026-08-15 across 9 cstest2 child-primary waits (deduped on start/end; a re-run
+    # re-copies the same guest log under a new Phase 8 stamp). Wait-start -> content:
+    #   no push          33m05s 36m26s 37m53s 38m29s 42m28s              (5)
+    #   Config Data only 37m44s 43m09s                                   (2)
+    #   + Site Control   16m54s (PS3) and 8m12s (PS1)                    (2)
+    # No overlap between the arms. Do NOT compare across labs -- fabrikam 08-12 gave 8m15s and
+    # 19m53s with no push at all, so a single fast reading proves nothing (rule 13).
+    # Registry detection matches ConfigureMPReplica.ps1; System.Data.SqlClient because Invoke-Sqlcmd
+    # is not present on a site server.
+    $drsPushGroups = @('Site Control Data', 'Configuration Data')
+    $pushDrsChangesToParent = {
+        param($Group)
+        try {
+            $sqlReg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+            $srv = $sqlReg.Server
+            $dbRaw = $sqlReg.'Database Name'
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [drs-push] skipped -- could not read site SQL registry: $($_.Exception.Message)"
+            return $false
+        }
+        $inst = $srv
+        $dbName = $dbRaw
+        if ($dbRaw -match '\\') { $inst = "$srv\$($dbRaw.Split('\')[0])"; $dbName = $dbRaw.Split('\')[1] }
+        $cn = $null
+        try {
+            $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$inst;Initial Catalog=$dbName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+            $cn.Open()
+            $cmd = $cn.CreateCommand()
+            $cmd.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup'
+            $cmd.CommandTimeout = 120
+            [void]$cmd.Parameters.AddWithValue('@ReplicationGroup', $Group)
+            [void]$cmd.ExecuteNonQuery()
+            Write-DscStatus "Client pkg coverage: [drs-push] ran spDRSSendChangesForGroup '$Group' on $dbName so the parent gets our targeting row now instead of waiting for the next scheduled sync."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [drs-push] spDRSSendChangesForGroup '$Group' failed: $($_.Exception.Message). The site's own scheduler still owns the outcome."
+            return $false
+        }
+        finally { if ($cn) { try { $cn.Close() } catch { } } }
+    }
+
+    $parentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }
+    $parentSite = "$($ThisVM.parentSiteCode)"
+    $lastParentPoke = $null
+    $lastParentFilePoke = $null
+    $pokeParentDistmgr = {
+        if (-not $parentFqdn -or -not $parentSite) {
+            Write-DscStatus "Client pkg coverage: [wake-ROW] skipped -- parent site unknown (fqdn='$parentFqdn' site='$parentSite')."
+            return $false
+        }
+        try {
+            $pPkg = @(Get-WmiObject -ComputerName $parentFqdn -Namespace "root\SMS\site_$parentSite" -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction Stop) | Select-Object -First 1
+            if (-not $pPkg) {
+                Write-DscStatus "Client pkg coverage: parent site $parentSite ($parentFqdn) has no SMS_Package row for $PackageID; cannot re-notify its distmgr."
+                return $false
+            }
+            $rc = $pPkg.AddChangeNotification()
+            Write-DscStatus "Client pkg coverage: [wake-ROW] asked parent site $parentSite ($parentFqdn) to re-notify its distmgr for $PackageID (AddChangeNotification returned $($rc.ReturnValue))."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [wake-ROW] could not re-notify parent site $parentSite ($parentFqdn) distmgr for $PackageID -- $($_.Exception.Message). The parent's own timer still governs the send."
+            return $false
+        }
+    }
+
+    # Neither wake path above can help a SECONDARY-site DP when the package is owned by a
+    # parent/CAS. The source site runs the send-to-child loop; when fan-out hands the transfer to a
+    # closer site it forwards a .FWD instruction to that site (distmgr.cpp:15133-15230), but that
+    # forward is gated on bServerChange while the PKG_STATUS_SENT write at :14900 is not -- so a
+    # pass with no server change locks the target without notifying anyone. AddChangeNotification on
+    # the parent only inserts a PkgNotification; it does not mark the TARGET site as owing a resend.
+    # spAoRetryPkgDistribution (scope CAS_OR_PRIMARY) is
+    # the supported call that does all three, and it self-guards on
+    #   EXISTS (SELECT * FROM SMSPackages WHERE PkgId=@packageID AND SourceSite=dbo.fnGetSiteCode())
+    # so running it anywhere but the package's source site is a logged no-op, never damage:
+    #   UPDATE PkgStatus SET Status=0        WHERE ID=@pkg AND SiteCode=@target AND Type=1
+    #   UPDATE TOP(1) PkgServers SET UpdateMask=4 (PKGSRV_UPDATE_REFRESHTRIG)
+    #   INSERT PkgNotification (PkgID, Priority, TimeKey, Type) VALUES (@pkg, 2, GETUTCDATE(), 1)
+    # Best-effort like every other wake path here: on any failure the parent's own timer still
+    # owns the outcome, so this can only ever shorten the wait.
+    # The source site's DB, resolved from ITS registry -- the parent's site DB can be on a separate
+    # SQL host, so the parent FQDN is not usable as a server name. Shared by the retry-DIST call and
+    # the PkgStatus read below so the two can never disagree about which DB is authoritative.
+    $sourceSiteDbConn = {
+        if (-not $parentFqdn -or -not $parentSite) { return $null }
+        $pReg = Invoke-Command -ComputerName $parentFqdn -ScriptBlock {
+            $p = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+            $port = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account' -Name 'Port' -ErrorAction SilentlyContinue).'Port'
+            [pscustomobject]@{ Server = $p.Server; Db = $p.'Database Name'; Port = $port }
+        } -ErrorAction Stop
+        $inst = $pReg.Server
+        $dbName = $pReg.Db
+        if ("$($pReg.Db)" -match '\\') { $inst = "$($pReg.Server)\$($pReg.Db.Split('\')[0])"; $dbName = $pReg.Db.Split('\')[1] }
+        if ($pReg.Port -and "$($pReg.Port)" -ne '1433') { $inst = "$inst,$($pReg.Port)" }
+        return [pscustomobject]@{
+            Db  = $dbName
+            Str = "Server=$inst;Initial Catalog=$dbName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
+        }
+    }
+
+    $retryPkgToSite = {
+        param($TargetSiteCode)
+        if (-not $parentFqdn -or -not $parentSite) {
+            Write-DscStatus "Client pkg coverage: [retry-DIST] skipped for site '$TargetSiteCode' -- parent site unknown (fqdn='$parentFqdn' site='$parentSite')."
+            return $false
+        }
+        $cn = $null
+        try {
+            $db = & $sourceSiteDbConn
+            if (-not $db) { throw 'could not resolve the source site DB' }
+            $dbName = $db.Db
+            $cn = New-Object System.Data.SqlClient.SqlConnection $db.Str
+            $cn.Open()
+            $cmd = $cn.CreateCommand()
+            $cmd.CommandText = 'EXEC dbo.spAoRetryPkgDistribution @packageID, @targetSiteCode'
+            $cmd.CommandTimeout = 120
+            [void]$cmd.Parameters.AddWithValue('@packageID', $PackageID)
+            [void]$cmd.Parameters.AddWithValue('@targetSiteCode', $TargetSiteCode)
+            [void]$cmd.ExecuteNonQuery()
+            Write-DscStatus "Client pkg coverage: [retry-DIST] ran spAoRetryPkgDistribution($PackageID -> site $TargetSiteCode) on $dbName at source site $parentSite so its distmgr re-evaluates that site instead of waiting out its own timer."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [retry-DIST] spAoRetryPkgDistribution($PackageID -> site $TargetSiteCode) against source site $parentSite failed: $($_.Exception.Message). The source site's own timer still owns the send."
+            return $false
+        }
+        finally { if ($cn) { try { $cn.Close() } catch { } } }
+    }
+
+    # LAST RESORT. distmgr.cpp:17252 guards its auto-recovery with
+    # `if (hr != HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED))`, and 0x800704D3 IS that HRESULT --
+    # the one failure that clears no StoredPkgPath, resets no Action, and writes no backdated
+    # PkgStatus row. The send is abandoned and never retried, so RefreshNow, spAoRetryPkgDistribution
+    # and an SMS_EXECUTIVE restart all correctly do nothing: they re-arm a send that
+    # IsPkgSendingNeeded still declines. Only moving the package's source version re-arms it.
+    # KEEP IN SYNC with the wedge gate at the top of this file and with Get-DrsLogs.ps1.
+    # $true = content present, $false = library readable and package absent, $null = NOT MEASURED.
+    # The three cases must stay distinct: "no content library found" is not "no content", and
+    # collapsing them is how a DP whose library sits on Q:/R: gets reported as empty.
+    # Hashtable, not $script: -- assignment inside a scriptblock would otherwise only bind a local.
+    $strandedWhy = @{}
+    $dpHasPackageContent = {
+        param($DpFqdn)
+        try {
+            return Invoke-Command -ComputerName $DpFqdn -ArgumentList $PackageID -ErrorAction Stop -ScriptBlock {
+                param($PkgId)
+                $roots = @()
+                # The registry key only exists once the DP role is configured, so reading it is
+                # also the proof that this machine IS a DP and has told us where its library goes.
+                $authoritative = $false
+                try {
+                    $clp = "$((Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name 'ContentLibraryPath' -ErrorAction Stop).ContentLibraryPath)"
+                    if ($clp) { $roots = @($clp); $authoritative = $true }
+                }
+                catch { }
+                if ($roots.Count -eq 0) {
+                    $roots = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object { Join-Path "$($_.Root)" 'SCCMContentLib' })
+                }
+                foreach ($root in $roots) {
+                    $pl = Join-Path "$root" 'PkgLib'
+                    if (-not (Test-Path $pl)) { continue }
+                    return [bool](@(Get-ChildItem -LiteralPath $pl -Filter '*.INI' -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -like "$PkgId*" }).Count -gt 0)
+                }
+                # A brand-new DP has no PkgLib at all -- the tree is created on first arrival. When
+                # the DP itself named the path, its absence is the package being ABSENT, not
+                # unmeasurable, and that is the exact state the repair exists for: burnin
+                # 2026-08-24 returned $null here and every repair rung declined on a DP that had
+                # never received anything. $null stays reserved for the drive-scan fallback, where
+                # a pull DP keeping its library on Q:/R: really can make absence uninformative.
+                if ($authoritative) { return $false }
+                return $null
+            }
+        }
+        catch { return $null }
+    }
+
+    $isPkgStrandedToSite = {
+        param($TargetSiteCode, $DpFqdn)
+        # Physical content VETOES the repair before any log is read. 2026-08-23 23:52 showed this DP
+        # at ContentValidating with an abort naming this package AND PkgLib holding it -- it reached
+        # Installed on its own 1h36m later. The old predicate would have bumped there, re-sending to
+        # every DP to fix nothing. An abort outlives the failure it describes; the library does not.
+        $has = & $dpHasPackageContent $DpFqdn
+        if ($has) { return $false }
+        # Unreadable library must not COST capability: fall back to exactly what shipped before this
+        # check existed (abort signature alone). The no-op signature is near-universal -- it fires on
+        # 17 of 23 collected distmgr logs, healthy ones included -- so it is only ever safe when the
+        # absence of content has actually been proven.
+        $contentUnmeasured = ($null -eq $has)
+        if ($contentUnmeasured) {
+            Write-DscStatus "Client pkg coverage: [stranded] NOT MEASURED for '$DpFqdn' -- its content library could not be read, so 'content absent' cannot be told apart from 'no answer'. Falling back to the bundle-abort signature alone."
+        }
+        $imd = $null
+        foreach ($ik in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+            try { $imd = (Get-ItemProperty -Path $ik -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+            if ($imd) { break }
+        }
+        if (-not $imd) { return $false }
+        $lg = Join-Path $imd 'Logs\distmgr.log'
+        if (-not (Test-Path $lg)) { return $false }
+        $tl = @(Get-Content $lg -Tail 4000 -ErrorAction SilentlyContinue)
+        if ($tl.Count -eq 0) { return $false }
+        $sitePat = 'to site {0}\.' -f [regex]::Escape("$TargetSiteCode")
+        $pkgPat = [regex]::Escape("$PackageID")
+        $lastAb = -1; $lastSd = -1
+        for ($i = 0; $i -lt $tl.Count; $i++) {
+            $ln = $tl[$i]
+            if ($ln -notmatch $pkgPat) { continue }
+            if ($ln -match '0x800704d3' -and $ln -match 'creating package bundle' -and $ln -match $sitePat) { $lastAb = $i }
+            if ($ln -match 'Created minijob to send compressed copy' -and $ln -match $sitePat) { $lastSd = $i }
+        }
+        # NOT extended to "distmgr looked and had nothing to do". That signature fires on 15 of 26
+        # collected logs, healthy ones included, because THIS log belongs to the primary and the
+        # package is owned by site HUB -- a no-op here is the correct behaviour of a site that does
+        # not owe the send, not evidence of stranding. Detecting the 2026-08-24 10:55 case needs the
+        # SOURCE site's distmgr.log (reachable via $parentFqdn, as $sourceDroppedAsInactive does),
+        # and that variant has no discrimination proof yet, so it is deliberately not here.
+        if (-not ($lastAb -ge 0 -and $lastAb -gt $lastSd)) { return $false }
+        $strandedWhy['sig'] = 'abort'
+        # No quiet period. The old 35-minute wait was only ever a PROXY for "is the cancel flag
+        # clear?", and it could not fit: on 2026-08-24 the abort landed at 01:46:33 against a
+        # 01:58 deadline, so the rung could never fire in the same phase. The repair below clears
+        # the flag itself with a fresh process, so the answer is known rather than inferred.
+        return $true
+    }
+
+    # SECOND trigger for the SAME repair, and the one the 2026-08-24 burnin needed. There, the
+    # abort signature above was correctly FALSE and broadening it to "any package -> this site"
+    # would ALSO have been false: after the wedge gate restarted SMS_EXECUTIVE at 07:19:50 the
+    # fresh process (PID 4276) sent PRI00001/2/F/10/11/12/13 to SEC, so the last send to SEC came
+    # AFTER the last abort. No cancel flag was set. distmgr simply processed HUB00004 ~29 more
+    # times -- "Processing package HUB00004 (SourceVersion:1;StoredVersion:1)", "No action
+    # specified", exit -- and never once emitted "Needs to send the compressed package ... to site
+    # SEC", while emitting exactly that for PRI00001 in the same process minutes later. The send
+    # was not wedged; it was UNOWNED. The source site logs "Skipped sending ... as the closest
+    # site is PRI" and defers, and this primary never runs the send-to-child loop for a package it
+    # does not own, so neither site sends. 89 RefreshNow + spAoRetryPkgDistribution attempts over
+    # 45 minutes moved nothing, because neither changes a version and the version is the only
+    # input to that decision.
+    #
+    # Deliberately a POSITIVE state predicate, not a log signature: distmgr logs nothing when it
+    # declines to send, so absence of evidence is the normal case here and cannot be waited for.
+    # Physical content still vetoes, reusing the same measurement proven over 26 logs -- and
+    # $null (library unreadable) must NOT fire this, because unlike the abort path there is no
+    # second signature to fall back on.
+    $isSendUnowned = {
+        param($DpFqdn, $UnownedSinceUtc)
+        if (-not $UnownedSinceUtc) { return $false }
+        $mins = ((Get-Date) - $UnownedSinceUtc).TotalMinutes
+        if ($mins -lt $unownedSendMinutes) { return $false }
+        if ((& $dpHasPackageContent $DpFqdn) -ne $false) { return $false }
+        $strandedWhy['sig'] = 'unowned'
+        $strandedWhy['mins'] = [int]$mins
+        return $true
+    }
+
+    # $null = not measured. The row distmgr itself consults: PkgStatus at the SOURCE site, keyed on
+    # (package, target site, PKG_TYPE_MAIN=1). Read from the source site because that is where
+    # distmgr.cpp:14900 writes it and where :23219 reads it back.
+    $readPkgStatusAtSource = {
+        param($TargetSiteCode)
+        $cn = $null
+        try {
+            $db = & $sourceSiteDbConn
+            if (-not $db) { return $null }
+            $cn = New-Object System.Data.SqlClient.SqlConnection $db.Str
+            $cn.Open()
+            $cmd = $cn.CreateCommand()
+            $cmd.CommandText = 'SELECT Status, UpdateTime FROM PkgStatus WHERE ID = @p AND SiteCode = @s AND Type = 1'
+            $cmd.CommandTimeout = 60
+            [void]$cmd.Parameters.AddWithValue('@p', $PackageID)
+            [void]$cmd.Parameters.AddWithValue('@s', $TargetSiteCode)
+            $r = $cmd.ExecuteReader()
+            try {
+                if (-not $r.Read()) { return [pscustomobject]@{ Status = -1; UpdateTime = $null } }
+                return [pscustomobject]@{ Status = [int]$r['Status']; UpdateTime = $r['UpdateTime'] }
+            }
+            finally { $r.Close() }
+        }
+        catch { return $null }
+        finally { if ($cn) { $cn.Dispose() } }
+    }
+
+    # THIRD trigger, and the only one that needs no waiting: the state is self-contradicting.
+    # distmgr recorded PKG_STATUS_SENT (1) for the target site at distmgr.cpp:14900 -- which sits
+    # OUTSIDE the `if(bClosestSite)` guard that creates the minijob at :14867 -- while the DP's own
+    # content library proves nothing arrived. "I sent it" and "nothing is here" cannot both be true,
+    # so there is nothing to wait for. :23219 then declines the send at BOTH sites until the row is
+    # two days old (`GetDays() <= 1` truncates, so 48h, not the 24 the adjacent comment claims).
+    # This exists so a Phase 8 RE-RUN against a lab already stuck repairs on its first iteration
+    # instead of spending $unownedSendMinutes rediscovering what the row already states.
+    $isSentButAbsent = {
+        param($TargetSiteCode, $DpFqdn)
+        if ((& $dpHasPackageContent $DpFqdn) -ne $false) { return $false }
+        $st = & $readPkgStatusAtSource $TargetSiteCode
+        # Every decline below is announced. A silent negative here is indistinguishable from "the
+        # check never ran", and that is precisely how the ordering bug above stayed invisible.
+        if ($null -eq $st) {
+            Write-DscStatus "Client pkg coverage: [sent-but-absent] NOT MEASURED for site $TargetSiteCode -- the package is absent from '$DpFqdn' but PkgStatus at the source site could not be read, so the elapsed-time signature has to decide instead."
+            return $false
+        }
+        if ([int]$st.Status -ne 1) {
+            Write-DscStatus "Client pkg coverage: [sent-but-absent] the package is absent from '$DpFqdn' but PkgStatus(site $TargetSiteCode) reads Status=$($st.Status), not 1 (SENT) -- not the false-SENT state, so the elapsed-time signature decides."
+            return $false
+        }
+        $strandedWhy['sig'] = 'sent-but-absent'
+        $strandedWhy['sentAt'] = "$($st.UpdateTime)"
+        return $true
+    }
+
+    # RefreshPkgSource re-snapshots the source and re-sends the package to EVERY DP, so it runs
+    # once per phase and only behind $isPkgStrandedToSite. The package belongs to its SOURCE site,
+    # so a child primary cannot bump a CAS-owned package locally -- reach the source the same way
+    # $retryPkgToSite does.
+    $bumpPkgSourceVersion = {
+        param($TargetSiteCode)
+        $srcSite = ''
+        try { $srcSite = "$((Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction Stop | Select-Object -First 1).SourceSite)" } catch {}
+        if (-not $srcSite) {
+            Write-DscStatus "Client pkg coverage: [bump] could not read the package's SourceSite -- NOT bumping. $PackageID stays stranded to site $TargetSiteCode."
+            return $false
+        }
+        $doBump = {
+            param($Site, $Pkg)
+            $p = @(Get-WmiObject -Namespace "root\SMS\site_$Site" -Class SMS_Package -Filter "PackageID='$Pkg'" -ErrorAction Stop) | Select-Object -First 1
+            if (-not $p) { return 'NO PACKAGE' }
+            $r = $p.RefreshPkgSource()
+            return "ReturnValue=$($r.ReturnValue)"
+        }
+        try {
+            $res = ''
+            if ($srcSite -ieq "$SiteCode") {
+                $res = & $doBump $SiteCode $PackageID
+            }
+            elseif ($parentFqdn -and $srcSite -ieq "$parentSite") {
+                $res = Invoke-Command -ComputerName $parentFqdn -ScriptBlock $doBump -ArgumentList $srcSite, $PackageID -ErrorAction Stop
+            }
+            else {
+                Write-DscStatus "Client pkg coverage: [bump] $PackageID is owned by site '$srcSite', which is neither this site ($SiteCode) nor the known parent ('$parentSite') -- NOT bumping. It stays stranded to site $TargetSiteCode."
+                return $false
+            }
+            Write-DscStatus "Client pkg coverage: [bump] $PackageID was ABANDONED to site $TargetSiteCode (0x800704D3 bundle abort with no send after it); distmgr never retries that error. Called RefreshPkgSource at source site $srcSite -> $res. This re-sends the package to every DP, which is why it is last-resort and once-per-phase." -Warning
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [bump] RefreshPkgSource for $PackageID at source site $srcSite failed: $($_.Exception.Message). $PackageID stays stranded to site $TargetSiteCode."
+            return $false
+        }
+    }
+
+
+    # The cancel flag is a per-process static cleared only by the CDistributionManager
+    # constructor, so nothing short of a fresh process clears it. Same restart the gate at the top
+    # of this file performs; the difference is that the gate runs ONCE before any content moves,
+    # and the wedge can start later -- 2026-08-24 the thread exited 01:39:09, 28 minutes after the
+    # gate had already run and passed.
+    $restartExecOnce = {
+        $before = 0
+        try { $before = [int](Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop).ProcessId } catch { }
+        try { Restart-Service -Name SMS_EXECUTIVE -Force -ErrorAction Stop }
+        catch {
+            Write-DscStatus "Client pkg coverage: [wedge-repair] could not restart SMS_EXECUTIVE: $($_.Exception.Message). The cancel flag is still set, so a bump would abort again -- skipping it."
+            return $false
+        }
+        Start-Sleep -Seconds 90
+        $after = 0
+        $state = '?'
+        try {
+            $svc = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+            $after = [int]$svc.ProcessId; $state = "$($svc.State)"
+        }
+        catch { }
+        # Only a CHANGED pid proves a fresh CDistributionManager; a reused pid means the flag survived.
+        if ($after -le 0 -or $after -eq $before -or $state -ne 'Running') {
+            Write-DscStatus "Client pkg coverage: [wedge-repair] SMS_EXECUTIVE did not come back as a NEW process (pid $before -> $after, state=$state). The cancel flag is not proven clear, so the bump is skipped."
+            return $false
+        }
+        Write-DscStatus "Client pkg coverage: [wedge-repair] restarted SMS_EXECUTIVE (pid $before -> $after) to clear the distmgr cancel flag; only a fresh process resets it." -Warning
+        return $true
+    }
+
+    # SECOND stranding mode, and the one $isPkgStrandedToSite is blind to by construction.
+    # wacky 2026-08-23: the source site logged "Package server ... is not an active site, ignore
+    # it" x5 for the secondary's DP and sent nothing -- ZERO bundle aborts anywhere, because the
+    # send never started. That evidence lives on the SOURCE site, not here, so a local scan for
+    # 0x800704d3 can never see it. Diagnosis only: the cure is the child reaching
+    # Sites.Status=1 (ACTIVE), after which the per-attempt retryPkgToSite re-enumerates it.
+    $sourceDroppedAsInactive = {
+        param($DpHost)
+        if (-not $parentFqdn) { return 'NOT MEASURED (source site server unknown)' }
+        try {
+            return Invoke-Command -ComputerName $parentFqdn -ArgumentList $DpHost -ScriptBlock {
+                param($H)
+                $d = $null
+                foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                    try { $d = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
+                    if ($d) { break }
+                }
+                if (-not $d) { return 'NOT MEASURED (no SMS install dir on the source site)' }
+                $p = Join-Path $d 'Logs\distmgr.log'
+                if (-not (Test-Path $p)) { return 'NOT MEASURED (no distmgr.log on the source site)' }
+                $t = @(Get-Content $p -Tail 4000 -ErrorAction SilentlyContinue)
+                if ($t.Count -eq 0) { return 'NOT MEASURED (source distmgr.log read returned nothing)' }
+                $hits = @($t | Where-Object { $_ -match 'is not an active site' -and $_ -match [regex]::Escape("$H") })
+                if ($hits.Count -eq 0) { return "no 'not an active site' drop naming $H in the last $($t.Count) lines" }
+                $last = (("$($hits[-1])" -replace '\s+\$\$<SMS_DISTRIBUTION_MANAGER>.*', '')).Trim()
+                return "$($hits.Count) x 'is not an active site, ignore it' naming $H -- last: $last"
+            } -ErrorAction Stop
+        }
+        catch { return "NOT MEASURED (could not read the source site's distmgr.log: $($_.Exception.Message))" }
+    }
+
+    # Second, INDEPENDENT wake path, run on a deliberately DIFFERENT cadence (8 min vs the
+    # row's 5) so the next build can attribute which one actually moved the parent: compare
+    # these [wake-ROW]/[wake-FILE] stamps against the wake times in the pulled
+    # <CAS>-Phase8-*-ClientPkgPrestage-ParentCAS-distmgr.log. They coincide only every 40 min.
+    #
+    # distmgr's wake handle is FindFirstChangeNotification(sDistMgrInbox, FALSE, FILE_NOTIFY_
+    # CHANGE_FILE_NAME | ...), so ANY file created in distmgr.box wakes it -- but only the top
+    # directory (bWatchSubtree = FALSE). Choosing an extension no enumerator matches is what
+    # makes this safe: distmgr.box itself is only ever enumerated for *.STS, *.MNT, *.PXY,
+    # *.TRN, *.NOT, *.CF?, *.CLM, *.DP?, *.CER*, *.DPU and *.DSU. The "*.*" sweep that deletes
+    # unrecognised files ('Unknown package replication file ... delete it') runs against
+    # SMS_INBOX_DISTMGR_INCOMING = distmgr.box\incoming, a SUBdirectory we must not touch.
+    # .MEMLABS matches none of those, so nothing parses or deletes it -- we clean it up here.
+    $pokeParentDistmgrFile = {
+        if (-not $parentFqdn -or -not $parentSite) {
+            Write-DscStatus "Client pkg coverage: [wake-FILE] skipped -- parent site unknown (fqdn='$parentFqdn' site='$parentSite')."
+            return $false
+        }
+        # SMS_<sitecode> is the site server's own install-dir share (the CAS reads package
+        # sources over it: '...from source \\<cas>\SMS_CS1\Client').
+        $wakeFile = "\\$parentFqdn\SMS_$parentSite\inboxes\distmgr.box\memlabs-wake-$([guid]::NewGuid().ToString('N')).MEMLABS"
+        try {
+            # .NET, not Set-Content/Remove-Item: this runs under the CMSite PSDrive, where a
+            # path starting with '\' is rooted on the CURRENT drive, so the cmdlets resolve to
+            # the CM provider and throw 'Cannot use interface. The IContentCmdletProvider
+            # interface is not implemented by this provider.' -- which is what happened on
+            # every poke of every run until now.
+            [System.IO.File]::WriteAllText($wakeFile, 'memlabs distmgr wake')
+            Write-DscStatus "Client pkg coverage: [wake-FILE] created a distmgr.box change on parent site $parentSite ($parentFqdn) to wake its distmgr for $PackageID."
+            return $true
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: [wake-FILE] could not write to $parentFqdn distmgr.box -- $($_.Exception.Message). The parent's own timer still governs the send."
+            return $false
+        }
+        finally {
+            # Leaving it would be litter no ConfigMgr component ever collects.
+            try { [System.IO.File]::Delete($wakeFile) } catch { }
+        }
+    }
+    $coverageStart = Get-Date
+    $coverageDeadline = $coverageStart.AddMinutes($(if ($extendedCoverageWait) { $contentPendingWaitMinutes } else { $normalWaitMinutes }))
+    Set-MemLabsClientPackageProgress -Stage 'coverage' -DeadlineUtc $coverageDeadline -Message 'Polling client-package coverage'
+    $pkgSourceBumped = $false
+    $coverageExtendedForRepair = $false
+    $repairExtraMinutes = 25
+    # Two full arm cycles (the loop flips RefreshNow every 5 min) with no state change at all.
+    # Sized against the budget, not picked: the secondary path runs on the 45-minute deadline and
+    # a re-armed send was measured landing ~20 min after it is armed, so firing at 10 leaves 35 --
+    # enough for the send plus the $repairExtraMinutes extension, and long enough that a
+    # distribution merely in flight (InstallPending is skipped outright) is never cut into.
+    $unownedSendMinutes = 10
+    $lastWedgeCheck = $null
+    $lastCoverageTimelineCapture = $null
+    $lastCoverageNodeCapture = $null
+    $lastCoverageFingerprint = ''
+    $lastCoverageMemoryReclaim = Get-Date
+    $optionalGraceStart = $null
+    $coverageExitReason = ''
+    $try = 0
+    while ((Get-Date) -lt $coverageDeadline) {
+        $try++
+        # A wedge that appears mid-wait blocks every send for the rest of the phase, and the
+        # check at phase start cannot see one that does not exist yet. Rate-limited because it
+        # tails 4000 lines; the $exeUpMin > 20 guard inside makes a restart loop impossible,
+        # since a restart resets uptime to zero.
+        if (-not $lastWedgeCheck -or ((Get-Date) - $lastWedgeCheck).TotalMinutes -ge 2) {
+            $lastWedgeCheck = Get-Date
+            if (& $clearStuckDistmgrWedge "coverage wait, try $try") {
+                $lastWedgeCheck = Get-Date
+                $null = & $writeCoverageSnapshot -Trigger 'after-distmgr-wedge-repair' `
+                    -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+                    -IncludeNodeState $true
+            }
+        }
+        # Is the client package content present at THIS site yet? StoredPkgVersion=0
+        # means it is still replicating down from a parent/CAS site.
+        $storedVer = 0
+        $currentPackageSourceVersion = 0
+        try {
+            $sp = Get-MemLabsProjectedCimRows -Namespace $ns `
+                -ClassName SMS_Package -Filter "PackageID='$PackageID'" `
+                -Property @('StoredPkgVersion', 'SourceVersion') |
+                Select-Object -First 1
+            if ($sp) {
+                $storedVer = [int]$sp.StoredPkgVersion
+                $currentPackageSourceVersion = [int]$sp.SourceVersion
+            }
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: provider state for $PackageID is unreadable; refusing to infer missing content. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
+            return
+        }
+        $contentPendingFromParent = ($storedVer -lt 1)
+        if ($contentPendingFromParent -and -not $extendedCoverageWait) {
+            $extendedCoverageWait = $true
+            # Extend from the ORIGINAL wait start, not from discovery time. A
+            # slow WMI call must not silently turn a 45-minute promise into a
+            # try-count whose wall-clock duration is unknowable.
+            $coverageDeadline = $coverageStart.AddMinutes($contentPendingWaitMinutes)
+            Set-MemLabsClientPackageProgress -DeadlineUtc $coverageDeadline
+            Write-DscStatus "Client pkg coverage: client package content has not replicated down to site $SiteCode yet (StoredPkgVersion=0; source is a parent/CAS site). Waiting for the parent to send content until the ${contentPendingWaitMinutes}-minute deadline and NOT tearing down the DP targeting that signals it."
+        }
+        # Only the parent can start this send, and only after something wakes its distmgr.
+        if ($contentPendingFromParent -and (-not $lastParentPoke -or ((Get-Date) - $lastParentPoke).TotalMinutes -ge 5)) {
+            $null = & $pokeParentDistmgr
+            $lastParentPoke = Get-Date
+        }
+        if ($contentPendingFromParent -and (-not $lastParentFilePoke -or ((Get-Date) - $lastParentFilePoke).TotalMinutes -ge 8)) {
+            $null = & $pokeParentDistmgrFile
+            $lastParentFilePoke = Get-Date
+        }
+        $state = @{}
+        $stateVer = @{}
+        try {
+            foreach ($r in @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                    -ClassName SMS_PackageStatusDistPointsSummarizer `
+                    -Filter "PackageID='$PackageID'" `
+                    -Property @('ServerNALPath', 'State', 'SourceVersion'))) {
+                $f = & $fqdnOf $r.ServerNALPath
+                if ($f) {
+                    $state[$f.ToUpper()] = [int]$r.State
+                    $stateVer[$f.ToUpper()] = "$($r.SourceVersion)"
+                }
+            }
+        }
+        catch {
+            Write-DscStatus "Client pkg coverage: DP summarizer state for $PackageID is unreadable; refusing remediation from unknown state. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
+            return
+        }
+        $notInstalled = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
+        $coverageFingerprint = "$storedVer|" + (@($bgDpFqdns | Sort-Object | ForEach-Object {
+                    $stateKey = $_.ToUpper()
+                    "$_=$(if ($state.ContainsKey($stateKey)) { $state[$stateKey] } else { -1 })"
+                }) -join ';')
+        if ($notInstalled.Count -eq 0) {
+            $coverageExitReason = 'Installed'
+            $null = & $writeCoverageSnapshot -Trigger 'content-installed' `
+                -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+                -IncludeNodeState $false
+            Write-DscStatus "Client package is Installed on all $($bgDpFqdns.Count) boundary-group DP(s)."
+            break
+        }
+        $coveragePeriodicSnapshotDue = (-not $lastCoverageTimelineCapture -or
+            ((Get-Date) - $lastCoverageTimelineCapture).TotalMinutes -ge 5)
+        if ($coveragePeriodicSnapshotDue -or
+            $coverageFingerprint -ne $lastCoverageFingerprint) {
+            $coverageStateChanged = $lastCoverageFingerprint -and
+                $coverageFingerprint -ne $lastCoverageFingerprint
+            $snapshotTrigger = if ($coverageStateChanged) {
+                'content-state-change'
+            }
+            else {
+                'content-wait'
+            }
+            $coverageNodeSnapshotDue = -not $lastCoverageNodeCapture -or
+                ((Get-Date) - $lastCoverageNodeCapture).TotalMinutes -ge 20
+            $includeCoverageNodeState = $coverageStateChanged -or $coverageNodeSnapshotDue
+            $null = & $writeCoverageSnapshot -Trigger $snapshotTrigger `
+                -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+                -IncludeNodeState $includeCoverageNodeState
+            if ($includeCoverageNodeState) { $lastCoverageNodeCapture = Get-Date }
+            $lastCoverageTimelineCapture = Get-Date
+            $lastCoverageFingerprint = $coverageFingerprint
+        }
+        if (((Get-Date) - $lastCoverageMemoryReclaim).TotalMinutes -ge 15) {
+            $memoryProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+            $beforeManagedMb = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+            $beforeWorkingMb = if ($memoryProcess) { [math]::Round($memoryProcess.WorkingSet64 / 1MB, 1) } else { -1 }
+            $beforePrivateMb = if ($memoryProcess) { [math]::Round($memoryProcess.PrivateMemorySize64 / 1MB, 1) } else { -1 }
+            if ($memoryProcess) { $memoryProcess.Dispose() }
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            [GC]::Collect()
+            $afterManagedMb = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+            Write-DscStatus "Client pkg coverage memory checkpoint: pid=$PID working=${beforeWorkingMb}MB private=${beforePrivateMb}MB managed=${beforeManagedMb}MB->$afterManagedMb MB after disposing CIM rows and forcing finalizers." -NoStatus
+            $lastCoverageMemoryReclaim = Get-Date
+        }
+        # Waiting on a DP nothing depends on is free while a DP something DOES depend on is
+        # still outstanding -- same poll, same wall clock. Only once the required set is done
+        # does the wait become marginal cost, so that is when the grace clock starts.
+        $requiredOutstanding = @($notInstalled | Where-Object { $_ -notin $optionalDpFqdns })
+        if ($optionalDpFqdns.Count -gt 0 -and $requiredOutstanding.Count -eq 0) {
+            if (-not $optionalGraceStart) {
+                $optionalGraceStart = Get-Date
+                Write-DscStatus "Client pkg coverage: every DP with clients depending on it is Installed; giving $($notInstalled -join ', ') up to $optionalGraceMinutes more minute(s) before moving on (no client is blocked by them)."
+            }
+            elseif (((Get-Date) - $optionalGraceStart).TotalMinutes -ge $optionalGraceMinutes) {
+                $coverageExitReason = 'OptionalGrace'
+                Write-DscStatus "Client pkg coverage: optional ${optionalGraceMinutes}-minute grace complete -- $($notInstalled -join ', ') still not Installed in the site summarizer, but no push client is assigned to them and every required boundary-group DP holds the content. Verifying physical content before deciding whether diagnostics are needed."
+                break
+            }
+        }
+        foreach ($dp in $notInstalled) {
+            $u = $dp.ToUpper()
+            $hasRow = $state.ContainsKey($u)
+            $st = if ($hasRow) { $state[$u] } else { -1 }
+            $stName = if ($stateName.ContainsKey("$st")) { $stateName["$st"] } else { "State$st" }
+            # Clock for $isSendUnowned. It only advances while this site already holds the content,
+            # so a parent that is merely slow to replicate down can never be read as an unowned send.
+            if ($contentPendingFromParent) { $dpUnownedSince.Remove($u) }
+            elseif (-not $dpUnownedSince.ContainsKey($u)) { $dpUnownedSince[$u] = Get-Date }
+            # The SMS_DistributionPoint (PkgServers) row is the one thing that matters: it
+            # tells distmgr to send the content AND it is what distmgr checks before it will
+            # accept the DP's status file back. With no row the copy still runs to completion
+            # but the result is discarded -- "Will reject STA for DP ... as it does not exist
+            # in the PkgServers table" (STATMSG 2354) -- leaving the content physically on the
+            # DP and permanently un-Installed in the site DB. Restore a missing row on EVERY
+            # iteration; the summarizer is not consulted because it lags the targeting table.
+            try {
+                $hasTgt = @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                        -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
+                        -Property @('ServerNALPath') |
+                        Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }).Count -gt 0
+            }
+            catch {
+                Write-DscStatus "Client pkg coverage: targeting rows for $PackageID are unreadable; refusing to create or refresh targeting from unknown state. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
+                return
+            }
+            if (-not $hasTgt) {
+                # Distributing to a DP that does not exist yet cannot succeed; hold rather than
+                # throw once per iteration. The DP stays in $notInstalled, so the phase keeps
+                # waiting on it and distributes the moment the role registers.
+                if (-not (& $isDpRoleLive $dp)) {
+                    if (-not $dpPendingSince.ContainsKey($u)) { $dpPendingSince[$u] = Get-Date }
+                    if (-not $dpWaitLogged.ContainsKey($u) -or ((Get-Date) - $dpWaitLogged[$u]).TotalMinutes -ge 5) {
+                        $dpWaitLogged[$u] = Get-Date
+                        $pendMin = [int](((Get-Date) - $dpPendingSince[$u]).TotalMinutes)
+                        Write-DscStatus "Client pkg coverage: DP '$dp' is declared installDP but its DP role has not registered yet (${pendMin}m so far; $(& $dpRoleSourceCounts)). Holding the distribute -- the DP stays in scope, so this phase cannot exit declaring success without it. InstallSecondarySiteServer.ps1 already proved the site install itself finished, so what is outstanding is role registration, not setup."
+                    }
+                    continue
+                }
+                if ($dpPendingSince.ContainsKey($u)) {
+                    Write-DscStatus "Client pkg coverage: DP '$dp' registered its DP role after $([int](((Get-Date) - $dpPendingSince[$u]).TotalMinutes))m of waiting -- distributing now."
+                    $dpPendingSince.Remove($u)
+                }
+                try {
+                    $null = & $writeCoverageSnapshot -Trigger "before-targeting-create:$dp" `
+                        -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                        -IncludeNodeState $true
+                    Start-CMContentDistribution -PackageId $PackageID -DistributionPointName $dp -ErrorAction Stop
+                    $lastArm[$u] = Get-Date
+                    Write-DscStatus "Client pkg coverage: DP '$dp' had NO targeting row (PkgServers) -> distributed to re-establish it [try $try]"
+                    $null = & $writeCoverageSnapshot -Trigger "after-targeting-create:$dp" `
+                        -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                        -IncludeNodeState $true
+                    if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) }; $lastParentPoke = $null }
+                }
+                catch { Write-DscStatus "Client pkg coverage: re-establishing the targeting row for DP '$dp' failed: $($_.Exception.Message)" }
+                continue
+            }
+            # InstallPending (1) is a distribution actually in flight -- leave it alone.
+            if ($st -eq 1) { continue }
+            # ContentValidating with a current-version PkgLib payload is no longer a
+            # transfer problem. Repeated RefreshNow writes reset/requeue the same
+            # validation and can keep the summarizer in state 7 indefinitely. Recheck
+            # the physical proof every five minutes, but leave ConfigMgr's native
+            # validation untouched while the current payload remains present.
+            if ($st -eq 7 -and -not $contentPendingFromParent -and
+                $currentPackageSourceVersion -gt 0 -and
+                $stateVer.ContainsKey($u) -and
+                "$($stateVer[$u])" -eq "$currentPackageSourceVersion") {
+                $lastProof = if ($contentCurrentCheckedAt.ContainsKey($u)) {
+                    $contentCurrentCheckedAt[$u]
+                }
+                else {
+                    $null
+                }
+                if ($lastProof -and ((Get-Date) - $lastProof).TotalMinutes -lt 5) {
+                    continue
+                }
+                $contentCurrentCheckedAt[$u] = Get-Date
+                if ((& $dpHasPackageContent $dp) -eq $true) {
+                    if (-not $contentCurrentLogged.ContainsKey($u)) {
+                        Write-DscStatus "Client pkg coverage: DP '$dp' is ContentValidating but physically holds $PackageID at current SourceVersion=$currentPackageSourceVersion. Leaving RefreshNow untouched so native validation can publish its acknowledgement."
+                        $contentCurrentLogged[$u] = $true
+                    }
+                    continue
+                }
+            }
+            # Re-arm at most every 5 minutes. RefreshNow is the ONLY remediation, by design.
+            #
+            # This runs while content is still pending from the parent too. RefreshNow does
+            # not poke the LOCAL distmgr into producing content it does not have -- it writes
+            # PkgServers, which replicates to the parent's PkgServers_G and is the one signal
+            # that wakes the PARENT's distmgr to send the package down. Arming once is not
+            # enough: cstest2 armed at 20:50, the CAS provably had the delta by 20:51
+            # (RefreshTrigger=1/UpdateMask=4/Action=2) and still sent nothing for the next 50
+            # minutes, while a fresh target refresh in the 08-09 run had the CAS scheduling
+            # the send immediately. Space those out further, because unlike the local case
+            # this can land on an inter-site transfer that is already running.
+            # Remove-CMContentDistribution (the old "clean copy through the wedge" step)
+            # deletes the PkgServers row and stranded the package every time it fired --
+            # most recently 7s after the CAS content finally landed, killing a distribution
+            # that had already reached the DP. Restarting SMS_EXECUTIVE is equally
+            # destructive (it aborts content import / status publication). ConfigMgr's own
+            # retry backoff (STATMSG 2326: 30 min, 100 retries) outlives this whole gate, so
+            # flipping RefreshNow is what makes distmgr re-process the package now.
+            $armMinutes = if ($contentPendingFromParent) { 10 } else { 5 }
+            $armedAt = if ($lastArm.ContainsKey($u)) { $lastArm[$u] } else { $null }
+            if ($armedAt -and ((Get-Date) - $armedAt).TotalMinutes -lt $armMinutes) { continue }
+            try {
+                $null = & $writeCoverageSnapshot -Trigger "before-refresh-now:$dp" `
+                    -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                    -IncludeNodeState $true
+                & $redistOrDistribute $dp | Out-Null
+                $lastArm[$u] = Get-Date
+                if ($contentPendingFromParent) { Write-DscStatus "Client pkg coverage: DP '$dp' is $stName and site $SiteCode still has no content -> re-armed the targeting with RefreshNow so the parent sees a fresh change and sends the package [try $try]" }
+                elseif ($armedAt) { Write-DscStatus "Client pkg coverage: DP '$dp' still $stName -> re-armed with RefreshNow so distmgr retries now instead of waiting out its backoff [try $try]" }
+                else { Write-DscStatus "Client pkg coverage: DP '$dp' state=$stName -> redistributed (RefreshNow) [try $try]" }
+                $null = & $writeCoverageSnapshot -Trigger "after-refresh-now:$dp" `
+                    -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                    -IncludeNodeState $true
+                # The CAS is gated on DistributionPoints, which hman builds from site control data.
+                # Clearing the poke stamp re-wakes the parent on the NEXT iteration (~31s): the wake at
+                # the top of this one fired ~19s BEFORE hman wrote the row, so distmgr looked while the
+                # join still failed and we then waited out the full 5-minute wake interval.
+                # CADENCE VERIFIED 2026-08-15 -- push -> next [wake-ROW] went 5m05s (PS3, before this)
+                # to 31s (PS1, after). The OUTCOME (16m54s -> 8m12s) is n=1 vs n=1 and the CAS half of
+                # the chain was not collected that run, so do not bank it as the cause.
+                if ($contentPendingFromParent) { foreach ($g in $drsPushGroups) { [void](& $pushDrsChangesToParent $g) }; $lastParentPoke = $null }
+                # A secondary-site DP is fed by the package's SOURCE site, not by this Primary:
+                # only the source site runs ReplicatePackage for a package it owns. Ask that site
+                # to mark this target site as owing a resend. Same cadence as the arm.
+                #
+                # But STOP once the bump has been attempted, because past that point the poke is
+                # actively harmful. spAoRetryPkgDistribution sets PkgStatus(target).Status=0, so
+                # IsPkgSendingNeeded returns TRUE and the source site enters ReplicatePackage --
+                # where, with fan-out on, IsClosestSite hands the transfer to the closest site that
+                # already holds a valid PCK and NO minijob is created (distmgr.cpp:14867). The
+                # PKG_STATUS_SENT write at distmgr.cpp:14900 sits OUTSIDE that guard, so the target
+                # is recorded as SENT with a fresh UpdateTime having been sent nothing. The closest
+                # site then declines too: IsPkgSendingNeeded returns FALSE for a SENT row less than
+                # a day old (distmgr.cpp:23219). ConfigMgr recovers on its own once that row ages
+                # past 24h -- and every extra poke resets the clock, turning a 24-hour stall into an
+                # indefinite one. Measured 2026-08-24: PkgStatus_G(SEC) UpdateTime landed 19s after
+                # our poke, nine times.
+                $secDpVm = $vmByHost[(("$dp" -split '\.')[0].ToUpper())]
+                if ($secDpVm -and "$($secDpVm.role)" -eq 'Secondary' -and "$($secDpVm.siteCode)") {
+                    # The repair DECIDES FIRST, before the poke below. spAoRetryPkgDistribution sets
+                    # PkgStatus(target).Status = 0, which erases the very PKG_STATUS_SENT row that
+                    # $isSentButAbsent exists to read. Poking first made that signal unobservable and
+                    # the trigger could never fire: observed 2026-08-24 12:48 on burnin, poke at :22
+                    # and the predicate read Status=0 a moment later, so no repair ran on a lab that
+                    # was in exactly the state it was written for.
+                    # Repair, in this order: a fresh process clears the cancel flag, THEN the bump
+                    # re-arms the send distmgr abandoned. Bumping first just re-snapshots into the
+                    # stuck flag and aborts again, burning the whole re-send for nothing.
+                    if (-not $pkgSourceBumped) {
+                        # Two independent ways for the send to be dead, sharing one repair. The abort
+                        # signature is checked first because it is the only one whose cancel flag has
+                        # to be cleared before the bump; if it does not hold, the flag is provably not
+                        # blocking (an abort with a later send is not a wedge) and the bump can run
+                        # on its own.
+                        $abortStranded = [bool](& $isPkgStrandedToSite "$($secDpVm.siteCode)" $dp)
+                        $sendUnowned = $false
+                        if (-not $abortStranded) {
+                            # DB-confirmed first: it needs no elapsed time, so a re-run against an
+                            # already-stuck lab repairs on iteration 1. The timer below is the
+                            # fallback for when PkgStatus cannot be read at all.
+                            $sendUnowned = [bool](& $isSentButAbsent "$($secDpVm.siteCode)" $dp)
+                            if (-not $sendUnowned) { $sendUnowned = [bool](& $isSendUnowned $dp $dpUnownedSince[$u]) }
+                        }
+                        # Only a bump that actually RAN earns the deadline extension; a consumed
+                        # one-shot after a failed restart must not buy runway for a send nobody armed.
+                        $bumpRan = $false
+                        if ($abortStranded) {
+                            Write-DscStatus "Client pkg coverage: [wedge-repair] $PackageID was ABANDONED to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- the content is NOT in that DP's library and the send is not armed. distmgr.cpp:17252 skips its auto-recovery for a 0x800704D3 abort, so StoredPkgPath is never cleared and every later pass exits with nothing to do."
+                            $null = & $writeCoverageSnapshot -Trigger "before-abort-repair:$dp" `
+                                -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                                -IncludeNodeState $true
+                            if (& $restartExecOnce) {
+                                $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
+                                $bumpRan = $pkgSourceBumped
+                            }
+                            else { $pkgSourceBumped = $true }
+                        }
+                        elseif ($sendUnowned) {
+                            $unownedWhy = "site $SiteCode has held the content for $($strandedWhy['mins'])m, the DP's content library still does not have the package, and no error was logged because distmgr logs NOTHING when it declines to send"
+                            if ("$($strandedWhy['sig'])" -eq 'sent-but-absent') {
+                                $unownedWhy = "the source site recorded this package as SENT to that site at $($strandedWhy['sentAt']) UTC while the DP's content library still does not have it -- those two cannot both be true, so no waiting is needed to tell them apart"
+                            }
+                            Write-DscStatus "Client pkg coverage: [wedge-repair] nobody owes the send of $PackageID to site $($secDpVm.siteCode) [signature=$($strandedWhy['sig'])] -- $unownedWhy. The source site's fan-out handed the transfer to the closest site holding a valid PCK without creating a minijob, then recorded the target as SENT anyway, and a SENT row under two days old stops every site from sending. Bumping the source version is what breaks that: it sets PKG_UPDATE_SOURCE, which bypasses the SENT check outright, and it invalidates the closest site's stale PCK so the source site sends it itself." -Warning
+                            $null = & $writeCoverageSnapshot -Trigger "before-unowned-send-repair:$dp" `
+                                -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                                -IncludeNodeState $true
+                            # No restart here on purpose. $isPkgStrandedToSite just returned false,
+                            # which for this DP means there is no abort left un-followed by a send --
+                            # the cancel flag is not what is blocking, so a restart would only spend
+                            # minutes of the coverage budget and re-import content for nothing.
+                            $pkgSourceBumped = & $bumpPkgSourceVersion "$($secDpVm.siteCode)"
+                            $bumpRan = $pkgSourceBumped
+                        }
+                        # A repair needs runway the original budget does not have: measured
+                        # 2026-08-23, content reached the secondary ~20 min after a fresh
+                        # process. Once only, so this can never become an unbounded wait.
+                        if ($bumpRan -and -not $coverageExtendedForRepair) {
+                            $coverageExtendedForRepair = $true
+                            # Take the LATER of the two. This assigned now+25m outright, which
+                            # SHORTENS the budget whenever more than that remains -- burnin
+                            # 2026-08-24 went 2103s -> 1499s while logging "extended by 25 min".
+                            $repairDeadline = (Get-Date).AddMinutes($repairExtraMinutes)
+                            if ($repairDeadline -gt $coverageDeadline) {
+                                $coverageDeadline = $repairDeadline
+                                Set-MemLabsClientPackageProgress -DeadlineUtc $coverageDeadline
+                                Write-DscStatus "Client pkg coverage: [wedge-repair] extended the coverage deadline to $repairExtraMinutes min from now (once) so the re-armed send has time to land."
+                            }
+                            else {
+                                Write-DscStatus "Client pkg coverage: [wedge-repair] left the coverage deadline alone -- $([int](($coverageDeadline - (Get-Date)).TotalMinutes))m already remains, which is more than the $repairExtraMinutes min a re-armed send needs."
+                            }
+                        }
+                        if ($abortStranded -or $sendUnowned) {
+                            $null = & $writeCoverageSnapshot -Trigger "after-source-version-repair:$dp" `
+                                -DistributionPoints @($dp) -ReplicationSites @($secLinkSites.Keys) `
+                                -IncludeNodeState $true
+                        }
+                    }
+                    # Only now, and only if no repair fired: the bump supersedes the poke, and past
+                    # that point the poke is actively harmful (see the note above).
+                    if (-not $pkgSourceBumped) { [void](& $retryPkgToSite "$($secDpVm.siteCode)") }
+                }
+            }
+            catch { Write-DscStatus "Client pkg coverage: remediation on DP '$dp' failed: $($_.Exception.Message)" }
+        }
+        $waitDesc = @($notInstalled | ForEach-Object {
+                $uw = $_.ToUpper()
+                $sw = if (-not $state.ContainsKey($uw)) { 'no-row' } elseif ($stateName.ContainsKey("$($state[$uw])")) { $stateName["$($state[$uw])"] } else { "State$($state[$uw])" }
+                "$_ ($sw)"
+            })
+        $siteContentState = if ($contentPendingFromParent) { 'PENDING FROM PARENT' } else { 'LOCAL' }
+            $elapsedSec = [math]::Round(((Get-Date) - $coverageStart).TotalSeconds)
+            $remainingSec = [math]::Max(0, [math]::Floor(($coverageDeadline - (Get-Date)).TotalSeconds))
+            Write-DscStatus "Client pkg coverage: waiting for client package on: $($waitDesc -join ', '); site $SiteCode content=$siteContentState (StoredPkgVersion=$storedVer) [attempt $try, elapsed=${elapsedSec}s, deadlineRemaining=${remainingSec}s]"
+            if ($remainingSec -le 0) { break }
+            Start-Sleep -Seconds ([int][math]::Min(30, [math]::Max(1, $remainingSec)))
+    }
+
+    # Final state + rich DP-side diagnostics if anything is still not Installed --
+    # so a genuine wedge (content never replicated, distmgr stuck, PFX decrypt,
+    # inter-site bundle failure, version skew) is captured in the phase log instead
+    # of just failing later in Phase 11.
+    #
+    # Package's CURRENT source version: a DP pinned at an OLDER version is a
+    # content-UPDATE/replication problem, not "never distributed" (observed: the
+    # pull DP had v3 while the site server processed v1). Capture it to flag skew.
+    Set-MemLabsClientPackageProgress -Stage 'final-state' -DeadlineUtc ([DateTime]::UtcNow.AddMinutes(3)) -Message 'Verifying final coverage and collecting its snapshot'
+    $pkgSourceVersion = $null
+    try {
+        $pkgSourceVersion = (Get-MemLabsProjectedCimRows -Namespace $ns `
+                -ClassName SMS_Package -Filter "PackageID='$PackageID'" `
+                -Property @('SourceVersion') |
+                Select-Object -First 1).SourceVersion
+    }
+    catch {
+        Write-DscStatus "Client pkg coverage: final package version is unreadable. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
+        return
+    }
+
+    $state = @{}; $stateVer = @{}
+    try {
+        foreach ($r in @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                -ClassName SMS_PackageStatusDistPointsSummarizer `
+                -Filter "PackageID='$PackageID'" `
+                -Property @('ServerNALPath', 'State', 'SourceVersion'))) {
+            $f = & $fqdnOf $r.ServerNALPath
+            if ($f) {
+                $state[$f.ToUpper()] = [int]$r.State
+                $stateVer[$f.ToUpper()] = "$($r.SourceVersion)"
+            }
+        }
+    }
+    catch {
+        Write-DscStatus "Client pkg coverage: final DP summarizer state is unreadable. CIM error [$($_.FullyQualifiedErrorId)]: $($_.Exception.Message)" -Failure
+        return
+    }
+    if (-not $coverageExitReason) { $coverageExitReason = 'Deadline' }
+    $stillBad = @($bgDpFqdns | Where-Object { -not ($state.ContainsKey($_.ToUpper()) -and $state[$_.ToUpper()] -eq 0) })
+    $requiredBad = @($stillBad | Where-Object { $_ -notin $optionalDpFqdns })
+    Set-MemLabsClientPackageProgress -Outcome $(if ($requiredBad.Count -eq 0) { 'Covered' } else { 'Incomplete' })
+    $finalSnapshotTrigger = if ($stillBad.Count -eq 0) {
+        'coverage-complete'
+    }
+    elseif ($coverageExitReason -eq 'OptionalGrace') {
+        'optional-grace-complete'
+    }
+    else {
+        'coverage-deadline'
+    }
+    $null = & $writeCoverageSnapshot -Trigger $finalSnapshotTrigger `
+        -DistributionPoints $bgDpFqdns -ReplicationSites @($secLinkSites.Keys) `
+        -IncludeNodeState:($stillBad.Count -gt 0) -ForceWrite $true
+
+    $optionalStatusLag = [System.Collections.Generic.List[string]]::new()
+    $needsDiagnostics = [System.Collections.Generic.List[string]]::new()
+    foreach ($dp in $stillBad) {
+        if ($dp -notin $optionalDpFqdns) {
+            $needsDiagnostics.Add($dp)
+            continue
+        }
+        $dpKey = $dp.ToUpper()
+        $physicalContent = & $dpHasPackageContent $dp
+        $dpReportedVersion = if ($stateVer.ContainsKey($dpKey)) { "$($stateVer[$dpKey])" } else { '' }
+        $versionMatches = $dpReportedVersion -and $pkgSourceVersion -and $dpReportedVersion -eq "$pkgSourceVersion"
+        if ($physicalContent -eq $true -and $versionMatches) {
+            $optionalStatusLag.Add("$dp (DPSourceVersion=$dpReportedVersion)")
+        }
+        else {
+            $needsDiagnostics.Add($dp)
+        }
+    }
+    if ($optionalStatusLag.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: optional DP(s) $($optionalStatusLag -join ', ') physically contain $PackageID in PkgLib at the current package version; only the site summarizer acknowledgement is lagging. No client depends on these DPs, so this is informational. Phase 11 validates each Secondary's implicit MP/DP roles."
+    }
+    $diagnosticTargets = $needsDiagnostics.ToArray()
+
+    if ($diagnosticTargets.Count -gt 0) {
+        $coverageElapsedSec = [math]::Round(((Get-Date) - $coverageStart).TotalSeconds)
+        if ($coverageExitReason -eq 'OptionalGrace') {
+            Write-DscStatus "Client pkg coverage: optional grace ended, but final verification could not prove current physical content plus matching DP source version on: $($diagnosticTargets -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics because safe summarizer lag is not proven." -Warning
+        }
+        else {
+            Write-DscStatus "Client pkg coverage: STILL not Installed at the wall-clock deadline after ${coverageElapsedSec}s and $try attempt(s) on: $($diagnosticTargets -join ', ') [pkg $PackageID SourceVersion=$pkgSourceVersion]. Capturing DP-side diagnostics..." -Warning
+        }
+        Set-MemLabsClientPackageProgress -Stage 'legacy-diagnostics' -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(60)) -Message 'Collecting bounded post-deadline DP diagnostics'
+        foreach ($dp in $diagnosticTargets) {
+            $dpHost = ("$dp" -split '\.')[0]
+            $u = $dp.ToUpper()
+            $diagVm = $vmByHost[$dpHost.ToUpper()]
+            if ($diagVm -and "$($diagVm.role)" -eq 'Secondary') {
+                Write-DscStatus "Client pkg coverage: [source-drop] $dpHost -- $(& $sourceDroppedAsInactive $dpHost)"
+                Write-DscStatus "Client pkg coverage: [source-drop] a drop at the SOURCE is a DIFFERENT failure from the 0x800704D3 bundle wedge -- nothing was ever sent, so there is no local abort to find. It clears once the child site reads Sites.Status=1 (ACTIVE) and the source re-enumerates its package servers."
+            }
+            $sInfo = if ($state.ContainsKey($u)) { "State=$($stateName["$($state[$u])"]) DPSourceVersion=$($stateVer[$u]) vs pkg=$pkgSourceVersion" } else { "no summarizer row" }
+            if (-not $state.ContainsKey($u)) {
+                # "never targeted, or not yet reported" was a coin toss, and the two halves
+                # need opposite fixes. The TARGETING table (SMS_DistributionPoint) answers it
+                # outright: a row means distribution WAS requested and only the summarizer is
+                # missing/lagging (with PkgLib holding the .INI that means the content landed
+                # but the site DB never recorded it -- so the MP hands clients no DP location
+                # and ccmsetup wedges in GetDPLocations, which is exactly what CS4 did). No row
+                # means the (re)distribute never took and the repair ladder is the problem.
+                try {
+                    $tgt = @(Get-MemLabsProjectedCimRows -Namespace $ns `
+                            -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageID'" `
+                            -Property @('ServerNALPath', 'SiteCode', 'RefreshNow') |
+                            Where-Object { (& $fqdnOf $_.ServerNALPath) -ieq $dp }) | Select-Object -First 1
+                    if ($tgt) {
+                        $sInfo = "no summarizer row BUT targeting row EXISTS (SMS_DistributionPoint: SiteCode=$($tgt.SiteCode) RefreshNow=$($tgt.RefreshNow)) -> distribution WAS requested; the site DB just never got an Installed status back"
+                    }
+                    else {
+                        $sInfo = 'no summarizer row AND no targeting row (SMS_DistributionPoint) -> the (re)distribute never created a distribution for this DP'
+                    }
+                }
+                catch { $sInfo = "no summarizer row; targeting-row query failed: $($_.Exception.Message)" }
+            }
+            try {
+                $diag = Invoke-Command -ComputerName $dpHost -ArgumentList $PackageID -ErrorAction Stop -ScriptBlock {
+                    param($pkgId)
+                    # Tail-bounded, TARGETED CMTrace-log reader: last $n lines that match
+                    # $pat (unwrapped), so a busy log yields package-relevant lines instead
+                    # of unrelated trailing noise.
+                    $grab = {
+                        param($p, $n, $pat)
+                        if (-not (Test-Path $p)) { return "" }
+                        $hits = @(Get-Content $p -Tail 3000 -ErrorAction SilentlyContinue | Where-Object { $_ -match $pat } | Select-Object -Last $n)
+                        (@($hits | ForEach-Object { $m = [regex]::Match($_, '<!\[LOG\[(.*?)\]LOG\]!>'); if ($m.Success) { $m.Groups[1].Value } else { $_ } }) -join ' | ')
+                    }
+                    $o = [ordered]@{ PkgLib = ''; ContentLib = ''; Distmgr = ''; PkgXfer = ''; Despool = ''; Sender = ''; Exec = ''; DpProv = '' }
+                    # Resolve the ACTUAL content library root from the DP registry. For an
+                    # HA site the library is RELOCATED to a remote share (\\<FileServer>\...
+                    # via remoteContentLibVM), so the old hard-coded E:/D:/F:/C:\SCCMContentLib
+                    # probe gave a FALSE "PkgLib MISSING -> content never arrived" plus no
+                    # drive info. ContentLibraryPath is a UNC path on an HA site.
+                    $clRoot = $null; $clRemote = $false
+                    try {
+                        $clp = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath
+                        if ($clp) { $clRoot = "$clp"; $clRemote = ($clRoot -like '\\*') }
+                    } catch {}
+                    if (-not $clRoot) {
+                        foreach ($cl in @('E:\SCCMContentLib', 'D:\SCCMContentLib', 'F:\SCCMContentLib', 'C:\SCCMContentLib')) {
+                            if (Test-Path (Join-Path $cl 'PkgLib')) { $clRoot = $cl; break }
+                        }
+                    }
+                    if ($clRoot) {
+                        $pl = Join-Path $clRoot 'PkgLib'
+                        $reach = Test-Path $pl
+                        if ($reach) { $o.PkgLib = (@(Get-ChildItem $pl -Filter "$pkgId*.INI" -ErrorAction SilentlyContinue).Name) -join ',' }
+                        if ($clRemote) {
+                            $clHostName = ($clRoot -replace '^\\\\', '' -split '\\')[0]
+                            $o.ContentLib = "REMOTE content library '$clRoot' (HA remoteContentLibVM) host=$clHostName reachable=$reach"
+                        }
+                        else {
+                            try { $drv = Get-PSDrive -Name ($clRoot.Substring(0, 1)) -ErrorAction Stop; $o.ContentLib = "LOCAL content library '$clRoot' drive free=$([math]::Round($drv.Free / 1GB, 1))GB" } catch { $o.ContentLib = "LOCAL content library '$clRoot'" }
+                        }
+                    }
+                    $smsDir = $null
+                    foreach ($k in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                        try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch {}
+                        if ($smsDir) { break }
+                    }
+                    if ($smsDir) {
+                        $logs = Join-Path $smsDir 'Logs'
+                        # distmgr: package activity + inter-site bundle / cert-decrypt /
+                        # content-library-write (HA remote content lib) faults.
+                        $o.Distmgr = & $grab (Join-Path $logs 'distmgr.log') 8 "$pkgId|creating package bundle|0x800704d3|hasn.t arrived|Failed to decrypt|PFX|No content destination|CopyFileExW|Failed to add the file|TakeContentSnapshot"
+                        # PkgXferMgr: pull-DP + inter-site send failures (STATMSG 8211).
+                        $o.PkgXfer = & $grab (Join-Path $logs 'PkgXferMgr.log') 4 "$pkgId|8211|Failed|error|abort"
+                        # despool: the RECEIVING (child/secondary) side unpacking bundles.
+                        $o.Despool = & $grab (Join-Path $logs 'despool.log') 4 "$pkgId|bundle|0x800704d3|decrypt|instruction"
+                        # sender: the SENDING side inter-site transfer.
+                        $o.Sender = & $grab (Join-Path $logs 'sender.log') 3 "$pkgId|Error|0x8|failed|retry"
+                    }
+                    # smsdpprov.log -- the DP's OWN content-import + status-publication log,
+                    # and the ONLY one of these that exists on a remote DP (no SMS install dir
+                    # -> every grab above returns empty, which is why CS4-DPMP1's diagnostics
+                    # were blank). This is where "content is in PkgLib but the site never saw
+                    # an Installed row" is explained.
+                    try {
+                        $dpProvLog = $null
+                        foreach ($d in @('E:', 'D:', 'F:', 'C:')) {
+                            $cand = "$d\SMS_DP`$\sms\logs\smsdpprov.log"
+                            if (Test-Path $cand) { $dpProvLog = $cand; break }
+                        }
+                        if ($dpProvLog) {
+                            $o.DpProv = "$dpProvLog :: " + (& $grab $dpProvLog 10 "$pkgId|Failed|error|0x8|ContentLibrary|AddFile|CreateContent|signature|Import")
+                        }
+                        else {
+                            $o.DpProv = 'smsdpprov.log not found (SMS_DP$ share/log missing -> the DP role may not be fully installed on this server)'
+                        }
+                    }
+                    catch { $o.DpProv = "smsdpprov.log read threw: $($_.Exception.Message)" }
+                    # SMS_EXECUTIVE forensics: a 0x800704d3 bundle abort means this site's
+                    # executive/distmgr was STOPPED mid-build. Show when it last started and
+                    # how many SCM start/stop (event 7036) entries it logged in the last 2h --
+                    # a high count = a restart LOOP = the real root cause of the inter-site
+                    # abort (find + stop whatever keeps bouncing the service).
+                    try {
+                        $exe = Get-CimInstance Win32_Service -Filter "Name='SMS_EXECUTIVE'" -ErrorAction Stop
+                        $startedNote = ''
+                        if ($exe.ProcessId -gt 0) { $pp = Get-Process -Id $exe.ProcessId -ErrorAction SilentlyContinue; if ($pp) { $startedNote = " up since $($pp.StartTime.ToString('MM-dd HH:mm:ss'))" } }
+                        $recent = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 7036; StartTime = (Get-Date).AddHours(-2) } -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'SMS_EXECUTIVE' })
+                        $o.Exec = "State=$($exe.State)$startedNote; $($recent.Count) SCM start/stop (7036) events in last 2h"
+                    }
+                    catch {}
+                    # distmgr COMPONENT state (SMS_ComponentSummarizer): the service-level
+                    # 7036 check above CANNOT see a component that is RUNNING but WEDGED
+                    # (thread alive, but Status=Critical because every op is aborting).
+                    # Status: 0=OK, 1=Warning, 2=Critical.
+                    try {
+                        $scNs = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code'
+                        $dmc = Get-CimInstance -Namespace "root\SMS\site_$scNs" -ClassName SMS_ComponentSummarizer -Filter "ComponentName='SMS_DISTRIBUTION_MANAGER'" -ErrorAction Stop | Select-Object -First 1
+                        if ($dmc) { $o.Exec += "; distmgr component State=$($dmc.State) Status=$($dmc.Status)(0=OK/1=Warn/2=Critical)" }
+                    }
+                    catch {}
+                    return $o
+                }
+                $pkgLibNote = if ($diag.PkgLib) { "PkgLib HAS [$($diag.PkgLib)]" } elseif ($diag.ContentLib -match 'REMOTE') { "$PackageID not yet listed in the content library" } else { "PkgLib MISSING $PackageID -> content never arrived on this DP" }
+                Write-DscStatus "Client pkg coverage diag [$dp]: summarizer $sInfo ; $pkgLibNote ; $($diag.ContentLib)" -Warning
+                if ($diag.Distmgr) { Write-DscStatus "Client pkg coverage diag [$dp] distmgr: $($diag.Distmgr)" -Warning }
+                # Source-confirmed (distmgr.cpp CreatePackageBundle ->
+                # SetCancelFlag(&m_bShutdownRequest); the content library returns
+                # ERROR_REQUEST_ABORTED ONLY when that flag is set; m_bShutdownRequest is
+                # set ONLY when the distmgr thread is exiting): a 0x800704d3 on an inter-
+                # site bundle means the SENDING site's SMS_EXECUTIVE/distmgr was STOPPED or
+                # RESTARTED mid-build. This is NOT benign -- if it keeps happening,
+                # something keeps bouncing the sending site's executive; that restarter is
+                # the ROOT CAUSE to hunt (see the executive forensics line below).
+                if ($diag.Distmgr -match 'creating package bundle' -and $diag.Distmgr -match '0x800704d3') {
+                    Write-DscStatus "Client pkg coverage diag [$dp]: 0x800704d3 = ERROR_REQUEST_ABORTED -- the inter-site content bundle was aborted because the SENDING site's SMS_EXECUTIVE/distmgr was STOPPED/RESTARTED mid-build (source: distmgr's bundle cancel flag is the thread-exit m_bShutdownRequest). NOT benign if persistent: find + stop whatever keeps restarting SMS_EXECUTIVE on the sending site (see executive forensics)." -Warning
+                }
+                # A 0x800704d3 on a CopyFileExW / TakeContentSnapshot / AddFile to the
+                # content library = the WRITE to the content library was aborted. On an HA
+                # site the library is REMOTE (\\<FileServer>); if the site server can't
+                # populate it, NO package snapshots -> NOTHING distributes anywhere (every
+                # package fails, not just the client package). This is the site-wide root
+                # cause and outranks the per-DP symptoms above.
+                if ($diag.Distmgr -match 'CopyFileExW|TakeContentSnapshot|Failed to add the file' -and $diag.Distmgr -match '0x800704d3') {
+                    Write-DscStatus "Client pkg coverage diag [$dp]: 0x800704d3 writing to the content library ($($diag.ContentLib)) -- content snapshot ABORTED. If the library is REMOTE (HA remoteContentLibVM), verify the FileServer host is UP and the site server's machine account can WRITE the ContentLib share; a broken remote content library blocks ALL content distribution for the whole site." -Warning
+                }
+                if ($diag.Exec) { Write-DscStatus "Client pkg coverage diag [$dp] SMS_EXECUTIVE: $($diag.Exec)" -Warning }
+                if ($diag.DpProv) { Write-DscStatus "Client pkg coverage diag [$dp] smsdpprov: $($diag.DpProv)" -Warning }
+                if ($diag.PkgXfer) { Write-DscStatus "Client pkg coverage diag [$dp] PkgXferMgr: $($diag.PkgXfer)" -Warning }
+                if ($diag.Despool) { Write-DscStatus "Client pkg coverage diag [$dp] despool: $($diag.Despool)" -Warning }
+                if ($diag.Sender) { Write-DscStatus "Client pkg coverage diag [$dp] sender: $($diag.Sender)" -Warning }
+            }
+            catch { Write-DscStatus "Client pkg coverage diag [$dp]: remote query failed (WinRM?): $($_.Exception.Message)" -Warning }
+        }
+    }
+
+    Set-MemLabsClientPackageProgress -Stage 'discovery-refresh' -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(60)) -Message 'Finishing coverage discovery refresh'
+    if ($pushClients) {
+        Invoke-CMSystemDiscovery
+        Invoke-CMDeviceCollectionUpdate -Name "All Systems"
+    }
+    else {
+        Write-DscStatus "Client pkg coverage: skipping post-coverage discovery refresh because there are no client-push targets."
+    }
+}
+
+$ensureClientPkgCoverage = {
+    $module = Get-Module -Name ConfigurationManager | Select-Object -First 1
+    if (-not $module) { throw 'The ConfigurationManager module is not loaded for client-package coverage.' }
+    $variables = @{
+        SiteCode = $SiteCode
+        deployConfig = $deployConfig
+        ThisVM = $ThisVM
+        bgs = @($bgs)
+        DomainFullName = $DomainFullName
+        NetbiosDomainName = $NetbiosDomainName
+        LogPath = $LogPath
+        ConfigFilePath = $ConfigFilePath
+        pushClients = $pushClients
+        clientPackageDiagCredential = $clientPackageDiagCredential
+        clearStuckDistmgrWedge = $clearStuckDistmgrWedge.ToString()
+        configurationManagerModulePath = $module.Path
+        siteProviderHost = (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Stop).Root
+    }
+    Invoke-MemLabsClientPackageCoverage -CoverageScript $ensureClientPkgCoverageCore `
+        -Variables $variables -ScriptRoot $PSScriptRoot -LogPath $LogPath
+}
+
+# Ensure every CHILD (secondary) boundary group also lists the parent primary's
+# DP(s) as fallback content sources, so a child BG never depends on a single --
+# possibly slow or wedged -- secondary DP (clients transparently use the parent DP
+# when the local one can't serve content, instead of looping in ccmsetup
+# GetDPLocations). Runs on BOTH paths (the "BGs already exist" early-return AND the
+# fresh client-push path) so a re-run adds them to already-existing child BGs too.
+$ensureChildBgFallbackDps = {
+    try {
+        $parentDps = @((Get-CMDistributionPoint -SiteCode $SiteCode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", "" | Where-Object { $_ -and $_.Trim() })
+        if ($parentDps.Count -eq 0) { return }
+        foreach ($childSite in ($bgs.SiteCode | Select-Object -Unique | Where-Object { $_ -and $_ -ne $SiteCode })) {
+            $childBoundaryGroup = Get-CMBoundaryGroup -Name $childSite -ErrorAction SilentlyContinue
+            if (-not $childBoundaryGroup) { continue }
+            try {
+                $missingParentDps = @(& $getMissingBoundaryGroupSiteSystems $childBoundaryGroup $parentDps)
+                if ($missingParentDps.Count -gt 0) {
+                    Set-CMBoundaryGroup -Name $childSite -AddSiteSystemServerName $missingParentDps -ErrorAction Stop
+                    Write-DscStatus "Added parent DP fallback(s) $($missingParentDps -join ',') to child Boundary Group '$childSite'"
+                }
+                else {
+                    Write-DscStatus "Child Boundary Group '$childSite' already contains all parent DP fallback(s) -- skipping provider write"
+                }
+            }
+            catch { Write-DscStatus "Could not add parent DP(s) to child BG '$childSite': $($_.Exception.Message)" }
+        }
+    }
+    catch { Write-DscStatus "Child-BG fallback-DP ensure failed: $($_.Exception.Message)" }
+}
+
 
 $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
@@ -67,77 +2433,247 @@ Write-DscStatus "Client push candidates are '$ClientNames'"
 # Create Boundary groups
 $bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
 $bgsCount = $bgs.count
+
+# Quick check: if all boundary groups, boundaries, membership, and discovery are already configured, skip
+$allBGsExist = $true
+foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
+    if (-not (Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue)) {
+        $allBGsExist = $false
+        break
+    }
+}
+if ($allBGsExist) {
+    foreach ($bg in $bgs) {
+        $IPBits = [int[]]$bg.Subnet.Split('.')
+        $MaskBits = [int[]]'255.255.255.0'.Split('.')
+        $NetworkIDBits = 0..3 | ForEach-Object { $IPBits[$_] -band $MaskBits[$_] }
+        $BroadcastBits = 0..3 | ForEach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+        $NetworkID = $NetworkIDBits -join '.'
+        $NetworkIDBits[3] = 1
+        $BroadcastBits[3] = 254
+        $rangeValue = "$(($NetworkIDBits -join '.'))-$(($BroadcastBits -join '.'))"
+        $boundaryName = "$DomainFullName/$($bg.SiteCode)/$NetworkID/24"
+        $boundary = Get-CMBoundary -BoundaryName $boundaryName -ErrorAction SilentlyContinue
+        if (-not $boundary) { $boundary = Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue }
+        if (-not $boundary) { $boundary = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue } }
+        if (-not $boundary) {
+            $allBGsExist = $false
+            break
+        }
+        # Verify boundary is actually in its group
+        $memberOf = @(Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue)
+        if (-not ($memberOf | Where-Object { $_.BoundaryID -eq $boundary.BoundaryID -or $_.DisplayName -eq $boundary.DisplayName })) {
+            $allBGsExist = $false
+            break
+        }
+    }
+}
+if ($allBGsExist) {
+    $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+    $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+    if ($adiscovery.Value1.ToLower() -eq "active" -and $adsgdiscovery.Value1.ToLower() -eq "active") {
+        Write-DscStatus "All boundary groups, boundaries, and discovery already configured. Skipping."
+        # A DP/MP/SUP can be added after its boundary group already exists (for
+        # example, an add-on SiteSystem deployment). The old early-return path
+        # never reconciled site-system membership, so the new DP remained outside
+        # the BG and the client-package coverage gate could neither see nor target
+        # it. Add every currently registered site system before checking content.
+        foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
+            $boundaryGroup = Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue
+            if (-not $boundaryGroup) { continue }
+            $sitesystems = @()
+            $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+            $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+            $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+            $sitesystems = @($sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
+            if ($sitesystems.Count -eq 0) { continue }
+            try {
+                $missingSiteSystems = @(& $getMissingBoundaryGroupSiteSystems $boundaryGroup $sitesystems)
+                if ($missingSiteSystems.Count -gt 0) {
+                    Set-CMBoundaryGroup -Name $bgsitecode -AddSiteSystemServerName $missingSiteSystems -ErrorAction Stop
+                    Write-DscStatus "Added missing Site Systems to Boundary Group '$bgsitecode': $($missingSiteSystems -join ',')"
+                }
+                else {
+                    Write-DscStatus "Boundary Group '$bgsitecode' already contains all registered Site Systems -- skipping provider write"
+                }
+            }
+            catch {
+                Write-DscStatus "Could not reconcile Site Systems in Boundary Group '$bgsitecode': $($_.Exception.Message)" -Warning
+            }
+        }
+        # Even when BGs are already configured (re-run / steady state), still ensure
+        # the client package is on every client-serving DP. This early-return used to
+        # skip the coverage repair further down, so a DP stuck at ContentValidating
+        # never self-healed on a Phase 8 re-run.
+        # Coverage is NOT gated on client PUSH: Phase 11's ClientPkg check hard-fails
+        # whenever a boundary-group DP lacks the client package, and clients installed
+        # by ANY method (push, SCP/GPO, manual) pull ccmsetup content from that DP. A
+        # no-push lab (pushClient=false) must still get the client package onto its DP.
+        & $ensureChildBgFallbackDps
+        & $ensureClientPkgCoverage
+        # Still handle client push path
+        if (-not $pushClients) {
+            $Configuration.InstallClient.Status = 'NotRequested'
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        }
+        return
+    }
+}
+
 Write-DscStatus "Create $bgsCount Boundary Groups for site $SiteCode"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
-    $siteStatus = Get-CMSite -SiteCode $bgsitecode
-    if ($siteStatus.Status -eq 1) {
-        $sitesystems = @()
-        $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
-        try {
-            $exists = Get-CMBoundaryGroup -Name $bgsitecode
-            if ($exists) {
-                Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
-                Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $sitesystems
+    # A child SECONDARY site is installed in PARALLEL with this script (the
+    # secondary/passive install runs as a background job and takes ~10+ min),
+    # and this Primary is the ONLY place InstallBoundaryGroups runs for the
+    # hierarchy: the secondary itself never runs it and the CAS doesn't call it.
+    # So gating child boundary-group creation on the child being fully 'Active'
+    # (Status -eq 1) ALWAYS skipped it (the secondary never finishes before this
+    # loop), and the child BG was never created at all -- the root cause of the
+    # Phase 11 'Expected boundary group <child> not found' warning, which never
+    # cleared on re-runs either.
+    #
+    # Fix: wait briefly for the child's SMS_Site ROW to register, then create the
+    # BG as soon as the row exists. A boundary group is global metadata and does
+    # not require the site to be fully installed to exist; site systems (the
+    # secondary's DP) are added best-effort and fill in on a later pass / re-run
+    # once the secondary is up.
+    $siteStatus = Get-CMSite -SiteCode $bgsitecode -ErrorAction SilentlyContinue
+    if (-not $siteStatus -and $bgsitecode -ne $SiteCode) {
+        Write-DscStatus "Site '$bgsitecode' not yet registered; waiting up to 3 min for its row before creating its Boundary Group..."
+        $rowWaitMax = 36   # 36 x 5s = ~3 min
+        for ($rw = 1; $rw -le $rowWaitMax -and -not $siteStatus; $rw++) {
+            Start-Sleep -Seconds 5
+            $siteStatus = Get-CMSite -SiteCode $bgsitecode -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $siteStatus) {
+        Write-DscStatus "Skip creating Boundary Group '$bgsitecode' - site row never registered after waiting."
+        Start-Sleep -Seconds 5
+        continue
+    }
+
+    # Resolve currently-registered site systems (best-effort; a still-installing
+    # secondary's DP/MP/SUP may not be present yet -- that's fine).
+    $sitesystems = @()
+    $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+    $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+    $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+    $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
+
+    # Site assignment (DefaultSiteCode): a secondary's clients are assigned to the
+    # PARENT primary ($SiteCode) and get content from the secondary's DP, so the
+    # child BG's default site is the running primary. For the primary's own BG
+    # this is identical ($SiteCode -eq $bgsitecode).
+    $bgDefaultSite = $SiteCode
+    $boundaryGroupChanged = $false
+
+    try {
+        $exists = Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue
+        if ($exists) {
+            if ($sitesystems) {
+                $missingSiteSystems = @(& $getMissingBoundaryGroupSiteSystems $exists $sitesystems)
+                if ($missingSiteSystems.Count -gt 0) {
+                    Write-DscStatus "Adding missing Site Systems to Boundary Group '$bgsitecode': $($missingSiteSystems -join ',')"
+                    Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $missingSiteSystems -ErrorAction Stop
+                    $boundaryGroupChanged = $true
+                }
+                else {
+                    Write-DscStatus "Boundary Group '$bgsitecode' already contains all registered Site Systems -- skipping provider write"
+                }
             }
             else {
-                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
-                #New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $sitesystems
-                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgsitecode -AddSiteSystemServerName $sitesystems
+                Write-DscStatus "Boundary Group '$bgsitecode' already exists; no site systems registered yet to add (site '$bgsitecode' still installing)"
             }
         }
-        catch {
-            Write-DscStatus "Failed to create Boundary Group '$bgsitecode' in sitecode $siteCode. Error: $_"
+        else {
+            if ($sitesystems) {
+                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',') in sitecode $SiteCode"
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite -AddSiteSystemServerName $sitesystems -ErrorAction Stop
+                $boundaryGroupChanged = $true
+            }
+            else {
+                # Site row exists but no site systems registered yet (secondary
+                # still installing). Create the group now so it EXISTS + replicates;
+                # the DP is added when it comes online (later pass / re-run).
+                Write-DscStatus "Creating Boundary Group '$bgsitecode' (site '$bgsitecode' still installing - no site systems yet; DP added on a later pass) in sitecode $SiteCode"
+                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $bgDefaultSite -ErrorAction Stop
+                $boundaryGroupChanged = $true
+            }
         }
     }
-    else {
-        Write-DscStatus "Skip creating Boundary groups for site $bgsitecode because Site Status for sitecode $siteCode is not 'Active'."
+    catch {
+        Write-DscStatus "Failed to create Boundary Group '$bgsitecode' in sitecode $SiteCode. Error: $_"
     }
-    Start-Sleep -Seconds 5
+    if ($boundaryGroupChanged) { Start-Sleep -Seconds 5 }
 }
 
 # Create Boundaries for each subnet and add to BG
 Write-DscStatus "Create Boundaries for each subnet and add to BG"
 foreach ($bg in $bgs) {
-    $exists = Get-CMBoundary -BoundaryName $bg.Subnet
+    # Compute usable host range (.1 to .254), matching the convention CM uses
+    # when auto-creating boundaries from AD subnets via Forest Discovery.
+    # Using .0-.255 (network/broadcast) would create a duplicate boundary
+    # alongside the Forest Discovery auto-created .1-.254 range.
+    $IP = $bg.Subnet
+    $mask = '255.255.255.0'
+    $IPBits = [int[]]$IP.Split('.')
+    $MaskBits = [int[]]$Mask.Split('.')
+    $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
+    $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+    $NetworkID = $NetworkIDBits -join '.'
+    $NetworkIDBits[3] = 1          # first usable host
+    $BroadcastBits[3] = 254        # last usable host
+    $FirstHost = $NetworkIDBits -join '.'
+    $LastHost = $BroadcastBits -join '.'
+    $rangeValue = "$FirstHost-$LastHost"
+    # Match AD Forest Discovery naming: domain/SiteCode/NetworkID/prefix
+    $boundaryName = "$DomainFullName/$($bg.SiteCode)/$NetworkID/24"
+
+    # Check by name first, then by value to catch Forest Discovery auto-created boundaries
+    $exists = Get-CMBoundary -BoundaryName $boundaryName -ErrorAction SilentlyContinue
+    if (-not $exists) {
+        # Also check the old naming convention (just the subnet IP)
+        $exists = Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue
+    }
+    if (-not $exists) {
+        $exists = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue }
+    }
+    $boundaryChanged = $false
     if ($exists) {
-        try {
-            Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
-            Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
+        $boundaryGroupMembers = @(Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue)
+        $alreadyMember = @($boundaryGroupMembers | Where-Object { $_.BoundaryID -eq $exists.BoundaryID -or $_.DisplayName -eq $exists.DisplayName }).Count -gt 0
+        if ($alreadyMember) {
+            Write-DscStatus "Boundary '$($exists.DisplayName)' is already in Boundary Group $($bg.SiteCode) -- skipping provider write"
         }
-        catch {
-            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+        else {
+            try {
+                Write-DscStatus "Adding Boundary '$($exists.DisplayName)' ($rangeValue) to Boundary Group $($bg.SiteCode)"
+                Add-CMBoundaryToGroup -BoundaryName $exists.DisplayName -BoundaryGroupName $bg.SiteCode -ErrorAction Stop
+                $boundaryChanged = $true
+            }
+            catch {
+                Write-DscStatus "Failed to add boundary '$($exists.DisplayName)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+            }
         }
     }
     else {
         try {
-            Write-DscStatus "Creating Boundary $($bg.SiteCode) with subnet $($bg.Subnet)"
-            #New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
-            $IP = $bg.Subnet
-            $mask = '255.255.255.0'
-            $IPBits = [int[]]$IP.Split('.')
-            $MaskBits = [int[]]$Mask.Split('.')
-            $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
-            $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
-            $NetworkID = $NetworkIDBits -join '.'
-            $Broadcast = $BroadcastBits -join '.'
-            New-CMBoundary -Type IPRange -Name $bg.Subnet -Value "$($NetworkID)-$($Broadcast)"
+            Write-DscStatus "Creating Boundary '$boundaryName' with range $rangeValue"
+            New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue -ErrorAction Stop
+            $boundaryChanged = $true
             try {
-                Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
-                Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
+                Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $bg.SiteCode -ErrorAction Stop
             }
             catch {
-                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+                Write-DscStatus "Failed to add boundary '$boundaryName' to Boundary Group '$($bg.SiteCode)'. Error: $_"
             }
         }
         catch {
-            Write-DscStatus "Failed to create boundary '$($bg.Subnet)'. Error: $_"
+            Write-DscStatus "Failed to create boundary '$boundaryName'. Error: $_"
         }
     }
 
-    Start-Sleep -Seconds 5
+    if ($boundaryChanged) { Start-Sleep -Seconds 5 }
 }
 
 # Setup System Discovery
@@ -178,18 +2714,34 @@ do {
 # Run discovery
 Write-DscStatus "Invoking AD system discovery"
 Invoke-CMSystemDiscovery
-Start-Sleep -Seconds 5
-
-if ($ThisVm.thisParams.PassiveNode) {
-    Write-DscStatus "Skip Client Push since we're adding Passive site server"
-    $pushClients = $false
-    #return
+if ($pushClients) {
+    Start-Sleep -Seconds 5
 }
+else {
+    Write-DscStatus "No client-push targets -- skipping the 5s discovery grace period"
+}
+
+# Ensure the client package is present on every client-serving boundary-group DP
+# BEFORE the no-push short-circuit below. Phase 11's ClientPkg check hard-fails if a
+# boundary-group DP lacks the client package, and clients installed by ANY method
+# (push, SCP/GPO, manual) pull ccmsetup content from that DP -- so coverage must NOT
+# be gated on client PUSH. Previously this ran only on the push path, so a no-push
+# lab (pushClient=false) returned here without ever distributing the client package
+# to the new DP, failing Phase 11 with the DP stuck at ContentValidating.
+& $ensureChildBgFallbackDps
+try {
+    $null = Invoke-MemLabsGuestMemoryReclaim `
+        -Context 'InstallBoundaryGroups before client package coverage'
+}
+catch {
+    Write-DscStatus "Client pkg coverage: pre-coverage memory reclaim failed: $($_.Exception.Message)" -Warning
+}
+& $ensureClientPkgCoverage
 
 # Push Clients
 #==============
 if (-not $pushClients) {
-    Write-DscStatus "Skipping Client Push. pushClientToDomainMembers options is set to false."
+    Write-DscStatus "Skipping Client Push. No VMs have pushClient=true in this deployment."
     $Configuration.InstallClient.Status = 'NotRequested'
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
@@ -201,37 +2753,8 @@ if (-not $pushClients) {
 # Wait for collection to populate
 
 if ($ClientNames) {
-
-    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-    if ($PackageSuccess -eq 0) {
-        $CollectionName = "All Systems"
-        Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
-        Invoke-CMSystemDiscovery
-        Invoke-CMDeviceCollectionUpdate -Name $CollectionName
-
-
-        if ($false) {
-            #Let PushClients.ps1 handle this later.
-            $failCount = 0
-            $success = $false
-            while (-not $success) {
-   
-                $failCount++
-                Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 15"
-                $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-                Start-Sleep -Seconds 30
-                $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-                $success = $PackageSuccess -ge 1
-
-                if ($failCount -ge 15) {
-                    $success = $true   
-                }
-    
-            }
-            Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
-        }
-    }
+    # Client-package coverage already ensured above (runs regardless of push).
+    $null = $ClientNames
 }
 else {
     Write-DscStatus "Skipping Client Push. No Clients to push."
@@ -253,8 +2776,7 @@ if ($false) {
             continue
         }
 
-        $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-        if (-not $testClient.TcpTestSucceeded) {
+        if (-not (Test-TcpPortFast -ComputerName $client -Port 445)) {
             # Don't wait for client to appear in collection if it's not online
             Write-DscStatus "Could not test SMB connection to $client. Skipping."
             continue
@@ -289,7 +2811,7 @@ if ($false) {
         }
         if ($success) {
             Write-DscStatus "Pushing client to $client."
-            Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
+            Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 5
         }
     }

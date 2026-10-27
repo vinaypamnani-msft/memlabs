@@ -1,4 +1,4 @@
-# PKISync.ps1
+﻿# PKISync.ps1
 # This script allows updating PKI objects in Active Directory for the
 # cross-forest certificate enrollment
 #
@@ -17,6 +17,8 @@ $ObjectCN = $null
 $DryRun = $FALSE
 $DeleteOnly = $FALSE
 $OverWrite = $FALSE
+$ErrorActionPreference = "Stop"
+$Script:CopyFailures = [System.Collections.Generic.List[string]]::new()
 
 function ParseCommandLine()
 {
@@ -122,37 +124,33 @@ function GetSchemaSystemMayContain($ForestContext, $ObjectType)
     # first get all attributes that are part of systemMayContain list
     #
     $SchemaDE = [System.DirectoryServices.ActiveDirectory.ActiveDirectorySchemaClass]::FindByName($ForestContext, $ObjectType).GetDirectoryEntry()
-    $SystemMayContain = $SchemaDE.systemMayContain
+    $SystemMayContain = @($SchemaDE.systemMayContain | ForEach-Object { "$_" })
 
     #
     # if schema was upgraded with adprep.exe, we need to check mayContain list as well
     #
     if($null -ne $SchemaDE.mayContain)
     {
-        $MayContain = $SchemaDE.mayContain
-        foreach($attr in $MayContain)
-        {
-            $SystemMayContain.Add($attr)
-        }
+        $SystemMayContain += @($SchemaDE.mayContain | ForEach-Object { "$_" })
     }
 
     #
     # special case some of the inherited attributes
     #
-    if (-1 -eq $SystemMayContain.IndexOf("displayName"))
+    if ($SystemMayContain -notcontains "displayName")
     {
-        $SystemMayContain.Add("displayName")
+        $SystemMayContain += "displayName"
     }
-    if (-1 -eq $SystemMayContain.IndexOf("flags"))
+    if ($SystemMayContain -notcontains "flags")
     {
-        $SystemMayContain.Add("flags")
+        $SystemMayContain += "flags"
     }
-    if ($objectType.ToLower().Contains("template") -and -1 -eq $SystemMayContain.IndexOf("revision"))
+    if ($objectType.ToLower().Contains("template") -and $SystemMayContain -notcontains "revision")
     {
-        $SystemMayContain.Add("revision")
+        $SystemMayContain += "revision"
     }
 
-    return $SystemMayContain
+    return @($SystemMayContain | Where-Object { $_ } | Select-Object -Unique)
 }
 
 #
@@ -165,19 +163,17 @@ function ProcessAllObjects($SourcePKIServicesDE, $TargetPKIServicesDE, $Relative
 
     foreach($ChildNode in $SourceObjectsDE.psbase.get_Children())
     {
-        # if some object failed, we will try to continue with the rest
-        trap
+        $ObjectCN = "$($ChildNode.psbase.Properties['cn'].Value)"
+        try
         {
-            # CN maybe null here, but its ok. Doing best effort.
-            write-warning ("Error while coping an object. CN=" + $ObjectCN)
-            write-warning $_
-            write-warning $_.InvocationInfo.PositionMessage
-            continue
+            ProcessObject $SourcePKIServicesDE $TargetPKIServicesDE $RelativeDN $ObjectCN
         }
-
-        $ObjectCN = $ChildNode.psbase.Properties["cn"]
-        ProcessObject $SourcePKIServicesDE $TargetPKIServicesDE $RelativeDN $ObjectCN
-        $ObjectCN = $null
+        catch
+        {
+            $failure = "$RelativeDN/$ObjectCN`: $($_.Exception.Message)"
+            $Script:CopyFailures.Add($failure)
+            write-warning "Error while copying $failure"
+        }
     }
 
 }
@@ -187,6 +183,11 @@ function ProcessAllObjects($SourcePKIServicesDE, $TargetPKIServicesDE, $Relative
 #
 function ProcessObject($SourcePKIServicesDE, $TargetPKIServicesDE, $RelativeDN, $ObjectCN)
 {
+    $ObjectCN = "$ObjectCN"
+    if ([string]::IsNullOrWhiteSpace($ObjectCN))
+    {
+        throw "Object CN is empty in $RelativeDN"
+    }
     $SourceObjectContainerDE = $SourcePKIServicesDE.psbase.get_Children().find($RelativeDN)
     $TargetObjectContainerDE = $TargetPKIServicesDE.psbase.get_Children().find($RelativeDN)
 
@@ -228,11 +229,7 @@ function ProcessObject($SourcePKIServicesDE, $TargetPKIServicesDE, $RelativeDN, 
         }
         elseif ($Script:OverWrite)
         {
-            write-host ("OverWriting: " + $TargetObjectDE.DistinguishedName)
-            if($FALSE -eq $DryRun)
-            {
-                $TargetObjectContainerDE.psbase.get_Children().Remove($TargetObjectDE)
-            }
+            write-host ("Updating: " + $TargetObjectDE.DistinguishedName)
         }
         else
         {
@@ -258,8 +255,14 @@ function ProcessObject($SourcePKIServicesDE, $TargetPKIServicesDE, $RelativeDN, 
     #
     if($FALSE -eq $DryRun -and $FALSE -eq $Script:DeleteOnly)
     {
-        #Create new AD object
-        $NewDE = $TargetObjectContainerDE.psbase.get_Children().Add("CN=" + $ObjectCN, $SourceObjectDE.psbase.SchemaClassName)
+        if ($null -ne $TargetObjectDE -and $Script:OverWrite)
+        {
+            $NewDE = $TargetObjectDE
+        }
+        else
+        {
+            $NewDE = $TargetObjectContainerDE.psbase.get_Children().Add("CN=" + $ObjectCN, $SourceObjectDE.psbase.SchemaClassName)
+        }
 
         #Obtain systemMayContain for the object type from the AD schema
         $ObjectMayContain = GetSchemaSystemMayContain $SourceForestContext $SourceObjectDE.psbase.SchemaClassName
@@ -269,14 +272,31 @@ function ProcessObject($SourcePKIServicesDE, $TargetPKIServicesDE, $RelativeDN, 
             $AttributeValue = $SourceObjectDE.psbase.Properties[$Attribute].Value
             if ($null -ne $AttributeValue)
             {
-                $NewDE.psbase.Properties[$Attribute].Value = $AttributeValue
-                $NewDE.psbase.CommitChanges()
+                try
+                {
+                    # Assign the source value as one object. Pipelining a byte[] through
+                    # ForEach-Object expands it into individual bytes and violates the
+                    # cACertificate octet-string constraint on Enrollment Services.
+                    $NewDE.psbase.Properties[$Attribute].Value = $AttributeValue
+                }
+                catch
+                {
+                    throw "attribute '$Attribute' ($($AttributeValue.GetType().FullName)): $($_.Exception.Message)"
+                }
             }
         }
+        $NewDE.psbase.CommitChanges()
         #Copy security descriptor to new object. Only DACL is copied.
         $BinarySecurityDescriptor = $SourceObjectDE.psbase.ObjectSecurity.GetSecurityDescriptorBinaryForm()
         $NewDE.psbase.ObjectSecurity.SetSecurityDescriptorBinaryForm($BinarySecurityDescriptor, [System.Security.AccessControl.AccessControlSections]::Access)
         $NewDE.psbase.CommitChanges()
+
+        $verify = [System.DirectoryServices.DirectorySearcher]$TargetObjectContainerDE
+        $verify.Filter = "(cn=" + $ObjectCN + ")"
+        if ($null -eq $verify.FindOne())
+        {
+            throw "Target object was not visible after copy: CN=$ObjectCN,$RelativeDN"
+        }
     }
 }
 
@@ -301,15 +321,6 @@ function GetPKIServicesContainer([System.DirectoryServices.ActiveDirectory.Direc
 #########################################################
 # Main script code
 #########################################################
-
-#
-# All errors are fatal by default unless there is another 'trap' with 'continue'
-#
-trap
-{
-    write-error "The script has encountered a fatal error. Terminating script."
-    break
-}
 
 ParseCommandLine
 
@@ -359,6 +370,7 @@ switch($ObjectType.ToLower())
             ProcessObject $SourcePKIServicesDE $TargetPKIServicesDE "CN=Enrollment Services" $ObjectCN
         }
     }
+
     oid
     {
         if($null -eq $ObjectCN)
@@ -370,6 +382,7 @@ switch($ObjectType.ToLower())
             ProcessObject $SourcePKIServicesDE $TargetPKIServicesDE "CN=OID" $ObjectCN
         }
     }
+
     template
     {
         if($null -eq $ObjectCN)
@@ -388,3 +401,9 @@ switch($ObjectType.ToLower())
         exit 87
     }
 }
+
+if ($Script:CopyFailures.Count -gt 0)
+{
+    throw "PKISync failed to copy $($Script:CopyFailures.Count) object(s): $($Script:CopyFailures -join ' | ')"
+}
+write-host "PKISYNC_OK: $($SourceForestName) -> $($TargetForestName) type=$ObjectType"

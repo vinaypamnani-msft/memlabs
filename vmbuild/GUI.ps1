@@ -100,7 +100,7 @@ $form.Controls.Add($btnManageLab)
 
 # Regenerate Rdcman file
 $btnRegenerateRdcman = New-Object system.Windows.Forms.Button
-$btnRegenerateRdcman.Text = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config"
+$btnRegenerateRdcman.Text = "Regenerate Remote Connection files (RDCMan / mRemoteNG)"
 $btnRegenerateRdcman.Size = $buttonSize
 $btnRegenerateRdcman.Font = $buttonFont
 $btnRegenerateRdcman.Location = New-Object System.Drawing.Point(50, 280)

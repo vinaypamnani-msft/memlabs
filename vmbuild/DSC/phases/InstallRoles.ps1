@@ -1,4 +1,4 @@
-#InstallRoles.ps1
+﻿#InstallRoles.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -9,23 +9,27 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get required values from config
 $DomainFullName = $deployConfig.vmOptions.domainName
+$NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CSName = $ThisVM.thisParams.ParentSiteServer
-$usePKI = $deployConfig.cmOptions.UsePKI
-$offlineSUP = $deployConfig.cmOptions.OfflineSUP
+# Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
+$offlineSUP = $cmo.OfflineSUP
 if (-not $usePKI) {
     $usePKI = $false
 }
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+$Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile `
+    -RequiredSteps @('InstallSUP')
 
 $Configuration.InstallSUP.Status = "Running"
 $Configuration.InstallSUP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 # Wait for CS
 if ($CSName) {
@@ -35,18 +39,26 @@ if ($CSName) {
     $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.json"
 
     # Wait for ScriptWorkflow.json to exist on CAS
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+        -RequiredSteps @('InstallSUP')
     Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)."
+    $sumWaitStart = Get-Date
     while ($CSConfiguration.InstallSUP.Status -ne "Completed") {
-        Write-DscStatus "Waiting for $CSName to finish SUM Configuration. Current Status: $($CSConfiguration.InstallSUP.Status)" -NoLog -RetrySeconds 30
+        if ("$($CSConfiguration.InstallSUP.Status)" -in @('Error', 'Failed', 'Failure')) {
+            throw "$CSName reported InstallSUP=$($CSConfiguration.InstallSUP.Status) in '$CSConfigurationFile'."
+        }
+        # Elapsed goes in the TEXT and the line is logged: with constant text and -NoLog this
+        # wait left ONE host record and ONE guest line for 451s (measured cstest2 PS1 08-15).
+        $sumWaitMin = [int]((Get-Date) - $sumWaitStart).TotalMinutes
+        if ($sumWaitMin -ge 240) {
+            throw "$CSName did not finish InstallSUP within 240 minutes (last state: $($CSConfiguration.InstallSUP.Status))."
+        }
+        Write-DscStatus "Waiting for $CSName to finish SUM Configuration (${sumWaitMin}m elapsed, CAS InstallSUP=$($CSConfiguration.InstallSUP.Status))" -RetrySeconds 30
         Start-Sleep -Seconds 30
-        try {
-            $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Stop | ConvertFrom-Json
-        }
-        catch {
-            Write-DscStatus "Failed to check Status on $CSName from $CSConfigurationFile. $_"
-        }
+        $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+            -RequiredSteps @('InstallSUP')
     }
+    Write-DscStatus "$CSName finished SUM Configuration ($([int]((Get-Date) - $sumWaitStart).TotalMinutes)m elapsed)."
 }
 
 # Read Site Code from registry
@@ -79,8 +91,68 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
+function Invoke-VerifiedWsusBaselineImport {
+    param([object[]] $SupVms)
+
+    if (-not $SupVms -or @($SupVms).Count -eq 0) { return }
+    if ($ThisVM.parentSiteCode) {
+        Write-DscStatus "[InstallRoles] Downstream site (parent=$($ThisVM.parentSiteCode)) - skipping WSUS cab import; categories replicate from the upstream SUP."
+        return
+    }
+
+    # wsusutil import can temporarily stop WsusService. Launch it only after
+    # every configured SUP has passed physical readiness (or after a new SUP
+    # has converged), otherwise the producer-prerequisite gate observes the
+    # importer's transient service state and rejects a healthy WSUS/API surface.
+    Start-WsusBaselineImportBackground -Tag "[InstallRoles]" | Out-Null
+    Wait-WsusBaselineImport -Tag "[InstallRoles]"
+}
+
+# Early exit: check if all configured roles (RP + SUP) are already installed.
+# InstallRoles.ps1 is called on every ScriptWorkflow pass, so this avoids
+# redundant work when everything is already in place.
+$allRolesInstalled = $true
+
+$rpVMs = @($deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true -and ($_.SiteCode -eq $thisVM.SiteCode -or $_.vmName -eq $thisVM.RemoteSQLVM) })
+foreach ($rp in $rpVMs) {
+    $rpFQDN = $rp.vmName + "." + $DomainFullName
+    if (-not (Get-CMReportingPointReadiness -ServerFQDN $rpFQDN -SiteCode $thisVM.SiteCode).Ready) {
+        $allRolesInstalled = $false
+        break
+    }
+}
+
+if ($allRolesInstalled) {
+    $ValidSiteCodes = @($SiteCode)
+    if ($ThisVM.role -eq "Primary") {
+        $ValidSiteCodes += (Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode)
+    }
+    $supVMs = @($deployConfig.virtualMachines | Where-Object { $_.installSUP -eq $true -and $_.siteCode -in $ValidSiteCodes })
+    foreach ($sup in $supVMs) {
+        $supFQDN = $sup.vmName.Trim() + "." + $DomainFullName
+        if (-not (Get-CMSoftwareUpdatePointReadiness -ServerFQDN $supFQDN -SiteCode $sup.siteCode).Ready) {
+            $allRolesInstalled = $false
+            break
+        }
+        if (-not (Confirm-CMWsusPoolHardening -ServerFQDN $supFQDN)) {
+            $allRolesInstalled = $false
+            break
+        }
+    }
+}
+
+if ($allRolesInstalled) {
+    Write-DscStatus "All roles (RP + SUP) already installed. Nothing to do."
+    Invoke-VerifiedWsusBaselineImport -SupVms @($supVMs)
+    $Configuration.InstallSUP.Status = 'Completed'
+    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    return
+}
+
 # Reporting Install
 Write-DscStatus "Installing Reporting Point"
+$rpFailed = $false
 foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true } ) {
 
     $thisSiteCode = $thisVM.SiteCode
@@ -135,7 +207,11 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
     }
 
     Add-ReportingUser -SiteCode $thisSiteCode -UserName $username -Unencrypted $unencrypted
-    Install-SRP -ServerSiteCode $thisSiteCode -ServerFQDN $PBIRSMachine -UserName $username -SqlServerName $sqlServerName -DatabaseName $databaseName
+    $rpResult = Install-SRP -ServerSiteCode $thisSiteCode -ServerFQDN $PBIRSMachine -UserName $username -SqlServerName $sqlServerName -DatabaseName $databaseName
+    if ($rpResult -eq $false) {
+        Write-DscStatus "Reporting Point installation failed for $($rp.vmName). InstallRoles will retry on next ScriptWorkflow pass."
+        $rpFailed = $true
+    }
 }
 
 # End Reporting Install
@@ -175,8 +251,43 @@ foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -e
 
 # Trim nulls/blanks
 $SUPNames = $SUPs.ServerName | Where-Object { $_ -and $_.Trim() }
+$supFailed = $false
 if ($SUPNames) {
     Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
+}
+
+# Quick check: if all SUPs are already installed, skip the entire install+sync
+$allSUPsInstalled = $true
+foreach ($SUP in $SUPs) {
+    if ([string]::IsNullOrWhiteSpace($SUP.ServerName)) { continue }
+    $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
+    if (-not (Get-CMSoftwareUpdatePointReadiness -ServerFQDN $SUPFQDN -SiteCode $SUP.ServerSiteCode).Ready) {
+        $allSUPsInstalled = $false
+        break
+    }
+}
+if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
+    Write-DscStatus "All SUP roles already installed. Skipping SUP install and configuration."
+    Invoke-VerifiedWsusBaselineImport -SupVms @($SUPs)
+    if (-not $rpFailed -and -not $supFailed) {
+        $Configuration.InstallSUP.Status = 'Completed'
+        $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    } else {
+        Write-DscStatus "Not marking InstallSUP as Completed because Reporting Point failed."
+    }
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    return
+}
+if ($SUPs.Count -eq 0) {
+    Write-DscStatus "No SUPs configured. Skipping SUP install."
+    if (-not $rpFailed -and -not $supFailed) {
+        $Configuration.InstallSUP.Status = 'Completed'
+        $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    } else {
+        Write-DscStatus "Not marking InstallSUP as Completed because Reporting Point failed."
+    }
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    return
 }
 
 # Check if a SUP Exists on this site
@@ -195,15 +306,34 @@ foreach ($SUP in $SUPs) {
     }
 
     $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
-    $domainUserName = "$($DomainFullName)\$($SUP.ServerName.Trim())"
+    # Grant the SUP server's MACHINE account CM Full Administrator so the Patch My
+    # PC publishing service (runs as SYSTEM on the SUP) can author/deploy third-
+    # party update CIs. A computer's down-level logon name is DOMAIN\NAME$ -- without
+    # the trailing '$' New-CMAdministrativeUser's AD validation fails every run with
+    # "Validation of input parameters failed. Cannot continue." (the account never
+    # resolves), so the intended grant silently never happened.
+    $accountDomain = if ($NetbiosDomainName) { $NetbiosDomainName } else { $DomainFullName }
+    $domainUserName = "$accountDomain\$($SUP.ServerName.Trim())" + '$'
     Write-DscStatus "Installing SUP on $SUPFQDN"
     $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$domainUserName*" } -ErrorAction SilentlyContinue
 
     if (-not $exists) {
-        New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-            -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
+        try {
+            New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+                -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction Stop | out-null
+        } catch {
+            if ($_.Exception.Message -notmatch 'already assigned') { Write-DscStatus "WARNING: New-CMAdministrativeUser failed: $($_.Exception.Message)" }
+        }
     }
-    Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode -usePKI:$usePKI
+    $supResult = @(Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode -usePKI:$usePKI)
+    if ($supResult.Count -eq 0 -or -not [bool]$supResult[-1]) {
+        Write-DscStatus "Software Update Point installation failed for $($SUP.ServerName). InstallRoles will retry on next ScriptWorkflow pass."
+        $supFailed = $true
+    }
+}
+
+if (-not $supFailed) {
+    Invoke-VerifiedWsusBaselineImport -SupVms @($SUPs)
 }
 
 # Configure SUP
@@ -232,12 +362,57 @@ if ($configureSUP) {
                     Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent."
                     #Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
                     Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
-                    Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
-                    Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
+                    Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting for WCM to configure WSUS..."
+
+                    # Poll WCM registry state instead of blind sleep. WCM stores its
+                    # configuration result at this key (0=NONE,1=PENDING,2=SUCCESS,3=FAILED,4=SUBSCRIPTION_PENDING).
+                    # Budget 30 -> 8. This loop has never given up (39 successes, 0
+                    # give-ups over 181 guest logs) so the cap is preventive, but it
+                    # restarts WsusService on EVERY failed attempt, so a first burn
+                    # would cost ~900s and up to 30 service restarts. 8 is sized from
+                    # the same distribution the sibling wait in perfloading.ps1 uses:
+                    # 71 successes across both waits, attempts 1-6, MAX 6.
+                    $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+                    $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                    $wcmMaxAttempts = 8
+                    $wcmReady = $false
+                    for ($wcmWait = 1; $wcmWait -le $wcmMaxAttempts; $wcmWait++) {
+                        Start-Sleep -Seconds 30
+                        try {
+                            $wcmRegVal = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                        } catch { $wcmRegVal = -1 }
+                        $wcmName = if ($wcmStateNames.ContainsKey($wcmRegVal)) { $wcmStateNames[$wcmRegVal] } else { "UNKNOWN($wcmRegVal)" }
+                        if ($wcmRegVal -eq 2) {
+                            Write-DscStatus "WCM reached SUCCESS state (attempt $wcmWait)"
+                            $wcmReady = $true
+                            break
+                        }
+                        if ($wcmRegVal -eq 3) {
+                            Write-DscStatus "WCM state is FAILED (attempt $wcmWait). Restarting WsusService to trigger reconfiguration."
+                            Restart-Service -Name WsusService -Force -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 30
+                        }
+                        else {
+                            Write-DscStatus "WCM state: $wcmName (attempt $wcmWait of $wcmMaxAttempts)"
+                        }
+                    }
+                    if (-not $wcmReady) {
+                        Write-DscStatus "WARNING: WCM did not reach SUCCESS after $wcmMaxAttempts attempts. Proceeding anyway."
+                    }
                 }
  
-                Sync-CMSoftwareUpdate
-                Write-DscStatus "SUM Component Sync started."
+                # Guard against re-runs: if a sync (especially a long Categories
+                # sync) is already in progress from a prior build attempt, don't
+                # restart it - triggering a new sync cancels the running one and
+                # forces a full restart. Only kick off a sync when none is running.
+                $preSyncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+                if ($preSyncState -and $preSyncState.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                    Write-DscStatus "SUM sync already in progress (state $($preSyncState.LastSyncState)) on re-run - not restarting. Waiting for it to complete."
+                }
+                else {
+                    Sync-CMSoftwareUpdate
+                    Write-DscStatus "SUM Component Sync started."
+                }
 
 
                 $i = 0
@@ -245,9 +420,16 @@ if ($configureSUP) {
                     $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
 
                     if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                        Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                        $i++
+                        Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products. (attempt $i of 30)"
                         Sync-CMSoftwareUpdate
-                        Start-Sleep -Seconds 120
+                        if ($i -ge 30) {
+                            $syncTimeout = $true
+                            Write-DscStatus "SUM Sync: gave up after $i attempts. Skipping Set-CMSoftwareUpdatePointComponent"
+                        }
+                        else {
+                            Start-Sleep -Seconds 120
+                        }
                     } 
                     else {
                         $syncStateString = "Unknown"
@@ -284,7 +466,15 @@ if ($configureSUP) {
             }
             #Start a 2nd Sync, or an initial sync if not top-level
             start-sleep -seconds 30
-            Sync-CMSoftwareUpdate
+            # Same re-run guard: never restart a sync that WSUS/CM still reports
+            # as running (a Categories sync can legitimately sit for many minutes).
+            $secondSyncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            if ($secondSyncState -and $secondSyncState.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                Write-DscStatus "Sync already in progress (state $($secondSyncState.LastSyncState)) - skipping 2nd sync trigger."
+            }
+            else {
+                Sync-CMSoftwareUpdate
+            }
         }
         catch { 
             Write-DscStatus "SUM Component Sync failed $_"
@@ -292,6 +482,18 @@ if ($configureSUP) {
         }                         
     }
 }
-$Configuration.InstallSUP.Status = 'Completed'
-$Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+if (-not $rpFailed -and -not $supFailed) {
+    $Configuration.InstallSUP.Status = 'Completed'
+    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+} else {
+    $failedRoles = @()
+    if ($rpFailed) { $failedRoles += 'Reporting Point' }
+    if ($supFailed) { $failedRoles += 'Software Update Point' }
+    Write-DscStatus "Not marking InstallSUP as Completed because role readiness failed: $($failedRoles -join ', ')."
+}
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+
+# CM site-role proxy is now applied by phases/ConfigureCMProxy.ps1, invoked
+# directly from ScriptWorkflow.ps1 so it runs even when this script returns
+# early (e.g. no SUP configured).
