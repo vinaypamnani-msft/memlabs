@@ -75,11 +75,20 @@
             "name": "vmSize",
             "type": "Microsoft.Compute.SizeSelector",
             "label": "Host VM size",
-            "toolTip": "Only sizes that support nested virtualization and at least 24 data disks are offered. All are 16 vCPU. 'a' = AMD, 'd' = local temp disk, 's' = Premium SSD capable.",
+            "toolTip": "Only sizes that support nested virtualization and at least 24 data disks are offered. All are 16 vCPU. Defaults prefer lower-cost 128 GB sizes; 64 GB options remain selectable. 'a' = AMD, 'd' = local temp disk, 's' = Premium SSD capable.",
             "recommendedSizes": [
-              "Standard_E16ds_v6",
+              "Standard_E16as_v5",
+              "Standard_E16as_v6",
+              "Standard_E16as_v7",
+              "Standard_E16s_v5",
+              "Standard_E16s_v4",
+              "Standard_E16ads_v5",
+              "Standard_E16s_v6",
+              "Standard_E16ds_v5",
+              "Standard_E16ds_v4",
+              "Standard_E16ads_v6",
               "Standard_E16ads_v7",
-              "Standard_E16ds_v5"
+              "Standard_E16ds_v6"
             ],
             "constraints": {
               "allowedSizes": [

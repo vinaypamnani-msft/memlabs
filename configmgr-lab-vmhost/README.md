@@ -26,6 +26,13 @@ Following extensions are also installed:
 
 ## Parameters worth noting
 
+The standard wizard and [azuredeploy.json](azuredeploy.json) default to
+**Standard_E16as_v5** (16 vCPU, 128 GB RAM). Wizard fallback recommendations also
+stay at 128 GB; 64 GB sizes remain manual options. The recommendation order
+prefers lower-cost sizes based on East US Windows retail pricing checked on
+October 27, 2026, not live pricing for the selected region. Review the portal's
+estimate because regional prices and availability can differ.
+
 | Parameter | Notes |
 | --- | --- |
 | `vmSize` | Curated list, all 16 vCPU (E = 128 GB RAM, D = 64 GB). `a` = AMD, `d` = local temp disk, `s` = Premium SSD capable. The no-temp-disk sizes cost less and provisioning never uses the temp disk, but Windows then places the pagefile on the 128 GB OS disk. Every entry supports nested virtualization, Gen2, and at least the 24 data disks the template attaches; 8-vCPU sizes cap at 16 data disks and are excluded because they cannot deploy. AMD v6/v7 sizes require an NVMe-capable OS image. A `SkuNotAvailable` error means the size isn't offered in that region; pick another. |
