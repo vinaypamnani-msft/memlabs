@@ -14,6 +14,7 @@ $workflowPath = Join-Path $RootPath 'DSC\phases\ScriptWorkflow.ps1'
 $phase3Path = Join-Path $RootPath 'DSC\phases\Phase3.ps1'
 $genConfigPath = Join-Path $RootPath 'common\Common.GenConfig.ps1'
 $siteInstallerPath = Join-Path $RootPath 'DSC\phases\InstallAndUpdateSCCM.ps1'
+$validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
 
 function Get-TestFunctionText {
     param([string] $Path, [string] $Name)
@@ -278,6 +279,147 @@ Assert-True ($workflowText -match 'Additional SMS Provider installation did not 
 foreach ($serviceName in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')) {
     Assert-True ($siteInstallerText -match "(?s)coreServiceName.+?$serviceName.+?did not reach Running.+?-Failure") `
         "Existing-site workflow no longer fails closed when $serviceName is stopped."
+}
+
+$validationTokens = $null
+$validationErrors = $null
+$validationAst = [Management.Automation.Language.Parser]::ParseFile($validationPath, [ref]$validationTokens, [ref]$validationErrors)
+Assert-True ($validationErrors.Count -eq 0) 'Functional validation has parse errors.'
+$mpIisChecks = @($validationAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.TryStatementAst] -and
+            $node.Body.Statements.Count -gt 0 -and
+            $node.Body.Statements[0].Extent.Text -eq 'Import-Module WebAdministration -ErrorAction Stop' -and
+            $node.Body.Extent.Text.Contains('SMS_MP') -and
+            $node.Body.Extent.Text.Contains('Get-WebAppPoolState')
+        }, $true))
+Assert-True ($mpIisChecks.Count -eq 1) 'Expected one MP IIS functional-validation block.'
+$mpIisValidationScript = [scriptblock]::Create($mpIisChecks[0].Extent.Text)
+
+& {
+    $script:MpProbeRegistryReady = $true
+    $script:MpProbeIisExists = $true
+    $script:MpProbeServiceStatus = 'Running'
+    $script:MpProbeModuleFailure = $null
+    $script:MpProbeQueryFailure = $null
+    $script:MpProbeIsApplication = $false
+    $script:MpProbeEndpoint = [pscustomobject]@{ PhysicalPath = 'E:\SMS_CCM\SMS_MP' }
+    $script:MpProbeRootPool = 'DefaultAppPool'
+    $script:MpProbeObservedPool = $null
+
+    function Import-Module {
+        param([string] $Name, $ErrorAction)
+        if ($script:MpProbeModuleFailure) { throw $script:MpProbeModuleFailure }
+    }
+    function Test-Path {
+        param([string] $LiteralPath, $ErrorAction)
+        switch ($LiteralPath) {
+            'HKLM:\SOFTWARE\Microsoft\SMS\MP' { return $script:MpProbeRegistryReady }
+            'IIS:\Sites\Default Web Site\SMS_MP' {
+                if ($script:MpProbeQueryFailure) { throw $script:MpProbeQueryFailure }
+                return $script:MpProbeIisExists
+            }
+            default { throw "Unexpected MP probe path: $LiteralPath" }
+        }
+    }
+    function Get-Service {
+        param([string] $Name, $ErrorAction)
+        return [pscustomobject]@{ Status = $script:MpProbeServiceStatus }
+    }
+    function Get-WebApplication {
+        param([string] $Site, [string] $Name, $ErrorAction)
+        if ($script:MpProbeIsApplication) { return $script:MpProbeEndpoint }
+        return $null
+    }
+    function Get-Item {
+        param([string] $LiteralPath, $ErrorAction)
+        Assert-True ($LiteralPath -eq 'IIS:\Sites\Default Web Site\SMS_MP') 'MP validation read the wrong IIS endpoint.'
+        return $script:MpProbeEndpoint
+    }
+    function Get-WebConfigurationProperty {
+        param([string] $PSPath, [string] $Filter, [string] $Name, $ErrorAction)
+        Assert-True ($PSPath -eq 'IIS:\' -and $Name -eq 'applicationPool') 'MP validation queried the wrong IIS pool property.'
+        Assert-True ($Filter -eq "system.applicationHost/sites/site[@name='Default Web Site']/application[@path='/']") `
+            'A virtual-directory MP must use the root application pool.'
+        return [pscustomobject]@{ Value = $script:MpProbeRootPool }
+    }
+    function Get-WebAppPoolState {
+        param([string] $Name, $ErrorAction)
+        Assert-True (-not [string]::IsNullOrWhiteSpace($Name)) 'MP validation queried an unnamed application pool.'
+        $script:MpProbeObservedPool = $Name
+        return [pscustomobject]@{ Value = 'Started' }
+    }
+    function Invoke-CMRoleTargetCommand {
+        param([string] $ComputerName, [scriptblock] $ScriptBlock, [object[]] $ArgumentList)
+        return & $ScriptBlock @ArgumentList
+    }
+
+    $mpState = Get-CMManagementPointReadiness -ServerFQDN 'mp.contoso.test' -SiteCode PS1
+    Assert-True $mpState.Ready 'A registered, running MP with an SMS_MP virtual directory was rejected by the actual guest probe.'
+    $mpConfiguration = $script:MpConfiguration
+    $script:MpConfiguration = $null
+    $mpState = Get-CMManagementPointReadiness -ServerFQDN 'mp.contoso.test' -SiteCode PS1
+    Assert-False $mpState.Ready 'An IIS endpoint without an MP configuration row was accepted.'
+    $script:MpConfiguration = $mpConfiguration
+    $script:MpProbeIisExists = $false
+    $mpState = Get-CMManagementPointReadiness -ServerFQDN 'mp.contoso.test' -SiteCode PS1
+    Assert-False $mpState.Ready 'An MP with no SMS_MP IIS endpoint was accepted.'
+    $script:MpProbeIisExists = $true
+    $script:MpProbeRegistryReady = $false
+    $mpState = Get-CMManagementPointReadiness -ServerFQDN 'mp.contoso.test' -SiteCode PS1
+    Assert-False $mpState.Ready 'An MP without its registry key was accepted.'
+    $script:MpProbeRegistryReady = $true
+    $script:MpProbeServiceStatus = 'Stopped'
+    $mpState = Get-CMManagementPointReadiness -ServerFQDN 'mp.contoso.test' -SiteCode PS1
+    Assert-False $mpState.Ready 'An MP with W3SVC stopped was accepted.'
+    $script:MpProbeServiceStatus = 'Running'
+
+    foreach ($failureKind in @('Module', 'Query')) {
+        $script:MpProbeModuleFailure = if ($failureKind -eq 'Module') { 'synthetic IIS module failure' } else { $null }
+        $script:MpProbeQueryFailure = if ($failureKind -eq 'Query') { 'synthetic IIS query failure' } else { $null }
+        $mpState = Get-CMManagementPointReadiness -ServerFQDN 'mp.contoso.test' -SiteCode PS1
+        Assert-False $mpState.Ready "An MP with an IIS $failureKind failure was accepted."
+        Assert-True ($mpState.Detail -match "synthetic IIS $($failureKind.ToLowerInvariant()) failure") `
+            "The guest probe swallowed an IIS $failureKind error."
+    }
+    $script:MpProbeModuleFailure = $null
+    $script:MpProbeQueryFailure = $null
+
+    foreach ($endpointType in @('VirtualDirectory', 'Application')) {
+        $script:MpProbeIsApplication = $endpointType -eq 'Application'
+        $script:MpProbeEndpoint = if ($script:MpProbeIsApplication) {
+            [pscustomobject]@{ PhysicalPath = 'E:\SMS_CCM\SMS_MP'; ApplicationPool = 'SMS Management Point Pool' }
+        }
+        else { [pscustomobject]@{ PhysicalPath = 'E:\SMS_CCM\SMS_MP' } }
+        $script:MpProbeObservedPool = $null
+        $mpState = Get-CMManagementPointReadiness -ServerFQDN 'mp.contoso.test' -SiteCode PS1
+        Assert-True $mpState.Ready "MP readiness rejected the $endpointType representation."
+        $results = @{ Passed = $true; Details = [Collections.Generic.List[string]]::new() }
+        $null = & $mpIisValidationScript
+        Assert-True $results.Passed "MP functional validation rejected $endpointType`: $($results.Details -join '; ')"
+        $expectedPool = if ($script:MpProbeIsApplication) { 'SMS Management Point Pool' } else { 'DefaultAppPool' }
+        Assert-True ($script:MpProbeObservedPool -eq $expectedPool) "MP validation selected the wrong pool for $endpointType."
+    }
+
+    foreach ($failureKind in @('Module', 'Query')) {
+        $script:MpProbeModuleFailure = if ($failureKind -eq 'Module') { 'synthetic IIS module failure' } else { $null }
+        $script:MpProbeQueryFailure = if ($failureKind -eq 'Query') { 'synthetic IIS query failure' } else { $null }
+        $results = @{ Passed = $true; Details = [Collections.Generic.List[string]]::new() }
+        $null = & $mpIisValidationScript
+        Assert-False $results.Passed "MP functional validation passed despite an IIS $failureKind failure."
+        Assert-True (($results.Details -join '; ') -match "synthetic IIS $($failureKind.ToLowerInvariant()) failure") `
+            "MP functional validation omitted the IIS $failureKind error."
+    }
+    $script:MpProbeModuleFailure = $null
+    $script:MpProbeQueryFailure = $null
+    $script:MpProbeIsApplication = $false
+    $script:MpProbeEndpoint = [pscustomobject]@{ PhysicalPath = 'E:\SMS_CCM\SMS_MP' }
+    $script:MpProbeRootPool = ''
+    $results = @{ Passed = $true; Details = [Collections.Generic.List[string]]::new() }
+    $null = & $mpIisValidationScript
+    Assert-False $results.Passed 'MP functional validation passed without a resolvable owning application pool.'
+    Assert-True (($results.Details -join '; ') -match 'Could not resolve the IIS application pool') `
+        'MP functional validation omitted the unresolved application-pool error.'
 }
 
 Write-Host 'PASS -- asynchronous ConfigMgr roles require stable physical readiness, bounded recovery, and fail-fast workflow gating.'

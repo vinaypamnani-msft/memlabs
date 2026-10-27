@@ -2251,17 +2251,20 @@ function Get-CMManagementPointReadiness {
         $guestState = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock {
             $registryReady = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\MP'
             $iisReady = $false
+            $probeErrors = @()
             try {
                 Import-Module WebAdministration -ErrorAction Stop
-                $iisReady = [bool](Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue)
+                $iisReady = Test-Path -LiteralPath 'IIS:\Sites\Default Web Site\SMS_MP' -ErrorAction Stop
             }
-            catch {}
+            catch { $probeErrors += "IIS: $($_.Exception.Message)" }
             [pscustomobject]@{
                 RegistryReady = [bool]$registryReady
                 IisReady      = [bool]$iisReady
                 W3SvcRunning  = [bool]((Get-Service -Name W3SVC -ErrorAction SilentlyContinue).Status -eq 'Running')
+                Errors        = @($probeErrors)
             }
         }
+        $errors += @($guestState.Errors | Where-Object { $_ })
     }
     catch { $errors += "guest: $($_.Exception.Message)" }
 

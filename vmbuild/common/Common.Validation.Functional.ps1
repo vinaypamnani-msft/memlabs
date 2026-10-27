@@ -5627,7 +5627,7 @@ function Test-SiteSystemFunctionality {
             }
             catch { $results.Details.Add("INFO: could not read applicationHost.config globalModules: $($_.Exception.Message)") }
 
-            # Check SMS_MP IIS virtual directory exists via WebAdministration (retry up to 5 times, 60s apart)
+            # SMS_MP can be a virtual directory rather than a standalone IIS application.
             try {
                 Import-Module WebAdministration -ErrorAction Stop
                 $addPoolDiagnostics = {
@@ -5715,32 +5715,30 @@ function Test-SiteSystemFunctionality {
                     }
                     catch { $results.Details.Add("DIAG: Application event query failed: $($_.Exception.Message)") }
                 }
-                $mpApp = $null
+                $mpEndpoint = $null
                 $maxAttempts = 5
                 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                    $mpApp = Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
-                    if ($mpApp) { break }
+                    if (Test-Path -LiteralPath 'IIS:\Sites\Default Web Site\SMS_MP' -ErrorAction Stop) {
+                        $mpEndpoint = Get-Item -LiteralPath 'IIS:\Sites\Default Web Site\SMS_MP' -ErrorAction Stop
+                        break
+                    }
                     if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds 60 }
                 }
-                if ($mpApp) {
-                    $results.Details.Add("OK: IIS application 'SMS_MP' exists (Physical: $($mpApp.PhysicalPath))")
+                if ($mpEndpoint) {
+                    $results.Details.Add("OK: IIS endpoint 'SMS_MP' exists (Physical: $($mpEndpoint.PhysicalPath))")
                 }
                 else {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: IIS application 'SMS_MP' not found under Default Web Site")
-                    # Diagnostics: the SMS_MP IIS app is provisioned REMOTELY by
-                    # SMS_MP_CONTROL_MANAGER (runs under SMS_EXECUTIVE on the site
-                    # server). If the site server's SMS_EXECUTIVE is down/unhealthy,
-                    # this MP never gets provisioned here. Capture what IS present so a
-                    # re-run distinguishes "site server didn't provision" from a local
-                    # IIS problem.
+                    $results.Details.Add("FAIL: IIS endpoint 'SMS_MP' not found under Default Web Site")
                     try {
-                        $apps = @(Get-WebApplication -Site 'Default Web Site' -ErrorAction SilentlyContinue | ForEach-Object { $_.Path })
-                        $results.Details.Add("DIAG: IIS apps under Default Web Site: $(if ($apps.Count -gt 0) { $apps -join ', ' } else { '<none>' })")
+                        $entries = @(Get-ChildItem -LiteralPath 'IIS:\Sites\Default Web Site' -ErrorAction Stop | ForEach-Object { $_.Name })
+                        $results.Details.Add("DIAG: IIS entries under Default Web Site: $(if ($entries.Count -gt 0) { $entries -join ', ' } else { '<none>' })")
                     }
-                    catch { }
+                    catch {
+                        $results.Details.Add("DIAG: Could not enumerate IIS entries: $($_.Exception.Message)")
+                    }
                     $mpReg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\MP' -ErrorAction SilentlyContinue
-                    if ($mpReg) { $results.Details.Add("DIAG: HKLM\SOFTWARE\Microsoft\SMS\MP present (MP Control Manager began provisioning); IIS app not yet created -- likely still in progress") }
+                    if ($mpReg) { $results.Details.Add("DIAG: HKLM\SOFTWARE\Microsoft\SMS\MP present, but the SMS_MP IIS endpoint is absent; inspect MP setup logs and IIS configuration.") }
                     else { $results.Details.Add("DIAG: HKLM\SOFTWARE\Microsoft\SMS\MP absent -- SMS_MP_CONTROL_MANAGER on the site server has not provisioned this MP. Verify SMS_EXECUTIVE + SMS_MP_CONTROL_MANAGER are Running on the site server (see its Phase 11 result) and check mpcontrol.log there.") }
                     foreach ($mpLog in @("$env:windir\Temp\mpMSI.log", 'C:\mpMSI.log', "$env:windir\Temp\mpsetup.log")) {
                         if (Test-Path $mpLog) {
@@ -5757,7 +5755,19 @@ function Test-SiteSystemFunctionality {
                 }
 
                 # Check that the app pool is started
-                $poolName = $mpApp.ApplicationPool
+                $poolName = ''
+                if ($mpEndpoint.PSObject.Properties['applicationPool']) {
+                    $poolName = [string]$mpEndpoint.applicationPool
+                }
+                if ([string]::IsNullOrWhiteSpace($poolName)) {
+                    $rootPool = Get-WebConfigurationProperty -PSPath 'IIS:\' `
+                        -Filter "system.applicationHost/sites/site[@name='Default Web Site']/application[@path='/']" `
+                        -Name applicationPool -ErrorAction Stop
+                    $poolName = [string]$rootPool.Value
+                }
+                if ([string]::IsNullOrWhiteSpace($poolName)) {
+                    throw 'Could not resolve the IIS application pool serving SMS_MP.'
+                }
                 $pool = Get-WebAppPoolState -Name $poolName -ErrorAction SilentlyContinue
                 if ($pool -and $pool.Value -eq 'Started') {
                     $results.Details.Add("OK: App pool '$poolName' is Started")
@@ -5791,7 +5801,9 @@ function Test-SiteSystemFunctionality {
                 }
             }
             catch {
-                $results.Details.Add("WARN: Could not load WebAdministration module: $($_.Exception.Message)")
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Could not verify the SMS_MP IIS endpoint or application pool: $($_.Exception.Message)")
+                return $results
             }
 
             # Verify SMS install location from registry

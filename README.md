@@ -1295,6 +1295,25 @@ Validate with `vmbuild\tools\Test-MaintenanceFixRobustness.ps1`,
 `vmbuild\tools\Test-ConsoleUpgradeRouting.ps1`, and
 `vmbuild\tools\Test-Odbc18VersionEnforcement.ps1`.
 
+## Management Point IIS readiness
+
+`SMS_MP` can be an IIS virtual directory rather than a standalone web
+application. Phase 8 and secondary-site setup inspect the exact
+`IIS:\Sites\Default Web Site\SMS_MP` endpoint instead of relying on
+`Get-WebApplication`. Phase 8 still requires the MP configuration, registry key,
+running W3SVC service, and two consecutive ready observations; a missing endpoint
+remains a failure. IIS probe errors are included in readiness diagnostics rather
+than being silently reported as a missing endpoint.
+
+Phase 11 accepts either IIS representation and checks the pool serving the
+endpoint, using the root application's pool for a virtual directory. An IIS
+query failure or unresolved pool fails validation.
+
+Validate with
+[`Test-CmRolePhysicalReadiness.ps1`](vmbuild/tools/Test-CmRolePhysicalReadiness.ps1)
+and
+[`Test-SecondarySiteInstallResilience.ps1`](vmbuild/tools/Test-SecondarySiteInstallResilience.ps1).
+
 ## Reporting Point and SUP resource readiness
 
 A running reporting service is not sufficient for Phase 8: its ReportServer
