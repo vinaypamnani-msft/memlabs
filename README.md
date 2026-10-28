@@ -59,6 +59,14 @@ and ConfigMgr HTTPS settings are preserved. **No** (the default) cancels both ch
 Validate without deploying a lab:
 `.\vmbuild\tools\Test-GenConfigOfflineRootRemoval.ps1`.
 
+## GenConfig: keyboard input
+
+Mouse-enabled menus ignore native console control-state flags that PowerShell's
+`ControlKeyStates` enum does not support. These extra flags no longer terminate
+GenConfig; supported modifiers, lock states, characters, and navigation keys
+are preserved. Validate without an interactive console using
+[`Test-MenuControlKeyStates.ps1`](vmbuild/tools/Test-MenuControlKeyStates.ps1).
+
 ## RDCMan startup preparation
 
 Launching `New-Lab.ps1` (including through `VMBuild.cmd`) or standalone
@@ -1504,10 +1512,18 @@ unhandled exceptions. A CAS update that exhausts its bounded retries persists
 role can enter an impossible wait. The hierarchy readers treat `Error` as
 terminal and bound dependency waits to four hours.
 
+The first-run request to force AD replication is an optimization, not an AD
+readiness gate. If controller or domain discovery fails, including AD's
+`A local error has occurred`, the workflow logs a warning and continues with
+normal AD replication instead of aborting setup. Required provisioning errors
+remain fatal.
+
 Validate these contracts with
 `vmbuild\tools\Test-GuestScriptMemoryBoundary.ps1`,
 `vmbuild\tools\Test-ScriptWorkflowStateIo.ps1`, and
-`vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1`.
+`vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1`. Optional AD discovery is
+covered by
+[`Test-ScriptWorkflowAdReplication.ps1`](vmbuild/tools/Test-ScriptWorkflowAdReplication.ps1).
 
 Critical DC/CAS aborts also finalize the phase elapsed time before returning the
 failure tally, so result validation preserves the guest setup error instead of
