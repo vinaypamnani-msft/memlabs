@@ -153,6 +153,23 @@ runs two minutes after logon, at most once per 24 hours. Normal VMBuild launches
 dispatch due WinGet and daily package work to a visible background maintenance
 window instead of waiting before opening the app. Both background entry points
 run the final ASP.NET Core security check after their package work.
+The Chocolatey `pwsh` version lookup allows 60 seconds **without log movement**,
+with a 10-minute maximum total runtime. It streams stdout/stderr to disk and uses
+Chocolatey's `--log-file` option for an attributable `ChocoSearch_*.native.log`.
+Changes in size or last-write time of these three query logs reset the inactivity
+timer; shared host-log activity cannot keep an unrelated search alive. Longer
+active searches report their elapsed time and last observed log movement.
+On timeout, maintenance collects a `ChocoSearch_*.diagnostics` directory **before**
+stopping the query by process ID. It contains query logs, tails of
+`chocolatey.log`/`choco.summary.log` and their numbered rotations, and `summary.json`
+with the timeout reason, PID, command, user/session, elapsed/idle times and
+per-log progress observations. Shared logs are labeled as host context, not proof
+of query progress. Collection is bounded to 10 shared logs, 4 MiB per file and
+32 MiB per run; the newest three failure directories are retained. Missing,
+locked or truncated logs and collection errors are reported without replacing
+the original timeout. A timed-out lookup fails daily upgrades without starting
+installers or recording successful completion; final ASP.NET Core verification
+still runs. These limits apply to the version lookup, not package installers.
 Host and package maintenance mutexes explicitly allow SYSTEM, local Administrators,
 and their creator, including in separate WinGet/Chocolatey upgrade windows. Existing
 mutexes are opened with only the wait/release rights when full control is unavailable.
@@ -178,6 +195,8 @@ Validate without changing host packages using
 `vmbuild\tools\Test-AspNetCoreMaintenance.ps1`,
 `vmbuild\tools\Test-MaintenanceScheduledTask.ps1`, and
 `vmbuild\tools\Test-WinGetMaintenance.ps1` under PowerShell 7 and Windows PowerShell 5.1.
+`vmbuild\tools\Test-PwshUpgradeDetection.ps1` also exercises a real delayed query
+without installing or upgrading host packages.
 
 ## Skipping an unreliable test family
 

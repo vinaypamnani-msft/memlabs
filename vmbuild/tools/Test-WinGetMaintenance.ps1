@@ -50,6 +50,7 @@ if (@($parseErrors).Count -ne 0) {
 }
 
 $wantedFunctions = @(
+    'Copy-MemLabsDiagnosticLog',
     'Get-MemLabsUserWinGetTimestampPath',
     'Invoke-MemLabsDueUserWinGetMaintenance',
     'Invoke-WinGetMaintenance',
@@ -357,6 +358,7 @@ try {
     Assert-Equal $true $childScript.Contains('$mutex = New-MemLabsMaintenanceMutex -Name ') 'interactive WinGet child uses the shared mutex policy'
     Assert-Equal $true $childScript.Contains('WinGet package maintenance could not run safely: $_') 'interactive WinGet child reports lock errors instead of running unlocked'
     Assert-Equal $true $childScript.Contains(${function:Save-WinGetFailureDiagnostics}.ToString()) 'interactive WinGet child embeds the shared failure collector'
+    Assert-Equal $true $childScript.Contains(${function:Copy-MemLabsDiagnosticLog}.ToString()) 'interactive WinGet child embeds the shared bounded log copier'
     Assert-Equal $true $childScript.Contains('$diagnostics = Save-WinGetFailureDiagnostics ') 'interactive WinGet failures invoke the shared collector'
     Assert-Equal $true $childScript.Contains('--disable-interactivity --verbose-logs') 'interactive WinGet commands enable verbose native diagnostics'
     Assert-Equal $true $childScript.Contains('winget.exe'' upgrade --all --source winget') 'interactive child runs the same upgrade-all command'

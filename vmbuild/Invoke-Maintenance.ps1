@@ -299,20 +299,366 @@ function Get-InstalledPwshVersion {
     return $null
 }
 
-function Get-ChocoAvailablePackageVersion {
+function Copy-MemLabsDiagnosticLog {
+    [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)]
-        [string]$PackageId
+        [Parameter(Mandatory = $true)][IO.FileInfo] $File,
+        [Parameter(Mandatory = $true)][string] $DestinationPath,
+        [ValidateRange(0, 33554432)][long] $MaximumBytes = 4MB
     )
 
-    $output = @(& choco search $PackageId --exact --limit-output)
-    $searchRc = $LASTEXITCODE
+    $source = $null
+    $destination = $null
+    try {
+        if ($File.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing to copy native diagnostic reparse point '$($File.FullName)'."
+        }
+        $source = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $length = $source.Length
+        $headerBytes = [byte[]]::new(16384)
+        $headerLength = $source.Read($headerBytes, 0, $headerBytes.Length)
+        $header = [Text.Encoding]::UTF8.GetString($headerBytes, 0, $headerLength)
+        $commandLine = $null
+        if ($header -match '(?m)Command line(?: Args)?:\s*([^\r\n]+)') {
+            $commandLine = $Matches[1]
+        }
+        $bytesToCopy = [Math]::Min($length, $MaximumBytes)
+        if ($bytesToCopy -le 0 -and $length -gt 0) {
+            throw 'The native diagnostic byte budget has been exhausted.'
+        }
+        [void]$source.Seek($length - $bytesToCopy, [IO.SeekOrigin]::Begin)
+        $destination = [IO.File]::Open($DestinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $buffer = [byte[]]::new(65536)
+        $copiedBytes = 0L
+        while ($copiedBytes -lt $bytesToCopy) {
+            $read = $source.Read($buffer, 0, [int][Math]::Min($buffer.Length, $bytesToCopy - $copiedBytes))
+            if ($read -eq 0) { break }
+            $destination.Write($buffer, 0, $read)
+            $copiedBytes += $read
+        }
+        return [pscustomobject]@{
+            Source = $File.FullName
+            File = [IO.Path]::GetFileName($DestinationPath)
+            LastWriteTimeUtc = $File.LastWriteTimeUtc.ToString('o')
+            OriginalBytes = $length
+            CapturedBytes = $copiedBytes
+            Truncated = ($copiedBytes -lt $length)
+            CommandLine = $commandLine
+        }
+    }
+    finally {
+        if ($destination) { $destination.Dispose() }
+        if ($source) { $source.Dispose() }
+    }
+}
+
+function Get-MemLabsLogFileState {
+    [CmdletBinding()]
+    param ([Parameter(Mandatory = $true)][string] $Path)
+
+    try {
+        $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+    }
+    catch [System.Management.Automation.ItemNotFoundException] {
+        return [pscustomobject]@{ Path = $Path; Exists = $false; Length = 0L; LastWriteTimeUtc = $null }
+    }
+    if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "The query log is not a regular file: '$Path'."
+    }
+    return [pscustomobject]@{
+        Path = $Path
+        Exists = $true
+        Length = $file.Length
+        LastWriteTimeUtc = $file.LastWriteTimeUtc.ToString('o')
+    }
+}
+
+function Save-ChocoSearchFailureDiagnostics {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string] $ChocoPath,
+        [Parameter(Mandatory = $true)][string] $LogPrefix,
+        [Parameter(Mandatory = $true)][string[]] $QueryLogPaths,
+        [Parameter(Mandatory = $true)][Collections.IDictionary] $RunContext
+    )
+
+    $logDirectory = Split-Path -Parent $LogPrefix
+    $directory = "$LogPrefix.diagnostics"
+    New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $warnings = [Collections.Generic.List[string]]::new()
+    $capturedFiles = [Collections.Generic.List[object]]::new()
+    try {
+        $olderDirectories = @(Get-ChildItem -LiteralPath $logDirectory -Directory -Filter 'ChocoSearch_*.diagnostics' -ErrorAction Stop |
+            Where-Object {
+                $_.FullName -ne $directory -and
+                $_.Name -match '^ChocoSearch_\d{8}_\d{6}_\d{3}_[0-9a-f]{8}\.diagnostics$' -and
+                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            } | Sort-Object CreationTimeUtc -Descending)
+        foreach ($oldDirectory in @($olderDirectories | Select-Object -Skip 2)) {
+            Remove-Item -LiteralPath $oldDirectory.FullName -Recurse -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        $warnings.Add("Could not prune older Chocolatey diagnostics: $($_.Exception.Message)")
+    }
+
+    $candidates = [Collections.Generic.List[object]]::new()
+    foreach ($path in $QueryLogPaths) {
+        try {
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($file.PSIsContainer) { throw "The query log is a directory: '$path'." }
+            $candidates.Add([pscustomobject]@{ File = $file; Scope = 'Query' })
+        }
+        catch {
+            $warnings.Add("Could not locate query log '$path': $($_.Exception.Message)")
+        }
+    }
+
+    $nativeDirectory = $null
+    try {
+        $installRoot = $env:ChocolateyInstall
+        if ([string]::IsNullOrWhiteSpace($installRoot)) {
+            $installRoot = Split-Path -Parent $ChocoPath
+            if ((Split-Path -Leaf $installRoot) -eq 'bin') { $installRoot = Split-Path -Parent $installRoot }
+        }
+        $nativeDirectory = Join-Path $installRoot 'logs'
+        $sourceDirectory = Get-Item -LiteralPath $nativeDirectory -ErrorAction Stop
+        if (-not $sourceDirectory.PSIsContainer -or ($sourceDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The native diagnostic directory is not a regular directory: '$nativeDirectory'."
+        }
+        $nativeLogs = @(Get-ChildItem -LiteralPath $nativeDirectory -File -Filter '*.log*' -ErrorAction Stop |
+            Where-Object Name -Match '^(?:chocolatey|choco\.summary)\.log(?:\.\d+)?$' |
+            Sort-Object LastWriteTimeUtc -Descending)
+        if ($nativeLogs.Count -eq 0) { $warnings.Add("No native Chocolatey logs were found in '$nativeDirectory'.") }
+        if ($nativeLogs.Count -gt 10) { $warnings.Add("Only the newest 10 of $($nativeLogs.Count) native Chocolatey logs will be collected.") }
+        foreach ($file in @($nativeLogs | Select-Object -First 10)) {
+            $candidates.Add([pscustomobject]@{ File = $file; Scope = 'SharedHostContext' })
+        }
+    }
+    catch {
+        $warnings.Add("Native Chocolatey diagnostic collection failed: $($_.Exception.Message)")
+    }
+
+    $totalBytes = 0L
+    foreach ($candidate in $candidates) {
+        try {
+            if ($totalBytes -ge 32MB -and $candidate.File.Length -gt 0) {
+                $warnings.Add('The 32 MiB native diagnostic limit was reached; remaining logs were not copied.')
+                break
+            }
+            $captured = Copy-MemLabsDiagnosticLog -File $candidate.File `
+                -DestinationPath (Join-Path $directory $candidate.File.Name) -MaximumBytes ([Math]::Min(4MB, 32MB - $totalBytes))
+            $totalBytes += $captured.CapturedBytes
+            $captured | Add-Member -NotePropertyName Scope -NotePropertyValue $candidate.Scope
+            $capturedFiles.Add($captured)
+            if ($captured.Truncated) {
+                $warnings.Add("Native log '$($captured.File)' was truncated; captured its last $($captured.CapturedBytes) of $($captured.OriginalBytes) bytes.")
+            }
+        }
+        catch {
+            $warnings.Add("Could not collect native log '$($candidate.File.FullName)': $($_.Exception.Message)")
+        }
+    }
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $identityName = $identity.Name }
+    finally { $identity.Dispose() }
+    $summary = [ordered]@{}
+    foreach ($key in $RunContext.Keys) { $summary[$key] = $RunContext[$key] }
+    $summary.Executable = $ChocoPath
+    $summary.Identity = $identityName
+    $summary.HostProcessId = $PID
+    $summary.SessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $summary.PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    $summary.PowerShellEdition = $PSVersionTable.PSEdition
+    $summary.NativeLogDirectory = $nativeDirectory
+    $summary.SharedLogsEstablishQueryProgress = $false
+    $summary.Files = @($capturedFiles.ToArray())
+    $summary.Warnings = @($warnings.ToArray())
+    $summary.Limits = @{ NativeFiles = 10; FileBytes = 4MB; TotalBytes = 32MB; RetainedRuns = 3 }
+    $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $directory 'summary.json') -Encoding utf8 -ErrorAction Stop
+    return [pscustomobject]@{ Directory = $directory; Warnings = @($warnings.ToArray()) }
+}
+
+function Get-ChocoAvailablePackageVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
+        [string]$PackageId,
+        [ValidateRange(1, 3600)]
+        [Alias('TimeoutSeconds')]
+        [int]$IdleTimeoutSeconds = 60,
+        [ValidateRange(1, 3600)]
+        [int]$MaxRuntimeSeconds = 600,
+        [string]$LogDirectory = $logsPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        throw 'The Chocolatey search log directory was not provided.'
+    }
+    if (-not (Test-Path -LiteralPath $LogDirectory)) {
+        New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    $choco = Get-Command choco -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $runId = '{0}_{1}' -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $logPrefix = Join-Path $LogDirectory "ChocoSearch_$runId"
+    $stdoutPath = "$logPrefix.stdout.log"
+    $stderrPath = "$logPrefix.stderr.log"
+    $nativePath = "$logPrefix.native.log"
+    $diagnostics = "Output: $stdoutPath; errors: $stderrPath; native log: $nativePath"
+    Write-LogMessage "Checking Chocolatey version for '$PackageId' (inactivity timeout: ${IdleTimeoutSeconds}s; maximum runtime: ${MaxRuntimeSeconds}s). $diagnostics"
+
+    $process = [System.Diagnostics.Process]::new()
+    $processStarted = $false
+    $stdoutStream = $null
+    $stderrStream = $null
+    try {
+        $stdoutStream = [IO.FileStream]::new($stdoutPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 1, [IO.FileOptions]::Asynchronous)
+        $stderrStream = [IO.FileStream]::new($stderrPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 1, [IO.FileOptions]::Asynchronous)
+        $logStates = [ordered]@{}
+        foreach ($path in @($stdoutPath, $stderrPath, $nativePath)) {
+            $state = Get-MemLabsLogFileState -Path $path
+            $state | Add-Member -NotePropertyName LastChangeElapsedSeconds -NotePropertyValue 0.0
+            $state | Add-Member -NotePropertyName ChangeCount -NotePropertyValue 0
+            $logStates[$path] = $state
+        }
+        $process.StartInfo.FileName = $choco.Source
+        $process.StartInfo.Arguments = "search $PackageId --exact --limit-output --log-file=`"$nativePath`""
+        $process.StartInfo.UseShellExecute = $false
+        $process.StartInfo.CreateNoWindow = $true
+        $process.StartInfo.RedirectStandardOutput = $true
+        $process.StartInfo.RedirectStandardError = $true
+        $started = Get-Date
+        $queryWatch = [Diagnostics.Stopwatch]::StartNew()
+        $processStarted = $process.Start()
+        if (-not $processStarted) { throw "Could not start choco search $PackageId. $diagnostics" }
+
+        # Stream both pipes to disk so their growth is observable while the query runs.
+        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+        $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
+        Write-LogMessage "choco search $PackageId started (PID $($process.Id))."
+        $lastProgressSeconds = 0.0
+        $lastProgressPath = $null
+        $nextProgressReport = [Math]::Min($IdleTimeoutSeconds, 60)
+        $timeoutReason = $null
+        while (-not $process.WaitForExit(250)) {
+            foreach ($state in $logStates.Values) {
+                $observed = Get-MemLabsLogFileState -Path $state.Path
+                if ($state.Exists -ne $observed.Exists -or $state.Length -ne $observed.Length -or $state.LastWriteTimeUtc -ne $observed.LastWriteTimeUtc) {
+                    $state.Exists = $observed.Exists
+                    $state.Length = $observed.Length
+                    $state.LastWriteTimeUtc = $observed.LastWriteTimeUtc
+                    $state.ChangeCount++
+                    $lastProgressSeconds = $queryWatch.Elapsed.TotalSeconds
+                    $state.LastChangeElapsedSeconds = $lastProgressSeconds
+                    $lastProgressPath = $state.Path
+                }
+            }
+            $elapsedSeconds = $queryWatch.Elapsed.TotalSeconds
+            $idleSeconds = $elapsedSeconds - $lastProgressSeconds
+            if ($elapsedSeconds -ge $MaxRuntimeSeconds) { $timeoutReason = 'MaximumRuntime'; break }
+            if ($idleSeconds -ge $IdleTimeoutSeconds) { $timeoutReason = 'NoLogProgress'; break }
+            if ($elapsedSeconds -ge $nextProgressReport) {
+                Write-LogMessage ("choco search {0} is still running: elapsed {1:N1}s, no log movement for {2:N1}s; last changed log: {3}." -f $PackageId, $elapsedSeconds, $idleSeconds, $lastProgressPath)
+                $nextProgressReport = $elapsedSeconds + [Math]::Min($IdleTimeoutSeconds, 60)
+            }
+        }
+
+        $failure = $null
+        if ($timeoutReason) {
+            $failure = if ($timeoutReason -eq 'NoLogProgress') {
+                "choco search $PackageId timed out after $IdleTimeoutSeconds seconds without log progress."
+            }
+            else {
+                "choco search $PackageId timed out at the maximum runtime of $MaxRuntimeSeconds seconds."
+            }
+            $failure += " Daily upgrades were not started. $diagnostics"
+            Write-LogMessage $failure -Level 'ERROR'
+            try {
+                $runContext = [ordered]@{
+                    Failure = $failure
+                    TimeoutReason = $timeoutReason
+                    Command = $process.StartInfo.Arguments
+                    QueryProcessId = $process.Id
+                    QueryHasExited = $process.HasExited
+                    Started = $started.ToString('o')
+                    Collected = (Get-Date).ToString('o')
+                    ElapsedSeconds = $queryWatch.Elapsed.TotalSeconds
+                    IdleSeconds = $queryWatch.Elapsed.TotalSeconds - $lastProgressSeconds
+                    IdleTimeoutSeconds = $IdleTimeoutSeconds
+                    MaxRuntimeSeconds = $MaxRuntimeSeconds
+                    LastProgressLog = $lastProgressPath
+                    LogProgress = @($logStates.Values)
+                }
+                $bundle = Save-ChocoSearchFailureDiagnostics -ChocoPath $choco.Source -LogPrefix $logPrefix `
+                    -QueryLogPaths @($stdoutPath, $stderrPath, $nativePath) -RunContext $runContext
+                foreach ($warningMessage in $bundle.Warnings) { Write-LogMessage $warningMessage -Level 'WARNING' }
+                $failure += " Diagnostics: $($bundle.Directory)."
+                Write-LogMessage "Chocolatey timeout diagnostics collected before stopping PID $($process.Id): $($bundle.Directory)"
+            }
+            catch {
+                $failure += " Diagnostic collection failed: $($_.Exception.Message)."
+                Write-LogMessage $failure -Level 'ERROR'
+            }
+            try {
+                if (-not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                }
+                if (-not $process.WaitForExit(5000)) {
+                    throw "Query PID $($process.Id) is still running."
+                }
+            }
+            catch {
+                throw "$failure Could not stop timed-out query PID $($process.Id): $($_.Exception.Message)"
+            }
+        }
+
+        try {
+            $outputTasks = [System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
+            if (-not [System.Threading.Tasks.Task]::WaitAll($outputTasks, 5000)) {
+                throw "choco search $PackageId output capture did not finish within 5 seconds of process exit. $diagnostics"
+            }
+            $stdoutStream.Flush()
+            $stderrStream.Flush()
+        }
+        catch {
+            if ($failure) { throw "$failure Output capture failed: $($_.Exception.Message)" }
+            throw
+        }
+        if ($failure) { throw $failure }
+        $searchRc = $process.ExitCode
+    }
+    catch {
+        $originalFailure = $_
+        if ($processStarted -and -not $process.HasExited) {
+            try {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                if (-not $process.WaitForExit(5000)) { throw "Query PID $($process.Id) is still running." }
+            }
+            catch {
+                Write-LogMessage "Could not stop query after failure '$originalFailure': $($_.Exception.Message)" -Level 'ERROR'
+            }
+        }
+        throw $originalFailure
+    }
+    finally {
+        if ($stdoutStream) { $stdoutStream.Dispose() }
+        if ($stderrStream) { $stderrStream.Dispose() }
+        $process.Dispose()
+    }
 
     if (-not (Test-ChocoSuccessCode -Code $searchRc)) {
-        Write-LogMessage "choco search $PackageId returned exit code $searchRc; cannot determine the available version." -Level 'WARNING'
+        Write-LogMessage "choco search $PackageId returned exit code $searchRc; cannot determine the available version. $diagnostics" -Level 'WARNING'
         return $null
     }
 
+    Write-LogMessage "choco search $PackageId completed (exit code: $searchRc). $diagnostics"
+    $output = @(Get-Content -LiteralPath $stdoutPath -ErrorAction Stop)
     $idPattern = '^{0}\|(\d+(?:\.\d+){{1,3}})' -f [regex]::Escape($PackageId)
     foreach ($line in $output) {
         if ($line -match $idPattern) {
@@ -320,7 +666,7 @@ function Get-ChocoAvailablePackageVersion {
         }
     }
 
-    Write-LogMessage "choco search $PackageId reported no usable version; cannot compare it against the installed build." -Level 'WARNING'
+    Write-LogMessage "choco search $PackageId reported no usable version; cannot compare it against the installed build. $diagnostics" -Level 'WARNING'
     return $null
 }
 
@@ -1243,61 +1589,24 @@ function Save-WinGetFailureDiagnostics {
             $warnings.Add("Only the newest 10 of $($nativeLogs.Count) native logs overlapping the failed run will be collected.")
         }
         foreach ($file in @($nativeLogs | Select-Object -First 10)) {
-            $source = $null
-            $destination = $null
             try {
-                if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                    throw "Refusing to copy native diagnostic reparse point '$($file.FullName)'."
-                }
-                $source = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read,
-                    ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
-                $length = $source.Length
-                $headerBytes = [byte[]]::new(16384)
-                $headerLength = $source.Read($headerBytes, 0, $headerBytes.Length)
-                $header = [Text.Encoding]::UTF8.GetString($headerBytes, 0, $headerLength)
-                $commandLine = $null
-                if ($header -match '(?m)Command line Args:\s*([^\r\n]+)') {
-                    $commandLine = $Matches[1]
-                }
-                $matchesUpgrade = $commandLine -match '\bupgrade\s+--all\b'
-                $bytesToCopy = [Math]::Min($length, [Math]::Min(4MB, 32MB - $totalBytes))
-                if ($bytesToCopy -le 0 -and $length -gt 0) {
+                if ($totalBytes -ge 32MB -and $file.Length -gt 0) {
                     $warnings.Add('The 32 MiB native diagnostic limit was reached; remaining logs were not copied.')
                     break
                 }
-                [void]$source.Seek($length - $bytesToCopy, [IO.SeekOrigin]::Begin)
-                $destinationPath = Join-Path $directory $file.Name
-                $destination = [IO.File]::Open($destinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
-                $totalBytes += $bytesToCopy
-                $buffer = [byte[]]::new(65536)
-                $copiedBytes = 0L
-                while ($copiedBytes -lt $bytesToCopy) {
-                    $read = $source.Read($buffer, 0, [int][Math]::Min($buffer.Length, $bytesToCopy - $copiedBytes))
-                    if ($read -eq 0) { break }
-                    $destination.Write($buffer, 0, $read)
-                    $copiedBytes += $read
+                $captured = Copy-MemLabsDiagnosticLog -File $file -DestinationPath (Join-Path $directory $file.Name) `
+                    -MaximumBytes ([Math]::Min(4MB, 32MB - $totalBytes))
+                $totalBytes += $captured.CapturedBytes
+                $matchesUpgrade = $captured.CommandLine -match '\bupgrade\s+--all\b'
+                $captured | Add-Member -NotePropertyName MatchesUpgradeCommand -NotePropertyValue $matchesUpgrade
+                $capturedFiles.Add($captured)
+                if ($captured.Truncated) {
+                    $warnings.Add("Native log '$($file.Name)' was truncated; captured its last $($captured.CapturedBytes) of $($captured.OriginalBytes) bytes.")
                 }
-                if ($copiedBytes -lt $length) {
-                    $warnings.Add("Native log '$($file.Name)' was truncated; captured its last $copiedBytes of $length bytes.")
-                }
-                $capturedFiles.Add([pscustomobject]@{
-                        Source = $file.FullName
-                        File = $file.Name
-                        LastWriteTimeUtc = $file.LastWriteTimeUtc.ToString('o')
-                        OriginalBytes = $length
-                        CapturedBytes = $copiedBytes
-                        Truncated = ($copiedBytes -lt $length)
-                        CommandLine = $commandLine
-                        MatchesUpgradeCommand = $matchesUpgrade
-                    })
                 if ($matchesUpgrade) { $upgradeLogFound = $true }
             }
             catch {
                 $warnings.Add("Could not collect native log '$($file.FullName)': $($_.Exception.Message)")
-            }
-            finally {
-                if ($destination) { $destination.Dispose() }
-                if ($source) { $source.Dispose() }
             }
         }
     }
@@ -1386,6 +1695,9 @@ function Invoke-WinGetMaintenance {
         $scriptLines = @(
             'function New-MemLabsMaintenanceMutex {'
             ${function:New-MemLabsMaintenanceMutex}.ToString()
+            '}'
+            'function Copy-MemLabsDiagnosticLog {'
+            ${function:Copy-MemLabsDiagnosticLog}.ToString()
             '}'
             'function Save-WinGetFailureDiagnostics {'
             ${function:Save-WinGetFailureDiagnostics}.ToString()
