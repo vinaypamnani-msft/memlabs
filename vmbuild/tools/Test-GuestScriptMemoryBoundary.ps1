@@ -57,12 +57,18 @@ function Invoke-MemLabsGuestMemoryReclaim {
 function Get-CmSslStateNote { return '' }
 . (Import-TestFunction -Name 'Invoke-DotSource')
 . (Import-TestFunction -Name 'Test-MemLabsOutOfMemoryError')
+. (Import-TestFunction -Name 'Get-MemLabsExceptionSummary')
+. (Import-TestFunction -Name 'Write-MemLabsExceptionDetails')
+. (Import-TestFunction -Name 'Write-StatusLogEntry')
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-guest-memory-$PID"
 $oomScript = Join-Path $testRoot 'Oom.ps1'
 $healthyScript = Join-Path $testRoot 'Healthy.ps1'
 $fatalScript = Join-Path $testRoot 'Fatal.ps1'
 $reportedFailureScript = Join-Path $testRoot 'ReportedFailure.ps1'
+$nestedScript = Join-Path $testRoot 'Nested.ps1'
+$previousStatusLog = $global:StatusLog
+$global:StatusLog = Join-Path $testRoot 'InstallCMLog.log'
 try {
     $null = New-Item -ItemType Directory -Path $testRoot -Force
     [IO.File]::WriteAllText(
@@ -81,6 +87,12 @@ try {
         $reportedFailureScript,
         "Write-DscStatus 'synthetic reported failure' -Failure",
         [Text.UTF8Encoding]::new($true))
+    $nestedSource = @'
+$identity = 'System.Text.Json, Version=8.0.0.6, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51'
+$inner = [IO.FileNotFoundException]::new("Could not load file or assembly '$identity'.", $identity)
+throw [InvalidOperationException]::new("Unable to build the 'Tables' collection.", $inner)
+'@
+    [IO.File]::WriteAllText($nestedScript, $nestedSource, [Text.Encoding]::ASCII)
 
     Invoke-DotSource -Script $oomScript
     if ($script:ReclaimCalls -ne 1) {
@@ -139,8 +151,88 @@ try {
         $global:TestGuestBoundaryFailureStatuses[1] -ne 'synthetic reported failure') {
         throw 'A reported guest failure was not preserved as the authoritative JOBFAILURE status.'
     }
+
+    $nestedFailure = $null
+    try { Invoke-DotSource -Script $nestedScript -Rethrow }
+    catch { $nestedFailure = $_ }
+    if (-not $nestedFailure -or $nestedFailure.Exception.GetBaseException() -isnot [IO.FileNotFoundException]) {
+        throw 'The nested assembly failure was not preserved when rethrown.'
+    }
+    $identity = 'System.Text.Json, Version=8.0.0.6, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51'
+    $summary = $global:TestGuestBoundaryFailureStatuses[$global:TestGuestBoundaryFailureStatuses.Count - 1]
+    if (-not $summary.Contains($identity) -or $summary.IndexOf('System.IO.FileNotFoundException') -gt
+        $summary.IndexOf('System.InvalidOperationException')) {
+        throw 'The host-visible failure summary hid the nested assembly cause behind the generic wrapper.'
+    }
+    $log = [IO.File]::ReadAllText($global:StatusLog)
+    foreach ($detail in @($identity, "Unable to build the 'Tables' collection.", 'End of inner exception stack trace',
+            'Error ID:', 'Position:', 'PowerShell stack:', 'Nested.ps1')) {
+        if (-not $log.Contains($detail)) { throw "The automatically collected guest log lost '$detail'." }
+    }
+    $longOuter = [InvalidOperationException]::new(('wrapper ' * 1000), $nestedFailure.Exception.GetBaseException())
+    $boundedSummary = (Get-MemLabsExceptionSummary -Exception $longOuter).Substring(0, 4000)
+    if (-not $boundedSummary.Contains($identity)) { throw 'A bounded failure receipt lost the root cause.' }
+
+    $logLength = $log.Length
+    $failureCount = $global:TestGuestBoundaryFailureStatuses.Count
+    try { Invoke-DotSource -Script $nestedScript -Rethrow -CallerOwnsRetry }
+    catch {
+        if ($_.Exception.GetBaseException() -isnot [IO.FileNotFoundException]) { throw }
+    }
+    $retryLog = [IO.File]::ReadAllText($global:StatusLog).Substring($logLength)
+    if (-not $retryLog.Contains($identity) -or $retryLog.Contains('type="3"') -or
+        $global:TestGuestBoundaryFailureStatuses.Count -ne $failureCount) {
+        throw 'Detailed retry diagnostics either lost the cause or published a premature error.'
+    }
+
+    $workflowPath = Join-Path $RootPath 'DSC\phases\ScriptWorkFlow.ps1'
+    $tokens = $null
+    $errors = $null
+    $workflowAst = [Management.Automation.Language.Parser]::ParseFile(
+        $workflowPath, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw "Workflow parse errors: $($errors -join '; ')" }
+    $traps = @($workflowAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.TrapStatementAst]
+            }, $true))
+    if ($traps.Count -ne 1) { throw 'Expected one terminal workflow trap.' }
+    $global:TestGuestBoundaryTrapReceipt = ''
+    $global:TestGuestBoundaryTrapBreadcrumb = ''
+    $trapScript = Join-Path $testRoot 'Trap.ps1'
+    $trapFixture = @'
+$ScriptWorkflowRunId = 'fixture-run'
+function Out-File {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline = $true)]$InputObject, [string]$FilePath, [switch]$Force)
+    process { $global:TestGuestBoundaryTrapBreadcrumb = "$InputObject" }
+}
+function Write-ScriptWorkflowFailureReceipt {
+    param([string]$RunId, [string]$Message)
+    $global:TestGuestBoundaryTrapReceipt = $Message
+}
+__TRAP__
+__NESTED__
+'@
+    [IO.File]::WriteAllText(
+        $trapScript, $trapFixture.Replace('__TRAP__', $traps[0].Extent.Text).Replace('__NESTED__', $nestedSource),
+        [Text.Encoding]::ASCII)
+    $trapFailure = $null
+    try { & $trapScript }
+    catch { $trapFailure = $_ }
+    if (-not $trapFailure -or $trapFailure.Exception.GetBaseException() -isnot [IO.FileNotFoundException]) {
+        throw 'The workflow trap did not preserve the terminal assembly failure.'
+    }
+    if (-not $global:TestGuestBoundaryTrapReceipt.Contains($identity) -or
+        -not $global:TestGuestBoundaryTrapBreadcrumb.Contains($identity)) {
+        throw 'The terminal receipt or pre-state-file breadcrumb lost the nested assembly cause.'
+    }
+    $rootEntries = @(Get-Content -LiteralPath $global:StatusLog | Where-Object {
+            $_.Contains($identity) -and $_.Contains('component="ScriptWorkflow"') -and $_.Contains('type="3"')
+        })
+    if ($rootEntries.Count -eq 0) { throw 'The workflow trap did not automatically log the full nested exception.' }
 }
 finally {
+    $global:StatusLog = $previousStatusLog
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 

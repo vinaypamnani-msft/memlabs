@@ -269,6 +269,34 @@ function Write-StatusLogEntry {
     }
 }
 
+function Get-MemLabsExceptionSummary {
+    param([Parameter(Mandatory = $true)][System.Exception]$Exception)
+
+    $messages = [System.Collections.Generic.List[string]]::new()
+    while ($Exception) {
+        # Keep the root cause ahead of wrappers when host status/receipt fields are bounded.
+        $messages.Insert(0, "$($Exception.GetType().FullName): $(($Exception.Message -replace '\s+', ' ').Trim())")
+        $Exception = $Exception.InnerException
+    }
+    return $messages -join ' <-- '
+}
+
+function Write-MemLabsExceptionDetails {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory = $true)][string]$Component,
+        [ValidateSet(2, 3)][int]$Type = 3
+    )
+
+    @(
+        "Error ID: $($ErrorRecord.FullyQualifiedErrorId)"
+        "Category: $($ErrorRecord.CategoryInfo)"
+        $ErrorRecord.Exception.ToString()
+        "Position: $($ErrorRecord.InvocationInfo.PositionMessage)"
+        "PowerShell stack: $($ErrorRecord.ScriptStackTrace)"
+    ) -join [Environment]::NewLine | Write-StatusLogEntry -Component $Component -Type $Type
+}
+
 function Get-CmSslStateNote {
     # Short "  [ssl=63]" tag for the Invoke-DotSource boundary lines, so a revert of
     # IISSSLState can be attributed to the script whose window it happened in.
@@ -437,13 +465,16 @@ function Invoke-DotSource {
         }
     }
     catch {
+        $__idsErrorRecord = $_
         if ([int]$global:MemLabsFailureSequence -gt $__idsFailureSequenceBefore) {
             $__idsReportedFailure = $true
         }
-        $__idsOutOfMemory = Test-MemLabsOutOfMemoryError -ErrorRecord $_
-        $__idsStack = (($_.ScriptStackTrace -replace '\s+', ' ').Trim())
+        $__idsOutOfMemory = Test-MemLabsOutOfMemoryError -ErrorRecord $__idsErrorRecord
+        $__idsStack = (($__idsErrorRecord.ScriptStackTrace -replace '\s+', ' ').Trim())
         if ($__idsStack.Length -gt 1200) { $__idsStack = $__idsStack.Substring(0, 1200) + '...' }
-        $__idsFailure = "exception in ${__idsScriptName}: $($_.Exception.GetType().FullName): $($_.Exception.Message); stack=$__idsStack"
+        $__idsFailure = "exception in ${__idsScriptName}: $(Get-MemLabsExceptionSummary -Exception $__idsErrorRecord.Exception); stack=$__idsStack"
+        $__idsDetailType = if ($__idsReportedFailure -or ($__idsRethrow -and -not $__idsCallerOwnsRetry)) { 3 } else { 2 }
+        Write-MemLabsExceptionDetails -ErrorRecord $__idsErrorRecord -Component 'Invoke-DotSource' -Type $__idsDetailType
         if ($__idsReportedFailure) {
             Write-DscStatus "FAILED: $__idsFailure" -NoStatus -Warning
             throw
@@ -1401,6 +1432,177 @@ function Get-VmSqlConnectionTarget {
     return $target
 }
 
+function Initialize-CMConsoleAssemblyResolver {
+    param([Parameter(Mandatory = $true)][string]$ModulePath)
+
+    if ($PSVersionTable.PSEdition -ne 'Desktop') { return }
+
+    $consoleDirectory = Split-Path -Parent $ModulePath
+    $configurationPath = Join-Path $consoleDirectory 'Microsoft.ConfigurationManagement.exe.config'
+    if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) {
+        Write-DscStatus "ConfigMgr console binding policy not found at '$configurationPath'; retaining normal CLR assembly resolution." -NoStatus -Warning
+        return
+    }
+
+    # CLR callbacks can run without a PowerShell runspace.
+    if (-not ('MemLabs.ConfigMgrConsoleAssemblyResolver' -as [type])) {
+        Add-Type -ReferencedAssemblies 'System.dll', 'System.Xml.dll' -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Xml;
+
+namespace MemLabs {
+    public static class ConfigMgrConsoleAssemblyResolver {
+        private sealed class Redirect {
+            public string Name, Token, Culture, Directory, FilePath;
+            public Version Minimum, Maximum, Target;
+
+            public bool SameIdentity(AssemblyName identity) {
+                return String.Equals(Name, identity.Name, StringComparison.OrdinalIgnoreCase)
+                    && String.Equals(Token, PublicKeyToken(identity), StringComparison.OrdinalIgnoreCase)
+                    && String.Equals(Culture, NormalizeCulture(identity.CultureName), StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private static readonly object Gate = new object();
+        private static readonly Dictionary<string, List<Redirect>> Policies =
+            new Dictionary<string, List<Redirect>>(StringComparer.OrdinalIgnoreCase);
+        private static bool registered;
+
+        private static string PublicKeyToken(AssemblyName identity) {
+            byte[] token = identity.GetPublicKeyToken();
+            return token == null ? "" : BitConverter.ToString(token).Replace("-", "").ToLowerInvariant();
+        }
+
+        private static string NormalizeCulture(string culture) {
+            return String.IsNullOrEmpty(culture) || culture == "neutral" ? "" : culture;
+        }
+
+        private static string Attribute(XmlNode node, string name, string fallback) {
+            XmlAttribute value = node.Attributes[name];
+            if (value != null) return value.Value;
+            if (fallback != null) return fallback;
+            throw new FormatException("Missing '" + name + "' in ConfigMgr console binding policy.");
+        }
+
+        public static int Register(string directory, string configurationPath) {
+            string root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var document = new XmlDocument();
+            var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
+            using (XmlReader reader = XmlReader.Create(configurationPath, settings)) {
+                document.Load(reader);
+            }
+            var namespaces = new XmlNamespaceManager(document.NameTable);
+            namespaces.AddNamespace("asm", "urn:schemas-microsoft-com:asm.v1");
+            var redirects = new List<Redirect>();
+            foreach (XmlNode entry in document.SelectNodes(
+                    "/configuration/runtime/asm:assemblyBinding/asm:dependentAssembly[asm:bindingRedirect]", namespaces)) {
+                XmlNode identity = entry.SelectSingleNode("asm:assemblyIdentity", namespaces);
+                XmlNode binding = entry.SelectSingleNode("asm:bindingRedirect", namespaces);
+                if (identity == null) throw new FormatException("Missing assemblyIdentity in ConfigMgr console binding policy.");
+                string name = Attribute(identity, "name", null);
+                if (name.Length == 0 || name != Path.GetFileName(name)) {
+                    throw new FormatException("Invalid assembly name in ConfigMgr console binding policy: " + name);
+                }
+                string[] range = Attribute(binding, "oldVersion", null).Split('-');
+                if (range.Length < 1 || range.Length > 2) {
+                    throw new FormatException("Invalid version range in ConfigMgr console binding policy: " + name);
+                }
+                var redirect = new Redirect {
+                    Name = name,
+                    Token = Attribute(identity, "publicKeyToken", "").Replace("null", "").ToLowerInvariant(),
+                    Culture = NormalizeCulture(Attribute(identity, "culture", "")),
+                    Minimum = new Version(range[0]),
+                    Maximum = new Version(range[range.Length - 1]),
+                    Target = new Version(Attribute(binding, "newVersion", null)),
+                    Directory = root,
+                    FilePath = Path.Combine(root, name + ".dll")
+                };
+                if (redirect.Minimum.CompareTo(redirect.Maximum) > 0) {
+                    throw new FormatException("Reversed version range in ConfigMgr console binding policy: " + name);
+                }
+                redirects.Add(redirect);
+            }
+            lock (Gate) {
+                Policies[root] = redirects;
+                if (!registered) {
+                    AppDomain.CurrentDomain.AssemblyResolve += Resolve;
+                    registered = true;
+                }
+            }
+            return redirects.Count;
+        }
+
+        private static void AddOrigin(List<string> origins, Assembly assembly) {
+            if (assembly != null && !assembly.IsDynamic && !String.IsNullOrEmpty(assembly.Location)) {
+                origins.Add(Path.GetFullPath(assembly.Location));
+            }
+        }
+
+        private static List<string> RequestOrigins(Assembly requester) {
+            var origins = new List<string>();
+            if (requester != null) {
+                AddOrigin(origins, requester);
+            } else {
+                // PowerShell can reissue a bind without RequestingAssembly; require a console call frame.
+                foreach (StackFrame frame in new StackTrace().GetFrames() ?? new StackFrame[0]) {
+                    MethodBase method = frame.GetMethod();
+                    if (method != null) AddOrigin(origins, method.Module.Assembly);
+                }
+            }
+            return origins;
+        }
+
+        private static Assembly Resolve(object sender, ResolveEventArgs args) {
+            var requested = new AssemblyName(args.Name);
+            var candidates = new List<Redirect>();
+            lock (Gate) {
+                foreach (var policy in Policies) {
+                    foreach (Redirect redirect in policy.Value) {
+                        if (redirect.SameIdentity(requested) && requested.Version != null
+                                && requested.Version.CompareTo(redirect.Minimum) >= 0
+                                && requested.Version.CompareTo(redirect.Maximum) <= 0) {
+                            candidates.Add(redirect);
+                        }
+                    }
+                }
+            }
+            if (candidates.Count == 0) return null;
+            Redirect match = null;
+            List<string> origins = RequestOrigins(args.RequestingAssembly);
+            foreach (Redirect redirect in candidates) {
+                foreach (string origin in origins) {
+                    if (origin.StartsWith(redirect.Directory, StringComparison.OrdinalIgnoreCase)) {
+                        match = redirect;
+                        break;
+                    }
+                }
+                if (match != null) break;
+            }
+            if (match == null) return null;
+            if (!File.Exists(match.FilePath)) {
+                throw new FileNotFoundException("ConfigMgr console binding redirect target is missing: "
+                    + match.Name + ", Version=" + match.Target, match.FilePath);
+            }
+            AssemblyName target = AssemblyName.GetAssemblyName(match.FilePath);
+            if (!match.SameIdentity(target) || !match.Target.Equals(target.Version)) {
+                throw new FileLoadException("ConfigMgr console binding redirect target identity mismatch. Expected "
+                    + match.Name + ", Version=" + match.Target + "; found " + target.FullName, match.FilePath);
+            }
+            return Assembly.LoadFrom(match.FilePath);
+        }
+    }
+}
+'@
+    }
+
+    $redirectCount = [MemLabs.ConfigMgrConsoleAssemblyResolver]::Register($consoleDirectory, $configurationPath)
+    Write-DscStatus "Registered $redirectCount ConfigMgr console binding redirect(s) from '$configurationPath' for Windows PowerShell." -NoStatus
+}
+
 function Set-CMSiteProvider {
     param($SiteCode, $ProviderFQDN)
 
@@ -1410,6 +1612,8 @@ function Set-CMSiteProvider {
     $uiInstallPath = $subKey.GetValue("UI Installation Directory")
     $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
     $initParams = @{}
+
+    Initialize-CMConsoleAssemblyResolver -ModulePath $modulePath
 
     # Import the ConfigurationManager.psd1 module
     if ($null -eq (Get-Module ConfigurationManager)) {

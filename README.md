@@ -59,6 +59,14 @@ and ConfigMgr HTTPS settings are preserved. **No** (the default) cancels both ch
 Validate without deploying a lab:
 `.\vmbuild\tools\Test-GenConfigOfflineRootRemoval.ps1`.
 
+## GenConfig: keyboard input
+
+Mouse-enabled menus ignore native console control-state flags that PowerShell's
+`ControlKeyStates` enum does not support. These extra flags no longer terminate
+GenConfig; supported modifiers, lock states, characters, and navigation keys
+are preserved. Validate without an interactive console using
+[`Test-MenuControlKeyStates.ps1`](vmbuild/tools/Test-MenuControlKeyStates.ps1).
+
 ## RDCMan startup preparation
 
 Launching `New-Lab.ps1` (including through `VMBuild.cmd`) or standalone
@@ -1420,6 +1428,16 @@ out-of-memory errors, check its assigned memory and demand in the Phase 8
 timeline before retrying; passing DNS, RPC, SMB, and WinRM checks does not
 establish reporting-service health.
 
+Windows PowerShell 5.1 does not read the ConfigMgr console executable's assembly
+binding policy. The guest site-provider bootstrap applies that installed policy
+to dependency requests originating under the console's `bin` directory. This
+allows SqlClient to use the console's bundled `System.Text.Json` version without
+downloading older DLLs or changing machine-wide PowerShell configuration.
+Redirects honor the configured version range, culture, public-key token, and
+target identity; missing or mismatched targets remain explicit failures.
+Validate with
+[`Test-CmConsoleAssemblyBinding.ps1`](vmbuild/tools/Test-CmConsoleAssemblyBinding.ps1).
+
 The CSTest3 existing-VM mutation explicitly brings the CAS RP/SUP host to the
 current baseline's 8 GB allocation. Both DP/MP/SUP hosts use 8 GB each, and the
 file server uses 3 GB; SQL, site-server, and client allocations are unchanged.
@@ -1504,10 +1522,26 @@ unhandled exceptions. A CAS update that exhausts its bounded retries persists
 role can enter an impossible wait. The hierarchy readers treat `Error` as
 terminal and bound dependency waits to four hours.
 
+Guest script failures automatically record `Exception.ToString()` (including
+inner exceptions and .NET stacks), error ID, source position, and the complete
+PowerShell stack in `InstallCMLog.log`. The normal host log collector pulls this
+file in full. Host status, failure receipts, and breadcrumbs put the deepest
+cause first so bounded summaries do not hide an assembly-load or SQL error
+behind a generic wrapper. Caller-owned retries retain warning severity until
+their retry budget is exhausted.
+
+The first-run request to force AD replication is an optimization, not an AD
+readiness gate. If controller or domain discovery fails, including AD's
+`A local error has occurred`, the workflow logs a warning and continues with
+normal AD replication instead of aborting setup. Required provisioning errors
+remain fatal.
+
 Validate these contracts with
 `vmbuild\tools\Test-GuestScriptMemoryBoundary.ps1`,
 `vmbuild\tools\Test-ScriptWorkflowStateIo.ps1`, and
-`vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1`.
+`vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1`. Optional AD discovery is
+covered by
+[`Test-ScriptWorkflowAdReplication.ps1`](vmbuild/tools/Test-ScriptWorkflowAdReplication.ps1).
 
 Critical DC/CAS aborts also finalize the phase elapsed time before returning the
 failure tally, so result validation preserves the guest setup error instead of

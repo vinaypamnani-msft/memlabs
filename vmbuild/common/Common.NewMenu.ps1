@@ -2235,10 +2235,11 @@ function Get-KeyStroke {
                                 Resume-MouseInput
                             }
                             # Synthesize a KeyInfo object matching what ReadKey returns
+                            # Native console records can include flags outside PowerShell's enum.
                             return [System.Management.Automation.Host.KeyInfo]::new(
                                 [int]$ke.wVirtualKeyCode,
                                 $ke.UnicodeChar,
-                                [System.Management.Automation.Host.ControlKeyStates]$ke.dwControlKeyState,
+                                [System.Management.Automation.Host.ControlKeyStates]($ke.dwControlKeyState -band 0x01ff),
                                 $true
                             )
                         }
@@ -3066,6 +3067,5 @@ function Start-Navigation {
         [System.Console]::CursorVisible = $true
     }
 }
-
 
 
