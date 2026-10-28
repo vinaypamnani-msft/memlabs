@@ -1157,6 +1157,21 @@ Resume the retained deployment with `-StartPhase 2` after updating the runner.
 
 Validate with `vmbuild\tools\Test-DscPayloadReadiness.ps1`.
 
+Phase 2 rechecks the shared Windows-client setup gate immediately before DSC
+apply, including for retained VMs. If the in-guest guard observes setup regressing
+after that check, the host waits for readiness before retrying instead of
+reapplying DSC or rebooting an unfinished setup. AAD and migration exemptions
+remain; the rename/domain-join guards and setup-completion criteria are unchanged.
+
+Failed DSC metadata pushes stop before apply and return exception types, HRESULTs,
+inner exceptions, and bounded LCM-state evidence to the host log. Last DSC status
+includes its start date; unavailable status falls back to dated operational events,
+and failed evidence reads are explicit. Clear-status recovery also logs the original
+transport errors before its existing retry/reboot ladder.
+
+Validate with `vmbuild\tools\Test-WindowsClientSetupReadiness.ps1` and
+`vmbuild\tools\Test-DscStartFailureDiagnostics.ps1`.
+
 ### Shutdown cleanup after PowerShell Direct timeouts
 
 A timed-out connection can remain in `Stopping` while blocked inside a Hyper-V
@@ -1611,6 +1626,25 @@ indicators identify possible causes, not a definitive diagnosis.
 
 Validate this path with `vmbuild\tools\Test-GuestCimMemoryRecovery.ps1` and
 `vmbuild\tools\Test-GuestMemoryDiagnostics.ps1`.
+
+Phase 11 client-package provider reads share the site's bounded three-attempt
+WMI query helper. Recovered queries are identified explicitly; exhausted retries
+retain namespace, class, filter, exception-chain types/HRESULTs, error identity,
+and stack. Provider-job failures collect site-side logs as well as failing the
+validation; they are not reported as empty or healthy package inventories.
+
+Secondary-only expansions now run client-package validation through their owning
+Primary, even when that unchanged Primary is absent from the partial configuration.
+They also independently probe the Secondary's configured content-library PkgLib
+for the production client-package metadata file, with a 30-second guest deadline.
+Unreadable registry/library/session state is unverified, not proof of missing
+content. A Secondary required by assigned push clients fails when physical presence
+cannot be established; an unassigned Secondary remains a visible warning with
+DP-side diagnostics. PkgLib presence does not itself prove version currency:
+the existing provider SourceVersion and ownership checks still apply.
+
+Validate with `vmbuild\tools\Test-Phase11ClientPackageCoverage.ps1` and
+`vmbuild\tools\Test-Phase11SiteWmiRetry.ps1`.
 
 Client-package diagnostic snapshots run in a disposable PowerShell process with
 a 60-second wall-clock limit, including local provider reads and remote node

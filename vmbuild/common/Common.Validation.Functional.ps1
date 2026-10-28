@@ -311,6 +311,9 @@ function Test-VmFunctionality {
                 $siteSystemRolesOk = Test-SiteSystemFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
                 $testsPassed = $testsPassed -and $siteSystemRolesOk
             }
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying parent-owned client package and physical Secondary content"
+            $pkgOk = Test-SecondaryClientPackageDistribution -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            $testsPassed = $testsPassed -and $pkgOk
         }
         'SiteSystem' {
             Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying site system roles"
@@ -11694,6 +11697,104 @@ function Test-PullDPConfiguration {
     return (Format-TestResult -VMName $VMName -RoleLabel 'PullDP' -Result $result)
 }
 
+function Invoke-CmWmiQueryWithRetry {
+    param(
+        [Parameter(Mandatory)][string]$Namespace,
+        [Parameter(Mandatory)][string]$Class,
+        [string]$Filter,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Details,
+        [ValidateRange(1, 10)][int]$Attempts = 3,
+        [ValidateRange(0, 30)][int]$RetrySeconds = 2
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            $query = @{ Namespace = $Namespace; Class = $Class; ErrorAction = 'Stop' }
+            if ($Filter) { $query.Filter = $Filter }
+            $items = @(Get-WmiObject @query)
+            if ($attempt -gt 1) {
+                $Details.Add("RECOVERED: $Label query succeeded on attempt $attempt/$Attempts after a provider failure")
+            }
+            return $items
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt $Attempts) {
+                $Details.Add("INFO: $Label query attempt $attempt/$Attempts failed: $($_.Exception.Message); retrying in ${RetrySeconds}s")
+                Start-Sleep -Seconds $RetrySeconds
+            }
+        }
+    }
+
+    $chain = [System.Collections.Generic.List[string]]::new()
+    $exception = $lastError.Exception
+    for ($depth = 0; $exception -and $depth -lt 8; $depth++) {
+        $errorCode = if ($exception.PSObject.Properties['ErrorCode']) { "$($exception.ErrorCode)" } else { '<none>' }
+        $chain.Add("Type=$($exception.GetType().FullName); Message=$($exception.Message); HResult=0x$($exception.HResult.ToString('X8')); ErrorCode=$errorCode")
+        $exception = $exception.InnerException
+    }
+    throw "$Label query failed after $Attempts attempts: Namespace=$Namespace; Class=$Class; Filter=[$Filter]; $($chain -join ' -> '); FQID=$($lastError.FullyQualifiedErrorId); Stack=$($lastError.ScriptStackTrace)"
+}
+
+function Get-ClientPackageContentProofBlock {
+    return {
+        param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{8}$')][string]$PackageId)
+
+        $proof = [pscustomobject]@{
+            PackageId = $PackageId
+            CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+            ContentRoot = ''
+            PackagePath = ''
+            Present = $null
+            Error = ''
+        }
+        try {
+            $proof.ContentRoot = "$((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath)"
+            if ([string]::IsNullOrWhiteSpace($proof.ContentRoot)) { throw 'The DP has no configured ContentLibraryPath.' }
+            if (-not (Test-Path -LiteralPath $proof.ContentRoot -PathType Container -ErrorAction Stop)) {
+                throw "The configured content library is not reachable: $($proof.ContentRoot)"
+            }
+            $proof.PackagePath = Join-Path (Join-Path $proof.ContentRoot 'PkgLib') "$PackageId.INI"
+            $proof.Present = Test-Path -LiteralPath $proof.PackagePath -PathType Leaf -ErrorAction Stop
+        }
+        catch { $proof.Error = "$($_.Exception.GetType().FullName): $($_.Exception.Message)" }
+        return $proof
+    }
+}
+
+function Test-SecondaryClientPackageDistribution {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $parentCode = "$($CurrentItem.parentSiteCode)"
+    $parents = @($DeployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.siteCode -eq $parentCode -and $_.vmName
+        })
+    if ($parentCode -and $parents.Count -eq 0) {
+        try {
+            $parents = @(Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName | Where-Object {
+                    $_.role -eq 'Primary' -and $_.siteCode -eq $parentCode -and $_.vmName
+                })
+        }
+        catch {
+            Add-Phase11Output "[Phase 11] $VMName [ClientPkg]: FAIL - could not resolve parent Primary '$parentCode': $($_.Exception.Message)" -Level Failure
+            return $false
+        }
+    }
+    if (-not $parentCode -or $parents.Count -ne 1) {
+        Add-Phase11Output "[Phase 11] $VMName [ClientPkg]: FAIL - expected one parent Primary for '$parentCode', found $($parents.Count); Secondary package coverage is unverified." -Level Failure
+        return $false
+    }
+    return (Test-CMClientPackageDistribution -VMName $parents[0].vmName -CurrentItem $parents[0] `
+        -DeployConfig $DeployConfig -PhysicalDpNames @($VMName))
+}
+
 function Get-ClientPackageValidationScope {
     param(
         [Parameter(Mandatory)][object]$CurrentItem,
@@ -11703,9 +11804,8 @@ function Get-ClientPackageValidationScope {
     $siteCode = "$($CurrentItem.siteCode)"
     # A CAS's package summarizer contains replicated rows for child Primaries,
     # but those rows can lag while the child's own provider is already current.
-    # Every Primary runs this same Phase 11 check, so delegate each child Primary
-    # to its local provider. A Primary still owns directly attached Secondary
-    # sites because Secondary roles do not run this package check themselves.
+    # Delegate child Primaries to their local providers. Secondary validation
+    # also uses its parent's provider, including in Secondary-only expansions.
     $ownedSiteCodes = @($siteCode)
     try {
         $ownedSiteCodes += @($DeployConfig.virtualMachines | Where-Object {
@@ -11774,7 +11874,8 @@ function Test-CMClientPackageDistribution {
     param(
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][object]$CurrentItem,
-        [Parameter(Mandatory)][object]$DeployConfig
+        [Parameter(Mandatory)][object]$DeployConfig,
+        [string[]]$PhysicalDpNames = @()
     )
 
     $Phase = 11
@@ -11793,8 +11894,14 @@ function Test-CMClientPackageDistribution {
     Write-Log "[Phase $Phase] $VMName [ClientPkg]: Verifying client package distribution for site '$siteCode' (owned sites: $ownedSiteCsv; owned DPs: $ownedDpCsv)" -LogOnly
 
     $scriptBlock = {
-        param($sc, $ownedSitesCsv, $ownedDpCsv, $requiredDpCsv)
-        $results = @{ Passed = $true; ContentPendingFromParent = $false; ClientPkgSourceSite = ''; Details = [System.Collections.Generic.List[string]]::new() }
+        param($sc, $ownedSitesCsv, $ownedDpCsv, $requiredDpCsv, $providerQueryDefinition)
+        if (-not $providerQueryDefinition) { throw 'The provider-query helper was not supplied by the host.' }
+        Set-Item -Path Function:\Invoke-CmWmiQueryWithRetry -Value ([scriptblock]::Create($providerQueryDefinition)) -ErrorAction Stop
+        $results = @{
+            Passed = $true; ContentPendingFromParent = $false; ClientPkgSourceSite = ''
+            ClientPackageId = ''; ClientPackageSourceVersion = ''
+            Details = [System.Collections.Generic.List[string]]::new()
+        }
         $ns = "root\SMS\site_$sc"
         $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
         $dpNameOf = {
@@ -11865,7 +11972,9 @@ function Test-CMClientPackageDistribution {
             # for a normal client install and memlabs never distributes it to a DP. Gating
             # Phase 11 on it (NOT distributed to ANY DP / no BG coverage) is a false positive
             # that fails otherwise-healthy sites, so exclude it from this coverage check.
-            $clientPkgs = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "Name LIKE 'Configuration Manager Client%' AND Name NOT LIKE '%Piloting%'" -ErrorAction Stop)
+            $clientPkgs = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_Package `
+                -Filter "Name LIKE 'Configuration Manager Client%' AND Name NOT LIKE '%Piloting%'" `
+                -Label 'Client package inventory' -Details $results.Details)
         }
         catch {
             $results.Passed = $false
@@ -11881,6 +11990,9 @@ function Test-CMClientPackageDistribution {
             "$($productionClientPackages[0].PackageID)"
         }
         else { '' }
+        $results.ClientPackageId = $requiredClientPackageId
+        $requiredPackage = $productionClientPackages | Where-Object { $_.PackageID -eq $requiredClientPackageId } | Select-Object -First 1
+        if ($requiredPackage) { $results.ClientPackageSourceVersion = "$($requiredPackage.SourceVersion)" }
         if ($requiredDps.Count -gt 0 -and $productionClientPackages.Count -eq 0) {
             $results.Passed = $false
             $results.Details.Add("FAIL: no production client package found in site $sc; required DP coverage cannot be verified ($($requiredDps -join ', ')).")
@@ -11891,13 +12003,15 @@ function Test-CMClientPackageDistribution {
 
         foreach ($pkg in $clientPkgs) {
             $pkgId = $pkg.PackageID
-            $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction Stop)
+            $dpRows = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                -Filter "PackageID='$pkgId'" -Label "Client package $pkgId DP status" -Details $results.Details)
             # Convergence: allow in-progress (1/2/7) to settle before judging.
             for ($t = 1; $t -le 3; $t++) {
                 $pending = @($dpRows | Where-Object { $_.State -in 1, 2, 7 })
                 if ($pending.Count -eq 0) { break }
                 Start-Sleep -Seconds 30
-                $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction Stop)
+                $dpRows = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                    -Filter "PackageID='$pkgId'" -Label "Client package $pkgId DP status" -Details $results.Details)
             }
             if ($dpRows.Count -eq 0) {
                 $results.Passed = $false
@@ -12033,12 +12147,13 @@ function Test-CMClientPackageDistribution {
         # loop -- even though OTHER boundary groups' DPs have the content. This is
         # the check that maps directly to the client symptom.
         try {
-            $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
-            $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop)
+            $bgs = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_BoundaryGroup -Label 'Client package boundary groups' -Details $results.Details)
+            $bgLinks = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -Label 'Client package boundary-group DPs' -Details $results.Details)
             foreach ($pkg in $clientPkgs) {
                 $dpState = @{}
                 $dpSite = @{}
-                foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($pkg.PackageID)'" -ErrorAction Stop)) {
+                foreach ($row in @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                        -Filter "PackageID='$($pkg.PackageID)'" -Label "Client package $($pkg.PackageID) boundary coverage" -Details $results.Details)) {
                     $rowName = (& $dpNameOf $row.ServerNALPath).ToUpper()
                     $dpState[$rowName] = [int]$row.State
                     $dpSite[$rowName] = "$($row.SiteCode)"
@@ -12079,7 +12194,8 @@ function Test-CMClientPackageDistribution {
         # GIVEN UP (retries exhausted); while it is still retrying, WARN.
         try {
             $clientPkgIds = @($clientPkgs | ForEach-Object { $_.PackageID })
-            $failedRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "State = 3 OR State = 6 OR State = 8" -ErrorAction Stop)
+            $failedRows = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                -Filter "State = 3 OR State = 6 OR State = 8" -Label 'Terminal package distribution states' -Details $results.Details)
             $foreignFailed = @($failedRows | Where-Object { -not (& $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode) })
             $failedRows = @($failedRows | Where-Object { & $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode })
             if ($foreignFailed.Count -gt 0) {
@@ -12168,10 +12284,50 @@ function Test-CMClientPackageDistribution {
         return $results
     }
 
+    $providerQueryDefinition = (Get-Command -Name Invoke-CmWmiQueryWithRetry -CommandType Function -ErrorAction Stop).Definition
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $ownedSiteCsv, $ownedDpCsv, $requiredDpCsv `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $ownedSiteCsv, $ownedDpCsv, $requiredDpCsv, $providerQueryDefinition `
         -DisplayName "Phase11-ClientPkg-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
+
+    if ($result -and -not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -is [hashtable]) {
+        $payload = $result.ScriptBlockOutput
+        $detailLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in @($payload.Details)) { $detailLines.Add("$line") }
+        $payload.Details = $detailLines
+        foreach ($dpName in @($PhysicalDpNames | Where-Object { $_ } | Select-Object -Unique)) {
+            $dpShort = ("$dpName" -split '\.')[0]
+            if ($ownedDpNames -notcontains $dpShort) {
+                $payload.Passed = $false
+                $payload.Details.Add("FAIL: requested physical DP '$dpShort' is outside site '$siteCode' validation scope; no foreign-site content was judged.")
+                continue
+            }
+            $required = @($validationScope.RequiredDpNames) -contains $dpShort
+            $proof = $null
+            $evidence = "No production client-package identity was returned by the provider."
+            if ($payload.ClientPackageId) {
+                $proof = Invoke-VmCommand -VmName $dpShort -VmDomainName $domain `
+                    -ScriptBlock (Get-ClientPackageContentProofBlock) -ArgumentList "$($payload.ClientPackageId)" `
+                    -DisplayName 'Phase11-ClientPkg-Physical' -AsJob -TimeoutSeconds 30 -SessionMaxRetries 1 -SuppressLog
+                $states = @($proof.ScriptBlockOutput)
+                $measured = $proof -and $proof.ScriptBlockFailed -is [bool] -and -not $proof.ScriptBlockFailed -and
+                    $states.Count -eq 1 -and $null -ne $states[0] -and
+                    $states[0].PackageId -eq $payload.ClientPackageId -and $states[0].Present -is [bool] -and
+                    -not [string]::IsNullOrWhiteSpace("$($states[0].ContentRoot)")
+                if ($measured -and $states[0].Present) {
+                    $payload.Details.Add("OK: DP '$dpShort' physical PkgLib presence verified for $($payload.ClientPackageId) at '$($states[0].PackagePath)' ($($states[0].CapturedAtUtc)). Provider SourceVersion=$($payload.ClientPackageSourceVersion) is checked separately; PkgLib presence alone does not establish version currency.")
+                    continue
+                }
+                $evidence = if ($measured) { "PkgLib file is absent at '$($states[0].PackagePath)'." }
+                elseif ($states.Count -eq 1 -and $states[0].Error) { "$($states[0].Error)" }
+                else { "Physical proof is unreadable or malformed. $(@($proof.ErrorDetails) -join '; ')" }
+            }
+            $severity = if ($required) { 'FAIL' } else { 'WARN' }
+            if ($required) { $payload.Passed = $false }
+            $payload.Details.Add("${severity}: DP '$dpShort' physical client-package content is unverified (package=$($payload.ClientPackageId), expected SourceVersion=$($payload.ClientPackageSourceVersion), required=$required). $evidence")
+            $payload.FailingDPs = @(@($payload.FailingDPs) + $dpShort | Where-Object { $_ } | Select-Object -Unique)
+        }
+    }
 
     # On a distribution failure OR any DP behind on the client package (even a
     # WARN, e.g. a Secondary DP stuck at ContentValidating), auto-collect the site
@@ -12179,8 +12335,9 @@ function Test-CMClientPackageDistribution {
     # reason is captured without hand-running commands.
     $failing = @()
     if (($result.ScriptBlockOutput -is [hashtable]) -and $result.ScriptBlockOutput.ContainsKey('FailingDPs')) { $failing = @($result.ScriptBlockOutput.FailingDPs | Where-Object { $_ }) }
-    if (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($failing.Count -gt 0))) {
-        Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: distribution failed or a DP is behind -- collecting distmgr/PkgXferMgr logs into the logs folder"
+    if ($result -and ($result.ScriptBlockFailed -or
+            (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($failing.Count -gt 0))))) {
+        Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: distribution or provider validation failed, or a DP needs diagnostics -- collecting site logs into the logs folder"
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' -Collector $Phase11SmsSiteLogCollector
 
         # The summarizer is HIERARCHY-wide, so the failing DP routinely belongs to a
@@ -13012,7 +13169,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner, $consoleHelperSourceInner)
+        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner, $consoleHelperSourceInner, $providerQueryDefinition)
 
         function Get-MemLabsValidationProjectedCimRows {
             param(
@@ -13126,47 +13283,8 @@ function Test-CMSiteWideFunctionality {
 
         $ns = "root\SMS\site_$sc"
 
-        function Invoke-CmWmiQueryWithRetry {
-            param(
-                [Parameter(Mandatory)][string]$Class,
-                [string]$Filter,
-                [Parameter(Mandatory)][string]$Label,
-                [int]$Attempts = 3,
-                [int]$RetrySeconds = 2
-            )
-
-            $lastError = $null
-            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-                try {
-                    $query = @{
-                        Namespace   = $ns
-                        Class       = $Class
-                        ErrorAction = 'Stop'
-                    }
-                    if ($Filter) { $query.Filter = $Filter }
-                    $items = @(Get-WmiObject @query)
-                    if ($attempt -gt 1) {
-                        $results.Details.Add("RECOVERED: $Label query succeeded on attempt $attempt/$Attempts after a transient provider failure")
-                    }
-                    return $items
-                }
-                catch {
-                    $lastError = $_
-                    if ($attempt -lt $Attempts) {
-                        $results.Details.Add("INFO: $Label query attempt $attempt/$Attempts failed: $($_.Exception.Message); retrying in ${RetrySeconds}s")
-                        Start-Sleep -Seconds $RetrySeconds
-                    }
-                }
-            }
-
-            $exception = $lastError.Exception
-            $exceptionType = if ($exception) { $exception.GetType().FullName } else { '<none>' }
-            $message = if ($exception) { $exception.Message } else { "$lastError" }
-            $hresult = if ($exception) { $exception.HResult } else { '<none>' }
-            $errorCode = if ($exception -and $exception.PSObject.Properties['ErrorCode']) { $exception.ErrorCode } else { '<none>' }
-            $fqid = if ($lastError.FullyQualifiedErrorId) { $lastError.FullyQualifiedErrorId } else { '<none>' }
-            throw "$Label query failed after $Attempts attempts: Type=$exceptionType; Message=$message; HResult=$hresult; ErrorCode=$errorCode; FQID=$fqid"
-        }
+        if (-not $providerQueryDefinition) { throw 'The provider-query helper was not supplied by the host.' }
+        Set-Item -Path Function:\Invoke-CmWmiQueryWithRetry -Value ([scriptblock]::Create($providerQueryDefinition)) -ErrorAction Stop
 
         # 1. Boundary groups -- runs on EVERY Primary/CAS (NOT gated on
         # top-level): each site's own boundary group is created LOCALLY by its
@@ -13178,7 +13296,7 @@ function Test-CMSiteWideFunctionality {
         # site assignment, so existence alone is not enough.
         $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_BoundaryGroup")
         try {
-            $bgs = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup')
+            $bgs = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup' -Namespace $ns -Details $results.Details)
             if ($bgs.Count -ge 1) {
                 $results.Details.Add("OK: $($bgs.Count) boundary group(s) defined: $(($bgs | Select-Object -First 5 -ExpandProperty Name) -join ', ')")
             }
@@ -13513,7 +13631,7 @@ function Test-CMSiteWideFunctionality {
 
         # 5. Client push install account configured (warn-only -- some labs disable client push)
         try {
-            $cpComp = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_SCI_Component' `
+            $cpComp = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_SCI_Component' -Namespace $ns -Details $results.Details `
                     -Filter "ComponentName='SMS_DISCOVERY_DATA_MANAGER' AND SiteCode='$sc'" `
                     -Label 'Client push pipeline component') | Select-Object -First 1
             if ($cpComp) {
@@ -15351,8 +15469,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     # The probe has to exist inside the guest session, and a hyphenated name needs the
     # braced form -- $function:Invoke-TftpReadProbe is a parse error.
     $tftpProbeText = "function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }"
+    $providerQueryDefinition = (Get-Command -Name Invoke-CmWmiQueryWithRetry -CommandType Function -ErrorAction Stop).Definition
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource, $providerQueryDefinition `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600 -PollProgress
 

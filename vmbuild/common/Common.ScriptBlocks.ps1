@@ -6644,11 +6644,11 @@ $global:VM_Config = {
             # kill+purge+drain cycle usually clears it. If it still fails after
             # a fresh Stop_RunningDSC, escalate to a VM reboot (the guaranteed
             # way to clear an in-memory LCM apply).
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Clear Old Status failed (likely LCM=Busy); re-running Stop_RunningDSC before retry. $($result.ScriptBlockOutput)" -Warning
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Clear Old Status failed; LCM busy and an unreachable session require different triage. Re-running Stop_RunningDSC before retry. Output=$($result.ScriptBlockOutput); TimedOut=$($result.TimedOut); Errors=$(@($result.ErrorDetails) -join '; ')" -Warning
             $stopRetry = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's (retry)"
             $stopRetryFailed = $stopRetry.ScriptBlockFailed -or ($stopRetry.ScriptBlockOutput -and ($stopRetry.ScriptBlockOutput.Stopped -eq $false))
             if ($stopRetryFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Stop_RunningDSC retry also failed; rebooting VM to clear the LCM." -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Stop_RunningDSC retry also failed; rebooting VM to clear the LCM. Output=$($stopRetry.ScriptBlockOutput); Stopped=$($stopRetry.ScriptBlockOutput.Stopped); TimedOut=$($stopRetry.TimedOut); Errors=$(@($stopRetry.ErrorDetails) -join '; ')" -Warning
                 $clearStatusRebooted = $true
                 Stop-Vm2 -Name $currentItem.vmName
                 Start-Sleep -Seconds 10
@@ -7099,38 +7099,55 @@ $global:VM_Config = {
                 # the failing resource + error travels back to the host build log
                 # instead of forcing a manual in-guest dig.
                 function Get-DscFailureDetail {
-                    param($ErrorRecord)
+                    param($ErrorRecord, [switch]$MetadataPushFailure)
                     $detail = New-Object System.Collections.Generic.List[string]
                     if ($ErrorRecord) {
-                        $msg = $null
-                        try { $msg = $ErrorRecord.Exception.Message } catch {}
-                        if (-not [string]::IsNullOrWhiteSpace($msg)) {
-                            $detail.Add("Error: " + ($msg -replace '\s+', ' ').Trim())
+                        $exception = $ErrorRecord.Exception
+                        for ($depth = 0; $exception -and $depth -lt 8; $depth++) {
+                            $detail.Add("Error[$depth]: Type=$($exception.GetType().FullName); HResult=0x$($exception.HResult.ToString('X8')); Message=" + ($exception.Message -replace '\s+', ' ').Trim())
+                            $exception = $exception.InnerException
                         }
+                        $detail.Add("FQID=$($ErrorRecord.FullyQualifiedErrorId); Stack=$($ErrorRecord.ScriptStackTrace)")
                     }
-                    # Authoritative: every resource the last apply left not-in-state, with its own error text.
                     try {
-                        $status = Get-DscConfigurationStatus -ErrorAction Stop
-                        if ($status -and $status.ResourcesNotInDesiredState) {
-                            foreach ($r in $status.ResourcesNotInDesiredState) {
-                                $rerr = $r.Error
-                                if ([string]::IsNullOrWhiteSpace($rerr)) { $rerr = '(no error text)' }
-                                $detail.Add("Failed resource " + $r.ResourceId + ": " + ($rerr -replace '\s+', ' ').Trim())
+                        $lcm = Get-CimInstance -Namespace 'root\Microsoft\Windows\DesiredStateConfiguration' `
+                            -ClassName MSFT_DSCLocalConfigurationManager -OperationTimeoutSec 5 -ErrorAction Stop
+                        if (-not $lcm) { throw 'LCM state query returned no instance.' }
+                        $detail.Add("LCMState=$($lcm.LCMState); LCMStateDetail=$($lcm.LCMStateDetail)")
+                    }
+                    catch { $detail.Add("LCM state unavailable: $($_.Exception.Message)") }
+                    $readEvents = [bool]$MetadataPushFailure
+                    if ($MetadataPushFailure) {
+                        $detail.Add('Metadata push failed before apply; previous configuration status was not queried.')
+                    }
+                    else {
+                        try {
+                            $status = Get-DscConfigurationStatus -ErrorAction Stop
+                            if ($status) { $detail.Add("Last DSC status=$($status.Status); StartDate=$($status.StartDate); Type=$($status.Type)") }
+                            if ($status -and $status.ResourcesNotInDesiredState) {
+                                foreach ($r in $status.ResourcesNotInDesiredState) {
+                                    $rerr = $r.Error
+                                    if ([string]::IsNullOrWhiteSpace($rerr)) { $rerr = '(no error text)' }
+                                    $detail.Add("Failed resource " + $r.ResourceId + ": " + ($rerr -replace '\s+', ' ').Trim())
+                                }
                             }
                         }
+                        catch {
+                            $detail.Add("Last DSC status unavailable: $($_.Exception.Message)")
+                            $readEvents = $true
+                        }
                     }
-                    catch {
-                        # Get-DscConfigurationStatus refuses while the LCM is mid-apply; fall back to the event log.
+                    if ($readEvents) {
                         try {
                             $evts = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 40 -ErrorAction Stop |
                                 Where-Object { $_.LevelDisplayName -eq 'Error' } | Select-Object -First 3
                             foreach ($e in $evts) {
                                 $em = ($e.Message -replace '\s+', ' ').Trim()
                                 if ($em.Length -gt 300) { $em = $em.Substring(0, 300) }
-                                $detail.Add("DSC error event: " + $em)
+                                $detail.Add("DSC error event $($e.Id) at $($e.TimeCreated): " + $em)
                             }
                         }
-                        catch {}
+                        catch { $detail.Add("DSC event evidence unavailable: $($_.Exception.Message)") }
                     }
                     if ($detail.Count -gt 0) { return ($detail -join ' || ') }
                     return $null
@@ -7211,12 +7228,17 @@ $global:VM_Config = {
                         # No -Verbose: nothing drains that stream on success and each record is a
                         # synchronous round trip back to the host job -- the same reason the
                         # multi-node Start-DscConfiguration below omits it.
-                        Set-DscLocalConfigurationManager -Path $dscConfigPath -force
+                        Set-DscLocalConfigurationManager -Path $dscConfigPath -force -ErrorAction Stop
                     }
                     catch {
                         $data = "Could not run Set-DscLocalConfigurationManager -Path $dscConfigPath -force"
                         $data | Out-File $log -Append      
-                        $_ | Out-File $log -Append              
+                        $_ | Out-File $log -Append
+                        $dscDetail = Get-DscFailureDetail -ErrorRecord $_ -MetadataPushFailure
+                        if ($dscDetail) {
+                            $dscDetail | Out-File $log -Append
+                            $data = "$data | $dscDetail"
+                        }
                         Write-Error $data
                         Write-Error $_
                         return $data
@@ -8002,6 +8024,12 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished waiting on all nodes"
 
 
+            if ($Phase -eq 2 -and -not $Migrate -and $currentItem.role -ne 'AADClient') {
+                if (-not (Wait-MemLabsWindowsClientSetup -VmName $currentItem.vmName -VmDomainName $domainName)) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows client setup is not ready before DSC apply; no rename, domain join, or DSC start was attempted." -Failure -OutputStream
+                    return
+                }
+            }
             Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting DSC configuration."
             $dscStartStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -8030,6 +8058,13 @@ $global:VM_Config = {
                 Start-Sleep -Seconds 15
                 $dscStartWhy = if ($result.TimedOut) { "timed out after ${dscStartTimeoutSeconds}s" } else { "$($result.ScriptBlockOutput)" }
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying. $dscStartWhy" -Warning
+                if ($Phase -eq 2 -and -not $Migrate -and $currentItem.role -ne 'AADClient' -and
+                    $dscStartWhy -like '*Windows client setup is not complete*') {
+                    if (-not (Wait-MemLabsWindowsClientSetup -VmName $currentItem.vmName -VmDomainName $domainName)) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows client setup regressed after the host check and is still not ready; refusing DSC retry or reboot for an unfinished setup." -Failure -OutputStream
+                        return
+                    }
+                }
                 # Retry once before exiting. On a timeout Invoke-VmCommand has already
                 # evicted the wedged session, so this attempt builds a fresh channel.
                 $result = Invoke-VmCommand -VmName $currentItem.vmName @dscStartArgs
