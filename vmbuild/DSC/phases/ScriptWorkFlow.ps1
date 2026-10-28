@@ -16,26 +16,31 @@ $ScriptWorkflowRunId = $null
 # Publish the captured invocation's failure, never a later deployment's RunId.
 trap {
     $workflowError = $_
+    $workflowErrorSummary = $workflowError.Exception.Message
     try {
+        $workflowErrorSummary = Get-MemLabsExceptionSummary -Exception $workflowError.Exception
         "ScriptWorkflow TERMINATING ERROR: $($_.Exception.Message)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  Type  : $($_.Exception.GetType().FullName)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  At    : $($_.InvocationInfo.ScriptName) line $($_.InvocationInfo.ScriptLineNumber)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  Line  : $("$($_.InvocationInfo.Line)".Trim())" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  Stack : $($_.ScriptStackTrace)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        Write-MemLabsExceptionDetails -ErrorRecord $workflowError -Component 'ScriptWorkflow'
     }
-    catch { }
+    catch {
+        Write-Warning "ScriptWorkflow could not write full exception diagnostics: $($_.Exception.Message). Original failure: $workflowErrorSummary"
+    }
     # A death before ScriptWorkflow.json exists leaves no evidence the DSC watchdog
     # (TemplateHelpDSC WaitForEvent) or the host can reach, so drop one here.
     try {
-        $crumbScript = try { Split-Path "$($_.InvocationInfo.ScriptName)" -Leaf } catch { 'ScriptWorkflow.ps1' }
-        $crumbText = "{0} line {1}: {2}" -f $crumbScript, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message
+        $crumbScript = try { Split-Path "$($workflowError.InvocationInfo.ScriptName)" -Leaf } catch { 'ScriptWorkflow.ps1' }
+        $crumbText = "{0} line {1}: {2}" -f $crumbScript, $workflowError.InvocationInfo.ScriptLineNumber, $workflowErrorSummary
         ($crumbText -replace '\s+', ' ').Trim() | Out-File -FilePath 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Force
     }
     catch { }
     if ($ScriptWorkflowRunId) {
         try {
             Write-ScriptWorkflowFailureReceipt -RunId $ScriptWorkflowRunId `
-                -Message "$($workflowError.InvocationInfo.ScriptName) line $($workflowError.InvocationInfo.ScriptLineNumber): $($workflowError.Exception.Message)"
+                -Message "$($workflowError.InvocationInfo.ScriptName) line $($workflowError.InvocationInfo.ScriptLineNumber): $workflowErrorSummary"
         }
         catch {
             Write-Warning "ScriptWorkflow could not publish its terminal failure receipt: $($_.Exception.Message)"
