@@ -4,6 +4,7 @@
 .DESCRIPTION
     With VMName, run elevated on the MemLabs Hyper-V host. Uses PowerShell Direct
     and the existing MemLabs domain credentials; no guest file copy or WinRM needed.
+    Explicitly loads cached guest credentials when the host session has none.
     Without VMName, run locally in Windows PowerShell 5.1 as a domain administrator.
     Does not install software, restart services, modify databases, or change
     configuration. Writes JSON on the calling machine, or returns JSON with AsJson.
@@ -160,6 +161,18 @@ if ($VMName) {
     $note = Get-VMNote -VMName $targetVmName
     if (-not $note -or [string]::IsNullOrWhiteSpace("$($note.domain)") -or $note.domain -eq 'WORKGROUP') {
         throw "Cannot resolve a MemLabs domain for '$targetVmName'. Run elevated on its Hyper-V host; local collection remains available without VMName."
+    }
+    if ($Common.LocalAdmin -isnot [pscredential] -or $Common.LocalAdmin.Password.Length -eq 0) {
+        if (-not (Get-Command Get-LocalAdminCredential -ErrorAction Ignore)) {
+            . (Join-Path (Split-Path -Parent $PSScriptRoot) 'Common.ps1') -InJob
+        }
+        try { $credentialLoaded = Get-LocalAdminCredential }
+        catch { throw "MemLabs guest-credential initialization failed on this host for '$targetVmName': $($_.Exception.Message)" }
+        if ($credentialLoaded -isnot [bool] -or -not $credentialLoaded -or
+            $Common.LocalAdmin -isnot [pscredential] -or $Common.LocalAdmin.Password.Length -eq 0) {
+            $reason = if ($Common.FatalError) { "$($Common.FatalError)" } else { 'The credential loader returned no usable cached credential.' }
+            throw "MemLabs guest credentials are unavailable on this host for '$targetVmName'. $reason"
+        }
     }
     $guestCollector = {
         param($Source, $SiteCode, $ReportServerUri)

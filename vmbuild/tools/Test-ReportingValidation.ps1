@@ -81,7 +81,12 @@ $null = New-Item -Path $fixtureRoot -ItemType Directory
 $null = New-Item -Path (Join-Path $fixtureRoot 'tools') -ItemType Directory
 $logDir = Join-Path $fixtureRoot 'logs'
 $null = New-Item -Path $logDir -ItemType Directory
-$Common = [pscustomobject]@{ LogPath = (Join-Path $logDir 'VMBuild.adatum.com.log') }
+$fixturePassword = [System.Security.SecureString]::new()
+$fixturePassword.AppendChar([char]120)
+$Common = [pscustomobject]@{
+    LogPath = (Join-Path $logDir 'VMBuild.adatum.com.log')
+    LocalAdmin = [pscredential]::new('fixture-admin', $fixturePassword)
+}
 $fixtureCollector = @'
 [CmdletBinding()]
 param([string]$VMName, [string]$SiteCode, [uri]$ReportServerUri, [switch]$AsJson)

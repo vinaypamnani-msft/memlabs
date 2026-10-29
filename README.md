@@ -18,6 +18,10 @@ host to `%TEMP%\PKIPS1SQL-ReportingDiagnostics.json`, or to `-OutputPath`.
 The host can use PowerShell 7. Local collection in Windows PowerShell 5.1 remains
 available by omitting `-VMName`; `-AsJson` returns JSON without writing a file.
 
+Standalone host runs explicitly load cached MemLabs guest credentials without
+depending on a successful storage/file-list refresh. Missing credentials fail
+before attempting to connect to the VM.
+
 Evidence includes installed OS/Edge versions and Edge Update state, ConfigMgr
 report counts through SOAP and SQL, portal assets/API responses, and local
 reporting logs. Unavailable evidence is recorded explicitly. The collector does

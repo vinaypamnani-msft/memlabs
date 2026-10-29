@@ -2,6 +2,7 @@
 .SYNOPSIS
     Exercises reporting diagnostics without a reporting server.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'Common', Justification = 'Consumed by the collector script during host invocations.')]
 [CmdletBinding()]
 param([string] $RootPath)
 
@@ -158,7 +159,25 @@ finally { Remove-Item -LiteralPath $outputPath -Force -ErrorAction Stop }
 if ([System.Net.ServicePointManager]::SecurityProtocol -ne $originalProtocol) { throw 'Collector changed the caller TLS configuration.' }
 
 $proxy.FailListing = $false
-$hostState = [pscustomobject]@{ Calls = 0; Mode = 'Success'; Source = $null; Domain = 'example' }
+$fixturePassword = [System.Security.SecureString]::new()
+$fixturePassword.AppendChar([char]120)
+$fixtureCredential = [pscredential]::new('fixture-admin', $fixturePassword)
+$hostCommon = [pscustomobject]@{ LocalAdmin = $fixtureCredential; FatalError = $null }
+$Common = $hostCommon
+$hostState = [pscustomobject]@{
+    Calls = 0; Mode = 'Success'; Source = $null; Domain = 'example'
+    CredentialLoads = 0; CredentialMode = 'Success'; UninitializedCalls = 0
+}
+function Get-LocalAdminCredential {
+    $hostState.CredentialLoads++
+    switch ($hostState.CredentialMode) {
+        'Missing' { $hostCommon.FatalError = 'Cached guest credential unavailable'; return $false }
+        'Empty' { return $true }
+        'Exception' { throw 'Fixture credential cache read denied' }
+        default { $hostCommon.LocalAdmin = $fixtureCredential; return $true }
+    }
+}
+Set-Item -Path Function:\Get-LocalAdminCredential -Value (${function:Get-LocalAdminCredential}.GetNewClosure())
 function Get-VMNote {
     param($VMName)
     if (-not $VMName) { throw 'VM name is required.' }
@@ -176,6 +195,10 @@ function Invoke-VmCommand {
     }
     $hostState.Calls++
     $hostState.Source = $ArgumentList[0]
+    if (-not $hostCommon.LocalAdmin) {
+        $hostState.UninitializedCalls++
+        return $false
+    }
     if ($hostState.Mode -eq 'Failure') {
         return [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $true; ErrorDetails = 'Guest collection failed' }
     }
@@ -202,6 +225,28 @@ try {
         ($jsonOutput[0] | ConvertFrom-Json).Endpoints.Count -ne 2) {
         throw 'Host JSON transport mode did not preserve the complete guest document.'
     }
+    if ($hostState.CredentialLoads -ne 0) { throw 'An initialized host session unnecessarily reloaded its credentials.' }
+    $hostCommon.LocalAdmin = $null
+    $jsonOutput = @(& $sourcePath -VMName 'RP-TEST' -SiteCode PS1 -AsJson)
+    if ($hostState.CredentialLoads -ne 1 -or $hostState.UninitializedCalls -ne 0 -or
+        $jsonOutput.Count -ne 1 -or ($jsonOutput[0] | ConvertFrom-Json).Endpoints[0].Catalog.ReportCount -ne 1) {
+        throw 'A standalone/lightweight host session did not initialize cached guest credentials before the VM call.'
+    }
+    foreach ($credentialMode in @('Missing', 'Empty', 'Exception')) {
+        $hostCommon.LocalAdmin = $null
+        $hostCommon.FatalError = $null
+        $hostState.CredentialMode = $credentialMode
+        $callCount = $hostState.Calls
+        $threw = $false
+        try { $null = & $sourcePath -VMName 'RP-TEST' -OutputPath $hostOutputPath }
+        catch { $threw = $_.Exception.Message -match 'MemLabs guest.credential' }
+        if (-not $threw -or $hostState.Calls -ne $callCount -or
+            (Get-Content -LiteralPath $hostOutputPath -Raw) -ne $hostJson) {
+            throw "Credential failure '$credentialMode' was hidden, attempted a guest call, or overwrote previous evidence."
+        }
+    }
+    $hostCommon.LocalAdmin = $fixtureCredential
+    $hostState.CredentialMode = 'Success'
     foreach ($mode in @('Failure', 'InvalidJson', 'InvalidShape')) {
         $hostState.Mode = $mode
         $threw = $false
