@@ -24,6 +24,24 @@ reporting logs. Unavailable evidence is recorded explicitly. The collector does
 not reconfigure Reporting Services, restart services, launch a browser, or install
 software. HTTP success alone does not prove that the browser renders the portal.
 
+Phase 11 automatically retains a snapshot for **every** reporting-point validation,
+including otherwise healthy checks so browser-only blank pages still have evidence.
+Files are saved beside the domain build log as
+`<VM>-Phase11-<timestamp>-ReportingDiagnostics.json`; their paths appear in the
+validation output. The owning site's `srsrp.log`, `srsrpsetup.log`, and
+`sitecomp.log` are also collected. SQL-hosted reporting points resolve their owning
+site even when the SQL VM has no `siteCode`.
+
+Validation now requires published ConfigMgr reports in the expected site folder
+and a responding portal with its required JavaScript assets and catalog API.
+Older integrated SSRS instances without the v2 API retain SOAP/portal validation.
+Collection or verification failures remain visible failures, not successful empty
+report inventories. These checks do not claim to execute the browser UI.
+
+Validate without a lab using
+[`Test-ReportingDiagnostics.ps1`](vmbuild/tools/Test-ReportingDiagnostics.ps1)
+and [`Test-ReportingValidation.ps1`](vmbuild/tools/Test-ReportingValidation.ps1).
+
 ## GenConfig: network editing
 
 For an OSDClient on a custom subnet, add a SiteSystem with `installDP` enabled,
@@ -1475,6 +1493,58 @@ Validate with
 [`Test-CmRolePhysicalReadiness.ps1`](vmbuild/tools/Test-CmRolePhysicalReadiness.ps1)
 and
 [`Test-SecondarySiteInstallResilience.ps1`](vmbuild/tools/Test-SecondarySiteInstallResilience.ps1).
+
+## Verified Windows feature prerequisites
+
+Required Windows-feature installation now stops on cmdlet errors or an
+unsuccessful result. A no-reboot installation is independently queried before
+its completion receipt is written; reboot-pending features remain unverified.
+The receipt retains the sorted feature signature on its first line and records
+`MemLabsFeatureStateVerified=1` on its second line.
+
+Older one-line receipts are not proof of installation: earlier versions could
+write them after a failed `Install-WindowsFeature` call. Phase 2/3 rechecks those
+receipts against actual installed state, and Phase 8 rejects them until that
+verification succeeds. Already verified receipts retain the existing fast path.
+Required-install and receipt-write errors remain visible failures.
+
+For an existing lab with a false completion receipt, update the DSC payload and
+rerun Phase 3, not just Phase 8. Servicing/source failures such as `0x80240438`
+must be resolved before role installation can proceed. Phase 3 failures now also
+retain the prerequisite snapshot and bounded CBS/DISM logs beside the build log.
+
+Validate with
+[`Test-WindowsFeatureReceipts.ps1`](vmbuild/tools/Test-WindowsFeatureReceipts.ps1).
+
+## Automatic MP/RP failure evidence
+
+Phase 7/8 failures automatically collect configured reporting targets and, during
+Phase 8, MP targets associated with the failed site. This includes SQL-hosted RPs,
+implicit Secondary MPs, and owning-site logs. Failed Phase 11 MP checks also
+collect this evidence, including when the validation transport throws. Existing
+Phase 11 reporting-validation snapshots and site-side log collection are reused;
+an unexpected reporting transport exception has an independent capture path.
+No additional failure-capture probes run for healthy checks.
+
+[`Get-ManagementPointDiagnostics.ps1`](vmbuild/tools/Get-ManagementPointDiagnostics.ps1)
+compares the IIS provider result with selected `applicationHost.config` fields
+and appcmd output, and records bindings, public certificate metadata, verified
+feature receipts, and MP setup logs. Known log directories on all fixed drives
+are searched, including non-C: installs. Site-side evidence includes
+`sitecomp`, `mpcontrol`, and reporting-role logs. Logs up to 8 MiB are retained
+in full; larger logs retain their last 6000 lines with an explicit capture mode.
+
+JSON files are written beside the build log using the triggering VM's prefix,
+the target VM, and `MPDiagnostics`, `RPDiagnostics`, or `SiteServerDiagnostics`.
+`<VM>-Phase<N>-<timestamp>-RoleDiagnostics.json` records every target's capture
+status and errors. Collection and file transfer have separate host-enforced
+timeouts; large log bodies do not cross the PSDirect return stream. A failed
+target cannot suppress other targets, baseline setup logs, or the original
+validation failure. Only diagnostic staging files are created/removed in guests;
+no services, configuration, or replication state are changed by collection.
+
+Validate with
+[`Test-CmRoleFailureDiagnostics.ps1`](vmbuild/tools/Test-CmRoleFailureDiagnostics.ps1).
 
 ## Reporting Point and SUP resource readiness
 

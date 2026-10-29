@@ -88,7 +88,12 @@ function Get-ReportingPortalEvidence {
                         $asset.Error = 'Script request returned an empty body or HTML rather than JavaScript.'
                     }
                 }
-                catch { $asset.Error = $_.Exception.ToString() }
+                catch {
+                    $asset.Error = $_.Exception.ToString()
+                    if ($_.Exception.Response -and $null -ne $_.Exception.Response.StatusCode) {
+                        $asset.StatusCode = [int] $_.Exception.Response.StatusCode
+                    }
+                }
             }
             [pscustomobject] $asset
         }
@@ -100,7 +105,12 @@ function Get-ReportingPortalEvidence {
         $document = $response.Content | ConvertFrom-Json -ErrorAction Stop
         if ('value' -notin $document.PSObject.Properties.Name) { throw 'Portal REST response has no OData value collection.' }
     }
-    catch { $api.Error = $_.Exception.ToString() }
+    catch {
+        $api.Error = $_.Exception.ToString()
+        if ($_.Exception.Response -and $null -ne $_.Exception.Response.StatusCode) {
+            $api.StatusCode = [int] $_.Exception.Response.StatusCode
+        }
+    }
     [pscustomobject]@{
         Uri = $PortalUri.AbsoluteUri
         StatusCode = [int] $page.StatusCode

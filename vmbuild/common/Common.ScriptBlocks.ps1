@@ -2665,6 +2665,202 @@ function Invoke-MemLabsGuestMemoryRecovery {
     Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: guest readiness verified; existing workflow resumed without snapshot rollback." -OutputStream
 }
 
+function Save-CMRoleFailureDiagnostics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$DomainName,
+        [Parameter(Mandatory)][ValidateSet(7, 8, 11)][int]$Phase,
+        [object]$DeployConfig,
+        [ValidateSet('MP', 'RP')][string[]]$Roles = @('MP', 'RP')
+    )
+
+    $logDir = if ($Common -and $Common.LogPath) { Split-Path $Common.LogPath -Parent } else { $null }
+    if (-not $logDir -or -not (Test-Path -LiteralPath $logDir -PathType Container)) {
+        Write-Log "[Phase $Phase]: $VmName`: role diagnostics: host log directory is unavailable ($logDir)." -Warning -OutputStream
+        return
+    }
+    $base = "$VmName-Phase$Phase-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    $statusPath = Join-Path $logDir "$base-RoleDiagnostics.json"
+    $state = [ordered]@{
+        CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+        TriggerVm = $VmName
+        Phase = $Phase
+        CaptureStatus = 'Collecting'
+        CollectionErrors = @()
+        Targets = @()
+    }
+    $saveStatus = {
+        $state | ConvertTo-Json -Depth 10 -ErrorAction Stop |
+            Set-Content -LiteralPath $statusPath -Encoding UTF8 -ErrorAction Stop
+    }
+    try {
+        & $saveStatus
+        $vms = @($DeployConfig.virtualMachines | Where-Object { $null -ne $_ })
+        $trigger = @($vms | Where-Object { $_.vmName -ieq $VmName })
+        if ($trigger.Count -ne 1) {
+            if ($Roles.Count -ne 1) { throw "Cannot identify one deployment VM for '$VmName'; role targets cannot be inferred." }
+            $message = "Deployment metadata for '$VmName' is unavailable; collecting only the requested $($Roles[0]) target without site ownership."
+            $state.CollectionErrors += $message
+            Write-Log "[Phase $Phase]: $VmName`: role diagnostics: $message" -Warning -OutputStream
+            $trigger = @([pscustomobject]@{
+                    vmName = $VmName; role = 'SiteSystem'; siteCode = ''
+                    installMP = $Roles -contains 'MP'; installRP = $Roles -contains 'RP'
+                })
+        }
+        $trigger = $trigger[0]
+        $candidates = @($trigger)
+        if ($Phase -eq 8 -and $trigger.role -in @('CAS', 'Primary') -and $trigger.siteCode) {
+            $candidates += @($vms | Where-Object {
+                    ($_.siteCode -and $_.siteCode -ieq $trigger.siteCode) -or
+                    ($trigger.remoteSQLVM -and $_.vmName -ieq $trigger.remoteSQLVM) -or
+                    ($_.role -eq 'Secondary' -and $_.parentSiteCode -ieq $trigger.siteCode)
+                })
+        }
+        $targets = [System.Collections.Generic.List[object]]::new()
+        foreach ($candidate in @($candidates | Sort-Object vmName -Unique)) {
+            $candidateRoles = @()
+            if ($Phase -ne 7 -and 'MP' -in $Roles -and ($candidate.installMP -eq $true -or $candidate.role -eq 'Secondary')) {
+                $candidateRoles += 'MP'
+            }
+            if ('RP' -in $Roles -and $candidate.installRP -eq $true) { $candidateRoles += 'RP' }
+            if (-not $candidateRoles.Count) { continue }
+
+            $siteCode = "$($candidate.siteCode)".Trim()
+            $owners = @($vms | Where-Object {
+                    $_.role -in @('CAS', 'Primary', 'Secondary') -and $siteCode -and $_.siteCode -ieq $siteCode
+                })
+            if (-not $siteCode) {
+                $owners = @($vms | Where-Object {
+                        $_.role -in @('CAS', 'Primary') -and $_.remoteSQLVM -and $_.remoteSQLVM -ieq $candidate.vmName
+                    })
+                if ($owners.Count -eq 1) { $siteCode = "$($owners[0].siteCode)".Trim() }
+            }
+            if (-not $siteCode -or $owners.Count -ne 1) {
+                $message = "Site ownership for '$($candidate.vmName)' could not be resolved uniquely; available target evidence will still be collected."
+                $state.CollectionErrors += $message
+                Write-Log "[Phase $Phase]: $VmName`: role diagnostics: $message" -Warning -OutputStream
+            }
+            foreach ($role in $candidateRoles) {
+                $targets.Add([pscustomobject]@{ VmName = $candidate.vmName; Role = $role; SiteCode = $siteCode })
+            }
+            if ($candidate.role -eq 'Secondary' -and $candidate.parentSiteCode) {
+                $owners += @($vms | Where-Object {
+                        $_.role -eq 'Primary' -and $_.siteCode -ieq $candidate.parentSiteCode
+                    })
+            }
+            foreach ($owner in $owners) {
+                $targets.Add([pscustomobject]@{ VmName = $owner.vmName; Role = 'SiteServer'; SiteCode = "$($owner.siteCode)" })
+            }
+        }
+        $state.Targets = @(foreach ($target in @($targets.ToArray() | Sort-Object VmName, Role -Unique)) {
+                $safeName = "$($target.VmName)" -replace '[^A-Za-z0-9._-]', '_'
+                [pscustomobject]@{
+                    VmName = $target.VmName; Role = $target.Role; SiteCode = $target.SiteCode
+                    CaptureStatus = 'NotStarted'; GuestPath = $null
+                    HostPath = Join-Path $logDir "$base-$safeName-$($target.Role)Diagnostics.json"
+                    CollectionErrors = @(); Error = $null; CleanupError = $null
+                }
+            })
+        if (-not $state.Targets.Count) {
+            $state.CaptureStatus = 'NoApplicableRoles'
+            Write-Log "[Phase $Phase]: $VmName`: no configured MP/RP targets apply to this failure." -LogOnly
+            return
+        }
+        $toolsPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools'
+        $collectGuest = {
+            param([string]$Source, [hashtable]$CollectorArguments, [string]$Destination)
+            $ErrorActionPreference = 'Stop'
+            $payload = @(& ([scriptblock]::Create($Source)) @CollectorArguments)
+            if ($payload.Count -ne 1 -or $payload[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($payload[0])) {
+                throw 'Role collector did not return one JSON document.'
+            }
+            $null = $payload[0] | ConvertFrom-Json -ErrorAction Stop
+            $payload[0] | Set-Content -LiteralPath $Destination -Encoding UTF8 -ErrorAction Stop
+            $file = Get-Item -LiteralPath $Destination -ErrorAction Stop
+            [pscustomobject]@{ Path = $file.FullName; Bytes = $file.Length }
+        }
+        foreach ($target in $state.Targets) {
+            $target.CaptureStatus = 'Collecting'
+            $target.GuestPath = "C:\Windows\Temp\MemLabs-RoleDiagnostics-$([guid]::NewGuid().ToString('N')).json"
+            & $saveStatus
+            try {
+                $toolName = if ($target.Role -eq 'RP') { 'Get-ReportingDiagnostics.ps1' } else { 'Get-ManagementPointDiagnostics.ps1' }
+                $timeout = if ($target.Role -eq 'RP') { 600 } else { 180 }
+                $source = Get-Content -LiteralPath (Join-Path $toolsPath $toolName) -Raw -ErrorAction Stop
+                $arguments = @{ AsJson = $true }
+                if ($target.SiteCode) { $arguments.SiteCode = $target.SiteCode }
+                if ($target.Role -eq 'SiteServer') { $arguments.SiteServerOnly = $true }
+                $result = Invoke-VmCommand -VmName $target.VmName -VmDomainName $DomainName `
+                    -ScriptBlock $collectGuest -ArgumentList @($source, $arguments, $target.GuestPath) `
+                    -AsJob -TimeoutSeconds $timeout -SessionMaxRetries 1 -SuppressLog `
+                    -RequireDomainIdentity -FailOnRemoteError -DisplayName "Capture $($target.Role) role diagnostics"
+                if (-not $result -or -not $result.CommandResult -or $result.ScriptBlockFailed) {
+                    throw "Guest collection failed (timedOut=$([bool]$result.TimedOut)): $(@($result.ErrorDetails) -join '; ')"
+                }
+                $manifest = @($result.ScriptBlockOutput | Where-Object { $null -ne $_ })
+                if ($manifest.Count -ne 1 -or $manifest[0].Path -ne $target.GuestPath -or [long]$manifest[0].Bytes -le 0) {
+                    throw 'Guest collection returned an invalid staging manifest.'
+                }
+                # Keep log bodies off the PSDirect return stream, as baseline capture does.
+                if (-not (Copy-ItemFromVmBounded -Path $target.GuestPath -Destination $target.HostPath `
+                            -VMName $target.VmName -VMDomainName $DomainName -TimeoutSeconds 180)) {
+                    throw "Bounded diagnostic transfer failed; guest evidence remains at $($target.GuestPath)."
+                }
+                $file = Get-Item -LiteralPath $target.HostPath -ErrorAction Stop
+                if ($file.Length -ne [long]$manifest[0].Bytes) { throw "Diagnostic size mismatch: guest=$($manifest[0].Bytes), host=$($file.Length)." }
+                $document = Get-Content -LiteralPath $target.HostPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $required = @('ComputerName', 'CollectedAt', 'CollectionErrors', 'Logs')
+                if ($target.Role -eq 'RP') { $required += 'Endpoints' } else { $required += 'Probes' }
+                foreach ($property in $required) {
+                    if ($property -notin $document.PSObject.Properties.Name) { throw "Diagnostic document has no '$property' field." }
+                }
+                if ($document.ComputerName -ine $target.VmName) { throw "Diagnostic identity mismatch: expected '$($target.VmName)', got '$($document.ComputerName)'." }
+                $target.CollectionErrors = @($document.CollectionErrors | Where-Object { $_ })
+                $target.CaptureStatus = if ($target.CollectionErrors.Count) { 'CompletedWithErrors' } else { 'Completed' }
+                Write-Log "[Phase $Phase]: $VmName`: Captured $($target.Role) evidence from $($target.VmName) -> $($target.HostPath)" -OutputStream
+                foreach ($errorText in $target.CollectionErrors) {
+                    Write-Log "[Phase $Phase]: $VmName`: $($target.VmName) $($target.Role) diagnostic evidence unavailable: $errorText" -Warning -OutputStream
+                }
+                try {
+                    $cleanup = Invoke-VmCommand -VmName $target.VmName -VmDomainName $DomainName -ArgumentList @($target.GuestPath) `
+                        -ScriptBlock { param([string]$Path) Remove-Item -LiteralPath $Path -Force -ErrorAction Stop } `
+                        -AsJob -TimeoutSeconds 30 -SessionMaxRetries 1 -SuppressLog -RequireDomainIdentity -FailOnRemoteError `
+                        -DisplayName 'Remove staged role diagnostic'
+                    if (-not $cleanup -or -not $cleanup.CommandResult -or $cleanup.ScriptBlockFailed) {
+                        throw "Staged diagnostic could not be removed: $(@($cleanup.ErrorDetails) -join '; ')"
+                    }
+                }
+                catch {
+                    $target.CleanupError = $_.Exception.Message
+                    $target.CaptureStatus = 'CompletedWithErrors'
+                    Write-Log "[Phase $Phase]: $VmName`: $($target.VmName): $($target.CleanupError)" -Warning -OutputStream
+                }
+            }
+            catch {
+                $target.CaptureStatus = 'Failed'
+                $target.Error = $_.Exception.Message
+                Write-Log "[Phase $Phase]: $VmName`: $($target.Role) diagnostic capture on $($target.VmName) failed: $($target.Error)" -Warning -OutputStream
+            }
+        }
+        $state.CaptureStatus = if ($state.CollectionErrors.Count -or @($state.Targets | Where-Object { $_.CaptureStatus -ne 'Completed' }).Count) { 'Partial' } else { 'Completed' }
+    }
+    catch {
+        $state.CaptureStatus = 'Failed'
+        $state.CollectionErrors += $_.Exception.Message
+        Write-Log "[Phase $Phase]: $VmName`: role diagnostic collection failed: $($_.Exception.Message)" -Warning -OutputStream
+    }
+    finally {
+        try {
+            & $saveStatus
+            Write-Log "[Phase $Phase]: $VmName`: Role diagnostic capture status -> $statusPath" -OutputStream
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: could not persist role diagnostic capture status: $($_.Exception.Message)" -Warning -OutputStream
+        }
+    }
+}
+
 function Save-CMSetupLogsFromVm {
     <#
     .SYNOPSIS
@@ -2712,13 +2908,17 @@ function Save-CMSetupLogsFromVm {
             <VmName>-Phase8-<timestamp>-SMSProv.log, dmpdownloader.log, etc. (failure only)
             <VmName>-Phase8-<timestamp>-ConfigMgrUpdateDiagnostics.json
             <VmName>-Phase8-<timestamp>-ConfigMgrProviderState.json
+        Phase 7/8 failures also collect configured MP/RP targets and owning-site
+        logs independently when deployment metadata is supplied. Large role
+        documents use a bounded staged-file transfer rather than PSDirect output.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][string]$DomainName,
         [Parameter(Mandatory)][int]$Phase,
-        [Parameter(Mandatory)][ValidateSet('Success', 'Failure')][string]$Mode
+        [Parameter(Mandatory)][ValidateSet('Success', 'Failure')][string]$Mode,
+        [Parameter()][object]$DeployConfig
     )
 
     $probeAndRead = {
@@ -2832,7 +3032,7 @@ function Save-CMSetupLogsFromVm {
                 }
             }
         }
-        if ($Mode -eq 'Failure' -and $Phase -eq 8) {
+        if ($Mode -eq 'Failure' -and $Phase -in @(3, 8)) {
             $prereq = [ordered]@{
                 CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
                 ComputerName  = $env:COMPUTERNAME
@@ -3569,6 +3769,10 @@ function Save-CMSetupLogsFromVm {
         catch {
             Write-Log "[Phase $Phase]: $VmName`: CMLog capture: failed to write ConfigMgr update/provider state: $_" -Warning
         }
+    }
+
+    if ($Mode -eq 'Failure' -and $Phase -in @(7, 8) -and $DeployConfig) {
+        Save-CMRoleFailureDiagnostics -VmName $VmName -DomainName $DomainName -Phase $Phase -DeployConfig $DeployConfig
     }
 
     if ($Mode -eq 'Failure' -and $Phase -eq 8) {
@@ -9791,7 +9995,7 @@ $global:VM_Config = {
                         # Any role/phase: DSC_Log.log is the only host-visible record of what
                         # the guest's DSC resources reported before giving up.
                         try {
-                            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+                            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure' -DeployConfig $deployConfig
                         }
                         catch {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture threw after failure was already determined: $($_.Exception.Message)" -Warning -OutputStream
@@ -9826,7 +10030,7 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
             Write-Progress2 "Exception" -Status "Failed end $_" -force
             try {
-                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure' -DeployConfig $deployConfig
             }
             catch {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture also threw while preserving monitoring-failure evidence: $($_.Exception.Message)" -Warning -OutputStream
@@ -9848,7 +10052,7 @@ $global:VM_Config = {
         if ($pullGuestLogs) {
             $cmLogMode = if ($complete) { 'Success' } else { 'Failure' }
             try {
-                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode $cmLogMode
+                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode $cmLogMode -DeployConfig $deployConfig
             }
             catch {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture threw after the phase result was already determined: $($_.Exception.Message)" -Warning -OutputStream

@@ -368,9 +368,10 @@ function Test-VmFunctionality {
     }
 
     # If the VM has installRP, also test reporting services
-    if ($testsPassed -and $CurrentItem.installRP) {
+    if ($CurrentItem.installRP) {
         Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Reporting Services"
-        $testsPassed = Test-ReportingFunctionality -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        $reportingPassed = Test-ReportingFunctionality -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        $testsPassed = $testsPassed -and $reportingPassed
     }
 
     # If the VM has InstallCA, test Certificate Authority
@@ -5890,12 +5891,24 @@ function Test-SiteSystemFunctionality {
             return $results
         }
 
-        $mpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog `
-            -AsJob -TimeoutSeconds 600
+        $mpPassed = $false
+        try {
+            $mpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+                -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog `
+                -AsJob -TimeoutSeconds 600
 
-        if (-not (Format-TestResult -VMName $VMName -RoleLabel 'MP' -Result $mpResult)) {
-            $allPassed = $false
+            $mpPassed = Format-TestResult -VMName $VMName -RoleLabel 'MP' -Result $mpResult
+            if (-not $mpPassed) { $allPassed = $false }
+        }
+        finally {
+            if (-not $mpPassed) {
+                try {
+                    Save-CMRoleFailureDiagnostics -VmName $VMName -DomainName $domain -Phase $Phase -DeployConfig $DeployConfig -Roles 'MP'
+                }
+                catch {
+                    Write-Log "[Phase $Phase] $VMName [MP]: diagnostic capture failed without changing the validation result: $($_.Exception.Message)" -Warning -OutputStream
+                }
+            }
         }
     }
 
@@ -6683,6 +6696,62 @@ function Test-SiteSystemFunctionality {
     return $allPassed
 }
 
+function Test-ReportingDiagnosticEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Evidence,
+        [string]$SiteCode
+    )
+
+    $results = @{ Passed = $false; Details = [System.Collections.Generic.List[string]]::new() }
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $expectedFolder = if ($SiteCode) { "/ConfigMgr_$SiteCode" } else { 'a ConfigMgr_* folder' }
+    $legacy = @($Evidence.Services | Where-Object { $_.Name -match '^ReportServer(\$|$)' }).Count -gt 0 -and
+        @($Evidence.Services | Where-Object { $_.Name -in @('PowerBIReportServer', 'SQLServerReportingServices') }).Count -eq 0
+    foreach ($endpoint in @($Evidence.Endpoints)) {
+        $reasons = [System.Collections.Generic.List[string]]::new()
+        $catalog = $endpoint.Catalog
+        if ($endpoint.CatalogError -or -not $catalog -or $catalog.RootType -ne 'Folder') {
+            $reasons.Add('report catalog could not be read')
+        }
+        elseif (($SiteCode -and $catalog.ExpectedFolder -ne $expectedFolder) -or
+            -not $catalog.ConfigMgrFolderFound -or $catalog.ReportCount -lt 1) {
+            $reasons.Add("no published reports verified in $expectedFolder")
+        }
+        $portal = $endpoint.Portal
+        if ($endpoint.PortalError -or -not $portal -or $portal.StatusCode -ne 200 -or $portal.HtmlLength -lt 1) {
+            $reasons.Add('web portal did not return a non-empty HTTP 200 page')
+        }
+        else {
+            $assets = @($portal.ScriptAssets | Where-Object { $null -ne $_ })
+            if ((-not $legacy -and $assets.Count -eq 0) -or
+                @($assets | Where-Object { $_.Error -or $_.StatusCode -ne 200 }).Count -gt 0) {
+                $reasons.Add('portal JavaScript assets are missing or could not be verified')
+            }
+            $legacyApi = $legacy -and $portal.RestApi.StatusCode -eq 404
+            if (-not $legacyApi -and
+                (-not $portal.RestApi -or $portal.RestApi.Error -or $portal.RestApi.StatusCode -ne 200)) {
+                $reasons.Add('portal REST API did not return a valid catalog response')
+            }
+        }
+        if ($reasons.Count -eq 0) {
+            $results.Passed = $true
+            $results.Details.Add("OK: $($catalog.ReportCount) published report(s) verified in $expectedFolder at '$($endpoint.Uri)'")
+            $results.Details.Add("OK: Web portal and its required endpoints/assets verified at '$($portal.Uri)'")
+            if ($legacy -and $portal.RestApi.StatusCode -eq 404) {
+                $results.Details.Add('Legacy ReportServer service has no v2 REST API; SOAP catalog and portal checks were used.')
+            }
+            break
+        }
+        $failures.Add("FAIL: '$($endpoint.Uri)': $($reasons -join '; ')")
+    }
+    if (-not $results.Passed) {
+        if ($failures.Count -eq 0) { $failures.Add('FAIL: No reporting endpoint evidence was returned.') }
+        foreach ($failure in $failures) { $results.Details.Add($failure) }
+    }
+    return $results
+}
+
 function Test-ReportingFunctionality {
     [CmdletBinding()]
     param(
@@ -6696,7 +6765,7 @@ function Test-ReportingFunctionality {
     Write-Log "[Phase $Phase] $VMName [RP]: Testing Reporting Services" -LogOnly
 
     $scriptBlock = {
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new(); ReportServerUri = $null }
 
         # MEMLABS RP role installs Power BI Report Server (PowerBIReportServer
         # service). Pre-2024 builds used classic SSRS (SQLServerReportingServices
@@ -6762,6 +6831,7 @@ function Test-ReportingFunctionality {
                         if ($itemType -eq 'Folder') {
                             $note = if ($attempt -gt 1) { " (attempt $attempt)" } else { "" }
                             $results.Details.Add("OK: SOAP API healthy at '$soapUri' (root = Folder)$note")
+                            $results.ReportServerUri = $soapUri -replace '/ReportService2005\.asmx$', ''
                             $soapOk = $true
                             break
                         }
@@ -6916,89 +6986,167 @@ function Test-ReportingFunctionality {
         return $results
     }
 
-    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 300
+    try {
+        $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+            -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
+    }
+    catch {
+        try {
+            Save-CMRoleFailureDiagnostics -VmName $VMName -DomainName $Domain -Phase $Phase -DeployConfig $DeployConfig -Roles 'RP'
+        }
+        catch {
+            Write-Log "[Phase $Phase] $VMName [RP]: diagnostic capture failed while preserving the original validation exception: $($_.Exception.Message)" -Warning -OutputStream
+        }
+        throw
+    }
 
     $allPassed = Format-TestResult -VMName $VMName -RoleLabel 'RP' -Result $result
 
-    # CM-level check: verify the Reporting Services Point role is actually
-    # registered in the site. The SSRS service/portal checks above only
-    # validate infrastructure; the CM RP role might not be configured if
-    # InstallRoles.ps1 was skipped (e.g. add-to-existing scenario).
-    if ($CurrentItem -and $DeployConfig -and $CurrentItem.siteCode) {
-        $siteCode = $CurrentItem.siteCode
+    $siteCode = "$($CurrentItem.siteCode)"
+    $cmVmName = $null
+    if ($CurrentItem -and $DeployConfig) {
+        try {
+            if (-not $siteCode) {
+                $sqlNames = @($VMName, "$($CurrentItem.OtherNode)") | Where-Object { $_ }
+                $owners = @($DeployConfig.virtualMachines | Where-Object {
+                        $_.role -in @('Primary', 'CAS') -and $_.remoteSQLVM -in $sqlNames -and
+                        (-not $_.domain -or $_.domain -ieq $Domain)
+                    })
+                if ($owners.Count -eq 0) {
+                    $owners = @(Get-List -Type VM -DomainName $Domain | Where-Object {
+                            $_.role -in @('Primary', 'CAS') -and $_.remoteSQLVM -in $sqlNames
+                        })
+                }
+                if ($owners.Count -ne 1 -or -not $owners[0].siteCode) {
+                    throw "Expected one Primary/CAS owning reporting SQL VM '$VMName'; found $($owners.Count)."
+                }
+                $siteCode = "$($owners[0].siteCode)"
+            }
+            $siteVM = Get-SiteServerForSiteCode -deployConfig $DeployConfig -SiteCode $siteCode -DomainName $Domain -type VM
+            if (-not $siteVM.vmName -or $siteVM.role -notin @('Primary', 'CAS')) {
+                throw "No Primary/CAS found for reporting site '$siteCode' in '$Domain'."
+            }
+            $cmVmName = $siteVM.vmName
+        }
+        catch {
+            $allPassed = $false
+            Add-Phase11Output "[Phase $Phase] $VMName [RP]: FAIL: Cannot resolve the owning ConfigMgr site: $($_.Exception.Message)" -Level Failure
+        }
+    }
+    if ($cmVmName) {
         $rpVmName = $VMName
+        Write-Log "[Phase $Phase] $VMName [RP]: Verifying CM RP role registration from '$cmVmName' (site $siteCode)" -LogOnly
 
-        # Determine which VM has the CM WMI namespace
-        $cmVmName = $null
-        if ($CurrentItem.role -in @('Primary', 'CAS')) {
-            $cmVmName = $VMName
-        }
-        else {
-            $parentVM = $DeployConfig.virtualMachines | Where-Object {
-                $_.siteCode -eq $siteCode -and $_.role -in @('Primary', 'CAS')
-            } | Select-Object -First 1
-            if ($parentVM) {
-                $cmVmName = $parentVM.vmName
-            }
-            else {
-                Write-Log "[Phase $Phase] $VMName [RP]: Cannot find parent site server for site '$siteCode'; skipping CM RP role check" -Warning
-            }
-        }
+        $rpRoleScript = {
+            param($sc, $rpVmName, $rpDomain)
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        if ($cmVmName) {
-            Write-Log "[Phase $Phase] $VMName [RP]: Verifying CM RP role registration from '$cmVmName' (site $siteCode)" -LogOnly
+            $maxAttempts = 3
+            $retryDelay = 20
+            $found = $false
+            $wmiFilter = "RoleName='SMS SRS Reporting Point' AND (ServerName='$rpVmName' OR ServerName='$rpVmName.$rpDomain')"
+            $results.Details.Add("CMD: Get-WmiObject SMS_SystemResourceList -Filter `"$wmiFilter`" (max $maxAttempts attempts)")
 
-            $rpRoleScript = {
-                param($sc, $rpVmName)
-                $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-
-                $maxAttempts = 3
-                $retryDelay = 20
-                $found = $false
-                $wmiFilter = "RoleName='SMS SRS Reporting Point' AND ServerName LIKE '%$rpVmName%'"
-                $results.Details.Add("CMD: Get-WmiObject SMS_SystemResourceList -Filter `"$wmiFilter`" (max $maxAttempts attempts)")
-
-                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                    try {
-                        $rpRole = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SystemResourceList `
-                            -Filter $wmiFilter -ErrorAction Stop | Select-Object -First 1
-                        if ($rpRole) {
-                            $results.Details.Add("OK: Reporting Services Point role registered for server matching '$rpVmName' in site '$sc' (attempt $attempt)")
-                            $found = $true
-                            break
-                        }
-                        else {
-                            $results.Details.Add("  Attempt $attempt/${maxAttempts}: RP role not yet visible in WMI")
-                            if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
-                        }
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                try {
+                    $rpRole = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SystemResourceList `
+                        -Filter $wmiFilter -ErrorAction Stop | Select-Object -First 1
+                    if ($rpRole) {
+                        $results.Details.Add("OK: Reporting Services Point role registered for '$rpVmName' in site '$sc' (attempt $attempt)")
+                        $found = $true
+                        break
                     }
-                    catch {
-                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: WMI query failed: $($_.Exception.Message)")
+                    else {
+                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: RP role not yet visible in WMI")
                         if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                     }
                 }
-
-                if (-not $found) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: Reporting Services Point role not registered for '$rpVmName' in site '$sc' -- InstallRoles may not have run")
+                catch {
+                    $results.Details.Add("  Attempt $attempt/${maxAttempts}: WMI query failed: $($_.Exception.Message)")
+                    if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                 }
-
-                return $results
             }
 
-            $rpRoleResult = Invoke-VmCommand -VmName $cmVmName -VmDomainName $Domain `
-                -ScriptBlock $rpRoleScript -ArgumentList $siteCode, $rpVmName `
-                -DisplayName "Phase11-RP-CMRole-Test" -SuppressLog `
-                -AsJob -TimeoutSeconds 300
-
-            if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-CMRole' -Result $rpRoleResult)) {
-                $allPassed = $false
+            if (-not $found) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Reporting Services Point role not registered for '$rpVmName' in site '$sc' -- InstallRoles may not have run")
             }
+
+            return $results
+        }
+
+        $rpRoleResult = Invoke-VmCommand -VmName $cmVmName -VmDomainName $Domain `
+            -ScriptBlock $rpRoleScript -ArgumentList $siteCode, $rpVmName, $Domain `
+            -DisplayName "Phase11-RP-CMRole-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
+
+        if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-CMRole' -Result $rpRoleResult)) {
+            $allPassed = $false
         }
     }
 
+    $diagnosticPath = $null
+    $evidence = $null
+    $snapshotSaved = $false
+    $diagnosticResult = @{ Passed = $false; Details = [System.Collections.Generic.List[string]]::new() }
+    try {
+        $logDir = if ($Common.LogPath) { Split-Path $Common.LogPath -Parent } else { $null }
+        if (-not $logDir -or -not (Test-Path -LiteralPath $logDir)) {
+            throw 'The host build-log directory is unavailable; reporting diagnostics cannot be retained.'
+        }
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'
+        $diagnosticPath = Join-Path $logDir "$VMName-Phase11-$stamp-ReportingDiagnostics.json"
+        $collectorPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\Get-ReportingDiagnostics.ps1'
+        $collectorArguments = @{ VMName = $VMName; AsJson = $true }
+        if ($siteCode) { $collectorArguments.SiteCode = $siteCode }
+        if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.ReportServerUri) {
+            $collectorArguments.ReportServerUri = $result.ScriptBlockOutput.ReportServerUri
+        }
+        $payload = @(& $collectorPath @collectorArguments)
+        if ($payload.Count -ne 1 -or $payload[0] -isnot [string]) {
+            throw 'Reporting collector did not return one JSON document.'
+        }
+        $evidence = $payload[0] | ConvertFrom-Json -ErrorAction Stop
+        foreach ($property in @('ComputerName', 'CollectedAt', 'Endpoints', 'CollectionErrors')) {
+            if ($property -notin $evidence.PSObject.Properties.Name) { throw "Reporting evidence has no '$property' field." }
+        }
+        $payload[0] | Set-Content -LiteralPath $diagnosticPath -Encoding UTF8 -ErrorAction Stop
+        $snapshotSaved = $true
+        Add-Phase11Output "[Phase $Phase] $VMName [RP]: Reporting diagnostic snapshot -> $diagnosticPath"
+        $diagnosticResult = Test-ReportingDiagnosticEvidence -Evidence $evidence -SiteCode $siteCode
+    }
+    catch {
+        $diagnosticResult.Passed = $false
+        $diagnosticResult.Details.Add("FAIL: Reporting diagnostics could not be collected, saved, or verified: $($_.Exception.Message)")
+        if ($diagnosticPath -and -not $snapshotSaved) {
+            try {
+                [ordered]@{
+                    ComputerName = $VMName
+                    CollectedAt = (Get-Date).ToString('o')
+                    SiteCode = $siteCode
+                    CollectionFailed = $true
+                    Endpoints = @()
+                    CollectionErrors = @($_.Exception.ToString())
+                    ErrorLocation = "$($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)"
+                    StackTrace = $_.ScriptStackTrace
+                } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $diagnosticPath -Encoding UTF8 -ErrorAction Stop
+                Add-Phase11Output "[Phase $Phase] $VMName [RP]: Reporting collection failure recorded -> $diagnosticPath" -Level Warning
+            }
+            catch { Add-Phase11Output "[Phase $Phase] $VMName [RP]: Could not save reporting collection failure: $($_.Exception.Message)" -Level Warning }
+        }
+    }
+    $diagnosticWrapper = [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $diagnosticResult }
+    if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-Publication' -Result $diagnosticWrapper)) { $allPassed = $false }
+    if ($cmVmName) {
+        try {
+            $siteLogs = @(Save-Phase11GuestLogs -VMName $cmVmName -DomainName $Domain -RoleLabel 'RP-Site' -Collector $Phase11ReportingSiteLogCollector)
+            if ($siteLogs.Count -eq 0) {
+                Add-Phase11Output "[Phase $Phase] $VMName [RP]: No site-side reporting logs were saved from '$cmVmName'; see the log-capture error in the build log." -Level Warning
+            }
+        }
+        catch { Add-Phase11Output "[Phase $Phase] $VMName [RP]: Site-side reporting log capture failed on '$cmVmName': $($_.Exception.Message)" -Level Warning }
+    }
     return $allPassed
 }
 
@@ -9121,6 +9269,31 @@ $Phase11CcmClientLogCollector = {
         }
     }
     $out['_collector-diag.txt'] = ($diag -join "`r`n")
+    return $out
+}
+
+$Phase11ReportingSiteLogCollector = {
+    $out = @{}
+    $notes = [System.Collections.Generic.List[string]]::new()
+    $smsDir = $null
+    foreach ($key in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $smsDir = (Get-ItemProperty -LiteralPath $key -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' }
+        catch { $notes.Add("Could not read SMS install directory from '$key': $($_.Exception.Message)") }
+        if ($smsDir) { break }
+    }
+    if ($smsDir) {
+        foreach ($name in @('srsrp.log', 'srsrpsetup.log', 'sitecomp.log')) {
+            $path = Join-Path $smsDir "Logs\$name"
+            try {
+                $lines = @(Get-Content -LiteralPath $path -Tail 4000 -ErrorAction Stop)
+                if ($lines.Count) { $out[$name] = $lines -join "`r`n" }
+                else { $notes.Add("'$path' is empty.") }
+            }
+            catch { $notes.Add("Could not read '$path': $($_.Exception.Message)") }
+        }
+    }
+    else { $notes.Add('No SMS installation directory was found; site-side reporting logs were not collected.') }
+    if ($notes.Count) { $out['ReportingSiteDiagnostics.txt'] = $notes -join "`r`n" }
     return $out
 }
 

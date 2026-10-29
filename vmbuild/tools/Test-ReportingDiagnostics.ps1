@@ -62,13 +62,18 @@ try { $null = Get-ReportingCatalogEvidence -Proxy $proxy -SiteCode PS1 }
 catch { $threw = $_.Exception.Message -match 'unexpected type' }
 if (-not $threw) { throw 'Unexpected SOAP root type was accepted.' }
 
-$webState = [pscustomobject]@{ RequestedUris = [System.Collections.Generic.List[string]]::new(); BrokenAsset = $false }
+$webState = [pscustomobject]@{ RequestedUris = [System.Collections.Generic.List[string]]::new(); BrokenAsset = $false; MissingApi = $false }
 function Invoke-WebRequest {
     param($Uri, [switch] $UseDefaultCredentials, [switch] $UseBasicParsing, $TimeoutSec, $ErrorAction)
     if (-not $UseDefaultCredentials -or -not $UseBasicParsing -or $TimeoutSec -gt 30) { throw 'Missing bounded authenticated HTTP probe.' }
     $webState.RequestedUris.Add("$Uri")
     $uriText = "$Uri"
     if ($uriText -match 'api/v2.0') {
+        if ($webState.MissingApi) {
+            $exception = [System.Exception]::new('HTTP 404')
+            $exception | Add-Member NoteProperty Response ([pscustomobject]@{ StatusCode = 404 })
+            throw $exception
+        }
         return [pscustomobject]@{ StatusCode = 200; Content = '{"value":[]}'; Headers = @{ 'Content-Type' = 'application/json' } }
     }
     if ($uriText -match 'main\.js') {
@@ -94,6 +99,10 @@ $result = Get-ReportingPortalEvidence -PortalUri 'https://rp.example/Reports/'
 if ($result.ScriptAssets[0].Error -notmatch 'Script download failed' -or $null -ne $result.ScriptAssets[0].StatusCode) {
     throw 'An unavailable script was given successful-looking evidence.'
 }
+$webState.MissingApi = $true
+$result = Get-ReportingPortalEvidence -PortalUri 'https://rp.example/Reports/'
+if ($result.RestApi.StatusCode -ne 404 -or -not $result.RestApi.Error) { throw 'Portal REST HTTP failure status was lost.' }
+$webState.MissingApi = $false
 
 $proxy | Add-Member NoteProperty Timeout 0
 $proxy | Add-Member ScriptMethod Dispose { }

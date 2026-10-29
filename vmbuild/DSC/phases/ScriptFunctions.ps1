@@ -2140,7 +2140,12 @@ function Get-CMRoleTargetPrerequisiteState {
                         -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
                 foreach ($marker in $markers) {
                     try {
-                        $recorded = @((Get-Content -LiteralPath $marker.FullName -TotalCount 1 -ErrorAction Stop) -split ',' |
+                        $receipt = @(Get-Content -LiteralPath $marker.FullName -TotalCount 2 -ErrorAction Stop)
+                        if ($receipt.Count -ne 2 -or ([string]$receipt[1]).Trim() -ne 'MemLabsFeatureStateVerified=1') {
+                            $probeWarnings += "Unverified Phase 3 feature receipt '$($marker.FullName)'; rerun Phase 3 to verify installed feature state."
+                            continue
+                        }
+                        $recorded = @(([string]$receipt[0]) -split ',' |
                                 ForEach-Object { "$_".Trim() } |
                                 Where-Object { $_ })
                         $unverified = @($Requirements.RequiredFeatures | Where-Object { $recorded -notcontains $_ })

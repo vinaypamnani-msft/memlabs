@@ -5864,6 +5864,10 @@ class InstallFeatureForSCCM {
         $_Role = $this.Role
 
         Write-Status "Installing Windows Features for Role $_Role"
+        $markerPath = $this.MarkerPath()
+        if (Test-Path -LiteralPath $markerPath -ErrorAction Stop) {
+            Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+        }
 
         # Install on all devices. This read "dism / online / Enable-Feature / FeatureName:..."
         # for years: PowerShell tokenizes each bare "/" as its own argument, so dism got
@@ -5903,12 +5907,34 @@ class InstallFeatureForSCCM {
             }
             else {
                 Write-Status "Installing $($missingFeatures.Count) missing Windows Features: $($missingFeatures -join ', ')"
-                $result = Install-WindowsFeature -Name $missingFeatures -IncludeManagementTools
+                try {
+                    $result = Install-WindowsFeature -Name $missingFeatures -IncludeManagementTools -ErrorAction Stop
+                }
+                catch {
+                    throw "Required Windows feature installation failed for role $_Role ($($missingFeatures -join ', ')): $($_.Exception.Message). No verified completion receipt was written. Review CBS.log and DISM\dism.log on this VM."
+                }
+                if (-not $result -or $result.Success -ne $true) {
+                    throw "Required Windows feature installation did not succeed for role $_Role (Success=$($result.Success), ExitCode=$($result.ExitCode), RestartNeeded=$($result.RestartNeeded)). No verified completion receipt was written."
+                }
                 if ($result.RestartNeeded -eq "Yes") {
                     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                     $global:DSCMachineStatus = 1
                 }
                 else {
+                    $verifiedState = @($this.GetFeatureState($featureList))
+                    $pendingVerification = @($verifiedState | Where-Object { ([string]$_.InstallState) -like "*Pending" })
+                    if ($pendingVerification.Count -gt 0) {
+                        Write-Status "Windows Features remain pending restart after installation: $($pendingVerification.Name -join ', ')"
+                        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                        $global:DSCMachineStatus = 1
+                        $this.WriteMarker('Finished')
+                        return
+                    }
+                    $stillMissing = @($verifiedState | Where-Object { $_.InstallState -ne "Installed" } |
+                            ForEach-Object { "$($_.Name)=$($_.InstallState)" })
+                    if ($stillMissing.Count -gt 0) {
+                        throw "Windows feature installation reported success, but required features are not Installed: $($stillMissing -join ', '). No verified completion receipt was written."
+                    }
                     $stamp = $this.FeatureSignature($featureList)
                 }
             }
@@ -5985,11 +6011,14 @@ class InstallFeatureForSCCM {
             Write-Status "IIS globalModule DLL(s) missing, w3wp cannot start: $($missingModules -join '; ')"
             return $false
         }
-        try {
-            $recorded = Get-Content -Path $this.MarkerPath() -TotalCount 1 -ErrorAction Stop
-            if ($recorded -and ([string]$recorded).Trim() -eq $signature) { return $true }
+        # Older one-line receipts could be written after a failed feature install.
+        if (Test-Path -LiteralPath $this.MarkerPath() -ErrorAction Stop) {
+            $recorded = @(Get-Content -LiteralPath $this.MarkerPath() -TotalCount 2 -ErrorAction Stop)
+            if ($recorded.Count -eq 2 -and ([string]$recorded[0]).Trim() -eq $signature -and
+                ([string]$recorded[1]).Trim() -eq $this.ReceiptVerificationStamp()) {
+                return $true
+            }
         }
-        catch {}
 
         $featureState = @($this.GetFeatureState($featureList))
         $missing = @($featureState | Where-Object { $_.InstallState -ne "Installed" })
@@ -6004,6 +6033,10 @@ class InstallFeatureForSCCM {
 
     [string] FeatureSignature([string[]] $featureList) {
         return (($featureList | Sort-Object -Unique) -join ',')
+    }
+
+    [string] ReceiptVerificationStamp() {
+        return 'MemLabsFeatureStateVerified=1'
     }
 
     # Every DLL applicationHost.config registers as a globalModule must exist or EVERY
@@ -6028,13 +6061,14 @@ class InstallFeatureForSCCM {
     }
 
     [void] WriteMarker([string] $content) {
-        try {
-            $markerPath = $this.MarkerPath()
-            $markerDir = Split-Path -Parent $markerPath
-            if (-not (Test-Path $markerDir)) { New-Item -ItemType Directory -Path $markerDir -Force | Out-Null }
-            $content | Out-File -FilePath $markerPath -Force -Encoding ascii
+        $markerPath = $this.MarkerPath()
+        $markerDir = Split-Path -Parent $markerPath
+        if (-not (Test-Path -LiteralPath $markerDir -ErrorAction Stop)) {
+            New-Item -ItemType Directory -Path $markerDir -Force -ErrorAction Stop | Out-Null
         }
-        catch {}
+        $lines = @($content)
+        if ($content -ne 'Finished') { $lines += $this.ReceiptVerificationStamp() }
+        $lines | Set-Content -LiteralPath $markerPath -Force -Encoding ascii -ErrorAction Stop
     }
 
     [object[]] GetFeatureState([string[]] $featureList) {
