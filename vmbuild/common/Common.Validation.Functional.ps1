@@ -5906,7 +5906,7 @@ function Test-SiteSystemFunctionality {
                     Save-CMRoleFailureDiagnostics -VmName $VMName -DomainName $domain -Phase $Phase -DeployConfig $DeployConfig -Roles 'MP'
                 }
                 catch {
-                    Write-Log "[Phase $Phase] $VMName [MP]: diagnostic capture failed without changing the validation result: $($_.Exception.Message)" -Warning -OutputStream
+                    Write-Log "[Phase $Phase] $VMName [MP]: diagnostic capture failed without changing the validation result: $($_.Exception.Message)" -Warning
                 }
             }
         }
@@ -6996,7 +6996,7 @@ function Test-ReportingFunctionality {
             Save-CMRoleFailureDiagnostics -VmName $VMName -DomainName $Domain -Phase $Phase -DeployConfig $DeployConfig -Roles 'RP'
         }
         catch {
-            Write-Log "[Phase $Phase] $VMName [RP]: diagnostic capture failed while preserving the original validation exception: $($_.Exception.Message)" -Warning -OutputStream
+            Write-Log "[Phase $Phase] $VMName [RP]: diagnostic capture failed while preserving the original validation exception: $($_.Exception.Message)" -Warning
         }
         throw
     }

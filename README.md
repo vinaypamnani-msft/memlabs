@@ -59,6 +59,22 @@ and [`Test-ReportingValidation.ps1`](vmbuild/tools/Test-ReportingValidation.ps1)
 also exercises real HTTP response stalls and the shared transport timeout in
 the Windows PowerShell 5.1 guest runtime.
 
+## GenConfig: deploying and updating VMs
+
+An empty VM list is allowed while browsing, editing, or saving a draft. Choosing
+**[D] Deploy / Apply Changes And Save Config** with nothing queued reports
+**Nothing to deploy or update**, rather than an unnamed-VM error. Actual unnamed
+VM entries still fail validation.
+
+To update only existing VMs, select them under **Existing Virtual Machines**,
+change the supported properties, and use the same **[D]** action. Modified VMs
+are staged as existing-VM updates; no new VM is required. Unchanged inventory
+and reverted edits do not count as queued work. The same action also handles
+new VMs and existing-VM updates together.
+
+Validate without deploying a lab:
+`.\vmbuild\tools\Test-GenConfigInvalidReferences.ps1`.
+
 ## GenConfig: network editing
 
 For an OSDClient on a custom subnet, add a SiteSystem with `installDP` enabled,
@@ -1560,6 +1576,10 @@ collect this evidence, including when the validation transport throws. Existing
 Phase 11 reporting-validation snapshots and site-side log collection are reused;
 an unexpected reporting transport exception has an independent capture path.
 No additional failure-capture probes run for healthy checks.
+
+Diagnostic and memory-recovery helpers use normal host/file logging rather than
+returning logging objects. Capture warnings cannot turn a failed Boolean
+validation result into a truthy array or pollute recovery results.
 
 [`Get-ManagementPointDiagnostics.ps1`](vmbuild/tools/Get-ManagementPointDiagnostics.ps1)
 compares the IIS provider result with selected `applicationHost.config` fields

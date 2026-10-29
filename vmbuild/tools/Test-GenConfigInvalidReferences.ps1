@@ -2,6 +2,7 @@
 .SYNOPSIS
     Verifies that invalid GenConfig VM references produce visible validation failures.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'InternalUseOnly', Justification = 'Consumed by the AST-imported deployment menu builder.')]
 [CmdletBinding()]
 param([string] $RootPath)
 
@@ -49,8 +50,13 @@ function Reset-Fixture {
     $script:Rendered = New-Object 'System.Collections.Generic.List[string]'
     $script:Prompts = 0
     $script:ValidationMode = 'Valid'
+    $script:PipelineMode = 'Valid'
+    $script:Enhancements = 0
+    $script:ExceptionsLogged = 0
     $script:RenderMenuErrors = $false
     $script:ActionFailure = 'Binding'
+    $global:DisableSmartUpdate = $false
+    $global:TestConfigFastCache = $null
     $global:Config = [pscustomobject]@{
         vmOptions       = [pscustomobject]@{ domainName = 'example.test'; domainNetBiosName = 'EXAMPLE'; prefix = 'T-'; network = '10.100.0.0' }
         domainDefaults  = [pscustomobject]@{ DefaultSqlVersion = 'SQL Server 2022'; IncludeSSMSOnNONSQL = $false; UseDynamicMemory = $false }
@@ -508,6 +514,67 @@ try {
     $global:DisableSmartUpdate = $false
     $global:TestConfigFastCache = $null
     $global:MemLabsSkipValidation = $false
+
+    $tokens = $null
+    $errors = $null
+    $menuAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $RootPath 'genconfig.ps1'), [ref] $tokens, [ref] $errors)
+    if ($errors.Count) { throw "genconfig.ps1 has parse errors: $($errors -join '; ')" }
+    $actionValidators = @($menuAst.FindAll({
+                param($node)
+                if ($node -isnot [Management.Automation.Language.CommandAst] -or $node.GetCommandName() -ne 'Test-Configuration') { return $false }
+                $parent = $node.Parent
+                while ($parent) {
+                    if ($parent -is [Management.Automation.Language.FunctionDefinitionAst]) { return $false }
+                    $parent = $parent.Parent
+                }
+                return $true
+            }, $true))
+    Assert-Equal 1 $actionValidators.Count 'Expected one validation command after the deployment menu returns.'
+    $validateMenuAction = [scriptblock]::Create($actionValidators[0].Extent.Text)
+
+    foreach ($emptyState in 'Null', 'Empty', 'Missing') {
+        Reset-Fixture
+        switch ($emptyState) {
+            'Null' { $global:Config.virtualMachines = $null }
+            'Empty' { $global:Config.virtualMachines = @() }
+            'Missing' { $global:Config.PSObject.Properties.Remove('virtualMachines') }
+        }
+        $before = Get-FixtureState
+        foreach ($fast in $false, $true) {
+            $result = Test-Configuration -InputObject $global:Config -Fast:$fast
+            Assert-Equal $true $result.Valid "$emptyState VM lists must be allowed while editing or saving a draft."
+            Assert-Equal 0 $result.Failures "$emptyState VM lists were mistaken for unnamed VM entries."
+        }
+        Assert-Equal $true (Get-TestResult) 'Property-menu validation rejected an empty deployment draft.'
+        $global:existingMachines = @([pscustomobject]@{ vmName = 'T-UNCHANGED' })
+        $script:RenderMenuErrors = $true
+        Set-Responses @('S')
+        Assert-Equal $false (Select-MainMenu) 'An empty draft could not leave the menu using Save.'
+        Assert-Equal 0 @($global:GenConfigErrorMessages).Count 'Browsing an empty deployment rendered a validation error.'
+        Assert-Equal $before (Get-FixtureState) 'Empty-draft validation changed the configuration.'
+
+        foreach ($deployNow in $false, $true) {
+            $return = [pscustomobject]@{ DeployNow = $deployNow }
+            $script:Enhancements = 0
+            $result = & $validateMenuAction
+            Assert-Equal (-not $deployNow) $result.Valid 'The actual menu action validator did not distinguish Save from Deploy.'
+            if ($deployNow) {
+                Assert-Equal 1 $result.Failures 'An empty deployment must produce one blocking failure.'
+                Assert-Equal $true ($result.Message -like '*Nothing to deploy or update*') 'The empty-deployment error did not explain how to proceed.'
+                Assert-Equal 0 $script:Enhancements 'An empty deployment reached dependency enhancement.'
+            }
+        }
+        $result = Test-Configuration -InputObject $global:Config -Final
+        Assert-Equal $false $result.Valid 'The New-Lab final validation path accepted an empty deployment.'
+        Assert-Equal $true ($result.Message -like '*Nothing to deploy or update*') 'Final validation did not report the empty deployment.'
+
+        $global:DisableSmartUpdate = $true
+        $preview = Test-Configuration -InputObject $global:Config -Fast
+        Assert-Equal $true $preview.Valid 'The cached empty-draft preview was invalid.'
+        $result = Test-Configuration -InputObject $global:Config -Fast -RequireDeploymentTargets
+        Assert-Equal $false $result.Valid 'A cached valid draft bypassed the deployment-target requirement.'
+    }
+
     foreach ($candidate in @($null, [pscustomobject]@{ vmName = '' }, [pscustomobject]@{ vmName = ' ' })) {
         Reset-Fixture
         $global:Config.virtualMachines = @($candidate)
@@ -534,7 +601,73 @@ try {
             Assert-Equal $false (Get-TestResult -SuccessOnWarning) 'SuccessOnWarning incorrectly bypassed a validation failure.'
         }
     }
-    Write-Host "PASS: $($script:Assertions) assertions cover invalid VM references, menu error rendering, edit rollback and fail-closed validation." -ForegroundColor Green
+
+    foreach ($name in 'Add-ModifiedExistingVMsToConfig', 'Test-AnyExistingVMModified', 'Build-MainMenuOptions') {
+        . (Import-TestFunction '..\genconfig.ps1' $name)
+    }
+    . (Import-TestFunction 'Common.GenConfig.Validation.ps1' 'get-IsExistingVMModified')
+    foreach ($name in 'ConvertFrom-MemLabsVmNoteScalar', 'Add-ModifiedExistingVMToDeployConfig') {
+        . (Import-TestFunction 'Common.Config.ps1' $name)
+    }
+    function Get-VMOptionsSummary { '' }
+    function Get-PKIOptionsSummary { '' }
+    function Get-VMString {
+        param($Config, $VirtualMachine, [switch] $Colors)
+        $VirtualMachine.vmName
+    }
+    function Start-VM2 {
+        param($Name)
+        throw "The isolated menu test must not start VM '$Name'."
+    }
+    $InternalUseOnly = [switch] $true
+    foreach ($includeNewVM in $false, $true) {
+        Reset-Fixture
+        $global:Config.virtualMachines = $null
+        if ($includeNewVM) {
+            $global:Config.virtualMachines = @([pscustomobject]@{ vmName = 'NEW1'; Role = 'DomainMember'; operatingSystem = 'Server 2022' })
+        }
+        $existingVM = [pscustomobject]@{
+            vmName = 'T-MEM1'; Role = 'DomainMember'; operatingSystem = 'Server 2022'; state = 'Running'
+            ExistingVM = $true; useProxy = $true; 'useProxy-Original' = $false
+        }
+        $global:existingMachines = @($existingVM)
+        $script:Inventory = @($existingVM)
+        $built = Build-MainMenuOptions
+        Assert-Equal $true ($built.Options['D'] -like '*Apply Changes*') 'The shared action does not advertise existing-VM updates.'
+        Assert-Equal $true ($built.Options['HD'] -like '*existing VMs*') 'The shared action help does not explain existing-VM updates.'
+        Assert-Equal $true (Test-AnyExistingVMModified) 'An existing-VM edit was not detected.'
+        Set-Responses @('D')
+        Assert-Equal $true (Select-MainMenu) 'The shared action did not queue existing-VM changes.'
+        Assert-Equal (1 + [int] $includeNewVM) @($global:Config.virtualMachines).Count 'Staging an existing-VM edit added an unexpected VM.'
+        $stagedVM = $global:Config.virtualMachines | Where-Object vmName -eq 'T-MEM1'
+        Assert-Equal $true $stagedVM.hidden 'An existing VM was staged as a new VM.'
+        Assert-Equal $true $stagedVM.ExistingVM 'The staged VM lost its existing-VM update marker.'
+        Assert-Equal $true $stagedVM.useProxy 'The staged VM lost its edited property.'
+        Assert-Equal $true $stagedVM.phase11Validate 'The staged VM was not scheduled for post-update validation.'
+        Assert-Equal $null $stagedVM.PSObject.Properties['useProxy-Original'] 'An edit-session marker leaked into the saved configuration.'
+        $return = [pscustomobject]@{ DeployNow = $true }
+        $result = & $validateMenuAction
+        Assert-Equal $true $result.Valid "Existing-VM updates were rejected (includes new VM: $includeNewVM): $($result.Message)"
+        Add-ModifiedExistingVMsToConfig
+        Assert-Equal (1 + [int] $includeNewVM) @($global:Config.virtualMachines).Count 'Staging the same update twice duplicated the existing VM.'
+    }
+
+    Reset-Fixture
+    $global:Config.virtualMachines = $null
+    $global:existingMachines = @([pscustomobject]@{
+            vmName = 'T-MEM1'; ExistingVM = $true; useProxy = $false; 'useProxy-Original' = $false
+        })
+    Assert-Equal $false (Test-AnyExistingVMModified) 'A reverted edit was still treated as modified.'
+    Set-Responses @('D')
+    Assert-Equal $true (Select-MainMenu) 'The menu did not return the selected deployment action.'
+    Assert-Equal 0 @($global:Config.virtualMachines | Where-Object { $_ }).Count 'An unchanged existing VM was queued for deployment.'
+    $return = [pscustomobject]@{ DeployNow = $true }
+    $result = & $validateMenuAction
+    Assert-Equal $false $result.Valid 'Unchanged existing inventory made an empty deployment valid.'
+    Convert-ValidationMessages -TestObject $result
+    Show-GenConfigErrorMessages
+    Assert-Equal $true (($script:Rendered -join ' ') -like '*Nothing to deploy or update*') 'The empty-deployment failure was not visible to the operator.'
+    Write-Host "PASS: $($script:Assertions) assertions cover invalid VM references, empty drafts, shared deploy/update actions, menu error rendering, edit rollback and fail-closed validation." -ForegroundColor Green
 }
 finally {
     foreach ($name in $savedGlobals.Keys) {

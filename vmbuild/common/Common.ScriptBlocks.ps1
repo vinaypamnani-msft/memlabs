@@ -2422,19 +2422,19 @@ function Save-MemLabsGuestMemoryDiagnostics {
         $logDir = Split-Path -Parent $Common.LogPath
         $path = Join-Path $logDir "$VmName-Phase8-$(Get-Date -Format 'yyyyMMdd-HHmmss-fff')-$Trigger-MemoryDiagnostics.json"
         $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
-        Write-Log "[Phase 8]: ${VmName}: memory diagnostic report ($Trigger) -> $path" -OutputStream
+        Write-Log "[Phase 8]: ${VmName}: memory diagnostic report ($Trigger) -> $path"
         if ($report.Guest) {
             $top = @($report.Guest.TopProcesses | Select-Object -First 5 | ForEach-Object { "$($_.Name)(pid=$($_.Id),private=$($_.PrivateMB)MB)" }) -join ', '
             $memorySummary = if ($report.Guest.Memory) { "available=$($report.Guest.Memory.AvailableMB)MB commit=$($report.Guest.Memory.CommittedMB)/$($report.Guest.Memory.CommitLimitMB)MB" } else { 'memory counters unavailable' }
             Write-Log "[Phase 8]: ${VmName}: OOM evidence: $memorySummary; largest private-memory consumers: $top. Collector errors: $($report.Guest.Errors | ConvertTo-Json -Compress -Depth 3)" -LogOnly
-            foreach ($indicator in $report.Guest.Indicators) { Write-Log "[Phase 8]: ${VmName}: OOM indicator: $indicator" -Warning -OutputStream }
+            foreach ($indicator in $report.Guest.Indicators) { Write-Log "[Phase 8]: ${VmName}: OOM indicator: $indicator" -Warning }
         }
         if ($report.Errors.Count) {
-            Write-Log "[Phase 8]: ${VmName}: memory diagnostic report is incomplete: $($report.Errors | ConvertTo-Json -Compress)" -Warning -OutputStream
+            Write-Log "[Phase 8]: ${VmName}: memory diagnostic report is incomplete: $($report.Errors | ConvertTo-Json -Compress)" -Warning
         }
     }
     catch {
-        Write-Log "[Phase 8]: ${VmName}: memory diagnostic capture failed; recovery/failure handling will continue: $($_.Exception.Message)" -Warning -OutputStream
+        Write-Log "[Phase 8]: ${VmName}: memory diagnostic capture failed; recovery/failure handling will continue: $($_.Exception.Message)" -Warning
     }
 }
 
@@ -2617,7 +2617,7 @@ function Invoke-MemLabsGuestMemoryRecovery {
         [ValidateRange(1, 600)] [int] $ReadyTimeoutSeconds = 600
     )
 
-    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: requesting the single permitted graceful reboot (RunId=$RunId)." -Warning -OutputStream
+    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: requesting the single permitted graceful reboot (RunId=$RunId)." -Warning
     if (-not (Restart-VM2Smart -Name $VmName -Reason 'Phase 8 CIM out-of-memory recovery')) {
         throw "${VmName}: memory recovery could not restart the guest gracefully; hard power-off is not permitted."
     }
@@ -2662,7 +2662,7 @@ function Invoke-MemLabsGuestMemoryRecovery {
     if (-not $resume -or $resume.ScriptBlockFailed -or $resume.ScriptBlockOutput -notcontains 'Resumed') {
         throw "${VmName}: memory recovery reboot completed, but resuming the existing DSC workflow failed: $($resume.ErrorDetails -join '; ') $($resume.ScriptBlockOutput)"
     }
-    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: guest readiness verified; existing workflow resumed without snapshot rollback." -OutputStream
+    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: guest readiness verified; existing workflow resumed without snapshot rollback."
 }
 
 function Save-CMRoleFailureDiagnostics {
@@ -2677,7 +2677,7 @@ function Save-CMRoleFailureDiagnostics {
 
     $logDir = if ($Common -and $Common.LogPath) { Split-Path $Common.LogPath -Parent } else { $null }
     if (-not $logDir -or -not (Test-Path -LiteralPath $logDir -PathType Container)) {
-        Write-Log "[Phase $Phase]: $VmName`: role diagnostics: host log directory is unavailable ($logDir)." -Warning -OutputStream
+        Write-Log "[Phase $Phase]: $VmName`: role diagnostics: host log directory is unavailable ($logDir)." -Warning
         return
     }
     $base = "$VmName-Phase$Phase-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
@@ -2702,7 +2702,7 @@ function Save-CMRoleFailureDiagnostics {
             if ($Roles.Count -ne 1) { throw "Cannot identify one deployment VM for '$VmName'; role targets cannot be inferred." }
             $message = "Deployment metadata for '$VmName' is unavailable; collecting only the requested $($Roles[0]) target without site ownership."
             $state.CollectionErrors += $message
-            Write-Log "[Phase $Phase]: $VmName`: role diagnostics: $message" -Warning -OutputStream
+            Write-Log "[Phase $Phase]: $VmName`: role diagnostics: $message" -Warning
             $trigger = @([pscustomobject]@{
                     vmName = $VmName; role = 'SiteSystem'; siteCode = ''
                     installMP = $Roles -contains 'MP'; installRP = $Roles -contains 'RP'
@@ -2739,7 +2739,7 @@ function Save-CMRoleFailureDiagnostics {
             if (-not $siteCode -or $owners.Count -ne 1) {
                 $message = "Site ownership for '$($candidate.vmName)' could not be resolved uniquely; available target evidence will still be collected."
                 $state.CollectionErrors += $message
-                Write-Log "[Phase $Phase]: $VmName`: role diagnostics: $message" -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $VmName`: role diagnostics: $message" -Warning
             }
             foreach ($role in $candidateRoles) {
                 $targets.Add([pscustomobject]@{ VmName = $candidate.vmName; Role = $role; SiteCode = $siteCode })
@@ -2818,9 +2818,9 @@ function Save-CMRoleFailureDiagnostics {
                 if ($document.ComputerName -ine $target.VmName) { throw "Diagnostic identity mismatch: expected '$($target.VmName)', got '$($document.ComputerName)'." }
                 $target.CollectionErrors = @($document.CollectionErrors | Where-Object { $_ })
                 $target.CaptureStatus = if ($target.CollectionErrors.Count) { 'CompletedWithErrors' } else { 'Completed' }
-                Write-Log "[Phase $Phase]: $VmName`: Captured $($target.Role) evidence from $($target.VmName) -> $($target.HostPath)" -OutputStream
+                Write-Log "[Phase $Phase]: $VmName`: Captured $($target.Role) evidence from $($target.VmName) -> $($target.HostPath)"
                 foreach ($errorText in $target.CollectionErrors) {
-                    Write-Log "[Phase $Phase]: $VmName`: $($target.VmName) $($target.Role) diagnostic evidence unavailable: $errorText" -Warning -OutputStream
+                    Write-Log "[Phase $Phase]: $VmName`: $($target.VmName) $($target.Role) diagnostic evidence unavailable: $errorText" -Warning
                 }
                 try {
                     $cleanup = Invoke-VmCommand -VmName $target.VmName -VmDomainName $DomainName -ArgumentList @($target.GuestPath) `
@@ -2834,13 +2834,13 @@ function Save-CMRoleFailureDiagnostics {
                 catch {
                     $target.CleanupError = $_.Exception.Message
                     $target.CaptureStatus = 'CompletedWithErrors'
-                    Write-Log "[Phase $Phase]: $VmName`: $($target.VmName): $($target.CleanupError)" -Warning -OutputStream
+                    Write-Log "[Phase $Phase]: $VmName`: $($target.VmName): $($target.CleanupError)" -Warning
                 }
             }
             catch {
                 $target.CaptureStatus = 'Failed'
                 $target.Error = $_.Exception.Message
-                Write-Log "[Phase $Phase]: $VmName`: $($target.Role) diagnostic capture on $($target.VmName) failed: $($target.Error)" -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $VmName`: $($target.Role) diagnostic capture on $($target.VmName) failed: $($target.Error)" -Warning
             }
         }
         $state.CaptureStatus = if ($state.CollectionErrors.Count -or @($state.Targets | Where-Object { $_.CaptureStatus -ne 'Completed' }).Count) { 'Partial' } else { 'Completed' }
@@ -2848,15 +2848,15 @@ function Save-CMRoleFailureDiagnostics {
     catch {
         $state.CaptureStatus = 'Failed'
         $state.CollectionErrors += $_.Exception.Message
-        Write-Log "[Phase $Phase]: $VmName`: role diagnostic collection failed: $($_.Exception.Message)" -Warning -OutputStream
+        Write-Log "[Phase $Phase]: $VmName`: role diagnostic collection failed: $($_.Exception.Message)" -Warning
     }
     finally {
         try {
             & $saveStatus
-            Write-Log "[Phase $Phase]: $VmName`: Role diagnostic capture status -> $statusPath" -OutputStream
+            Write-Log "[Phase $Phase]: $VmName`: Role diagnostic capture status -> $statusPath"
         }
         catch {
-            Write-Log "[Phase $Phase]: $VmName`: could not persist role diagnostic capture status: $($_.Exception.Message)" -Warning -OutputStream
+            Write-Log "[Phase $Phase]: $VmName`: could not persist role diagnostic capture status: $($_.Exception.Message)" -Warning
         }
     }
 }

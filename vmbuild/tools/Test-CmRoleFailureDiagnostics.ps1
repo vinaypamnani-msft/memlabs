@@ -176,7 +176,11 @@ try {
         $secondary = [pscustomobject]@{ vmName = 'SEC'; role = 'Secondary'; siteCode = 'SEC'; parentSiteCode = 'NOM' }
         $other = [pscustomobject]@{ vmName = 'OTHER'; role = 'Primary'; siteCode = 'ALT'; installMP = $true; installRP = $true }
         $config = [pscustomobject]@{ vmOptions = [pscustomobject]@{ domainName = 'example.test' }; virtualMachines = @($primary, $mp, $sql, $secondary, $other) }
-        function Write-Log { param($Text, [switch]$Warning, [switch]$OutputStream, [switch]$LogOnly); $transportFixture.Messages.Add("$Text") }
+        function Write-Log {
+            param($Text, [switch]$Warning, [switch]$OutputStream, [switch]$LogOnly)
+            $transportFixture.Messages.Add("$Text")
+            if ($OutputStream) { [pscustomobject]@{ Text = "$Text"; LogLevel = 2 } }
+        }
         function Invoke-VmCommand {
             param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, [switch]$AsJob, $TimeoutSeconds,
                 $SessionMaxRetries, [switch]$SuppressLog, [switch]$RequireDomainIdentity, [switch]$FailOnRemoteError, $DisplayName)
@@ -216,7 +220,8 @@ try {
             [IO.File]::WriteAllText($Destination, $transportFixture.Payloads[$Path], [Text.UTF8Encoding]::new($false))
             return $true
         }
-        Save-CMRoleFailureDiagnostics -VmName PRI -DomainName example.test -Phase 8 -DeployConfig $config
+        $captureOutput = @(Save-CMRoleFailureDiagnostics -VmName PRI -DomainName example.test -Phase 8 -DeployConfig $config)
+        Assert-True ($captureOutput.Count -eq 0) 'Role capture leaked logging objects into the caller return stream.'
         $calls = @($transportFixture.Calls | Where-Object DisplayName -like 'Capture *')
         Assert-True ($calls.Count -eq 5 -and 'OTHER' -notin $calls.VmName) "Phase 8 target capture is incorrect (calls=$($calls.Count)): $($transportFixture.Messages -join ' | ')"
         $rpCall = $calls | Where-Object DisplayName -eq 'Capture RP role diagnostics'
@@ -232,7 +237,8 @@ try {
         foreach ($mode in @('Success', 'TransportFailure', 'CopyFailure', 'InvalidManifest', 'InvalidJson', 'IdentityMismatch', 'ProbeFailure', 'CleanupFailure')) {
             $transportFixture.Mode = $mode
             $transportFixture.Calls.Clear()
-            Save-CMRoleFailureDiagnostics -VmName MP -DomainName example.test -Phase 11 -DeployConfig $config -Roles MP
+            $captureOutput = @(Save-CMRoleFailureDiagnostics -VmName MP -DomainName example.test -Phase 11 -DeployConfig $config -Roles MP)
+            Assert-True ($captureOutput.Count -eq 0) "$mode role capture leaked logging objects into the caller return stream."
             $statusFile = Get-ChildItem -LiteralPath $workDir -Filter 'MP-Phase11-*-RoleDiagnostics.json' | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
             $status = Get-Content -LiteralPath $statusFile.FullName -Raw | ConvertFrom-Json
             $expected = if ($mode -eq 'Success') { 'Completed' } else { 'Partial' }
@@ -245,7 +251,8 @@ try {
         }
         $transportFixture.Mode = 'Success'
         $transportFixture.Calls.Clear()
-        Save-CMRoleFailureDiagnostics -VmName SQL -DomainName example.test -Phase 7 -DeployConfig $config
+        $captureOutput = @(Save-CMRoleFailureDiagnostics -VmName SQL -DomainName example.test -Phase 7 -DeployConfig $config)
+        Assert-True ($captureOutput.Count -eq 0) 'Phase 7 role capture leaked logging objects into the caller return stream.'
         Assert-True (@($transportFixture.Calls | Where-Object DisplayName -eq 'Capture RP role diagnostics').Count -eq 1 -and @($transportFixture.Calls | Where-Object DisplayName -eq 'Capture MP role diagnostics').Count -eq 0) 'Phase 7 capture requests MP checks before role provisioning.'
     }
 
@@ -254,15 +261,24 @@ try {
         . (Get-TestFunction $validationAst 'Test-ReportingFunctionality')
         . (Get-TestFunction $commonAst 'Save-CMSetupLogsFromVm')
         $Common = [pscustomobject]@{ LogPath = (Join-Path $workDir 'VMBuild.log') }
-        $hooks = [pscustomobject]@{ Passed = $true; Throw = $false; Captures = [Collections.Generic.List[object]]::new() }
+        $hooks = [pscustomobject]@{
+            Passed = $true; Throw = $false; CaptureThrows = $false
+            Captures = [Collections.Generic.List[object]]::new()
+            Messages = [Collections.Generic.List[string]]::new()
+        }
         $item = [pscustomobject]@{ vmName = 'MP'; role = 'SiteSystem'; siteCode = 'NOM'; installMP = $true }
         $config = [pscustomobject]@{ vmOptions = [pscustomobject]@{ domainName = 'example.test' }; virtualMachines = @($item) }
         function Write-Progress2 { param($PercentComplete, $Activity, $Status) }
-        function Write-Log { param($Text, [switch]$Warning, [switch]$OutputStream, [switch]$LogOnly) }
+        function Write-Log {
+            param($Text, [switch]$Warning, [switch]$OutputStream, [switch]$LogOnly)
+            $hooks.Messages.Add("$Text")
+            if ($OutputStream) { [pscustomobject]@{ Text = "$Text"; LogLevel = 2 } }
+        }
         function Format-TestResult { param($VMName, $RoleLabel, $Result); return $hooks.Passed }
         function Save-CMRoleFailureDiagnostics {
             param($VmName, $DomainName, $Phase, $DeployConfig, $Roles)
             $hooks.Captures.Add([pscustomobject]@{ VmName = $VmName; Phase = $Phase; Roles = $Roles })
+            if ($hooks.CaptureThrows) { throw 'synthetic diagnostic failure' }
         }
         function Invoke-VmCommand {
             param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, $DisplayName, [switch]$SuppressLog, [switch]$AsJob, $TimeoutSeconds, $SessionMaxRetries)
@@ -278,18 +294,31 @@ try {
         $hooks.Passed = $false
         Assert-True (-not (Test-SiteSystemFunctionality -VMName MP -CurrentItem $item -DeployConfig $config)) 'Failed MP validation was converted to success.'
         Assert-True ($hooks.Captures.Count -eq 1 -and $hooks.Captures[0].Roles -eq 'MP') 'Failed MP validation did not automatically capture evidence.'
+        $hooks.CaptureThrows = $true
+        $validationOutput = @(Test-SiteSystemFunctionality -VMName MP -CurrentItem $item -DeployConfig $config)
+        Assert-True ($validationOutput.Count -eq 1 -and $validationOutput[0] -is [bool] -and -not $validationOutput[0]) 'Diagnostic capture failure polluted the false MP validation result.'
+        Assert-True (@($hooks.Messages | Where-Object { $_ -match 'diagnostic capture failed.*synthetic diagnostic failure' }).Count -gt 0) 'Diagnostic capture failure was not logged.'
         $hooks.Throw = $true
         foreach ($role in @('MP', 'RP')) {
             $caught = $null
             $count = $hooks.Captures.Count
+            $validationOutput = [Collections.Generic.List[object]]::new()
             try {
-                if ($role -eq 'MP') { Test-SiteSystemFunctionality -VMName MP -CurrentItem $item -DeployConfig $config }
-                else { Test-ReportingFunctionality -VMName MP -Domain example.test -CurrentItem $item -DeployConfig $config }
+                if ($role -eq 'MP') {
+                    Test-SiteSystemFunctionality -VMName MP -CurrentItem $item -DeployConfig $config |
+                        ForEach-Object { $validationOutput.Add($_) }
+                }
+                else {
+                    Test-ReportingFunctionality -VMName MP -Domain example.test -CurrentItem $item -DeployConfig $config |
+                        ForEach-Object { $validationOutput.Add($_) }
+                }
             }
             catch { $caught = $_ }
             Assert-True ($caught -and $caught.Exception.Message -match 'synthetic validation transport failure' -and $hooks.Captures.Count -eq ($count + 1)) "$role transport exceptions bypassed capture or were replaced."
+            Assert-True ($validationOutput.Count -eq 0) "$role diagnostic failure polluted the validation-exception return stream."
         }
         $hooks.Throw = $false
+        $hooks.CaptureThrows = $false
         foreach ($case in @(@{ Phase = 7; Mode = 'Failure'; Capture = $true }, @{ Phase = 8; Mode = 'Failure'; Capture = $true },
                 @{ Phase = 8; Mode = 'Success'; Capture = $false }, @{ Phase = 3; Mode = 'Failure'; Capture = $false })) {
             $count = $hooks.Captures.Count
