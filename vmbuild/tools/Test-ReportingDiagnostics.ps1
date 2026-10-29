@@ -8,6 +8,7 @@ param([string] $RootPath)
 
 $ErrorActionPreference = 'Stop'
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
+. (Join-Path $RootPath 'DSC\phases\ProcessFunctions.ps1')
 $sourcePath = Join-Path $RootPath 'tools\Get-ReportingDiagnostics.ps1'
 $tokens = $null
 $parseErrors = $null
@@ -117,7 +118,8 @@ function New-WebServiceProxy {
 }
 Set-Item -Path Function:\New-WebServiceProxy -Value (${function:New-WebServiceProxy}.GetNewClosure())
 function Get-CimInstance {
-    param($ClassName, $Namespace, $Filter, $ErrorAction)
+    param($ClassName, $Namespace, $Filter, $OperationTimeoutSec, $ErrorAction)
+    if ($OperationTimeoutSec -ne 15) { throw 'CIM inventory lost its timeout.' }
     switch ($ClassName) {
         'Win32_OperatingSystem' { [pscustomobject]@{ Caption = 'Test OS'; Version = '10.0.20348'; BuildNumber = '20348' } }
         'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'rp'; Domain = 'example' } }
@@ -131,6 +133,12 @@ function Get-ScheduledTask {
     [pscustomobject]@{ TaskName = 'MicrosoftEdgeUpdateTaskMachineCore'; TaskPath = '\'; State = 'Disabled' }
 }
 function Test-Path { param($LiteralPath) [System.IO.File]::Exists($LiteralPath) }
+function Invoke-MemLabsBoundedPowerShell {
+    param($ProbeScript, $Parameters, $TimeoutSeconds, $ProgressPath, $ProgressId)
+    if ($TimeoutSeconds -ne 60 -or -not $ProgressPath -or $ProgressId -ne 'reporting') { throw 'Reporting web probes lost their hard limit or checkpoint.' }
+    try { [pscustomobject]@{ Output = (& $ProbeScript @Parameters); Error = ''; ElapsedSeconds = 0.1; TimedOut = $false } }
+    catch { [pscustomobject]@{ Output = $null; Error = $_.Exception.ToString(); ElapsedSeconds = 0.1; TimedOut = $false } }
+}
 
 $outputPath = Join-Path ([System.IO.Path]::GetTempPath()) "MemLabs-Reporting-Test-$([guid]::NewGuid().ToString('N')).json"
 $originalProtocol = [System.Net.ServicePointManager]::SecurityProtocol
@@ -195,12 +203,16 @@ function Invoke-VmCommand {
     }
     $hostState.Calls++
     $hostState.Source = $ArgumentList[0]
+    if ($ArgumentList[3] -notmatch 'function Invoke-MemLabsBoundedPowerShell') { throw 'Bounded worker helpers were not sent to the guest.' }
     if (-not $hostCommon.LocalAdmin) {
         $hostState.UninitializedCalls++
         return $false
     }
     if ($hostState.Mode -eq 'Failure') {
         return [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $true; ErrorDetails = 'Guest collection failed' }
+    }
+    if ($hostState.Mode -eq 'Timeout') {
+        return [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $true; TimedOut = $true; ErrorDetails = $null }
     }
     $output = switch ($hostState.Mode) {
         'InvalidJson' { '{broken' }
@@ -247,6 +259,11 @@ try {
     }
     $hostCommon.LocalAdmin = $fixtureCredential
     $hostState.CredentialMode = 'Success'
+    $hostState.Mode = 'Timeout'
+    $threw = $false
+    try { $null = & $sourcePath -VMName 'RP-TEST' -OutputPath $hostOutputPath }
+    catch { $threw = $_.Exception.Message -match '600-second transport limit' }
+    if (-not $threw) { throw 'Transport timeout was collapsed into a generic no-result error.' }
     foreach ($mode in @('Failure', 'InvalidJson', 'InvalidShape')) {
         $hostState.Mode = $mode
         $threw = $false

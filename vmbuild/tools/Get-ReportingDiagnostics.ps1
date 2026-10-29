@@ -11,6 +11,10 @@
     Does not launch a browser or modify its profile.
     SOAP/catalog access, HTTP responses, and browser versions are recorded
     separately: a working SOAP root does not prove reports exist or the portal works.
+    SOAP discovery, report-server pages, and portal checks run in separate bounded
+    workers. A stalled web check is recorded without discarding other evidence.
+    Local collection requires the MemLabs checkout and its ProcessFunctions.ps1
+    helper; host mode transmits that helper automatically.
 .EXAMPLE
     .\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
 .EXAMPLE
@@ -65,9 +69,18 @@ function Get-ReportingCatalogEvidence {
 }
 
 function Get-ReportingPortalEvidence {
-    param([Parameter(Mandatory)][uri] $PortalUri)
+    param([Parameter(Mandatory)][uri] $PortalUri, [string] $ProgressPath)
 
-    $page = Invoke-WebRequest -Uri $PortalUri -UseDefaultCredentials -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+    $request = {
+        param($Uri, $TimeoutSeconds)
+        if ($ProgressPath) {
+            Write-MemLabsProcessProgress -Path $ProgressPath -Record @{
+                Id = 'reporting'; Stage = 'Portal'; Message = "GET $Uri"; UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+            }
+        }
+        Invoke-WebRequest -Uri $Uri -UseDefaultCredentials -UseBasicParsing -TimeoutSec $TimeoutSeconds -ErrorAction Stop
+    }
+    $page = & $request $PortalUri 30
     $html = [string] $page.Content
     $baseUri = $PortalUri
     if ($page.BaseResponse.ResponseUri) { $baseUri = $page.BaseResponse.ResponseUri }
@@ -82,7 +95,7 @@ function Get-ReportingPortalEvidence {
             }
             else {
                 try {
-                    $response = Invoke-WebRequest -Uri $assetUri -UseDefaultCredentials -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                    $response = & $request $assetUri 20
                     $asset.StatusCode = [int] $response.StatusCode
                     $asset.ContentType = [string] $response.Headers['Content-Type']
                     if (-not $response.Content -or $asset.ContentType -match 'text/html') {
@@ -101,7 +114,7 @@ function Get-ReportingPortalEvidence {
     )
     $api = [ordered]@{ Uri = "$($PortalUri.AbsoluteUri.TrimEnd('/'))/api/v2.0/CatalogItems?`$top=1"; StatusCode = $null; Error = $null }
     try {
-        $response = Invoke-WebRequest -Uri $api.Uri -UseDefaultCredentials -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $response = & $request $api.Uri 30
         $api.StatusCode = [int] $response.StatusCode
         $document = $response.Content | ConvertFrom-Json -ErrorAction Stop
         if ('value' -notin $document.PSObject.Properties.Name) { throw 'Portal REST response has no OData value collection.' }
@@ -146,6 +159,78 @@ function Get-ReportingSqlReportCount {
     finally { $command.Dispose(); $connection.Dispose() }
 }
 
+function Get-ReportingEndpointEvidence {
+    param(
+        [Parameter(Mandatory)][uri] $ServerUri,
+        [string] $SiteCode,
+        [ValidateRange(1, 90)][int] $TimeoutSeconds = 60
+    )
+
+    $endpoint = [ordered]@{
+        Uri = $ServerUri.AbsoluteUri
+        Catalog = $null
+        CatalogError = $null
+        ReportServerPage = $null
+        ReportServerPageError = $null
+        Portal = $null
+        PortalError = $null
+        Probes = @()
+    }
+    $helperSource = "function Get-ReportingCatalogEvidence { ${function:Get-ReportingCatalogEvidence} }`nfunction Get-ReportingPortalEvidence { ${function:Get-ReportingPortalEvidence} }`nfunction Write-MemLabsProcessProgress { ${function:Write-MemLabsProcessProgress} }"
+    $probe = {
+        param($Stage, $ServerUri, $SiteCode, $HelperSource, $ProgressPath)
+        $ProgressPreference = 'SilentlyContinue'
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+        . ([scriptblock]::Create($HelperSource))
+        Write-MemLabsProcessProgress -Path $ProgressPath -Record @{
+            Id = 'reporting'; Stage = $Stage; Message = "$Stage at $ServerUri"; UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        }
+        switch ($Stage) {
+            'Catalog' {
+                $proxy = $null
+                try {
+                    $proxy = New-WebServiceProxy -Uri "$($ServerUri.AbsoluteUri.TrimEnd('/'))/ReportService2010.asmx" -UseDefaultCredential -ErrorAction Stop
+                    $proxy.Timeout = 30000
+                    Get-ReportingCatalogEvidence -Proxy $proxy -SiteCode $SiteCode
+                }
+                finally { if ($proxy) { $proxy.Dispose() } }
+            }
+            'ReportServerPage' {
+                $page = Invoke-WebRequest -Uri $ServerUri -UseDefaultCredentials -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                [pscustomobject]@{
+                    StatusCode = [int] $page.StatusCode
+                    HtmlLength = ([string] $page.Content).Length
+                    Title = [regex]::Match([string] $page.Content, '(?is)<title[^>]*>(.*?)</title>').Groups[1].Value
+                }
+            }
+            'Portal' { Get-ReportingPortalEvidence -PortalUri ([uri]::new($ServerUri, '/Reports/')) -ProgressPath $ProgressPath }
+        }
+    }
+    foreach ($stage in @('Catalog', 'ReportServerPage', 'Portal')) {
+        $progressPath = Join-Path ([IO.Path]::GetTempPath()) "MemLabs-Reporting-$([guid]::NewGuid().ToString('N')).json"
+        try {
+            $result = Invoke-MemLabsBoundedPowerShell -ProbeScript $probe -Parameters @{
+                Stage = $stage; ServerUri = $ServerUri; SiteCode = $SiteCode; HelperSource = $helperSource; ProgressPath = $progressPath
+            } -TimeoutSeconds $TimeoutSeconds -ProgressPath $progressPath -ProgressId 'reporting'
+        }
+        finally { [IO.File]::Delete($progressPath) }
+        $endpoint.Probes += [pscustomobject]@{
+            Name = $stage
+            ProcessId = $result.ProcessId
+            ElapsedSeconds = $result.ElapsedSeconds
+            TimedOut = $result.TimedOut
+            Error = $result.Error
+            LastRequest = $result.Progress.Message
+        }
+        if ($result.Error) {
+            $lastRequest = if ($result.Progress.Message) { " Last request: $($result.Progress.Message)" } else { '' }
+            $endpoint["${stage}Error"] = "$stage probe at '$ServerUri': $($result.Error)$lastRequest"
+        }
+        else { $endpoint[$stage] = $result.Output }
+    }
+    [pscustomobject] $endpoint
+}
+
 if ($ReportServerUri -and (-not $ReportServerUri.IsAbsoluteUri -or $ReportServerUri.Scheme -notin @('http', 'https') -or $ReportServerUri.UserInfo)) {
     throw 'ReportServerUri must be an absolute HTTP(S) URL without embedded credentials.'
 }
@@ -155,6 +240,7 @@ if ($AsJson -and $PSBoundParameters.ContainsKey('OutputPath')) {
 if ($VMName) {
     $targetVmName = $VMName
     $collectorSource = Get-Content -LiteralPath $PSCommandPath -Raw -ErrorAction Stop
+    $processSource = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'DSC\phases\ProcessFunctions.ps1') -Raw -ErrorAction Stop
     if (-not (Get-Command Invoke-VmCommand -ErrorAction Ignore) -or -not (Get-Command Get-VMNote -ErrorAction Ignore)) {
         . (Join-Path (Split-Path -Parent $PSScriptRoot) 'Common.ps1') -InJob
     }
@@ -175,18 +261,24 @@ if ($VMName) {
         }
     }
     $guestCollector = {
-        param($Source, $SiteCode, $ReportServerUri)
+        param($Source, $SiteCode, $ReportServerUri, $ProcessSource)
+        if (-not (Get-Command Invoke-MemLabsBoundedPowerShell -ErrorAction Ignore)) {
+            . ([scriptblock]::Create($ProcessSource))
+        }
         $collectorArguments = @{ AsJson = $true }
         if ($SiteCode) { $collectorArguments.SiteCode = $SiteCode }
         if ($ReportServerUri) { $collectorArguments.ReportServerUri = $ReportServerUri }
         & ([scriptblock]::Create($Source)) @collectorArguments
     }
     $vmResult = Invoke-VmCommand -VmName $targetVmName -VmDomainName $note.domain `
-        -ScriptBlock $guestCollector -ArgumentList $collectorSource, $SiteCode, "$ReportServerUri" `
+        -ScriptBlock $guestCollector -ArgumentList $collectorSource, $SiteCode, "$ReportServerUri", $processSource `
         -DisplayName 'Collect reporting diagnostics' -AsJob -TimeoutSeconds 600 `
         -RequireDomainIdentity -FailOnRemoteError -SuppressLog
     if (-not $vmResult -or -not $vmResult.CommandResult -or $vmResult.ScriptBlockFailed) {
-        $detail = if ($vmResult.ErrorDetails) { $vmResult.ErrorDetails -join '; ' } else { 'No successful guest result was returned.' }
+        $detail = if ($vmResult.TimedOut) { 'The guest diagnostic call exceeded its 600-second transport limit; see the timeout autopsy in the host build log.' }
+        elseif ($vmResult.ErrorDetails) { $vmResult.ErrorDetails -join '; ' }
+        elseif ($vmResult.ChannelBroken) { 'The PowerShell Direct channel broke during collection; see the host build log.' }
+        else { 'No successful guest result was returned; see the host build log for the connection/job failure.' }
         throw "Reporting diagnostics failed on '$targetVmName': $detail"
     }
     $payload = @($vmResult.ScriptBlockOutput)
@@ -210,6 +302,9 @@ if ($VMName) {
 if (-not (Get-Command New-WebServiceProxy -ErrorAction Ignore)) {
     throw 'For local collection, use Windows PowerShell 5.1 (powershell.exe), not PowerShell 7. Host collection with VMName supports PowerShell 7.'
 }
+if (-not (Get-Command Invoke-MemLabsBoundedPowerShell -ErrorAction Ignore)) {
+    . (Join-Path (Split-Path -Parent $PSScriptRoot) 'DSC\phases\ProcessFunctions.ps1')
+}
 if (-not $OutputPath) { $OutputPath = Join-Path $env:TEMP "$env:COMPUTERNAME-ReportingDiagnostics.json" }
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 $evidence = [ordered]@{
@@ -228,14 +323,14 @@ $evidence = [ordered]@{
     Note = 'Collection only; no service, database, browser-update, or Reporting Services configuration is changed.'
 }
 try {
-    $evidence.OperatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop |
+    $evidence.OperatingSystem = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 15 -ErrorAction Stop |
         Select-Object Caption, Version, BuildNumber
-    $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    $computer = Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 15 -ErrorAction Stop
     $fqdn = "$($computer.DNSHostName).$($computer.Domain)"
 }
 catch { throw "Cannot identify the local reporting VM: $($_.Exception.Message)" }
 try {
-    $evidence.Services = @(Get-CimInstance Win32_Service -Filter "Name='PowerBIReportServer' OR Name='SQLServerReportingServices' OR Name LIKE 'ReportServer%' OR Name='edgeupdate' OR Name='edgeupdatem' OR Name='MicrosoftEdgeElevationService'" -ErrorAction Stop |
+    $evidence.Services = @(Get-CimInstance Win32_Service -Filter "Name='PowerBIReportServer' OR Name='SQLServerReportingServices' OR Name LIKE 'ReportServer%' OR Name='edgeupdate' OR Name='edgeupdatem' OR Name='MicrosoftEdgeElevationService'" -OperationTimeoutSec 15 -ErrorAction Stop |
             Select-Object Name, State, StartMode, PathName)
 }
 catch { $evidence.CollectionErrors.Add("Service inventory: $($_.Exception.Message)") }
@@ -254,10 +349,10 @@ foreach ($directory in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCAL
 if (-not $evidence.Browsers.Count) { $evidence.CollectionErrors.Add('No installed Edge executable found; browser rendering cannot be tested.') }
 try {
     $root = 'root\Microsoft\SqlServer\ReportServer'
-    foreach ($instance in @(Get-CimInstance -Namespace $root -ClassName __NAMESPACE -ErrorAction Stop)) {
-        foreach ($version in @(Get-CimInstance -Namespace "$root\$($instance.Name)" -ClassName __NAMESPACE -ErrorAction Stop | Where-Object { $_.Name -match '^v\d+$' })) {
+    foreach ($instance in @(Get-CimInstance -Namespace $root -ClassName __NAMESPACE -OperationTimeoutSec 15 -ErrorAction Stop)) {
+        foreach ($version in @(Get-CimInstance -Namespace "$root\$($instance.Name)" -ClassName __NAMESPACE -OperationTimeoutSec 15 -ErrorAction Stop | Where-Object { $_.Name -match '^v\d+$' })) {
             $evidence.ReportServerConfiguration += @(Get-CimInstance -Namespace "$root\$($instance.Name)\$($version.Name)\Admin" `
-                    -ClassName MSReportServer_ConfigurationSetting -ErrorAction Stop |
+                    -ClassName MSReportServer_ConfigurationSetting -OperationTimeoutSec 15 -ErrorAction Stop |
                     Select-Object InstanceName, Version, IsInitialized, DatabaseServerName, DatabaseName, VirtualDirectoryReportServer, VirtualDirectoryReportManager, SecureConnectionLevel)
         }
     }
@@ -269,36 +364,7 @@ $originalProtocol = [System.Net.ServicePointManager]::SecurityProtocol
 try {
     [System.Net.ServicePointManager]::SecurityProtocol = $originalProtocol -bor [System.Net.SecurityProtocolType]::Tls12
     foreach ($serverUri in $serverUris) {
-        $endpoint = [ordered]@{
-            Uri = $serverUri.AbsoluteUri
-            Catalog = $null
-            CatalogError = $null
-            ReportServerPage = $null
-            ReportServerPageError = $null
-            Portal = $null
-            PortalError = $null
-        }
-        $proxy = $null
-        try {
-            $proxy = New-WebServiceProxy -Uri "$($serverUri.AbsoluteUri.TrimEnd('/'))/ReportService2010.asmx" -UseDefaultCredential -ErrorAction Stop
-            $proxy.Timeout = 30000
-            $endpoint.Catalog = Get-ReportingCatalogEvidence -Proxy $proxy -SiteCode $SiteCode
-        }
-        catch { $endpoint.CatalogError = $_.Exception.ToString() }
-        finally { if ($proxy) { $proxy.Dispose() } }
-        try {
-            $page = Invoke-WebRequest -Uri $serverUri -UseDefaultCredentials -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
-            $endpoint.ReportServerPage = [pscustomobject]@{
-                StatusCode = [int] $page.StatusCode
-                HtmlLength = ([string] $page.Content).Length
-                Title = [regex]::Match([string] $page.Content, '(?is)<title[^>]*>(.*?)</title>').Groups[1].Value
-            }
-        }
-        catch { $endpoint.ReportServerPageError = $_.Exception.ToString() }
-        $portalUri = [uri]::new($serverUri, '/Reports/')
-        try { $endpoint.Portal = Get-ReportingPortalEvidence -PortalUri $portalUri }
-        catch { $endpoint.PortalError = $_.Exception.ToString() }
-        $evidence.Endpoints += [pscustomobject] $endpoint
+        $evidence.Endpoints += Get-ReportingEndpointEvidence -ServerUri $serverUri -SiteCode $SiteCode
     }
 }
 finally { [System.Net.ServicePointManager]::SecurityProtocol = $originalProtocol }

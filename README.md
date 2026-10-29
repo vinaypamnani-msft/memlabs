@@ -17,10 +17,20 @@ file copy, WinRM, or host-to-guest DNS connectivity is needed. JSON is saved on 
 host to `%TEMP%\PKIPS1SQL-ReportingDiagnostics.json`, or to `-OutputPath`.
 The host can use PowerShell 7. Local collection in Windows PowerShell 5.1 remains
 available by omitting `-VMName`; `-AsJson` returns JSON without writing a file.
+Local collection requires the MemLabs checkout, including the bounded-process
+helper; host mode supplies that helper automatically.
 
 Standalone host runs explicitly load cached MemLabs guest credentials without
 depending on a successful storage/file-list refresh. Missing credentials fail
 before attempting to connect to the VM.
+
+Web checks have separate 60-second worker deadlines for SOAP discovery/catalog
+access, the report-server page, and the portal/assets/API. A stuck web check is
+recorded with its elapsed time, last request, and timeout; other reporting,
+browser, SQL, and log evidence is retained. Workers are cancelled without
+restarting the VM or services.
+An outer PowerShell Direct timeout is reported explicitly rather than as an
+unspecified missing result.
 
 Evidence includes installed OS/Edge versions and Edge Update state, ConfigMgr
 report counts through SOAP and SQL, portal assets/API responses, and local
@@ -45,6 +55,9 @@ report inventories. These checks do not claim to execute the browser UI.
 Validate without a lab using
 [`Test-ReportingDiagnostics.ps1`](vmbuild/tools/Test-ReportingDiagnostics.ps1)
 and [`Test-ReportingValidation.ps1`](vmbuild/tools/Test-ReportingValidation.ps1).
+[`Test-ReportingProbeBounds.ps1`](vmbuild/tools/Test-ReportingProbeBounds.ps1)
+also exercises real HTTP response stalls and the shared transport timeout in
+the Windows PowerShell 5.1 guest runtime.
 
 ## GenConfig: network editing
 
