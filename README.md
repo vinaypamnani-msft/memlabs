@@ -2,6 +2,28 @@
 
 ARM Template and DSC configurations for deploying an Azure VM with Hyper-V, and for deploying ConfigMgr lab virtual machines on this Hyper-V host.
 
+## Reporting diagnostics
+
+For missing ConfigMgr reports or a blank report portal, run
+[`Get-ReportingDiagnostics.ps1`](vmbuild/tools/Get-ReportingDiagnostics.ps1)
+from elevated PowerShell on the MemLabs Hyper-V host:
+
+```powershell
+.\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
+```
+
+The host uses existing MemLabs domain credentials and PowerShell Direct; no guest
+file copy, WinRM, or host-to-guest DNS connectivity is needed. JSON is saved on the
+host to `%TEMP%\PKIPS1SQL-ReportingDiagnostics.json`, or to `-OutputPath`.
+The host can use PowerShell 7. Local collection in Windows PowerShell 5.1 remains
+available by omitting `-VMName`; `-AsJson` returns JSON without writing a file.
+
+Evidence includes installed OS/Edge versions and Edge Update state, ConfigMgr
+report counts through SOAP and SQL, portal assets/API responses, and local
+reporting logs. Unavailable evidence is recorded explicitly. The collector does
+not reconfigure Reporting Services, restart services, launch a browser, or install
+software. HTTP success alone does not prove that the browser renders the portal.
+
 ## GenConfig: network editing
 
 For an OSDClient on a custom subnet, add a SiteSystem with `installDP` enabled,
