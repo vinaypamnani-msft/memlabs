@@ -9,9 +9,10 @@ For missing ConfigMgr reports or a blank report portal, run
 from elevated PowerShell on the MemLabs Hyper-V host:
 
 ```powershell
-.\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
+pwsh -NoProfile -File .\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
 ```
 
+The fresh process avoids reusing host functions loaded before a `git pull`.
 The host uses existing MemLabs domain credentials and PowerShell Direct; no guest
 file copy, WinRM, or host-to-guest DNS connectivity is needed. JSON is saved on the
 host to `%TEMP%\PKIPS1SQL-ReportingDiagnostics.json`, or to `-OutputPath`.
@@ -31,6 +32,18 @@ browser, SQL, and log evidence is retained. Workers are cancelled without
 restarting the VM or services.
 An outer PowerShell Direct timeout is reported explicitly rather than as an
 unspecified missing result.
+
+Host-side collection failures write a separate `*.failure-<id>.json` beside the
+requested output (or beside the build log during automatic validation), and the
+error names that file. Earlier successful evidence is not overwritten. Success
+and failure JSON include SHA-256 fingerprints of the collector, loaded transport
+function, and transmitted worker helpers to distinguish running code from a
+different checkout or stale session. Worker helpers are refreshed in the guest
+for every host collection.
+
+The shared VM-command wrapper preserves exception details for session setup,
+execution, logging, and cleanup failures instead of returning an unexplained
+false or incomplete result.
 
 Evidence includes installed OS/Edge versions and Edge Update state, ConfigMgr
 report counts through SOAP and SQL, portal assets/API responses, and local
@@ -58,6 +71,10 @@ and [`Test-ReportingValidation.ps1`](vmbuild/tools/Test-ReportingValidation.ps1)
 [`Test-ReportingProbeBounds.ps1`](vmbuild/tools/Test-ReportingProbeBounds.ps1)
 also exercises real HTTP response stalls and the shared transport timeout in
 the Windows PowerShell 5.1 guest runtime.
+It also runs the actual collector through local Windows PowerShell remoting,
+including replacement of a deliberately stale guest worker helper.
+[`Test-VmCommandFailureDetails.ps1`](vmbuild/tools/Test-VmCommandFailureDetails.ps1)
+covers the shared command wrapper's failure envelopes.
 
 ## GenConfig: deploying and updating VMs
 

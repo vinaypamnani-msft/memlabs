@@ -7918,6 +7918,18 @@ function Invoke-VmCommand {
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
+    $return = [PSCustomObject]@{
+        CommandResult     = $false
+        ScriptBlockFailed = $false
+        ScriptBlockOutput = $null
+        ErrorDetails      = $null
+        ChannelBroken     = $false
+        TimedOut          = $false
+        Rebooted          = $false
+    }
+    $inflightToken = $null
+    $caughtException = $null
+    $jobFailureReason = $null
     try {
         # Set display name for logging
         if (-not $DisplayName) {
@@ -7933,24 +7945,16 @@ function Invoke-VmCommand {
 
         # Fatal failure
         if ($null -eq $Common.LocalAdmin) {
-            Write-Log "$VmName`: Skip running '$DisplayName' since Local Admin creds not available" -Failure
-            return $false
+            $return.ScriptBlockFailed = $true
+            $return.ErrorDetails = @("Local admin credentials are unavailable; cannot run '$DisplayName' on '$VmName'.")
+            $return.ScriptBlockOutput = $return.ErrorDetails[0]
+            Write-Log "$VmName`: $($return.ErrorDetails[0])" -Failure -LogOnly:$SuppressLog
+            return $return
         }
 
         # Log entry
         if (-not $SuppressLog) {
             Write-Log "$VmName`: Running '$DisplayName'" -Verbose
-        }
-
-        # Create return object
-        $return = [PSCustomObject]@{
-            CommandResult     = $false
-            ScriptBlockFailed = $false
-            ScriptBlockOutput	= $null
-            ErrorDetails      = $null
-            ChannelBroken     = $false
-            TimedOut          = $false
-            Rebooted          = $false
         }
 
         # Prepare args
@@ -8022,8 +8026,6 @@ function Invoke-VmCommand {
         }
 
         # Run script block inside VM
-        $inflightToken = $null
-        $jobFailureReason = $null
         if (-not $failed) {
             # Mark this scriptblock as in-flight on $ps so a concurrent pipeline on
             # the SAME cached session (the suspected cause of "An error occurred while
@@ -8254,6 +8256,7 @@ function Invoke-VmCommand {
                         catch {}
                         if ($jobTimedOut) {
                             $OutErr = "remote pipeline still running after ${TimeoutSeconds}s"
+                            $jobFailureReason = $OutErr
                         }
                         elseif ($Err2.Count -ne 0) {
                             $OutErr = "$($Err2[0].ToString().Trim())"
@@ -8638,10 +8641,18 @@ function Invoke-VmCommand {
         }
     }
     catch {
-        Write-Log "$VmName`: Invoke-VMCommand Exception $_"
+        $commandError = $_
+        $return.CommandResult = $false
+        $return.ScriptBlockFailed = $true
+        $return.ErrorDetails = @($return.ErrorDetails | Where-Object { $_ })
+        $return.ErrorDetails += "$($commandError.Exception.ToString()); HRESULT=$($commandError.Exception.HResult); FQID=$($commandError.FullyQualifiedErrorId); stack=$($commandError.ScriptStackTrace)"
+        if ($null -eq $return.ScriptBlockOutput) { $return.ScriptBlockOutput = $return.ErrorDetails[0] }
+        try { Write-Log "$VmName`: Invoke-VMCommand Exception $($commandError.Exception.Message)" -LogOnly:$SuppressLog }
+        catch { $return.ErrorDetails += "Could not log the command failure: $($_.Exception.Message)" }
         # Ensure the in-flight marker is released even on an unexpected throw, so a
         # leaked entry can't produce a false-positive concurrency reading later.
-        Exit-VmSessionInflight -Token $inflightToken
+        try { Exit-VmSessionInflight -Token $inflightToken }
+        catch { $return.ErrorDetails += "Could not release the command's inflight marker: $($_.Exception.Message)" }
     }
     return $return
 

@@ -8,11 +8,6 @@ param([string] $RootPath)
 
 $ErrorActionPreference = 'Stop'
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
-if ($PSVersionTable.PSEdition -eq 'Core') {
-    & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File $PSCommandPath -RootPath $RootPath
-    if ($LASTEXITCODE -ne 0) { throw 'Reporting guest-runtime regression failed in Windows PowerShell 5.1.' }
-    return
-}
 function Import-TestFunction {
     param([string] $Path, [string] $Name)
     $tokens = $null
@@ -118,6 +113,62 @@ namespace MemLabs {
 }
 '@
 }
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    & {
+        . (Import-TestFunction -Path (Join-Path $RootPath 'Common.ps1') -Name 'Invoke-VmCommand')
+        $server = [MemLabs.ReportingHttpFixture]::new()
+        $server.StallApi = $false
+        $remote = $null
+        $messages = [System.Collections.Generic.List[string]]::new()
+        $password = [System.Security.SecureString]::new()
+        $password.AppendChar([char]120)
+        $Common = [pscustomobject]@{ LocalAdmin = [pscredential]::new('fixture-admin', $password) }
+        function Write-Log {
+            param($Text, [switch]$LogOnly, [switch]$Failure, [switch]$Warning, [switch]$Verbose)
+            $messages.Add("$Text")
+        }
+        function Get-VMNote { param($VMName); [pscustomobject]@{ domain = 'example' } }
+        function Get-VmSession {
+            param($VmName, $VmDomainName, $VmDomainAccount, $ShowVMSessionError, $MaxRetries, $LocalOnly, $RequireDomainIdentity, $Diagnostics, $Quiet)
+            if (-not $RequireDomainIdentity) { throw 'Reporting transport lost its identity requirement.' }
+            $remote
+        }
+        function Enter-VmSessionInflight { param($Session, $DisplayName); 'remoting-fixture' }
+        function Exit-VmSessionInflight { param($Token) }
+        function Write-VmJobLedger { param($Op, $Job, $VmName, $DisplayName, $Detail) }
+        function Set-VmSessionPipelineEvent { param($Session, $Kind, $Op) }
+        function Remove-VmSessionFromCache { param($VmName, [switch]$LeakSession, $AbandonedJob) }
+        try {
+            $remote = New-PSSession -UseWindowsPowerShell -Name "MemLabs-Reporting-$([guid]::NewGuid().ToString('N'))" -ErrorAction Stop
+            Invoke-Command -Session $remote -ScriptBlock {
+                function global:Invoke-MemLabsBoundedPowerShell { throw 'Fixture stale worker helper reused' }
+            } -ErrorAction Stop
+            $json = @(& $collectorPath -VMName RP-TEST -SiteCode PS1 -ReportServerUri "http://127.0.0.1:$($server.Port)/ReportServer" -AsJson)
+            if ($json.Count -ne 1 -or $json[0] -isnot [string]) { throw 'Real remoting collection did not return one JSON document.' }
+            $document = $json[0] | ConvertFrom-Json
+            if ($document.ComputerName -ne $env:COMPUTERNAME -or
+                $document.Endpoints[0].ReportServerPage.StatusCode -ne 200 -or
+                $document.Endpoints[0].Portal.RestApi.StatusCode -ne 200) {
+                throw "Real remoting collection lost web evidence: $($document.Endpoints | ConvertTo-Json -Depth 6 -Compress)"
+            }
+        }
+        catch {
+            $testError = $_
+            if ($testError.Exception.Message -match 'Failure evidence: (.+\.json)$') {
+                Remove-Item -LiteralPath $Matches[1] -Force -ErrorAction Stop
+            }
+            throw "Real Windows PowerShell remoting collection failed: $($testError.Exception.Message); transport=$($messages -join '; ')"
+        }
+        finally {
+            if ($remote) { Remove-PSSession -Session $remote -ErrorAction Stop }
+            $server.Dispose()
+        }
+        Write-Host 'PASS -- the real collector executes through the shared asynchronous transport and Windows PowerShell remoting.'
+    }
+    & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File $PSCommandPath -RootPath $RootPath
+    if ($LASTEXITCODE -ne 0) { throw 'Reporting guest-runtime regression failed in Windows PowerShell 5.1.' }
+    return
+}
 $server = [MemLabs.ReportingHttpFixture]::new()
 try {
     $uri = [uri] "http://127.0.0.1:$($server.Port)/ReportServer"
@@ -196,9 +247,23 @@ function Remove-VmSessionFromCache {
     $transport.Evicted = $LeakSession -and $null -ne $AbandonedJob
 }
 $threw = $false
+$failurePath = $null
 try { $null = & $collectorPath -VMName RP-TEST -SiteCode PS1 -AsJson }
-catch { $threw = $_.Exception.Message -match '600-second transport limit' }
+catch {
+    $threw = $_.Exception.Message -match '600-second transport limit'
+    if ($_.Exception.Message -match 'Failure evidence: (.+\.json)$') { $failurePath = $Matches[1] }
+}
+if ($failurePath) {
+    try {
+        $failure = Get-Content -LiteralPath $failurePath -Raw | ConvertFrom-Json
+        if (-not $failure.Transport.TimedOut -or -not $failure.HostCollection.CollectorSourceHash) {
+            throw 'Actual transport timeout lost its persisted failure metadata.'
+        }
+    }
+    finally { Remove-Item -LiteralPath $failurePath -Force -ErrorAction Stop }
+}
 if (-not $threw -or -not $transport.StopRequested -or -not $transport.Evicted -or
+    -not $failurePath -or
     -not ($transport.Logs | Where-Object { $_ -match 'Timeout autopsy.*Reading web response' })) {
     throw "Actual Invoke-VmCommand timeout was not surfaced or safely cancelled: $($transport | ConvertTo-Json -Compress)"
 }

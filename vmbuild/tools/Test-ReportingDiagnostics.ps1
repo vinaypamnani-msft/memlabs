@@ -14,7 +14,7 @@ $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref] $tokens, [ref] $parseErrors)
 if ($parseErrors.Count) { throw "Collector parse errors: $($parseErrors -join '; ')" }
-foreach ($name in @('Get-ReportingCatalogEvidence', 'Get-ReportingPortalEvidence')) {
+foreach ($name in @('Get-ReportingSourceHash', 'Get-ReportingCatalogEvidence', 'Get-ReportingPortalEvidence')) {
     $definition = @($ast.FindAll({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -175,6 +175,7 @@ $Common = $hostCommon
 $hostState = [pscustomobject]@{
     Calls = 0; Mode = 'Success'; Source = $null; Domain = 'example'
     CredentialLoads = 0; CredentialMode = 'Success'; UninitializedCalls = 0
+    WorkerSourceForTest = "function Invoke-MemLabsBoundedPowerShell { ${function:Invoke-MemLabsBoundedPowerShell} }"
 }
 function Get-LocalAdminCredential {
     $hostState.CredentialLoads++
@@ -214,22 +215,36 @@ function Invoke-VmCommand {
     if ($hostState.Mode -eq 'Timeout') {
         return [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $true; TimedOut = $true; ErrorDetails = $null }
     }
+    if ($hostState.Mode -eq 'EmptyFailure') {
+        return [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $false; ErrorDetails = $null }
+    }
+    if ($hostState.Mode -eq 'BareFalse') { return $false }
+    if ($hostState.Mode -eq 'Thrown') { throw 'Fixture transport exception' }
     $output = switch ($hostState.Mode) {
         'InvalidJson' { '{broken' }
         'InvalidShape' { '{"Passed":true}' }
-        default { & $ScriptBlock @ArgumentList }
+        default {
+            $fixtureArguments = @($ArgumentList)
+            $fixtureArguments[3] = $hostState.WorkerSourceForTest
+            & $ScriptBlock @fixtureArguments
+        }
     }
     [pscustomobject]@{ CommandResult = $true; ScriptBlockFailed = $false; ScriptBlockOutput = $output }
 }
 Set-Item -Path Function:\Invoke-VmCommand -Value (${function:Invoke-VmCommand}.GetNewClosure())
-$hostOutputPath = Join-Path ([System.IO.Path]::GetTempPath()) "MemLabs-Reporting-Host-Test-$([guid]::NewGuid().ToString('N')).json"
+$hostRoot = Join-Path ([System.IO.Path]::GetTempPath()) "MemLabs-Reporting-Host-Test-$([guid]::NewGuid().ToString('N'))"
+$null = New-Item -Path $hostRoot -ItemType Directory
+$hostOutputPath = Join-Path $hostRoot 'ReportingDiagnostics.json'
+$hostCommon | Add-Member NoteProperty LogPath (Join-Path $hostRoot 'VMBuild.log')
 try {
     $null = & $sourcePath -VMName 'RP-TEST' -SiteCode PS1 -ReportServerUri 'http://rp.example/ReportServer' -OutputPath $hostOutputPath
     $hostJson = Get-Content -LiteralPath $hostOutputPath -Raw
     $collected = $hostJson | ConvertFrom-Json
     if ($hostState.Calls -ne 1 -or $hostState.Source -notmatch 'function Get-ReportingCatalogEvidence' -or
         $collected.Endpoints.Count -ne 1 -or $collected.Endpoints[0].Uri -ne 'http://rp.example/ReportServer' -or
-        $collected.Endpoints[0].Catalog.ReportCount -ne 1) {
+        $collected.Endpoints[0].Catalog.ReportCount -ne 1 -or
+        $collected.HostCollection.CollectorSourceHash -ne (Get-ReportingSourceHash -Source (Get-Content -LiteralPath $sourcePath -Raw)) -or
+        $collected.HostCollection.TransportSourceHash -notmatch '^[A-F0-9]{64}$') {
         throw 'Host mode did not execute the collector source and preserve its arguments/evidence.'
     }
     $jsonOutput = @(& $sourcePath -VMName 'RP-TEST' -SiteCode PS1 -AsJson)
@@ -259,19 +274,29 @@ try {
     }
     $hostCommon.LocalAdmin = $fixtureCredential
     $hostState.CredentialMode = 'Success'
-    $hostState.Mode = 'Timeout'
-    $threw = $false
-    try { $null = & $sourcePath -VMName 'RP-TEST' -OutputPath $hostOutputPath }
-    catch { $threw = $_.Exception.Message -match '600-second transport limit' }
-    if (-not $threw) { throw 'Transport timeout was collapsed into a generic no-result error.' }
-    foreach ($mode in @('Failure', 'InvalidJson', 'InvalidShape')) {
+    foreach ($mode in @('Timeout', 'Failure', 'InvalidJson', 'InvalidShape', 'EmptyFailure', 'BareFalse', 'Thrown')) {
         $hostState.Mode = $mode
+        $before = @(Get-ChildItem -LiteralPath $hostRoot -Filter '*.failure-*.json')
         $threw = $false
+        $failureMessage = ''
         try { $null = & $sourcePath -VMName 'RP-TEST' -OutputPath $hostOutputPath }
-        catch { $threw = $true }
+        catch { $threw = $true; $failureMessage = $_.Exception.Message }
         if (-not $threw -or (Get-Content -LiteralPath $hostOutputPath -Raw) -ne $hostJson) {
             throw "Host failure '$mode' was hidden or overwrote previously collected evidence."
         }
+        $created = @(Get-ChildItem -LiteralPath $hostRoot -Filter '*.failure-*.json' | Where-Object { $_.FullName -notin $before.FullName })
+        if ($created.Count -ne 1 -or -not $failureMessage.Contains($created[0].FullName)) { throw "Host failure '$mode' did not expose a unique failure evidence file." }
+        $failure = Get-Content -LiteralPath $created[0].FullName -Raw | ConvertFrom-Json
+        if (-not $failure.CollectionFailed -or -not $failure.CollectionErrors.Count -or
+            $failure.HostCollection.CollectorSourceHash -notmatch '^[A-F0-9]{64}$' -or
+            $failure.HostCollection.TransportSourceHash -notmatch '^[A-F0-9]{64}$') {
+            throw "Host failure '$mode' lost its error or source fingerprints."
+        }
+        if ($mode -eq 'Timeout' -and (-not $failure.Transport.TimedOut -or $failureMessage -notmatch '600-second transport limit')) {
+            throw 'Transport timeout lost its explicit state.'
+        }
+        if ($mode -eq 'BareFalse' -and $failure.Transport.ResultType -ne 'System.Boolean') { throw 'Bare-false return shape was not captured.' }
+        if ($mode -eq 'Thrown' -and $failureMessage -notmatch 'Fixture transport exception') { throw 'Thrown transport exception was lost.' }
     }
     $hostState.Domain = ''
     $callCount = $hostState.Calls
@@ -280,7 +305,7 @@ try {
     catch { $threw = $_.Exception.Message -match 'Cannot resolve a MemLabs domain' }
     if (-not $threw -or $hostState.Calls -ne $callCount) { throw 'Host mode attempted collection without domain identity metadata.' }
 }
-finally { Remove-Item -LiteralPath $hostOutputPath -Force -ErrorAction Stop }
+finally { Remove-Item -LiteralPath $hostRoot -Recurse -Force -ErrorAction Stop }
 
 $forbiddenCommands = @('Restart-Service', 'Start-Service', 'Stop-Service', 'Set-Service', 'Start-Process',
     'Install-Module', 'Set-RsDatabase', 'Initialize-Rs', 'Set-ItemProperty', 'New-ItemProperty', 'Copy-VMFile')

@@ -15,6 +15,8 @@
     workers. A stalled web check is recorded without discarding other evidence.
     Local collection requires the MemLabs checkout and its ProcessFunctions.ps1
     helper; host mode transmits that helper automatically.
+    Host-side transport failures write a separate failure JSON with source
+    fingerprints and error details, without overwriting earlier evidence.
 .EXAMPLE
     .\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
 .EXAMPLE
@@ -34,6 +36,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-ReportingSourceHash {
+    param([Parameter(Mandatory)][string] $Source)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { [BitConverter]::ToString($algorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($Source))).Replace('-', '') }
+    finally { $algorithm.Dispose() }
+}
 
 function Get-ReportingCatalogEvidence {
     param([Parameter(Mandatory)] $Proxy, [string] $SiteCode)
@@ -262,39 +271,89 @@ if ($VMName) {
     }
     $guestCollector = {
         param($Source, $SiteCode, $ReportServerUri, $ProcessSource)
-        if (-not (Get-Command Invoke-MemLabsBoundedPowerShell -ErrorAction Ignore)) {
-            . ([scriptblock]::Create($ProcessSource))
-        }
+        . ([scriptblock]::Create($ProcessSource))
         $collectorArguments = @{ AsJson = $true }
         if ($SiteCode) { $collectorArguments.SiteCode = $SiteCode }
         if ($ReportServerUri) { $collectorArguments.ReportServerUri = $ReportServerUri }
         & ([scriptblock]::Create($Source)) @collectorArguments
     }
-    $vmResult = Invoke-VmCommand -VmName $targetVmName -VmDomainName $note.domain `
-        -ScriptBlock $guestCollector -ArgumentList $collectorSource, $SiteCode, "$ReportServerUri", $processSource `
-        -DisplayName 'Collect reporting diagnostics' -AsJob -TimeoutSeconds 600 `
-        -RequireDomainIdentity -FailOnRemoteError -SuppressLog
-    if (-not $vmResult -or -not $vmResult.CommandResult -or $vmResult.ScriptBlockFailed) {
-        $detail = if ($vmResult.TimedOut) { 'The guest diagnostic call exceeded its 600-second transport limit; see the timeout autopsy in the host build log.' }
-        elseif ($vmResult.ErrorDetails) { $vmResult.ErrorDetails -join '; ' }
-        elseif ($vmResult.ChannelBroken) { 'The PowerShell Direct channel broke during collection; see the host build log.' }
-        else { 'No successful guest result was returned; see the host build log for the connection/job failure.' }
-        throw "Reporting diagnostics failed on '$targetVmName': $detail"
+    $transportCommand = Get-Command Invoke-VmCommand -CommandType Function -ErrorAction Stop
+    $hostMetadata = [pscustomobject]@{
+        InvocationId = [guid]::NewGuid().ToString('N')
+        StartedAt = [DateTime]::UtcNow.ToString('o')
+        CollectorPath = $PSCommandPath
+        CollectorSourceHash = Get-ReportingSourceHash -Source $collectorSource
+        TransportFunctionPath = $transportCommand.ScriptBlock.File
+        TransportSourceHash = Get-ReportingSourceHash -Source $transportCommand.Definition
+        WorkerSourceHash = Get-ReportingSourceHash -Source $processSource
+        HostPowerShellVersion = $PSVersionTable.PSVersion.ToString()
+        HostProcessId = $PID
+        VMName = $targetVmName
+        Domain = "$($note.domain)"
     }
-    $payload = @($vmResult.ScriptBlockOutput)
-    if ($payload.Count -ne 1 -or $payload[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($payload[0])) {
-        throw "Reporting diagnostics on '$targetVmName' did not return one JSON document."
-    }
-    $document = $payload[0] | ConvertFrom-Json -ErrorAction Stop
-    foreach ($property in @('ComputerName', 'CollectedAt', 'Endpoints', 'CollectionErrors')) {
-        if ($property -notin $document.PSObject.Properties.Name) {
-            throw "Reporting diagnostics on '$targetVmName' returned JSON without '$property'."
+    $targetPath = if ($OutputPath) { [IO.Path]::GetFullPath($OutputPath) }
+    elseif ($AsJson -and $Common.LogPath) { Join-Path (Split-Path $Common.LogPath -Parent) "$targetVmName-ReportingDiagnostics.json" }
+    else { Join-Path $env:TEMP "$targetVmName-ReportingDiagnostics.json" }
+    $vmResult = $null
+    try {
+        $vmResult = Invoke-VmCommand -VmName $targetVmName -VmDomainName $note.domain `
+            -ScriptBlock $guestCollector -ArgumentList $collectorSource, $SiteCode, "$ReportServerUri", $processSource `
+            -DisplayName 'Collect reporting diagnostics' -AsJob -TimeoutSeconds 600 `
+            -RequireDomainIdentity -FailOnRemoteError -SuppressLog
+        if (-not $vmResult -or -not $vmResult.CommandResult -or $vmResult.ScriptBlockFailed) {
+            $detail = if ($vmResult.TimedOut) { 'The guest diagnostic call exceeded its 600-second transport limit; see the timeout autopsy in the host build log.' }
+            elseif ($vmResult.ErrorDetails) { $vmResult.ErrorDetails -join '; ' }
+            elseif ($vmResult.ChannelBroken) { 'The PowerShell Direct channel broke during collection; see the host build log.' }
+            else {
+                $resultType = if ($null -eq $vmResult) { 'null' } else { $vmResult.GetType().FullName }
+                "The transport returned no usable failure detail (type=$resultType, CommandResult=$($vmResult.CommandResult), ScriptBlockFailed=$($vmResult.ScriptBlockFailed)); see the host build log."
+            }
+            throw "Reporting diagnostics failed on '$targetVmName': $detail"
+        }
+        $payload = @($vmResult.ScriptBlockOutput)
+        if ($payload.Count -ne 1 -or $payload[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($payload[0])) {
+            throw "Reporting diagnostics on '$targetVmName' did not return one JSON document."
+        }
+        $document = $payload[0] | ConvertFrom-Json -ErrorAction Stop
+        foreach ($property in @('ComputerName', 'CollectedAt', 'Endpoints', 'CollectionErrors')) {
+            if ($property -notin $document.PSObject.Properties.Name) {
+                throw "Reporting diagnostics on '$targetVmName' returned JSON without '$property'."
+            }
         }
     }
-    if ($AsJson) { return $payload[0] }
+    catch {
+        $collectionError = $_
+        $failurePath = [IO.Path]::ChangeExtension($targetPath, "failure-$($hostMetadata.InvocationId).json")
+        $resultType = if ($null -eq $vmResult) { 'null' } else { $vmResult.GetType().FullName }
+        try {
+            [ordered]@{
+                ComputerName = $targetVmName
+                CollectedAt = [DateTime]::UtcNow.ToString('o')
+                SiteCode = $SiteCode
+                CollectionFailed = $true
+                CollectionErrors = @($collectionError.Exception.ToString())
+                ErrorLocation = "$($collectionError.InvocationInfo.ScriptName):$($collectionError.InvocationInfo.ScriptLineNumber)"
+                StackTrace = $collectionError.ScriptStackTrace
+                HostCollection = $hostMetadata
+                Transport = [ordered]@{
+                    ResultType = $resultType
+                    CommandResult = $vmResult.CommandResult
+                    ScriptBlockFailed = $vmResult.ScriptBlockFailed
+                    TimedOut = $vmResult.TimedOut
+                    ChannelBroken = $vmResult.ChannelBroken
+                    ErrorDetails = @($vmResult.ErrorDetails)
+                }
+            } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $failurePath -Encoding UTF8 -ErrorAction Stop
+        }
+        catch { throw "$($collectionError.Exception.Message) Failure evidence could not be saved to '$failurePath': $($_.Exception.Message)" }
+        throw "$($collectionError.Exception.Message) Failure evidence: $failurePath"
+    }
+    $document | Add-Member -MemberType NoteProperty -Name HostCollection -Value $hostMetadata -Force
+    $json = $document | ConvertTo-Json -Depth 12
+    if ($AsJson) { return $json }
     if (-not $OutputPath) { $OutputPath = Join-Path $env:TEMP "$targetVmName-ReportingDiagnostics.json" }
     $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
-    $payload[0] | Set-Content -LiteralPath $OutputPath -Encoding UTF8 -ErrorAction Stop
+    $json | Set-Content -LiteralPath $OutputPath -Encoding UTF8 -ErrorAction Stop
     Write-Host "Reporting evidence for $targetVmName saved on the host to $OutputPath"
     Get-Item -LiteralPath $OutputPath -ErrorAction Stop
     return
