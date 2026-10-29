@@ -44,7 +44,7 @@ $fixture = [pscustomobject]@{
     MarkerExists = $false; MarkerLines = @(); MarkerWrites = 0; MarkerRemovals = 0
     InitialState = 'Missing'; AfterInstallState = 'Installed'; InstallMode = 'Success'
     InstallAttempted = $false; FeatureQueries = 0; InstallCalls = 0
-    FailMarkerWrite = $false; ClientOS = $false
+    FailMarkerWrite = $false; ClientOS = $false; StatusMessages = [Collections.Generic.List[string]]::new()
 }
 function Reset-Fixture {
     $fixture.MarkerExists = $false
@@ -59,9 +59,10 @@ function Reset-Fixture {
     $fixture.InstallCalls = 0
     $fixture.FailMarkerWrite = $false
     $fixture.ClientOS = $false
+    $fixture.StatusMessages.Clear()
     $global:DSCMachineStatus = 0
 }
-function Write-Status { param([string] $Message) }
+function Write-Status { param([string] $Message); $fixture.StatusMessages.Add($Message) }
 function Get-WmiObject {
     param([string] $Class, $ErrorAction)
     Assert-True ($Class -eq 'Win32_OperatingSystem') "Unexpected WMI query: $Class"
@@ -94,6 +95,11 @@ function Install-WindowsFeature {
         'Restart' { return [pscustomobject]@{ Success = $true; ExitCode = 'SuccessRestartRequired'; RestartNeeded = 'Yes' } }
         default { return [pscustomobject]@{ Success = $true; ExitCode = 'Success'; RestartNeeded = 'No' } }
     }
+}
+function Install-MemLabsRequiredWindowsFeature {
+    [CmdletBinding()]
+    param([string[]] $Name)
+    Install-WindowsFeature -Name $Name -IncludeManagementTools -ErrorAction Stop
 }
 function dism.exe { $global:LASTEXITCODE = 0 }
 function Start-Sleep { param([int] $Seconds) }
@@ -203,7 +209,8 @@ foreach ($mode in @('NonTerminatingError', 'Failure', 'NoResult')) {
     catch { $caught = $_ }
     finally { $ErrorActionPreference = $savedPreference }
     Assert-True ([bool]$caught -and -not $fixture.MarkerExists -and $fixture.MarkerWrites -eq 0) "$mode left a successful completion receipt."
-    Assert-True ($fixture.InstallCalls -eq 1 -and $fixture.MarkerRemovals -eq 1) "$mode did not invalidate the old receipt before installation."
+    Assert-True (@($fixture.StatusMessages | Where-Object { $_ -like 'JOBFAILURE: *' }).Count -eq 1) "$mode did not publish the host's terminal failure sentinel."
+    Assert-True ($fixture.InstallCalls -eq 1 -and $fixture.MarkerRemovals -eq 1) "$mode did not invalidate the old receipt before installation (installCalls=$($fixture.InstallCalls), removals=$($fixture.MarkerRemovals), error=$($caught.Exception.Message))."
     if ($mode -eq 'NonTerminatingError') {
         Assert-True ($caught.Exception.Message -match '0x80240438') 'Original feature download failure was lost.'
     }
@@ -214,6 +221,7 @@ $fixture.AfterInstallState = 'Missing'
 $caught = $null
 try { $resource.Set() } catch { $caught = $_ }
 Assert-True ($caught -and $caught.Exception.Message -match 'not Installed' -and -not $fixture.MarkerExists) 'Installer Success=True was trusted without checking actual installed state.'
+Assert-True (@($fixture.StatusMessages | Where-Object { $_ -like 'JOBFAILURE: *' }).Count -eq 1) 'Post-install verification failure was not published to the host.'
 
 Reset-Fixture
 $resource.Set()

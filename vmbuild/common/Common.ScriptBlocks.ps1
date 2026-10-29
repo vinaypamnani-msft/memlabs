@@ -3040,6 +3040,7 @@ function Save-CMSetupLogsFromVm {
                 ODBC          = [ordered]@{}
                 ReportBuilder = [ordered]@{}
                 IIS           = [ordered]@{}
+                WindowsUpdate = [ordered]@{ Policies = @(); Services = @() }
                 PendingReboot = @()
                 Certificates  = [ordered]@{}
                 Errors        = @()
@@ -3097,6 +3098,35 @@ function Save-CMSetupLogsFromVm {
                 }
             }
             catch { $prereq.Errors += "IIS: $($_.Exception.Message)" }
+            foreach ($policy in @(
+                    @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Names = @('WUServer', 'WUStatusServer', 'DoNotConnectToWindowsUpdateInternetLocations', 'DisableWindowsUpdateAccess') },
+                    @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Names = @('UseWUServer', 'NoAutoUpdate', 'AUOptions') },
+                    @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Servicing'; Names = @('LocalSourcePath', 'UseWindowsUpdate', 'RepairContentServerSource') }
+                )) {
+                try {
+                    if (-not (Test-Path -LiteralPath $policy.Path -ErrorAction Stop)) { continue }
+                    $key = Get-Item -LiteralPath $policy.Path -ErrorAction Stop
+                    try {
+                        foreach ($name in $policy.Names) {
+                            if ($name -in $key.GetValueNames()) {
+                                $prereq.WindowsUpdate.Policies += [ordered]@{
+                                    Path = $policy.Path; Name = $name; Kind = "$($key.GetValueKind($name))"
+                                    Value = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                }
+                            }
+                        }
+                    }
+                    finally { $key.Dispose() }
+                }
+                catch { $prereq.Errors += "Windows Update policy '$($policy.Path)': $($_.Exception.Message)" }
+            }
+            foreach ($serviceName in @('wuauserv', 'UsoSvc')) {
+                try {
+                    $service = Get-Service -Name $serviceName -ErrorAction Stop
+                    $prereq.WindowsUpdate.Services += [ordered]@{ Name = $serviceName; Status = "$($service.Status)"; StartType = "$($service.StartType)" }
+                }
+                catch { $prereq.Errors += "Windows Update service '$serviceName': $($_.Exception.Message)" }
+            }
             foreach ($pendingPath in @(
                     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
                     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'

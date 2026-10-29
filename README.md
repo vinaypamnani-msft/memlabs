@@ -1525,13 +1525,31 @@ receipts against actual installed state, and Phase 8 rejects them until that
 verification succeeds. Already verified receipts retain the existing fast path.
 Required-install and receipt-write errors remain visible failures.
 
+When required server features are missing, installation temporarily permits
+Windows Update as a feature-payload source. It snapshots and verifies the four
+affected update policy values plus the Windows Update service's startup/running
+state, keeps `NoAutoUpdate=1`, and does not start Update Orchestrator or request
+normal Windows updates. WSUS URLs are not changed. The original policy values
+(including absence) and service state are restored on success or failure.
+Restoration failures are explicit errors and retain the automatic-update block.
+Deployment-wide update lockdown is otherwise unchanged.
+
+This avoids directing feature-payload requests at a SUP that is not ready yet,
+or blocking those requests with deployment policies. Required-install failures
+also publish the host's terminal failure status immediately: they no longer
+spend the recovery budget repeatedly resuming/rebooting the same failed install.
+The prerequisite snapshot records selected WSUS/repair-source policies and
+update-service state alongside the original error and CBS/DISM evidence.
+
 For an existing lab with a false completion receipt, update the DSC payload and
 rerun Phase 3, not just Phase 8. Servicing/source failures such as `0x80240438`
 must be resolved before role installation can proceed. Phase 3 failures now also
 retain the prerequisite snapshot and bounded CBS/DISM logs beside the build log.
 
 Validate with
-[`Test-WindowsFeatureReceipts.ps1`](vmbuild/tools/Test-WindowsFeatureReceipts.ps1).
+[`Test-WindowsFeatureReceipts.ps1`](vmbuild/tools/Test-WindowsFeatureReceipts.ps1)
+and
+[`Test-WindowsFeatureUpdateAccess.ps1`](vmbuild/tools/Test-WindowsFeatureUpdateAccess.ps1).
 
 ## Automatic MP/RP failure evidence
 
