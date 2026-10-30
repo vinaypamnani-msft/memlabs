@@ -6565,12 +6565,9 @@ function Test-SiteSystemFunctionality {
             -AsJob -TimeoutSeconds 300
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $localDpResult)) {
             $allPassed = $false
-            # Everything this check can fail on -- missing PXE payload, responder settings,
-            # share/vdir state -- is decided by smsdpprov on the DP itself, and it records
-            # its refusals as INFO rather than errors. Without this the answer needs a
-            # hand-run on the guest after the build has already ended.
-            Add-Phase11Output "[Phase $Phase] $VMName [DP]: local DP validation failed -- collecting smsdpprov/SMSPXE/SMSDPMon logs and content-library state into the logs folder"
-            $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'DPLocal' -Collector $Phase11DpContentLogCollector
+            Add-Phase11Output "[Phase $Phase] $VMName [DP]: local DP validation failed -- collecting DP payload and feeding-site distribution evidence into the logs folder"
+            Save-Phase11OsdContentFailureLogs -VMName $VMName -CurrentItem $CurrentItem `
+                -DeployConfig $DeployConfig -DistributionPointNames @($VMName)
         }
     }
 
@@ -9182,6 +9179,60 @@ function Save-Phase11GuestLogs {
     return $saved
 }
 
+function Save-Phase11OsdContentFailureLogs {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig,
+        [string[]]$DistributionPointNames = @()
+    )
+
+    $domain = "$($DeployConfig.vmOptions.domainName)"
+    $siteCodes = @("$($CurrentItem.siteCode)", "$($CurrentItem.parentSiteCode)" |
+            Where-Object { $_ } | Select-Object -Unique)
+    $knownVms = @($DeployConfig.virtualMachines | Where-Object {
+            -not $_.domain -or "$($_.domain)" -ieq $domain
+        })
+    $siteCodes = @(@($siteCodes) + @($knownVms | Where-Object {
+                "$($_.siteCode)" -in $siteCodes -and $_.role -eq 'Primary'
+            } | ForEach-Object { "$($_.parentSiteCode)" }) |
+            Where-Object { $_ } | Select-Object -Unique)
+    $missingSites = @($siteCodes | Where-Object {
+            $code = $_
+            @($knownVms | Where-Object { "$($_.siteCode)" -ieq $code -and $_.role -in 'CAS', 'Primary', 'Secondary' }).Count -eq 0
+        })
+    if ($missingSites.Count -gt 0) {
+        try { $knownVms += @(Get-List -Type VM -DomainName $domain) }
+        catch {
+            Write-Log "[Phase 11] $VMName [OSD]: site-server discovery failed: $($_.Exception.Message). Using the deployment's known site servers." -Warning -LogOnly
+        }
+    }
+    $siteCodes = @(@($siteCodes) + @($knownVms | Where-Object {
+                "$($_.siteCode)" -in $siteCodes -and $_.role -eq 'Primary'
+            } | ForEach-Object { "$($_.parentSiteCode)" }) |
+            Where-Object { $_ } | Select-Object -Unique)
+    foreach ($code in $siteCodes) {
+        $sites = @($knownVms | Where-Object {
+                $_.vmName -and "$($_.siteCode)" -ieq $code -and $_.role -in 'CAS', 'Primary', 'Secondary' -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domain)
+            } | Sort-Object vmName -Unique)
+        if ($sites.Count -eq 0) {
+            Write-Log "[Phase 11] $VMName [OSD]: no site server for site '$code' in '$domain'; sending-site logs were NOT collected." -Warning -LogOnly
+        }
+        foreach ($site in $sites) {
+            Add-Phase11Output "[Phase 11] $VMName [OSD]: collecting distribution/provider/workflow evidence from '$($site.vmName)' (site $code)"
+            $null = Save-Phase11GuestLogs -VMName $site.vmName -DomainName $domain `
+                -RoleLabel 'OSD-Site' -Collector $Phase11SmsSiteLogCollector -TimeoutSeconds 180
+        }
+    }
+    foreach ($dpName in @($DistributionPointNames | Where-Object { $_ } |
+            ForEach-Object { ("$_" -split '\.')[0] } | Sort-Object -Unique)) {
+        $null = Save-Phase11GuestLogs -VMName $dpName -DomainName $domain `
+            -RoleLabel 'OSD-DP' -Collector $Phase11DpContentLogCollector
+    }
+}
+
 # Collector scriptblocks used by the DP / pull-DP diagnostics below. Each is
 # self-contained (runs IN the guest), resolves its log directory from the
 # authoritative registry key, and tails the named logs into a hashtable.
@@ -9346,12 +9397,19 @@ $Phase11SmsSiteLogCollector = {
     # set and every later content bundle aborting on 0x800704d3 (burnin 2026-08-24:
     # stop at 13:23:36, threads back at 13:24:59, HUB00004 -> SEC dead at 13:29:30, and
     # the cause of the stop was unrecoverable from the artifacts collected).
-    foreach ($n in @('distmgr.log', 'PkgXferMgr.log', 'sender.log', 'despool.log', 'rcmctrl.log', 'sitecomp.log')) {
-        $p = Join-Path $smsDir "Logs\$n"
-        if (Test-Path $p) {
-            try { $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } else { $diag += "'$n' present but read returned no content" } } catch { $diag += "'$n' read threw: $($_.Exception.Message)" }
+    foreach ($baseName in @('distmgr', 'PkgXferMgr', 'sender', 'despool', 'rcmctrl', 'sitecomp', 'SMSProv', 'smsexec')) {
+        foreach ($extension in @('.log', '.lo_')) {
+            $n = "$baseName$extension"
+            $p = Join-Path $smsDir "Logs\$n"
+            try {
+                $file = Get-Item -LiteralPath $p -ErrorAction Stop
+                $diag += "'$p': bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o')) tailLines=4000"
+                $c = @(Get-Content -LiteralPath $p -Tail 4000 -ErrorAction Stop)
+                if ($c.Count) { $out[$n] = $c -join "`r`n" }
+                else { $diag += "'$n' is empty" }
+            }
+            catch { $diag += "'$p' capture failed: $($_.Exception.Message)" }
         }
-        else { $diag += "'$n' not present at $p" }
     }
     # A remote DP still carries SMS\Identification with an Installation Directory, so
     # the guard above passes and the loop then reports five separate "not present"
@@ -9359,6 +9417,51 @@ $Phase11SmsSiteLogCollector = {
     if ($out.Count -eq 0) {
         $diag += "NONE of the site-server logs exist under '$smsDir\Logs'. This VM is a remote DP/site system, not a site server -- the logs that explain ITS content state are under ?:\SMS_DP`$\sms\logs (see the DpContent capture)."
     }
+
+    foreach ($name in @('InstallCMLog.log', 'DSC_Log.log', 'DSC_Status.txt')) {
+        $path = "C:\staging\DSC\$name"
+        try {
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            $diag += "'$path': bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o')) tailLines=4000"
+            $out[$name] = @(Get-Content -LiteralPath $path -Tail 4000 -ErrorAction Stop) -join "`r`n"
+        }
+        catch { $diag += "'$path' capture failed: $($_.Exception.Message)" }
+    }
+
+    $snapshot = [ordered]@{
+        CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+        ComputerName = $env:COMPUTERNAME
+        SiteCode = ''
+        BootImages = @()
+        Classes = [ordered]@{}
+        Errors = @()
+    }
+    try {
+        $snapshot.SiteCode = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code')"
+        if ($snapshot.SiteCode -notmatch '^[A-Za-z0-9]{3}$') { throw 'No valid local site code was found.' }
+        $namespace = "root\SMS\site_$($snapshot.SiteCode)"
+        $bootRows = @(Get-CimInstance -Namespace $namespace -ClassName SMS_BootImagePackage `
+                -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 21)
+        if ($bootRows.Count -gt 20) { $snapshot.Errors += 'Boot-image inventory truncated to 20 rows.' }
+        $snapshot.BootImages = @($bootRows | Select-Object -First 20 -Property * -ExcludeProperty 'Cim*')
+        $bootIds = @($snapshot.BootImages | ForEach-Object { "$($_.PackageID)" } |
+                Where-Object { $_ -match '^[A-Za-z0-9]{8}$' } | Select-Object -Unique)
+        if ($bootIds.Count) {
+            $filter = ($bootIds | ForEach-Object { "PackageID='$_'" }) -join ' OR '
+            foreach ($class in @('SMS_DistributionPoint', 'SMS_PackageStatusDistPointsSummarizer', 'SMS_DistributionDPStatus')) {
+                try {
+                    $rows = @(Get-CimInstance -Namespace $namespace -ClassName $class -Filter $filter `
+                            -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 251)
+                    if ($rows.Count -gt 250) { $snapshot.Errors += "$class inventory truncated to 250 rows." }
+                    $snapshot.Classes[$class] = @($rows | Select-Object -First 250 -Property * -ExcludeProperty 'Cim*')
+                }
+                catch { $snapshot.Errors += "$class query failed: $($_.Exception.Message)" }
+            }
+        }
+    }
+    catch { $snapshot.Errors += "Boot-image snapshot failed: $($_.Exception.Message)" }
+    try { $out['OsdDistributionState.json'] = $snapshot | ConvertTo-Json -Depth 6 -ErrorAction Stop }
+    catch { $diag += "OSD snapshot serialization failed: $($_.Exception.Message)" }
 
     # A Secondary can sit in a despooler retry loop -- "This package[X]'s information
     # hasn't arrived yet for this version [N]" -- where the CONTENT arrived but the
@@ -9475,24 +9578,42 @@ $Phase11DpContentLogCollector = {
     $out = @{}
     $diag = @()
 
-    $dpLogDir = $null
+    $dpSharePath = ''
+    try { $dpSharePath = "$((Get-SmbShare -Name 'SMS_DP$' -ErrorAction Stop).Path)" }
+    catch { $diag += "SMS_DP$ share lookup failed: $($_.Exception.Message)" }
+    $logCandidates = @()
+    if ($dpSharePath) { $logCandidates += Join-Path $dpSharePath 'sms\logs' }
     foreach ($d in @('E:', 'D:', 'F:', 'G:', 'C:')) {
-        $cand = "$d\SMS_DP`$\sms\logs"
-        if (Test-Path $cand) { $dpLogDir = $cand; break }
+        $logCandidates += "$d\SMS_DP`$\sms\logs"
     }
-    if ($dpLogDir) {
-        $diag += "DP log dir = '$dpLogDir'"
-        foreach ($n in @('smsdpprov.log', 'SMSDPMon.log', 'PrestageContent.log', 'SMSPXE.log')) {
-            $p = Join-Path $dpLogDir $n
-            if (-not (Test-Path $p)) { $diag += "'$n' not present at $p"; continue }
+    $dpLogDirs = @(
+        foreach ($candidate in @($logCandidates | Select-Object -Unique)) {
             try {
-                $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue
-                if ($c) { $out[$n] = ($c -join "`r`n") } else { $diag += "'$n' present but read returned no content" }
+                if (Test-Path -LiteralPath $candidate -ErrorAction Stop) { $candidate }
             }
-            catch { $diag += "'$n' read threw: $($_.Exception.Message)" }
+            catch { $diag += "DP log directory '$candidate' probe failed: $($_.Exception.Message)" }
+        }
+    )
+    $dpLogDir = $dpLogDirs | Select-Object -First 1
+    foreach ($directory in $dpLogDirs) {
+        $diag += "DP log dir = '$directory'"
+        $prefix = if ($directory -eq $dpLogDir) { '' } else { "$($directory.Substring(0, 1))-" }
+        foreach ($baseName in @('smsdpprov', 'SMSDPMon', 'PrestageContent', 'SMSPXE')) {
+            foreach ($extension in @('.log', '.lo_')) {
+                $n = "$baseName$extension"
+                $p = Join-Path $directory $n
+                try {
+                    $file = Get-Item -LiteralPath $p -ErrorAction Stop
+                    $diag += "'$p': bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o')) tailLines=4000"
+                    $c = @(Get-Content -LiteralPath $p -Tail 4000 -ErrorAction Stop)
+                    if ($c.Count) { $out["$prefix$n"] = $c -join "`r`n" }
+                    else { $diag += "'$p' is empty" }
+                }
+                catch { $diag += "'$p' capture failed: $($_.Exception.Message)" }
+            }
         }
     }
-    else {
+    if (-not $dpLogDir) {
         $diag += 'no ?:\SMS_DP$\sms\logs found (probed E,D,F,G,C) -- the DP role is not installed on this server.'
     }
 
@@ -9593,6 +9714,57 @@ $Phase11DpContentLogCollector = {
     catch { $lines += "IIS probe unavailable: $($_.Exception.Message)" }
 
     $out['DpContent.txt'] = ($lines -join "`r`n")
+    $payload = @("CapturedAtUtc=$([datetime]::UtcNow.ToString('o')) ComputerName=$env:COMPUTERNAME", "SMS_DP$ share path='$dpSharePath'")
+    $roots = @()
+    if ($dpSharePath) { $roots += Join-Path $dpSharePath 'sms\bin' }
+    try {
+        foreach ($service in @(Get-CimInstance -ClassName Win32_Service -Filter "Name='SccmPxe' OR Name='WDSServer'" -OperationTimeoutSec 10 -ErrorAction Stop)) {
+            $payload += "Service $($service.Name): State=$($service.State) PID=$($service.ProcessId) PathName='$($service.PathName)'"
+            if ($service.Name -eq 'SccmPxe' -and "$($service.PathName)" -match '^\s*"?(.+?\.exe)"?(?:\s|$)') {
+                $roots += Split-Path -Path $Matches[1] -Parent
+            }
+        }
+    }
+    catch { $payload += "PXE service query failed: $($_.Exception.Message)" }
+    try {
+        $wdsRoot = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name RootFolder -ErrorAction Stop).RootFolder
+        if ($wdsRoot) { $roots += [Environment]::ExpandEnvironmentVariables("$wdsRoot") }
+    }
+    catch { $payload += "WDS root lookup failed: $($_.Exception.Message)" }
+    foreach ($drive in @('E:', 'D:', 'F:', 'G:', 'C:')) { $roots += "$drive\SMS_DP`$\sms\bin" }
+    foreach ($root in @($roots | Select-Object -Unique)) {
+        try {
+            $null = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+            $path = Join-Path $root 'SMSBoot'
+            $payload += "Payload path '$path': Test-Path=$(Test-Path -LiteralPath $path -ErrorAction Stop)"
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            $payload += "  Attributes=$($item.Attributes) LinkType=$($item.LinkType) Target=$($item.Target)"
+            try { $payload += "  SDDL=$((Get-Acl -LiteralPath $path -ErrorAction Stop).Sddl)" }
+            catch { $payload += "  ACL read failed: $($_.Exception.Message)" }
+            $files = @(Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction Stop | Select-Object -First 201)
+            if ($files.Count -gt 200) { $payload += '  Payload inventory truncated to 200 files.' }
+            foreach ($file in @($files | Select-Object -First 200)) {
+                $payload += "  $($file.FullName) bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o'))"
+            }
+            if ($files.Count -eq 0) { $payload += '  Payload directory is empty.' }
+        }
+        catch { $payload += "Root '$root' payload probe failed: $($_.Exception.Message)" }
+    }
+    if ($clp) {
+        try {
+            foreach ($definition in @(Get-ChildItem -LiteralPath (Join-Path $clp 'DataLib') -Directory -ErrorAction Stop | Select-Object -First 100)) {
+                $entries = @(Get-ChildItem -LiteralPath $definition.FullName -ErrorAction Stop)
+                $wims = @($entries | Where-Object { -not $_.PSIsContainer -and $_.Name -like '*.wim.ini' })
+                if ($wims.Count -eq 0) { continue }
+                $payload += "DataLib '$($definition.Name)': files=$(@($entries | Where-Object { -not $_.PSIsContainer }).Count) folders=$(@($entries | Where-Object { $_.PSIsContainer }).Count) WIMs=$($wims.Name -join ', ') (first 100 definitions inspected)"
+                foreach ($wim in $wims) {
+                    $payload += @(Get-Content -LiteralPath $wim.FullName -TotalCount 40 -ErrorAction Stop)
+                }
+            }
+        }
+        catch { $payload += "Boot-image DataLib probe failed: $($_.Exception.Message)" }
+    }
+    $out['DpPxePayload.txt'] = $payload -join "`r`n"
     # Deliberately NOT '_collector-diag.txt': Save-Phase11GuestLogs names files
     # <vm>-Phase11-<stamp>-<key>, so a second collector finishing in the same second
     # would overwrite the first one's diagnostics.
@@ -15672,6 +15844,19 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
         -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource, $providerQueryDefinition `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600 -PollProgress
+
+    $osdFailureLines = @()
+    if ($result -and $result.ScriptBlockOutput -is [hashtable]) {
+        $osdFailureLines = @($result.ScriptBlockOutput.Details | Where-Object {
+                $_ -match '^FAIL:.*(?:boot image|OS image|OS upgrade|OSD|TFTP|PXE)'
+            })
+    }
+    if ($prePopulate -and $hasOsdClient -and
+        (-not $result -or $result.ScriptBlockFailed -or $osdFailureLines.Count -gt 0)) {
+        Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: OSD validation failed -- collecting sending-site and DP evidence, including pending/retrying boot-image failures"
+        Save-Phase11OsdContentFailureLogs -VMName $VMName -CurrentItem $CurrentItem `
+            -DeployConfig $DeployConfig -DistributionPointNames @($expectedOsdDpCsv -split '\|' | Where-Object { $_ })
+    }
 
     # Failed/unreachable native health needs both sides of the WSUS exchange,
     # not just CM's projection. Include the configured upstream SUP for SOAP faults.

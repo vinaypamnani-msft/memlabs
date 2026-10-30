@@ -239,6 +239,39 @@ Write-DscStatus "$Tag Starting perfloading"
         return $null
     }
 
+    function Get-MemLabsBootImagePayloadRepairTargets {
+        param (
+            [string] $PackageId,
+            [int] $SourceVersion,
+            [string[]] $DistributionPointNames,
+            [object[]] $DistributionStatusRows,
+            [string] $StatusTag
+        )
+
+        if ($SourceVersion -le 0) { throw 'Boot-image SourceVersion was not measured; payload repair cannot be evaluated.' }
+        foreach ($dpName in $DistributionPointNames) {
+            $installed = @($DistributionStatusRows | Where-Object {
+                    (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $dpName -and
+                    "$($_.State)" -eq '0' -and "$($_.SourceVersion)" -and
+                    [int]$_.SourceVersion -ge $SourceVersion
+                })
+            if ($installed.Count -eq 0) { continue }
+            $dpBin = "FileSystem::\\$dpName\SMS_DP`$\sms\bin"
+            try {
+                if (-not (Test-Path -LiteralPath $dpBin -PathType Container -ErrorAction Stop)) {
+                    Write-DscStatus "$StatusTag Cannot reach '$dpBin'; PXE payload repair was not measured on $dpName." -Warning
+                    continue
+                }
+                if (-not (Test-Path -LiteralPath "$dpBin\SMSBoot\$PackageId\x64\wdsmgfw.efi" -PathType Leaf -ErrorAction Stop)) {
+                    $dpName
+                }
+            }
+            catch {
+                Write-DscStatus "$StatusTag Could not measure PXE payload on $dpName`: $($_.Exception.Message). No boot-image rebuild was requested for this unreadable DP." -Warning
+            }
+        }
+    }
+
     function Get-MemLabsDistributionPointGroup {
         param (
             [string] $SiteCode,
@@ -1999,34 +2032,28 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Boot image '$biName' ($packageId) has NO content destination on $($unTargetedOsdDps -join ', ') after 3 confirmations$(if ($bootDistError) { " (distribution error: $bootDistError)" }). Content is never installed to an untargeted DP, so the coverage wait cannot clear -- skipping it rather than spending the full budget. PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
             }
             else {
-                # A PXE flag that was ALREADY correct -- set by hand in the console, or by an
-                # earlier run -- arms nothing here, so a DP that never extracted would stay
-                # broken through every re-run. Probe the payload itself and republish when it
-                # is POSITIVELY absent. An unreachable DP is skipped rather than counted as
-                # missing, so no permission problem can trigger a pointless 350MB republish.
-                # FileSystem:: because this script runs on the CMSite provider drive, where a
-                # bare UNC reads as absent regardless of what is actually there.
+                # Missing payload is expected during a new DP's first transfer. Only repair
+                # an Installed, current-version DP whose boot file is measurably absent.
                 $pxePayloadMissingOn = @()
                 if (-not $pxeBootFlagSet -and $osdDpFqdns.Count -gt 0) {
-                    foreach ($odp in $osdDpFqdns) {
-                        try {
-                            $dpBin = "FileSystem::\\$odp\SMS_DP`$\sms\bin"
-                            if (-not (Test-Path -LiteralPath $dpBin)) { continue }
-                            if (-not (Test-Path -LiteralPath "$dpBin\SMSBoot\$packageId")) { $pxePayloadMissingOn += $odp }
-                        }
-                        catch { }
+                    try {
+                        $payloadStatusRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction Stop)
+                        $pxePayloadMissingOn = @(Get-MemLabsBootImagePayloadRepairTargets -PackageId $packageId `
+                            -SourceVersion ([int]$biFlags.SourceVersion) -DistributionPointNames $osdDpFqdns `
+                            -DistributionStatusRows $payloadStatusRows -StatusTag $Tag)
+                    }
+                    catch {
+                        Write-DscStatus "$Tag Could not establish Installed/current boot-image state before checking payload repair: $($_.Exception.Message). First-time distribution continues without an unverified rebuild." -Warning
                     }
                     if ($pxePayloadMissingOn.Count -gt 0) {
-                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is already flagged for PXE, but $($pxePayloadMissingOn -join ', ') has no SMSBoot\$packageId -- republishing so the DP extracts it."
+                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is Installed/current, but $($pxePayloadMissingOn -join ', ') has no SMSBoot\$packageId\x64\wdsmgfw.efi -- republishing so the DP extracts it."
                     }
                 }
 
                 # Set-CMBootImage changes the provider property, but clients keep using
                 # the old WIM until Update Distribution Points rebuilds and republishes it.
-                # Publish only after the assignment above exists. A newly targeted DP also
-                # needs this update when command support was enabled on an earlier run that
-                # had no OSD targets yet.
-                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0 -or $missingOsdDps.Count -gt 0
+                # A new content destination needs the existing WIM, not a site-wide rebuild.
+                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0
                 if ($bootImagePublicationNeeded) {
                     $bootImagePublicationError = $null
                     $bootPublicationBaselineError = ''
@@ -2089,6 +2116,7 @@ Write-DscStatus "$Tag Starting perfloading"
                 $bootCoverageProblems = @()
                 $bootCoverageObservedSourceVersion = ''
                 $bootCoverageLastArm = @{}
+                $bootCoverageIncompleteSince = @{}
                 $bootStoredVersion = ''
                 $bootSourceVersion = ''
                 $bootCoverageTerminalProblem = if ($bootImagePublicationNeeded -and -not $bootImagePublicationStarted) {
@@ -2130,6 +2158,7 @@ Write-DscStatus "$Tag Starting perfloading"
                         if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
                             $bootCoverageObservedSourceVersion = $bootSourceVersion
                             $bootCoverageLastArm = @{}
+                            $bootCoverageIncompleteSince = @{}
                         }
                         $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
                         foreach ($expectedDp in $osdDpFqdns) {
@@ -2150,10 +2179,23 @@ Write-DscStatus "$Tag Starting perfloading"
                     }
                     if ($bootCoverageProblems.Count -eq 0) { break }
 
-                    # ContentValidating can sit until ConfigMgr's 30-minute retry fires. Re-arm
-                    # the existing target without rebuilding the WIM or changing SourceVersion.
+                    # Do not interrupt a first transfer or its hash validation. Give a retry
+                    # five minutes, then re-arm once per DP/version without rebuilding the WIM.
                     foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
                         $armKey = $incompleteDp.ToUpper()
+                        $armStatus = @($bootDpRows | Where-Object {
+                                (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $incompleteDp
+                            } | Select-Object -First 1)
+                        if ($armStatus.Count -gt 0 -and [int]$armStatus[0].State -in 1, 7) {
+                            $bootCoverageIncompleteSince.Remove($armKey)
+                            continue
+                        }
+                        if ($bootCoverageLastArm.ContainsKey($armKey)) { continue }
+                        if (-not $bootCoverageIncompleteSince.ContainsKey($armKey)) {
+                            $bootCoverageIncompleteSince[$armKey] = Get-Date
+                        }
+                        if (((Get-Date) - $bootCoverageIncompleteSince[$armKey]).TotalSeconds -lt 300) { continue }
+                        $bootCoverageLastArm[$armKey] = Get-Date
                         try {
                             $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
                                     Where-Object { (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $incompleteDp })
@@ -2162,15 +2204,12 @@ Write-DscStatus "$Tag Starting perfloading"
                                 Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"
                             }
                             else {
-                                $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $null }
-                                if ($lastArm -and ((Get-Date) - $lastArm).TotalMinutes -lt 5) { continue }
                                 foreach ($targetRow in $targetRows) {
                                     $targetRow.RefreshNow = $true
                                     [void]$targetRow.Put()
                                 }
                                 Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow at SourceVersion=$bootSourceVersion (StoredPkgVersion=$bootStoredVersion)"
                             }
-                            $bootCoverageLastArm[$armKey] = Get-Date
                         }
                         catch {
                             Write-DscStatus "$Tag Boot image coverage: re-arm failed for $incompleteDp`: $($_.Exception.Message)"
