@@ -15,7 +15,8 @@ pwsh -NoProfile -File .\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS
 The fresh process avoids reusing host functions loaded before a `git pull`.
 The host uses existing MemLabs domain credentials and PowerShell Direct; no guest
 file copy, WinRM, or host-to-guest DNS connectivity is needed. JSON is saved on the
-host to `%TEMP%\PKIPS1SQL-ReportingDiagnostics.json`, or to `-OutputPath`.
+host beside the build log as `logs\PKIPS1SQL-ReportingDiagnostics.json`,
+so normal log synchronization includes it. `-OutputPath` overrides this location.
 The host can use PowerShell 7. Local collection in Windows PowerShell 5.1 remains
 available by omitting `-VMName`; `-AsJson` returns JSON without writing a file.
 Local collection requires the MemLabs checkout, including the bounded-process
@@ -33,13 +34,19 @@ restarting the VM or services.
 An outer PowerShell Direct timeout is reported explicitly rather than as an
 unspecified missing result.
 
-Host-side collection failures write a separate `*.failure-<id>.json` beside the
-requested output (or beside the build log during automatic validation), and the
+Host-side collection failures write a separate `*.failure-<id>.json` in the same
+logs directory by default (or beside an explicit `-OutputPath`), and the
 error names that file. Earlier successful evidence is not overwritten. Success
 and failure JSON include SHA-256 fingerprints of the collector, loaded transport
 function, and transmitted worker helpers to distinguish running code from a
 different checkout or stale session. Worker helpers are refreshed in the guest
 for every host collection.
+
+After a broken PowerShell Direct channel, the original failure JSON is saved
+first. One bounded read-only guest call then attempts to append boot time, crash/
+service/Defender events, and the shared memory diagnostics, plus host Hyper-V
+state. It does not rerun the report probes or restart the VM/services. If that
+capture is unavailable, its error is retained alongside the original failure.
 
 The shared VM-command wrapper preserves exception details for session setup,
 execution, logging, and cleanup failures instead of returning an unexplained

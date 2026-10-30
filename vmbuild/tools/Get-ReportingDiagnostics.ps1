@@ -17,6 +17,9 @@
     helper; host mode transmits that helper automatically.
     Host-side transport failures write a separate failure JSON with source
     fingerprints and error details, without overwriting earlier evidence.
+    Host JSON defaults to the build logs directory for normal log synchronization.
+    A broken channel triggers one bounded, read-only crash/memory evidence capture
+    after the original failure has been saved; no VM or service is restarted.
 .EXAMPLE
     .\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
 .EXAMPLE
@@ -42,6 +45,92 @@ function Get-ReportingSourceHash {
     $algorithm = [Security.Cryptography.SHA256]::Create()
     try { [BitConverter]::ToString($algorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($Source))).Replace('-', '') }
     finally { $algorithm.Dispose() }
+}
+
+function Get-ReportingTransportFailureEvidence {
+    param(
+        [Parameter(Mandatory)][string] $VMName,
+        [Parameter(Mandatory)][string] $Domain,
+        [Parameter(Mandatory)][string] $StartedAt
+    )
+
+    $report = [ordered]@{
+        CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+        HostState = $null
+        Guest = $null
+        Errors = [System.Collections.Generic.List[string]]::new()
+    }
+    try { $report.HostState = Get-VmHostSideDiag -VmName $VMName }
+    catch { $report.Errors.Add("Hyper-V state: $($_.Exception.Message)") }
+    $memorySource = ''
+    try { $memorySource = (Get-MemLabsMemoryDiagnosticProbe).ToString() }
+    catch { $report.Errors.Add("Memory collector source: $($_.Exception.Message)") }
+    $probe = {
+        param($SinceUtc, $MemorySource)
+        $result = @{
+            ComputerName = $env:COMPUTERNAME
+            CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+            LastBootUpTime = $null
+            Memory = $null
+            EventLogs = @()
+            Errors = [System.Collections.Generic.List[string]]::new()
+        }
+        try {
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem -OperationTimeoutSec 10 -ErrorAction Stop
+            $result.LastBootUpTime = $os.LastBootUpTime
+        }
+        catch { $result.Errors.Add("Guest boot time: $($_.Exception.Message)") }
+        foreach ($query in @(
+                @{ Name = 'Application'; Id = @(1000, 1001, 1026) },
+                @{ Name = 'System'; Id = @(41, 1074, 6008, 7031, 7034) },
+                @{ Name = 'Microsoft-Windows-Windows Defender/Operational'; Id = @(1116, 1117, 1121, 1122) }
+            )) {
+            $log = [ordered]@{ LogName = $query.Name; Available = $false; Events = @(); Error = $null }
+            try {
+                $events = @(Get-WinEvent -FilterHashtable @{
+                        LogName = $query.Name; Id = $query.Id
+                        StartTime = [DateTimeOffset]::Parse($SinceUtc).UtcDateTime.AddMinutes(-2)
+                    } -MaxEvents 20 -ErrorAction Stop)
+                $log.Events = @($events | ForEach-Object {
+                        $message = "$($_.Message)"
+                        if ($message.Length -gt 4000) { $message = $message.Substring(0, 4000) }
+                        [pscustomobject]@{
+                            TimeCreated = $_.TimeCreated
+                            Id = $_.Id
+                            Provider = $_.ProviderName
+                            Message = $message
+                        }
+                    })
+                $log.Available = $true
+            }
+            catch {
+                if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $log.Available = $true }
+                else { $log.Error = $_.Exception.Message }
+            }
+            $result.EventLogs += [pscustomobject] $log
+        }
+        if ($MemorySource) {
+            try { $result.Memory = & ([scriptblock]::Create($MemorySource)) }
+            catch { $result.Errors.Add("Guest memory evidence: $($_.Exception.Message)") }
+        }
+        return $result
+    }
+    try {
+        $response = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain -ScriptBlock $probe `
+            -ArgumentList $StartedAt, $memorySource -DisplayName 'Collect reporting transport failure evidence' `
+            -AsJob -TimeoutSeconds 60 -SessionMaxRetries 1 -RequireDomainIdentity -FailOnRemoteError -SuppressLog
+        if ($response.CommandResult -and -not $response.ScriptBlockFailed -and
+            $response.ScriptBlockOutput -is [Collections.IDictionary] -and
+            $response.ScriptBlockOutput.Contains('ComputerName')) {
+            $report.Guest = $response.ScriptBlockOutput
+        }
+        else {
+            $detail = if ($response.ErrorDetails) { $response.ErrorDetails -join '; ' } else { 'No valid guest event/memory response was returned.' }
+            $report.Errors.Add("Post-failure guest capture: $detail")
+        }
+    }
+    catch { $report.Errors.Add("Post-failure guest capture: $($_.Exception.Message)") }
+    [pscustomobject] $report
 }
 
 function Get-ReportingCatalogEvidence {
@@ -250,6 +339,7 @@ if ($VMName) {
     $targetVmName = $VMName
     $collectorSource = Get-Content -LiteralPath $PSCommandPath -Raw -ErrorAction Stop
     $processSource = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'DSC\phases\ProcessFunctions.ps1') -Raw -ErrorAction Stop
+    . ([scriptblock]::Create($processSource))
     if (-not (Get-Command Invoke-VmCommand -ErrorAction Ignore) -or -not (Get-Command Get-VMNote -ErrorAction Ignore)) {
         . (Join-Path (Split-Path -Parent $PSScriptRoot) 'Common.ps1') -InJob
     }
@@ -292,8 +382,12 @@ if ($VMName) {
         Domain = "$($note.domain)"
     }
     $targetPath = if ($OutputPath) { [IO.Path]::GetFullPath($OutputPath) }
-    elseif ($AsJson -and $Common.LogPath) { Join-Path (Split-Path $Common.LogPath -Parent) "$targetVmName-ReportingDiagnostics.json" }
-    else { Join-Path $env:TEMP "$targetVmName-ReportingDiagnostics.json" }
+    else {
+        $logDirectory = if ($Common.LogPath) { Split-Path $Common.LogPath -Parent }
+        else { Join-Path (Split-Path -Parent $PSScriptRoot) 'logs' }
+        $null = New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop
+        Join-Path $logDirectory "$targetVmName-ReportingDiagnostics.json"
+    }
     $vmResult = $null
     try {
         $vmResult = Invoke-VmCommand -VmName $targetVmName -VmDomainName $note.domain `
@@ -326,7 +420,7 @@ if ($VMName) {
         $failurePath = [IO.Path]::ChangeExtension($targetPath, "failure-$($hostMetadata.InvocationId).json")
         $resultType = if ($null -eq $vmResult) { 'null' } else { $vmResult.GetType().FullName }
         try {
-            [ordered]@{
+            $failureRecord = [ordered]@{
                 ComputerName = $targetVmName
                 CollectedAt = [DateTime]::UtcNow.ToString('o')
                 SiteCode = $SiteCode
@@ -343,19 +437,26 @@ if ($VMName) {
                     ChannelBroken = $vmResult.ChannelBroken
                     ErrorDetails = @($vmResult.ErrorDetails)
                 }
-            } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $failurePath -Encoding UTF8 -ErrorAction Stop
+            }
+            Write-MemLabsProcessProgress -Path $failurePath -Record $failureRecord
         }
         catch { throw "$($collectionError.Exception.Message) Failure evidence could not be saved to '$failurePath': $($_.Exception.Message)" }
+        if ($vmResult.ChannelBroken) {
+            try {
+                $failureRecord.TransportFailureEvidence = Get-ReportingTransportFailureEvidence `
+                    -VMName $targetVmName -Domain $note.domain -StartedAt $hostMetadata.StartedAt
+                Write-MemLabsProcessProgress -Path $failurePath -Record $failureRecord
+            }
+            catch { throw "$($collectionError.Exception.Message) Failure evidence: $failurePath; post-failure evidence could not be appended: $($_.Exception.Message)" }
+        }
         throw "$($collectionError.Exception.Message) Failure evidence: $failurePath"
     }
     $document | Add-Member -MemberType NoteProperty -Name HostCollection -Value $hostMetadata -Force
     $json = $document | ConvertTo-Json -Depth 12
     if ($AsJson) { return $json }
-    if (-not $OutputPath) { $OutputPath = Join-Path $env:TEMP "$targetVmName-ReportingDiagnostics.json" }
-    $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
-    $json | Set-Content -LiteralPath $OutputPath -Encoding UTF8 -ErrorAction Stop
-    Write-Host "Reporting evidence for $targetVmName saved on the host to $OutputPath"
-    Get-Item -LiteralPath $OutputPath -ErrorAction Stop
+    $json | Set-Content -LiteralPath $targetPath -Encoding UTF8 -ErrorAction Stop
+    Write-Host "Reporting evidence for $targetVmName saved on the host to $targetPath"
+    Get-Item -LiteralPath $targetPath -ErrorAction Stop
     return
 }
 if (-not (Get-Command New-WebServiceProxy -ErrorAction Ignore)) {

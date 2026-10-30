@@ -119,9 +119,9 @@ function New-WebServiceProxy {
 Set-Item -Path Function:\New-WebServiceProxy -Value (${function:New-WebServiceProxy}.GetNewClosure())
 function Get-CimInstance {
     param($ClassName, $Namespace, $Filter, $OperationTimeoutSec, $ErrorAction)
-    if ($OperationTimeoutSec -ne 15) { throw 'CIM inventory lost its timeout.' }
+    if ($OperationTimeoutSec -ne 15 -and -not ($ClassName -eq 'Win32_OperatingSystem' -and $OperationTimeoutSec -eq 10)) { throw 'CIM inventory lost its timeout.' }
     switch ($ClassName) {
-        'Win32_OperatingSystem' { [pscustomobject]@{ Caption = 'Test OS'; Version = '10.0.20348'; BuildNumber = '20348' } }
+        'Win32_OperatingSystem' { [pscustomobject]@{ Caption = 'Test OS'; Version = '10.0.20348'; BuildNumber = '20348'; LastBootUpTime = [datetime]'2026-10-29T01:00:00Z' } }
         'Win32_ComputerSystem' { [pscustomobject]@{ DNSHostName = 'rp'; Domain = 'example' } }
         'Win32_Service' { [pscustomobject]@{ Name = 'PowerBIReportServer'; State = 'Running'; StartMode = 'Auto'; PathName = 'test' } }
         '__NAMESPACE' { @() }
@@ -133,6 +133,23 @@ function Get-ScheduledTask {
     [pscustomobject]@{ TaskName = 'MicrosoftEdgeUpdateTaskMachineCore'; TaskPath = '\'; State = 'Disabled' }
 }
 function Test-Path { param($LiteralPath) [System.IO.File]::Exists($LiteralPath) }
+function Get-VmHostSideDiag { param($VmName); "[host-diag: $VmName State=Running Uptime=3600s Heartbeat=Ok]" }
+function Get-MemLabsMemoryDiagnosticProbe { { [pscustomobject]@{ Memory = @{ AvailableMB = 4096 }; Errors = @{} } } }
+function Get-WinEvent {
+    [CmdletBinding()]
+    param($FilterHashtable, $MaxEvents)
+    if ($MaxEvents -ne 20 -or -not $FilterHashtable.StartTime) { throw 'Crash events lost their bounded query window.' }
+    switch ($FilterHashtable.LogName) {
+        'Application' { [pscustomobject]@{ TimeCreated = [DateTime]::UtcNow; Id = 1026; ProviderName = '.NET Runtime'; Message = 'Fixture guest process failure' } }
+        'System' {
+            $record = [Management.Automation.ErrorRecord]::new(
+                [InvalidOperationException]::new('No fixture events'), 'NoMatchingEventsFound',
+                [Management.Automation.ErrorCategory]::ObjectNotFound, $null)
+            $PSCmdlet.ThrowTerminatingError($record)
+        }
+        default { throw 'Fixture event log unavailable' }
+    }
+}
 function Invoke-MemLabsBoundedPowerShell {
     param($ProbeScript, $Parameters, $TimeoutSeconds, $ProgressPath, $ProgressId)
     if ($TimeoutSeconds -ne 60 -or -not $ProgressPath -or $ProgressId -ne 'reporting') { throw 'Reporting web probes lost their hard limit or checkpoint.' }
@@ -176,6 +193,7 @@ $hostState = [pscustomobject]@{
     Calls = 0; Mode = 'Success'; Source = $null; Domain = 'example'
     CredentialLoads = 0; CredentialMode = 'Success'; UninitializedCalls = 0
     WorkerSourceForTest = "function Invoke-MemLabsBoundedPowerShell { ${function:Invoke-MemLabsBoundedPowerShell} }"
+    PostFailureCalls = 0; FailureFolder = ''
 }
 function Get-LocalAdminCredential {
     $hostState.CredentialLoads++
@@ -196,7 +214,23 @@ Set-Item -Path Function:\Get-VMNote -Value (${function:Get-VMNote}.GetNewClosure
 function Invoke-VmCommand {
     param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, $DisplayName, [switch] $AsJob,
         $TimeoutSeconds, [switch] $RequireDomainIdentity, [switch] $FailOnRemoteError, [switch] $SuppressLog,
-        [switch] $RebootIfUnresponsive)
+        [switch] $RebootIfUnresponsive, $SessionMaxRetries)
+    if ($DisplayName -eq 'Collect reporting transport failure evidence') {
+        if ($TimeoutSeconds -ne 60 -or $SessionMaxRetries -ne 1 -or $RebootIfUnresponsive -or
+            -not $AsJob -or -not $RequireDomainIdentity -or -not $FailOnRemoteError) {
+            throw 'Post-failure probe lost its bounded, non-restarting transport contract.'
+        }
+        $persisted = @(Get-ChildItem -LiteralPath $hostState.FailureFolder -Filter '*.failure-*.json' |
+                Where-Object { (Get-Content -LiteralPath $_.FullName -Raw).Contains("$($ArgumentList[0])") })
+        if ($persisted.Count -ne 1) {
+            throw 'Original failure evidence was not persisted before attempting another guest call.'
+        }
+        $hostState.PostFailureCalls++
+        if ($hostState.Mode -eq 'ChannelBrokenProbeFailure') {
+            return [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $true; ErrorDetails = 'Fixture post-failure capture unavailable' }
+        }
+        return [pscustomobject]@{ CommandResult = $true; ScriptBlockFailed = $false; ScriptBlockOutput = (& $ScriptBlock @ArgumentList) }
+    }
     if (-not $VmName -or $VmDomainName -ne 'example' -or -not $DisplayName -or -not $AsJob -or
         $TimeoutSeconds -ne 600 -or -not $RequireDomainIdentity -or -not $FailOnRemoteError -or
         -not $SuppressLog -or $RebootIfUnresponsive) {
@@ -220,6 +254,9 @@ function Invoke-VmCommand {
     }
     if ($hostState.Mode -eq 'BareFalse') { return $false }
     if ($hostState.Mode -eq 'Thrown') { throw 'Fixture transport exception' }
+    if ($hostState.Mode -like 'ChannelBroken*') {
+        return [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $true; ChannelBroken = $true; ErrorDetails = 'Fixture Hyper-V socket target process has ended' }
+    }
     $output = switch ($hostState.Mode) {
         'InvalidJson' { '{broken' }
         'InvalidShape' { '{"Passed":true}' }
@@ -236,6 +273,7 @@ $hostRoot = Join-Path ([System.IO.Path]::GetTempPath()) "MemLabs-Reporting-Host-
 $null = New-Item -Path $hostRoot -ItemType Directory
 $hostOutputPath = Join-Path $hostRoot 'ReportingDiagnostics.json'
 $hostCommon | Add-Member NoteProperty LogPath (Join-Path $hostRoot 'VMBuild.log')
+$hostState.FailureFolder = $hostRoot
 try {
     $null = & $sourcePath -VMName 'RP-TEST' -SiteCode PS1 -ReportServerUri 'http://rp.example/ReportServer' -OutputPath $hostOutputPath
     $hostJson = Get-Content -LiteralPath $hostOutputPath -Raw
@@ -246,6 +284,10 @@ try {
         $collected.HostCollection.CollectorSourceHash -ne (Get-ReportingSourceHash -Source (Get-Content -LiteralPath $sourcePath -Raw)) -or
         $collected.HostCollection.TransportSourceHash -notmatch '^[A-F0-9]{64}$') {
         throw 'Host mode did not execute the collector source and preserve its arguments/evidence.'
+    }
+    $defaultOutput = @(& $sourcePath -VMName 'RP-TEST' -SiteCode PS1)
+    if ($defaultOutput.Count -ne 1 -or $defaultOutput[0].FullName -ne (Join-Path $hostRoot 'RP-TEST-ReportingDiagnostics.json')) {
+        throw 'Default host reporting output was not saved beside the build log.'
     }
     $jsonOutput = @(& $sourcePath -VMName 'RP-TEST' -SiteCode PS1 -AsJson)
     if ($jsonOutput.Count -ne 1 -or $jsonOutput[0] -isnot [string] -or
@@ -274,7 +316,7 @@ try {
     }
     $hostCommon.LocalAdmin = $fixtureCredential
     $hostState.CredentialMode = 'Success'
-    foreach ($mode in @('Timeout', 'Failure', 'InvalidJson', 'InvalidShape', 'EmptyFailure', 'BareFalse', 'Thrown')) {
+    foreach ($mode in @('Timeout', 'Failure', 'InvalidJson', 'InvalidShape', 'EmptyFailure', 'BareFalse', 'Thrown', 'ChannelBroken', 'ChannelBrokenProbeFailure')) {
         $hostState.Mode = $mode
         $before = @(Get-ChildItem -LiteralPath $hostRoot -Filter '*.failure-*.json')
         $threw = $false
@@ -297,6 +339,34 @@ try {
         }
         if ($mode -eq 'BareFalse' -and $failure.Transport.ResultType -ne 'System.Boolean') { throw 'Bare-false return shape was not captured.' }
         if ($mode -eq 'Thrown' -and $failureMessage -notmatch 'Fixture transport exception') { throw 'Thrown transport exception was lost.' }
+        if ($mode -like 'ChannelBroken*' -and $failureMessage -notmatch 'Fixture Hyper-V socket target process has ended') { throw 'Post-failure capture replaced the original transport error.' }
+        if ($mode -eq 'ChannelBroken') {
+            $context = $failure.TransportFailureEvidence
+            if ($context.HostState -notmatch 'State=Running' -or
+                $context.Guest.EventLogs[0].Events[0].Id -ne 1026 -or
+                -not $context.Guest.EventLogs[1].Available -or
+                $context.Guest.EventLogs[2].Available -or
+                $context.Guest.EventLogs[2].Error -notmatch 'unavailable' -or
+                $context.Guest.Memory.Memory.AvailableMB -ne 4096) {
+                throw 'Transport failure evidence lost crash events, verified-empty versus unreadable logs, or memory context.'
+            }
+        }
+        if ($mode -eq 'ChannelBrokenProbeFailure' -and
+            $failure.TransportFailureEvidence.Errors[0] -notmatch 'Fixture post-failure capture unavailable') {
+            throw 'An unavailable post-failure probe hid its failure or discarded the primary error.'
+        }
+    }
+    if ($hostState.PostFailureCalls -ne 2) { throw 'Post-failure evidence was retried or collected for unrelated failure modes.' }
+    $hostState.Mode = 'Failure'
+    foreach ($jsonMode in @($false, $true)) {
+        $before = @(Get-ChildItem -LiteralPath $hostRoot -Filter 'RP-TEST-ReportingDiagnostics.failure-*.json')
+        $message = ''
+        try { $null = & $sourcePath -VMName 'RP-TEST' -AsJson:$jsonMode }
+        catch { $message = $_.Exception.Message }
+        $created = @(Get-ChildItem -LiteralPath $hostRoot -Filter 'RP-TEST-ReportingDiagnostics.failure-*.json' | Where-Object { $_.FullName -notin $before.FullName })
+        if ($created.Count -ne 1 -or -not $message.Contains($created[0].FullName)) {
+            throw "Default failure evidence (AsJson=$jsonMode) was not persisted in the synced build-log directory."
+        }
     }
     $hostState.Domain = ''
     $callCount = $hostState.Calls

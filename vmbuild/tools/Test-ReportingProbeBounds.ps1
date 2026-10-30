@@ -22,7 +22,7 @@ function Import-TestFunction {
     [scriptblock]::Create($definitions[0].Extent.Text)
 }
 $collectorPath = Join-Path $RootPath 'tools\Get-ReportingDiagnostics.ps1'
-foreach ($name in @('Get-ReportingCatalogEvidence', 'Get-ReportingPortalEvidence', 'Get-ReportingEndpointEvidence')) {
+foreach ($name in @('Get-ReportingCatalogEvidence', 'Get-ReportingPortalEvidence', 'Get-ReportingEndpointEvidence', 'Get-ReportingTransportFailureEvidence')) {
     . (Import-TestFunction -Path $collectorPath -Name $name)
 }
 . (Join-Path $RootPath 'DSC\phases\ProcessFunctions.ps1')
@@ -116,6 +116,7 @@ namespace MemLabs {
 if ($PSVersionTable.PSEdition -eq 'Core') {
     & {
         . (Import-TestFunction -Path (Join-Path $RootPath 'Common.ps1') -Name 'Invoke-VmCommand')
+        . (Import-TestFunction -Path (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Name 'Get-MemLabsMemoryDiagnosticProbe')
         $server = [MemLabs.ReportingHttpFixture]::new()
         $server.StallApi = $false
         $remote = $null
@@ -150,6 +151,10 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
                 $document.Endpoints[0].ReportServerPage.StatusCode -ne 200 -or
                 $document.Endpoints[0].Portal.RestApi.StatusCode -ne 200) {
                 throw "Real remoting collection lost web evidence: $($document.Endpoints | ConvertTo-Json -Depth 6 -Compress)"
+            }
+            $context = Get-ReportingTransportFailureEvidence -VMName RP-TEST -Domain example -StartedAt ([DateTime]::UtcNow.ToString('o'))
+            if ($context.Guest.ComputerName -ne $env:COMPUTERNAME -or $context.Guest.EventLogs.Count -ne 3 -or -not $context.Guest.Memory) {
+                throw 'Real remoting did not return the post-failure crash/memory evidence shape.'
             }
         }
         catch {
