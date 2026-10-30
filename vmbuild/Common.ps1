@@ -3435,13 +3435,22 @@ function Start-DHCP {
         Reset-CimProxyModuleState | Out-Null
     }
 
+    $dhcpImport = @{ Name = 'DhcpServer'; Force = $true; ErrorAction = 'Stop' }
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $dhcpImport.SkipEditionCheck = $true
+    }
+
     $moduleLoaded = $false
     try {
-        Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+        Import-Module @dhcpImport
         $moduleLoaded = $true
     }
     catch {
         $importError = $_
+        if ($importError.Exception -is [System.Management.Automation.ParameterBindingException]) {
+            Write-Log "Start-DHCP: Invalid DhcpServer module import parameters; restarting WMI cannot fix this: $importError" -Failure
+            return $false
+        }
         Write-Log "Start-DHCP: DhcpServer module failed to load: $importError" -Warning
 
         # First, classify the "missing temp path" failure explicitly. This is
@@ -3457,7 +3466,7 @@ function Start-DHCP {
             Repair-CimProxyTempPath | Out-Null
             Reset-CimProxyModuleState | Out-Null
             try {
-                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                Import-Module @dhcpImport
                 $moduleLoaded = $true
                 Write-GreenCheck "DhcpServer module loaded after repairing the CIM-proxy temp directory and resetting the cached compat proxy."
             }
@@ -3479,7 +3488,7 @@ function Start-DHCP {
             Start-Service DHCPServer -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
             try {
-                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                Import-Module @dhcpImport
                 $moduleLoaded = $true
                 Write-GreenCheck "DhcpServer module loaded after WMI service restart."
             }
@@ -3497,9 +3506,14 @@ function Start-DHCP {
                     $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
                 }
                 if ($installed -and $installed.Success) {
-                    Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction SilentlyContinue
-                    $moduleLoaded = $true
-                    Write-GreenCheck "DHCP management tools reinstalled."
+                    try {
+                        Import-Module @dhcpImport
+                        $moduleLoaded = $true
+                        Write-GreenCheck "DHCP management tools reinstalled."
+                    }
+                    catch {
+                        Write-Log "Start-DHCP: DhcpServer module still won't load after reinstalling management tools: $_" -Failure
+                    }
                 }
                 else {
                     Write-Log "Start-DHCP: Failed to reinstall DHCP management tools. Run 'Install-WindowsFeature RSAT-DHCP' manually." -Failure
@@ -3512,6 +3526,14 @@ function Start-DHCP {
     }
 
     if (-not $moduleLoaded) {
+        return $false
+    }
+
+    try {
+        Initialize-MemLabsDhcpServer
+    }
+    catch {
+        Write-Log "Start-DHCP: DHCP post-install configuration failed: $_" -Failure
         return $false
     }
 

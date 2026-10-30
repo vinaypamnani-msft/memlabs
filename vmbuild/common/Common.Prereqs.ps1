@@ -12,6 +12,7 @@
 #   Install-MemLabsModule    - install/update PSGallery modules and VERIFY they landed
 #   Get-OpenSshToolPath      - locate ssh.exe / ssh-keygen.exe, installing the Windows
 #                              OpenSSH Client capability when it is missing
+#   Initialize-MemLabsDhcpServer - complete the local DHCP role's post-install configuration
 
 function Get-MemLabsWindowsPowerShellModulePath {
     param ([switch]$AllUsersOnly)
@@ -58,6 +59,49 @@ function Write-PrereqLog {
         'Failure' { Write-Host $Message -ForegroundColor Red }
         default { Write-Host $Message }
     }
+}
+
+function Initialize-MemLabsDhcpServer {
+    [CmdletBinding()]
+    param ()
+
+    $rolePath = 'HKLM:\SOFTWARE\Microsoft\ServerManager\Roles\12'
+    $roleExists = Test-Path -LiteralPath $rolePath -ErrorAction Stop
+    if ($roleExists) {
+        $role = Get-ItemProperty -LiteralPath $rolePath -ErrorAction Stop
+        if ($role.PSObject.Properties['ConfigurationState'] -and $role.ConfigurationState -eq 2) {
+            return
+        }
+    }
+
+    Write-PrereqLog 'Completing DHCP post-install configuration.'
+    $service = Get-Service -Name DHCPServer -ErrorAction Stop
+    if ($service.Status -ne 'Running') {
+        Start-Service -Name DHCPServer -ErrorAction Stop
+        $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+    }
+
+    $settings = Get-DhcpServerSetting -ErrorAction Stop
+    if ($null -eq $settings -or $settings.IsDomainJoined -isnot [bool] -or $settings.IsAuthorized -isnot [bool]) {
+        throw 'DHCP server settings did not report domain membership and authorization status.'
+    }
+    if ($settings.IsDomainJoined -and -not $settings.IsAuthorized) {
+        throw 'DHCP on this domain-joined host must be authorized in its Active Directory domain before post-install configuration can be completed. MemLabs does not authorize DHCP servers automatically.'
+    }
+
+    Add-DhcpServerSecurityGroup -ErrorAction Stop | Out-Null
+    Restart-Service -Name DHCPServer -ErrorAction Stop
+    $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+
+    # Only dismiss Server Manager's task after the actual post-install steps succeed.
+    if (-not $roleExists) {
+        New-Item -Path $rolePath -Force -ErrorAction Stop | Out-Null
+    }
+    New-ItemProperty -LiteralPath $rolePath -Name ConfigurationState -PropertyType DWord -Value 2 -Force -ErrorAction Stop | Out-Null
+    if ((Get-ItemPropertyValue -LiteralPath $rolePath -Name ConfigurationState -ErrorAction Stop) -ne 2) {
+        throw 'Could not verify the DHCP post-install completion state in Server Manager.'
+    }
+    Write-PrereqLog 'DHCP post-install configuration completed.' -Level Success
 }
 
 function Get-MemLabsBuildServerMarkerPath {

@@ -67,6 +67,11 @@ param (
 
 )
 
+if ($PSVersionTable.PSVersion -lt [Version]'7.4') {
+    Write-Host "ERROR: New-Lab requires PowerShell 7.4 or above (current: $($PSVersionTable.PSVersion)). Use VMBuild.cmd to install or launch the supported version, or run this script from pwsh.exe. Host initialization has not run." -ForegroundColor Red
+    exit 1
+}
+
 if ($NoSnapshot.IsPresent -and $AutoSnapshot.IsPresent) {
     throw '-NoSnapshot and -AutoSnapshot cannot be used together.'
 }
@@ -376,12 +381,6 @@ if (-not $NoWindowResize.IsPresent) {
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
-    exit 1
-}
-
-# Validate PS7
-if (-not $Common.PS7) {
-    Write-Log "You must use PowerShell version 7.4 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
     exit 1
 }
 

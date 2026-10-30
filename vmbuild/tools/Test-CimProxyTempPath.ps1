@@ -196,6 +196,7 @@ foreach ($scenario in @('Maintenance', 'BelowThreshold', 'RecentCreation', 'Rece
     function Start-Service { throw 'DHCP unexpectedly changed service state.' }
     function Restart-Service { throw 'DHCP unexpectedly restarted WMI or DHCP.' }
     function Install-WindowsFeature { throw 'DHCP unexpectedly installed host features.' }
+    function Initialize-MemLabsDhcpServer { $script:PostInstallCalls++ }
     function Get-Module {
         param($Name, [switch]$ListAvailable, $ErrorAction)
         if ($ListAvailable) { return $dhcpModule }
@@ -241,8 +242,10 @@ foreach ($scenario in @('Maintenance', 'BelowThreshold', 'RecentCreation', 'Rece
     }
     function Import-Module {
         param($Name, [switch]$Force, [switch]$SkipEditionCheck, $ErrorAction)
-        Assert-True ($Name -eq 'DhcpServer' -and $Force -and $SkipEditionCheck -and $ErrorAction -eq 'Stop') `
-            'DHCP lost the native force-import/SkipEditionCheck recovery path.'
+        $expectedSkip = $PSVersionTable.PSEdition -eq 'Core'
+        Assert-True ($Name -eq 'DhcpServer' -and $Force -and $ErrorAction -eq 'Stop' -and
+            $PSBoundParameters.ContainsKey('SkipEditionCheck') -eq $expectedSkip -and $SkipEditionCheck.IsPresent -eq $expectedSkip) `
+            'DHCP lost its runtime-compatible native force-import recovery path.'
         $script:NativeImports++
         if ($script:DhcpScenario -eq 'ImportRetry' -and $script:NativeImports -eq 1) {
             $script:ProxyLoaded = $true; $script:ProxyMissing = $true
@@ -264,6 +267,7 @@ foreach ($scenario in @('Maintenance', 'BelowThreshold', 'RecentCreation', 'Rece
         $script:Messages = [Collections.Generic.List[string]]::new()
         $script:Directories = @{}
         $script:NativeImports = 0; $script:CompatReads = 0; $script:CompatRemovals = 0
+        $script:PostInstallCalls = 0
         $script:ProxyLoaded = $scenario -eq 'StaleProxy'; $script:ProxyMissing = $script:ProxyLoaded
         $script:DhcpLoaded = $script:ProxyLoaded; $script:CompatAlive = $script:ProxyLoaded
         $script:ModuleRemovals = [Collections.Generic.List[string]]::new()
@@ -272,7 +276,7 @@ foreach ($scenario in @('Maintenance', 'BelowThreshold', 'RecentCreation', 'Rece
         $expectedResets = if ($scenario -eq 'Healthy') { 0 } else { 1 }
         Assert-True ($result.Count -eq 1 -and $result[0] -is [bool] -and $result[0] -and
             $script:NativeImports -eq $expectedImports -and $script:CompatReads -eq $expectedResets -and
-            $script:Deleted.Count -eq 0) "$scenario broke DHCP startup/recovery or deleted shared proxies."
+            $script:Deleted.Count -eq 0 -and $script:PostInstallCalls -eq 1) "$scenario broke DHCP startup/recovery or deleted shared proxies."
         if ($scenario -eq 'MissingTemp') { Assert-True ($script:Created.Count -gt 0) 'DHCP did not repair missing temp paths before import.' }
         if ($scenario -in @('StaleProxy', 'ImportRetry')) {
             Assert-True ($script:ModuleRemovals -contains 'DhcpServer' -and
