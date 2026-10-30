@@ -55,7 +55,7 @@ $Fix_EdgeServicing = {
             if ($core.Count -eq 0 -or @($core | Where-Object StartType -eq 'Disabled').Count) { throw 'Edge updater services are missing or remain disabled.' }
             $verified = @(Get-ScheduledTask -ErrorAction Stop | Where-Object TaskName -Like 'MicrosoftEdgeUpdate*')
             if ($verified.Count -eq 0 -or @($verified | Where-Object State -eq 'Disabled').Count) { throw 'Edge updater tasks are missing or remain disabled.' }
-            foreach ($service in $core | Where-Object Name -eq 'edgeupdate') { Start-Service -Name $service.Name -ErrorAction Stop }
+            Write-FixLog 'Edge updater startup types and scheduled tasks restored; updater services may remain stopped while idle.'
         }
     }
     $temporary = $null
@@ -153,7 +153,7 @@ $Fix_EdgeServicing = {
 }
 
 $fixesToPerform += [pscustomobject]@{
-    FixName='Fix-EdgeServicing'; FixVersion='261030.0'; NeededOnFreshDeploy=$true; AppliesToExisting=$true
+    FixName='Fix-EdgeServicing'; FixVersion='261030.1'; NeededOnFreshDeploy=$true; AppliesToExisting=$true
     DoNotSeedFromWatermark=$true; AppliesToRoles=@()
     NotAppliesToRoles=@('OSDClient','AADClient','Proxy','LinuxClient','LinuxServer','StandaloneRootCA')
     DependentVMs=@(); ScriptBlock=$Fix_EdgeServicing

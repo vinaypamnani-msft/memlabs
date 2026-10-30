@@ -12,12 +12,13 @@ $fixesToPerform = @()
 . (Join-Path $RootPath 'Fixes\Fix-EdgeServicing.ps1')
 if ($fixesToPerform.Count -ne 1 -or -not $fixesToPerform[0].NeededOnFreshDeploy -or
     -not $fixesToPerform[0].AppliesToExisting -or -not $fixesToPerform[0].DoNotSeedFromWatermark -or
-    'StandaloneRootCA' -notin $fixesToPerform[0].NotAppliesToRoles) { throw 'Edge servicing registration lost its late/fresh/existing/offline-root contract.' }
+    'StandaloneRootCA' -notin $fixesToPerform[0].NotAppliesToRoles -or
+    $fixesToPerform[0].FixVersion -ne '261030.1') { throw 'Edge servicing registration lost its version/late/fresh/existing/offline-root contract.' }
 $body = $fixesToPerform[0].ScriptBlock
 $state = [pscustomobject]@{
     Installed='86.0.622.38'; Target='156.0.0.0'; ExitCodes=@(0); UpdateFiles=$true
     HashValid=$true; SignatureValid=$true; MetadataFails=$false; MetadataFault=''; PolicyValues=$null; Timeout=$false
-    ServicesPresent=$true; TasksPresent=$true; InstallCalls=0; DownloadCalls=0; Stops=0
+    ServicesPresent=$true; TasksPresent=$true; InstallCalls=0; DownloadCalls=0; Stops=0; ServiceStarts=0
     DownloadBytes=64; Temporary=$null; ServiceFailure=$false; TaskFailure=$false
     SignerSubject='CN=Microsoft Corporation, O=Microsoft Corporation, C=US'
     Services=@(); Tasks=@(); Logs=[Collections.Generic.List[string]]::new()
@@ -47,7 +48,11 @@ function Set-Service {
     if ($state.ServiceFailure) { throw 'Fixture service change denied' }
     foreach ($service in $state.Services | Where-Object Name -eq $Name) { $service.StartType=$StartupType }
 }
-function Start-Service { param($Name,$ErrorAction); foreach ($service in $state.Services | Where-Object Name -eq $Name) { $service.Status='Running' } }
+function Start-Service {
+    param($Name,$ErrorAction)
+    $state.ServiceStarts++
+    throw 'Fixture: demand-activated Edge updater services must not be forced to start.'
+}
 function Get-ScheduledTask { param($ErrorAction); if ($state.TasksPresent) { $state.Tasks } }
 function Enable-ScheduledTask {
     param($TaskName,$TaskPath,$ErrorAction)
@@ -128,19 +133,21 @@ function Stop-Process { param($Id,[switch]$Force,$ErrorAction); if($Id -ne 98765
 function Start-Sleep { param($Seconds); if($Seconds -ne 15){throw 'Unexpected MSI retry interval.'} }
 $metadataFailures = @('WrongProduct','DuplicateStable','MissingArchitecture','InvalidVersion','WrongArtifact','DuplicateArtifact',
     'InsecureOrigin','LookalikeOrigin','UserInfoOrigin','WrongHashAlgorithm','InvalidHash','Oversized','ZeroSize','InvalidSize')
-$cases = @('Old','Uninstalled','Current','Newer','HashFailure','SizeMismatch','SignatureFailure','WrongSigner','MsiFailure','MsiBusy',
+$cases = @('Current','CurrentUpdaterRunning','Old','Uninstalled','Newer','HashFailure','SizeMismatch','SignatureFailure','WrongSigner','MsiFailure','MsiBusy',
     'MsiBusyExhausted','RebootRequired','Timeout','VersionUnchanged','MetadataOffline','PolicyBlocked','ManualOnlyPolicy',
     'ApplicationPolicyOverride','ManagedTarget','StableChannelPolicy','LowercaseHash','MissingUpdater','MissingTasks','ServiceFailure','TaskFailure') + $metadataFailures
 foreach ($case in $cases) {
     $state.Installed='86.0.622.38'; $state.ExitCodes=@(0); $state.UpdateFiles=$true; $state.HashValid=$true
     $state.SignatureValid=$true; $state.MetadataFails=$false; $state.PolicyValues=$null; $state.Timeout=$false
-    $state.ServicesPresent=$true; $state.TasksPresent=$true; $state.InstallCalls=0; $state.DownloadCalls=0; $state.Stops=0; $state.Logs.Clear()
+    $state.ServicesPresent=$true; $state.TasksPresent=$true; $state.InstallCalls=0; $state.DownloadCalls=0; $state.Stops=0; $state.ServiceStarts=0; $state.Logs.Clear()
+    $state.Target='156.0.0.0'
     $state.MetadataFault=''; $state.DownloadBytes=64; $state.Temporary=$null; $state.ServiceFailure=$false; $state.TaskFailure=$false
     $state.SignerSubject='CN=Microsoft Corporation, O=Microsoft Corporation, C=US'
     $state.Services=@([pscustomobject]@{Name='edgeupdate';StartType='Disabled';Status='Stopped'},[pscustomobject]@{Name='edgeupdatem';StartType='Disabled';Status='Stopped'})
     $state.Tasks=@([pscustomobject]@{TaskName='MicrosoftEdgeUpdateTaskMachineUA';TaskPath='\';State='Disabled'})
     switch ($case) {
-        Current {$state.Installed=$state.Target}
+        Current {$state.Target='156.0.4314.56'; $state.Installed=$state.Target}
+        CurrentUpdaterRunning {$state.Installed=$state.Target; $state.Services[0].Status='Running'}
         Uninstalled {$state.Installed=$null}
         Newer {$state.Installed='157.0.0.0'}
         HashFailure {$state.HashValid=$false}
@@ -168,7 +175,7 @@ foreach ($case in $cases) {
     if ($case -in $metadataFailures) { $state.MetadataFault=$case }
     $savedProtocol=[Net.ServicePointManager]::SecurityProtocol
     $output=@(& $body)
-    $success=$case -in @('Old','Uninstalled','Current','Newer','MsiBusy','RebootRequired','ApplicationPolicyOverride','StableChannelPolicy','LowercaseHash')
+    $success=$case -in @('Old','Uninstalled','Current','CurrentUpdaterRunning','Newer','MsiBusy','RebootRequired','ApplicationPolicyOverride','StableChannelPolicy','LowercaseHash')
     if ($output.Count -ne 1 -or $output[0].Success -isnot [bool] -or $output[0].Success -ne $success) {
         throw "Edge scenario '$case' returned an incorrect maintenance result: $($output | ConvertTo-Json -Compress); fixture=$($state.Logs -join '; ')"
     }
@@ -177,13 +184,18 @@ foreach ($case in $cases) {
     if ($state.Temporary -and [IO.Directory]::Exists($state.Temporary)) { throw "$case leaked its temporary MSI directory." }
     if ($case -in (@('HashFailure','SizeMismatch','SignatureFailure','WrongSigner','PolicyBlocked','ManualOnlyPolicy','ManagedTarget','MetadataOffline') + $metadataFailures) -and $state.InstallCalls) { throw "$case executed an unverified MSI." }
     if ($case -in $metadataFailures -and $state.DownloadCalls) { throw "$case downloaded an unapproved artifact." }
-    if ($case -in @('Current','Newer') -and ($state.DownloadCalls -or $state.InstallCalls)) { throw "$case needlessly installed or downgraded Edge." }
-    if ($success -and $case -notin @('Current','Newer') -and $state.InstallCalls -lt 1) { throw "$case never installed the selected Stable release." }
+    if ($case -in @('Current','CurrentUpdaterRunning','Newer') -and ($state.DownloadCalls -or $state.InstallCalls)) { throw "$case needlessly installed or downgraded Edge." }
+    if ($success -and $case -notin @('Current','CurrentUpdaterRunning','Newer') -and $state.InstallCalls -lt 1) { throw "$case never installed the selected Stable release." }
     if ($case -eq 'MsiBusy' -and $state.InstallCalls -ne 2) { throw 'MSI busy retry was not bounded/correct.' }
     if ($case -eq 'MsiBusyExhausted' -and $state.InstallCalls -ne 3) { throw 'MSI busy retries did not stop after three attempts.' }
     if ($case -eq 'Timeout' -and $state.Stops -ne 1) { throw 'Timed-out MSI launcher was not stopped by its owned process ID.' }
     if ($success -and (@($state.Services | Where-Object StartType -eq 'Disabled').Count -or $state.Tasks[0].State -eq 'Disabled')) { throw "$case left Edge Update disabled." }
-    if ($success -and ($state.Services[0].StartType -ne 'Automatic' -or $state.Services[0].Status -ne 'Running' -or $state.Services[1].StartType -ne 'Manual')) { throw "$case did not restore normal updater service startup." }
+    if ($success -and ($state.Services[0].StartType -ne 'Automatic' -or $state.Services[1].StartType -ne 'Manual')) { throw "$case did not restore normal updater service startup." }
+    if ($state.ServiceStarts -ne 0) { throw "$case forced an on-demand updater service to start." }
+    if ($success) {
+        $expectedStatus = if ($case -eq 'CurrentUpdaterRunning') { 'Running' } else { 'Stopped' }
+        if ($state.Services[0].Status -ne $expectedStatus) { throw "$case changed the updater's running state." }
+    }
     if ($case -eq 'MetadataOffline' -and ($state.Services[0].StartType -eq 'Disabled' -or $state.Tasks[0].State -eq 'Disabled')) { throw 'An unavailable download left updates permanently disabled.' }
 }
-Write-Host 'PASS -- late Edge Stable servicing verifies integrity, preserves newer versions, restores updater services/tasks, and fails explicitly on installation/policy/network errors.'
+Write-Host 'PASS -- late Edge Stable servicing verifies integrity, preserves newer versions, accepts idle updaters, restores updater configuration, and fails explicitly on installation/policy/network errors.'

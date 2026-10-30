@@ -91,6 +91,9 @@ It keeps newer installed versions, bounds downloads and the shared MSI retry
 budget, records `C:\staging\Fix\EdgeServicing-MSI.log`, verifies the installed
 version, and restores Edge updater services/tasks. The host execution limit is
 1,200 seconds; the MSI budget is 600 seconds across at most three attempts.
+The installed browser must meet the current Stable version for its architecture;
+updater services are not manually started or required to remain running.
+Their startup types and enabled scheduled tasks are still restored and verified.
 Managed policies that prevent normal Stable updates cause an explicit failure
 without registry-policy changes. Update services/tasks are also restored after
 a failed download. No automatic reboot or forced browser termination is requested.
