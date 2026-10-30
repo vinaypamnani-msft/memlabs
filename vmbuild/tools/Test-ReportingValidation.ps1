@@ -47,6 +47,27 @@ $evidence = New-TestEvidence
 if (-not (Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1).Passed) { throw 'Healthy reporting failed.' }
 $evidence.Endpoints[0].Catalog.ReportCount = 1
 if (-not (Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1).Passed) { throw 'The one-published-report boundary failed.' }
+foreach ($version in @('86.0.622.38','93.999.999.999','94.0.0.0','156.0.4314.56')) {
+    $evidence = New-TestEvidence
+    $evidence.Browsers[0].Version = $version
+    $evidence.Endpoints[0].Portal.ScriptAssets[0] | Add-Member NoteProperty MinimumChromiumMajor 94
+    $verdict = Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1
+    $expected = ([version]$version).Major -ge 94
+    if ($verdict.Passed -ne $expected) { throw "Portal static-initialization syntax boundary failed for Edge $version." }
+    if (-not $expected -and ($verdict.Details -join '; ') -notmatch 'cannot parse.+Chromium 94') { throw 'Unsupported Edge was not explained explicitly.' }
+}
+foreach ($version in @($null,'unreadable')) {
+    $evidence = New-TestEvidence
+    $evidence.Browsers = if ($version) { @([pscustomobject]@{Version=$version}) } else { @() }
+    $evidence.Endpoints[0].Portal.ScriptAssets[0] | Add-Member NoteProperty MinimumChromiumMajor 94
+    $verdict = Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1
+    if (-not $verdict.Passed -or ($verdict.Details -join '; ') -notmatch 'WARN:.+rendering compatibility is not verified') {
+        throw 'Unknown browser version was treated as verified compatibility or as a measured service failure.'
+    }
+}
+$evidence = New-TestEvidence
+$evidence.Browsers[0].Version = '86.0.622.38'
+if (-not (Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1).Passed) { throw 'An unsupported universal browser floor was invented without portal syntax evidence.' }
 foreach ($case in @('EmptyRoot', 'EmptyFolder', 'WrongSite', 'UnreadableCatalog', 'EmptyPortal', 'MissingAssets', 'BrokenAsset', 'BrokenApi')) {
     $evidence = New-TestEvidence
     switch ($case) {

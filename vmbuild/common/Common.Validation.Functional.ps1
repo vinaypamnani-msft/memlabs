@@ -6709,6 +6709,16 @@ function Test-ReportingDiagnosticEvidence {
     }
     $failures = [System.Collections.Generic.List[string]]::new()
     $expectedFolder = if ($SiteCode) { "/ConfigMgr_$SiteCode" } else { 'a ConfigMgr_* folder' }
+    $edgeVersions = @(
+        foreach ($browser in @($Evidence.Browsers)) {
+            [version]$version = $null
+            if ([version]::TryParse("$($browser.Version)",[ref]$version)) { $version }
+        }
+    )
+    $newestEdge = $edgeVersions | Sort-Object -Descending | Select-Object -First 1
+    if (-not $newestEdge) {
+        $results.Details.Add('WARN: Installed Edge version is unavailable; browser-side rendering compatibility is not verified.')
+    }
     $sqlPublication = @($Evidence.SqlCatalog | Where-Object {
             $_.VerificationSucceeded -eq $true -and $_.Source -in @('HostSQL','GuestSQL') -and
             $_.ExpectedFolder -eq $expectedFolder -and $_.FolderExists -eq $true -and $_.ReportCount -ge 1
@@ -6737,6 +6747,12 @@ function Test-ReportingDiagnosticEvidence {
         }
         else {
             $assets = @($portal.ScriptAssets | Where-Object { $null -ne $_ })
+            $requirements = @($assets | Where-Object { $_.PSObject.Properties['MinimumChromiumMajor'] -and $_.MinimumChromiumMajor -gt 0 } |
+                    ForEach-Object { [int]$_.MinimumChromiumMajor })
+            $minimumChromium = if ($requirements.Count) { ($requirements | Measure-Object -Maximum).Maximum } else { $null }
+            if ($minimumChromium -and $newestEdge -and $newestEdge.Major -lt $minimumChromium) {
+                $reasons.Add("installed Edge $newestEdge cannot parse the portal's class static initialization blocks (Chromium $minimumChromium+ required); install current Edge Stable")
+            }
             if ((-not $legacy -and $assets.Count -eq 0) -or
                 @($assets | Where-Object { $_.Error -or $_.StatusCode -ne 200 }).Count -gt 0) {
                 $reasons.Add('portal JavaScript assets are missing or could not be verified')

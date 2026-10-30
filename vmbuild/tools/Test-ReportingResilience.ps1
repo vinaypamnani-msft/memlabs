@@ -13,7 +13,7 @@ $tokens = $null; $errors = $null
 $collectorPath = Join-Path $PSScriptRoot 'Get-ReportingDiagnostics.ps1'
 $ast = [Management.Automation.Language.Parser]::ParseFile($collectorPath,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw "Collector parser errors: $($errors -join '; ')" }
-foreach ($name in @('Get-ReportingSourceHash','Invoke-ReportingWebRequest','Get-ReportingCatalogEvidence','Get-ReportingPortalEvidence')) {
+foreach ($name in @('Get-ReportingSourceHash','New-ReportingSqlConnectionString','Invoke-ReportingWebRequest','Get-ReportingCatalogEvidence','Get-ReportingPortalEvidence')) {
     $definition = @($ast.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name

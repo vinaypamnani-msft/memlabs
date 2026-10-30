@@ -23,6 +23,7 @@ try {
     Assert-Maintenance (-not $text.Contains($secret)) 'Diagnostic redaction leaked a token, password, SAS signature, or URL credential.'
     Assert-Maintenance ((Protect-VMFixDiagnosticText ('x' * 200) 50).Length -lt 80) 'Diagnostic text truncation is not bounded.'
     Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-ODBC18') -eq 1800) 'ODBC execution timeout changed unexpectedly.'
+    Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-EdgeServicing') -eq 1200) 'Edge servicing lost its bounded execution timeout.'
     Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-Upgrade-Console') -eq 3600) 'Console execution timeout changed unexpectedly.'
     Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-CMFullAdmin') -eq 600) 'Administrator execution timeout changed unexpectedly.'
     Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-Unrelated') -eq 0) 'Unrelated fixes acquired an unexpected execution policy.'

@@ -53,6 +53,21 @@ function Get-ReportingSourceHash {
     finally { $algorithm.Dispose() }
 }
 
+function New-ReportingSqlConnectionString {
+    param(
+        [Parameter(Mandatory)][string]$Server,
+        [Parameter(Mandatory)][string]$Database,
+        [ValidateRange(1,60)][int]$ConnectTimeout = 10
+    )
+    $builder = [Data.SqlClient.SqlConnectionStringBuilder]::new()
+    $builder['Data Source'] = $Server
+    $builder['Initial Catalog'] = $Database
+    $builder['Integrated Security'] = $true
+    $builder['TrustServerCertificate'] = $true
+    $builder['Connect Timeout'] = $ConnectTimeout
+    $builder.ConnectionString
+}
+
 function Get-ReportingTransportFailureEvidence {
     param(
         [Parameter(Mandatory)][string] $VMName,
@@ -252,7 +267,10 @@ function Get-ReportingPortalEvidence {
     $scripts = @(
         foreach ($match in [regex]::Matches($html, '(?is)<script\b[^>]*\bsrc\s*=\s*["'']([^"'']+)') | Select-Object -First 8) {
             $assetUri = [uri]::new($baseUri, [System.Net.WebUtility]::HtmlDecode($match.Groups[1].Value))
-            $asset = [ordered]@{ Uri = $assetUri.AbsoluteUri; StatusCode = $null; ContentType = $null; Error = $null; SavedResponse = $null; ResponseTruncated = $false }
+            $asset = [ordered]@{
+                Uri = $assetUri.AbsoluteUri; StatusCode = $null; ContentType = $null; Error = $null
+                SavedResponse = $null; ResponseTruncated = $false; ClassStaticInitializationBlocks = 0; MinimumChromiumMajor = $null
+            }
             if ($assetUri.Authority -ne $PortalUri.Authority -or $assetUri.Scheme -ne $PortalUri.Scheme) {
                 $asset.Error = 'External asset not requested; credentials are only sent to the portal origin.'
             }
@@ -261,6 +279,8 @@ function Get-ReportingPortalEvidence {
                     $response = & $request $assetUri 20
                     $asset.StatusCode = [int] $response.StatusCode
                     $asset.ContentType = [string] $response.Headers['Content-Type']
+                    $asset.ClassStaticInitializationBlocks = [regex]::Matches([string]$response.Content,'\bstatic\s*\{').Count
+                    if ($asset.ClassStaticInitializationBlocks -gt 0) { $asset.MinimumChromiumMajor = 94 }
                     if (-not $response.Content -or $asset.ContentType -match 'text/html') {
                         $asset.Error = 'Script request returned an empty body or HTML rather than JavaScript.'
                     }
@@ -315,13 +335,8 @@ function Get-ReportingPortalEvidence {
 function Get-ReportingSqlReportCount {
     param([Parameter(Mandatory)] $Configuration, [string] $SiteCode)
 
-    $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-    $builder.DataSource = $Configuration.DatabaseServerName
-    $builder.InitialCatalog = $Configuration.DatabaseName
-    $builder.IntegratedSecurity = $true
-    $builder.TrustServerCertificate = $true
-    $builder.ConnectTimeout = 15
-    $connection = New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString
+    $connectionString = New-ReportingSqlConnectionString -Server $Configuration.DatabaseServerName -Database $Configuration.DatabaseName -ConnectTimeout 15
+    $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
     $command = $connection.CreateCommand()
     try {
         $command.CommandTimeout = 20

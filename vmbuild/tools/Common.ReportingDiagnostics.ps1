@@ -365,10 +365,8 @@ function Get-ReportingRpcEvidence {
 function Get-ReportingSqlEvidence {
     param([string]$Server, [string]$Database, [string]$SiteCode, [pscredential]$Credential)
     $action = {
-        $builder = [Data.SqlClient.SqlConnectionStringBuilder]::new()
-        $builder.DataSource = $Server; $builder.InitialCatalog = $Database
-        $builder.IntegratedSecurity = $true; $builder.TrustServerCertificate = $true; $builder.ConnectTimeout = 10
-        $connection = [Data.SqlClient.SqlConnection]::new($builder.ConnectionString)
+        $connectionString = New-ReportingSqlConnectionString -Server $Server -Database $Database
+        $connection = [Data.SqlClient.SqlConnection]::new($connectionString)
         $command = $connection.CreateCommand()
         try {
             $command.CommandTimeout = 15
@@ -608,7 +606,7 @@ function Invoke-ReportingHostCollection {
     $prefix = "$VMName-Reporting-$id"
     $checkpoint = Join-Path $logDirectory "$prefix.partial.json"
     $primitiveSource = ''
-    foreach ($name in @('Get-ReportingSourceHash','Invoke-ReportingWebRequest','Get-ReportingCatalogEvidence','Get-ReportingPortalEvidence')) {
+    foreach ($name in @('Get-ReportingSourceHash','New-ReportingSqlConnectionString','Invoke-ReportingWebRequest','Get-ReportingCatalogEvidence','Get-ReportingPortalEvidence')) {
         $definition = Get-Command $name -CommandType Function -ErrorAction Stop
         $primitiveSource += "function $name { $($definition.Definition) }`n"
     }

@@ -19,7 +19,7 @@ function Import-ReportingTestDefinition {
 }
 $entryPath = Join-Path $PSScriptRoot 'Get-ReportingDiagnostics.ps1'
 $primitiveSource = ''
-foreach ($name in @('Get-ReportingSourceHash','Invoke-ReportingWebRequest','Get-ReportingCatalogEvidence','Get-ReportingPortalEvidence')) {
+foreach ($name in @('Get-ReportingSourceHash','New-ReportingSqlConnectionString','Invoke-ReportingWebRequest','Get-ReportingCatalogEvidence','Get-ReportingPortalEvidence')) {
     . (Import-ReportingTestDefinition $entryPath $name)
     $primitiveSource += "function $name { $((Get-Command $name).Definition) }`n"
 }

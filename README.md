@@ -74,11 +74,37 @@ verified through SOAP or an explicitly successful, site-scoped SQL catalog read,
 and a responding portal with its required JavaScript assets and catalog API.
 Older integrated SSRS instances without the v2 API retain SOAP/portal validation.
 Collection or verification failures remain visible failures, not successful empty
-report inventories. These checks do not claim to execute the browser UI.
+report inventories. Portal assets also record class static initialization blocks:
+an installed Edge older than Chromium 94 fails validation when that syntax is
+present, even if the portal and API return HTTP 200. An unavailable browser
+version is explicitly unverified, not assumed compatible. These checks do not
+claim to execute the browser UI or establish a universal supported-browser floor.
+
+### Browser maintenance and empty catalogs
+
+Early provisioning still suppresses Edge Update to avoid extra pending-file
+renames and reboots. Phase 10
+[`Fix-EdgeServicing.ps1`](vmbuild/Fixes/Fix-EdgeServicing.ps1) installs the current
+official Stable release, verifies its installed version, and restores Edge
+updater services/tasks. It also runs through maintenance for existing Windows
+VMs; offline root CAs, proxy, Linux, OSD, and AAD-client roles are excluded.
+It does not downgrade a newer browser, override managed update policies, restart
+the VM, or forcibly close browser windows. Reopen existing Edge windows afterward.
+Download, policy, installation, or updater-restoration failures remain explicit
+maintenance failures. Microsoft requires a
+[current supported browser for Power BI Report Server](https://learn.microsoft.com/en-us/power-bi/report-server/browser-support).
+
+A blank browser and an empty catalog are separate checks. If the ConfigMgr
+Reporting Services Point was removed or its ReportServer database recreated,
+re-add/reconfigure that role against the intended database and confirm publication
+in `srsrp.log` and the `ConfigMgr_<site>` folder. Updating the browser cannot restore
+reports to a newly empty database; do not repeatedly recreate it to fix a blank UI.
 
 Validate without a lab using
 [`Test-ReportingDiagnostics.ps1`](vmbuild/tools/Test-ReportingDiagnostics.ps1)
 and [`Test-ReportingValidation.ps1`](vmbuild/tools/Test-ReportingValidation.ps1).
+[`Test-EdgeServicing.ps1`](vmbuild/tools/Test-EdgeServicing.ps1) uses mocked
+installers/services/tasks and does not change host software or update settings.
 [`Test-ReportingProbeBounds.ps1`](vmbuild/tools/Test-ReportingProbeBounds.ps1)
 also exercises real HTTP response stalls and the shared transport timeout in
 the Windows PowerShell 5.1 guest runtime.

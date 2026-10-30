@@ -52,6 +52,28 @@ When dot-sourced, the file MUST:
 Load order within this folder is alphabetical, but **runtime execution order**
 is determined by `FixVersion` (sorted ascending), not load order.
 
+## Late Edge servicing
+
+[Fix-EdgeServicing.ps1](Fix-EdgeServicing.ps1) runs during fresh-build Phase 10
+and existing-VM maintenance, after early provisioning's intentional Edge Update
+suppression. It is not seeded as already applied from a legacy version watermark.
+Offline root CA, proxy, Linux, OSD, and AAD-client roles are excluded.
+
+The fix selects the current Windows Stable MSI for the OS architecture using
+Microsoft's enterprise metadata. Before installation it verifies the official
+HTTPS delivery origin, exact file size, SHA-256, and valid Microsoft signature.
+It keeps newer installed versions, bounds downloads and the shared MSI retry
+budget, records `C:\staging\Fix\EdgeServicing-MSI.log`, verifies the installed
+version, and restores Edge updater services/tasks. The host execution limit is
+1,200 seconds; the MSI budget is 600 seconds across at most three attempts.
+Managed policies that prevent normal Stable updates cause an explicit failure
+without registry-policy changes. Update services/tasks are also restored after
+a failed download. No automatic reboot or forced browser termination is requested.
+Existing browser windows must be reopened to use the updated engine.
+
+Validate with [Test-EdgeServicing.ps1](../tools/Test-EdgeServicing.ps1).
+The test uses mock installers, services, tasks, policy, and download responses.
+
 ## Windows activation on air-gapped VMs
 
 [Fix_ActivateWindows.ps1](Fix_ActivateWindows.ps1) uses Azure KMS for unactivated

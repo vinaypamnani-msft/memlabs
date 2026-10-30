@@ -17,10 +17,17 @@ $sourcePath = Join-Path $RootPath 'tools\Get-ReportingDiagnostics.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw "Collector parser errors: $($errors -join '; ')" }
-foreach ($name in @('Get-ReportingSourceHash','Invoke-ReportingWebRequest','Get-ReportingCatalogEvidence','Get-ReportingPortalEvidence')) {
+foreach ($name in @('Get-ReportingSourceHash','New-ReportingSqlConnectionString','Invoke-ReportingWebRequest','Get-ReportingCatalogEvidence','Get-ReportingPortalEvidence')) {
     $nodes = @($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true))
     if ($nodes.Count -ne 1) { throw "Expected one $name definition." }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
+}
+$connectionString = New-ReportingSqlConnectionString -Server 'fixture\REPORTING,1544' -Database 'ReportServer;Custom' -ConnectTimeout 15
+$parsedConnection = [Data.SqlClient.SqlConnectionStringBuilder]::new($connectionString)
+if ($parsedConnection.DataSource -ne 'fixture\REPORTING,1544' -or $parsedConnection.InitialCatalog -ne 'ReportServer;Custom' -or
+    -not $parsedConnection.IntegratedSecurity -or -not $parsedConnection.TrustServerCertificate -or $parsedConnection.ConnectTimeout -ne 15 -or
+    ($parsedConnection.ContainsKey('Password') -and $parsedConnection.Password)) {
+    throw 'The actual SQL connection-string builder lost safe keyword handling or its target/authentication contract.'
 }
 $proxy = [pscustomobject]@{ Items=@(); Children=@(); FailListing=$false; RootType='Folder'; Timeout=0 }
 $proxy | Add-Member ScriptMethod GetItemType { param($Path); $this.RootType }
@@ -57,7 +64,7 @@ try { $null = Get-ReportingCatalogEvidence $proxy -SiteCode PS1 } catch { $threw
 if (-not $threw) { throw 'Invalid SOAP root was accepted.' }
 $proxy.RootType = 'Folder'
 
-$web = [pscustomobject]@{ Uris=[Collections.Generic.List[string]]::new(); BrokenAsset=$false; Api404=$false; Redirect=''; CredentialSeen=$false }
+$web = [pscustomobject]@{ Uris=[Collections.Generic.List[string]]::new(); BrokenAsset=$false; Api404=$false; Redirect=''; CredentialSeen=$false; Script='console.log("loaded")' }
 function Invoke-WebRequest {
     param($Uri,[switch]$UseDefaultCredentials,[switch]$UseBasicParsing,$TimeoutSec,$ErrorAction,$MaximumRedirection,[pscredential]$Credential)
     if (-not $UseBasicParsing -or $TimeoutSec -gt 30 -or $MaximumRedirection -ne 0) { throw 'Unbounded/automatically redirecting HTTP request.' }
@@ -74,7 +81,7 @@ function Invoke-WebRequest {
     }
     if ("$Uri" -match 'main\.js') {
         if ($web.BrokenAsset) { throw 'Fixture script download failed' }
-        return [pscustomobject]@{ StatusCode=200; Content='console.log("loaded")'; Headers=@{'Content-Type'='application/javascript'} }
+        return [pscustomobject]@{ StatusCode=200; Content=$web.Script; Headers=@{'Content-Type'='application/javascript'} }
     }
     [pscustomobject]@{
         StatusCode=200; Content='<title>Report Server</title><base href="/Reports/"><script src="assets/main.js"></script><script src="https://external.invalid/script.js"></script>'
@@ -87,6 +94,11 @@ if ($page.Title -ne 'Report Server' -or $page.ScriptAssets.Count -ne 2 -or $page
 if ('https://rp.fixture/Reports/assets/main.js' -notin $web.Uris -or ($web.Uris | Where-Object { $_ -match 'external\.invalid' })) {
     throw 'Asset base resolution failed or credentials reached another origin.'
 }
+if ($page.ScriptAssets[0].ClassStaticInitializationBlocks -ne 0 -or $page.ScriptAssets[0].MinimumChromiumMajor) { throw 'A modern syntax requirement was invented for a plain script.' }
+$web.Script='class Portal { static { this.factory = 1; } static { this.provider = 2; } }'
+$asset=(Get-ReportingPortalEvidence -PortalUri 'https://rp.fixture/Reports/').ScriptAssets[0]
+if ($asset.ClassStaticInitializationBlocks -ne 2 -or $asset.MinimumChromiumMajor -ne 94) { throw 'The captured portal syntax incompatibility was not measured correctly.' }
+$web.Script='console.log("loaded")'
 $web.BrokenAsset = $true
 if ((Get-ReportingPortalEvidence -PortalUri 'https://rp.fixture/Reports/').ScriptAssets[0].Error -notmatch 'download failed') { throw 'Broken script became successful evidence.' }
 $web.BrokenAsset = $false; $web.Api404 = $true

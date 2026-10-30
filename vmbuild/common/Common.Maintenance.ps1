@@ -1561,6 +1561,7 @@ function Get-VMFixExecutionTimeout {
     param([string]$FixName)
     switch ($FixName) {
         'Fix-ODBC18' { return 1800 }
+        'Fix-EdgeServicing' { return 1200 }
         'Fix-Upgrade-Console' { return 3600 }
         'Fix-CMFullAdmin' { return 600 }
         default { return 0 }
