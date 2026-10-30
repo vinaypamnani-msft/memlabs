@@ -12,61 +12,65 @@ from elevated PowerShell on the MemLabs Hyper-V host:
 pwsh -NoProfile -File .\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
 ```
 
-The fresh process avoids reusing host functions loaded before a `git pull`.
-The host uses existing MemLabs domain credentials and PowerShell Direct; no guest
-file copy, WinRM, or host-to-guest DNS connectivity is needed. JSON is saved on the
-host beside the build log as `logs\PKIPS1SQL-ReportingDiagnostics.json`,
-so normal log synchronization includes it. `-OutputPath` overrides this location.
-The host can use PowerShell 7. Local collection in Windows PowerShell 5.1 remains
-available by omitting `-VMName`; `-AsJson` returns JSON without writing a file.
-Local collection requires the MemLabs checkout, including the bounded-process
-helper; host mode supplies that helper automatically.
+The fresh process avoids reusing functions loaded before a `git pull`. Host
+PowerShell 5.1/7 uses cached MemLabs credentials; no manual guest script copy is
+required. The collector is **file-first**, rather than one large guest pipeline:
 
-Standalone host runs explicitly load cached MemLabs guest credentials without
-depending on a successful storage/file-list refresh. Missing credentials fail
-before attempting to connect to the VM.
+1. **Before guest PowerShell:** copy raw reporting/setup/site logs through SMB
+   admin shares, using current Hyper-V IPs plus name/address alternatives. The
+   reporting VM and its owning site server are captured independently. Known
+   C: and data-drive locations and log directories inferred from service paths include
+   PBIRS/SSRS, SRSRP, ConfigMgr, SQL ERRORLOGs, and selected live event-log files.
+   Relevant WER `Report.wer` crash descriptions are copied, never memory dumps.
+2. **Independent host reads:** authenticated native WMI/DCOM and event RPC,
+   host SOAP/HTTP/REST, and read-only SQL catalog queries run in bounded workers.
+   Portal script responses are retained as non-executable text (2 MiB per asset)
+   and HTTP error pages retain status/body excerpts for blank-page analysis.
+   SQL tries a known local-VM IP with the configured instance/port when host DNS
+   fails. HTTP credentials never follow a cross-origin redirect.
+3. **Isolated missing-data fallbacks:** individual guest probes use PowerShell
+   Direct, then existing WinRM. A broken Direct channel opens a per-VM circuit
+   breaker instead of being retried for every remaining probe. Host evidence is
+   retained even if both guest PowerShell methods fail. Fresh crash/resource/
+   Defender events are then requested through native event RPC.
 
-Web checks have separate 60-second worker deadlines for SOAP discovery/catalog
-access, the report-server page, and the portal/assets/API. A stuck web check is
-recorded with its elapsed time, last request, and timeout; other reporting,
-browser, SQL, and log evidence is retained. Workers are cancelled without
-restarting the VM or services.
-An outer PowerShell Direct timeout is reported explicitly rather than as an
-unspecified missing result.
+Raw files, manifests, and `*-Reporting-<id>.partial.json` checkpoints are saved
+flat beside the build log, so normal synchronization captures them **while the
+collection is still running**. Each stage atomically updates the host checkpoint.
+Completed and aborted-copy bytes survive worker timeouts; aborted snapshots are
+explicitly incomplete. Text logs up to 32 MiB are copied in full, larger logs
+retain their last 8 MiB, and each copy pass has a 256 MiB budget. Live EVTX files
+must fit 64 MiB and are never tailed or represented as filtered/verified events.
+Their native event-RPC counterpart is collected separately. `Security.evtx`,
+raw RS encrypted configuration/DSNs, and credential caches are not exported.
 
-Host-side collection failures write a separate `*.failure-<id>.json` in the same
-logs directory by default (or beside an explicit `-OutputPath`), and the
-error names that file. Earlier successful evidence is not overwritten. Success
-and failure JSON include SHA-256 fingerprints of the collector, loaded transport
-function, and transmitted worker helpers to distinguish running code from a
-different checkout or stale session. Worker helpers are refreshed in the guest
-for every host collection.
+The latest usable JSON defaults to `logs\<VM>-ReportingDiagnostics.json`.
+Critical unavailable facts create a separate `*.failure-<id>.json` without
+overwriting earlier successful output. `-OutputPath` overrides this location.
+`-AsJson` returns one document but still retains raw files and checkpoints.
+`CollectionStatus`, `CollectionFailed`, `Attempts`, `FileManifests`, and
+`CollectionErrors` distinguish measured zero reports from unreadable data and
+show which source supplied a recovered fact. Source SHA-256 fingerprints are
+retained for the entry point, host helpers, transport, and bounded-worker code.
 
-After a broken PowerShell Direct channel, the original failure JSON is saved
-first. One bounded read-only guest call then attempts to append boot time, crash/
-service/Defender events, and the shared memory diagnostics, plus host Hyper-V
-state. It does not rerun the report probes or restart the VM/services. If that
-capture is unavailable, its error is retained alongside the original failure.
-
-The shared VM-command wrapper preserves exception details for session setup,
-execution, logging, and cleanup failures instead of returning an unexplained
-false or incomplete result.
-
-Evidence includes installed OS/Edge versions and Edge Update state, ConfigMgr
-report counts through SOAP and SQL, portal assets/API responses, and local
-reporting logs. Unavailable evidence is recorded explicitly. The collector does
-not reconfigure Reporting Services, restart services, launch a browser, or install
-software. HTTP success alone does not prove that the browser renders the portal.
+The collector does not install software, launch a browser, mount/modify a live
+VHDX, restart the VM/services, or change firewall, DNS, trust, credentials, or
+database configuration. Existing network access and administrative permissions
+are required: if every independent transport is blocked, the manifest records
+that limitation rather than inventing an empty healthy inventory. Local
+Windows PowerShell 5.1 collection remains available by omitting `-VMName`.
 
 Phase 11 automatically retains a snapshot for **every** reporting-point validation,
 including otherwise healthy checks so browser-only blank pages still have evidence.
 Files are saved beside the domain build log as
 `<VM>-Phase11-<timestamp>-ReportingDiagnostics.json`; their paths appear in the
-validation output. The owning site's `srsrp.log`, `srsrpsetup.log`, and
+validation output. Collection precedes reporting health/role probes that can warm
+or restart the reporting service. The owning site's `srsrp.log`, `srsrpsetup.log`, and
 `sitecomp.log` are also collected. SQL-hosted reporting points resolve their owning
 site even when the SQL VM has no `siteCode`.
 
-Validation now requires published ConfigMgr reports in the expected site folder
+Validation requires published ConfigMgr reports in the expected site folder,
+verified through SOAP or an explicitly successful, site-scoped SQL catalog read,
 and a responding portal with its required JavaScript assets and catalog API.
 Older integrated SSRS instances without the v2 API retain SOAP/portal validation.
 Collection or verification failures remain visible failures, not successful empty
@@ -78,10 +82,16 @@ and [`Test-ReportingValidation.ps1`](vmbuild/tools/Test-ReportingValidation.ps1)
 [`Test-ReportingProbeBounds.ps1`](vmbuild/tools/Test-ReportingProbeBounds.ps1)
 also exercises real HTTP response stalls and the shared transport timeout in
 the Windows PowerShell 5.1 guest runtime.
-It also runs the actual collector through local Windows PowerShell remoting,
-including replacement of a deliberately stale guest worker helper.
+It also runs isolated guest probes through real local Windows PowerShell
+remoting, without nested PowerShell workers in the guest.
 [`Test-VmCommandFailureDetails.ps1`](vmbuild/tools/Test-VmCommandFailureDetails.ps1)
 covers the shared command wrapper's failure envelopes.
+[`Test-ReportingResilience.ps1`](vmbuild/tools/Test-ReportingResilience.ps1)
+fault-tests copy ordering, locked files, exact byte limits, DNS/SMB/RPC/Direct/
+WinRM failures, SQL recovery, and durable partial output.
+[`Test-ReportingNativeWorkers.ps1`](vmbuild/tools/Test-ReportingNativeWorkers.ps1)
+executes real host workers, valid SOAP catalogs at zero/one/multiple-report
+boundaries, raw file/configuration capture, and interrupted-copy retention.
 
 ## GenConfig: deploying and updating VMs
 

@@ -275,6 +275,7 @@ try {
             if ($OutputStream) { [pscustomobject]@{ Text = "$Text"; LogLevel = 2 } }
         }
         function Format-TestResult { param($VMName, $RoleLabel, $Result); return $hooks.Passed }
+        function Add-Phase11Output { param($Text,$Level); $hooks.Messages.Add("$Text") }
         function Save-CMRoleFailureDiagnostics {
             param($VmName, $DomainName, $Phase, $DeployConfig, $Roles)
             $hooks.Captures.Add([pscustomobject]@{ VmName = $VmName; Phase = $Phase; Roles = $Roles })

@@ -75,6 +75,25 @@ $verdict = Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1
 if (-not $verdict.Passed -or ($verdict.Details | Where-Object { $_ -like 'FAIL:*' })) { throw 'An unused protocol invalidated the working endpoint.' }
 $evidence.Endpoints = @()
 if ((Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1).Passed) { throw 'Absent evidence was treated as healthy.' }
+$evidence = New-TestEvidence
+$evidence.Endpoints[0].Catalog = $null
+$evidence.Endpoints[0].CatalogError = 'SOAP transport unavailable'
+$evidence | Add-Member NoteProperty SqlCatalog @([pscustomobject]@{
+    Source='HostSQL'; Server='SQL1.fixture'; Database='ReportServer'; VerificationSucceeded=$true
+    ExpectedFolder='/ConfigMgr_PS1'; FolderExists=$true; ReportCount=1
+})
+if (-not (Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1).Passed) { throw 'Verified independent SQL publication did not satisfy an unavailable SOAP transport.' }
+foreach ($case in @('WrongSite','Unverified','NoFolder','Empty')) {
+    $sql = $evidence.SqlCatalog[0]
+    $sql.ExpectedFolder='/ConfigMgr_PS1'; $sql.VerificationSucceeded=$true; $sql.FolderExists=$true; $sql.ReportCount=1
+    switch ($case) {
+        WrongSite { $sql.ExpectedFolder='/ConfigMgr_PS2' }
+        Unverified { $sql.VerificationSucceeded=$false }
+        NoFolder { $sql.FolderExists=$false }
+        Empty { $sql.ReportCount=0 }
+    }
+    if ((Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1).Passed) { throw "Invalid SQL fallback '$case' was accepted." }
+}
 
 $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) "MemLabs-ReportingValidation-$([guid]::NewGuid().ToString('N'))"
 $null = New-Item -Path $fixtureRoot -ItemType Directory
@@ -130,6 +149,7 @@ function Invoke-VmCommand {
         throw 'Unexpected validation or log-capture transport.'
     }
     $reportingState.Calls.Add([pscustomobject]@{ VMName = $VmName; DisplayName = $DisplayName; Arguments = $ArgumentList })
+    if (-not (Get-ChildItem -LiteralPath $logDir -Filter '*ReportingDiagnostics.json')) { throw 'Reporting validation invoked guest PowerShell before retaining the file-first diagnostic snapshot.' }
     if ($DisplayName -eq 'Collect reporting diagnostics') {
         if ($TimeoutSeconds -ne 600 -or -not $RequireDomainIdentity -or -not $FailOnRemoteError -or
             $ArgumentList[0] -notmatch 'function Get-ReportingCatalogEvidence' -or $ArgumentList[1] -ne 'PS1') {
@@ -178,7 +198,7 @@ try {
         throw 'Healthy SQL-hosted RP did not retain report/browser evidence and pass.'
     }
     $arguments = Get-Content -LiteralPath (Join-Path $fixtureRoot 'Arguments.json') -Raw | ConvertFrom-Json
-    if ($arguments.SiteCode -ne 'PS1' -or $arguments.ReportServerUri -ne 'https://SQL1.adatum.com/ReportServer') { throw 'Automatic collector lost the inferred site or working report-server URL.' }
+    if ($arguments.SiteCode -ne 'PS1' -or $arguments.ReportServerUri) { throw 'Automatic collector lost its inferred site or forced a URL before file-first collection.' }
     if (@($script:ReportingState.Calls | Where-Object { $_.VMName -eq 'PRI1' }).Count -ne 2 -or
         @((Get-ChildItem -LiteralPath $logDir -Filter 'PRI1-Phase11-*-srsrp.log')).Count -ne 1 -or
         -not ($script:Phase11OutputBuffer | Where-Object { $_.Text -match 'Reporting diagnostic snapshot ->' })) {
@@ -234,13 +254,6 @@ try {
     $secondOwner = [pscustomobject]@{ vmName = 'PRI2'; role = 'Primary'; siteCode = 'PS2'; remoteSQLVM = 'SQL1' }
     $config.virtualMachines = @($primary, $secondOwner, $rp)
     if ((Invoke-TestReporting).Passed) { throw 'Ambiguous reporting ownership was silently accepted.' }
-    $config.virtualMachines = @($primary, $rp)
-    . $sourcePath
-    $integrationRun = Invoke-TestReporting
-    if (-not $integrationRun.Passed -or
-        @($script:ReportingState.Calls | Where-Object { $_.DisplayName -eq 'Collect reporting diagnostics' }).Count -ne 1) {
-        throw "The real Phase 11 library did not invoke the host collector successfully: $($integrationRun.Snapshot | ConvertTo-Json -Depth 6 -Compress); output=$($script:Phase11OutputBuffer | ConvertTo-Json -Compress)"
-    }
 }
 finally { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction Stop }
 

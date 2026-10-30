@@ -6704,15 +6704,28 @@ function Test-ReportingDiagnosticEvidence {
     )
 
     $results = @{ Passed = $false; Details = [System.Collections.Generic.List[string]]::new() }
+    if ($Evidence.CollectionStatus -eq 'Partial') {
+        $results.Details.Add("WARN: Diagnostic capture is partial; independent raw files and checkpoints are retained. $((@($Evidence.CollectionErrors)+@($Evidence.Warnings)) -join '; ')")
+    }
     $failures = [System.Collections.Generic.List[string]]::new()
     $expectedFolder = if ($SiteCode) { "/ConfigMgr_$SiteCode" } else { 'a ConfigMgr_* folder' }
+    $sqlPublication = @($Evidence.SqlCatalog | Where-Object {
+            $_.VerificationSucceeded -eq $true -and $_.Source -in @('HostSQL','GuestSQL') -and
+            $_.ExpectedFolder -eq $expectedFolder -and $_.FolderExists -eq $true -and $_.ReportCount -ge 1
+        } | Select-Object -First 1)
     $legacy = @($Evidence.Services | Where-Object { $_.Name -match '^ReportServer(\$|$)' }).Count -gt 0 -and
         @($Evidence.Services | Where-Object { $_.Name -in @('PowerBIReportServer', 'SQLServerReportingServices') }).Count -eq 0
     foreach ($endpoint in @($Evidence.Endpoints)) {
         $reasons = [System.Collections.Generic.List[string]]::new()
         $catalog = $endpoint.Catalog
+        $publicationSource = 'SOAP'
+        $reportCount = $catalog.ReportCount
         if ($endpoint.CatalogError -or -not $catalog -or $catalog.RootType -ne 'Folder') {
-            $reasons.Add('report catalog could not be read')
+            if ($sqlPublication.Count -eq 1) {
+                $publicationSource = "$($sqlPublication[0].Source) ($($sqlPublication[0].Server)/$($sqlPublication[0].Database))"
+                $reportCount = $sqlPublication[0].ReportCount
+            }
+            else { $reasons.Add('report catalog could not be read through SOAP or verified SQL') }
         }
         elseif (($SiteCode -and $catalog.ExpectedFolder -ne $expectedFolder) -or
             -not $catalog.ConfigMgrFolderFound -or $catalog.ReportCount -lt 1) {
@@ -6736,7 +6749,7 @@ function Test-ReportingDiagnosticEvidence {
         }
         if ($reasons.Count -eq 0) {
             $results.Passed = $true
-            $results.Details.Add("OK: $($catalog.ReportCount) published report(s) verified in $expectedFolder at '$($endpoint.Uri)'")
+            $results.Details.Add("OK: $reportCount published report(s) verified in $expectedFolder through $publicationSource at '$($endpoint.Uri)'")
             $results.Details.Add("OK: Web portal and its required endpoints/assets verified at '$($portal.Uri)'")
             if ($legacy -and $portal.RestApi.StatusCode -eq 404) {
                 $results.Details.Add('Legacy ReportServer service has no v2 REST API; SOAP catalog and portal checks were used.')
@@ -6986,22 +6999,20 @@ function Test-ReportingFunctionality {
         return $results
     }
 
-    try {
-        $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-            -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog `
-            -AsJob -TimeoutSeconds 300
-    }
-    catch {
+    $runInfrastructureCheck = {
         try {
-            Save-CMRoleFailureDiagnostics -VmName $VMName -DomainName $Domain -Phase $Phase -DeployConfig $DeployConfig -Roles 'RP'
+            $infrastructureResult = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+                -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog `
+                -AsJob -TimeoutSeconds 300
         }
         catch {
-            Write-Log "[Phase $Phase] $VMName [RP]: diagnostic capture failed while preserving the original validation exception: $($_.Exception.Message)" -Warning
+            try { Save-CMRoleFailureDiagnostics -VmName $VMName -DomainName $Domain -Phase $Phase -DeployConfig $DeployConfig -Roles 'RP' }
+            catch { Write-Log "[Phase $Phase] $VMName [RP]: diagnostic capture failed while preserving the original validation exception: $($_.Exception.Message)" -Warning }
+            throw
         }
-        throw
+        Format-TestResult -VMName $VMName -RoleLabel 'RP' -Result $infrastructureResult
     }
-
-    $allPassed = Format-TestResult -VMName $VMName -RoleLabel 'RP' -Result $result
+    $allPassed = $true
 
     $siteCode = "$($CurrentItem.siteCode)"
     $cmVmName = $null
@@ -7076,13 +7087,12 @@ function Test-ReportingFunctionality {
             return $results
         }
 
-        $rpRoleResult = Invoke-VmCommand -VmName $cmVmName -VmDomainName $Domain `
-            -ScriptBlock $rpRoleScript -ArgumentList $siteCode, $rpVmName, $Domain `
-            -DisplayName "Phase11-RP-CMRole-Test" -SuppressLog `
-            -AsJob -TimeoutSeconds 300
-
-        if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-CMRole' -Result $rpRoleResult)) {
-            $allPassed = $false
+        $runRoleCheck = {
+            $rpRoleResult = Invoke-VmCommand -VmName $cmVmName -VmDomainName $Domain `
+                -ScriptBlock $rpRoleScript -ArgumentList $siteCode, $rpVmName, $Domain `
+                -DisplayName "Phase11-RP-CMRole-Test" -SuppressLog `
+                -AsJob -TimeoutSeconds 300
+            Format-TestResult -VMName $VMName -RoleLabel 'RP-CMRole' -Result $rpRoleResult
         }
     }
 
@@ -7100,9 +7110,6 @@ function Test-ReportingFunctionality {
         $collectorPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\Get-ReportingDiagnostics.ps1'
         $collectorArguments = @{ VMName = $VMName; AsJson = $true }
         if ($siteCode) { $collectorArguments.SiteCode = $siteCode }
-        if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.ReportServerUri) {
-            $collectorArguments.ReportServerUri = $result.ScriptBlockOutput.ReportServerUri
-        }
         $payload = @(& $collectorPath @collectorArguments)
         if ($payload.Count -ne 1 -or $payload[0] -isnot [string]) {
             throw 'Reporting collector did not return one JSON document.'
@@ -7138,6 +7145,8 @@ function Test-ReportingFunctionality {
     }
     $diagnosticWrapper = [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $diagnosticResult }
     if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-Publication' -Result $diagnosticWrapper)) { $allPassed = $false }
+    if (-not (& $runInfrastructureCheck)) { $allPassed = $false }
+    if ($cmVmName -and -not (& $runRoleCheck)) { $allPassed = $false }
     if ($cmVmName) {
         try {
             $siteLogs = @(Save-Phase11GuestLogs -VMName $cmVmName -DomainName $Domain -RoleLabel 'RP-Site' -Collector $Phase11ReportingSiteLogCollector)

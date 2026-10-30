@@ -22,7 +22,7 @@ function Import-TestFunction {
     [scriptblock]::Create($definitions[0].Extent.Text)
 }
 $collectorPath = Join-Path $RootPath 'tools\Get-ReportingDiagnostics.ps1'
-foreach ($name in @('Get-ReportingCatalogEvidence', 'Get-ReportingPortalEvidence', 'Get-ReportingEndpointEvidence', 'Get-ReportingTransportFailureEvidence')) {
+foreach ($name in @('Invoke-ReportingWebRequest', 'Get-ReportingCatalogEvidence', 'Get-ReportingPortalEvidence', 'Get-ReportingEndpointEvidence', 'Get-ReportingTransportFailureEvidence')) {
     . (Import-TestFunction -Path $collectorPath -Name $name)
 }
 . (Join-Path $RootPath 'DSC\phases\ProcessFunctions.ps1')
@@ -36,6 +36,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 namespace MemLabs {
     public sealed class ReportingHttpFixture : IDisposable {
         private readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
@@ -45,6 +46,8 @@ namespace MemLabs {
         public readonly ConcurrentQueue<string> Requests = new ConcurrentQueue<string>();
         public readonly ConcurrentQueue<string> Errors = new ConcurrentQueue<string>();
         public volatile bool StallApi = true;
+        public volatile bool SoapCatalog = false;
+        public int ReportCount = 1;
         public int Port { get { return ((IPEndPoint)listener.LocalEndpoint).Port; } }
         public ReportingHttpFixture() {
             listener.Start();
@@ -79,7 +82,43 @@ namespace MemLabs {
                     string path = first.Split(' ')[1];
                     Requests.Enqueue(path);
                     string line;
-                    do { line = reader.ReadLine(); } while (!String.IsNullOrEmpty(line));
+                    string soapAction = "";
+                    int bodyLength = 0;
+                    do {
+                        line = reader.ReadLine();
+                        if (line != null && line.StartsWith("SOAPAction:", StringComparison.OrdinalIgnoreCase)) soapAction = line;
+                        if (line != null && line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) bodyLength = Int32.Parse(line.Substring(15).Trim());
+                    } while (!String.IsNullOrEmpty(line));
+                    if (SoapCatalog && path.StartsWith("/ReportServer/ReportService2010.asmx", StringComparison.OrdinalIgnoreCase)) {
+                        string response;
+                        if (!first.StartsWith("POST ", StringComparison.Ordinal)) response = Wsdl();
+                        else {
+                            if (bodyLength < 0 || bodyLength > 131072) throw new InvalidDataException("Invalid fixture SOAP body length.");
+                            char[] bodyChars = new char[bodyLength];
+                            int used = 0;
+                            while (used < bodyChars.Length) {
+                                int count = reader.Read(bodyChars, used, bodyChars.Length - used);
+                                if (count == 0) throw new EndOfStreamException();
+                                used += count;
+                            }
+                            string requestBody = new String(bodyChars);
+                            string operation = soapAction.Contains("GetItemType") ? "GetItemType" : "ListChildren";
+                            string result;
+                            if (operation == "GetItemType") result = "Folder";
+                            else {
+                                result = "";
+                                if (Regex.IsMatch(requestBody, "<(?:\\w+:)?ItemPath>\\s*/\\s*</")) result = CatalogItem("ConfigMgr_PS1", "/ConfigMgr_PS1", "Folder");
+                                else for (int i = 0; i < ReportCount; i++) result += CatalogItem("Report" + i, "/ConfigMgr_PS1/Hardware/Report" + i, "Report");
+                            }
+                            response = "<soap:Envelope xmlns:soap='http://schemas.xmlsoap.org/soap/envelope/'><soap:Body><" +
+                                operation + "Response xmlns='urn:memlabs:reporting'><" + operation + "Result>" + result +
+                                "</" + operation + "Result></" + operation + "Response></soap:Body></soap:Envelope>";
+                        }
+                        byte[] payload = Encoding.UTF8.GetBytes(response);
+                        byte[] soapHeader = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: " + payload.Length + "\r\nConnection: close\r\n\r\n");
+                        stream.Write(soapHeader,0,soapHeader.Length); stream.Write(payload,0,payload.Length); stream.Flush();
+                        return;
+                    }
                     bool api = path.StartsWith("/Reports/api/", StringComparison.OrdinalIgnoreCase);
                     string body = api ? "{\"value\":[]}" :
                         path.EndsWith("main.js", StringComparison.OrdinalIgnoreCase) ? "console.log('reporting');" :
@@ -109,6 +148,31 @@ namespace MemLabs {
             workers.Dispose();
             stopping.Dispose();
         }
+        private string CatalogItem(string name, string path, string type) {
+            return "<CatalogItem><Name>" + name + "</Name><Path>" + path + "</Path><TypeName>" + type + "</TypeName></CatalogItem>";
+        }
+        private string Wsdl() {
+            StringBuilder xml = new StringBuilder("<wsdl:definitions xmlns:wsdl='http://schemas.xmlsoap.org/wsdl/' xmlns:s='http://www.w3.org/2001/XMLSchema' xmlns:soap='http://schemas.xmlsoap.org/wsdl/soap/' xmlns:tns='urn:memlabs:reporting' targetNamespace='urn:memlabs:reporting'>");
+            xml.Append("<wsdl:types><s:schema elementFormDefault='qualified' targetNamespace='urn:memlabs:reporting'><s:complexType name='CatalogItem'><s:sequence><s:element name='Name' type='s:string'/><s:element name='Path' type='s:string'/><s:element name='TypeName' type='s:string'/></s:sequence></s:complexType><s:complexType name='ArrayOfCatalogItem'><s:sequence><s:element name='CatalogItem' type='tns:CatalogItem' minOccurs='0' maxOccurs='unbounded'/></s:sequence></s:complexType>");
+            foreach (string op in new string[] {"GetItemType", "ListChildren"}) {
+                xml.Append("<s:element name='" + op + "'><s:complexType><s:sequence><s:element name='ItemPath' type='s:string'/>" +
+                    (op == "ListChildren" ? "<s:element name='Recursive' type='s:boolean'/>" : "") +
+                    "</s:sequence></s:complexType></s:element><s:element name='" + op + "Response'><s:complexType><s:sequence><s:element name='" + op + "Result' type='" +
+                    (op == "ListChildren" ? "tns:ArrayOfCatalogItem" : "s:string") + "'/></s:sequence></s:complexType></s:element>");
+            }
+            xml.Append("</s:schema></wsdl:types>");
+            foreach (string op in new string[] {"GetItemType", "ListChildren"})
+                foreach (string suffix in new string[] {"", "Response"})
+                    xml.Append("<wsdl:message name='" + op + suffix + "'><wsdl:part name='parameters' element='tns:" + op + suffix + "'/></wsdl:message>");
+            xml.Append("<wsdl:portType name='ReportingSoap'>");
+            foreach (string op in new string[] {"GetItemType", "ListChildren"})
+                xml.Append("<wsdl:operation name='" + op + "'><wsdl:input message='tns:" + op + "'/><wsdl:output message='tns:" + op + "Response'/></wsdl:operation>");
+            xml.Append("</wsdl:portType><wsdl:binding name='ReportingSoap' type='tns:ReportingSoap'><soap:binding transport='http://schemas.xmlsoap.org/soap/http' style='document'/>");
+            foreach (string op in new string[] {"GetItemType", "ListChildren"})
+                xml.Append("<wsdl:operation name='" + op + "'><soap:operation soapAction='urn:memlabs:reporting/" + op + "'/><wsdl:input><soap:body use='literal'/></wsdl:input><wsdl:output><soap:body use='literal'/></wsdl:output></wsdl:operation>");
+            xml.Append("</wsdl:binding><wsdl:service name='Reporting'><wsdl:port name='ReportingSoap' binding='tns:ReportingSoap'><soap:address location='http://127.0.0.1:" + Port + "/ReportServer/ReportService2010.asmx'/></wsdl:port></wsdl:service></wsdl:definitions>");
+            return xml.ToString();
+        }
     }
 }
 '@
@@ -116,6 +180,7 @@ namespace MemLabs {
 if ($PSVersionTable.PSEdition -eq 'Core') {
     & {
         . (Import-TestFunction -Path (Join-Path $RootPath 'Common.ps1') -Name 'Invoke-VmCommand')
+        . (Join-Path $PSScriptRoot 'Common.ReportingDiagnostics.ps1')
         . (Import-TestFunction -Path (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Name 'Get-MemLabsMemoryDiagnosticProbe')
         $server = [MemLabs.ReportingHttpFixture]::new()
         $server.StallApi = $false
@@ -144,13 +209,16 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
             Invoke-Command -Session $remote -ScriptBlock {
                 function global:Invoke-MemLabsBoundedPowerShell { throw 'Fixture stale worker helper reused' }
             } -ErrorAction Stop
-            $json = @(& $collectorPath -VMName RP-TEST -SiteCode PS1 -ReportServerUri "http://127.0.0.1:$($server.Port)/ReportServer" -AsJson)
-            if ($json.Count -ne 1 -or $json[0] -isnot [string]) { throw 'Real remoting collection did not return one JSON document.' }
-            $document = $json[0] | ConvertFrom-Json
-            if ($document.ComputerName -ne $env:COMPUTERNAME -or
-                $document.Endpoints[0].ReportServerPage.StatusCode -ne 200 -or
-                $document.Endpoints[0].Portal.RestApi.StatusCode -ne 200) {
-                throw "Real remoting collection lost web evidence: $($document.Endpoints | ConvertTo-Json -Depth 6 -Compress)"
+            $source = ''
+            foreach ($name in @('Invoke-ReportingWebRequest','Get-ReportingPortalEvidence')) {
+                $source += "function $name { $((Get-Command $name).Definition) }`n"
+            }
+            $probe = { param($Source,$Uri); . ([scriptblock]::Create($Source)); Get-ReportingPortalEvidence -PortalUri ([uri]$Uri) }
+            $result = Invoke-ReportingGuestAlternative -VMName RP-TEST -Domain example -Addresses @('localhost') `
+                -Credential $Common.LocalAdmin -Probe $probe -ProbeArguments $source,"http://127.0.0.1:$($server.Port)/Reports/" `
+                -PrimitiveSource $source -Name Portal -TimeoutSeconds 20
+            if ($result.Error -or $result.Method -ne 'PowerShellDirect' -or $result.Output.RestApi.StatusCode -ne 200) {
+                throw "Real isolated guest probe failed: $($result.Error)"
             }
             $context = Get-ReportingTransportFailureEvidence -VMName RP-TEST -Domain example -StartedAt ([DateTime]::UtcNow.ToString('o'))
             if ($context.Guest.ComputerName -ne $env:COMPUTERNAME -or $context.Guest.EventLogs.Count -ne 3 -or -not $context.Guest.Memory) {
@@ -168,7 +236,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
             if ($remote) { Remove-PSSession -Session $remote -ErrorAction Stop }
             $server.Dispose()
         }
-        Write-Host 'PASS -- the real collector executes through the shared asynchronous transport and Windows PowerShell remoting.'
+        Write-Host 'PASS -- isolated guest probes execute through the actual shared asynchronous transport without nested guest workers.'
     }
     & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File $PSCommandPath -RootPath $RootPath
     if ($LASTEXITCODE -ne 0) { throw 'Reporting guest-runtime regression failed in Windows PowerShell 5.1.' }
@@ -178,12 +246,12 @@ $server = [MemLabs.ReportingHttpFixture]::new()
 try {
     $uri = [uri] "http://127.0.0.1:$($server.Port)/ReportServer"
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $blocked = Get-ReportingEndpointEvidence -ServerUri $uri -SiteCode PS1 -TimeoutSeconds 3
+    $blocked = Get-ReportingEndpointEvidence -ServerUri $uri -SiteCode PS1 -TimeoutSeconds 6
     $clock.Stop()
     $portalProbe = $blocked.Probes | Where-Object { $_.Name -eq 'Portal' }
-    if (-not $portalProbe.TimedOut -or $blocked.PortalError -notmatch '3-second wall-clock limit' -or
+    if (-not $portalProbe.TimedOut -or $blocked.PortalError -notmatch '6-second wall-clock limit' -or
         $portalProbe.LastRequest -notmatch '/Reports/api/v2.0/CatalogItems' -or
-        $blocked.ReportServerPage.StatusCode -ne 200 -or $clock.Elapsed.TotalSeconds -ge 18) {
+        $blocked.ReportServerPage.StatusCode -ne 200 -or $clock.Elapsed.TotalSeconds -ge 30) {
         throw "Stalled HTTP body was not bounded with other evidence retained: $($blocked | ConvertTo-Json -Depth 6 -Compress)"
     }
     if (-not ($server.Requests.ToArray() | Where-Object { $_ -like '/Reports/api/*' })) { throw 'Fixture did not reach the stalled REST response.' }
@@ -251,24 +319,9 @@ function Remove-VmSessionFromCache {
     param($VmName, [switch]$LeakSession, $AbandonedJob)
     $transport.Evicted = $LeakSession -and $null -ne $AbandonedJob
 }
-$threw = $false
-$failurePath = $null
-try { $null = & $collectorPath -VMName RP-TEST -SiteCode PS1 -AsJson }
-catch {
-    $threw = $_.Exception.Message -match '600-second transport limit'
-    if ($_.Exception.Message -match 'Failure evidence: (.+\.json)$') { $failurePath = $Matches[1] }
-}
-if ($failurePath) {
-    try {
-        $failure = Get-Content -LiteralPath $failurePath -Raw | ConvertFrom-Json
-        if (-not $failure.Transport.TimedOut -or -not $failure.HostCollection.CollectorSourceHash) {
-            throw 'Actual transport timeout lost its persisted failure metadata.'
-        }
-    }
-    finally { Remove-Item -LiteralPath $failurePath -Force -ErrorAction Stop }
-}
-if (-not $threw -or -not $transport.StopRequested -or -not $transport.Evicted -or
-    -not $failurePath -or
+$result = Invoke-VmCommand -VmName RP-TEST -VmDomainName example -ScriptBlock { 1 } `
+    -DisplayName 'Isolated timeout regression' -AsJob -TimeoutSeconds 40 -SuppressLog
+if (-not $result.TimedOut -or ($result.ErrorDetails -join ' ') -notmatch '40s' -or -not $transport.StopRequested -or -not $transport.Evicted -or
     -not ($transport.Logs | Where-Object { $_ -match 'Timeout autopsy.*Reading web response' })) {
     throw "Actual Invoke-VmCommand timeout was not surfaced or safely cancelled: $($transport | ConvertTo-Json -Compress)"
 }

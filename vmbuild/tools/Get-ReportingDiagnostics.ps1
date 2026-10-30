@@ -2,24 +2,30 @@
 .SYNOPSIS
     Collects reporting evidence locally or from the Hyper-V host.
 .DESCRIPTION
-    With VMName, run elevated on the MemLabs Hyper-V host. Uses PowerShell Direct
-    and the existing MemLabs domain credentials; no guest file copy or WinRM needed.
-    Explicitly loads cached guest credentials when the host session has none.
-    Without VMName, run locally in Windows PowerShell 5.1 as a domain administrator.
-    Does not install software, restart services, modify databases, or change
-    configuration. Writes JSON on the calling machine, or returns JSON with AsJson.
-    Does not launch a browser or modify its profile.
-    SOAP/catalog access, HTTP responses, and browser versions are recorded
-    separately: a working SOAP root does not prove reports exist or the portal works.
-    SOAP discovery, report-server pages, and portal checks run in separate bounded
-    workers. A stalled web check is recorded without discarding other evidence.
-    Local collection requires the MemLabs checkout and its ProcessFunctions.ps1
-    helper; host mode transmits that helper automatically.
-    Host-side transport failures write a separate failure JSON with source
-    fingerprints and error details, without overwriting earlier evidence.
-    Host JSON defaults to the build logs directory for normal log synchronization.
-    A broken channel triggers one bounded, read-only crash/memory evidence capture
-    after the original failure has been saved; no VM or service is restarted.
+    Run elevated on the MemLabs Hyper-V host with VMName. Raw reporting/site/setup
+    logs and selected live event-log snapshots are copied through SMB before any
+    guest PowerShell runs. Cached MemLabs credentials and Hyper-V network addresses
+    are used; no manual guest script copy is required.
+
+    Independent host RPC/WMI/events, HTTP/SOAP/REST, and read-only SQL probes run
+    in bounded workers and checkpoint evidence in host logs after each stage.
+    Missing facts use isolated PowerShell Direct probes, then existing WinRM.
+    A broken Direct channel is not repeatedly retried. Fresh crash events are
+    requested through native RPC, not through the broken guest process.
+
+    Full files up to 32 MiB are copied; larger text logs retain their last 8 MiB.
+    Live EVTX snapshots must fit 64 MiB and are never tailed. Per-copy-pass data
+    is limited to 256 MiB. Missing, unreadable, truncated and aborted files are
+    explicit in the manifests. Security.evtx and raw encrypted RS configuration
+    are not exported. No VM, service, firewall, DNS, trust or database settings
+    are changed. Does not launch a browser.
+
+    Host JSON, raw files and per-run partial checkpoints default to the build
+    logs directory for synchronization. Critical unavailable facts create a
+    separate failure JSON; earlier successful output is preserved. AsJson returns
+    one document with explicit CollectionStatus/CollectionFailed flags, while
+    retaining raw files and checkpoints. Without VMName, local Windows PowerShell
+    5.1 collection remains available. HTTP success is not a browser-rendering test.
 .EXAMPLE
     .\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
 .EXAMPLE
@@ -166,8 +172,67 @@ function Get-ReportingCatalogEvidence {
     }
 }
 
+function Invoke-ReportingWebRequest {
+    param([Parameter(Mandatory)][uri]$Uri, [pscredential]$Credential, [int]$TimeoutSeconds = 20)
+    $current = $Uri
+    for ($redirect = 0; $redirect -le 5; $redirect++) {
+        $arguments = @{
+            Uri = $current; UseBasicParsing = $true; TimeoutSec = $TimeoutSeconds
+            MaximumRedirection = 0; ErrorAction = 'Stop'
+        }
+        if ($Credential) { $arguments.Credential = $Credential }
+        else { $arguments.UseDefaultCredentials = $true }
+        $response = $null
+        $requestError = $null
+        try { $response = Invoke-WebRequest @arguments }
+        catch {
+            $requestError = $_
+            $response = $_.Exception.Response
+            if (-not $response) { throw }
+            if ([int]$response.StatusCode -ge 400) {
+                $content = ''; $bodyError = $null; $reader = $null
+                try {
+                    if ($response.PSObject.Methods['GetResponseStream']) {
+                        $reader = [IO.StreamReader]::new($response.GetResponseStream())
+                        $buffer = [char[]]::new(16384)
+                        $used = 0
+                        while ($used -lt $buffer.Length) {
+                            $count = $reader.Read($buffer,$used,$buffer.Length-$used)
+                            if ($count -eq 0) { break }
+                            $used += $count
+                        }
+                        if ($used -gt 0) { $content = [string]::new($buffer,0,$used) }
+                    }
+                    else { $bodyError = 'HTTP error response did not expose a readable body stream.' }
+                }
+                catch { $bodyError = $_.Exception.Message }
+                finally { if ($reader) { $reader.Dispose() } }
+                return [pscustomobject]@{
+                    StatusCode=[int]$response.StatusCode; Content=$content; Headers=$response.Headers
+                    BaseResponse=[pscustomobject]@{ResponseUri=$current}
+                    HttpError=$requestError.Exception.Message; BodyReadError=$bodyError
+                }
+            }
+            if ([int]$response.StatusCode -notin @(301,302,303,307,308)) { throw }
+        }
+        if ([int]$response.StatusCode -notin @(301,302,303,307,308)) { return $response }
+        $location = [string]$response.Headers['Location']
+        if (-not $location) {
+            if ($requestError) { throw $requestError }
+            throw "Reporting redirect from '$current' did not specify a Location."
+        }
+        $next = [uri]::new($current,$location)
+        if ($next.Scheme -ne $Uri.Scheme -or $next.Authority -ne $Uri.Authority -or $next.UserInfo) {
+            throw "Reporting redirect to another origin was not followed with credentials: '$current' -> '$next'."
+        }
+        $current = $next
+    }
+    throw "Reporting request exceeded five same-origin redirects: $Uri"
+}
+
 function Get-ReportingPortalEvidence {
-    param([Parameter(Mandatory)][uri] $PortalUri, [string] $ProgressPath)
+    param([Parameter(Mandatory)][uri] $PortalUri, [string] $ProgressPath, [pscredential]$Credential,
+        [string]$ArtifactDirectory,[string]$ArtifactPrefix)
 
     $request = {
         param($Uri, $TimeoutSeconds)
@@ -176,7 +241,7 @@ function Get-ReportingPortalEvidence {
                 Id = 'reporting'; Stage = 'Portal'; Message = "GET $Uri"; UpdatedAtUtc = [DateTime]::UtcNow.ToString('o')
             }
         }
-        Invoke-WebRequest -Uri $Uri -UseDefaultCredentials -UseBasicParsing -TimeoutSec $TimeoutSeconds -ErrorAction Stop
+        Invoke-ReportingWebRequest -Uri $Uri -Credential $Credential -TimeoutSeconds $TimeoutSeconds
     }
     $page = & $request $PortalUri 30
     $html = [string] $page.Content
@@ -187,7 +252,7 @@ function Get-ReportingPortalEvidence {
     $scripts = @(
         foreach ($match in [regex]::Matches($html, '(?is)<script\b[^>]*\bsrc\s*=\s*["'']([^"'']+)') | Select-Object -First 8) {
             $assetUri = [uri]::new($baseUri, [System.Net.WebUtility]::HtmlDecode($match.Groups[1].Value))
-            $asset = [ordered]@{ Uri = $assetUri.AbsoluteUri; StatusCode = $null; ContentType = $null; Error = $null }
+            $asset = [ordered]@{ Uri = $assetUri.AbsoluteUri; StatusCode = $null; ContentType = $null; Error = $null; SavedResponse = $null; ResponseTruncated = $false }
             if ($assetUri.Authority -ne $PortalUri.Authority -or $assetUri.Scheme -ne $PortalUri.Scheme) {
                 $asset.Error = 'External asset not requested; credentials are only sent to the portal origin.'
             }
@@ -198,6 +263,16 @@ function Get-ReportingPortalEvidence {
                     $asset.ContentType = [string] $response.Headers['Content-Type']
                     if (-not $response.Content -or $asset.ContentType -match 'text/html') {
                         $asset.Error = 'Script request returned an empty body or HTML rather than JavaScript.'
+                    }
+                    if ($ArtifactDirectory -and $ArtifactPrefix) {
+                        $body = [Text.Encoding]::UTF8.GetBytes([string]$response.Content)
+                        $asset.ResponseTruncated = $body.Length -gt 2MB
+                        $suffix = (Get-ReportingSourceHash -Source $assetUri.AbsoluteUri).Substring(0,12)
+                        $asset.SavedResponse = Join-Path $ArtifactDirectory "$ArtifactPrefix-$suffix-script.response.txt"
+                        $output = [IO.File]::Open("$($asset.SavedResponse).partial",[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                        try { $output.Write($body,0,[int][math]::Min(2MB,$body.Length)) }
+                        finally { $output.Dispose() }
+                        [IO.File]::Move("$($asset.SavedResponse).partial",$asset.SavedResponse)
                     }
                 }
                 catch {
@@ -227,6 +302,9 @@ function Get-ReportingPortalEvidence {
         Uri = $PortalUri.AbsoluteUri
         StatusCode = [int] $page.StatusCode
         HtmlLength = $html.Length
+        HtmlExcerpt = $html.Substring(0,[math]::Min(16384,$html.Length))
+        HttpError = $page.HttpError
+        BodyReadError = $page.BodyReadError
         Title = [regex]::Match($html, '(?is)<title[^>]*>(.*?)</title>').Groups[1].Value
         ScriptAssets = $scripts
         RestApi = [pscustomobject] $api
@@ -274,7 +352,7 @@ function Get-ReportingEndpointEvidence {
         PortalError = $null
         Probes = @()
     }
-    $helperSource = "function Get-ReportingCatalogEvidence { ${function:Get-ReportingCatalogEvidence} }`nfunction Get-ReportingPortalEvidence { ${function:Get-ReportingPortalEvidence} }`nfunction Write-MemLabsProcessProgress { ${function:Write-MemLabsProcessProgress} }"
+    $helperSource = "function Get-ReportingCatalogEvidence { ${function:Get-ReportingCatalogEvidence} }`nfunction Invoke-ReportingWebRequest { ${function:Invoke-ReportingWebRequest} }`nfunction Get-ReportingPortalEvidence { ${function:Get-ReportingPortalEvidence} }`nfunction Write-MemLabsProcessProgress { ${function:Write-MemLabsProcessProgress} }"
     $probe = {
         param($Stage, $ServerUri, $SiteCode, $HelperSource, $ProgressPath)
         $ProgressPreference = 'SilentlyContinue'
@@ -359,28 +437,6 @@ if ($VMName) {
             throw "MemLabs guest credentials are unavailable on this host for '$targetVmName'. $reason"
         }
     }
-    $guestCollector = {
-        param($Source, $SiteCode, $ReportServerUri, $ProcessSource)
-        . ([scriptblock]::Create($ProcessSource))
-        $collectorArguments = @{ AsJson = $true }
-        if ($SiteCode) { $collectorArguments.SiteCode = $SiteCode }
-        if ($ReportServerUri) { $collectorArguments.ReportServerUri = $ReportServerUri }
-        & ([scriptblock]::Create($Source)) @collectorArguments
-    }
-    $transportCommand = Get-Command Invoke-VmCommand -CommandType Function -ErrorAction Stop
-    $hostMetadata = [pscustomobject]@{
-        InvocationId = [guid]::NewGuid().ToString('N')
-        StartedAt = [DateTime]::UtcNow.ToString('o')
-        CollectorPath = $PSCommandPath
-        CollectorSourceHash = Get-ReportingSourceHash -Source $collectorSource
-        TransportFunctionPath = $transportCommand.ScriptBlock.File
-        TransportSourceHash = Get-ReportingSourceHash -Source $transportCommand.Definition
-        WorkerSourceHash = Get-ReportingSourceHash -Source $processSource
-        HostPowerShellVersion = $PSVersionTable.PSVersion.ToString()
-        HostProcessId = $PID
-        VMName = $targetVmName
-        Domain = "$($note.domain)"
-    }
     $targetPath = if ($OutputPath) { [IO.Path]::GetFullPath($OutputPath) }
     else {
         $logDirectory = if ($Common.LogPath) { Split-Path $Common.LogPath -Parent }
@@ -388,78 +444,13 @@ if ($VMName) {
         $null = New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop
         Join-Path $logDirectory "$targetVmName-ReportingDiagnostics.json"
     }
-    $vmResult = $null
-    try {
-        $vmResult = Invoke-VmCommand -VmName $targetVmName -VmDomainName $note.domain `
-            -ScriptBlock $guestCollector -ArgumentList $collectorSource, $SiteCode, "$ReportServerUri", $processSource `
-            -DisplayName 'Collect reporting diagnostics' -AsJob -TimeoutSeconds 600 `
-            -RequireDomainIdentity -FailOnRemoteError -SuppressLog
-        if (-not $vmResult -or -not $vmResult.CommandResult -or $vmResult.ScriptBlockFailed) {
-            $detail = if ($vmResult.TimedOut) { 'The guest diagnostic call exceeded its 600-second transport limit; see the timeout autopsy in the host build log.' }
-            elseif ($vmResult.ErrorDetails) { $vmResult.ErrorDetails -join '; ' }
-            elseif ($vmResult.ChannelBroken) { 'The PowerShell Direct channel broke during collection; see the host build log.' }
-            else {
-                $resultType = if ($null -eq $vmResult) { 'null' } else { $vmResult.GetType().FullName }
-                "The transport returned no usable failure detail (type=$resultType, CommandResult=$($vmResult.CommandResult), ScriptBlockFailed=$($vmResult.ScriptBlockFailed)); see the host build log."
-            }
-            throw "Reporting diagnostics failed on '$targetVmName': $detail"
-        }
-        $payload = @($vmResult.ScriptBlockOutput)
-        if ($payload.Count -ne 1 -or $payload[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($payload[0])) {
-            throw "Reporting diagnostics on '$targetVmName' did not return one JSON document."
-        }
-        $document = $payload[0] | ConvertFrom-Json -ErrorAction Stop
-        foreach ($property in @('ComputerName', 'CollectedAt', 'Endpoints', 'CollectionErrors')) {
-            if ($property -notin $document.PSObject.Properties.Name) {
-                throw "Reporting diagnostics on '$targetVmName' returned JSON without '$property'."
-            }
-        }
-    }
-    catch {
-        $collectionError = $_
-        $failurePath = [IO.Path]::ChangeExtension($targetPath, "failure-$($hostMetadata.InvocationId).json")
-        $resultType = if ($null -eq $vmResult) { 'null' } else { $vmResult.GetType().FullName }
-        try {
-            $failureRecord = [ordered]@{
-                ComputerName = $targetVmName
-                CollectedAt = [DateTime]::UtcNow.ToString('o')
-                SiteCode = $SiteCode
-                CollectionFailed = $true
-                CollectionErrors = @($collectionError.Exception.ToString())
-                ErrorLocation = "$($collectionError.InvocationInfo.ScriptName):$($collectionError.InvocationInfo.ScriptLineNumber)"
-                StackTrace = $collectionError.ScriptStackTrace
-                HostCollection = $hostMetadata
-                Transport = [ordered]@{
-                    ResultType = $resultType
-                    CommandResult = $vmResult.CommandResult
-                    ScriptBlockFailed = $vmResult.ScriptBlockFailed
-                    TimedOut = $vmResult.TimedOut
-                    ChannelBroken = $vmResult.ChannelBroken
-                    ErrorDetails = @($vmResult.ErrorDetails)
-                }
-            }
-            Write-MemLabsProcessProgress -Path $failurePath -Record $failureRecord
-        }
-        catch { throw "$($collectionError.Exception.Message) Failure evidence could not be saved to '$failurePath': $($_.Exception.Message)" }
-        if ($vmResult.ChannelBroken) {
-            try {
-                $failureRecord.TransportFailureEvidence = Get-ReportingTransportFailureEvidence `
-                    -VMName $targetVmName -Domain $note.domain -StartedAt $hostMetadata.StartedAt
-                Write-MemLabsProcessProgress -Path $failurePath -Record $failureRecord
-            }
-            catch { throw "$($collectionError.Exception.Message) Failure evidence: $failurePath; post-failure evidence could not be appended: $($_.Exception.Message)" }
-        }
-        throw "$($collectionError.Exception.Message) Failure evidence: $failurePath"
-    }
-    $document | Add-Member -MemberType NoteProperty -Name HostCollection -Value $hostMetadata -Force
-    $json = $document | ConvertTo-Json -Depth 12
-    if ($AsJson) { return $json }
-    $json | Set-Content -LiteralPath $targetPath -Encoding UTF8 -ErrorAction Stop
-    Write-Host "Reporting evidence for $targetVmName saved on the host to $targetPath"
-    Get-Item -LiteralPath $targetPath -ErrorAction Stop
+    . (Join-Path $PSScriptRoot 'Common.ReportingDiagnostics.ps1')
+    Invoke-ReportingHostCollection -VMName $targetVmName -Note $note -Credential $Common.LocalAdmin `
+        -CollectorSource $collectorSource -ProcessSource $processSource -TargetPath $targetPath `
+        -SiteCode $SiteCode -ReportServerUri $ReportServerUri -AsJson:$AsJson
     return
 }
-if (-not (Get-Command New-WebServiceProxy -ErrorAction Ignore)) {
+if ($PSVersionTable.PSEdition -eq 'Core' -or -not (Get-Command New-WebServiceProxy -ErrorAction Ignore)) {
     throw 'For local collection, use Windows PowerShell 5.1 (powershell.exe), not PowerShell 7. Host collection with VMName supports PowerShell 7.'
 }
 if (-not (Get-Command Invoke-MemLabsBoundedPowerShell -ErrorAction Ignore)) {
