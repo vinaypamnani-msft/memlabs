@@ -6402,9 +6402,10 @@ function Test-SiteSystemFunctionality {
             else {
                 $results.Details.Add("CMD: PXE payload check ($($pxeEvidence -join '; '))")
                 $tftpRoots = New-Object System.Collections.Generic.List[string]
+                if ($share -and $share.Path) { $tftpRoots.Add((Join-Path $share.Path 'sms\bin')) }
                 foreach ($drv in @('E:', 'F:', 'D:', 'G:', 'C:')) {
                     $cand = "$drv\SMS_DP`$\sms\bin"
-                    if (Test-Path -LiteralPath $cand) { $tftpRoots.Add($cand) }
+                    if ((Test-Path -LiteralPath $cand) -and -not $tftpRoots.Contains($cand)) { $tftpRoots.Add($cand) }
                 }
                 try {
                     $wdsRoot = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name 'RootFolder' -ErrorAction Stop).RootFolder
@@ -6418,19 +6419,29 @@ function Test-SiteSystemFunctionality {
                 else {
                     $bootFiles = @()
                     $smsBootDirs = @()
+                    $payloadProbeErrors = @()
                     foreach ($root in $tftpRoots) {
                         $smsBoot = Join-Path $root 'SMSBoot'
-                        if (-not (Test-Path -LiteralPath $smsBoot)) { continue }
-                        $smsBootDirs += $smsBoot
-                        $bootFiles += @(Get-ChildItem -LiteralPath $smsBoot -Recurse -File -Include 'wdsmgfw.efi', 'pxeboot.n12' -ErrorAction SilentlyContinue)
+                        try {
+                            $null = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+                            try { $null = Get-Item -LiteralPath $smsBoot -Force -ErrorAction Stop }
+                            catch [System.Management.Automation.ItemNotFoundException] { continue }
+                            $smsBootDirs += $smsBoot
+                            $bootFiles += @(Get-ChildItem -LiteralPath $smsBoot -Recurse -File -Force -Include 'wdsmgfw.efi', 'pxeboot.n12' -ErrorAction Stop)
+                        }
+                        catch { $payloadProbeErrors += "'$smsBoot': $($_.Exception.Message)" }
                     }
-                    if ($bootFiles.Count -eq 0) {
+                    if ($payloadProbeErrors.Count) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: PXE payload could NOT be measured: $($payloadProbeErrors -join '; '). An unreadable path is not a missing payload. Verify SMS_DP$ share/NTFS permissions and the owning site computer's local Administrator membership; a stale payload can still answer TFTP while new content transfers fail with Access Denied.")
+                    }
+                    if ($bootFiles.Count -eq 0 -and $payloadProbeErrors.Count -eq 0) {
                         $missingWhere = if ($smsBootDirs.Count) { "'$($smsBootDirs -join "', '")' contains no boot files" } else { "no SMSBoot folder exists under $($tftpRoots -join ', ')" }
                         $payloadWhy = "PXE is enabled on this DP but it has NO PXE boot payload -- $missingWhere. These files are extracted locally by smsdpprov (dpprovutils.cpp ExpandPXEImage -> CopyWIMBootFiles), which mounts the boot WIM and copies \Windows\Boot\PXE\* into SMSBoot\<PackageID>\<arch>. It skips silently (ENDOK) when SccmPxe=0 and PxeInstalled=0, when the package content is not exactly one file whose name contains '<PackageID>.WIM', or when the package's PXE-boot flag is not set -- and the package still reports Installed in every one of those cases. Read smsdpprov.log ON THIS DP for 'Extracting boot files' / 'Expanding'; the site's SMSProv.log will not show this. To force a re-extract: Update-CMDistributionPoint -BootImageId <PackageID>."
                         $results.Passed = $false
                         $results.Details.Add("FAIL: $payloadWhy The responder answers DHCP and the client then dies on the TFTP read ('cannot open smsboot\<PackageID>\x64\wdsmgfw.efi').")
                     }
-                    else {
+                    elseif ($bootFiles.Count -gt 0) {
                         # Name the per-package folders: the responder hands out
                         # smsboot\<PackageID>\<arch>\..., so this is what a client asks for.
                         $pkgFolders = @(Get-ChildItem -LiteralPath $smsBootDirs -Directory -ErrorAction SilentlyContinue |
@@ -9715,6 +9726,34 @@ $Phase11DpContentLogCollector = {
 
     $out['DpContent.txt'] = ($lines -join "`r`n")
     $payload = @("CapturedAtUtc=$([datetime]::UtcNow.ToString('o')) ComputerName=$env:COMPUTERNAME", "SMS_DP$ share path='$dpSharePath'")
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        try {
+            $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+            $payload += "Probe identity='$($identity.Name)' SID=$($identity.User.Value) ElevatedAdministrator=$($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+        }
+        finally { $identity.Dispose() }
+    }
+    catch { $payload += "Probe token lookup failed: $($_.Exception.Message)" }
+    try {
+        foreach ($access in @(Get-SmbShareAccess -Name 'SMS_DP$' -ErrorAction Stop)) {
+            $payload += "SMS_DP$ share ACE: $($access.AccountName) $($access.AccessControlType) $($access.AccessRight)"
+        }
+    }
+    catch { $payload += "SMS_DP$ share ACL lookup failed: $($_.Exception.Message)" }
+    try {
+        $group = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]'S-1-5-32-544') -ErrorAction Stop
+        foreach ($member in @(Get-LocalGroupMember -Group $group.Name -ErrorAction Stop)) {
+            $payload += "Local Administrator: $($member.Name) SID=$($member.SID)"
+        }
+    }
+    catch { $payload += "Local Administrators lookup failed: $($_.Exception.Message)" }
+    if ($dpSharePath) {
+        foreach ($path in @($dpSharePath, (Join-Path $dpSharePath 'sms'), (Join-Path $dpSharePath 'sms\bin'), (Join-Path $dpSharePath 'sms\bin\SMSBoot'))) {
+            try { $payload += "Independent ACL '$path': $((Get-Acl -LiteralPath $path -ErrorAction Stop).Sddl)" }
+            catch { $payload += "Independent ACL '$path' lookup failed: $($_.Exception.Message)" }
+        }
+    }
     $roots = @()
     if ($dpSharePath) { $roots += Join-Path $dpSharePath 'sms\bin' }
     try {

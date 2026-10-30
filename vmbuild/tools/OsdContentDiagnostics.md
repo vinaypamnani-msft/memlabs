@@ -23,6 +23,8 @@ The capture contains:
 - `DpContent.txt` and `DpPxePayload.txt`: library/package presence, PXE service
   executable paths, candidate TFTP roots, forced filesystem inventory, file sizes
   and modification times, directory attributes/ACLs, and boot-WIM DataLib shape.
+  The probe token, local Administrators, share permissions, and parent-directory
+  ACLs are captured independently, even when payload enumeration is denied.
 
 Log reads retain the last 4,000 lines of each file. Log inventories record the
 original path, size, last-write UTC time, and read failures, so an old or unreadable
@@ -39,13 +41,31 @@ Publication still occurs for changed command support, a restored source WIM,
 a newly set PXE flag, or a confirmed missing boot file on an Installed/current DP.
 An unreachable or unreadable payload probe does not justify a rebuild.
 
+Registered DPs must also allow the site workflow to open and enumerate
+`SMS_DP$\sms\bin`; a provider row and an existing share alone are not readiness.
+An Access Denied result permits one guarded Phase 8 repair: restore the owning
+site computer's local Administrators membership, the share's Administrators Full
+grant, and missing SYSTEM/Administrators Full grants on the canonical local
+`SMS_DP$`, `sms`, and `sms\bin` directories. Other grants and protected ACLs are
+preserved. Explicit denies, unreadable security descriptors, nonstandard paths,
+and failed post-repair access checks fail visibly; no content-library/DataLib
+reset, take-ownership operation, or service restart is performed.
+
+Phase 11 reports an unreadable payload as **unmeasured**, not missing, and still
+fails required coverage. A successful TFTP read can serve an old boot image while
+SMB transfer of the current WIM fails with Win32 error 5.
+
 The Phase 8 coverage loop does not refresh content in `InstallPending` or
 `ContentValidating`. A remaining incomplete/retrying target gets five minutes to
 settle before one recovery attempt per DP/source version. Phase 11 still requires
 current Installed content and a working PXE chain; a successful TFTP first-block
 read alone does not prove that the current WIM is installed.
 
-After updating, rerun the affected deployment from Phase 8. If it still fails,
+After updating the host and guest DSC release, rerun the affected deployment from
+**Phase 8**, not just Phase 11: validation does not apply the permission repair or
+rerun content distribution. Check the captured Phase 8 execution timestamp, not
+only the Phase 11 host version, when confirming that new guest code ran.
+If it still fails,
 include the site and DP captures above in the diagnostic archive; the change does
 not claim to repair an unmeasured underlying transfer/provider error.
 
@@ -53,6 +73,7 @@ Offline regression checks:
 
 ```powershell
 .\vmbuild\tools\Test-BootImageExpansion.ps1
+.\vmbuild\tools\Test-DpAccessRecovery.ps1
 .\vmbuild\tools\Test-OsdContentFailureDiagnostics.ps1
 .\vmbuild\tools\Test-PerfloadingOsdContentReconciliation.ps1
 .\vmbuild\tools\Test-Phase11OsdContentState.ps1

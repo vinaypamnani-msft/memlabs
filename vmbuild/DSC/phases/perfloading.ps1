@@ -258,11 +258,12 @@ Write-DscStatus "$Tag Starting perfloading"
             if ($installed.Count -eq 0) { continue }
             $dpBin = "FileSystem::\\$dpName\SMS_DP`$\sms\bin"
             try {
-                if (-not (Test-Path -LiteralPath $dpBin -PathType Container -ErrorAction Stop)) {
-                    Write-DscStatus "$StatusTag Cannot reach '$dpBin'; PXE payload repair was not measured on $dpName." -Warning
-                    continue
+                $null = Get-Item -LiteralPath $dpBin -Force -ErrorAction Stop
+                try {
+                    $payload = Get-Item -LiteralPath "$dpBin\SMSBoot\$PackageId\x64\wdsmgfw.efi" -Force -ErrorAction Stop
+                    if ($payload.PSIsContainer) { $dpName }
                 }
-                if (-not (Test-Path -LiteralPath "$dpBin\SMSBoot\$PackageId\x64\wdsmgfw.efi" -PathType Leaf -ErrorAction Stop)) {
+                catch [System.Management.Automation.ItemNotFoundException] {
                     $dpName
                 }
             }

@@ -210,6 +210,18 @@ $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector
         param($Name, $ErrorAction)
         if ($Name -eq 'SMS_DP$') { [pscustomobject]@{ Path = 'C:\AlternateDP' } }
     }
+    function Get-SmbShareAccess {
+        param($Name, $ErrorAction)
+        [pscustomobject]@{ AccountName = 'BUILTIN\Administrators'; AccessControlType = 'Allow'; AccessRight = 'Full' }
+    }
+    function Get-LocalGroup {
+        param($SID, $ErrorAction)
+        [pscustomobject]@{ Name = 'Administrators' }
+    }
+    function Get-LocalGroupMember {
+        param($Group, $ErrorAction)
+        [pscustomobject]@{ Name = 'MEMLABS\SITESERVER$'; SID = 'S-1-5-21-10-20-30-1001' }
+    }
     function Test-Path {
         param($LiteralPath, $ErrorAction)
         return $LiteralPath -in $directories

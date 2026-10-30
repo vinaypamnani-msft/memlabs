@@ -37,12 +37,16 @@ function Get-TestFunction {
         Probes = [System.Collections.Generic.List[string]]::new()
         Warnings = [System.Collections.Generic.List[string]]::new()
     }
-    function Test-Path {
-        param([string]$LiteralPath, [string]$PathType, $ErrorAction)
-        $state.Probes.Add("$PathType $LiteralPath")
+    function Get-Item {
+        param([string]$LiteralPath, [switch]$Force, $ErrorAction)
+        $kind = if ($LiteralPath -like '*\wdsmgfw.efi') { 'Leaf' } else { 'Container' }
+        $state.Probes.Add("$kind $LiteralPath")
         if ($state.ProbeError) { throw 'synthetic access denied' }
-        if ($PathType -eq 'Container') { return $state.Reachable }
-        return $state.PayloadPresent
+        if ($kind -eq 'Container' -and -not $state.Reachable) { throw [IO.IOException]::new('root not measured') }
+        if ($kind -eq 'Leaf' -and -not $state.PayloadPresent) {
+            throw [Management.Automation.ItemNotFoundException]::new('missing boot file')
+        }
+        [pscustomobject]@{ PSIsContainer = $kind -eq 'Container' }
     }
     function Write-DscStatus {
         param([string]$Message, [switch]$Warning)

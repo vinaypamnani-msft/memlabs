@@ -2398,6 +2398,182 @@ function Confirm-CMRoleTargetPrerequisites {
     return $false
 }
 
+function Get-CMDistributionPointShareAccess {
+    param([Parameter(Mandatory = $true)][string]$ServerFQDN)
+
+    $job = $null
+    try {
+        $job = Start-Job -ArgumentList $ServerFQDN -ScriptBlock {
+            param($Server)
+            $path = "\\$Server\SMS_DP`$\sms\bin"
+            try {
+                if (($Server -split '\.')[0] -ieq $env:COMPUTERNAME) {
+                    $path = Join-Path (Get-SmbShare -Name 'SMS_DP$' -ErrorAction Stop).Path 'sms\bin'
+                }
+                $null = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                $null = Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Select-Object -First 1
+                [pscustomobject]@{ Ready = $true; Category = ''; Error = '' }
+            }
+            catch {
+                $denied = $_.CategoryInfo.Category -eq 'PermissionDenied'
+                for ($exception = $_.Exception; $exception; $exception = $exception.InnerException) {
+                    if ($exception -is [UnauthorizedAccessException] -or ($exception.HResult -band 0xFFFF) -eq 5) { $denied = $true }
+                }
+                $category = if ($denied) { 'AccessDenied' } else { 'Unreadable' }
+                [pscustomobject]@{ Ready = $false; Category = $category; Error = "$path : $($_.Exception.Message)" }
+            }
+        }
+        if (-not (Wait-Job -Job $job -Timeout 20)) {
+            return [pscustomobject]@{ Ready = $false; Category = 'TimedOut'; Error = 'SMS_DP$ access probe timed out after 20 seconds.' }
+        }
+        $result = @(Receive-Job -Job $job -ErrorAction Stop) | Select-Object -Last 1
+        if (-not $result -or $result.Ready -isnot [bool]) { throw 'SMS_DP$ access probe returned no structured readiness result.' }
+        return $result
+    }
+    catch {
+        return [pscustomobject]@{ Ready = $false; Category = 'Unreadable'; Error = "SMS_DP$ access probe failed: $($_.Exception.Message)" }
+    }
+    finally {
+        if ($job) {
+            if ($job.State -eq 'Running') { Stop-Job -Job $job -ErrorAction SilentlyContinue }
+            Remove-Job -Job $job -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Repair-CMDistributionPointAccess {
+    param([Parameter(Mandatory = $true)][string]$ServerFQDN)
+
+    $repairScript = {
+        param([string]$SiteAccount, [string]$SiteAccountSid)
+
+        $changes = [System.Collections.Generic.List[string]]::new()
+        try {
+            if ($SiteAccount -notmatch '\\[^\\]+\$$' -or $SiteAccountSid -notmatch '^S-1-5-21-(\d+-){3}\d+$') {
+                throw 'The owning site computer account was not resolved to a domain SID.'
+            }
+            $administrators = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]'S-1-5-32-544') -ErrorAction Stop
+            $members = @(Get-LocalGroupMember -Group $administrators.Name -ErrorAction Stop)
+            $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction Stop
+            $root = [IO.Path]::GetFullPath("$($share.Path)").TrimEnd('\')
+            if ($root -notmatch '^[A-Za-z]:\\SMS_DP\$$') { throw "Refusing automatic ACL repair outside a local drive's SMS_DP$ root: '$root'." }
+            $shareAccess = @(Get-SmbShareAccess -Name 'SMS_DP$' -ErrorAction Stop)
+            if (@($shareAccess | Where-Object { "$($_.AccessControlType)" -eq 'Deny' }).Count) {
+                throw 'SMS_DP$ has an explicit share deny. Review the policy instead of overriding it.'
+            }
+            $paths = @($root, (Join-Path $root 'sms'), (Join-Path $root 'sms\bin'))
+            $acls = @{}
+            foreach ($path in $paths) {
+                $acls[$path] = Get-Acl -LiteralPath $path -ErrorAction Stop
+                if (@($acls[$path].GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                            Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny }).Count) {
+                    throw "'$path' has a deny ACE. Review the policy instead of resetting permissions."
+                }
+            }
+
+            $siteComputerName = ($SiteAccount -split '\\')[-1].TrimEnd('$')
+            if ($siteComputerName -ine $env:COMPUTERNAME -and
+                @($members | Where-Object { "$($_.SID)" -eq $SiteAccountSid }).Count -eq 0) {
+                Add-LocalGroupMember -Group $administrators.Name -Member $SiteAccountSid -ErrorAction Stop
+                if (@(Get-LocalGroupMember -Group $administrators.Name -ErrorAction Stop |
+                            Where-Object { "$($_.SID)" -eq $SiteAccountSid }).Count -eq 0) {
+                    throw "Could not verify '$SiteAccount' in local Administrators."
+                }
+                $changes.Add("added owning site computer '$SiteAccount' ($SiteAccountSid) to local Administrators")
+            }
+            $adminAccount = ([Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate([Security.Principal.NTAccount]).Value
+            if (@($shareAccess | Where-Object {
+                        "$($_.AccountName)" -in @($adminAccount, 'S-1-5-32-544') -and
+                        "$($_.AccessControlType)" -eq 'Allow' -and "$($_.AccessRight)" -eq 'Full'
+                    }).Count -eq 0) {
+                $null = Grant-SmbShareAccess -Name 'SMS_DP$' -AccountName $adminAccount -AccessRight Full -Force -ErrorAction Stop
+                $verifiedShare = @(Get-SmbShareAccess -Name 'SMS_DP$' -ErrorAction Stop | Where-Object {
+                        "$($_.AccountName)" -in @($adminAccount, 'S-1-5-32-544') -and
+                        "$($_.AccessControlType)" -eq 'Allow' -and "$($_.AccessRight)" -eq 'Full'
+                    })
+                if ($verifiedShare.Count -eq 0) { throw 'Could not verify the Administrators Full grant on SMS_DP$.' }
+                $changes.Add('restored Administrators Full on the SMS_DP$ share')
+            }
+            foreach ($path in $paths) {
+                $changed = $false
+                foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+                    $rules = @($acls[$path].GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                            Where-Object {
+                                $_.IdentityReference.Value -eq $sidValue -and
+                                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                                ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+                                ($_.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0
+                            })
+                    if ($rules.Count) { continue }
+                    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                        ([Security.Principal.SecurityIdentifier]$sidValue),
+                        [Security.AccessControl.FileSystemRights]::FullControl,
+                        ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit),
+                        [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+                    $acls[$path].SetAccessRule($rule)
+                    $changed = $true
+                }
+                if (-not $changed) { continue }
+                Set-Acl -LiteralPath $path -AclObject $acls[$path] -ErrorAction Stop
+                $verifiedAcl = Get-Acl -LiteralPath $path -ErrorAction Stop
+                foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+                    $verifiedRules = @($verifiedAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                            Where-Object {
+                                $_.IdentityReference.Value -eq $sidValue -and
+                                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                                ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+                                ($_.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0
+                            })
+                    if ($verifiedRules.Count -eq 0) { throw "Could not verify the required '$sidValue' grant on '$path'." }
+                }
+                $changes.Add("restored SYSTEM/Administrators Full on '$path' without an ACL reset")
+            }
+            [pscustomobject]@{ Succeeded = $true; Changes = $changes.ToArray(); Error = '' }
+        }
+        catch {
+            [pscustomobject]@{ Succeeded = $false; Changes = $changes.ToArray(); Error = $_.Exception.Message }
+        }
+    }
+    try {
+        $computer = Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 10 -ErrorAction Stop
+        if (-not $computer.PartOfDomain -or -not $computer.Domain -or -not $computer.Name) {
+            throw 'The owning site server domain identity could not be established.'
+        }
+        $account = [Security.Principal.NTAccount]::new("$($computer.Domain)", "$($computer.Name)`$")
+        $sid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
+        $result = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock $repairScript `
+            -ArgumentList @($account.Value, $sid) -OperationTimeoutMs 90000
+        if (-not $result -or $result.Succeeded -isnot [bool]) { throw 'DP access repair returned no structured result.' }
+        return $result
+    }
+    catch {
+        return [pscustomobject]@{ Succeeded = $false; Changes = @(); Error = $_.Exception.Message }
+    }
+}
+
+function Confirm-CMDistributionPointAccess {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServerFQDN,
+        [Parameter(Mandatory = $true)][string]$SiteCode,
+        [Parameter(Mandatory = $true)][object]$Readiness
+    )
+
+    if ($Readiness.AccessErrorCategory -ne 'AccessDenied') { return $true }
+    Write-DscStatus "DP '$ServerFQDN' is registered but required SMS_DP$ access is denied. Checking the owning site computer and standard DP permissions." -Warning
+    $repair = Repair-CMDistributionPointAccess -ServerFQDN $ServerFQDN
+    foreach ($change in @($repair.Changes)) { Write-DscStatus "DP access repair on $ServerFQDN`: $change" }
+    if (-not $repair.Succeeded) {
+        Write-DscStatus "DP access repair on $ServerFQDN failed: $($repair.Error). No content-library ACL reset or deny-policy override is attempted." -Failure
+        return $false
+    }
+    $verified = Get-CMDistributionPointReadiness -ServerFQDN $ServerFQDN -SiteCode $SiteCode
+    if (-not $verified.AccessReady) {
+        Write-DscStatus "DP access remains unverified on $ServerFQDN after checking required grants ($($verified.Detail)). Check authentication, share/NTFS denies and the site-system installation account; refusing another blind content wait." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Get-CMDistributionPointReadiness {
     param(
         [Parameter(Mandatory = $true)]
@@ -2410,6 +2586,8 @@ function Get-CMDistributionPointReadiness {
     $configuration = $null
     $providerInfo = $null
     $shareReady = $false
+    $siteServerAdmin = $false
+    $access = [pscustomobject]@{ Ready = $false; Category = 'NotMeasured'; Error = '' }
     $errors = @()
     try {
         $configuration = Get-CMDistributionPoint -SiteSystemServerName $ServerFQDN -SiteCode $SiteCode -ErrorAction Stop
@@ -2426,18 +2604,42 @@ function Get-CMDistributionPointReadiness {
     }
     catch { $errors += "provider: $($_.Exception.Message)" }
     try {
-        $shareReady = [bool](Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock {
-                [bool](Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue)
-            })
+        $computer = Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 10 -ErrorAction Stop
+        $guest = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN `
+            -ArgumentList @("$env:COMPUTERNAME", "$($computer.Domain)") -ScriptBlock {
+                param([string]$SiteComputer, [string]$SiteDomain)
+                $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
+                $adminReady = $SiteComputer -ieq $env:COMPUTERNAME
+                if ($share -and -not $adminReady) {
+                    $account = [Security.Principal.NTAccount]::new($SiteDomain, "$SiteComputer`$")
+                    $sid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
+                    $administrators = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]'S-1-5-32-544') -ErrorAction Stop
+                    $adminReady = @(Get-LocalGroupMember -Group $administrators.Name -ErrorAction Stop |
+                            Where-Object { "$($_.SID)" -eq $sid }).Count -gt 0
+                }
+                [pscustomobject]@{ ShareReady = [bool]$share; SiteServerAdmin = $adminReady }
+            }
+        $shareReady = [bool]($guest -and $guest.ShareReady)
+        $siteServerAdmin = [bool]($guest -and $guest.SiteServerAdmin)
     }
     catch { $errors += "SMS_DP`$: $($_.Exception.Message)" }
+    if ($configuration -and $providerInfo -and $shareReady) {
+        if ($siteServerAdmin) { $access = Get-CMDistributionPointShareAccess -ServerFQDN $ServerFQDN }
+        else {
+            $access = [pscustomobject]@{ Ready = $false; Category = 'AccessDenied'; Error = "Owning site computer '$env:COMPUTERNAME`$' is not a local Administrator on the DP." }
+        }
+        if (-not $access.Ready) { $errors += "SMS_DP`$ content access: $($access.Error)" }
+    }
 
     [pscustomobject]@{
-        Ready                = [bool]($configuration -and $providerInfo -and $shareReady)
+        Ready                = [bool]($configuration -and $providerInfo -and $shareReady -and $access.Ready)
         ConfigurationVisible = [bool]$configuration
         ProviderVisible      = [bool]$providerInfo
         ShareReady           = [bool]$shareReady
-        Detail               = "configuration=$([bool]$configuration), providerInfo=$([bool]$providerInfo), SMS_DP`$=$([bool]$shareReady)$(if ($errors.Count) { "; errors=$($errors -join ' | ')" })"
+        SiteServerAdmin      = $siteServerAdmin
+        AccessReady          = [bool]$access.Ready
+        AccessErrorCategory  = "$($access.Category)"
+        Detail               = "configuration=$([bool]$configuration), providerInfo=$([bool]$providerInfo), SMS_DP`$=$([bool]$shareReady), contentAccess=$([bool]$access.Ready)$(if ($errors.Count) { "; errors=$($errors -join ' | ')" })"
     }
 }
 
@@ -3343,6 +3545,7 @@ function Install-DP {
     $dpinstalled = $false
 
     $initialDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+    if (-not (Confirm-CMDistributionPointAccess -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode -Readiness $initialDpReadiness)) { return $false }
     if (-not $initialDpReadiness.Ready -and
         -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $DPFQDN -RoleName 'DP')) {
         return $false
@@ -3457,6 +3660,7 @@ function Install-PullDP {
     $dpinstalled = $false
 
     $initialDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+    if (-not (Confirm-CMDistributionPointAccess -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode -Readiness $initialDpReadiness)) { return $false }
     if (-not $initialDpReadiness.Ready -and
         -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $DPFQDN -RoleName 'DP')) {
         return $false

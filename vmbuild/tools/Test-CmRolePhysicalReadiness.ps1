@@ -53,6 +53,8 @@ function Assert-False {
 $script:DpConfiguration = $null
 $script:DpProviderInfo = $null
 $script:DpShareReady = $false
+$script:DpSiteServerAdmin = $true
+$script:DpAccessState = [pscustomobject]@{ Ready = $true; Category = ''; Error = '' }
 $script:MpConfiguration = $null
 $script:SupConfiguration = $null
 $script:RpConfiguration = $null
@@ -66,6 +68,14 @@ function Start-Sleep { param([int] $Seconds) }
 function Get-CMDistributionPoint {
     param([string] $SiteSystemServerName, [string] $SiteCode, $ErrorAction)
     return $script:DpConfiguration
+}
+function Get-CMDistributionPointShareAccess {
+    param([string]$ServerFQDN)
+    return $script:DpAccessState
+}
+function Get-CimInstance {
+    param($ClassName, $OperationTimeoutSec, $ErrorAction)
+    [pscustomobject]@{ Domain = 'contoso.test' }
 }
 function Get-CMManagementPoint {
     param([string] $SiteSystemServerName, [string] $SiteCode, $ErrorAction)
@@ -95,7 +105,9 @@ function Invoke-CMRoleTargetCommand {
         [int] $OpenTimeoutMs,
         [int] $OperationTimeoutMs
     )
-    if ("$ScriptBlock" -match 'SMS_DP') { return $script:DpShareReady }
+    if ("$ScriptBlock" -match 'SMS_DP') {
+        return [pscustomobject]@{ ShareReady = $script:DpShareReady; SiteServerAdmin = $script:DpSiteServerAdmin }
+    }
     return $script:GuestState
 }
 
@@ -130,6 +142,16 @@ Assert-False $dpState.Ready 'Provider visibility without the physical DP share w
 $script:DpShareReady = $true
 $dpState = Get-CMDistributionPointReadiness -ServerFQDN 'CT3-PS1DPMPSUP1.cstest3.com' -SiteCode 'PS1'
 Assert-True $dpState.Ready 'A configured, provider-visible DP with SMS_DP$ was not accepted.'
+$script:DpAccessState = [pscustomobject]@{ Ready = $false; Category = 'AccessDenied'; Error = 'Access is denied' }
+$dpState = Get-CMDistributionPointReadiness -ServerFQDN 'CT3-PS1DPMPSUP1.cstest3.com' -SiteCode 'PS1'
+Assert-False $dpState.Ready 'A registered DP with an existing but unreadable SMS_DP$ was accepted.'
+Assert-True ($dpState.AccessErrorCategory -eq 'AccessDenied' -and $dpState.Detail -match 'Access is denied') 'Denied DP access lost its actionable error.'
+$script:DpAccessState = [pscustomobject]@{ Ready = $true; Category = ''; Error = '' }
+$script:DpSiteServerAdmin = $false
+$dpState = Get-CMDistributionPointReadiness -ServerFQDN 'CT3-PS1DPMPSUP1.cstest3.com' -SiteCode 'PS1'
+Assert-False $dpState.Ready 'A workflow user with access hid the missing site-computer Administrator membership.'
+Assert-True ($dpState.AccessErrorCategory -eq 'AccessDenied') 'Missing site-computer permissions do not enter the guarded repair path.'
+$script:DpSiteServerAdmin = $true
 
 $script:MpConfiguration = [pscustomobject]@{ NetworkOSPath = '\\CT3-PS1DPMPSUP1.cstest3.com' }
 $script:GuestState = [pscustomobject]@{ RegistryReady = $true; IisReady = $false; W3SvcRunning = $true }
