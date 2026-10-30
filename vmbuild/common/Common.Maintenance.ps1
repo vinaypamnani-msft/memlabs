@@ -946,6 +946,7 @@ function Start-VMFixesBatched {
     # Build and execute a batched scriptblock for each session group
     # Process groups in version order of their first fix
     $sortedKeys = @($groups.Keys) | Sort-Object { ConvertTo-MemLabsVersion ($groups[$_] | Select-Object -First 1).FixVersion }
+    $providerRecoveryAttempted = $false
 
     foreach ($key in $sortedKeys) {
         $groupFixes = $groups[$key]
@@ -1061,6 +1062,7 @@ function Start-VMFixesBatched {
         # processed/stamped below, so there is no double-stamping.
         $maxGroupAttempts = 2
         $groupAttempt = 0
+        $groupRecoveryFailed = $false
         $results = @()
         while ($groupAttempt -lt $maxGroupAttempts) {
             $groupAttempt++
@@ -1116,7 +1118,8 @@ function Start-VMFixesBatched {
             }
 
             $allOk = ($results.Count -ge $groupFixes.Count) -and (@($results | Where-Object { -not $_.Success }).Count -eq 0)
-            if ($allOk -or ($groupAttempt -ge $maxGroupAttempts)) { break }
+            $consoleFailed = @($results | Where-Object { $_.FixName -eq 'Fix-Upgrade-Console' -and -not $_.Success }).Count -gt 0
+            if ($allOk -or (($groupAttempt -ge $maxGroupAttempts) -and (-not $consoleFailed -or $providerRecoveryAttempted))) { break }
 
             $failedNames = @($results | Where-Object { -not $_.Success } | ForEach-Object { $_.FixName }) -join ', '
             if (-not $failedNames) { $failedNames = '(no/partial results)' }
@@ -1138,6 +1141,24 @@ function Start-VMFixesBatched {
                     }
                 }
             }
+            if ($consoleFailed -and -not $providerRecoveryAttempted) {
+                $recovery = Repair-VMConsoleProvider -VMName $VMName -VMDomain $VMDomain `
+                    -VMDomainAccount $(if ($key -eq '__default__') { $null } else { $key })
+                if ($recovery.Attempted) {
+                    $providerRecoveryAttempted = $true
+                    if (-not $recovery.Recovered) { $groupRecoveryFailed = $true; break }
+                    $ps = Get-VmSession @sessionArgs
+                    if (-not $ps) {
+                        Write-Log "$VMName`: Could not reconnect the maintenance account after console provider recovery." -Warning
+                        $groupRecoveryFailed = $true
+                        break
+                    }
+                    # A fail-fast sibling can defer the console's first execution until the final ordinary attempt.
+                    $maxGroupAttempts = [Math]::Max($maxGroupAttempts, $groupAttempt + 1)
+                    $retryDelay = 0
+                }
+            }
+            if ($groupAttempt -ge $maxGroupAttempts) { break }
             Write-Log "$VMName`: Fix(es) did not report explicit success on attempt $groupAttempt [$failedNames]; retrying batch once in $retryDelay seconds." -Warning
             Start-Sleep -Seconds $retryDelay
         }
@@ -1177,8 +1198,10 @@ function Start-VMFixesBatched {
             }
 
             # Always pull transcript (LogOnly) so failures + slow fixes are diagnosable
-            Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript `
-                -CollectDiagnostics:(!$r.Success) -Stage "batch-result-$groupAttempt"
+            if (-not $groupRecoveryFailed) {
+                Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript `
+                    -CollectDiagnostics:(!$r.Success) -Stage "batch-result-$groupAttempt"
+            }
 
             if ($r.Success) {
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied." -force
@@ -1195,9 +1218,13 @@ function Start-VMFixesBatched {
         # runs every fix, so it is no longer just fail-fast stopping early.
         if ($results.Count -lt $groupFixes.Count) {
             $failedFix = $groupFixes[$results.Count]
-            Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
-            # Pull transcript for the fix that we suspect crashed mid-execution
-            Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
+            if ($groupRecoveryFailed) {
+                Write-Log "$VMName`: Console provider recovery failed; batch could not continue to fix '$($failedFix.FixName)'." -Warning
+            }
+            else {
+                Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
+                Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
+            }
             $groupFailedNames += $failedFix.FixName
         }
 
@@ -1423,6 +1450,7 @@ function Start-VMFix {
     $rawOut = $null
     $isStructured = $false
     $maxFixAttempts = 2
+    $providerRecoveryAttempted = $false
     for ($fixAttempt = 1; $fixAttempt -le $maxFixAttempts; $fixAttempt++) {
         $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
 
@@ -1467,8 +1495,18 @@ function Start-VMFix {
         Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount `
             -CollectDiagnostics:(!$fixSucceeded) -Stage "attempt-$fixAttempt"
 
-        if ($fixSucceeded -or ($fixAttempt -ge $maxFixAttempts)) { break }
+        if ($fixSucceeded) { break }
         $retryDelay = if ($executionTimeout -gt 0) { 60 } else { 5 }
+        if ($fixName -eq 'Fix-Upgrade-Console' -and -not $providerRecoveryAttempted) {
+            $recovery = Repair-VMConsoleProvider -VMName $VMName -VMDomain $vmDomain -VMDomainAccount $vmFix.RunAsAccount
+            if ($recovery.Attempted) {
+                $providerRecoveryAttempted = $true
+                if (-not $recovery.Recovered) { break }
+                $maxFixAttempts = [Math]::Max($maxFixAttempts, $fixAttempt + 1)
+                $retryDelay = 0
+            }
+        }
+        if ($fixAttempt -ge $maxFixAttempts) { break }
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) did not report success on attempt $fixAttempt; retrying once in $retryDelay seconds." -Warning
         Start-Sleep -Seconds $retryDelay
     }
@@ -1487,6 +1525,183 @@ function Start-VMFix {
     }
 
     return $return
+}
+
+function Get-VMConsoleProviderHealthScriptBlock {
+    $sourcePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'DSC\phases\Upgrade-Console.ps1'
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$null, [ref]$parseErrors)
+    if ($parseErrors.Count) { throw "Console provider probe source does not parse: $($parseErrors -join '; ')" }
+    $definitions = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ConsoleSetupInfo'
+            }, $true))
+    if ($definitions.Count -ne 1) { throw "Expected one Get-ConsoleSetupInfo definition in $sourcePath" }
+
+    $probe = {
+        $identification = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop
+        $siteCode = "$($identification.'Site Code')"
+        if (-not $siteCode) { throw 'Console provider probe found no installed Site Code.' }
+        $setup = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
+        $directory = "$($setup.'Installation Directory')"
+        if (-not $directory) { throw 'Console provider probe found no site installation directory.' }
+        $providerLog = Join-Path $directory 'Logs\SMSProv.log'
+        $state = [pscustomobject]@{
+            Ready = $false; ShutdownDetected = $false; Error = ''; Evidence = ''; Diagnostics = @()
+        }
+        $previousLines = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $canCompareLog = $true
+        try {
+            if (Test-Path -LiteralPath $providerLog -PathType Leaf -ErrorAction Stop) {
+                foreach ($line in @(Get-Content -LiteralPath $providerLog -Tail 120 -ErrorAction Stop)) {
+                    [void]$previousLines.Add("$line")
+                }
+            }
+        }
+        catch {
+            $canCompareLog = $false
+            $state.Diagnostics += "Could not snapshot ${providerLog}: $($_.Exception.Message)"
+        }
+        try {
+            $info = Get-ConsoleSetupInfo -SiteCode $siteCode
+            [version]$version = $null
+            if (-not [version]::TryParse("$($info.FileVersion)".Trim(), [ref]$version) -or $version.Build -le 0) {
+                throw 'SMS_ConsoleSetupInfo returned no valid console extension version.'
+            }
+            $state.Ready = $true
+        }
+        catch {
+            $failure = $_
+            $state.Error = $failure.Exception.Message
+            $pattern = '(?i)\b(0x80041033|WBEM_E_SHUTTING_DOWN)\b'
+            $state.ShutdownDetected = $failure.FullyQualifiedErrorId -match $pattern -or
+                "$($failure.ErrorDetails)" -match $pattern
+            $exception = $failure.Exception
+            while ($exception) {
+                if ($exception.HResult -eq -2147217357 -or $exception.Message -match $pattern) {
+                    $state.ShutdownDetected = $true
+                }
+                $exception = $exception.InnerException
+            }
+            if ($state.ShutdownDetected) {
+                $state.Evidence = 'SMS_ConsoleSetupInfo query returned WBEM_E_SHUTTING_DOWN (0x80041033).'
+            }
+            elseif ($canCompareLog) {
+                try {
+                    # CIM can expose only E_FAIL; require a new, class-specific provider-log error.
+                    $newErrors = @(Get-Content -LiteralPath $providerLog -Tail 120 -ErrorAction Stop |
+                        Where-Object {
+                            -not $previousLines.Contains("$_") -and
+                            $_ -match '(?i)\bSMS_ConsoleSetupInfo\b.*\b0x80041033\b'
+                        })
+                    if ($newErrors.Count) {
+                        $state.ShutdownDetected = $true
+                        $state.Evidence = "$($newErrors[-1])"
+                    }
+                }
+                catch {
+                    $state.Diagnostics += "Could not inspect fresh ${providerLog} evidence: $($_.Exception.Message)"
+                }
+            }
+        }
+        return $state
+    }
+    return [scriptblock]::Create("$($definitions[0].Extent.Text)`n$probe")
+}
+
+function Repair-VMConsoleProvider {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$VMDomain,
+        [string]$VMDomainAccount,
+        [ValidateRange(1, 600)][int]$ReadyTimeoutSeconds = 300
+    )
+
+    $recovery = [pscustomobject]@{ Attempted = $false; Recovered = $false }
+    try { $probeBlock = Get-VMConsoleProviderHealthScriptBlock }
+    catch {
+        Write-Log "$VMName`: Cannot prepare console provider recovery probe: $($_.Exception.Message)" -Warning
+        return $recovery
+    }
+    $probeArguments = @{
+        VmName = $VMName; VmDomainName = $VMDomain; ScriptBlock = $probeBlock
+        DisplayName = 'Probe console SMS Provider'; AsJob = $true; TimeoutSeconds = 45
+        SessionMaxRetries = 1; SuppressLog = $true; FailOnRemoteError = $true
+    }
+    if ($VMDomainAccount) { $probeArguments.VmDomainAccount = $VMDomainAccount }
+    $readyWatch = $null
+    $lastError = ''
+    while ($true) {
+        if ($readyWatch) {
+            $remaining = $ReadyTimeoutSeconds - $readyWatch.Elapsed.TotalSeconds
+            if ($remaining -le 0) { break }
+            $probeArguments.TimeoutSeconds = [int][Math]::Min(45, [Math]::Ceiling($remaining))
+        }
+        $probe = Invoke-VmCommand @probeArguments
+        $states = @($probe.ScriptBlockOutput)
+        $state = $null
+        if (-not $probe -or $probe.ScriptBlockFailed) {
+            $lastError = "Console provider probe failed: $($probe.ErrorDetails -join '; ')"
+        }
+        elseif ($states.Count -ne 1 -or $states[0].Ready -isnot [bool] -or
+            $states[0].ShutdownDetected -isnot [bool] -or ($states[0].Ready -and $states[0].ShutdownDetected) -or
+            (-not $states[0].Ready -and [string]::IsNullOrWhiteSpace("$($states[0].Error)")) -or
+            ($states[0].ShutdownDetected -and [string]::IsNullOrWhiteSpace("$($states[0].Evidence)"))) {
+            $lastError = 'Console provider probe returned an invalid health result.'
+            Write-Log "$VMName`: Console provider probe returned an invalid health result; refusing further recovery." -Warning
+            break
+        }
+        else {
+            $state = $states[0]
+            foreach ($diagnostic in @($state.Diagnostics)) {
+                Write-Log "$VMName`: $(Protect-VMFixDiagnosticText $diagnostic)" -Warning -LogOnly
+            }
+            if ($state.Ready) {
+                if ($recovery.Attempted) {
+                    $recovery.Recovered = $true
+                    Write-Log "$VMName`: Console provider recovered after one graceful reboot; SMS_ConsoleSetupInfo returned a valid extension version. Retrying the console fix." -Success
+                }
+                return $recovery
+            }
+            $lastError = "$($state.Error)"
+        }
+        if (-not $recovery.Attempted) {
+            if (-not $state -or -not $state.ShutdownDetected) {
+                Write-Log "$VMName`: Console provider shutdown was not confirmed; retaining the normal maintenance retry. $(Protect-VMFixDiagnosticText $lastError)" -Warning
+                return $recovery
+            }
+            $recovery.Attempted = $true
+            Write-Log "$VMName`: Confirmed console provider shutdown: $(Protect-VMFixDiagnosticText $state.Evidence). Requesting the single permitted graceful reboot; hard power-off is prohibited." -Warning
+            Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName 'Fix-Upgrade-Console' `
+                -VMDomainAccount $VMDomainAccount -Stage 'provider-recovery-before-reboot'
+            $restartWatch = [Diagnostics.Stopwatch]::StartNew()
+            $restartBudget = [TimeSpan]::FromSeconds(180 + $ReadyTimeoutSeconds)
+            try {
+                $restarted = Restart-VM2Smart -Name $VMName -Reason 'Console provider WBEM_E_SHUTTING_DOWN recovery' `
+                    -GracefulTimeoutSeconds 180 -ShutdownNoProgressSeconds 300 -Stopwatch $restartWatch -Timespan $restartBudget
+            }
+            catch {
+                Write-Log "$VMName`: Console provider graceful recovery restart failed: $(Protect-VMFixDiagnosticText $_.Exception.Message). No hard power-off or second reboot will be attempted." -Warning
+                return $recovery
+            }
+            if (-not $restarted) {
+                Write-Log "$VMName`: Console provider recovery could not gracefully restart the VM; no hard power-off or second reboot will be attempted." -Warning
+                return $recovery
+            }
+            $readyWatch = [Diagnostics.Stopwatch]::StartNew()
+            continue
+        }
+        Write-Log "$VMName`: Waiting for console provider readiness after reboot: $(Protect-VMFixDiagnosticText $lastError)" -LogOnly
+        $delay = [int][Math]::Min(5, [Math]::Ceiling($ReadyTimeoutSeconds - $readyWatch.Elapsed.TotalSeconds))
+        if ($delay -gt 0) { Start-Sleep -Seconds $delay }
+    }
+    if ($recovery.Attempted) {
+        Write-Log "$VMName`: Console provider recovery failed after one reboot (readiness budget ${ReadyTimeoutSeconds}s); no further reboot will be attempted. $(Protect-VMFixDiagnosticText $lastError)" -Warning
+        Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName 'Fix-Upgrade-Console' `
+            -VMDomainAccount $VMDomainAccount -Stage 'provider-recovery-failed'
+    }
+    return $recovery
 }
 
 function Start-VMIfNotRunning {

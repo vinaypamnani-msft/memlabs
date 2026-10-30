@@ -13404,7 +13404,7 @@ function Test-CMSiteWideFunctionality {
         $parseErrors = $null
         $consoleAst = [Management.Automation.Language.Parser]::ParseFile($consoleHelpersPath, [ref]$null, [ref]$parseErrors)
         if ($parseErrors.Count) { throw "Console helper source does not parse: $($parseErrors -join '; ')" }
-        foreach ($name in @('Get-ConsolePayloadState', 'Get-ConsoleVersionState')) {
+        foreach ($name in @('Get-ConsoleSetupInfo', 'Get-ConsolePayloadState', 'Get-ConsoleVersionState')) {
             $definitions = @($consoleAst.FindAll({
                         param($node)
                         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name

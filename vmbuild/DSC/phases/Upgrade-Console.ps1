@@ -7,6 +7,14 @@ param(
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
+function Get-ConsoleSetupInfo {
+    param([Parameter(Mandatory)][string]$SiteCode)
+
+    Get-CimInstance -Namespace "root\sms\Site_$SiteCode" `
+        -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' `
+        -OperationTimeoutSec 15 -ErrorAction Stop | Select-Object -First 1
+}
+
 function Get-ConsolePayloadState {
     param([Parameter(Mandatory)][string]$SiteInstallDirectory)
 
@@ -60,9 +68,7 @@ function Get-ConsolePayloadState {
         throw "Upgrade-Console: the SMS Provider returned no valid live site version for '$siteCode'"
     }
     # The setup bootstrapper can retain its baseline build after the payload is updated.
-    $consoleSetupInfo = Get-CimInstance -Namespace "root\sms\Site_$siteCode" `
-        -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' `
-        -OperationTimeoutSec 15 -ErrorAction Stop | Select-Object -First 1
+    $consoleSetupInfo = Get-ConsoleSetupInfo -SiteCode $siteCode
     $extensionVersionText = "$($consoleSetupInfo.FileVersion)".Trim()
     if (-not [version]::TryParse($extensionVersionText, [ref]$extensionVersion) -or $extensionVersion.Build -le 0) {
         throw "Upgrade-Console: SMS_ConsoleSetupInfo returned no valid payload extension version for site '$siteCode' ('$extensionVersionText')"
@@ -250,8 +256,7 @@ function Get-ConsoleVersionState {
     $requiredExtensionSiteVersion = ''
     $providerError = ''
     try {
-        $consoleSetupInfo = Get-CimInstance -Namespace "root\sms\Site_$SiteCode" -Query 'SELECT FileVersion FROM SMS_ConsoleSetupInfo WHERE FileName = "ConfigMgr.AC_Extension.i386.cab"' -OperationTimeoutSec 15 -ErrorAction Stop |
-            Select-Object -First 1
+        $consoleSetupInfo = Get-ConsoleSetupInfo -SiteCode $SiteCode
         $requiredExtensionSiteVersion = ([string]$consoleSetupInfo.FileVersion).Trim()
         if (-not $requiredExtensionSiteVersion) { throw "SMS_ConsoleSetupInfo returned no required extension version for site $SiteCode" }
     }

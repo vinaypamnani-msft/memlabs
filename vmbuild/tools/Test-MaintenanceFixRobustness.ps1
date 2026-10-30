@@ -102,11 +102,17 @@ try {
     Remove-Item Function:\Invoke-VmCommand, Function:\Write-Log
 
     function Invoke-MaintenanceEngineFixture {
-        param([switch]$Batch, [switch]$AlwaysFail, [switch]$MissingMarker)
+        param([switch]$Batch, [switch]$AlwaysFail, [switch]$MissingMarker, [switch]$Console,
+            [switch]$RecoveryFailure, [switch]$UnconfirmedShutdown, [switch]$LateRecovery,
+            [switch]$DelayedConsole, [switch]$SuccessfulSibling)
         & {
             $script:Engine = @{
                 Count = 0; Stamps = 0; AlwaysFail = $AlwaysFail.IsPresent
                 MissingMarker = $MissingMarker.IsPresent
+                RecoveryCalls = 0; RecoveryFailure = $RecoveryFailure.IsPresent
+                UnconfirmedShutdown = $UnconfirmedShutdown.IsPresent
+                LateRecovery = $LateRecovery.IsPresent; PrefixCalls = 0
+                DelayedConsole = $DelayedConsole.IsPresent
                 Directory = Join-Path $testRoot ([guid]::NewGuid().ToString('N'))
                 Calls = [System.Collections.Generic.List[object]]::new()
                 Events = [System.Collections.Generic.List[string]]::new()
@@ -127,6 +133,19 @@ try {
             function Get-VmSession {
                 param($VmName, $VmDomainName, $VmDomainAccount, [switch]$ShowVMSessionError)
                 [pscustomobject]@{ Availability = 'Available' }
+            }
+            function Repair-VMConsoleProvider {
+                param($VMName, $VMDomain, $VMDomainAccount)
+                $script:Engine.RecoveryCalls++
+                $script:Engine.Events.Add('provider-recovery')
+                Assert-Maintenance ($VMName -eq 'LAB-PRI' -and $VMDomain -eq 'lab.test' -and
+                    $VMDomainAccount -eq 'setupadmin') 'Console recovery did not retain the maintenance identity.'
+                [pscustomobject]@{
+                    Attempted = -not $script:Engine.UnconfirmedShutdown -and
+                        (-not $script:Engine.LateRecovery -or $script:Engine.RecoveryCalls -gt 1)
+                    Recovered = -not $script:Engine.RecoveryFailure -and -not $script:Engine.UnconfirmedShutdown -and
+                        (-not $script:Engine.LateRecovery -or $script:Engine.RecoveryCalls -gt 1)
+                }
             }
             function Start-Transcript {
                 param($Path, [switch]$Force, $ErrorAction)
@@ -177,16 +196,34 @@ try {
                 $value = & ([scriptblock]::Create($text)) @arguments 3>$null 6>$null
                 [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $value; ErrorDetails = $null }
             }
+            $fixtureFixName = if ($Console) { 'Fix-Upgrade-Console' } else { 'Fix-ODBC18' }
             $definition = [pscustomobject]@{
-                FixName = 'Fix-ODBC18'; FixVersion = '18.6.2.1'; AppliesToThisVM = $true
+                FixName = $fixtureFixName; FixVersion = '18.6.2.1'; AppliesToThisVM = $true
                 RunAsAccount = 'setupadmin'; DependentVMs = @(); InjectFiles = @(); InjectTools = @()
                 ScriptBlock = {
                     $script:Engine.Count++
                     'pipeline noise must not mask a failed result'
-                    [pscustomobject]@{ Success = -not $script:Engine.AlwaysFail -and $script:Engine.Count -gt 1; Message = 'engine fixture' }
+                    $succeeded = if ($script:Engine.LateRecovery) { $script:Engine.RecoveryCalls -gt 1 }
+                    else { -not $script:Engine.AlwaysFail -and $script:Engine.Count -gt 1 }
+                    [pscustomobject]@{ Success = $succeeded; Message = 'engine fixture' }
                 }
             }
-            if ($Batch) { $result = Start-VMFixesBatched -VMName 'LAB-PRI' -VMDomain 'lab.test' -VMFixes @($definition) }
+            $definitions = @($definition)
+            if ($DelayedConsole -or $SuccessfulSibling) {
+                $prefix = [pscustomobject]@{
+                    FixName = 'Fix-UnitBeforeConsole'; FixVersion = '18.0'; AppliesToThisVM = $true
+                    RunAsAccount = 'setupadmin'; DependentVMs = @(); InjectFiles = @(); InjectTools = @()
+                    ScriptBlock = {
+                        $script:Engine.PrefixCalls++
+                        [pscustomobject]@{
+                            Success = -not $script:Engine.DelayedConsole -or $script:Engine.PrefixCalls -gt 1
+                            Message = 'prefix fixture'
+                        }
+                    }
+                }
+                $definitions = @($prefix, $definition)
+            }
+            if ($Batch) { $result = Start-VMFixesBatched -VMName 'LAB-PRI' -VMDomain 'lab.test' -VMFixes $definitions }
             else { $result = Start-VMFix -VMName 'LAB-PRI' -VMFix $definition }
             [pscustomobject]@{ Result = $result; State = $script:Engine }
         }
@@ -195,6 +232,7 @@ try {
         foreach ($fail in @($false, $true)) {
             $probe = Invoke-MaintenanceEngineFixture -Batch:$batch -AlwaysFail:$fail
             Assert-Maintenance ($probe.State.Count -eq 2 -and $probe.Result.Success -eq (-not $fail)) 'The real maintenance engine exceeded its attempt budget or lost the explicit verdict.'
+            Assert-Maintenance ($probe.State.RecoveryCalls -eq 0) 'An unrelated fix triggered console provider recovery.'
             Assert-Maintenance ($probe.State.Stamps -eq $(if ($fail) { 0 } else { 1 })) 'A failed fix was stamped or a successful retry was stamped more than once.'
             Assert-Maintenance ($probe.State.Sleeps.Count -eq 1 -and $probe.State.Sleeps[0] -eq 60) 'The engine did not use exactly one 60-second retry delay.'
             Assert-Maintenance ($probe.State.Events.IndexOf('diagnostics') -lt $probe.State.Events.IndexOf('sleep:60')) 'Evidence was not collected before the retry delay.'
@@ -206,6 +244,42 @@ try {
     $missingMarker = Invoke-MaintenanceEngineFixture -MissingMarker
     Assert-Maintenance (-not $missingMarker.Result.Success -and $missingMarker.State.Stamps -eq 0 -and $missingMarker.State.Count -eq 2) `
         'A successful pipeline result bypassed a missing authoritative marker.'
+
+    foreach ($batch in @($false, $true)) {
+        $healed = Invoke-MaintenanceEngineFixture -Batch:$batch -Console
+        Assert-Maintenance ($healed.Result.Success -and $healed.State.Count -eq 2 -and $healed.State.Stamps -eq 1 -and
+            $healed.State.RecoveryCalls -eq 1 -and $healed.State.Sleeps.Count -eq 0) `
+            'Console maintenance did not resume exactly once after verified recovery.'
+        Assert-Maintenance ($healed.State.Events.IndexOf('diagnostics') -lt $healed.State.Events.IndexOf('provider-recovery')) `
+            'Console recovery ran before collecting failure diagnostics.'
+        $failedRecovery = Invoke-MaintenanceEngineFixture -Batch:$batch -Console -RecoveryFailure
+        Assert-Maintenance (-not $failedRecovery.Result.Success -and $failedRecovery.State.Count -eq 1 -and
+            $failedRecovery.State.Stamps -eq 0 -and $failedRecovery.State.RecoveryCalls -eq 1) `
+            'Failed provider recovery retried setup or stamped the console fix.'
+        $failedAfterRecovery = Invoke-MaintenanceEngineFixture -Batch:$batch -Console -AlwaysFail
+        Assert-Maintenance (-not $failedAfterRecovery.Result.Success -and $failedAfterRecovery.State.Count -eq 2 -and
+            $failedAfterRecovery.State.Stamps -eq 0 -and $failedAfterRecovery.State.RecoveryCalls -eq 1) `
+            'A failed post-recovery console retry was stamped or triggered another recovery.'
+        $unconfirmed = Invoke-MaintenanceEngineFixture -Batch:$batch -Console -UnconfirmedShutdown
+        Assert-Maintenance ($unconfirmed.Result.Success -and $unconfirmed.State.Count -eq 2 -and
+            $unconfirmed.State.Sleeps.Count -eq 1 -and $unconfirmed.State.Sleeps[0] -eq 60) `
+            'An unconfirmed shutdown changed the ordinary console retry policy.'
+        $lateRecovery = Invoke-MaintenanceEngineFixture -Batch:$batch -Console -LateRecovery
+        Assert-Maintenance ($lateRecovery.Result.Success -and $lateRecovery.State.Count -eq 3 -and
+            $lateRecovery.State.Stamps -eq 1 -and $lateRecovery.State.RecoveryCalls -eq 2 -and
+            $lateRecovery.State.Sleeps.Count -eq 1 -and $lateRecovery.State.Sleeps[0] -eq 60) `
+            'A shutdown first confirmed on the final ordinary attempt did not get exactly one post-recovery retry.'
+    }
+    $delayedConsole = Invoke-MaintenanceEngineFixture -Batch -Console -DelayedConsole
+    Assert-Maintenance ($delayedConsole.Result.Success -and $delayedConsole.State.Count -eq 2 -and
+        $delayedConsole.State.PrefixCalls -eq 3 -and $delayedConsole.State.Stamps -eq 2 -and
+        $delayedConsole.State.RecoveryCalls -eq 1 -and $delayedConsole.State.Sleeps.Count -eq 1 -and
+        $delayedConsole.State.Sleeps[0] -eq 5) `
+        'An earlier fail-fast fix prevented console recovery on the final ordinary batch attempt.'
+    $successfulSibling = Invoke-MaintenanceEngineFixture -Batch -Console -SuccessfulSibling -RecoveryFailure
+    Assert-Maintenance (-not $successfulSibling.Result.Success -and $successfulSibling.State.Count -eq 1 -and
+        $successfulSibling.State.Stamps -eq 1 -and $successfulSibling.State.RecoveryCalls -eq 1) `
+        'Failed console provider recovery discarded an explicitly successful sibling fix.'
 
     $vmNote = [pscustomobject]@{ adminName = 'setupadmin'; remoteSQLVM = 'LAB-SQL' }
     $dc = [pscustomobject]@{ vmName = 'LAB-DC' }

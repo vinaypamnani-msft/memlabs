@@ -52,6 +52,31 @@ When dot-sourced, the file MUST:
 Load order within this folder is alphabetical, but **runtime execution order**
 is determined by `FixVersion` (sorted ascending), not load order.
 
+## Console provider shutdown recovery
+
+When [Fix-Upgrade-Console.ps1](Fix-Upgrade-Console.ps1) fails during Phase 10
+or existing-VM maintenance, the host re-runs the same `SMS_ConsoleSetupInfo`
+query before retrying the failed fix. A typed `WBEM_E_SHUTTING_DOWN`
+(`0x80041033`) error, or a newly written, class-specific error in `SMSProv.log`,
+permits **one graceful reboot of only that VM**. Historical log entries,
+unrelated provider errors, and a generic "server threw an exception" alone
+never trigger a reboot.
+
+The host saves failure evidence before restarting, reconnects using the same
+maintenance account, and allows up to 300 seconds for that exact query to
+return a valid extension version. Only then is the console fix retried.
+If the shutdown is first confirmed on the final ordinary attempt, one additional
+attempt is allowed after recovery; it never grants another reboot.
+Recovery never hard-powers off the VM, restarts WMI inside an active workflow,
+or marks the fix applied without its normal explicit success marker.
+Failed recovery remains a maintenance failure with diagnostics. Provisioning
+and Phase 11 validation share the query helper but do not initiate this reboot.
+
+Validate with [Test-ConsoleProviderRecovery.ps1](../tools/Test-ConsoleProviderRecovery.ps1),
+[Test-MaintenanceFixRobustness.ps1](../tools/Test-MaintenanceFixRobustness.ps1),
+and [Test-ConsoleUpgradeRouting.ps1](../tools/Test-ConsoleUpgradeRouting.ps1).
+The recovery tests mock guest queries and VM restarts; they do not reboot a lab.
+
 ## Late Edge servicing
 
 [Fix-EdgeServicing.ps1](Fix-EdgeServicing.ps1) runs during fresh-build Phase 10
