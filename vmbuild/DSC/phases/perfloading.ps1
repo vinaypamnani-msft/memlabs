@@ -258,6 +258,17 @@ Write-DscStatus "$Tag Starting perfloading"
             if ($installed.Count -eq 0) { continue }
             $dpBin = "FileSystem::\\$dpName\SMS_DP`$\sms\bin"
             try {
+                if (($dpName -split '\.')[0] -ieq $env:COMPUTERNAME) {
+                    $responder = Get-CimInstance -ClassName Win32_Service -Filter "Name='SccmPxe'" -OperationTimeoutSec 10 -ErrorAction Stop
+                    if ($responder -and "$($responder.PathName)" -match '^\s*"?(.+?\.exe)"?(?:\s|$)') {
+                        $dpBin = Split-Path -Path ([Environment]::ExpandEnvironmentVariables($Matches[1])) -Parent
+                    }
+                    else {
+                        $dpBin = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name RootFolder -ErrorAction Stop).RootFolder
+                        if (-not $dpBin) { throw 'No active PXE payload root was found for this site-server DP.' }
+                        $dpBin = [Environment]::ExpandEnvironmentVariables("$dpBin")
+                    }
+                }
                 $null = Get-Item -LiteralPath $dpBin -Force -ErrorAction Stop
                 try {
                     $payload = Get-Item -LiteralPath "$dpBin\SMSBoot\$PackageId\x64\wdsmgfw.efi" -Force -ErrorAction Stop

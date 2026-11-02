@@ -34,6 +34,7 @@ function Get-TestFunction {
 & {
     $state = [pscustomobject]@{
         Reachable = $true; PayloadPresent = $false; ProbeError = $false
+        ResponderPresent = $true
         Probes = [System.Collections.Generic.List[string]]::new()
         Warnings = [System.Collections.Generic.List[string]]::new()
     }
@@ -51,6 +52,14 @@ function Get-TestFunction {
     function Write-DscStatus {
         param([string]$Message, [switch]$Warning)
         if ($Warning) { $state.Warnings.Add($Message) }
+    }
+    function Get-CimInstance {
+        param($ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
+        if ($state.ResponderPresent) { [pscustomobject]@{ PathName = '"C:\ConfigMgr\bin\x64\sccmpxe.exe" service' } }
+    }
+    function Get-ItemProperty {
+        param($LiteralPath, $Name, $ErrorAction)
+        [pscustomobject]@{ RootFolder = 'C:\RemoteInstall' }
     }
     $arguments = @{
         PackageId = 'PRI00008'; SourceVersion = 4
@@ -80,6 +89,24 @@ function Get-TestFunction {
     $state.ProbeError = $true
     Assert-True (@(Get-MemLabsBootImagePayloadRepairTargets @arguments -DistributionStatusRows @($row)).Count -eq 0) 'A denied probe triggered a rebuild.'
     Assert-True (($state.Warnings -join ' ') -match 'synthetic access denied') 'An unreadable payload probe lost its error.'
+    $state.ProbeError = $false
+    $state.Reachable = $true
+    $state.PayloadPresent = $false
+    $localName = "$env:COMPUTERNAME.memlabs.test"
+    $localArguments = @{
+        PackageId = 'PRI00008'; SourceVersion = 4
+        DistributionPointNames = @($localName); StatusTag = '[test]'
+    }
+    $localRow = [pscustomobject]@{ ServerNALPath = "\\$localName\"; State = 0; SourceVersion = 4 }
+    $state.Probes.Clear()
+    $targets = @(Get-MemLabsBootImagePayloadRepairTargets @localArguments -DistributionStatusRows @($localRow))
+    Assert-True ($targets.Count -eq 1 -and
+        $state.Probes[1] -eq 'Leaf C:\ConfigMgr\bin\x64\SMSBoot\PRI00008\x64\wdsmgfw.efi') 'Site-server payload repair used a nonexistent remote-DP bin tree.'
+    $state.ResponderPresent = $false
+    $state.Probes.Clear()
+    $targets = @(Get-MemLabsBootImagePayloadRepairTargets @localArguments -DistributionStatusRows @($localRow))
+    Assert-True ($targets.Count -eq 1 -and
+        $state.Probes[1] -eq 'Leaf C:\RemoteInstall\SMSBoot\PRI00008\x64\wdsmgfw.efi') 'Local WDS payload repair did not use RootFolder.'
 }
 
 $publicationAssignments = @($ast.FindAll({

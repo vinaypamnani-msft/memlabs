@@ -89,9 +89,11 @@ function Assert-CasWorkflowStepCanContinue {
         [Parameter(Mandatory)][string]$Step
     )
 
-    $status = "$($CasConfiguration.$Step.Status)"
-    if ($status -in @('Error', 'Failed', 'Failure')) {
-        throw "$CSName reported $Step=$status in '$CSConfigurationFile'. Stopping the primary before dependent setup; inspect the CAS Phase 8 diagnostics."
+    foreach ($dependency in @('InstallSCCM', 'UpgradeSCCM', $Step) | Select-Object -Unique) {
+        $status = "$($CasConfiguration.$dependency.Status)"
+        if ($status -in @('Error', 'Failed', 'Failure')) {
+            throw "$CSName reported $dependency=$status in '$CSConfigurationFile'. Stopping the primary before dependent setup; inspect the CAS Phase 8 diagnostics."
+        }
     }
 }
 
@@ -314,30 +316,34 @@ CurrentBranch=1
     # Delete ini file?
     # Remove-Item $CMINIPath
 
-    # Wait for Site ready
-    $propName = "PSReadyToUse" + $ThisVm.VmName
+}
+
+# Recheck the CAS handshake on resumes too; an old Completed flag may be unverified.
+$propName = "PSReadyToUse" + $ThisVm.VmName
+$CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+    -RequiredSteps @($propName)
+Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
+$psReadyStart = Get-Date
+$casReady = $CSConfiguration.$propName
+while ($casReady.Status -ne 'Completed' -or
+    -not ($casReady.PSObject.Properties['ReplicationVerified'] -and
+        $casReady.ReplicationVerified -is [bool] -and $casReady.ReplicationVerified)) {
+    Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step $propName
+    $psReadyMin = [int]((Get-Date) - $psReadyStart).TotalMinutes
+    if ($psReadyMin -ge $casDependencyWaitMaxMinutes) {
+        throw "$CSName did not verify $propName within $casDependencyWaitMaxMinutes minutes (last state: $($casReady.Status))."
+    }
+    $proof = $casReady.PSObject.Properties['ReplicationVerified']
+    $proofText = if ($proof) { "$($proof.Value)" } else { 'missing; update and rerun Phase 8 on the CAS too' }
+    Write-DscStatus "Waiting for $CSName to verify Primary replication readiness (${psReadyMin}m elapsed, status=$($casReady.Status), ReplicationVerified=$proofText)" -RetrySeconds 30
+    Start-Sleep -Seconds 30
     $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
         -RequiredSteps @($propName)
-    Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
-    # This is the largest single wait in Phase 8 (1,217-2,219s measured over 10 child-primary
-    # installs) - it is the CAS waiting for the CAS<->child DRS link to activate. Elapsed goes in
-    # the TEXT at the poll cadence, like the three CAS waits above: the host only records status
-    # CHANGES, and at the old 600s -NoLog cadence the guest log carried ONE line for the whole wait.
-    $psReadyStart = Get-Date
-    while ($CSConfiguration.$propName.Status -ne "Completed") {
-        Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step $propName
-        $psReadyMin = [int]((Get-Date) - $psReadyStart).TotalMinutes
-        if ($psReadyMin -ge $casDependencyWaitMaxMinutes) {
-            throw "$CSName did not mark $propName Completed within $casDependencyWaitMaxMinutes minutes (last state: $($CSConfiguration.$propName.Status))."
-        }
-        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use (${psReadyMin}m elapsed)" -RetrySeconds 30
-        Start-Sleep -Seconds 30
-        $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
-            -RequiredSteps @($propName)
-    }
-    Write-DscStatus "$CSName reports Primary is ready to use ($([int]((Get-Date) - $psReadyStart).TotalMinutes)m elapsed)."
-
-    $Configuration.InstallSCCM.Status = 'Completed'
-    $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    $casReady = $CSConfiguration.$propName
 }
+Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step $propName
+Write-DscStatus "$CSName verified Primary replication readiness ($([int]((Get-Date) - $psReadyStart).TotalMinutes)m elapsed)."
+
+$Configuration.InstallSCCM.Status = 'Completed'
+$Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile

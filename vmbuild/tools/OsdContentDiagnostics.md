@@ -41,12 +41,16 @@ Publication still occurs for changed command support, a restored source WIM,
 a newly set PXE flag, or a confirmed missing boot file on an Installed/current DP.
 An unreachable or unreadable payload probe does not justify a rebuild.
 
-Registered DPs must also allow the site workflow to open and enumerate
-`SMS_DP$\sms\bin`; a provider row and an existing share alone are not readiness.
+Registered DPs must also allow the site workflow to open and enumerate the
+`SMS_DP$` share itself; a provider row and an existing share alone are not readiness.
+This is a transport-access check, not a binary-directory check. Site-server DPs
+do not have to contain the remote-DP `sms\bin` layout. PXE payload probes separately
+use the actual `SccmPxe` executable directory or WDS `RootFolder`.
 An Access Denied result permits one guarded Phase 8 repair: restore the owning
 site computer's local Administrators membership, the share's Administrators Full
 grant, and missing SYSTEM/Administrators Full grants on the canonical local
-`SMS_DP$`, `sms`, and `sms\bin` directories. Other grants and protected ACLs are
+`SMS_DP$` directory, plus `sms` and `sms\bin` for non-site-server DPs. A site server
+is identified by its installed `SMS_EXECUTIVE` service. Other grants and protected ACLs are
 preserved. Explicit denies, unreadable security descriptors, nonstandard paths,
 and failed post-repair access checks fail visibly; no content-library/DataLib
 reset, take-ownership operation, or service restart is performed.
@@ -54,6 +58,15 @@ reset, take-ownership operation, or service restart is performed.
 Phase 11 reports an unreadable payload as **unmeasured**, not missing, and still
 fails required coverage. A successful TFTP read can serve an old boot image while
 SMB transfer of the current WIM fails with Win32 error 5.
+
+In a hierarchy, a CAS replication-readiness timeout is a failure, never an
+implicit ready/Active verdict. Cached ready flags are revalidated, and resumed
+Primaries also wait for an explicitly verified CAS handoff before dependent work.
+Phase 8 failure captures include current/rolled `rcmctrl`, `replmgr`, `sender`,
+and `despool` logs, replication monitoring classes, and a bounded
+`DRSReadinessFailure.json` with the last provider/SQL health observations.
+These diagnostics identify an initialization blocker; they do not automatically
+repair database replication or override ConfigMgr authorization.
 
 The Phase 8 coverage loop does not refresh content in `InstallPending` or
 `ContentValidating`. A remaining incomplete/retrying target gets five minutes to
@@ -65,6 +78,8 @@ After updating the host and guest DSC release, rerun the affected deployment fro
 **Phase 8**, not just Phase 11: validation does not apply the permission repair or
 rerun content distribution. Check the captured Phase 8 execution timestamp, not
 only the Phase 11 host version, when confirming that new guest code ran.
+In a hierarchy, update/rerun the CAS as well as its Primaries so both sides use
+the verified-readiness handshake.
 If it still fails,
 include the site and DP captures above in the diagnostic archive; the change does
 not claim to repair an unmeasured underlying transfer/provider error.
@@ -74,6 +89,7 @@ Offline regression checks:
 ```powershell
 .\vmbuild\tools\Test-BootImageExpansion.ps1
 .\vmbuild\tools\Test-DpAccessRecovery.ps1
+.\vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1
 .\vmbuild\tools\Test-OsdContentFailureDiagnostics.ps1
 .\vmbuild\tools\Test-PerfloadingOsdContentReconciliation.ps1
 .\vmbuild\tools\Test-Phase11OsdContentState.ps1

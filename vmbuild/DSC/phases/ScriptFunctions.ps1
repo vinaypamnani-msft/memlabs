@@ -2405,10 +2405,10 @@ function Get-CMDistributionPointShareAccess {
     try {
         $job = Start-Job -ArgumentList $ServerFQDN -ScriptBlock {
             param($Server)
-            $path = "\\$Server\SMS_DP`$\sms\bin"
+            $path = "\\$Server\SMS_DP`$"
             try {
                 if (($Server -split '\.')[0] -ieq $env:COMPUTERNAME) {
-                    $path = Join-Path (Get-SmbShare -Name 'SMS_DP$' -ErrorAction Stop).Path 'sms\bin'
+                    $path = (Get-SmbShare -Name 'SMS_DP$' -ErrorAction Stop).Path
                 }
                 $null = Get-Item -LiteralPath $path -Force -ErrorAction Stop
                 $null = Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Select-Object -First 1
@@ -2461,7 +2461,10 @@ function Repair-CMDistributionPointAccess {
             if (@($shareAccess | Where-Object { "$($_.AccessControlType)" -eq 'Deny' }).Count) {
                 throw 'SMS_DP$ has an explicit share deny. Review the policy instead of overriding it.'
             }
-            $paths = @($root, (Join-Path $root 'sms'), (Join-Path $root 'sms\bin'))
+            $paths = @($root)
+            if (-not (Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue)) {
+                $paths += @((Join-Path $root 'sms'), (Join-Path $root 'sms\bin'))
+            }
             $acls = @{}
             foreach ($path in $paths) {
                 $acls[$path] = Get-Acl -LiteralPath $path -ErrorAction Stop

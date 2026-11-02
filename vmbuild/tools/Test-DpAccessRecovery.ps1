@@ -55,19 +55,25 @@ $worker = & ([scriptblock]::Create($workerNodes[0].Extent.Text))
         param($LiteralPath, [switch]$Force, $ErrorAction)
         $state.Paths.Add($LiteralPath)
         Assert-True ($Force -and $ErrorAction -eq 'Stop') 'The share probe can hide a denied root.'
+        if ($LiteralPath -like '*\sms\bin') { throw [Management.Automation.ItemNotFoundException]::new('Site-server DP has no remote-DP bin tree') }
         if ($state.Mode -eq 'RootDenied') { throw [UnauthorizedAccessException]::new('Access is denied') }
         [pscustomobject]@{ FullName = $LiteralPath }
+    }
+    function Get-SmbShare {
+        param($Name, $ErrorAction)
+        [pscustomobject]@{ Path = 'C:\SMS_DP$' }
     }
     function Get-ChildItem {
         param($LiteralPath, [switch]$Force, $ErrorAction)
         if ($state.Mode -eq 'ListDenied') { throw [UnauthorizedAccessException]::new('Access is denied') }
         if ($state.Mode -eq 'Unavailable') { throw [IO.IOException]::new('SMB unavailable') }
-        [pscustomobject]@{ Name = 'smsdp.dll' }
+        if ($state.Mode -eq 'Empty') { return }
+        [pscustomobject]@{ Name = 'sms' }
     }
-    foreach ($mode in @('RootDenied', 'ListDenied', 'Unavailable', 'Ready')) {
+    foreach ($mode in @('RootDenied', 'ListDenied', 'Unavailable', 'Ready', 'Empty')) {
         $state.Mode = $mode
         $result = & $worker 'NEWDP.memlabs.test'
-        if ($mode -eq 'Ready') { Assert-True $result.Ready 'A readable DP bin directory was rejected.' }
+        if ($mode -in 'Ready', 'Empty') { Assert-True $result.Ready 'A readable DP share was rejected because of its contents/layout.' }
         elseif ($mode -eq 'Unavailable') {
             Assert-True (-not $result.Ready -and $result.Category -eq 'Unreadable') 'An unknown SMB failure was misclassified as permission-repair evidence.'
         }
@@ -76,7 +82,10 @@ $worker = & ([scriptblock]::Create($workerNodes[0].Extent.Text))
                 $result.Error -match 'Access is denied') "$mode lost the actual permission failure."
         }
     }
-    Assert-True ($state.Paths[0] -eq '\\NEWDP.memlabs.test\SMS_DP$\sms\bin') 'The probe does not exercise the producer SMB path.'
+    Assert-True ($state.Paths[0] -eq '\\NEWDP.memlabs.test\SMS_DP$') 'The probe does not exercise the producer SMB share.'
+    $state.Mode = 'Ready'
+    $result = & $worker "$env:COMPUTERNAME.memlabs.test"
+    Assert-True ($result.Ready -and $state.Paths[$state.Paths.Count - 1] -eq 'C:\SMS_DP$') 'A site-server-local DP still requires the remote-DP bin tree.'
 }
 
 . ([scriptblock]::Create($shareFunction.Extent.Text))
@@ -119,7 +128,7 @@ $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
     $state = [pscustomobject]@{
         Root = 'C:\SMS_DP$'; Members = @(); ShareAccess = @(); Acls = @{}
         Added = 0; Granted = 0; Written = [System.Collections.Generic.List[string]]::new()
-        IgnoreAclWrite = $false; DenyAclRead = $false
+        IgnoreAclWrite = $false; DenyAclRead = $false; SiteServer = $false
     }
     function Reset-Fixture {
         $state.Root = 'C:\SMS_DP$'
@@ -131,6 +140,7 @@ $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
         $state.Written.Clear()
         $state.IgnoreAclWrite = $false
         $state.DenyAclRead = $false
+        $state.SiteServer = $false
         foreach ($path in @('C:\SMS_DP$', 'C:\SMS_DP$\sms', 'C:\SMS_DP$\sms\bin')) {
             $acl = [Security.AccessControl.DirectorySecurity]::new()
             $acl.SetAccessRuleProtection($true, $false)
@@ -152,6 +162,10 @@ $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
         $state.Members += [pscustomobject]@{ SID = $Member }
     }
     function Get-SmbShare { param($Name, $ErrorAction) [pscustomobject]@{ Path = $state.Root } }
+    function Get-Service {
+        param($Name, $ErrorAction)
+        if ($state.SiteServer) { [pscustomobject]@{ Name = 'SMS_EXECUTIVE'; Status = 'Running' } }
+    }
     function Get-SmbShareAccess { param($Name, $ErrorAction) return $state.ShareAccess }
     function Grant-SmbShareAccess {
         param($Name, $AccountName, $AccessRight, [switch]$Force, $ErrorAction)
@@ -209,6 +223,13 @@ $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
     Reset-Fixture
     $result = & $repair "MEMLABS\$env:COMPUTERNAME`$" $siteSid
     Assert-True ($result.Succeeded -and $state.Added -eq 0) 'A site-server-local DP unnecessarily granted its own computer network-administrator membership.'
+    Reset-Fixture
+    $state.SiteServer = $true
+    $state.Acls.Remove('C:\SMS_DP$\sms')
+    $state.Acls.Remove('C:\SMS_DP$\sms\bin')
+    $result = & $repair "MEMLABS\$env:COMPUTERNAME`$" $siteSid
+    Assert-True ($result.Succeeded -and $state.Written.Count -eq 1 -and
+        $state.Written[0] -eq 'C:\SMS_DP$') 'Site-server repair touched or required remote-only binary directories.'
 }
 
 . ([scriptblock]::Create((Get-TestFunction $functions 'Confirm-CMDistributionPointAccess').Extent.Text))
@@ -254,6 +275,49 @@ foreach ($name in @('Install-DP', 'Install-PullDP')) {
 }
 
 $validation = Get-TestAst (Join-Path $root 'common\Common.Validation.Functional.ps1')
+$rootAssignments = @($validation.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -eq '$tftpRoots'
+        }, $true))
+$rootVerdicts = @($validation.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Clauses[0].Item1.Extent.Text -eq '$tftpRoots.Count -eq 0'
+        }, $true))
+Assert-True ($rootAssignments.Count -eq 1 -and $rootVerdicts.Count -eq 1) 'Expected one active PXE root discovery path.'
+$validationSource = $validation.Extent.Text
+$discoveryStart = $rootAssignments[0].Extent.StartOffset
+$discoverRoots = [scriptblock]::Create($validationSource.Substring(
+        $discoveryStart, $rootVerdicts[0].Extent.StartOffset - $discoveryStart))
+& {
+    $state = [pscustomobject]@{ FailServiceQuery = $false }
+    function Get-CimInstance {
+        param($ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
+        if ($state.FailServiceQuery) { throw [UnauthorizedAccessException]::new('service metadata denied') }
+        [pscustomobject]@{ PathName = '"C:\ConfigMgr\bin\x64\sccmpxe.exe" service' }
+    }
+    function Get-ItemProperty {
+        param($Path, $Name, $ErrorAction)
+        [pscustomobject]@{ RootFolder = 'C:\RemoteInstall' }
+    }
+    $sccmPxe = [pscustomobject]@{ Status = 'Running' }
+    $wds = $null
+    $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+    . $discoverRoots
+    Assert-True ($results.Passed -and $tftpRoots.Count -eq 1 -and
+        $tftpRoots[0] -eq 'C:\ConfigMgr\bin\x64') 'PXE validation did not select the site-server responder directory.'
+    $state.FailServiceQuery = $true
+    . $discoverRoots
+    Assert-True (-not $results.Passed -and $tftpRoots.Count -eq 0 -and
+        ($results.Details -join ' ') -match 'service metadata denied') 'Unreadable responder metadata was silently replaced by an assumed directory.'
+    $sccmPxe = $null
+    $wds = [pscustomobject]@{ Status = 'Running' }
+    $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+    . $discoverRoots
+    Assert-True ($results.Passed -and $tftpRoots[0] -eq 'C:\RemoteInstall') 'WDS RootFolder discovery was not preserved.'
+}
+
 $payloadLoops = @($validation.FindAll({
             param($node)
             $node -is [Management.Automation.Language.ForEachStatementAst] -and

@@ -6402,19 +6402,46 @@ function Test-SiteSystemFunctionality {
             else {
                 $results.Details.Add("CMD: PXE payload check ($($pxeEvidence -join '; '))")
                 $tftpRoots = New-Object System.Collections.Generic.List[string]
-                if ($share -and $share.Path) { $tftpRoots.Add((Join-Path $share.Path 'sms\bin')) }
-                foreach ($drv in @('E:', 'F:', 'D:', 'G:', 'C:')) {
-                    $cand = "$drv\SMS_DP`$\sms\bin"
-                    if ((Test-Path -LiteralPath $cand) -and -not $tftpRoots.Contains($cand)) { $tftpRoots.Add($cand) }
+                $rootDiscoveryErrors = @()
+                if ($sccmPxe) {
+                    try {
+                        $responder = Get-CimInstance -ClassName Win32_Service -Filter "Name='SccmPxe'" -OperationTimeoutSec 10 -ErrorAction Stop
+                        if (-not $responder -or "$($responder.PathName)" -notmatch '^\s*"?(.+?\.exe)"?(?:\s|$)') {
+                            throw 'SccmPxe has no readable executable path.'
+                        }
+                        $tftpRoots.Add((Split-Path -Path ([Environment]::ExpandEnvironmentVariables($Matches[1])) -Parent))
+                    }
+                    catch { $rootDiscoveryErrors += "SccmPxe root: $($_.Exception.Message)" }
                 }
-                try {
-                    $wdsRoot = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name 'RootFolder' -ErrorAction Stop).RootFolder
-                    if ($wdsRoot -and (Test-Path -LiteralPath $wdsRoot)) { $tftpRoots.Add($wdsRoot) }
+                if ($wds) {
+                    try {
+                        $wdsRoot = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name 'RootFolder' -ErrorAction Stop).RootFolder
+                        if (-not $wdsRoot) { throw 'WDSTFTP has no configured RootFolder.' }
+                        $wdsRoot = [Environment]::ExpandEnvironmentVariables("$wdsRoot")
+                        if (-not $tftpRoots.Contains($wdsRoot)) { $tftpRoots.Add($wdsRoot) }
+                    }
+                    catch { $rootDiscoveryErrors += "WDS root: $($_.Exception.Message)" }
                 }
-                catch { }
+                if ($tftpRoots.Count -eq 0 -and $rootDiscoveryErrors.Count -eq 0) {
+                    foreach ($drv in @('E:', 'F:', 'D:', 'G:', 'C:')) {
+                        $cand = "$drv\SMS_DP`$\sms\bin"
+                        try {
+                            $null = Get-Item -LiteralPath $cand -Force -ErrorAction Stop
+                            $tftpRoots.Add($cand)
+                        }
+                        catch [System.Management.Automation.ItemNotFoundException] { }
+                        catch [System.Management.Automation.DriveNotFoundException] { }
+                        catch { $rootDiscoveryErrors += "'$cand': $($_.Exception.Message)" }
+                    }
+                }
 
+                if ($rootDiscoveryErrors.Count) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: PXE root discovery could NOT be completed: $($rootDiscoveryErrors -join '; '). The responder's configured root was not replaced by an assumed remote-DP directory.")
+                }
                 if ($tftpRoots.Count -eq 0) {
-                    $results.Details.Add("WARN: PXE is enabled but no TFTP root was found (no ?:\SMS_DP`$\sms\bin, no WDS RootFolder) -- the PXE payload could NOT be measured")
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: PXE is enabled but no TFTP root was measured from the responder, WDS, or DP directories -- the PXE payload could NOT be checked")
                 }
                 else {
                     $bootFiles = @()

@@ -3251,7 +3251,11 @@ function Save-CMSetupLogsFromVm {
                 'cmupdate.log', 'cmupdate.lo_',
                 'hman.log', 'hman.lo_',
                 'distmgr.log', 'distmgr.lo_',
-                'smsexec.log', 'smsexec.lo_'
+                'smsexec.log', 'smsexec.lo_',
+                'rcmctrl.log', 'rcmctrl.lo_',
+                'replmgr.log', 'replmgr.lo_',
+                'sender.log', 'sender.lo_',
+                'despool.log', 'despool.lo_'
             )
             if ($cmLogDir -and (Test-Path -LiteralPath $cmLogDir -PathType Container)) {
                 foreach ($cmLogName in $cmLogNames) {
@@ -3283,6 +3287,27 @@ function Save-CMSetupLogsFromVm {
                 $productLogInventory.Add([pscustomobject]@{ SourcePath = '<ConfigMgr installation directory>'; Exists = $false; Collected = $false; Bytes = 0; Error = 'Installation Directory registry value was unavailable' })
             }
 
+            $drsSnapshotPath = 'C:\staging\DSC\DRSReadinessFailure.json'
+            try {
+                $drsSnapshot = Get-Item -LiteralPath $drsSnapshotPath -ErrorAction Stop
+                if ($drsSnapshot.Length -gt 1MB) { throw 'DRS readiness snapshot exceeds the 1 MiB capture bound.' }
+                $cmArtifacts.Add([pscustomobject]@{
+                        Name = $drsSnapshot.Name
+                        SourcePath = $drsSnapshot.FullName
+                        Bytes = $drsSnapshot.Length
+                        LastWriteTimeUtc = $drsSnapshot.LastWriteTimeUtc
+                        TailLines = 0
+                        Content = Get-Content -LiteralPath $drsSnapshot.FullName -Raw -ErrorAction Stop
+                    })
+                $productLogInventory.Add([pscustomobject]@{ SourcePath = $drsSnapshotPath; Exists = $true; Collected = $true; Bytes = $drsSnapshot.Length; Error = '' })
+            }
+            catch {
+                $productLogInventory.Add([pscustomobject]@{
+                        SourcePath = $drsSnapshotPath
+                        Exists = Test-Path -LiteralPath $drsSnapshotPath -PathType Leaf
+                        Collected = $false; Bytes = 0; Error = $_.Exception.Message
+                    })
+            }
             foreach ($rootLogPath in @('C:\ConfigMgrPrereq.log')) {
                 try {
                     $rootLogFile = Get-Item -LiteralPath $rootLogPath -ErrorAction Stop
@@ -3867,7 +3892,9 @@ function Save-CMSetupLogsFromVm {
                         'SMS_DPGroupMembers',
                         'SMS_DPGroupPackages',
                         'SMS_DPGroupCollections',
-                        'SMS_DistributionPointInfo'
+                        'SMS_DistributionPointInfo',
+                        'SMS_ReplicationLinkSummary',
+                        'SMS_ReplicationGroup'
                     )) {
                     try {
                         $boundedRows = @(Get-CimInstance -Namespace $probe.Namespace -ClassName $className -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 251)

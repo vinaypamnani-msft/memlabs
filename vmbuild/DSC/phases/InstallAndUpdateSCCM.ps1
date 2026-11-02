@@ -2782,22 +2782,21 @@ else {
                 $Configuration | Add-Member -MemberType NoteProperty -Name  $propName  -Value  $PSReadytoUse -Force
 
             }
-            # Only mark Running if not already Completed
-            if ($Configuration.$propName.Status -ne 'Completed') {
-                $Configuration.$propName.Status = 'Running'
-                $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            if ($Configuration.$propName -is [System.Collections.IDictionary]) {
+                $Configuration.$propName['ReplicationVerified'] = $false
             }
+            else {
+                $Configuration.$propName | Add-Member -NotePropertyName ReplicationVerified -NotePropertyValue $false -Force
+            }
+            $Configuration.$propName.Status = 'Running'
+            $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            $Configuration.$propName.EndTime = ''
             Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
         }
 
-        # Build wait list excluding already-completed primaries
+        # A previous timeout could have written Completed without an active link.
         $waitList = @()
         foreach ($PSVM in $PSVMs) {
-            $propName = "PSReadyToUse" + $PSVM.VmName
-            if ($Configuration.$propName.Status -eq 'Completed') {
-                Write-DscStatus "Replication link for $($PSVM.VmName) already verified. Skipping."
-                continue
-            }
             $waitList += $PSVM.vmName
         }
 
@@ -2971,6 +2970,7 @@ else {
         # Replication wait with timeout, failure detection, and reinit
         $drsStartTime = Get-Date
         $drsTimeoutSec = 120 * 60  # 2 hours
+        $drsLastObservation = @{}
         # Get-CMDatabaseReplicationStatus LinkStatus / GlobalState / SiteState enum. Authoritative source:
         # AdminConsole SMS_ReplicationLinkSummary-LinkStatus.resx (the SAME table backs all four columns):
         #   0=Deleted, 1=Tombstoned, 2=Active, 3=Interim, 4=Initializing, 5=NotStarted(being configured),
@@ -3015,17 +3015,43 @@ else {
                 $drsElapsedMin = [int]($drsElapsed / 60)
 
                 if ($drsElapsed -ge $drsTimeoutSec) {
-                    Write-DscStatus "DRS replication wait timed out after ${drsElapsedMin}m. Proceeding anyway." -MachineName $PSVM.VmName
-                    $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
-                    $Configuration.$propName.Status = 'Completed'
+                    $drsFailureReason = "DRS replication readiness for $SiteCode -> $PSSiteCode timed out after ${drsElapsedMin}m. The Primary is NOT ready; inspect DRSReadinessFailure.json and both sites' rcmctrl.log."
+                    $Configuration.$propName.Status = 'Error'
+                    $Configuration.$propName.ReplicationVerified = $false
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+                    $Configuration.InstallSCCM.Status = 'Error'
+                    $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-                    continue
+                    try {
+                        [ordered]@{
+                            CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+                            SourceSite = $SiteCode
+                            TargetSite = $PSSiteCode
+                            Primary = $PSVM.VmName
+                            ElapsedSeconds = $drsElapsed
+                            Error = $drsFailureReason
+                            LastObservations = $drsLastObservation
+                        } | ConvertTo-Json -Depth 6 -ErrorAction Stop |
+                            Set-Content -LiteralPath (Join-Path $LogPath 'DRSReadinessFailure.json') -Encoding UTF8 -ErrorAction Stop
+                    }
+                    catch { Write-DscStatus "DRS readiness failure snapshot could not be written: $($_.Exception.Message)" -Warning }
+                    Write-DscStatus $drsFailureReason -Failure -MachineName $PSVM.VmName
+                    throw $drsFailureReason
                 }
 
                 # Wait for replication ready
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+                $drsLastObservation[$PSVM.VmName] = [ordered]@{
+                    CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+                    StatusReturned = $null -ne $replicationStatus
+                    LinkStatus = $replicationStatus.LinkStatus
+                    CasToPrimaryGlobal = $replicationStatus.Site1ToSite2GlobalState
+                    PrimaryToCasGlobal = $replicationStatus.Site2ToSite1GlobalState
+                    PrimaryToCasSite = $replicationStatus.Site2ToSite1SiteState
+                    GlobalInitPercentage = $replicationStatus.GlobalInitPercentage
+                    SqlHealth = $null
+                }
 
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
                     $linkName = $stateMap[[int]$replicationStatus.LinkStatus]; if (-not $linkName) { $linkName = "$($replicationStatus.LinkStatus)" }
@@ -3039,12 +3065,14 @@ else {
                     # ReplicationActive (125 child / 225 CAS) and there are no failed sends for the primary, the
                     # link is functionally Active and we complete now, regardless of the stale summary.
                     $sqlHealth = Test-DrsLinkHealthyViaSql -CasSqlDataSource $casSqlDataSource -CasDbName $casDbName -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode -ActiveStatuses $drsActiveStatuses
+                    $drsLastObservation[$PSVM.VmName].SqlHealth = $sqlHealth
                     if ($sqlHealth.Healthy) {
                         Write-DscStatus "Replication link is Active per SQL ground truth (ServerData: $SiteCode=$($sqlHealth.CasStatus), $PSSiteCode=$($sqlHealth.PriStatus); 0 failed sends) - the monitoring summary still lags (Link=$linkName, CAS->PRI=$g12Name, PRI->CAS=$g21Name, Site=$s21Name) (${drsElapsedMin}m elapsed)" -MachineName $PSVM.VmName
                         Write-DscStatus "$SiteCode -> $PSSiteCode replication link Active (SQL ground truth)"
                         $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                         $propName = "PSReadyToUse" + $PSVM.VmName
                         $Configuration.$propName.Status = 'Completed'
+                        $Configuration.$propName.ReplicationVerified = $true
                         $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                         Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                         continue
@@ -3226,6 +3254,7 @@ ORDER BY p.rows DESC
                     $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
                     $Configuration.$propName.Status = 'Completed'
+                    $Configuration.$propName.ReplicationVerified = $true
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                 }
