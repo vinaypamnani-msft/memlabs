@@ -91,6 +91,13 @@ It keeps newer installed versions, bounds downloads and the shared MSI retry
 budget, records `C:\staging\Fix\EdgeServicing-MSI.log`, verifies the installed
 version, and restores Edge updater services/tasks. The host execution limit is
 1,200 seconds; the MSI budget is 600 seconds across at most three attempts.
+After a successful MSI exit, browser-version verification allows up to 30 seconds
+for completion within that same budget. If exit `0` leaves the browser outdated,
+the next permitted attempt uses `REINSTALL=ALL REINSTALLMODE=vomus` against the
+same verified MSI. A normal `/i` can otherwise skip the browser installer when
+that MSI version is already registered. Repair is never used for the initial
+installation, and an unchanged browser still fails after the bounded repair.
+Later MSI attempts append to the log so the original no-op is retained.
 The installed browser must meet the current Stable version for its architecture;
 updater services are not manually started or required to remain running.
 Their startup types and enabled scheduled tasks are still restored and verified.
@@ -99,8 +106,20 @@ without registry-policy changes. Update services/tasks are also restored after
 a failed download. No automatic reboot or forced browser termination is requested.
 Existing browser windows must be reopened to use the updated engine.
 
+On failure, the host automatically embeds Edge's MSI log, updater logs and
+recent `msedge_installer*.log` files in its timestamped `.diagnostics.log`
+sidecar, which is already included in build-log bundles. Small product logs
+are captured in full; larger logs retain bounded tails (64K characters per log,
+at most six logs). The shared 512 KB transfer limit can reduce those captures
+further, with explicit truncation metadata. Missing or unreadable logs are
+inventoried rather than silently omitted. Browser launcher/payload versions,
+Edge registration, updater services/tasks and related processes are captured
+as separate evidence; MSI product version alone is not browser verification.
+
 Validate with [Test-EdgeServicing.ps1](../tools/Test-EdgeServicing.ps1).
 The test uses mock installers, services, tasks, policy, and download responses.
+Validate failure capture and host-side export with
+[Test-EdgeFailureEvidence.ps1](../tools/Test-EdgeFailureEvidence.ps1).
 
 ## Windows activation on air-gapped VMs
 

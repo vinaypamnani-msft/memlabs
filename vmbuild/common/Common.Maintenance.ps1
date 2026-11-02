@@ -1767,7 +1767,8 @@ function Protect-VMFixDiagnosticText {
     $safe = "$Text" -replace '(?i)(-Token\s+)(?:"[^"]*"|\S+)', '$1[REDACTED]'
     $safe = $safe -replace '(?i)([?&](?:sig|token|password|secret|access_token)=)[^&\s"]+', '$1[REDACTED]'
     $safe = $safe -replace '(?i)(\b(?:password|pwd|access_token|client_secret)\s*[:=]\s*)(?:"[^"]*"|''[^'']*''|[^;\s,]+)', '$1[REDACTED]'
-    $safe = $safe -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@', '$1[REDACTED]@'
+    # Bound scheme starts so long MSI lines do not cause quadratic scans on .NET Framework.
+    $safe = $safe -replace '(?<![a-zA-Z0-9+.-])([0-9+.-]*[a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@', '$1[REDACTED]@'
     if ($safe.Length -gt $MaximumLength) { return $safe.Substring(0, $MaximumLength) + ' [truncated]' }
     return $safe
 }
@@ -1783,8 +1784,145 @@ function Get-VMFixExecutionTimeout {
     }
 }
 
+function Get-VMEdgeFailureEvidence {
+    param([string[]]$TempPaths = @())
+
+    $evidence = [ordered]@{
+        BrowserFiles = @(); RegistryPaths = @(); Services = @(); Tasks = @()
+        Processes = @(); Logs = @(); LogInventory = @(); Errors = @()
+    }
+    foreach ($directory in @(${env:ProgramFiles(x86)}, $env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique) {
+        $application = Join-Path $directory 'Microsoft\Edge\Application'
+        $browserPaths = @(Join-Path $application 'msedge.exe'; Join-Path $application 'new_msedge.exe')
+        try {
+            if (Test-Path -LiteralPath $application -PathType Container -ErrorAction Stop) {
+                $versions = @(Get-ChildItem -LiteralPath $application -Directory -ErrorAction Stop |
+                    Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+                    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 4)
+                $browserPaths += @($versions | ForEach-Object { Join-Path $_.FullName 'msedge.dll' })
+            }
+        }
+        catch { $evidence.Errors += "Edge payload inventory ${application}: $($_.Exception.Message)" }
+        foreach ($path in $browserPaths) {
+            try {
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop)) {
+                    $evidence.BrowserFiles += [pscustomobject]@{ Path = $path; Exists = $false }
+                    continue
+                }
+                $file = Get-Item -LiteralPath $path -ErrorAction Stop
+                $evidence.BrowserFiles += [pscustomobject]@{
+                    Path = $path; Exists = $true; Bytes = $file.Length; LastWriteTimeUtc = "$($file.LastWriteTimeUtc)"
+                    ProductVersion = "$($file.VersionInfo.ProductVersion)"; FileVersion = "$($file.VersionInfo.FileVersion)"
+                }
+            }
+            catch { $evidence.Errors += "Edge binary ${path}: $($_.Exception.Message)" }
+        }
+    }
+    foreach ($root in @('HKLM:\SOFTWARE', 'HKLM:\SOFTWARE\WOW6432Node')) {
+        $evidence.RegistryPaths += [pscustomobject]@{ Path = "$root\Microsoft\Edge\BLBeacon"; Names = @('version') }
+        $evidence.RegistryPaths += [pscustomobject]@{
+            Path = "$root\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}"
+            Names = @('pv', 'name', 'location')
+        }
+        $evidence.RegistryPaths += [pscustomobject]@{
+            Path = "$root\Microsoft\EdgeUpdate\ClientState\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}"
+            Names = @('InstallerResult', 'InstallerError', 'InstallerExtraCode1')
+        }
+    }
+    try {
+        $services = @(Get-Service -ErrorAction Stop | Where-Object {
+                $_.Name -in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService') -or
+                $_.Name -like 'MicrosoftEdgeUpdate*'
+            } | Select-Object -First 8)
+        $evidence.Services = @($services | Select-Object Name,
+            @{ Name = 'Status'; Expression = { "$($_.Status)" } },
+            @{ Name = 'StartType'; Expression = { "$($_.StartType)" } })
+        foreach ($service in $services) {
+            $evidence.RegistryPaths += [pscustomobject]@{
+                Path = "HKLM:\SYSTEM\CurrentControlSet\Services\$($service.Name)"
+                Names = @('ImagePath', 'Start', 'DelayedAutoStart')
+            }
+        }
+    }
+    catch { $evidence.Errors += "Edge updater services: $($_.Exception.Message)" }
+    try {
+        $evidence.Tasks = @(Get-ScheduledTask -ErrorAction Stop |
+            Where-Object TaskName -Like 'MicrosoftEdgeUpdate*' |
+            Select-Object -First 8 TaskName, TaskPath, @{ Name = 'State'; Expression = { "$($_.State)" } })
+    }
+    catch { $evidence.Errors += "Edge updater tasks: $($_.Exception.Message)" }
+    try {
+        $evidence.Processes = @(Get-Process -ErrorAction Stop |
+            Where-Object { $_.ProcessName -in @('msedge', 'MicrosoftEdgeUpdate', 'MicrosoftEdgeUpdateSetup', 'setup') } |
+            Sort-Object ProcessName | Select-Object -First 20 Id, ProcessName,
+                @{ Name = 'Path'; Expression = { Protect-VMFixDiagnosticText "$($_.Path)" 500 } })
+    }
+    catch { $evidence.Errors += "Edge processes: $($_.Exception.Message)" }
+
+    $logPaths = @('C:\staging\Fix\EdgeServicing-MSI.log')
+    if ($env:ProgramData) {
+        $updaterRoot = Join-Path $env:ProgramData 'Microsoft\EdgeUpdate\Log'
+        $logPaths += @(Join-Path $updaterRoot 'MicrosoftEdgeUpdate.log'; Join-Path $updaterRoot 'MicrosoftEdgeUpdate.log.bak')
+    }
+    else { $evidence.Errors += 'ProgramData is unavailable; Edge updater logs could not be located.' }
+    $setupRoots = @($TempPaths)
+    if ($env:SystemRoot) {
+        $setupRoots += @(Join-Path $env:SystemRoot 'SystemTemp'
+            Join-Path $env:SystemRoot 'System32\config\systemprofile\AppData\Local\Temp')
+    }
+    $setupLogs = @(foreach ($directory in @($setupRoots | Select-Object -Unique)) {
+            try {
+                if (Test-Path -LiteralPath $directory -PathType Container -ErrorAction Stop) {
+                    Get-ChildItem -LiteralPath $directory -File -Filter 'msedge_installer*.log' -ErrorAction Stop
+                }
+            }
+            catch { $evidence.Errors += "Edge setup log inventory ${directory}: $($_.Exception.Message)" }
+        })
+    $logPaths += @($setupLogs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 3 -ExpandProperty FullName)
+    foreach ($path in @($logPaths | Select-Object -Unique | Select-Object -First 6)) {
+        $inventory = [ordered]@{ Path = $path; Exists = $null; Collected = $false; Bytes = 0; Truncated = $false; Error = '' }
+        try {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop)) {
+                $inventory.Exists = $false
+                $inventory.Error = 'File not found; it may not have been created for this attempt.'
+                continue
+            }
+            $inventory.Exists = $true
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            $inventory.Bytes = $file.Length
+            if ($file.Length -le 64KB) {
+                $content = [string](Get-Content -LiteralPath $path -Raw -ErrorAction Stop)
+            }
+            else {
+                $content = @(Get-Content -LiteralPath $path -Tail 2000 -ErrorAction Stop) -join "`r`n"
+                $inventory.Truncated = $true
+            }
+            $protected = Protect-VMFixDiagnosticText $content ([int]::MaxValue)
+            if ($protected.Length -gt 64KB) {
+                $protected = $protected.Substring($protected.Length - 64KB)
+                $inventory.Truncated = $true
+            }
+            $evidence.Logs += [pscustomobject]@{
+                Path = $path; Bytes = $file.Length; LastWriteTimeUtc = "$($file.LastWriteTimeUtc)"
+                Content = $protected; ContentTruncated = [bool]$inventory.Truncated; CaptureCharacterLimit = 64KB
+                Tail = @($protected -split '\r?\n' | Select-Object -Last 60 |
+                    ForEach-Object { Protect-VMFixDiagnosticText $_ 500 })
+                TailLimit = 60
+            }
+            $inventory.Collected = $true
+        }
+        catch {
+            $inventory.Error = Protect-VMFixDiagnosticText $_.Exception.Message 600
+            $evidence.Errors += "Edge log ${path}: $($inventory.Error)"
+        }
+        finally { $evidence.LogInventory += [pscustomobject]$inventory }
+    }
+    return [pscustomobject]$evidence
+}
+
 function Get-VMFixDiagnosticScriptBlock {
     $redactor = ${function:Protect-VMFixDiagnosticText}.ToString()
+    $edgeCollector = ${function:Get-VMEdgeFailureEvidence}.ToString()
     $collector = {
         $ErrorActionPreference = 'Stop'
         $errors = [System.Collections.Generic.List[string]]::new()
@@ -1933,13 +2071,22 @@ function Get-VMFixDiagnosticScriptBlock {
         }
         $paths = [System.Collections.Generic.List[string]]::new()
         $fixedLogs = @("C:\staging\Fix\$FixName.result.json", 'C:\staging\DSC\DSC_Log.log')
-        if ($FixName -ne 'Fix-ODBC18') { $fixedLogs += @('C:\ConfigMgrAdminUISetup.log', 'C:\ConfigMgrAdminUISetupVerbose.log') }
+        if ($FixName -notin @('Fix-ODBC18', 'Fix-EdgeServicing')) { $fixedLogs += @('C:\ConfigMgrAdminUISetup.log', 'C:\ConfigMgrAdminUISetupVerbose.log') }
         foreach ($path in $fixedLogs) {
             if (Test-Path -LiteralPath $path -PathType Leaf) { $paths.Add($path) }
         }
         $tempPaths = @([IO.Path]::GetTempPath(), 'C:\Windows\Temp')
         $tempPaths += @(Get-ChildItem -LiteralPath 'C:\Users' -Directory -Filter 'vmbuildadmin*' -ErrorAction SilentlyContinue |
             Select-Object -First 4 | ForEach-Object { Join-Path $_.FullName 'AppData\Local\Temp' })
+        if ($FixName -eq 'Fix-EdgeServicing') {
+            $edge = Get-VMEdgeFailureEvidence -TempPaths $tempPaths
+            $snapshot.Edge = $edge | Select-Object BrowserFiles, Services, Tasks, Processes, LogInventory
+            $snapshot.Logs += @($edge.Logs)
+            foreach ($registry in @($edge.RegistryPaths)) {
+                $snapshot.Registry += Read-DiagnosticRegistry -Path $registry.Path -Names $registry.Names
+            }
+            foreach ($errorText in @($edge.Errors)) { $errors.Add($errorText) }
+        }
         $msiLogs = @(foreach ($tempPath in @($tempPaths | Select-Object -Unique)) {
                 if (Test-Path -LiteralPath $tempPath) {
                     Get-ChildItem -LiteralPath $tempPath -File -Filter 'memlabs-msodbcsql-*.log' -ErrorAction SilentlyContinue
@@ -1949,7 +2096,7 @@ function Get-VMFixDiagnosticScriptBlock {
             foreach ($file in @($msiLogs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 7)) { $paths.Add($file.FullName) }
         }
         $installDirectory = $siteSetup.Values.'Installation Directory'
-        if ($installDirectory -and $FixName -ne 'Fix-ODBC18') {
+        if ($installDirectory -and $FixName -notin @('Fix-ODBC18', 'Fix-EdgeServicing')) {
             foreach ($name in @('SMSProv.log', 'hman.log', 'sitecomp.log')) {
                 $path = Join-Path $installDirectory "Logs\$name"
                 if (Test-Path -LiteralPath $path -PathType Leaf) { $paths.Add($path) }
@@ -1974,15 +2121,25 @@ function Get-VMFixDiagnosticScriptBlock {
             foreach ($log in $snapshot.Logs) {
                 $log.Tail = @($log.Tail | Select-Object -Last 10 | ForEach-Object { Protect-VMFixDiagnosticText $_ 200 })
                 $log.TailLimit = 10
+                if ($log.PSObject.Properties['Content'] -and $log.Content.Length -gt 8KB) {
+                    $log.Content = $log.Content.Substring($log.Content.Length - 8KB)
+                    $log.ContentTruncated = $true
+                    $log.CaptureCharacterLimit = 8KB
+                    if ($snapshot.Edge) {
+                        foreach ($inventory in @($snapshot.Edge.LogInventory | Where-Object { $_.Path -eq $log.Path })) {
+                            $inventory.Truncated = $true
+                        }
+                    }
+                }
             }
             $snapshot.TransferTruncated = $true
-            $snapshot.CollectionErrors += 'Log tails reduced to fit the 512 KB transfer limit.'
+            $snapshot.CollectionErrors += 'Log tails and product-log content reduced to fit the 512 KB transfer limit.'
             $json = $snapshot | ConvertTo-Json -Depth 9 -Compress
             if ($json.Length -gt 512KB) { throw 'Maintenance diagnostic context exceeded the 512 KB transfer limit.' }
         }
         return $json
     }
-    return [scriptblock]::Create("param([string]`$FixName, [string]`$Stage)`nfunction Protect-VMFixDiagnosticText {`n$redactor`n}`n$($collector.ToString())")
+    return [scriptblock]::Create("param([string]`$FixName, [string]`$Stage)`nfunction Protect-VMFixDiagnosticText {`n$redactor`n}`nfunction Get-VMEdgeFailureEvidence {`n$edgeCollector`n}`n$($collector.ToString())")
 }
 
 function Save-VMFixFailureEvidence {

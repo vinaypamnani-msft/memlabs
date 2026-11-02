@@ -62,6 +62,9 @@ $Fix_EdgeServicing = {
     $savedProtocol = [Net.ServicePointManager]::SecurityProtocol
     $savedProgress = $ProgressPreference
     $restored = $false
+    $repairRequested = $false
+    $repairAttempted = $false
+    $exitCode = $null
     try {
         $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate'
         if (Test-Path -LiteralPath $policyPath) {
@@ -105,12 +108,22 @@ $Fix_EdgeServicing = {
             $null = New-Item -Path (Split-Path $logPath -Parent) -ItemType Directory -Force -ErrorAction Stop
             $installClock = [Diagnostics.Stopwatch]::StartNew()
             for ($attempt=1; $attempt -le 3; $attempt++) {
+                $observed = Get-LabEdgeVersion
+                if ($observed -and $observed -ge $payload.Version) { break }
                 $remainingMilliseconds = 600000 - [int]$installClock.Elapsed.TotalMilliseconds
                 if ($remainingMilliseconds -le 0) { throw "Edge MSI exceeded its 600-second limit; see $logPath." }
+                $logOption = if ($attempt -eq 1) { '/L*v' } else { '/L*v+' }
+                $arguments = @('/i',"`"$installer`"",'/qn','/norestart',$logOption,"`"$logPath`"")
+                if ($repairRequested) {
+                    $arguments += @('REINSTALL=ALL', 'REINSTALLMODE=vomus')
+                    $repairAttempted = $true
+                }
+                $mode = if ($repairRequested) { 'repair' } else { 'install' }
+                Write-FixLog "Edge MSI attempt $attempt/3; mode=$mode; remaining budget=$remainingMilliseconds ms."
                 $process = $null
                 try {
                     $process = Start-Process -FilePath "$env:WINDIR\System32\msiexec.exe" `
-                        -ArgumentList @('/i',"`"$installer`"",'/qn','/norestart','/L*v',"`"$logPath`"") -PassThru -ErrorAction Stop
+                        -ArgumentList $arguments -PassThru -ErrorAction Stop
                     $null = $process.Handle
                     if (-not $process.WaitForExit($remainingMilliseconds)) {
                         Stop-Process -Id $process.Id -Force -ErrorAction Stop
@@ -123,13 +136,40 @@ $Fix_EdgeServicing = {
                     if ($null -eq $exitCode) { throw "Edge MSI returned no exit code; see $logPath." }
                 }
                 finally { if ($process) { $process.Dispose() } }
-                if ($exitCode -in @(0,3010)) { break }
-                if ($exitCode -eq 1618 -and $attempt -lt 3) { Write-FixLog 'Another MSI is active; retrying Edge installation in 15 seconds.'; Start-Sleep -Seconds 15; continue }
+                Write-FixLog "Edge MSI attempt $attempt/3 completed; mode=$mode; exit=$exitCode."
+                if ($exitCode -in @(0,3010)) {
+                    for ($verification=1; $verification -le 7; $verification++) {
+                        $observed = Get-LabEdgeVersion
+                        if ($observed -and $observed -ge $payload.Version) { break }
+                        if ($verification -ge 7) { break }
+                        $remainingMilliseconds = 600000 - [int]$installClock.Elapsed.TotalMilliseconds
+                        if ($remainingMilliseconds -le 0) { break }
+                        Start-Sleep -Milliseconds ([int][math]::Min(5000, $remainingMilliseconds))
+                    }
+                    if ($observed -and $observed -ge $payload.Version) { break }
+                    if ($exitCode -eq 0 -and -not $repairAttempted -and $attempt -lt 3) {
+                        $repairRequested = $true
+                        Write-FixLog "Edge MSI returned success but browser '$observed' is below '$($payload.Version)'; retrying the verified package in repair mode so an already-registered MSI cannot skip browser installation." -Level Warning
+                        continue
+                    }
+                    break
+                }
+                if ($exitCode -eq 1618 -and $attempt -lt 3) {
+                    if ($installClock.Elapsed.TotalMilliseconds -gt 585000) { throw "Edge MSI has insufficient retry time remaining in its 600-second budget; see $logPath." }
+                    Write-FixLog 'Another MSI is active; retrying Edge installation in 15 seconds.'
+                    Start-Sleep -Seconds 15
+                    continue
+                }
                 throw "Edge MSI failed with exit code $exitCode; see $logPath."
             }
         }
         $after = Get-LabEdgeVersion
-        if (-not $after -or $after -lt $payload.Version) { throw "Edge is not at the required Stable release after maintenance (required=$($payload.Version), installed=$after); a pending installer reboot may be required." }
+        if (-not $after -or $after -lt $payload.Version) {
+            $detail = if ($exitCode -eq 3010) { 'MSI returned 3010; a reboot is required before browser convergence can be verified.' }
+            elseif ($repairAttempted) { 'The explicit MSI repair did not converge; MSI registration alone is not browser verification.' }
+            else { 'The bounded MSI attempts did not converge; no additional repair attempt was permitted.' }
+            throw "Edge is not at the required Stable release after maintenance (required=$($payload.Version), installed=$after). $detail See C:\staging\Fix\EdgeServicing-MSI.log."
+        }
         Restore-LabEdgeUpdates
         $restored = $true
         [pscustomobject]@{ Success=$true; Message="Edge $after verified; automatic update services/tasks restored. Reopen any existing Edge windows."; Errors=@() }
@@ -153,7 +193,7 @@ $Fix_EdgeServicing = {
 }
 
 $fixesToPerform += [pscustomobject]@{
-    FixName='Fix-EdgeServicing'; FixVersion='261030.1'; NeededOnFreshDeploy=$true; AppliesToExisting=$true
+    FixName='Fix-EdgeServicing'; FixVersion='261102.0'; NeededOnFreshDeploy=$true; AppliesToExisting=$true
     DoNotSeedFromWatermark=$true; AppliesToRoles=@()
     NotAppliesToRoles=@('OSDClient','AADClient','Proxy','LinuxClient','LinuxServer','StandaloneRootCA')
     DependentVMs=@(); ScriptBlock=$Fix_EdgeServicing
