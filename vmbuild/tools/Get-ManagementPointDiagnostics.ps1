@@ -218,7 +218,7 @@ $inventory = & $addProbe 'LogInventory' {
         try {
             if (-not (Test-Path -LiteralPath $directory -PathType Container -ErrorAction Stop)) { continue }
             Get-ChildItem -LiteralPath $directory -File -ErrorAction Stop |
-                Where-Object { $_.Name -match '^(mpMSI|mpsetup|mpcontrol|sitecomp|srsrp|smsdpprov|SMS_BOOTSTRAP)\.(log|lo_)$' } |
+                Where-Object { $_.Name -match '^(mpMSI|mpsetup|mpcontrol|sitecomp|srsrp|smsdpprov|SMS_BOOTSTRAP|rcmctrl|replmgr|sender|despool|hman|smsexec)\.(log|lo_)$' } |
                 Select-Object @{ Name = 'Path'; Expression = { $_.FullName } },
                     @{ Name = 'LengthBytes'; Expression = { $_.Length } }, LastWriteTimeUtc
         }

@@ -2718,6 +2718,31 @@ function Save-CMRoleFailureDiagnostics {
                 })
         }
         $targets = [System.Collections.Generic.List[object]]::new()
+        if ($Phase -eq 8 -and $trigger.role -in @('CAS', 'Primary')) {
+            $replicationSites = @($trigger)
+            if ($trigger.role -eq 'CAS') {
+                $replicationSites += @($vms | Where-Object {
+                        $_.role -eq 'Primary' -and $trigger.siteCode -and
+                        $_.parentSiteCode -ieq $trigger.siteCode -and
+                        (-not $_.domain -or $_.domain -ieq $DomainName)
+                    })
+            }
+            elseif ($trigger.parentSiteCode) {
+                $parents = @($vms | Where-Object {
+                        $_.role -eq 'CAS' -and $_.siteCode -ieq $trigger.parentSiteCode -and
+                        (-not $_.domain -or $_.domain -ieq $DomainName)
+                    })
+                if ($parents.Count -ne 1) {
+                    $message = "Could not resolve one CAS peer for '$VmName' (parent site '$($trigger.parentSiteCode)'); replication peer evidence is incomplete."
+                    $state.CollectionErrors += $message
+                    Write-Log "[Phase $Phase]: $VmName`: $message" -Warning
+                }
+                else { $replicationSites += $parents }
+            }
+            foreach ($site in $replicationSites) {
+                $targets.Add([pscustomobject]@{ VmName = $site.vmName; Role = 'SiteServer'; SiteCode = "$($site.siteCode)" })
+            }
+        }
         foreach ($candidate in @($candidates | Sort-Object vmName -Unique)) {
             $candidateRoles = @()
             if ($Phase -ne 7 -and 'MP' -in $Roles -and ($candidate.installMP -eq $true -or $candidate.role -eq 'Secondary')) {
@@ -2764,7 +2789,7 @@ function Save-CMRoleFailureDiagnostics {
             })
         if (-not $state.Targets.Count) {
             $state.CaptureStatus = 'NoApplicableRoles'
-            Write-Log "[Phase $Phase]: $VmName`: no configured MP/RP targets apply to this failure." -LogOnly
+            Write-Log "[Phase $Phase]: $VmName`: no configured role/site-server targets apply to this failure." -LogOnly
             return
         }
         $toolsPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools'
@@ -10013,7 +10038,11 @@ $global:VM_Config = {
                         if ($failEntry -is [string] -and $failEntry.Contains("$")) {
                             $failEntry = $failEntry.Substring(0, $failEntry.IndexOf("$"))
                         }
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $failEntry. Check C:\ConfigMgrSetup.log for more." -Failure -OutputStream
+                        $setupFailureMessage = "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $failEntry. Check C:\ConfigMgrSetup.log for more."
+                        if ($using:Phase -eq 8) {
+                            Write-Log "$setupFailureMessage Collecting bounded failure evidence before notifying the phase controller." -Warning -OutputStream
+                        }
+                        else { Write-Log $setupFailureMessage -Failure -OutputStream }
                         # Recognize the SQLAO Init_Database AG wait-for-health timeout
                         # and surface explicit remediation. CM Setup creates the site
                         # database BEFORE the failover/failback, so a blind retry
@@ -10057,6 +10086,7 @@ $global:VM_Config = {
                         catch {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture threw after failure was already determined: $($_.Exception.Message)" -Warning -OutputStream
                         }
+                        if ($using:Phase -eq 8) { Write-Log $setupFailureMessage -Failure -OutputStream }
                         return
                     }
                 }
@@ -10083,8 +10113,13 @@ $global:VM_Config = {
             Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscApplyWait completed in $([math]::Round($stopWatch.Elapsed.TotalSeconds, 1)) seconds (complete=$complete)" -LogOnly
         }
         catch {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+            $monitoringFailure = $_
+            $monitoringFailureMessage = "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $monitoringFailure"
+            if ($using:Phase -eq 8) {
+                Write-Log "$monitoringFailureMessage Collecting bounded failure evidence before notifying the phase controller." -Warning -OutputStream
+            }
+            else { Write-Log $monitoringFailureMessage -Failure -OutputStream }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($monitoringFailure.ScriptStackTrace)" -LogOnly
             Write-Progress2 "Exception" -Status "Failed end $_" -force
             try {
                 Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure' -DeployConfig $deployConfig
@@ -10092,6 +10127,7 @@ $global:VM_Config = {
             catch {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture also threw while preserving monitoring-failure evidence: $($_.Exception.Message)" -Warning -OutputStream
             }
+            if ($using:Phase -eq 8) { Write-Log $monitoringFailureMessage -Failure -OutputStream }
             return
         }
 

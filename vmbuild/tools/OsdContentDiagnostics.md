@@ -67,6 +67,12 @@ and `despool` logs, replication monitoring classes, and a bounded
 `DRSReadinessFailure.json` with the last provider/SQL health observations.
 These diagnostics identify an initialization blocker; they do not automatically
 repair database replication or override ConfigMgr authorization.
+Phase 8 site failures also collect independent site-server documents from the
+trigger and its configured CAS/Primary peers, even when no MP/RP is installed.
+Those documents include current and rolled replication log bodies. A failed
+peer capture is recorded without discarding the other side. Terminal Phase 8
+failure notification follows bounded capture so CAS cancellation cannot stop
+the evidence collection halfway through.
 
 The Phase 8 coverage loop does not refresh content in `InstallPending` or
 `ContentValidating`. A remaining incomplete/retrying target gets five minutes to
@@ -90,6 +96,8 @@ Offline regression checks:
 .\vmbuild\tools\Test-BootImageExpansion.ps1
 .\vmbuild\tools\Test-DpAccessRecovery.ps1
 .\vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1
+.\vmbuild\tools\Test-CmRoleFailureDiagnostics.ps1
+.\vmbuild\tools\Test-ReplicationFailureCapture.ps1
 .\vmbuild\tools\Test-OsdContentFailureDiagnostics.ps1
 .\vmbuild\tools\Test-PerfloadingOsdContentReconciliation.ps1
 .\vmbuild\tools\Test-Phase11OsdContentState.ps1

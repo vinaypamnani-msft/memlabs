@@ -113,6 +113,8 @@ try {
                     'E:\SMS\Logs' {
                         [pscustomobject]@{ Name = 'mpMSI.log'; FullName = 'E:\SMS\Logs\mpMSI.log'; Length = 8MB; LastWriteTimeUtc = [datetime]::UtcNow }
                         [pscustomobject]@{ Name = 'MPSetup.log'; FullName = 'E:\SMS\Logs\MPSetup.log'; Length = (8MB + 1); LastWriteTimeUtc = [datetime]::UtcNow }
+                        [pscustomobject]@{ Name = 'rcmctrl.log'; FullName = 'E:\SMS\Logs\rcmctrl.log'; Length = 1024; LastWriteTimeUtc = [datetime]::UtcNow }
+                        [pscustomobject]@{ Name = 'rcmctrl.lo_'; FullName = 'E:\SMS\Logs\rcmctrl.lo_'; Length = 1024; LastWriteTimeUtc = [datetime]::UtcNow }
                         break
                     }
                     'E:\Unreadable\Logs' { throw 'synthetic directory failure' }
@@ -121,6 +123,10 @@ try {
             }
             function Get-Content {
                 param([string]$LiteralPath, [switch]$Raw, [int]$Tail, [int]$TotalCount, $ErrorAction)
+                if ($LiteralPath -like 'E:\SMS\Logs\rcmctrl.*') {
+                    Assert-True ($Raw -and -not $PSBoundParameters.ContainsKey('Tail')) 'Small current/rolled replication logs were not captured in full.'
+                    return "replication evidence from $LiteralPath"
+                }
                 switch ($LiteralPath) {
                     'C:\staging\InstallFeatureStatusFixture8.txt' { return @('BITS,BITS-IIS-Ext', 'MemLabsFeatureStateVerified=1') }
                     'E:\SMS\Logs\mpMSI.log' {
@@ -145,7 +151,8 @@ try {
             Assert-True ($provider.Success -and -not $provider.Data[0].Exists -and $configuration.Success) 'Provider and independent IIS evidence were not retained separately.'
             Assert-True (@($configuration.Data[0].Sites.Applications.VirtualDirectories | Where-Object IsSmsMp).Count -eq 2) 'Virtual-directory/application or custom-site endpoint mapping changed.'
             Assert-True ($payload[0] -notmatch 'DO-NOT-EXPORT|fixture-user') 'IIS configuration credentials were exported.'
-            Assert-True ($localState.FullReads -eq 1 -and $localState.TailReads -eq 1 -and $document.Logs.Count -eq 2) 'Non-C: logs or exact capture bounds were lost.'
+            Assert-True ($localState.FullReads -eq 1 -and $localState.TailReads -eq 1 -and $document.Logs.Count -eq 4) 'Non-C: logs or exact capture bounds were lost.'
+            Assert-True (@($document.Logs | Where-Object { $_.Path -like '*rcmctrl.*' -and $_.Content -match 'replication evidence' }).Count -eq 2) 'Current and rolled replication log bodies are missing.'
             Assert-True (($document.CollectionErrors -join '; ') -match 'synthetic directory failure') 'An inaccessible directory was hidden or suppressed other available logs.'
             $certificate = $document.Probes | Where-Object Name -eq 'PublicCertificateMetadata'
             Assert-True ($certificate.Data[0].EnhancedKeyUsageOids[0] -eq '1.3.6.1.5.5.7.3.1') 'Single-EKU metadata lost its array shape.'
@@ -194,7 +201,8 @@ try {
             $role = ($DisplayName -split ' ')[1]
             $expectedTimeout = if ($role -eq 'RP') { 600 } else { 180 }
             Assert-True ($TimeoutSeconds -eq $expectedTimeout -and $ArgumentList[1].AsJson) 'Role capture lost its documented budget or JSON mode.'
-            if ($transportFixture.Mode -eq 'TransportFailure' -and $VmName -eq 'MP') {
+            if (($transportFixture.Mode -eq 'TransportFailure' -and $VmName -eq 'MP') -or
+                ($transportFixture.Mode -eq 'PeerFailure' -and $VmName -eq 'PRI')) {
                 return [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $true; TimedOut = $true; ErrorDetails = @('synthetic timeout') }
             }
             $document = [ordered]@{
@@ -254,6 +262,31 @@ try {
         $captureOutput = @(Save-CMRoleFailureDiagnostics -VmName SQL -DomainName example.test -Phase 7 -DeployConfig $config)
         Assert-True ($captureOutput.Count -eq 0) 'Phase 7 role capture leaked logging objects into the caller return stream.'
         Assert-True (@($transportFixture.Calls | Where-Object DisplayName -eq 'Capture RP role diagnostics').Count -eq 1 -and @($transportFixture.Calls | Where-Object DisplayName -eq 'Capture MP role diagnostics').Count -eq 0) 'Phase 7 capture requests MP checks before role provisioning.'
+
+        $cas = [pscustomobject]@{ vmName = 'CAS'; role = 'CAS'; siteCode = 'HUB' }
+        $child = [pscustomobject]@{ vmName = 'PRI'; role = 'Primary'; siteCode = 'NOM'; parentSiteCode = 'HUB' }
+        $sibling = [pscustomobject]@{ vmName = 'PRI2'; role = 'Primary'; siteCode = 'TWO'; parentSiteCode = 'HUB' }
+        $foreign = [pscustomobject]@{ vmName = 'FOREIGN'; role = 'Primary'; siteCode = 'FOR'; parentSiteCode = 'HUB'; domain = 'other.test' }
+        $hierarchy = [pscustomobject]@{
+            vmOptions = [pscustomobject]@{ domainName = 'example.test' }
+            virtualMachines = @($cas, $child, $sibling, $other, $foreign)
+        }
+        $transportFixture.Calls.Clear()
+        $null = Save-CMRoleFailureDiagnostics -VmName CAS -DomainName example.test -Phase 8 -DeployConfig $hierarchy -Roles @()
+        $siteCalls = @($transportFixture.Calls | Where-Object DisplayName -eq 'Capture SiteServer role diagnostics')
+        Assert-True (($siteCalls.VmName -join ',') -eq 'CAS,PRI,PRI2' -and
+            @($siteCalls | Where-Object { -not $_.Arguments[1].SiteServerOnly }).Count -eq 0) 'CAS failure did not collect both sides independently of MP/RP roles, or crossed the hierarchy/domain boundary.'
+        $transportFixture.Calls.Clear()
+        $null = Save-CMRoleFailureDiagnostics -VmName PRI -DomainName example.test -Phase 8 -DeployConfig $hierarchy -Roles @()
+        $siteCalls = @($transportFixture.Calls | Where-Object DisplayName -eq 'Capture SiteServer role diagnostics')
+        Assert-True (($siteCalls.VmName -join ',') -eq 'CAS,PRI') 'A Primary failure did not collect its CAS peer, or collected unrelated sibling sites.'
+        $transportFixture.Mode = 'PeerFailure'
+        $null = Save-CMRoleFailureDiagnostics -VmName CAS -DomainName example.test -Phase 8 -DeployConfig $hierarchy -Roles @()
+        $statusFile = Get-ChildItem -LiteralPath $workDir -Filter 'CAS-Phase8-*-RoleDiagnostics.json' | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        $status = Get-Content -LiteralPath $statusFile.FullName -Raw | ConvertFrom-Json
+        Assert-True ($status.CaptureStatus -eq 'Partial' -and
+            @($status.Targets | Where-Object { $_.CaptureStatus -eq 'Completed' }).Count -eq 2 -and
+            @($status.Targets | Where-Object { $_.VmName -eq 'PRI' -and $_.CaptureStatus -eq 'Failed' }).Count -eq 1) 'A failed peer collection suppressed successful source/sibling evidence or lost its failure status.'
     }
 
     & {
