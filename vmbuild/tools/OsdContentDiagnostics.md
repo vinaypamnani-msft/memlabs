@@ -67,6 +67,26 @@ and `despool` logs, replication monitoring classes, and a bounded
 `DRSReadinessFailure.json` with the last provider/SQL health observations.
 These diagnostics identify an initialization blocker; they do not automatically
 repair database replication or override ConfigMgr authorization.
+The one-time automatic DRS reinit selects failed groups from
+`RCM_ReplicationLinkStatus` for the exact CAS/Primary pair. It does not filter
+`SMS_ReplicationGroup` using nonexistent site-pair properties or infer failure
+from that class's catalog-wide `Status`. Only those group IDs are submitted to
+the documented `InitializeData(ReplicationGroupID, SiteCode1, SiteCode2)` method;
+nonzero or malformed results remain failures, and an accepted request is not
+readiness. Selection/request errors are retained in the deadline snapshot.
+Recovery calls have a maximum 60-second operation timeout capped by the remaining
+DRS stage budget; no new request is submitted after that deadline.
+Formatted monitoring values such as `50%` are parsed numerically before any
+100-percent gate; invalid values are reported and suppress that gate.
+
+Site-server documents also contain `ReplicationSqlState`: bounded read-only
+initialization/link rows, relevant `dbo.Logs` errors, and Broker transmission
+errors. SQL procedures can write initialization failure details to `dbo.Logs`
+without writing them to `rcmctrl.log`. Each query has a 15-second timeout and a
+200-row limit; connection/query failures and truncation remain explicit.
+The API contract is documented in
+[SMS_ReplicationGroup](https://learn.microsoft.com/en-us/intune/configmgr/develop/reference/core/servers/configure/sms_replicationgroup-server-wmi-class)
+and [InitializeData](https://learn.microsoft.com/en-us/intune/configmgr/develop/reference/core/servers/configure/initializedata-method-in-class-sms_replicationgroup).
 Phase 8 site failures also collect independent site-server documents from the
 trigger and its configured CAS/Primary peers, even when no MP/RP is installed.
 Those documents include current and rolled replication log bodies. A failed
@@ -98,6 +118,8 @@ Offline regression checks:
 .\vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1
 .\vmbuild\tools\Test-CmRoleFailureDiagnostics.ps1
 .\vmbuild\tools\Test-ReplicationFailureCapture.ps1
+.\vmbuild\tools\Test-DrsScopedReinitialization.ps1
+.\vmbuild\tools\Test-ReplicationSqlDiagnostics.ps1
 .\vmbuild\tools\Test-OsdContentFailureDiagnostics.ps1
 .\vmbuild\tools\Test-PerfloadingOsdContentReconciliation.ps1
 .\vmbuild\tools\Test-Phase11OsdContentState.ps1

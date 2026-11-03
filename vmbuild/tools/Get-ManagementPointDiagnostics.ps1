@@ -69,6 +69,84 @@ function Invoke-ManagementPointDiagnosticNative {
     $text
 }
 
+function Get-MemLabsReplicationSqlDiagnostics {
+    param([string]$SiteCode)
+
+    $registry = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server' -ErrorAction Stop
+    $dataSource = "$($registry.Server)"
+    $database = "$($registry.'Database Name')"
+    if (-not $dataSource) { throw 'ConfigMgr SQL Server registry metadata has no Server value.' }
+    if ($database -match '^([^\\]+)\\(CM_[A-Za-z0-9]{3})$') {
+        $instance = $Matches[1]
+        $database = $Matches[2]
+        if ($instance -ine 'MSSQLSERVER' -and $dataSource -notmatch '\\') { $dataSource = "$dataSource\$instance" }
+    }
+    if ($database -notmatch '^CM_([A-Za-z0-9]{3})$') { throw 'ConfigMgr SQL database metadata was not recognized.' }
+    $databaseSite = $Matches[1]
+    if ($SiteCode -and $SiteCode -ine $databaseSite) { throw 'Requested site does not match the registered ConfigMgr database.' }
+    $SiteCode = $databaseSite
+    $portKey = 'HKLM:\SOFTWARE\Microsoft\SMS\SQL Server\Site System SQL Account'
+    $portEvidence = 'No registered nondefault port; SQL default port applies.'
+    if (Test-Path -LiteralPath $portKey -ErrorAction Stop) {
+        $portProperty = (Get-ItemProperty -LiteralPath $portKey -ErrorAction Stop).PSObject.Properties['Port']
+        if ($portProperty -and "$($portProperty.Value)") {
+            [int]$port = 0
+            if (-not [int]::TryParse("$($portProperty.Value)", [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+                throw 'Registered ConfigMgr SQL port was not valid.'
+            }
+            $portEvidence = "Registered SQL port=$port"
+            if ($port -ne 1433 -and $dataSource -notmatch ',\d+$') { $dataSource = "$dataSource,$port" }
+        }
+    }
+    $queries = @(
+        @{ Name = 'Initialization'; Text = 'SELECT TOP 201 SiteRequesting, SiteFulfilling, ReplicationGroup, InitializationStatus, InitializationPercent, TryCount, CreatedTime, ModifiedTime FROM dbo.RCM_DrsInitializationTracking WHERE SiteRequesting=@site OR SiteFulfilling=@site ORDER BY ModifiedTime DESC' },
+        @{ Name = 'LinkGroups'; Text = 'SELECT TOP 201 rd.ID, rd.ReplicationGroup, links.SiteSending, links.SiteReceiving, links.Status AS LinkStatus, links.SnapshotApplied, links.SnapshotAppliedTime FROM dbo.RCM_ReplicationLinkStatus AS links INNER JOIN dbo.ReplicationData AS rd ON rd.ID=links.ReplicationID WHERE links.SiteSending=@site OR links.SiteReceiving=@site ORDER BY links.Status DESC, rd.ID' },
+        @{ Name = 'InitializationErrors'; Text = "SELECT TOP 201 LogTime, ProcedureName, CONVERT(nvarchar(4000),LogText) AS LogText FROM dbo.Logs WHERE LogText LIKE @group OR ((ProcedureName LIKE 'spDRS%' OR ProcedureName LIKE 'spRcm%' OR ProcedureName LIKE '%Init%' OR ProcedureName LIKE '%BCP%') AND (LogText LIKE '%fail%' OR LogText LIKE '%error%' OR LogText LIKE '%exception%')) ORDER BY LogLine DESC" },
+        @{ Name = 'BrokerTransmission'; Text = 'SELECT TOP 201 to_service_name, transmission_status, enqueue_time FROM sys.transmission_queue WHERE transmission_status IS NOT NULL AND transmission_status <> '''' ORDER BY enqueue_time' }
+    )
+    $sections = [Collections.Generic.List[object]]::new()
+    $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$dataSource;Initial Catalog=$database;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+    try {
+        $connection.Open()
+        foreach ($query in $queries) {
+            $command = $null
+            $reader = $null
+            $section = [ordered]@{ Name = $query.Name; Rows = @(); Truncated = $false; Error = '' }
+            try {
+                $command = $connection.CreateCommand()
+                $command.CommandTimeout = 15
+                $command.CommandText = $query.Text
+                [void]$command.Parameters.AddWithValue('@site', $SiteCode)
+                [void]$command.Parameters.AddWithValue('@group', '%Replication Configuration%')
+                $reader = $command.ExecuteReader()
+                $rows = [Collections.Generic.List[object]]::new()
+                while ($reader.Read()) {
+                    if ($rows.Count -ge 200) { $section.Truncated = $true; break }
+                    $values = [ordered]@{}
+                    for ($index = 0; $index -lt $reader.FieldCount; $index++) {
+                        $value = $null
+                        if (-not $reader.IsDBNull($index)) { $value = $reader.GetValue($index) }
+                        $values[$reader.GetName($index)] = $value
+                    }
+                    $rows.Add([pscustomobject]$values)
+                }
+                $section.Rows = $rows.ToArray()
+            }
+            catch { $section.Error = "$($_.Exception.GetType().FullName): $($_.Exception.Message)" }
+            finally {
+                if ($reader) { $reader.Dispose() }
+                if ($command) { $command.Dispose() }
+            }
+            $sections.Add([pscustomobject]$section)
+        }
+    }
+    finally { $connection.Dispose() }
+    [pscustomobject]@{
+        DataSource = $dataSource; Database = $database; SiteCode = $SiteCode
+        PortEvidence = $portEvidence; Sections = $sections.ToArray()
+    }
+}
+
 $probes = [System.Collections.Generic.List[object]]::new()
 $logs = [System.Collections.Generic.List[object]]::new()
 $collectionErrors = [System.Collections.Generic.List[string]]::new()
@@ -107,6 +185,17 @@ $installation = & $addProbe 'InstallationPaths' {
                     Verified = $lines.Count -eq 2 -and ([string]$lines[1]).Trim() -eq 'MemLabsFeatureStateVerified=1'
                 }
             }
+        }
+    }
+}
+
+if ($SiteServerOnly) {
+    $replicationSql = & $addProbe 'ReplicationSqlState' {
+        Get-MemLabsReplicationSqlDiagnostics -SiteCode $SiteCode
+    }
+    if ($replicationSql.Success) {
+        foreach ($section in @($replicationSql.Data[0].Sections | Where-Object { $_.Error })) {
+            $collectionErrors.Add("ReplicationSqlState/$($section.Name): $($section.Error)")
         }
     }
 }
