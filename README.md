@@ -86,7 +86,11 @@ Early provisioning still suppresses Edge Update to avoid extra pending-file
 renames and reboots. Phase 10
 [`Fix-EdgeServicing.ps1`](vmbuild/Fixes/Fix-EdgeServicing.ps1) installs the current
 official Stable release, verifies its installed version, and restores Edge
-updater services/tasks. It also runs through maintenance for existing Windows
+updater services/tasks. The internet-connected host resolves and caches the
+Microsoft-signed MSI, then injects it into guests that need an upgrade; guests
+verify the local package without contacting internet endpoints. Isolated guests
+are supported, but a fully disconnected host still needs access to the official
+metadata/download endpoints. It also runs through maintenance for existing Windows
 VMs; offline root CAs, proxy, Linux, OSD, and AAD-client roles are excluded.
 It does not downgrade a newer browser, override managed update policies, restart
 the VM, or forcibly close browser windows. Reopen existing Edge windows afterward.

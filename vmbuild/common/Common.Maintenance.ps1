@@ -845,6 +845,16 @@ function Start-VMFixesBatched {
     if ($status.StartedVM) { $return.VMsToStop += $VMName }
     if ($status.StartFailed) { return $return }
 
+    foreach ($fix in $applicableFixes) {
+        $preparation = $fix.PSObject.Properties['PrepareScriptBlock']
+        if (-not $preparation -or -not $preparation.Value) { continue }
+        try { $null = & $preparation.Value -VMName $VMName -VMDomain $VMDomain -VMFix $fix }
+        catch {
+            Write-Log "$VMName`: Host preparation for fix '$($fix.FixName)' failed: $($_.Exception.Message)" -Failure
+            return $return
+        }
+    }
+
     # Copy all InjectFiles upfront in one session
     $allInjectFiles = $applicableFixes | Where-Object { $_.InjectFiles } | ForEach-Object { $_.InjectFiles } | Select-Object -Unique
     $allInjectTools = $applicableFixes | Where-Object { $_.InjectTools } | ForEach-Object { $_.InjectTools } | Select-Object -Unique
@@ -930,7 +940,7 @@ function Start-VMFixesBatched {
             }
         }
         catch {
-            Write-Log "$VMName`: Failed to copy InjectFiles/InjectTools for batched maintenance." -Warning
+            Write-Log "$VMName`: Failed to copy InjectFiles/InjectTools for batched maintenance: $($_.Exception.Message)" -Warning
             return $return
         }
     }
@@ -1323,6 +1333,15 @@ function Start-VMFix {
         return $return
     }
     
+    $preparation = $vmFix.PSObject.Properties['PrepareScriptBlock']
+    if ($preparation -and $preparation.Value) {
+        try { $null = & $preparation.Value -VMName $VMName -VMDomain $vmDomain -VMFix $vmFix }
+        catch {
+            Write-Log "$VMName`: Host preparation for fix '$fixName' failed: $($_.Exception.Message)" -Failure
+            return $return
+        }
+    }
+
     # Apply Fix
     $HashArguments = @{
         VmName       = $VMName
@@ -1423,7 +1442,7 @@ function Start-VMFix {
             }
         }
         catch {
-            Write-Log "$VMName`: Failed to copy files for fix '$fixName' ($fixVersion)." -Warning
+            Write-Log "$VMName`: Failed to copy files for fix '$fixName' ($fixVersion): $($_.Exception.Message)" -Warning
             $return.Success = $false
             return $return
         }

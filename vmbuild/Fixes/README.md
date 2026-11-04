@@ -32,8 +32,15 @@ When dot-sourced, the file MUST:
        RunAsAccount        = $vmNote.adminName      # optional, run under specific account
        InjectFiles         = @('Foo.ps1')           # optional, copied to C:\staging\
        InjectTools         = @('LogMachine')        # optional, copied to C:\tools\
+       PrepareScriptBlock  = { param($VMName, $VMDomain, $VMFix) ... } # optional, host-side preparation
    }
    ```
+
+Host preparation runs only for pending, applicable fixes, after the VM connects
+and before file injection or argument serialization, in both execution paths.
+It can populate the descriptor's `InjectFiles` and `ArgumentList` properties.
+It must throw on failure; a failed preparation is logged and prevents execution
+and applied-version stamping.
 
 ## Available variables
 
@@ -84,9 +91,17 @@ and existing-VM maintenance, after early provisioning's intentional Edge Update
 suppression. It is not seeded as already applied from a legacy version watermark.
 Offline root CA, proxy, Linux, OSD, and AAD-client roles are excluded.
 
-The fix selects the current Windows Stable MSI for the OS architecture using
-Microsoft's enterprise metadata. Before installation it verifies the official
-HTTPS delivery origin, exact file size, SHA-256, and valid Microsoft signature.
+The host probes the guest's OS architecture and installed browser version, then
+selects the current Windows Stable MSI using Microsoft's enterprise metadata.
+An internet-connected host is required; the guest does not need internet access.
+When an upgrade is needed, the host verifies the official HTTPS delivery origin,
+exact file size, SHA-256, and valid Microsoft signature, then injects the MSI
+through the existing `InjectFiles` path. Versioned packages are cached in the
+host's `filesToInject\staging` directory; concurrent workers share a verified
+download. Current/newer browsers need no MSI download or transfer.
+The guest independently verifies the staged MSI's size, SHA-256 and Microsoft
+signature before installation. Missing media or unavailable host metadata remains
+an explicit failure, not an unverified success or a guest-download fallback.
 It keeps newer installed versions, bounds downloads and the shared MSI retry
 budget, records `C:\staging\Fix\EdgeServicing-MSI.log`, verifies the installed
 version, and restores Edge updater services/tasks. The host execution limit is
@@ -103,7 +118,9 @@ updater services are not manually started or required to remain running.
 Their startup types and enabled scheduled tasks are still restored and verified.
 Managed policies that prevent normal Stable updates cause an explicit failure
 without registry-policy changes. Update services/tasks are also restored after
-a failed download. No automatic reboot or forced browser termination is requested.
+a failed guest-side verification or installation. Host preparation failures do
+not run the guest fix or change its updater configuration.
+No automatic reboot or forced browser termination is requested.
 Existing browser windows must be reopened to use the updated engine.
 
 On failure, the host automatically embeds Edge's MSI log, updater logs and

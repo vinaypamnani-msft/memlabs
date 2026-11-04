@@ -88,7 +88,7 @@ try {
             }
         }
     }
-    $global:Common = [pscustomobject]@{ LogPath = (Join-Path $testRoot 'VMBuild.log'); MemLabsVersion = 'test'; LatestHotfixVersion = 'test' }
+    $global:Common = [pscustomobject]@{ LogPath = (Join-Path $testRoot 'VMBuild.log'); MemLabsVersion = 'test'; LatestHotfixVersion = 'test'; StagingInjectPath = $testRoot }
     Save-VMFixFailureEvidence -VMName 'LAB-PRI' -VMDomain 'lab.test' -FixName 'Fix-ODBC18' -VMDomainAccount 'admin'
     Assert-Maintenance (@(Get-ChildItem -LiteralPath $testRoot -Filter '*.diagnostics.log').Count -eq 1) 'Evidence was not persisted in the host log directory.'
     $call = $script:EvidenceCalls[0]
@@ -104,7 +104,7 @@ try {
     function Invoke-MaintenanceEngineFixture {
         param([switch]$Batch, [switch]$AlwaysFail, [switch]$MissingMarker, [switch]$Console,
             [switch]$RecoveryFailure, [switch]$UnconfirmedShutdown, [switch]$LateRecovery,
-            [switch]$DelayedConsole, [switch]$SuccessfulSibling)
+            [switch]$DelayedConsole, [switch]$SuccessfulSibling, [string]$PreparationMode = '')
         & {
             $script:Engine = @{
                 Count = 0; Stamps = 0; AlwaysFail = $AlwaysFail.IsPresent
@@ -113,17 +113,23 @@ try {
                 UnconfirmedShutdown = $UnconfirmedShutdown.IsPresent
                 LateRecovery = $LateRecovery.IsPresent; PrefixCalls = 0
                 DelayedConsole = $DelayedConsole.IsPresent
+                PreparationMode = $PreparationMode; PreparationCalls = 0; CopyCalls = 0
                 Directory = Join-Path $testRoot ([guid]::NewGuid().ToString('N'))
                 Calls = [System.Collections.Generic.List[object]]::new()
                 Events = [System.Collections.Generic.List[string]]::new()
                 Sleeps = [System.Collections.Generic.List[int]]::new()
             }
             $null = New-Item -ItemType Directory -Path $script:Engine.Directory
-            function Write-Log { param($Message, [switch]$Warning, [switch]$LogOnly, [switch]$Verbose) }
+            function Write-Log {
+                param($Message, [switch]$Warning, [switch]$LogOnly, [switch]$Verbose, [switch]$Failure)
+                $script:Engine.Events.Add("log:$Message")
+            }
             function Write-Progress2 { param([switch]$Log, $PercentComplete, $Activity, $Status, [switch]$Force) }
             function Get-VMNote {
                 param($VMName)
-                [pscustomobject]@{ domain = 'lab.test'; appliedFixes = [pscustomobject]@{} }
+                $applied = @{}
+                if ($script:Engine.PreparationMode -eq 'Applied') { $applied['Fix-ODBC18']='18.6.2.1' }
+                [pscustomobject]@{ domain = 'lab.test'; appliedFixes = [pscustomobject]$applied }
             }
             function ConvertTo-MemLabsVersion { param($Version) [version]$Version }
             function Start-VMIfNotRunning {
@@ -133,6 +139,14 @@ try {
             function Get-VmSession {
                 param($VmName, $VmDomainName, $VmDomainAccount, [switch]$ShowVMSessionError)
                 [pscustomobject]@{ Availability = 'Available' }
+            }
+            function Copy-Item {
+                param($ToSession, $Path, $Destination, [switch]$Force, $ErrorAction)
+                if (-not $ToSession) { Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters; return }
+                $script:Engine.CopyCalls++
+                $script:Engine.Events.Add('copy')
+                if ($Path -notlike '*\staging\UnitEdge.msi' -or $Destination -ne 'C:\staging\UnitEdge.msi') { throw 'Prepared media was routed incorrectly.' }
+                if ($script:Engine.PreparationMode -eq 'CopyFailure') { throw 'Fixture staged media copy failed' }
             }
             function Repair-VMConsoleProvider {
                 param($VMName, $VMDomain, $VMDomainAccount)
@@ -198,14 +212,29 @@ try {
             }
             $fixtureFixName = if ($Console) { 'Fix-Upgrade-Console' } else { 'Fix-ODBC18' }
             $definition = [pscustomobject]@{
-                FixName = $fixtureFixName; FixVersion = '18.6.2.1'; AppliesToThisVM = $true
+                FixName = $fixtureFixName; FixVersion = '18.6.2.1'; AppliesToThisVM = $PreparationMode -ne 'NotApplicable'
                 RunAsAccount = 'setupadmin'; DependentVMs = @(); InjectFiles = @(); InjectTools = @()
+                ArgumentList = @(); PrepareScriptBlock = $null
                 ScriptBlock = {
+                    param([string]$PreparedValue)
+                    if ($script:Engine.PreparationMode -and $PreparedValue -ne 'prepared-edge') { throw 'Host-prepared arguments were not forwarded to the guest.' }
+                    $script:Engine.Events.Add('execute')
                     $script:Engine.Count++
                     'pipeline noise must not mask a failed result'
                     $succeeded = if ($script:Engine.LateRecovery) { $script:Engine.RecoveryCalls -gt 1 }
                     else { -not $script:Engine.AlwaysFail -and $script:Engine.Count -gt 1 }
                     [pscustomobject]@{ Success = $succeeded; Message = 'engine fixture' }
+                }
+            }
+            if ($PreparationMode) {
+                $definition.PrepareScriptBlock = {
+                    param($VMName, $VMDomain, $VMFix)
+                    Assert-Maintenance ($VMName -eq 'LAB-PRI' -and $VMDomain -eq 'lab.test') 'Host preparation targeted the wrong guest.'
+                    $script:Engine.PreparationCalls++
+                    $script:Engine.Events.Add('prepare')
+                    if ($script:Engine.PreparationMode -eq 'Failure') { throw 'Fixture Edge metadata offline' }
+                    $VMFix.InjectFiles=@('UnitEdge.msi')
+                    $VMFix.ArgumentList=@('prepared-edge')
                 }
             }
             $definitions = @($definition)
@@ -239,6 +268,32 @@ try {
             Assert-Maintenance (@($probe.State.Calls | Where-Object {
                         -not $_.AsJob -or $_.Timeout -ne 1800 -or -not $_.FailOnRemoteError -or $_.Account -ne 'setupadmin'
                     }).Count -eq 0) 'A maintenance execution lost its deadline or requested account.'
+        }
+    }
+    foreach ($batch in @($false, $true)) {
+        foreach ($mode in @('Ready','Failure','CopyFailure','Applied','NotApplicable')) {
+            $probe = Invoke-MaintenanceEngineFixture -Batch:$batch -PreparationMode $mode
+            if ($mode -eq 'Ready') {
+                Assert-Maintenance ($probe.Result.Success -and $probe.State.PreparationCalls -eq 1 -and
+                    $probe.State.CopyCalls -eq 1 -and $probe.State.Count -eq 2 -and $probe.State.Stamps -eq 1) `
+                    'Host preparation/copy was skipped, repeated on retry, or lost its serialized arguments.'
+                Assert-Maintenance ($probe.State.Events.IndexOf('prepare') -lt $probe.State.Events.IndexOf('copy') -and
+                    $probe.State.Events.IndexOf('copy') -lt $probe.State.Events.IndexOf('execute')) `
+                    'Host preparation did not precede injection and guest execution.'
+            }
+            elseif ($mode -in @('Applied','NotApplicable')) {
+                Assert-Maintenance ($probe.Result.Success -and $probe.State.PreparationCalls -eq 0 -and
+                    $probe.State.CopyCalls -eq 0 -and $probe.State.Count -eq 0) `
+                    'An already-applied or inapplicable fix performed host preparation.'
+            }
+            else {
+                Assert-Maintenance (-not $probe.Result.Success -and $probe.State.PreparationCalls -eq 1 -and
+                    $probe.State.Count -eq 0 -and $probe.State.Stamps -eq 0) `
+                    'Failed host preparation/copy ran or stamped the guest fix.'
+                $reason = if ($mode -eq 'Failure') { 'Fixture Edge metadata offline' } else { 'Fixture staged media copy failed' }
+                Assert-Maintenance (($probe.State.Events -join "`n") -match [regex]::Escape($reason)) `
+                    'Host preparation/copy failure did not retain its concrete error.'
+            }
         }
     }
     $missingMarker = Invoke-MaintenanceEngineFixture -MissingMarker

@@ -1,19 +1,7 @@
-$Fix_EdgeServicing = {
+$Prepare_EdgeServicing = {
+    param($VMName, $VMDomain, $VMFix)
+
     $ErrorActionPreference = 'Stop'
-    function Get-LabEdgeVersion {
-        $versions = @(
-            foreach ($directory in @(${env:ProgramFiles(x86)},$env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique) {
-                $path = Join-Path $directory 'Microsoft\Edge\Application\msedge.exe'
-                if (Test-Path -LiteralPath $path -PathType Leaf) {
-                    $text = (Get-Item -LiteralPath $path -ErrorAction Stop).VersionInfo.ProductVersion
-                    [version]$parsed = $null
-                    if (-not [version]::TryParse("$text",[ref]$parsed)) { throw "Installed Edge has an unreadable version at '$path': '$text'." }
-                    $parsed
-                }
-            }
-        )
-        $versions | Sort-Object -Descending | Select-Object -First 1
-    }
     function Get-LabEdgePayload {
         param([Parameter(Mandatory)]$Products,[Parameter(Mandatory)][string]$Architecture)
         $stable = @($Products | Where-Object Product -eq 'Stable')
@@ -41,6 +29,117 @@ $Fix_EdgeServicing = {
             Hash = "$($artifact.Hash)"; Bytes = [long]$artifact.SizeInBytes
         }
     }
+    function Assert-LabEdgeInstaller {
+        param([string]$Path, $Payload)
+
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($item.Length -ne $Payload.Bytes -or (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash -ine $Payload.Hash) {
+            throw 'Host-downloaded Edge MSI does not match the official size/SHA-256 metadata; it was not staged.'
+        }
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
+            throw 'Host-downloaded Edge MSI has no valid Microsoft signature; it was not staged.'
+        }
+    }
+
+    $probeArguments = @{
+        VmName = $VMName; VmDomainName = $VMDomain; ScriptBlock = $VMFix.ScriptBlock
+        ArgumentList = @('', $true); DisplayName = 'Inspecting Edge for host staging'
+        AsJob = $true; TimeoutSeconds = 60; SessionMaxRetries = 1; FailOnRemoteError = $true
+    }
+    if ($VMFix.RunAsAccount) { $probeArguments.VmDomainAccount = $VMFix.RunAsAccount }
+    $probe = Invoke-VmCommand @probeArguments
+    $states = @($probe.ScriptBlockOutput)
+    if (-not $probe -or $probe.ScriptBlockFailed -or $states.Count -ne 1 -or
+        $states[0].Architecture -notin @('x64', 'x86', 'arm64')) {
+        throw "Could not inspect Edge architecture/version on '$VMName' for host staging: $($probe.ErrorDetails)"
+    }
+    [version]$installed = $null
+    if ("$($states[0].Version)" -and -not [version]::TryParse("$($states[0].Version)", [ref]$installed)) {
+        throw "Installed Edge has an unreadable version on '$VMName': '$($states[0].Version)'."
+    }
+
+    $savedProgress = $ProgressPreference
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        $products = Invoke-RestMethod -Uri 'https://edgeupdates.microsoft.com/api/products?view=enterprise' -TimeoutSec 30 -ErrorAction Stop
+        $architecture = $states[0].Architecture
+        $payload = Get-LabEdgePayload -Products $products -Architecture $architecture
+        $VMFix.InjectFiles = @()
+        if (-not $installed -or $installed -lt $payload.Version) {
+            if ([string]::IsNullOrWhiteSpace("$($Common.StagingInjectPath)")) { throw 'The host Edge staging directory is unavailable.' }
+            $directory = Join-Path $Common.StagingInjectPath 'staging'
+            $null = New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop
+            $fileName = "MemLabs-Edge-$($payload.Version)-$architecture.msi"
+            $installer = Join-Path $directory $fileName
+            $mutex = [Threading.Mutex]::new($false, "MemLabs-Edge-$($payload.Hash)")
+            $ownsMutex = $false
+            $temporary = $null
+            try {
+                try { $ownsMutex = $mutex.WaitOne(300000) }
+                catch [Threading.AbandonedMutexException] {
+                    $ownsMutex = $true
+                    Write-Log "$VMName`: A previous Edge staging worker exited; revalidating its cache." -Warning
+                }
+                if (-not $ownsMutex) { throw 'Timed out waiting for the host Edge installer cache after 300 seconds.' }
+                $cached = $false
+                if (Test-Path -LiteralPath $installer -PathType Leaf) {
+                    $item = Get-Item -LiteralPath $installer -ErrorAction Stop
+                    $cached = $item.Length -eq $payload.Bytes -and
+                        (Get-FileHash -LiteralPath $installer -Algorithm SHA256 -ErrorAction Stop).Hash -ieq $payload.Hash
+                    if (-not $cached) { Write-Log "$VMName`: Cached Edge MSI failed size/SHA-256 verification; downloading a fresh copy." -Warning }
+                }
+                if ($cached) { Assert-LabEdgeInstaller -Path $installer -Payload $payload }
+                else {
+                    $temporary = "$installer.$([guid]::NewGuid().ToString('N')).download.msi"
+                    $null = Invoke-WebRequest -Uri $payload.Uri -OutFile $temporary -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
+                    Assert-LabEdgeInstaller -Path $temporary -Payload $payload
+                    Move-Item -LiteralPath $temporary -Destination $installer -Force -ErrorAction Stop
+                }
+                $VMFix.InjectFiles = @($fileName)
+            }
+            finally {
+                if ($temporary -and [IO.File]::Exists($temporary)) {
+                    try { Remove-Item -LiteralPath $temporary -Force -ErrorAction Stop }
+                    catch { Write-Log "$VMName`: Edge host download cleanup failed at '$temporary': $($_.Exception.Message)" -Warning }
+                }
+                if ($ownsMutex) { $mutex.ReleaseMutex() }
+                $mutex.Dispose()
+            }
+        }
+        $VMFix.ArgumentList = @(
+            [pscustomobject]@{
+                Version = "$($payload.Version)"; Architecture = $architecture
+                Hash = $payload.Hash; Bytes = $payload.Bytes
+            } | ConvertTo-Json -Compress
+        )
+        Write-Log "$VMName`: Host resolved Edge Stable $($payload.Version) for $architecture; installed=$installed; staged MSI count=$($VMFix.InjectFiles.Count)." -LogOnly
+    }
+    finally { $ProgressPreference = $savedProgress }
+}
+
+$Fix_EdgeServicing = {
+    param([string]$PayloadJson, [bool]$ProbeOnly = $false)
+
+    $ErrorActionPreference = 'Stop'
+    function Get-LabEdgeVersion {
+        $versions = @(
+            foreach ($directory in @(${env:ProgramFiles(x86)},$env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique) {
+                $path = Join-Path $directory 'Microsoft\Edge\Application\msedge.exe'
+                if (Test-Path -LiteralPath $path -PathType Leaf) {
+                    $text = (Get-Item -LiteralPath $path -ErrorAction Stop).VersionInfo.ProductVersion
+                    [version]$parsed = $null
+                    if (-not [version]::TryParse("$text",[ref]$parsed)) { throw "Installed Edge has an unreadable version at '$path': '$text'." }
+                    $parsed
+                }
+            }
+        )
+        $versions | Sort-Object -Descending | Select-Object -First 1
+    }
+    $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { 'arm64' }
+    elseif ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+    if ($ProbeOnly) { return [pscustomobject]@{ Architecture = $architecture; Version = "$(Get-LabEdgeVersion)" } }
+
     function Restore-LabEdgeUpdates {
         param([switch]$AllowMissing)
         $services = @(Get-Service -ErrorAction Stop | Where-Object { $_.Name -in @('edgeupdate','edgeupdatem','MicrosoftEdgeElevationService') })
@@ -58,9 +157,6 @@ $Fix_EdgeServicing = {
             Write-FixLog 'Edge updater startup types and scheduled tasks restored; updater services may remain stopped while idle.'
         }
     }
-    $temporary = $null
-    $savedProtocol = [Net.ServicePointManager]::SecurityProtocol
-    $savedProgress = $ProgressPreference
     $restored = $false
     $repairRequested = $false
     $repairAttempted = $false
@@ -83,26 +179,26 @@ $Fix_EdgeServicing = {
                 }
             }
         }
-        [Net.ServicePointManager]::SecurityProtocol = $savedProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $ProgressPreference = 'SilentlyContinue'
-        $architecture = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { 'arm64' }
-        elseif ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
-        $products = Invoke-RestMethod -Uri 'https://edgeupdates.microsoft.com/api/products?view=enterprise' -TimeoutSec 30 -ErrorAction Stop
-        $payload = Get-LabEdgePayload -Products $products -Architecture $architecture
+        $payload = $PayloadJson | ConvertFrom-Json -ErrorAction Stop
+        [version]$required = $null
+        if (-not $payload -or -not [version]::TryParse("$($payload.Version)", [ref]$required) -or
+            $payload.Architecture -ne $architecture -or "$($payload.Hash)" -notmatch '^[A-Fa-f0-9]{64}$' -or
+            [long]$payload.Bytes -le 0 -or [long]$payload.Bytes -gt 1GB) {
+            throw "The host did not provide valid Edge Stable metadata for '$architecture'."
+        }
+        $payload.Version = $required
         $before = Get-LabEdgeVersion
         Write-FixLog "Edge Stable required=$($payload.Version); installed=$before; architecture=$architecture."
         if (-not $before -or $before -lt $payload.Version) {
-            $temporary = Join-Path $env:TEMP "MemLabs-Edge-$([guid]::NewGuid().ToString('N'))"
-            $null = New-Item -Path $temporary -ItemType Directory -ErrorAction Stop
-            $installer = Join-Path $temporary 'MicrosoftEdgeEnterprise.msi'
-            $null = Invoke-WebRequest -Uri $payload.Uri -OutFile $installer -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
+            $installer = "C:\staging\MemLabs-Edge-$($payload.Version)-$architecture.msi"
+            if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "The host-staged Edge MSI is missing at '$installer'." }
             $item = Get-Item -LiteralPath $installer -ErrorAction Stop
             if ($item.Length -ne $payload.Bytes -or (Get-FileHash -LiteralPath $installer -Algorithm SHA256 -ErrorAction Stop).Hash -ine $payload.Hash) {
-                throw 'Downloaded Edge MSI does not match the official size/SHA-256 metadata; it was not installed.'
+                throw 'Host-staged Edge MSI does not match the official size/SHA-256 metadata; it was not installed.'
             }
             $signature = Get-AuthenticodeSignature -LiteralPath $installer -ErrorAction Stop
             if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
-                throw 'Downloaded Edge MSI has no valid Microsoft signature; it was not installed.'
+                throw 'Host-staged Edge MSI has no valid Microsoft signature; it was not installed.'
             }
             $logPath = 'C:\staging\Fix\EdgeServicing-MSI.log'
             $null = New-Item -Path (Split-Path $logPath -Parent) -ItemType Directory -Force -ErrorAction Stop
@@ -179,22 +275,17 @@ $Fix_EdgeServicing = {
         [pscustomobject]@{ Success=$false; Message=$_.Exception.Message; Errors=@($_.Exception.ToString()) }
     }
     finally {
-        [Net.ServicePointManager]::SecurityProtocol = $savedProtocol
-        $ProgressPreference = $savedProgress
         if (-not $restored) {
             try { Restore-LabEdgeUpdates -AllowMissing }
             catch { Write-FixLog "Edge updater restoration also failed: $($_.Exception.Message)" -Level Failure }
-        }
-        if ($temporary -and [IO.Directory]::Exists($temporary)) {
-            try { Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction Stop }
-            catch { Write-FixLog "Edge installer cleanup failed at '$temporary': $($_.Exception.Message)" -Level Warning }
         }
     }
 }
 
 $fixesToPerform += [pscustomobject]@{
-    FixName='Fix-EdgeServicing'; FixVersion='261102.0'; NeededOnFreshDeploy=$true; AppliesToExisting=$true
+    FixName='Fix-EdgeServicing'; FixVersion='261103.0'; NeededOnFreshDeploy=$true; AppliesToExisting=$true
     DoNotSeedFromWatermark=$true; AppliesToRoles=@()
     NotAppliesToRoles=@('OSDClient','AADClient','Proxy','LinuxClient','LinuxServer','StandaloneRootCA')
-    DependentVMs=@(); ScriptBlock=$Fix_EdgeServicing
+    DependentVMs=@(); ScriptBlock=$Fix_EdgeServicing; PrepareScriptBlock=$Prepare_EdgeServicing
+    InjectFiles=@(); ArgumentList=@()
 }
