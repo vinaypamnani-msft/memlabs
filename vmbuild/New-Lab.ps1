@@ -1290,9 +1290,9 @@ try {
                     # post-dcpromo window. Letting Phase 3 (media download/prep) run first gives
                     # the DC extra settle time so the common case installs on the first attempt;
                     # the in-guest write-probe gate + retry/remediation loop still wait the window
-                    # out if it hasn't closed yet. Phase 3 consumes no PKI certs (the first cert
-                    # consumer is the Phase 8 HTTPS flip), so deferring one phase costs no
-                    # autoenrollment lead time in practice.
+                    # out if it hasn't closed yet. Phase 3 applies computer policy before these
+                    # templates exist; Install-PKI verifies member autoenrollment after publishing
+                    # them, without waiting for a later background cycle or client-push request.
                     # Only trigger for NEW VMs (non-hidden). If only existing/hidden VMs have
                     # InstallCA, PKI is already deployed and should not be re-orchestrated.
                     $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA -and -not $_.hidden }).Count -gt 0

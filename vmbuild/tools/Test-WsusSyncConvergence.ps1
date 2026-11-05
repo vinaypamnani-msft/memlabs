@@ -152,7 +152,18 @@ Add-Type @'
 namespace MemLabs {
     public static class WsusValidationTestProxy {
         public static object Server;
-        public static object GetUpdateServer(string name, bool ssl, int port) { return Server; }
+        public static int LocalConfigurationCalls;
+        public static int GuessedEndpointCalls;
+        public static object GetUpdateServer() {
+            LocalConfigurationCalls++;
+            return Server;
+        }
+        public static object GetUpdateServer(string name, bool ssl, int port) {
+            GuessedEndpointCalls++;
+            throw new System.InvalidOperationException(ssl
+                ? "fixture certificate is valid for the configured SUP, not localhost"
+                : "fixture WSUS requires SSL (HTTP 403)");
+        }
     }
     public class WsusValidationTestScope {}
 }
@@ -176,6 +187,8 @@ function Import-Module { param($Name, $ErrorAction) }
 function Get-WebAppPoolState { param($Name, $ErrorAction) [pscustomobject]@{ Value = 'Started' } }
 function Get-NetTCPConnection { param($State, $LocalPort, $ErrorAction) [pscustomobject]@{ LocalPort = 8530 } }
 function Test-Path { param($LiteralPath) $false }
+$subscription.Result = 'Succeeded'
+Assert-True ((& $supScript).Passed) 'A healthy SSL SUP failed because validation guessed localhost endpoints.'
 foreach ($nativeResult in @('Failed', 'Canceled')) {
     $subscription.Result = $nativeResult
     $result = & $supScript
@@ -188,6 +201,34 @@ $subscription.State = 'NotProcessing'; $subscription.Result = 'Succeeded'
 Assert-True ((& $supScript).Passed) 'Successful native synchronization failed validation.'
 [MemLabs.WsusValidationTestProxy]::Server = $null
 Assert-True (-not (& $supScript).Passed) 'Unreachable WSUS API silently passed validation.'
+Assert-True ([MemLabs.WsusValidationTestProxy]::LocalConfigurationCalls -gt 0 -and
+    [MemLabs.WsusValidationTestProxy]::GuessedEndpointCalls -eq 0) `
+    'SUP validation guessed localhost endpoints instead of using the local WSUS configuration.'
+
+$standaloneFunction = $validationAst.Find({
+    param($n)
+    $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-WSUSFunctionality'
+}, $true)
+$standaloneApi = @($standaloneFunction.Body.FindAll({
+    param($n)
+    $n -is [Management.Automation.Language.TryStatementAst] -and
+        $n.CatchClauses.Extent.Text -match 'FAIL: WSUS API test failed'
+}, $true))
+Assert-True ($standaloneApi.Count -eq 1) 'Expected one standalone WSUS API connectivity check.'
+$standaloneProbe = [scriptblock]::Create($standaloneApi[0].Extent.Text.Replace(
+    '[Microsoft.UpdateServices.Administration.AdminProxy]', '[MemLabs.WsusValidationTestProxy]'))
+[MemLabs.WsusValidationTestProxy]::Server = $server
+$results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+& $standaloneProbe
+Assert-True ($results.Passed -and ($results.Details -join ' ') -match 'WSUS API connected') `
+    'Standalone WSUS validation rejected the configured local SSL endpoint.'
+[MemLabs.WsusValidationTestProxy]::Server = $null
+$results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+& $standaloneProbe
+Assert-True (-not $results.Passed) 'Standalone WSUS validation accepted an unavailable local API.'
+Assert-True ([MemLabs.WsusValidationTestProxy]::GuessedEndpointCalls -eq 0) `
+    'Standalone WSUS validation still guessed localhost endpoints.'
+[MemLabs.WsusValidationTestProxy]::Server = $server
 
 $validationText = [IO.File]::ReadAllText($validationPath)
 Assert-True ($validationText -notmatch 'Result=Canceled but catalog is populated - benign') 'Catalog presence still masks a canceled synchronization.'

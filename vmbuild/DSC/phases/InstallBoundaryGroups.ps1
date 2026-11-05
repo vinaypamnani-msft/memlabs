@@ -350,6 +350,10 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
+if ($ThisVM.role -ne 'CAS') {
+    if (-not (Disable-MemLabsAutomaticClientPush -SiteCode $SiteCode)) { return }
+}
+
 $boundaryNamespace = "root\SMS\site_$SiteCode"
 $getMissingBoundaryGroupSiteSystems = {
     param($BoundaryGroup, [string[]]$DesiredSiteSystems)

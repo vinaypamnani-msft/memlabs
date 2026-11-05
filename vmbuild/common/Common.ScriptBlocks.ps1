@@ -2445,6 +2445,12 @@ function Get-MemLabsClientCertificateReadinessBlock {
             ChainStatus = 'no usable client-auth certificate'; Thumbprint = ''
             Diagnostics = @()
         }
+        try {
+            $aePolicy = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment' `
+                -Name 'AEPolicy' -ErrorAction Stop
+            $result.Diagnostics += "AutoEnrollment AEPolicy at probe start=$aePolicy (expected 7)"
+        }
+        catch { $result.Diagnostics += "AutoEnrollment policy read failed: $($_.Exception.Message)" }
         for ($attempt = 1; $attempt -le 4; $attempt++) {
             $now = Get-Date
             $candidates = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop |
@@ -2455,6 +2461,7 @@ function Get-MemLabsClientCertificateReadinessBlock {
                 } | Sort-Object NotAfter -Descending)
             $result.CertFound = $candidates.Count -gt 0
             foreach ($cert in $candidates) {
+                $result.Diagnostics += "Client-auth certificate thumbprint=$($cert.Thumbprint), subject=$($cert.Subject), issuer=$($cert.Issuer)"
                 $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
                 try {
                     $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
@@ -2479,17 +2486,25 @@ function Get-MemLabsClientCertificateReadinessBlock {
             }
             if ($attempt -lt 4) {
                 if ($attempt -eq 1) {
+                    $previousPreference = $ErrorActionPreference
                     try {
+                        $ErrorActionPreference = 'Continue'
                         $gpOutput = @(& gpupdate.exe /target:computer /force /wait:30 2>&1)
-                        $result.Diagnostics += "gpupdate exit=$LASTEXITCODE; $($gpOutput -join ' ')"
+                        $gpExitCode = $LASTEXITCODE
+                        $result.Diagnostics += "gpupdate exit=$gpExitCode; $($gpOutput -join ' ')"
                     }
                     catch { $result.Diagnostics += "gpupdate invocation failed: $($_.Exception.Message)" }
+                    finally { $ErrorActionPreference = $previousPreference }
                 }
+                $previousPreference = $ErrorActionPreference
                 try {
+                    $ErrorActionPreference = 'Continue'
                     $pulseOutput = @(& certutil.exe -pulse 2>&1)
-                    $result.Diagnostics += "certutil -pulse attempt=$attempt exit=$LASTEXITCODE; $($pulseOutput -join ' ')"
+                    $pulseExitCode = $LASTEXITCODE
+                    $result.Diagnostics += "certutil -pulse attempt=$attempt exit=$pulseExitCode; $($pulseOutput -join ' ')"
                 }
                 catch { $result.Diagnostics += "certutil -pulse attempt=$attempt invocation failed: $($_.Exception.Message)" }
+                finally { $ErrorActionPreference = $previousPreference }
                 Start-Sleep -Seconds 10
             }
         }
@@ -2511,6 +2526,35 @@ function Get-MemLabsClientCertificateReadinessBlock {
         }
         return [pscustomobject]$result
     }
+}
+
+function Invoke-MemLabsClientCertificateReadiness {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$DomainName,
+        [string]$DisplayName = 'PKI certificate readiness'
+    )
+
+    $probe = Invoke-VmCommand -VmName $VMName -VmDomainName $DomainName -AsJob -TimeoutSeconds 120 `
+        -SuppressLog -DisplayName $DisplayName -ScriptBlock (Get-MemLabsClientCertificateReadinessBlock)
+    if (-not $probe -or $probe.ScriptBlockFailed) {
+        throw "Certificate readiness probe failed. $($probe.ErrorDetails)"
+    }
+    $states = @($probe.ScriptBlockOutput)
+    if ($states.Count -ne 1 -or $states[0].Ready -isnot [bool]) {
+        throw 'Certificate readiness probe must return exactly one result with a Boolean Ready value.'
+    }
+    $state = $states[0]
+    if ($state.Ready -and ($state.CertFound -isnot [bool] -or -not $state.CertFound -or
+            $state.ChainOk -isnot [bool] -or -not $state.ChainOk -or
+            $state.Thumbprint -isnot [string] -or [string]::IsNullOrWhiteSpace($state.Thumbprint))) {
+        throw 'Certificate readiness probe returned inconsistent success evidence.'
+    }
+    $detail = "certFound=$($state.CertFound), chain=$($state.ChainStatus)"
+    if ($state.Thumbprint) { $detail += ", thumbprint=$($state.Thumbprint)" }
+    if ($state.Diagnostics) { $detail += "; $($state.Diagnostics -join ' | ')" }
+    [pscustomobject]@{ Target = $VMName; Ready = [bool]$state.Ready; Detail = $detail }
 }
 
 function Invoke-MemLabsClientCertificatePrestage {
@@ -2555,25 +2599,8 @@ function Invoke-MemLabsClientCertificatePrestage {
         $targetVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $target } | Select-Object -First 1
         $targetDomain = if ($targetVm.domain) { $targetVm.domain } else { $DomainName }
         try {
-            $probe = Invoke-VmCommand -VmName $target -VmDomainName $targetDomain -AsJob -TimeoutSeconds 120 `
-                -SuppressLog -DisplayName 'PKI cert pre-stage' -ScriptBlock (Get-MemLabsClientCertificateReadinessBlock)
-            if (-not $probe -or $probe.ScriptBlockFailed) {
-                throw "Certificate readiness probe failed. $($probe.ErrorDetails)"
-            }
-            $states = @($probe.ScriptBlockOutput)
-            if ($states.Count -ne 1 -or $states[0].Ready -isnot [bool]) {
-                throw 'Certificate readiness probe must return exactly one result with a Boolean Ready value.'
-            }
-            $state = $states[0]
-            if ($state.Ready -and ($state.CertFound -isnot [bool] -or -not $state.CertFound -or
-                    $state.ChainOk -isnot [bool] -or -not $state.ChainOk -or
-                    $state.Thumbprint -isnot [string] -or [string]::IsNullOrWhiteSpace($state.Thumbprint))) {
-                throw 'Certificate readiness probe returned inconsistent success evidence.'
-            }
-            $detail = "certFound=$($state.CertFound), chain=$($state.ChainStatus)"
-            if ($state.Thumbprint) { $detail += ", thumbprint=$($state.Thumbprint)" }
-            if ($state.Diagnostics) { $detail += "; $($state.Diagnostics -join ' | ')" }
-            $targetResult = [pscustomobject]@{ Target = $target; Ready = [bool]$state.Ready; Detail = $detail }
+            $targetResult = Invoke-MemLabsClientCertificateReadiness -VMName $target -DomainName $targetDomain `
+                -DisplayName 'PKI cert pre-stage'
         }
         catch {
             $targetResult = [pscustomobject]@{ Target = $target; Ready = $false; Detail = $_.Exception.Message }

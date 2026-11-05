@@ -1365,6 +1365,9 @@ guard with `vmbuild\tools\Test-PerfloadingContract.ps1`; log transport is covere
 by `vmbuild\tools\Test-CmFailureDiagnostics.ps1`.
 Phase 11 fails an idle failed/canceled sync or an unreachable WSUS health check;
 a populated catalog alone is not evidence that the latest sync recovered.
+Local WSUS connectivity and SUP health checks use the same configured local
+`AdminProxy.GetUpdateServer()` connection as Phase 8, rather than guessing
+`localhost` endpoints that fail hostname validation on a healthy PKI SUP.
 Native results/state are read directly from the subscription API, without the
 heavyweight `GetStatus()` client/compliance aggregation. A separate scoped update
 count is informational: an unavailable count warns, is never treated as zero,
@@ -1384,11 +1387,28 @@ A `Canceled`/`UserCanceled` outcome is not proof of a service restart: SQL or
 transport failures can precede cancellation. Idle failures still fail validation;
 only a running replacement or a newer successful cycle supersedes the old failure.
 
+Certificate autoenrollment is domain-wide and independent of client push.
+Phase 2 creates the computer autoenrollment GPO (`AEPolicy=7`). Phase 3 applies
+computer policy before the CA templates are published. After CA/template
+provisioning, `Install-PKI` verifies autoenrollment for every new Windows domain
+member, including clients with `pushClient=false`, using bounded computer-policy
+refresh and `certutil -pulse` retries. A current client-auth certificate with a
+private key and trusted chain is required before PKI setup reports success.
+Workgroup/offline-root machines, domain controllers, and hidden existing VMs are
+not part of this member-enrollment pass. Validate with
+`vmbuild\tools\Test-PkiAutoEnrollment.ps1`.
+
 For HTTPS client push, the guest requests host certificate pre-staging and waits
 for a receipt matching both the deployment RunId and request ID. The host checks
 each target in its own domain, retries computer policy/autoenrollment, and verifies
 a current client-auth certificate with a private key and trusted chain. Missing
-or failed receipts stop client push. Phase 11 uses the same readiness probe.
+or failed receipts stop client push. Phase 11 uses the same readiness probe for
+all PKI-enabled Windows domain-member clients, even when push is disabled and
+no agent/setup is present. A local issuing CA also requires this check without
+a managing ConfigMgr site. Diagnostics include the applied autoenrollment policy
+and certificate issuer details. Failed/wedged
+setup collects ccmsetup/client MSI log tails (up to six files, 4,000 lines each);
+historical errors on a currently running agent do not trigger redundant capture.
 Enrollment command exit codes and recent autoenrollment events are diagnostic
 evidence; a future policy cycle is no longer treated as successful readiness.
 The receipt contains exactly one structured result per target. Per-target console
@@ -1405,6 +1425,18 @@ and a cryptographic error on one candidate does not hide another usable certific
 The existing certificate validity/private-key/trust policy and lab revocation
 behavior are unchanged. Validate with `vmbuild\tools\Test-PkiClientPrestage.ps1`
 and `vmbuild\tools\Test-PkiPrestageState.ps1`.
+
+Client push is explicitly per-VM. Account configuration never enables site-wide
+automatic push, which would bypass `pushClient=false` and certificate pre-staging.
+Deployment disables automatic push on each owning primary before discovery and
+explicit pushes, including cross-forest workflows and reruns with existing
+accounts. Failure to apply that policy stops discovery/push and reports a
+deployment failure. CAS boundary setup does not modify client-push settings.
+Requested clients that cannot be reached, discovered within the existing
+shared budget, or explicitly pushed report failure instead of marking the stage
+complete and relying on disabled automatic push.
+This does not uninstall existing agents or cancel previously queued installs.
+Validate with `vmbuild\tools\Test-ClientPushSiteResolution.ps1`.
 
 Phase 11 domain-member Windows Time checks require a successful status query,
 synchronized leap/stratum values, a non-local-clock source, and a valid last-sync

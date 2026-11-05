@@ -550,6 +550,7 @@ if ($scenario -eq "Standalone") {
         try {
             Set-Location $LogPath
             . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+            if (-not (Disable-MemLabsAutomaticClientPush -SiteCode $SiteCode)) { return }
             $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
             Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
             Invoke-CMSystemDiscovery
@@ -694,6 +695,7 @@ if ($scenario -eq "Hierarchy") {
             try {
                 Set-Location $LogPath
                 . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+                if (-not (Disable-MemLabsAutomaticClientPush -SiteCode $SiteCode)) { return }
                 $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
                 Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
                 Invoke-CMSystemDiscovery
@@ -1128,14 +1130,14 @@ if ($CurrentRole -eq "CAS") {
     Write-DscStatus "Complete!"
 }
 
-# PushClients first so auto-push has maximum time to install the agent on
+# PushClients first so explicit pushes have maximum time to install the agent on
 # all targets while EnableBLM configures policies and collections.
 if ($ThisVM.role -ne "CAS") {
     # Cross-tier PKI pre-stage handshake. ScriptWorkflow runs inside the guest
     # and cannot PSDirect into the client VMs, but the HOST monitor can. Emit a
     # sentinel status the host watches for, then wait for its matching receipt to
     # pulse + verify the offline-root/sub-CA chain into every push client's
-    # LocalMachine cert stores BEFORE auto-push runs ccmsetup. Without the full
+    # LocalMachine cert stores BEFORE explicit push runs ccmsetup. Without the full
     # chain the client fails GetDPLocations (0x87d00454) over HTTPS.
     #
     # Only request the verified host pre-stage
@@ -1203,7 +1205,7 @@ if ($ThisVM.role -ne "CAS") {
         # and the push succeeds. (Single-MP sites happen to get cycled at the right
         # moment; a SECOND MP that never gets a post-HTTPS restart keeps failing
         # deterministically -- the multi-MP delta we hit.) So bounce every MP in
-        # THIS site once, right before auto-push:
+        # THIS site once, right before explicit push:
         #   - remote MPs: full reboot (flushes http.sys SSL cache AND the
         #     LSASS/Schannel trusted-issuer cache, which iisreset alone does not),
         #   - the local site-server MP: iisreset + CcmExec restart (we run inside
@@ -1258,7 +1260,7 @@ if ($ThisVM.role -ne "CAS") {
                         Start-Sleep -Seconds 30
                     }
                     if (-not $mpHealthy) {
-                        Write-DscStatus "MP TLS bounce: $($mp.vmName) not confirmed healthy after reboot; continuing (auto-push will retry)" -Warning
+                        Write-DscStatus "MP TLS bounce: $($mp.vmName) not confirmed healthy after reboot; the bounded pre-push health check still must pass" -Warning
                     }
                 }
             }
@@ -1475,14 +1477,15 @@ if ($ThisVM.role -ne "CAS") {
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
         }
         catch {
-            Write-DscStatus "PushClients.ps1 failed: $_" -Warning
+            Write-DscStatus "PushClients.ps1 failed: $_" -Warning -NoStatus
+            throw
         }
     }
 }
 
 # EnableBLM only needs AD-discovered devices (not pushed clients) for its
 # collection query rules, so it is safe to run after PushClients kicks off
-# auto-push. If PushClients fails, EnableBLM still runs.
+# explicit pushes. Nonfatal warnings allow EnableBLM; reported push failures stop the workflow.
 if ($CurrentRole -eq "Primary") {
     Write-DscStatus "Running EnableBLM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
@@ -1629,7 +1632,7 @@ if ($CurrentRole -ne "CAS" -and $CurrentRole -in @("Primary", "Secondary")) {
 
 # Force a FULL collection re-evaluation on every MEMLABS-* device collection
 # (plus All Unknown Computers) when this site has client-push targets and
-# PushClients + auto-push + first-contact
+# PushClients + explicit push + first-contact
 # Heartbeat Discovery have had time to register the agent and flip
 # SMS_R_System.Client to 1 for every freshly-pushed VM. Without this,
 # SMS_FullCollectionMembership.IsClient is the value colleval snapshotted

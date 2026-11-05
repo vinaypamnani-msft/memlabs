@@ -3874,26 +3874,14 @@ function Test-WSUSFunctionality {
         }
 
         # Test WSUS API connectivity
-        $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', ...)")
+        $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()")
         try {
             [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
-            $connected = $false
-            foreach ($port in @(8530, 443)) {
-                try {
-                    $useSSL = ($port -eq 443)
-                    $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', $useSSL, $port)
-                    if ($wsus) {
-                        $results.Details.Add("OK: WSUS API connected on port $port (server version: $($wsus.Version))")
-                        $connected = $true
-                        break
-                    }
-                }
-                catch { }
+            $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+            if (-not $wsus) {
+                throw 'WSUS local API returned no server'
             }
-            if (-not $connected) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: Cannot connect to WSUS API on port 8530 or 443")
-            }
+            $results.Details.Add("OK: WSUS API connected using local server configuration (server version: $($wsus.Version))")
         }
         catch {
             $results.Passed = $false
@@ -6662,51 +6650,40 @@ function Test-SiteSystemFunctionality {
             }
 
             # A listening SUP is not healthy if its latest native sync failed.
-            $syncMeasured = $false
-            $syncProbeErrors = @()
+            $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()")
             try {
                 [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
-                foreach ($port in @(8530, 443, 8531)) {
-                    try {
-                        $useSSL = ($port -in 443, 8531)
-                        $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', $useSSL, $port)
-                        $sub = $wsus.GetSubscription()
-                        $sync = $sub.GetLastSynchronizationInfo()
-                        $nativeState = "$($sub.GetSynchronizationStatus())"
-                        if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
-                            Start-Sleep -Seconds 5
-                            $sync = $sub.GetLastSynchronizationInfo()
-                            $nativeState = "$($sub.GetSynchronizationStatus())"
+                # Match Phase 8's local API connection; localhost fails PKI hostname validation.
+                $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                $sub = $wsus.GetSubscription()
+                $sync = $sub.GetLastSynchronizationInfo()
+                $nativeState = "$($sub.GetSynchronizationStatus())"
+                if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
+                    Start-Sleep -Seconds 5
+                    $sync = $sub.GetLastSynchronizationInfo()
+                    $nativeState = "$($sub.GetSynchronizationStatus())"
+                }
+                if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Last WSUS sync $($sync.Result) ($($sync.Error)); native state=$nativeState, start=$($sync.StartTime), end=$($sync.EndTime), errorText=$($sync.ErrorText). No newer running sync supersedes this result.")
+                    $sdLog = Join-Path $env:ProgramFiles 'Update Services\LogFiles\SoftwareDistribution.log'
+                    if (Test-Path -LiteralPath $sdLog) {
+                        foreach ($line in @(Get-Content -LiteralPath $sdLog -Tail 80 -ErrorAction Stop |
+                                Where-Object { $_ -match 'error|fail|cancel|0x8' } | Select-Object -Last 5)) {
+                            $results.Details.Add("DIAG: $line")
                         }
-                        $syncMeasured = $true
-                        if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: Last WSUS sync $($sync.Result) ($($sync.Error)); native state=$nativeState, start=$($sync.StartTime), end=$($sync.EndTime), errorText=$($sync.ErrorText). No newer running sync supersedes this result.")
-                            $sdLog = Join-Path $env:ProgramFiles 'Update Services\LogFiles\SoftwareDistribution.log'
-                            if (Test-Path -LiteralPath $sdLog) {
-                                foreach ($line in @(Get-Content -LiteralPath $sdLog -Tail 80 -ErrorAction Stop |
-                                        Where-Object { $_ -match 'error|fail|cancel|0x8' } | Select-Object -Last 5)) {
-                                    $results.Details.Add("DIAG: $line")
-                                }
-                            }
-                        }
-                        elseif ($nativeState -eq 'Running') {
-                            $results.Details.Add("INFO: WSUS synchronization is running; previous result=$($sync.Result). Completion is pending, not proven.")
-                        }
-                        else {
-                            $results.Details.Add("OK: WSUS last sync result = $($sync.Result), at $($sync.StartTime)")
-                        }
-                        break
                     }
-                    catch { $syncProbeErrors += "${port}: $($_.Exception.Message)" }
+                }
+                elseif ($nativeState -eq 'Running') {
+                    $results.Details.Add("INFO: WSUS synchronization is running; previous result=$($sync.Result). Completion is pending, not proven.")
+                }
+                else {
+                    $results.Details.Add("OK: WSUS last sync result = $($sync.Result), at $($sync.StartTime)")
                 }
             }
             catch {
-                $syncProbeErrors += $_.Exception.Message
-            }
-            if (-not $syncMeasured) {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: WSUS native sync health could not be measured: $($syncProbeErrors -join ' | ')")
+                $results.Details.Add("FAIL: WSUS native sync health could not be measured: $($_.Exception.Message)")
             }
 
             return $results
@@ -10158,8 +10135,8 @@ function Test-DomainMemberFunctionality {
     .SYNOPSIS
         Lightweight checks for a domain-joined member server / client.
     .DESCRIPTION
-        Verifies domain join, secure-channel health, time sync, and (when the
-        SCCM client is present) CCMExec service + last MP communication.
+        Verifies domain join, secure-channel health, time sync, PKI autoenrollment,
+        and (when the SCCM client is present) CCMExec service + last MP communication.
     #>
     [CmdletBinding()]
     param(
@@ -10205,7 +10182,7 @@ function Test-DomainMemberFunctionality {
             Write-Log "[Phase $Phase] $VMName [DomainMember]: managing site '$expectedSiteCode' resolved from $($mgmtVm.vmName); UsePKI=$usePKI (this domain has no cmOptions of its own)" -LogOnly
         }
         else {
-            Write-Log "[Phase $Phase] $VMName [DomainMember]: domain is managed by remote site '$expectedSiteCode' but no VM in this config carries cmOptions -- UsePKI unknown, client-certificate check will be skipped" -LogOnly
+            Write-Log "[Phase $Phase] $VMName [DomainMember]: domain is managed by remote site '$expectedSiteCode' but no VM in this config carries cmOptions -- managing-site UsePKI is unknown; local CA configuration will still be checked" -Warning -LogOnly
         }
     }
 
@@ -10679,7 +10656,7 @@ function Test-DomainMemberFunctionality {
 
         Test-WindowsTimeSync -Details $results.Details -Activity $progressActivity
 
-        # PKI client authentication certificate (when UsePKI + pushClient)
+        # Domain-wide autoenrollment is independent of client-push selection.
         if ($checkPki) {
             try {
                 $pkiState = & ([scriptblock]::Create($clientCertificateProbeText))
@@ -10927,7 +10904,7 @@ function Test-DomainMemberFunctionality {
 
                 if ($pkiCertFailure) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt after reporting no usable PKI client-auth certificate (CCM_E_NO_CLIENT_PKI_CERT / 0x87D00454). HTTPS client authentication could not complete at that attempt; this is not evidence of missing DP content. The certificate readiness result above shows whether enrollment has since recovered. Check ConfigMgrClientCertificate Read+Enroll+AutoEnroll for this domain's Domain Computers and Root/NTAuth publication. Once readiness passes, allow the existing setup retry to complete and re-run Phase 11; do not launch a competing ccmsetup.")
+                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt after reporting no usable PKI client-auth certificate (CCM_E_NO_CLIENT_PKI_CERT / 0x87D00454). HTTPS client authentication could not complete at that attempt; this is not evidence of missing DP content. Use the PKI readiness diagnostics (when available) to determine whether enrollment has since recovered. Check ConfigMgrClientCertificate Read+Enroll+AutoEnroll for this domain's Domain Computers and Root/NTAuth publication. Once readiness passes, allow the existing setup retry to complete and re-run Phase 11; do not launch a competing ccmsetup.")
                 }
                 elseif ($mpUnavailable) {
                     $results.Passed = $false
@@ -11025,7 +11002,10 @@ function Test-DomainMemberFunctionality {
         return $results
     }
 
-    $checkPkiCert = ($usePKI -and $pushExpected)
+    $checkPkiCert = ($usePKI -or @($DeployConfig.virtualMachines | Where-Object {
+                $_.InstallCA -and $_.role -ne 'StandaloneRootCA' -and
+                (-not $_.domain -or $_.domain -eq $domain)
+            }).Count -gt 0)
     $clientCertificateProbeText = (Get-MemLabsClientCertificateReadinessBlock).ToString()
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $domain, $checkPkiCert, $clientCertificateProbeText `
@@ -11054,7 +11034,7 @@ function Test-DomainMemberFunctionality {
     # logs to the host log directory so the operator can troubleshoot offline
     # (these live only on the guest and are otherwise lost on VHD compaction).
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Details) {
-        $ccmFailed = $result.ScriptBlockOutput.Details | Where-Object { $_ -match 'ccmsetup failed' }
+        $ccmFailed = $result.ScriptBlockOutput.Details | Where-Object { $_ -match 'ccmsetup failed|^FAIL: ccmsetup\b' }
         # ccmsetup.log rolls but is never truncated, so a failure line from an
         # outage hours ago survives the repair. If CcmExec is Running now, that
         # entry is history and pulling ~1MB of guest logs per VM over PSDirect

@@ -142,6 +142,22 @@ function Test-PushClientRequested {
     return $false
 }
 
+function Disable-MemLabsAutomaticClientPush {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$SiteCode)
+
+    try {
+        Write-DscStatus "Disabling automatic client push at site $SiteCode; client push uses explicit per-VM targets."
+        Set-CMClientPushInstallation -SiteCode $SiteCode -EnableAutomaticClientPushInstallation $false -ErrorAction Stop |
+            Write-StatusLogEntry
+        return $true
+    }
+    catch {
+        Write-DscStatus "Cannot enforce per-VM client-push opt-outs at site ${SiteCode}: $($_.Exception.Message). Refusing discovery/client push." -Failure
+        return $false
+    }
+}
+
 
 function Test-TcpPortFast {
     # Hard-timeout TCP probe using TcpClient + WaitHandle. Never use Test-NetConnection:
