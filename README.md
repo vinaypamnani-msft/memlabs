@@ -2,6 +2,22 @@
 
 ARM Template and DSC configurations for deploying an Azure VM with Hyper-V, and for deploying ConfigMgr lab virtual machines on this Hyper-V host.
 
+## Diagnostic configuration exports
+
+[`New-Lab.ps1`](vmbuild/New-Lab.ps1) writes a redacted
+`VMBuild.<domain>.config.json` beside the deployment log. Activation keys
+(`productID`, `SysCenterId`, and product/license key fields), passwords,
+credentials, secrets, and token fields are omitted recursively. Credential
+objects and credential-bearing diagnostic text/URLs are redacted. Inline
+sidecar-write fallbacks and configuration error context use the same protection;
+failed redaction omits the configuration and reports a warning, never raw JSON.
+
+Runtime settings, activation, and guest deployment configurations are unchanged.
+This only protects newly generated configuration diagnostics; existing logs,
+archives, and OneDrive copies are not cleaned. Review other collected files
+before sharing. Validate with
+[`Test-ConfigDiagnosticRedaction.ps1`](vmbuild/tools/Test-ConfigDiagnosticRedaction.ps1).
+
 ## Reporting diagnostics
 
 For missing ConfigMgr reports or a blank report portal, run

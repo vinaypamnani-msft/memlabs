@@ -3,6 +3,71 @@
 ### Config Functions ###
 ########################
 
+function ConvertTo-ConfigDiagnosticJson {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object]$Config,
+        [ValidateRange(1, 100)]
+        [int]$Depth = 10,
+        [switch]$Compress
+    )
+
+    $sensitiveFieldPattern = '(?i)password|passwd|passphrase|credential|secret|token|^(pwd|productid|syscenterid|(?:api|access|private|sharedaccess|account|product|license|activation)[_-]?key|connectionstrings?)$'
+
+    function Copy-ConfigDiagnosticValue {
+        param ([AllowNull()][object]$Value, [int]$Level = 0)
+
+        if ($Value -is [System.Management.Automation.PSCredential] -or $Value -is [System.Security.SecureString]) {
+            return '[REDACTED]'
+        }
+        if ($null -eq $Value) { return $null }
+        if ($Value -is [string]) {
+            return Protect-VMFixDiagnosticText -Text $Value -MaximumLength ([int]::MaxValue)
+        }
+        if ($Value.GetType().IsPrimitive -or $Value -is [decimal] -or $Value -is [datetime] -or
+            $Value -is [datetimeoffset] -or $Value -is [timespan] -or $Value -is [guid] -or
+            $Value -is [version] -or $Value -is [enum]) {
+            return $Value
+        }
+        if ($Level -ge 100) {
+            throw 'Diagnostic configuration exceeds the supported nesting depth.'
+        }
+        if ($Value -is [System.Collections.IDictionary]) {
+            $copy = [ordered]@{}
+            foreach ($key in $Value.Keys) {
+                if ([string]$key -notmatch $sensitiveFieldPattern) {
+                    $copy[[string]$key] = Copy-ConfigDiagnosticValue -Value $Value[$key] -Level ($Level + 1)
+                }
+            }
+            return $copy
+        }
+        if ($Value -is [System.Collections.IEnumerable]) {
+            $items = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($item in $Value) {
+                $items.Add((Copy-ConfigDiagnosticValue -Value $item -Level ($Level + 1)))
+            }
+            return ,$items.ToArray()
+        }
+        if ($Value -isnot [System.Management.Automation.PSCustomObject]) {
+            throw 'Diagnostic configuration contains an unsupported value type.'
+        }
+        $copy = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            if ($property.Name -notmatch $sensitiveFieldPattern) {
+                $copy[$property.Name] = Copy-ConfigDiagnosticValue -Value $property.Value -Level ($Level + 1)
+            }
+        }
+        return $copy
+    }
+
+    # Copy before serialization so credentials stay available to deployment/guest consumers.
+    $diagnosticConfig = Copy-ConfigDiagnosticValue -Value $Config
+    if ($null -eq $diagnosticConfig) { return 'null' }
+    ConvertTo-Json -InputObject $diagnosticConfig -Depth $Depth -Compress:$Compress -ErrorAction Stop
+}
+
 # Returns the top-level site server VM from a config (CAS preferred, else standalone
 # Primary, i.e. a Primary with no parentSiteCode). Returns $null when no top-level
 # site server is present. Used by genconfig, summary, deploy rehydration, and
@@ -1339,7 +1404,15 @@ function New-DeployConfig {
         return $deploy
     }
     catch {
-        Write-Exception -ExceptionInfo $_ -AdditionalInfo ($configObject | ConvertTo-Json)
+        $configError = $_
+        $diagnosticConfigJson = $null
+        try {
+            $diagnosticConfigJson = ConvertTo-ConfigDiagnosticJson -Config $configObject -Depth 2
+        }
+        catch {
+            Write-Log 'Configuration diagnostic redaction failed; configuration omitted from error context.' -Warning
+        }
+        Write-Exception -ExceptionInfo $configError -AdditionalInfo $diagnosticConfigJson
         throw
     }
 }

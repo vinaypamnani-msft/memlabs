@@ -710,8 +710,8 @@ try {
 
     # The deploy config JSON is written to a sidecar file next to the log
     # (<logbase>.config.json) instead of a giant single line inside the log,
-    # so the log stays readable/greppable while the deployment remains
-    # self-contained.
+    # so the log stays readable/greppable. Diagnostic copies exclude secrets;
+    # the runtime deployConfig remains unchanged.
     $configSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".config.json")
     $jsonlSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".jsonl")
     $sourceSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".source.json")
@@ -743,8 +743,7 @@ try {
         Write-Log -verbose "Could not rename existing $($Common.LogPath)"
     }
 
-    # Banner: stamp the fresh log with session details and a copy of the config
-    # so the deployment is self-contained even if the JSON on disk is removed.
+    # Retain session details and redacted settings even if the source config is removed.
     Write-Log "========================================" -LogOnly
     Write-Log "Deployment log started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -LogOnly
     Write-Log "Configuration: $Configuration" -LogOnly
@@ -836,16 +835,22 @@ try {
         Write-Log "Source identity sidecar write failed: $($_.Exception.Message)" -Warning
     }
     $configSidecarWritten = $false
+    $diagnosticConfigJson = $null
     try {
         # Pretty-print (no -Compress) to the sidecar so it's readable + diffable.
-        ($deployConfig | ConvertTo-Json -Depth 10) | Set-Content -Path $configSidecar -Encoding UTF8 -ErrorAction Stop
+        $diagnosticConfigJson = ConvertTo-ConfigDiagnosticJson -Config $deployConfig
+        $diagnosticConfigJson | Set-Content -Path $configSidecar -Encoding UTF8 -ErrorAction Stop
         $configSidecarWritten = $true
         Write-Log "Deploy config JSON written to: $configSidecar" -LogOnly
     }
     catch {
-        # Fall back to inline if the sidecar can't be written, so the deployment stays self-contained.
-        Write-Log "Deploy config JSON (sidecar write failed: $($_.Exception.Message)):" -LogOnly
-        Write-Log ($deployConfig | ConvertTo-Json -Depth 10 -Compress) -LogOnly
+        if ($diagnosticConfigJson) {
+            Write-Log "Deploy config JSON (sidecar write failed: $($_.Exception.Message)):" -LogOnly
+            Write-Log ($diagnosticConfigJson | ConvertFrom-Json -ErrorAction Stop | ConvertTo-Json -Depth 10 -Compress -ErrorAction Stop) -LogOnly
+        }
+        else {
+            Write-Log 'Deploy config diagnostic redaction failed; configuration omitted from diagnostic output.' -Warning
+        }
     }
     if ($RequireCleanSource -and
         (-not $sourceIdentity.Reproducible -or -not $sourceSidecarWritten -or -not $configSidecarWritten)) {
@@ -1503,7 +1508,15 @@ try {
 
 }
 catch {
-    Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json -Depth 12)
+    $deploymentError = $_
+    $diagnosticConfigJson = $null
+    try {
+        $diagnosticConfigJson = ConvertTo-ConfigDiagnosticJson -Config $deployConfig -Depth 12
+    }
+    catch {
+        Write-Log 'Deploy config diagnostic redaction failed; configuration omitted from error context.' -Warning
+    }
+    Write-Exception -ExceptionInfo $deploymentError -AdditionalInfo $diagnosticConfigJson
     $NewLabsuccess = $false
 }
 finally {
