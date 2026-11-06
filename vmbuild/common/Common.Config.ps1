@@ -4965,14 +4965,16 @@ function Get-List {
         [Parameter(Mandatory = $true, ParameterSetName = "FlushCache")]
         [switch] $FlushCache,
         [Parameter(Mandatory = $false, ParameterSetName = "Type")]
-        [object] $DeployConfig
+        [object] $DeployConfig,
+        [Parameter(Mandatory = $false, ParameterSetName = "Type", HelpMessage = "Refresh live inventory and rethrow failures instead of returning null.")]
+        [switch] $FailOnError
     )
 
-    $doSmartUpdate = $SmartUpdate.IsPresent
+    $doSmartUpdate = $SmartUpdate.IsPresent -or $FailOnError.IsPresent
     $inMutex = $false
     $return = $null
     #Get-PSCallStack | out-host
-    if ($global:DisableSmartUpdate -eq $true) {
+    if ($global:DisableSmartUpdate -eq $true -and -not $FailOnError.IsPresent) {
         $doSmartUpdate = $false        
     }
     else {        
@@ -5007,6 +5009,7 @@ function Get-List {
                 write-log "Failed to convert DeployConfig: $DeployConfig" -Failure
                 write-log "Failed to convert DeployConfig: $DeployConfigJson" -Failure
                 Write-Log "$($_.ScriptStackTrace)" -LogOnly
+                if ($FailOnError.IsPresent) { throw }
             }
 
         }
@@ -5031,7 +5034,7 @@ function Get-List {
                 # before any -SmartUpdate pass reconciles. So reconcile the
                 # seed against live Hyper-V right here (interactive host only;
                 # job workers seed cheaply and target a specific VM by name).
-                if (-not $Common.InJob) {
+                if (-not $Common.InJob -or $FailOnError.IsPresent) {
                     try {
                         $liveVms = Get-VM -ErrorAction Stop
                         $beforeCount = @($diskCached).Count
@@ -5042,6 +5045,7 @@ function Get-List {
                         }
                     }
                     catch {
+                        if ($FailOnError.IsPresent) { throw }
                         Write-Log "Get-List: disk-cache seed reconcile (Get-VM) failed; using seed as-is. $_" -LogOnly
                         $droppedCount = 0
                     }
@@ -5070,7 +5074,7 @@ function Get-List {
                 # was refreshed less than 3 seconds ago. Rapid-fire menu
                 # navigation calls get-list -SmartUpdate multiple times in
                 # the same user action; the VM state won't change that fast.
-                if ($global:vm_List_LastUpdate -and -not $global:vm_List_Dirty -and ((Get-Date) - $global:vm_List_LastUpdate).TotalSeconds -lt 3) {
+                if (-not $FailOnError.IsPresent -and $global:vm_List_LastUpdate -and -not $global:vm_List_Dirty -and ((Get-Date) - $global:vm_List_LastUpdate).TotalSeconds -lt 3) {
                     # Skip refresh, use cached data as-is.
                 }
                 else {
@@ -5082,11 +5086,11 @@ function Get-List {
                 $filterByDomain = $DomainName -and -not $global:vm_List_Dirty
                 try {
                     try {
-                        $virtualMachines = Get-VM
+                        $virtualMachines = Get-VM -ErrorAction Stop
                     }
                     catch {
                         start-sleep -seconds 3
-                        $virtualMachines = Get-VM
+                        $virtualMachines = Get-VM -ErrorAction Stop
                     }
                     foreach ( $oldListVM in $global:vm_List) {
                         if ($filterByDomain) {
@@ -5143,7 +5147,7 @@ function Get-List {
                     # Bulk-fetch network adapters in one WMI call before iterating VMs
                     Invoke-VMNetworkBulkWarmup
                     try {
-                        $virtualMachines = Get-VM
+                        $virtualMachines = Get-VM -ErrorAction Stop
                     }
                     catch {
                         # vmms can transiently throw "object was not found" right
@@ -5151,7 +5155,7 @@ function Get-List {
                         # once after a short settle rather than failing the build.
                         Write-Log "Get-List: Get-VM threw ($($_.Exception.Message)); retrying after 3s..." -LogOnly
                         Start-Sleep -Seconds 3
-                        $virtualMachines = Get-VM
+                        $virtualMachines = Get-VM -ErrorAction Stop
                     }
                     Write-Log "Get-List: Get-VM returned $($virtualMachines.Count) VMs. Building cache..." -LogOnly
                     Flush-LogBuffer -All
@@ -5257,6 +5261,7 @@ function Get-List {
     catch {
         Write-Log "Failed to get '$Type' list. $_" -Failure -LogOnly
         write-Log "Trace $($_.ScriptStackTrace)" -Failure -LogOnly
+        if ($FailOnError.IsPresent) { throw }
         return $null
     }
     finally {

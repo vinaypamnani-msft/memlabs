@@ -1207,6 +1207,39 @@ function Write-Exception {
     [void]$sb.AppendLine($msg)
     Write-Host2 $msg -ForegroundColor Red
 
+    $exception = $null
+    $errorId = '<not supplied>'
+    $category = '<not supplied>'
+    if ($ExceptionInfo -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $ExceptionInfo.Exception
+        $errorId = $ExceptionInfo.FullyQualifiedErrorId
+        $category = "$($ExceptionInfo.CategoryInfo)"
+    }
+    elseif ($ExceptionInfo -is [System.Exception]) {
+        $exception = $ExceptionInfo
+    }
+    $exceptionType = '<not supplied>'
+    $hresult = '<not supplied>'
+    if ($null -ne $exception) {
+        $exceptionType = $exception.GetType().FullName
+        $hresult = '0x{0:X8}' -f $exception.HResult
+    }
+    # ErrorRecord.ToString() may replace the native cause with ErrorDetails.
+    $rootMessage = if ($null -ne $exception) { $exception.Message } else { "$ExceptionInfo" }
+    $logMessage = Protect-MemLabsLogText "`n=== $parentFunctionName`: An error occurred: $rootMessage"
+    if ($logMessage -cne $msg) { [void]$sb.AppendLine($logMessage) }
+    Write-Log -LogOnly $logMessage -Failure
+    if ($ExceptionInfo -is [System.Management.Automation.ErrorRecord] -and
+        $null -ne $ExceptionInfo.ErrorDetails -and
+        -not [string]::IsNullOrWhiteSpace($ExceptionInfo.ErrorDetails.Message)) {
+        $detailMessage = Protect-MemLabsLogText "ErrorDetails=$($ExceptionInfo.ErrorDetails.Message)"
+        [void]$sb.AppendLine($detailMessage)
+        Write-Log -LogOnly $detailMessage -Failure
+    }
+    $msg = Protect-MemLabsLogText "ExceptionType=$exceptionType; HResult=$hresult; FullyQualifiedErrorId=$errorId; Category=$category; CrashReportPath=$crashFile"
+    [void]$sb.AppendLine($msg)
+    Write-Log -LogOnly $msg -Failure
+
     $msg = "`n=== Exception.ScriptStackTrace:`n"
     [void]$sb.AppendLine($msg)
     Write-Host2 $msg -ForegroundColor Red
@@ -1233,15 +1266,14 @@ function Write-Exception {
         $msg = "`n=== Additional Information:`n"
         [void]$sb.AppendLine($msg)
         Write-Host2 "$msg" -ForegroundColor Red
-        Write-Host "Dumped to $crashFile"
         Write-Log -LogOnly $msg -Failure
-        Write-Log -LogOnly  "Dumped to $crashFile" -Failure
         $msg = Protect-MemLabsLogText ($AdditionalInfo | Out-String).Trim()
         [void]$sb.AppendLine($msg)
         Write-Log -LogOnly $msg -Failure
     }
 
-    Protect-MemLabsLogText $sb.ToString() | Out-File -FilePath $crashFile -Force
+    Protect-MemLabsLogText $sb.ToString() | Out-File -FilePath $crashFile -Force -ErrorAction Stop
+    Write-Host "Dumped to $crashFile"
     Write-Host
 }
 

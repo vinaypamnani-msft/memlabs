@@ -170,6 +170,50 @@ try {
     try { throw "synthetic native exception $secret" }
     catch { Write-Exception -ExceptionInfo $_ -AdditionalInfo ("source Encrypt('" + $secret.Replace("'", "''") + "', key)") }
 
+    $longMessage = 'AUDIT_ROOT_BEGIN ' + ('long diagnostic context ' * 100) + $secret + ' AUDIT_ROOT_END'
+    $longException = [InvalidOperationException]::new($longMessage)
+    $longRecord = [Management.Automation.ErrorRecord]::new(
+        $longException, "Audit.LongError.$secret", [Management.Automation.ErrorCategory]::ResourceUnavailable, 'fixture')
+    Write-Exception -ExceptionInfo $longRecord
+    Flush-LogBuffer -All
+    $exceptionRecords = @(Get-Content -LiteralPath ([IO.Path]::ChangeExtension($Common.LogPath, '.jsonl')) |
+        ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop } |
+        Where-Object { $_.comp -eq 'Write-Exception' })
+    $completeMessage = @($exceptionRecords | Where-Object {
+        $_.lvl -eq 'ERROR' -and $_.msg.Contains('AUDIT_ROOT_BEGIN') -and $_.msg.Contains('AUDIT_ROOT_END')
+    })
+    Assert-True ($completeMessage.Count -eq 1 -and $completeMessage[0].msg.Contains('[REDACTED]') -and
+        -not $completeMessage[0].msg.Contains($secret)) 'normal structured logs retain the entire redacted exception message, not truncated call-stack arguments'
+    $cmTraceText = [IO.File]::ReadAllText($Common.LogPath)
+    Assert-True ($cmTraceText.Contains('AUDIT_ROOT_BEGIN') -and $cmTraceText.Contains('AUDIT_ROOT_END')) 'CMTrace logs also retain the complete root exception message'
+    $exceptionIdentity = @($exceptionRecords | Where-Object {
+        $_.msg.Contains('ExceptionType=System.InvalidOperationException') -and
+        $_.msg.Contains('HResult=0x80131509') -and $_.msg.Contains('FullyQualifiedErrorId=Audit.LongError.[REDACTED]')
+    })
+    Assert-True ($exceptionIdentity.Count -eq 1 -and $exceptionIdentity[0].lvl -eq 'ERROR') 'normal logs retain redacted error identity and exception HRESULT'
+    $reports = @(Get-ChildItem -LiteralPath $crash -File | Where-Object {
+        [IO.File]::ReadAllText($_.FullName).Contains('AUDIT_ROOT_END')
+    })
+    Assert-True ($reports.Count -eq 1) 'the long exception remains complete in its crash report'
+    if ($reports.Count -eq 1) {
+        Assert-True (@($exceptionRecords | Where-Object { $_.msg.Contains($reports[0].FullName) }).Count -eq 1) 'the normal log identifies the crash report even without AdditionalInfo'
+    }
+    $detailRecord = [Management.Automation.ErrorRecord]::new(
+        [InvalidOperationException]::new("NATIVE_CAUSE_BEGIN $secret NATIVE_CAUSE_END"),
+        'Audit.ErrorDetails', [Management.Automation.ErrorCategory]::InvalidOperation, 'fixture')
+    $detailRecord.ErrorDetails = [Management.Automation.ErrorDetails]::new("Friendly explanation $secret")
+    Write-Exception -ExceptionInfo $detailRecord
+    Flush-LogBuffer -All
+    $detailMessages = @(Get-Content -LiteralPath ([IO.Path]::ChangeExtension($Common.LogPath, '.jsonl')) |
+        ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop } |
+        Where-Object { $_.comp -eq 'Write-Exception' -and $_.lvl -eq 'ERROR' })
+    Assert-True (@($detailMessages | Where-Object {
+        $_.msg.Contains('NATIVE_CAUSE_BEGIN [REDACTED] NATIVE_CAUSE_END')
+    }).Count -eq 1) 'custom ErrorDetails cannot replace the native exception message in normal logs'
+    Assert-True (@($detailMessages | Where-Object {
+        $_.msg -eq 'ErrorDetails=Friendly explanation [REDACTED]'
+    }).Count -eq 1) 'custom ErrorDetails are retained separately and redacted'
+
     $ps32 = Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $ps32)) { throw '32-bit Windows PowerShell is required for the native fallback regression.' }
     $env:ProgramData = Join-Path $workDir "provider's data"

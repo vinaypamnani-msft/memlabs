@@ -20,6 +20,13 @@ just matching fields named `password`. The mRemoteNG 32-bit encryption fallback
 passes credentials through redirected input, never generated script text or
 process arguments. Restart the launcher after updating to load these changes.
 
+`Write-Exception` writes the complete redacted root message, exception type,
+HRESULT, error identity/category, and crash-report path directly to CMTrace and
+JSONL logs, including calls without additional diagnostic data. Native exception
+messages and custom `ErrorDetails` are logged separately. Offline investigation
+no longer depends on potentially truncated call-stack arguments.
+Console and crash-report output remain available.
+
 Modern self-contained x64 mRemoteNG builds require x64 PowerShell 7 with a
 .NET runtime matching or exceeding the package's target framework (currently
 `.NET 10`). The primary loader selects the modern BouncyCastle dependency and
@@ -257,8 +264,17 @@ leaves the client and connection files unchanged. `New-Lab.ps1 -WhatIf` skips th
 preparation, initialization errors leave files untouched, and internal GenConfig
 calls do not repeat it.
 
+Connection-file regeneration and domain/server pruning capture one verified live
+VM inventory before stopping clients or modifying connection files. Startup shares
+that snapshot between both exporters, and recursive pruning does not re-read
+inventory after changes begin. Failed reads are logged and stop the operation
+without replacing existing data; a genuinely empty host remains valid and can
+remove retired connections. `Get-List -FailOnError` requests a fresh read and
+rethrows errors without changing legacy callers' logged null-result contract.
+
 Validate with `vmbuild\tools\Test-RdcManStartup.ps1` and
-`vmbuild\tools\Test-RdcManEmptyFileRecovery.ps1`.
+`vmbuild\tools\Test-RdcManEmptyFileRecovery.ps1`, plus
+`vmbuild\tools\Test-ConnectionInventorySafety.ps1`.
 
 ## Windows Terminal settings safety
 

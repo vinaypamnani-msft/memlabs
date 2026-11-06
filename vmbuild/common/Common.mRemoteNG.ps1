@@ -1336,10 +1336,16 @@ function Set-MRemoteNGNodeOrder {
 }
 
 function Remove-MissingConnectionsFromMRemoteNG {
-    param($Container)
+    param(
+        $Container,
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
+    )
 
     $return = $false
-    $completeServerList = Get-List -Type VM | Select-Object -ExpandProperty vmName
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
+    $completeServerList = @($VmInventory | Select-Object -ExpandProperty vmName)
     $nodes = $Container.SelectNodes("Node[@Type='Connection']")
     foreach ($node in $nodes) {
         $hostname = $node.GetAttribute("Hostname")
@@ -1362,7 +1368,7 @@ function Remove-MissingConnectionsFromMRemoteNG {
     # Also check sub-containers (e.g. "Linux (SSH)")
     $subContainers = $Container.SelectNodes("Node[@Type='Container']")
     foreach ($sub in $subContainers) {
-        if (Remove-MissingConnectionsFromMRemoteNG -Container $sub) {
+        if (Remove-MissingConnectionsFromMRemoteNG -Container $sub -VmInventory $VmInventory) {
             $return = $true
         }
         # Remove empty sub-containers
@@ -1375,10 +1381,17 @@ function Remove-MissingConnectionsFromMRemoteNG {
 }
 
 function Remove-MissingDomainsFromMRemoteNG {
-    param([xml]$Doc)
+    param(
+        [xml]$Doc,
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
+    )
 
     $return = $false
-    $domainList = Get-List -Type UniqueDomain -SmartUpdate
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
+    $domainList = @($VmInventory | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Domain) } |
+        Select-Object -ExpandProperty Domain -Unique)
     $root = $Doc.DocumentElement
     $containers = $root.SelectNodes("Node[@Type='Container']")
     foreach ($container in $containers) {
@@ -1490,7 +1503,9 @@ function New-MRemoteNGFileFromHyperV {
         [string]$MRemoteNGFile,
         [bool]$OverWrite = $false,
         [switch]$NoActivity,
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [Parameter(DontShow = $true)]
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
     )
 
     if ($WhatIf.IsPresent) {
@@ -1504,6 +1519,9 @@ function New-MRemoteNGFileFromHyperV {
         return
     }
 
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating mRemoteNG connection file" -Activity:$Activity
 
@@ -1630,12 +1648,13 @@ function New-MRemoteNGFileFromHyperV {
     # the domain container (which made them show up twice).
     $anyAdditiveGrouping = [bool]($rdcSettings.AllVMsGroup -or $rdcSettings.RoleGroups -or $rdcSettings.OSGroups -or $rdcSettings.SubnetGroups -or $rdcSettings.SiteCodeGroups)
 
-    $domainList = Get-List -Type UniqueDomain -SmartUpdate
+    $domainList = @($VmInventory | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Domain) } |
+        Select-Object -ExpandProperty Domain -Unique)
     foreach ($domain in $domainList) {
         Write-Verbose "mRemoteNG: Processing domain $domain"
 
         # Get DC admin name for this domain
-        $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1).AdminName
+        $username = ($VmInventory | Where-Object { $_.Domain -eq $domain -and $_.Role -eq 'DC' } | Select-Object -First 1).AdminName
         if (-not $username) {
             Write-Log "Could not determine username from DC config for domain $domain. Assuming 'admin'" -LogOnly
             $username = "admin"
@@ -1656,7 +1675,7 @@ function New-MRemoteNGFileFromHyperV {
         }
 
         # Prune removed VMs
-        if (Remove-MissingConnectionsFromMRemoteNG -Container $container) {
+        if (Remove-MissingConnectionsFromMRemoteNG -Container $container -VmInventory $VmInventory) {
             $shouldSave = $true
         }
 
@@ -1670,7 +1689,7 @@ function New-MRemoteNGFileFromHyperV {
             }
         }
 
-        $vmListFull = Get-List -Type VM -domain $domain
+        $vmListFull = @($VmInventory | Where-Object { $_.Domain -eq $domain })
 
         # Determine CM version per VM from actual hierarchy-owned cmOptions.
         # domainDefaults is retained only as a legacy missing-data fallback.
@@ -2116,20 +2135,20 @@ function New-MRemoteNGFileFromHyperV {
         # were scaffolded but left empty; prune them (also clears any empty
         # additive folders). Recursion handles nested site sub-containers.
         if (-not $rdcSettings.DefaultGrouping) {
-            if (Remove-MissingConnectionsFromMRemoteNG -Container $container) {
+            if (Remove-MissingConnectionsFromMRemoteNG -Container $container -VmInventory $VmInventory) {
                 $shouldSave = $true
             }
         }
     }
 
     # Prune domains that no longer exist
-    if (Remove-MissingDomainsFromMRemoteNG -Doc $doc) {
+    if (Remove-MissingDomainsFromMRemoteNG -Doc $doc -VmInventory $VmInventory) {
         $shouldSave = $true
     }
 
     # Unknown VMs (no domain)
     $unknownVMs = @()
-    $unknownVMs += Get-List -type vm | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
+    $unknownVMs += $VmInventory | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
         Write-Verbose "mRemoteNG: Adding Unknown VMs"
         $unknownContainer = Get-MRemoteNGContainerForDomain -Doc $doc -Domain "UnknownVMs" -Username "" -Password ""
