@@ -54,8 +54,11 @@ function Write-Exception {
 }
 
 $configAst = Read-TestAst (Join-Path $root 'common\Common.Config.ps1')
+$commonAst = Read-TestAst (Join-Path $root 'Common.ps1')
 $maintenanceAst = Read-TestAst (Join-Path $root 'common\Common.Maintenance.ps1')
 $newLabAst = Read-TestAst (Join-Path $root 'New-Lab.ps1')
+. (Get-TestFunction $commonAst 'Protect-MemLabsLogText')
+. (Get-TestFunction $commonAst 'Get-JsonLogEscaped')
 . (Get-TestFunction $maintenanceAst 'Protect-VMFixDiagnosticText')
 . (Get-TestFunction $configAst 'ConvertTo-ConfigDiagnosticJson')
 

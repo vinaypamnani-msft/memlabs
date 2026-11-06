@@ -12,11 +12,30 @@ objects and credential-bearing diagnostic text/URLs are redacted. Inline
 sidecar-write fallbacks and configuration error context use the same protection;
 failed redaction omits the configuration and reports a warning, never raw JSON.
 
+Shared MemLabs logging also redacts the actual password loaded from
+`cache\vmbuildadmin.txt`, including escaped representations in native errors,
+console/notification output, CMTrace/JSONL buffers, progress diagnostics, crash
+reports, and configuration diagnostics. This is value-based protection, not
+just matching fields named `password`. The mRemoteNG 32-bit encryption fallback
+passes credentials through redirected input, never generated script text or
+process arguments. Restart the launcher after updating to load these changes.
+
+Modern self-contained x64 mRemoteNG builds require x64 PowerShell 7 with a
+.NET runtime matching or exceeding the package's target framework (currently
+`.NET 10`). The primary loader selects the modern BouncyCastle dependency and
+resolves the provider from the installed assembly. Primary failures report the
+original sanitized error and host/runtime context; only legacy .NET Framework
+builds may retry in 32-bit Windows PowerShell. An encryption failure leaves the
+existing connection file and credentials unchanged, including overwrite requests.
+
 Runtime settings, activation, and guest deployment configurations are unchanged.
-This only protects newly generated configuration diagnostics; existing logs,
+This only protects newly generated MemLabs diagnostics; existing logs,
 archives, and OneDrive copies are not cleaned. Review other collected files
 before sharing. Validate with
-[`Test-ConfigDiagnosticRedaction.ps1`](vmbuild/tools/Test-ConfigDiagnosticRedaction.ps1).
+[`Test-ConfigDiagnosticRedaction.ps1`](vmbuild/tools/Test-ConfigDiagnosticRedaction.ps1)
+and [`Test-LogSecretRedaction.ps1`](vmbuild/tools/Test-LogSecretRedaction.ps1).
+[`Test-MRemoteNGEncryption.ps1`](vmbuild/tools/Test-MRemoteNGEncryption.ps1)
+also verifies the primary path against an installed modern mRemoteNG package.
 
 ## Reporting diagnostics
 

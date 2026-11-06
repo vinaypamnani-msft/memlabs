@@ -588,6 +588,98 @@ function Set-MRemoteNGSettings {
     }
 }
 
+function New-MRemoteNGCryptoProvider {
+    param(
+        [Parameter(Mandatory = $true)][string]$BouncyCastleDll,
+        [Parameter(Mandatory = $true)][string]$AssemblyPath
+    )
+
+    [System.Reflection.Assembly]::LoadFrom($BouncyCastleDll) | Out-Null
+    $assembly = [System.Reflection.Assembly]::LoadFrom($AssemblyPath)
+    $providerType = $assembly.GetType('mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider', $true)
+    return [Activator]::CreateInstance($providerType)
+}
+
+function Get-MRemoteNGPassword32Bit {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PowerShellPath,
+        [Parameter(Mandatory = $true)][string]$BouncyCastleDll,
+        [Parameter(Mandatory = $true)][string]$AssemblyPath,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential
+    )
+
+    $scriptText = @'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try {
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding -ArgumentList @($false)
+    $requestJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))
+    $request = $requestJson | ConvertFrom-Json -ErrorAction Stop
+    [System.Reflection.Assembly]::LoadFrom($request.BouncyCastleDll) | Out-Null
+    $assembly = [System.Reflection.Assembly]::LoadFrom($request.AssemblyPath)
+    $providerType = $assembly.GetType('mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider', $true)
+    $cp = [Activator]::CreateInstance($providerType)
+    $key = ConvertTo-SecureString 'mR3m' -AsPlainText -Force
+    [Console]::Out.Write($cp.Encrypt($request.Password, $key))
+    exit 0
+}
+catch {
+    [Console]::Error.WriteLine($_.ToString())
+    exit 1
+}
+'@
+    $encodedScript = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($scriptText))
+    $request = @{
+        BouncyCastleDll = $BouncyCastleDll
+        AssemblyPath    = $AssemblyPath
+        Password        = $Credential.GetNetworkCredential().Password
+    } | ConvertTo-Json -Compress
+    $encodedRequest = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request))
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $PowerShellPath
+    $startInfo.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedScript"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $startInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $startInfo.EnvironmentVariables['PSModulePath'] = Get-MemLabsWindowsPowerShellModulePath
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        if (-not $process) { throw '32-bit PowerShell encryption process did not start.' }
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        # ASCII transport preserves Unicode passwords even under Windows PowerShell's console encoding.
+        $process.StandardInput.Write($encodedRequest)
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(60000)) {
+            throw '32-bit PowerShell encryption timed out after 60 seconds.'
+        }
+        $outputText = $outputTask.GetAwaiter().GetResult()
+        $errorText = $errorTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            $detail = Protect-MemLabsLogText -Text ("$errorText`n$outputText".Trim())
+            throw "32-bit PowerShell encryption failed (exit $($process.ExitCode)): $detail"
+        }
+        if ([string]::IsNullOrWhiteSpace($outputText)) {
+            throw '32-bit PowerShell encryption returned no encrypted password.'
+        }
+        return $outputText.Trim()
+    }
+    finally {
+        if ($process) {
+            try {
+                if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction Stop }
+            }
+            finally { $process.Dispose() }
+        }
+    }
+}
+
 function Get-MRemoteNGPassword {
     # Encrypt password using mRemoteNG's BouncyCastle-based AES-GCM encryption.
     # Same pattern as Get-RDCManPassword loading rdcman.dll.
@@ -595,10 +687,11 @@ function Get-MRemoteNGPassword {
     $searchPaths = @(
         (Join-Path $env:ProgramData "memlabs\mRemoteNG"),
         "$env:ProgramFiles\mRemoteNG",
-        "${env:ProgramFiles(x86)}\mRemoteNG"
+        "${env:ProgramFiles(x86)}\mRemoteNG",
+        (Join-Path $env:ProgramData 'chocolatey\lib\mremoteng\tools')
     )
     foreach ($p in $searchPaths) {
-        if (Test-Path "$p\mRemoteNG.exe") {
+        if (Test-Path -LiteralPath "$p\mRemoteNG.exe") {
             $mRNGPath = $p
             break
         }
@@ -609,13 +702,21 @@ function Get-MRemoteNGPassword {
         return $null
     }
 
-    $bouncyCastleDll = Join-Path $mRNGPath "BouncyCastle.Crypto.dll"
-    if (-not (Test-Path $bouncyCastleDll)) {
-        $bouncyCastleDll = Get-ChildItem -Path $mRNGPath -Filter "BouncyCastle*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-        if (-not $bouncyCastleDll) {
-            Write-Log "BouncyCastle DLL not found in $mRNGPath. Cannot encrypt password." -Warning -LogOnly
-            return $null
+    $runtimeConfigPath = Join-Path $mRNGPath 'mRemoteNG.runtimeconfig.json'
+    $modernBuild = Test-Path -LiteralPath $runtimeConfigPath
+    $bouncyCastleNames = @('BouncyCastle.Crypto.dll', 'BouncyCastle.Cryptography.dll')
+    if ($modernBuild) { $bouncyCastleNames = @('BouncyCastle.Cryptography.dll') }
+    $bouncyCastleDll = $null
+    foreach ($name in $bouncyCastleNames) {
+        $candidate = Join-Path $mRNGPath $name
+        if (Test-Path -LiteralPath $candidate) {
+            $bouncyCastleDll = $candidate
+            break
         }
+    }
+    if (-not $bouncyCastleDll) {
+        Write-Log "Required BouncyCastle DLL ($($bouncyCastleNames -join ', ')) not found in $mRNGPath. Cannot encrypt password." -Warning -LogOnly
+        return $null
     }
 
     try {
@@ -624,37 +725,47 @@ function Get-MRemoteNGPassword {
         # .NET 10 self-contained builds ship mRemoteNG.dll (managed) + mRemoteNG.exe (native host).
         # Old .NET Framework builds (choco 1.76) only have the managed .exe.
         $mRNGAssembly = Join-Path $mRNGPath "mRemoteNG.dll"
-        if (-not (Test-Path $mRNGAssembly)) {
+        if (-not (Test-Path -LiteralPath $mRNGAssembly) -and -not $modernBuild) {
             $mRNGAssembly = Join-Path $mRNGPath "mRemoteNG.exe"
         }
 
-        # Try loading inline first (pwsh/.NET Core — works for .NET 10 nightly builds).
-        # Fall back to 32-bit Windows PowerShell for old .NET Framework x86 builds.
         $encrypted = $null
+        $hostContext = "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition)), .NET $([Environment]::Version), 64-bit=$([Environment]::Is64BitProcess), assembly=$mRNGAssembly"
         try {
-            Add-Type -Path $bouncyCastleDll -ErrorAction Stop
-            [System.Reflection.Assembly]::LoadFile($mRNGAssembly) | Out-Null
-            $cp = New-Object mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider
+            if ($modernBuild) {
+                $runtimeConfig = Get-Content -LiteralPath $runtimeConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $targetFramework = $runtimeConfig.runtimeOptions.tfm
+                if ($targetFramework -notmatch '^net(\d+)\.') {
+                    throw "Unsupported mRemoteNG target framework '$targetFramework' in $runtimeConfigPath."
+                }
+                $requiredRuntimeMajor = [int]$Matches[1]
+                if ($PSVersionTable.PSEdition -ne 'Core' -or
+                    [Environment]::Version.Major -lt $requiredRuntimeMajor -or
+                    [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
+                    throw "This x64 mRemoteNG package targets $targetFramework. Run it from x64 PowerShell 7 using .NET $requiredRuntimeMajor or later; restart VMBuild.cmd after updating PowerShell."
+                }
+            }
+            $cp = New-MRemoteNGCryptoProvider -BouncyCastleDll $bouncyCastleDll -AssemblyPath $mRNGAssembly
             $key = ConvertTo-SecureString 'mR3m' -AsPlainText -Force
             $encrypted = $cp.Encrypt($plaintext, $key)
+            if ([string]::IsNullOrWhiteSpace($encrypted)) { throw 'The mRemoteNG provider returned no encrypted password.' }
         }
         catch {
-            # Inline load failed (likely old .NET Framework build) — try 32-bit WinPS
+            $detail = Protect-MemLabsLogText -Text $_.Exception.Message
+            Write-Log "mRemoteNG primary encryption failed [$hostContext]: $detail" -Warning -LogOnly
+            if ($modernBuild) {
+                Write-Log 'Modern x64 mRemoteNG cannot use the 32-bit Windows PowerShell fallback. Correct the reported runtime or installation error before retrying.' -Warning -LogOnly
+                return $null
+            }
+            # Only legacy .NET Framework installations can use the x86 Windows PowerShell host.
             $ps32 = Join-Path $env:SystemRoot "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
             if (Test-Path $ps32) {
-                $scriptText = @"
-Add-Type -Path '$bouncyCastleDll' -ErrorAction Stop
-[System.Reflection.Assembly]::LoadFile('$mRNGAssembly') | Out-Null
-`$cp = New-Object mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider
-`$key = ConvertTo-SecureString 'mR3m' -AsPlainText -Force
-`$cp.Encrypt('$($plaintext -replace "'","''")', `$key)
-"@
-                $result = & $ps32 -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $scriptText 2>&1
-                if ($LASTEXITCODE -eq 0 -and $result -and $result -isnot [System.Management.Automation.ErrorRecord]) {
-                    $encrypted = ($result | Select-Object -Last 1).ToString().Trim()
+                try {
+                    $encrypted = Get-MRemoteNGPassword32Bit -PowerShellPath $ps32 -BouncyCastleDll $bouncyCastleDll `
+                        -AssemblyPath $mRNGAssembly -Credential $Common.LocalAdmin
                 }
-                else {
-                    Write-Log "32-bit PowerShell encryption also failed: $result" -Warning -LogOnly
+                catch {
+                    Write-Log "32-bit PowerShell encryption also failed: $($_.Exception.Message)" -Warning -LogOnly
                 }
             }
         }
@@ -1387,6 +1498,12 @@ function New-MRemoteNGFileFromHyperV {
         return
     }
 
+    $encryptedPass = Get-MRemoteNGPassword
+    if ([string]::IsNullOrWhiteSpace($encryptedPass)) {
+        Write-Log 'mRemoteNG connection file was not updated because password encryption failed. Existing connections and credentials were left unchanged.' -Warning -LogOnly
+        return
+    }
+
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating mRemoteNG connection file" -Activity:$Activity
 
@@ -1502,12 +1619,6 @@ function New-MRemoteNGFileFromHyperV {
             $root.SetAttribute($kvp.Key, $kvp.Value)
             $shouldSave = $true
         }
-    }
-
-    # Encrypt password
-    $encryptedPass = Get-MRemoteNGPassword
-    if (-not $encryptedPass) {
-        $encryptedPass = ""
     }
 
     # Load persisted RDC settings (grouping + display-name toggles), shared with

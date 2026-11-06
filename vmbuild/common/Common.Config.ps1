@@ -24,7 +24,8 @@ function ConvertTo-ConfigDiagnosticJson {
         }
         if ($null -eq $Value) { return $null }
         if ($Value -is [string]) {
-            return Protect-VMFixDiagnosticText -Text $Value -MaximumLength ([int]::MaxValue)
+            $safeText = Protect-MemLabsLogText -Text $Value
+            return Protect-VMFixDiagnosticText -Text $safeText -MaximumLength ([int]::MaxValue)
         }
         if ($Value.GetType().IsPrimitive -or $Value -is [decimal] -or $Value -is [datetime] -or
             $Value -is [datetimeoffset] -or $Value -is [timespan] -or $Value -is [guid] -or
@@ -65,7 +66,8 @@ function ConvertTo-ConfigDiagnosticJson {
     # Copy before serialization so credentials stay available to deployment/guest consumers.
     $diagnosticConfig = Copy-ConfigDiagnosticValue -Value $Config
     if ($null -eq $diagnosticConfig) { return 'null' }
-    ConvertTo-Json -InputObject $diagnosticConfig -Depth $Depth -Compress:$Compress -ErrorAction Stop
+    $json = ConvertTo-Json -InputObject $diagnosticConfig -Depth $Depth -Compress:$Compress -ErrorAction Stop
+    Protect-MemLabsLogText -Text $json
 }
 
 # Returns the top-level site server VM from a config (CAS preferred, else standalone

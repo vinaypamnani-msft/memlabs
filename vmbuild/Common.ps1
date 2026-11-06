@@ -110,7 +110,7 @@ Function Write-ProgressDiagLog {
             $diagPath = Join-Path $base "progressdiag.log"
             $global:ProgressDiagPath = $diagPath
         }
-        $line = "{0} [pid:{1}] {2}`r`n" -f (Get-Date -Format "HH:mm:ss.fff"), $PID, $Message
+        $line = Protect-MemLabsLogText ("{0} [pid:{1}] {2}`r`n" -f (Get-Date -Format "HH:mm:ss.fff"), $PID, $Message)
         [System.IO.File]::AppendAllText($diagPath, $line)
     }
     catch {}
@@ -395,6 +395,41 @@ if (-not $global:MemLabsRunId) {
     }
 }
 
+function Protect-MemLabsLogText {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $commonState = $ExecutionContext.SessionState.PSVariable.GetValue('Common')
+    if ($null -eq $commonState) { return $Text }
+    $credential = $null
+    if ($commonState -is [System.Collections.IDictionary]) {
+        $credential = $commonState['LocalAdmin']
+    }
+    else {
+        $property = $commonState.PSObject.Properties['LocalAdmin']
+        if ($property) { $credential = $property.Value }
+    }
+    if ($credential -isnot [System.Management.Automation.PSCredential]) { return $Text }
+
+    # The cache file's loaded value can appear anywhere in native errors, not just password fields.
+    $password = $credential.GetNetworkCredential().Password
+    if ([string]::IsNullOrEmpty($password)) { return $Text }
+    $variants = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    [void]$variants.Add($password)
+    [void]$variants.Add($password.Replace("'", "''"))
+    $jsonEscaped = Get-JsonLogEscaped -Value $password
+    [void]$variants.Add($jsonEscaped)
+    [void]$variants.Add($jsonEscaped.Replace("'", '\u0027').Replace('<', '\u003c').Replace('>', '\u003e').Replace('&', '\u0026'))
+    $serialized = ConvertTo-Json -InputObject $password -Compress
+    [void]$variants.Add($serialized.Substring(1, $serialized.Length - 2))
+    [void]$variants.Add([System.Security.SecurityElement]::Escape($password))
+    [void]$variants.Add([Uri]::EscapeDataString($password))
+    foreach ($variant in @($variants | Sort-Object -Property Length -Descending)) {
+        $Text = $Text.Replace($variant, '[REDACTED]')
+    }
+    return $Text
+}
+
 function Get-JsonLogEscaped {
     # Minimal RFC-8259 string escaping for a single JSON value. The text has
     # already been stripped of control/non-ASCII chars (except TAB) upstream in
@@ -436,6 +471,7 @@ function Add-LogBufferText {
     # MemLabs.LogFlusher timer callback. StringBuilder is not thread-safe, and an
     # Append landing between the flusher's ToString() and its clear used to vanish.
     param([object]$Entry, [string]$Text)
+    $Text = Protect-MemLabsLogText -Text $Text
     [System.Threading.Monitor]::Enter($Entry.Builder)
     try { [void]$Entry.Builder.Append($Text) }
     finally { [System.Threading.Monitor]::Exit($Entry.Builder) }
@@ -448,6 +484,7 @@ function Add-LogTextToFile {
     # measured 144 records silently clobbered across 8 writers. Let the OS reject the
     # second writer and retry: a sharing violation must cost latency, not a record.
     param([string]$Path, [string]$Text, [int]$Attempts = 12)
+    $Text = Protect-MemLabsLogText -Text $Text
     for ($i = 1; $i -le $Attempts; $i++) {
         try {
             [System.IO.File]::AppendAllText($Path, $Text, [System.Text.Encoding]::UTF8)
@@ -540,8 +577,8 @@ function Flush-LogBuffer {
             if ($entry.Builder.Length -gt $global:LogBufferHardCapBytes) {
                 $lost = $entry.Builder.Length
                 $entry.Builder.Length = 0
-                [void]$entry.Builder.AppendLine(
-                    "*** MemLabs logging DROPPED $lost buffered chars for $Path : $($_.Exception.Message) ***")
+                [void]$entry.Builder.AppendLine((Protect-MemLabsLogText (
+                    "*** MemLabs logging DROPPED $lost buffered chars for $Path : $($_.Exception.Message) ***")))
                 $entry.LastFlushUtc = [DateTime]::UtcNow
             }
         }
@@ -862,6 +899,8 @@ function Write-Log {
     }
 
     if ($Text -is [string]) { $Text = $Text.ToString().Trim() }
+    $protectedText = Protect-MemLabsLogText -Text "$Text"
+    if ($Text -is [string] -or $protectedText -cne "$Text") { $Text = $protectedText }
     # $Text = "[$caller] $Text"
 
     if ($ShowNotification.IsPresent) {
@@ -1105,7 +1144,7 @@ function Write-Log {
             try {
                 # Last-resort direct append; ignore failure.
                 if ($logText -and $Common -and $Common.LogPath) {
-                    $logText | Out-File -LiteralPath $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
+                    Protect-MemLabsLogText -Text $logText | Out-File -LiteralPath $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
                 }
             }
             catch {
@@ -1164,7 +1203,7 @@ function Write-Exception {
     $sb = [System.Text.StringBuilder]::new()
 
     $parentFunctionName = (Get-PSCallStack)[1].FunctionName
-    $msg = "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
+    $msg = Protect-MemLabsLogText "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
     [void]$sb.AppendLine($msg)
     Write-Host2 $msg -ForegroundColor Red
 
@@ -1173,7 +1212,7 @@ function Write-Exception {
     Write-Host2 $msg -ForegroundColor Red
     Write-Log -LogOnly $msg -Failure
 
-    $msg = $ExceptionInfo.ScriptStackTrace
+    $msg = Protect-MemLabsLogText $ExceptionInfo.ScriptStackTrace
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
     Write-Log -LogOnly $msg -Failure
@@ -1183,7 +1222,10 @@ function Write-Exception {
     Write-Host2 $msg -ForegroundColor Red
     Write-Log -LogOnly $msg -Failure
 
-    $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
+    $msg = (Get-PSCallStack | Select-Object Command, Location,
+        @{ Name = 'Arguments'; Expression = { Protect-MemLabsLogText "$($_.Arguments)" } } |
+        Format-Table | Out-String).Trim()
+    $msg = Protect-MemLabsLogText $msg
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
     Write-Log -LogOnly $msg -Failure
@@ -1194,12 +1236,12 @@ function Write-Exception {
         Write-Host "Dumped to $crashFile"
         Write-Log -LogOnly $msg -Failure
         Write-Log -LogOnly  "Dumped to $crashFile" -Failure
-        $msg = ($AdditionalInfo | Out-String).Trim()
+        $msg = Protect-MemLabsLogText ($AdditionalInfo | Out-String).Trim()
         [void]$sb.AppendLine($msg)
         Write-Log -LogOnly $msg -Failure
     }
 
-    $sb.ToString() | Out-File -FilePath $crashFile -Force
+    Protect-MemLabsLogText $sb.ToString() | Out-File -FilePath $crashFile -Force
     Write-Host
 }
 
