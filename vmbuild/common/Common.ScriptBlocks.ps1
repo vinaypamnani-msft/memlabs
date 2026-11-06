@@ -1141,6 +1141,7 @@ $global:VM_Create = {
                         $ccmProbeStart = Get-Date
                         $ccmProbeDeadline = $ccmProbeStart.AddSeconds(60)
                         $ccmClientState = 'Starting'
+                        $ccmManagementPointOnly = $null
                         $lastCcmFailure = "CcmExec service is '$($ccmService.Status)'"
                         while ((Get-Date) -lt $ccmProbeDeadline) {
                             if ($ccmService.Status -eq 'Running') {
@@ -1172,9 +1173,42 @@ $global:VM_Create = {
                                     else { '' }
                                     $cimHresult = '{0:X8}' -f $_.Exception.HResult
                                     $lastCcmFailure = "native=$nativeCimError hresult=$cimHresult errorId=$($_.FullyQualifiedErrorId): $($_.Exception.Message)"
-                                    $ccmInitializing = $nativeCimError -in @('AccessDenied', 'InvalidNamespace', 'InvalidClass') -or
-                                        $cimHresult -in @('80070005', '80041003', '8004100E', '80041010') -or
-                                        $_.FullyQualifiedErrorId -match '80070005|80041003|8004100E|80041010'
+                                    $ccmSdkAbsent = $nativeCimError -in @('InvalidNamespace', 'InvalidClass') -or
+                                        $cimHresult -in @('8004100E', '80041010') -or
+                                        $_.FullyQualifiedErrorId -match '8004100E|80041010'
+                                    if ($ccmSdkAbsent -and $null -eq $ccmManagementPointOnly) {
+                                        $ccmManagementPointOnly = $false
+                                        try {
+                                            # MP-only installs share CcmExec but do not install the client SDK.
+                                            if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\MP' -ErrorAction Stop) {
+                                                $ccmUninstallRoots = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+                                                $ccmUninstall32Root = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+                                                if (Test-Path -LiteralPath $ccmUninstall32Root -ErrorAction Stop) {
+                                                    $ccmUninstallRoots += $ccmUninstall32Root
+                                                }
+                                                $ccmClientProducts = @(
+                                                    foreach ($ccmUninstallRoot in $ccmUninstallRoots) {
+                                                        Get-ItemProperty -Path "$ccmUninstallRoot\*" -ErrorAction Stop |
+                                                            Where-Object {
+                                                                $_.PSObject.Properties['DisplayName'] -and
+                                                                $_.DisplayName -eq 'Configuration Manager Client'
+                                                            }
+                                                    }
+                                                )
+                                                $ccmManagementPointOnly = $ccmClientProducts.Count -eq 0
+                                            }
+                                        }
+                                        catch {
+                                            throw "ConfigMgr client installation lookup failed: $($_.Exception.Message) (errorId=$($_.FullyQualifiedErrorId))"
+                                        }
+                                    }
+                                    if ($ccmSdkAbsent -and $ccmManagementPointOnly) {
+                                        $ccmClientState = 'ManagementPointOnly'
+                                        break
+                                    }
+                                    $ccmInitializing = $ccmSdkAbsent -or $nativeCimError -eq 'AccessDenied' -or
+                                        $cimHresult -in @('80070005', '80041003') -or
+                                        $_.FullyQualifiedErrorId -match '80070005|80041003'
                                     if (-not $ccmInitializing) {
                                         throw "ConfigMgr client reboot probe failed (CcmExec=$($ccmService.Status); $lastCcmFailure)"
                                     }
@@ -1189,7 +1223,7 @@ $global:VM_Create = {
                             $ccmService = Get-Service -Name 'CcmExec' -ErrorAction Stop
                         }
                         $ccmWaitSeconds = [Math]::Round(((Get-Date) - $ccmProbeStart).TotalSeconds, 1)
-                        if ($ccmClientState -ne 'Ready') {
+                        if ($ccmClientState -notin @('Ready', 'ManagementPointOnly')) {
                             throw "ConfigMgr client reboot status did not become readable within 60 seconds (CcmExec=$($ccmService.Status); attempts=$ccmProbeAttempts; lastError=$lastCcmFailure)"
                         }
                     }

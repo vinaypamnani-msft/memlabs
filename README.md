@@ -634,9 +634,16 @@ Ordinary Windows VMs retain their guest-readiness checks. Initial OSD VM creatio
 remains in Phase 1.
 
 Resume reboot checks query the ConfigMgr ClientSDK only when the `CcmExec`
-service is installed. Installed clients receive a read-only, 60-second readiness
-window per probe: service startup and SDK access-denied/missing-namespace/class
-responses retry every five seconds. Each of the two remote probes has a
+service is installed, but that shared service alone does not prove a full client
+is installed. A missing SDK namespace/class on a registered management point is
+classified as `ManagementPointOnly` only when neither Windows uninstall registry
+view registers the `Configuration Manager Client` product. Hidden MSI entries and
+custom installation directories are supported. Working SDK results always take
+precedence; Windows reboot markers remain actionable on MP-only hosts. Registry
+read failures and SDK access-denied errors are never treated as client absence.
+Installed clients receive a read-only, 60-second readiness window per probe:
+service startup and SDK access-denied/missing-namespace/class responses retry
+every five seconds. Each of the two remote probes has a
 90-second job timeout. Persistent unreadable client state still fails preparation;
 it never becomes "no reboot needed." Errors identify the service state and CIM
 failure, and successful checks log client availability, call count, and elapsed
