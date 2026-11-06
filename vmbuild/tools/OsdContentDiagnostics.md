@@ -5,7 +5,10 @@ VMBuild log. This includes a boot image that remains pending or `InstallRetrying
 after its convergence wait, not just terminal distribution failures. A failed
 DP-local check also collects its feeding site's evidence. Existing site servers
 are resolved from VM inventory when an expansion configuration omits them;
-parent CAS evidence is included for a child Primary.
+parent CAS evidence is included for a child Primary. Site-wide failures also
+capture the source sites reported by the required OS content, including a
+different Primary that owns the packages. Discovery stays within the deployment
+domain; missing or invalid source-site metadata is reported.
 
 The capture contains:
 
@@ -13,10 +16,12 @@ The capture contains:
   `despool`, and `rcmctrl` logs, including `.lo_` rolled copies.
 - Guest `InstallCMLog.log`, `DSC_Log.log`, and `DSC_Status.txt`, preserving Phase 8
   publication, targeting, recovery, and coverage decisions.
-- `OsdDistributionState.json`: capture time, boot-image source/stored versions,
-  flags, targeting rows, distribution summaries, and detailed provider status.
-  Provider queries have ten-second operation limits. Inventories are capped at
-  20 boot images and 250 rows per related class; truncation and errors are recorded.
+- `OsdDistributionState.json`: capture time, boot images, OS images, OS upgrade
+  packages, their source sites and source/stored versions, targeting rows,
+  distribution summaries, and detailed provider status. Provider queries have
+  ten-second operation limits. Each package inventory is capped at 20 objects,
+  and each related status class at 250 rows; truncation and errors are recorded.
+  A failed inventory does not discard the independently measured inventories.
 - DP-side `smsdpprov`, `SMSPXE`, `SMSDPMon`, and `PrestageContent` active and rolled
   logs. The actual `SMS_DP$` share path is preferred; other discovered log roots
   are retained separately rather than silently selecting a stale directory.
@@ -32,6 +37,60 @@ log is not mistaken for evidence from the current attempt. Payload inventory is
 capped at 200 files per root and the DataLib probe inspects at most 100 definitions.
 Diagnostic failures remain explicit and do not replace the original validation
 failure.
+
+## OS image and upgrade progress windows
+
+Phase 8 verifies targeting, not completed installation. Phase 11 allows each
+required package/DP/source-version target 15 minutes without verified forward
+progress, with a **45-minute overall convergence hard cap** including preparation
+and queueing. A first observed transfer start seeds that target's transfer window;
+it is not proof of sustained I/O.
+
+The no-progress window renews only for these package-correlated milestones:
+
+- A distinct file copied to DP staging, identified by `PkgXferMgr`'s `Adding ...
+  file in <package>.<version>` event and its sending thread. This is after the copy
+  and before the remote provider's content-library add; it is not proof that the
+  package is fully Installed.
+- A completed package transfer to that DP.
+- Local source content observed advancing from an older stored version to the
+  required source version during this validation.
+
+Pending-state changes, log-file freshness, temp-file size, open SMB handles,
+repeated transfer starts, and repeated attempts to add the same file do not renew
+the window. One package or DP cannot borrow another's progress. The existing
+one-time `InstallRetrying` re-arm does not reset a deadline.
+
+The evidence reader checks the last 10,000 lines of active and rolled
+`PkgXferMgr` logs. Classic and CMTrace timestamps are normalized to UTC, and file
+milestones are correlated chronologically to the sending thread's package, DP,
+and source version. Previous attempts, future timestamps, other versions, and
+different DP FQDNs are excluded. Uncorrelated records and probe errors are reported
+as unmeasured. A late observation cannot resurrect an already expired window.
+
+These are **file/stage-level observations, not live intra-file byte counters**.
+A large SMB copy can be active without producing another file-completion event.
+If that progress cannot be measured, the failure says *no verified progress*,
+not that the copy was proved stalled. The documented DP status class has no
+bytes-transferred property. The 45-minute hard cap applies even while milestones
+continue advancing.
+
+Progress and failure details include the observed stage, source/stored versions,
+last evidence, distinct copied-file count, time without progress, per-target
+deadline, and overall deadline. Validation still requires Installed content and
+stops immediately on a known problem state. These are lab-validation timers,
+not ConfigMgr client timeouts.
+
+See Microsoft's [content distribution troubleshooting](https://learn.microsoft.com/en-us/troubleshoot/mem/configmgr/content-management/troubleshoot-content-distribution)
+for the copy/provider-add sequence and sending-thread correlation, and
+[SMS_DistributionDPStatus](https://learn.microsoft.com/en-us/intune/configmgr/develop/reference/core/servers/configure/sms_distributiondpstatus-server-wmi-class)
+for the actual status properties.
+
+Per-package failure details include timestamp-preserving active/rolled
+`distmgr`, `PkgXferMgr`, `despool`, and `sender` tails. DP `smsdpprov` excerpts are
+package-correlated; unrelated historical startup errors are not presented as the
+package's failure. Full DP logs remain in the capture for wider investigation.
+No additional redistribution, service restart, or database repair is introduced.
 
 ## Existing-site expansion behavior
 

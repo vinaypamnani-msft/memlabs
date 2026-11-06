@@ -75,6 +75,17 @@ function Get-TestDefinition {
     Assert-True ($dps.Count -eq 1 -and $dps[0].VM -ieq 'NEWDP') 'FQDN/short-name aliases were not deduplicated.'
     Assert-True (@($state.Calls | Where-Object { $_.VM -eq 'FOREIGN' }).Count -eq 0) 'Diagnostic discovery crossed a domain boundary.'
     $state.Calls.Clear()
+    $source = [pscustomobject]@{ vmName = 'SOURCE1'; role = 'Primary'; siteCode = 'SRC'; parentSiteCode = 'HUB' }
+    $foreignSource = [pscustomobject]@{ vmName = 'FOREIGNSOURCE'; role = 'Primary'; siteCode = 'SRC'; parentSiteCode = 'BAD'; domain = 'other.test' }
+    $unrelatedCas = [pscustomobject]@{ vmName = 'UNRELATEDCAS'; role = 'CAS'; siteCode = 'BAD' }
+    $state.Existing = @($source, $foreignSource, $unrelatedCas)
+    Save-Phase11OsdContentFailureLogs -VMName NEWDP -CurrentItem $dp -DeployConfig $config `
+        -DistributionPointNames @('NEWDP') -SourceSiteCodes @('SRC', 'src', 'PRI', 'bad-source')
+    Assert-True (@($state.Calls | Where-Object { $_.Kind -eq "'site'" }).Count -eq 3 -and
+        @($state.Calls | Where-Object { $_.VM -eq 'SOURCE1' }).Count -eq 1) 'The actual content source Primary was not captured from inventory.'
+    Assert-True (@($state.Calls | Where-Object { $_.VM -in 'FOREIGNSOURCE', 'UNRELATEDCAS' }).Count -eq 0 -and
+        ($state.Warnings -join ' ') -match 'invalid content source site') 'Source discovery crossed a domain boundary or hid invalid source metadata.'
+    $state.Calls.Clear()
     $config.virtualMachines = @($dp)
     $state.Existing = @($primary, $cas)
     Save-Phase11OsdContentFailureLogs -VMName NEWDP -CurrentItem $dp -DeployConfig $config -DistributionPointNames @('NEWDP')
@@ -104,6 +115,8 @@ $callOwners = @(
 )
 Assert-True ('Test-SiteSystemFunctionality' -in $callOwners -and
     'Test-CMSiteWideFunctionality' -in $callOwners) 'OSD failure capture is wired to the wrong validation functions.'
+Assert-True ($ast.Extent.Text.Contains('-SourceSiteCodes $osdSourceSiteCodes') -and
+    $ast.Extent.Text.Contains('$result.ScriptBlockOutput.OsdContentSourceSiteCodes')) 'Measured content source sites are not passed from the validator to failure capture.'
 $guards = @($ast.FindAll({
             param($node)
             $node -is [Management.Automation.Language.IfStatementAst] -and
@@ -127,7 +140,9 @@ $captureCondition = [scriptblock]::Create($guards[0].Clauses[0].Item1.Extent.Tex
 
 $siteCollector = Get-TestDefinition 'Phase11SmsSiteLogCollector' -Collector
 & {
-    $state = [pscustomobject]@{ ProviderFails = $false; ManyRows = $false }
+    $state = [pscustomobject]@{
+        ProviderFails = $false; ManyRows = $false; InventoryFails = ''; ManyImages = $false
+    }
     $contents = @{
         'C:\Site\Logs\distmgr.log' = 'current distribution retry'
         'C:\Site\Logs\distmgr.lo_' = 'original distribution failure'
@@ -158,16 +173,37 @@ $siteCollector = Get-TestDefinition 'Phase11SmsSiteLogCollector' -Collector
         param($Namespace, $ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
         if ($ClassName -eq 'Win32_Service') { return }
         Assert-True ($OperationTimeoutSec -eq 10) 'A provider diagnostic query has no bounded operation timeout.'
+        if ($ClassName -eq $state.InventoryFails) { throw 'fixture package inventory failed' }
         if ($ClassName -eq 'SMS_BootImagePackage') {
             return [pscustomobject]@{ PackageID = 'PRI00008'; SourceSite = 'PRI'; SourceVersion = 4; StoredPkgVersion = 4; PkgFlags = 1024 }
         }
-        Assert-True ($Filter -eq "PackageID='PRI00008'") 'A provider diagnostic query is not scoped to measured boot images.'
+        if ($ClassName -eq 'SMS_ImagePackage') {
+            if ($state.ManyImages) {
+                1..21 | ForEach-Object {
+                    [pscustomobject]@{ PackageID = ('SRC{0:X5}' -f $_); SourceSite = 'SRC'; SourceVersion = 1; StoredPkgVersion = 1 }
+                }
+                return
+            }
+            return [pscustomobject]@{ PackageID = 'SRC00007'; SourceSite = 'SRC'; SourceVersion = 1; StoredPkgVersion = 1 }
+        }
+        if ($ClassName -eq 'SMS_OperatingSystemInstallPackage') {
+            return [pscustomobject]@{ PackageID = 'SRC00004'; SourceSite = 'SRC'; SourceVersion = 1; StoredPkgVersion = 0 }
+        }
+        Assert-True ($Filter -match "PackageID='SRC00004'") 'A provider diagnostic query omitted measured OS upgrade content.'
+        if (-not $state.ManyImages -and $state.InventoryFails -ne 'SMS_ImagePackage') {
+            Assert-True ($Filter -match "PackageID='SRC00007'") 'A provider diagnostic query omitted measured OS image content.'
+        }
         if ($state.ProviderFails -and $ClassName -eq 'SMS_DistributionDPStatus') { throw 'synthetic provider failure' }
         if ($state.ManyRows) {
             1..251 | ForEach-Object { [pscustomobject]@{ State = 2; SourceVersion = 4 } }
             return
         }
-        [pscustomobject]@{ PackageID = 'PRI00008'; State = 2; SourceVersion = 4; ServerNALPath = '\\NEWDP.memlabs.test\' }
+        foreach ($packageMatch in [regex]::Matches($Filter, "PackageID='([^']+)'")) {
+            [pscustomobject]@{
+                PackageID = $packageMatch.Groups[1].Value; State = 2; SourceVersion = 4
+                ServerNALPath = '\\NEWDP.memlabs.test\'
+            }
+        }
     }
     function Get-WinEvent { param($FilterHashtable, $ErrorAction) }
     $out = & $siteCollector
@@ -179,17 +215,77 @@ $siteCollector = Get-TestDefinition 'Phase11SmsSiteLogCollector' -Collector
     $snapshot = $out['OsdDistributionState.json'] | ConvertFrom-Json
     Assert-True ($snapshot.SiteCode -eq 'PRI' -and $snapshot.BootImages[0].SourceVersion -eq 4 -and
         $snapshot.Classes.SMS_PackageStatusDistPointsSummarizer[0].State -eq 2) 'The snapshot lost the package/DP version and retry state.'
+    Assert-True ($snapshot.OSImages[0].PackageID -eq 'SRC00007' -and
+        $snapshot.OSUpgradePackages[0].StoredPkgVersion -eq 0 -and
+        $snapshot.SourceSiteCodes -contains 'SRC' -and
+        $snapshot.Classes.SMS_PackageStatusDistPointsSummarizer.Count -eq 3) 'The snapshot lost OS content versions, their source Primary, or their per-DP status.'
     $state.ProviderFails = $true
     $out = & $siteCollector
     $snapshot = $out['OsdDistributionState.json'] | ConvertFrom-Json
     Assert-True (($snapshot.Errors -join ' ') -match 'synthetic provider failure' -and
         $out.ContainsKey('distmgr.lo_')) 'A failed provider probe hid its error or discarded already collected logs.'
     $state.ProviderFails = $false
+    $state.InventoryFails = 'SMS_BootImagePackage'
+    $snapshot = (& $siteCollector)['OsdDistributionState.json'] | ConvertFrom-Json
+    Assert-True ($snapshot.BootImages.Count -eq 0 -and $snapshot.OSImages.Count -eq 1 -and
+        $snapshot.OSUpgradePackages.Count -eq 1 -and
+        ($snapshot.Errors -join ' ') -match 'fixture package inventory failed') 'A failed boot-image query discarded the independent OS inventories.'
+    $state.InventoryFails = 'SMS_ImagePackage'
+    $snapshot = (& $siteCollector)['OsdDistributionState.json'] | ConvertFrom-Json
+    Assert-True ($snapshot.OSImages.Count -eq 0 -and $snapshot.BootImages.Count -eq 1 -and
+        $snapshot.OSUpgradePackages.Count -eq 1) 'A failed OS image query discarded the remaining inventories.'
+    $state.InventoryFails = ''
+    $state.ManyImages = $true
+    $snapshot = (& $siteCollector)['OsdDistributionState.json'] | ConvertFrom-Json
+    Assert-True ($snapshot.OSImages.Count -eq 20 -and
+        ($snapshot.Errors -join ' ') -match 'SMS_ImagePackage inventory truncated to 20') 'OS image inventory truncation is unbounded or silent.'
+    $state.ManyImages = $false
     $state.ManyRows = $true
     $out = & $siteCollector
     $snapshot = $out['OsdDistributionState.json'] | ConvertFrom-Json
     Assert-True ($snapshot.Classes.SMS_DistributionPoint.Count -eq 250 -and
         ($snapshot.Errors -join ' ') -match 'truncated to 250') 'Provider snapshot truncation is unbounded or silent.'
+}
+
+$failureDiagnostic = Get-TestDefinition 'getOsdContentFailureDiagnostic' -Collector
+& {
+    $results = @{ OsdContentWaitTargets = @() }
+    $ns = 'root\SMS\site_PRI'
+    $dpNameOf = { param($Path) "$Path".Trim('\') }
+    $getOsdContentTargetRows = { param($PackageId, $RequiredDp) @() }
+    $logs = @{
+        'C:\Site\Logs\PkgXferMgr.log' = 'Sending legacy content SRC00007.1 -- current transfer timestamp'
+        'C:\Site\Logs\despool.lo_' = 'Stored Package SRC00007 -- original arrival timestamp'
+        'E:\SMS_DP$\sms\logs\smsdpprov.log' = 'Unrelated old startup failed; 0x80070002'
+    }
+    function Get-ItemProperty {
+        param($Path, $Name, $ErrorAction)
+        if ($Name -eq 'ContentLibraryPath') { return [pscustomobject]@{ ContentLibraryPath = 'E:\CLib' } }
+        [pscustomobject]@{ 'Installation Directory' = 'C:\Site' }
+    }
+    function Test-Path {
+        param($Path, $LiteralPath, $ErrorAction)
+        $name = $LiteralPath
+        if (-not $name) { $name = $Path }
+        $logs.ContainsKey($name)
+    }
+    function Get-Content {
+        param($LiteralPath, $Tail, $ErrorAction)
+        Assert-True ($Tail -in 3000, 5000) 'A per-package failure diagnostic lost its log-read bound.'
+        $logs[$LiteralPath]
+    }
+    function Get-WmiObject { param($Namespace, $Class, $Filter, $ErrorAction) @() }
+    function New-PSSessionOption { param($OpenTimeout, $OperationTimeout) [pscustomobject]@{} }
+    function Invoke-Command {
+        param($ComputerName, $SessionOption, $ErrorAction, [object[]]$ArgumentList, $ScriptBlock)
+        & $ScriptBlock @ArgumentList
+    }
+    $package = [pscustomobject]@{ PackageID = 'SRC00007'; SourceSite = 'SRC'; SourceVersion = 1; StoredPkgVersion = 1 }
+    $detail = & $failureDiagnostic $package 'NEWDP.fixture.test' 'ContentValidating'
+    Assert-True ($detail -match 'PkgXferMgr.log package tail:.*current transfer timestamp' -and
+        $detail -match 'despool.lo_ package tail:.*original arrival timestamp') 'Failure diagnostics lost the active transfer or rolled arrival evidence.'
+    Assert-True ($detail -notmatch 'Unrelated old startup failed' -and
+        $detail -match 'unrelated startup errors are not evidence') 'Old uncorrelated DP startup errors masqueraded as this package''s failure.'
 }
 
 $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector

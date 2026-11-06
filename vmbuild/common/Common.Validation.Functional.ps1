@@ -9200,25 +9200,34 @@ function Save-Phase11OsdContentFailureLogs {
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][object]$CurrentItem,
         [Parameter(Mandatory)][object]$DeployConfig,
-        [string[]]$DistributionPointNames = @()
+        [string[]]$DistributionPointNames = @(),
+        [string[]]$SourceSiteCodes = @()
     )
 
     $domain = "$($DeployConfig.vmOptions.domainName)"
-    $siteCodes = @("$($CurrentItem.siteCode)", "$($CurrentItem.parentSiteCode)" |
-            Where-Object { $_ } | Select-Object -Unique)
+    foreach ($sourceCode in @($SourceSiteCodes | Where-Object { $_ -and $_ -notmatch '^[A-Za-z0-9]{3}$' })) {
+        Write-Log "[Phase 11] $VMName [OSD]: invalid content source site '$sourceCode'; its site-server logs could not be resolved." -Warning -LogOnly
+    }
+    $siteCodes = @(@("$($CurrentItem.siteCode)", "$($CurrentItem.parentSiteCode)") +
+            @($SourceSiteCodes | Where-Object { $_ -match '^[A-Za-z0-9]{3}$' }) |
+            Where-Object { $_ } | ForEach-Object { "$_".ToUpperInvariant() } | Select-Object -Unique)
     $knownVms = @($DeployConfig.virtualMachines | Where-Object {
             -not $_.domain -or "$($_.domain)" -ieq $domain
         })
     $siteCodes = @(@($siteCodes) + @($knownVms | Where-Object {
                 "$($_.siteCode)" -in $siteCodes -and $_.role -eq 'Primary'
             } | ForEach-Object { "$($_.parentSiteCode)" }) |
-            Where-Object { $_ } | Select-Object -Unique)
+            Where-Object { $_ } | ForEach-Object { "$_".ToUpperInvariant() } | Select-Object -Unique)
     $missingSites = @($siteCodes | Where-Object {
             $code = $_
             @($knownVms | Where-Object { "$($_.siteCode)" -ieq $code -and $_.role -in 'CAS', 'Primary', 'Secondary' }).Count -eq 0
         })
     if ($missingSites.Count -gt 0) {
-        try { $knownVms += @(Get-List -Type VM -DomainName $domain) }
+        try {
+            $knownVms += @(Get-List -Type VM -DomainName $domain | Where-Object {
+                    -not $_.domain -or "$($_.domain)" -ieq $domain
+                })
+        }
         catch {
             Write-Log "[Phase 11] $VMName [OSD]: site-server discovery failed: $($_.Exception.Message). Using the deployment's known site servers." -Warning -LogOnly
         }
@@ -9226,7 +9235,7 @@ function Save-Phase11OsdContentFailureLogs {
     $siteCodes = @(@($siteCodes) + @($knownVms | Where-Object {
                 "$($_.siteCode)" -in $siteCodes -and $_.role -eq 'Primary'
             } | ForEach-Object { "$($_.parentSiteCode)" }) |
-            Where-Object { $_ } | Select-Object -Unique)
+            Where-Object { $_ } | ForEach-Object { "$_".ToUpperInvariant() } | Select-Object -Unique)
     foreach ($code in $siteCodes) {
         $sites = @($knownVms | Where-Object {
                 $_.vmName -and "$($_.siteCode)" -ieq $code -and $_.role -in 'CAS', 'Primary', 'Secondary' -and
@@ -9448,6 +9457,9 @@ $Phase11SmsSiteLogCollector = {
         ComputerName = $env:COMPUTERNAME
         SiteCode = ''
         BootImages = @()
+        OSImages = @()
+        OSUpgradePackages = @()
+        SourceSiteCodes = @()
         Classes = [ordered]@{}
         Errors = @()
     }
@@ -9455,14 +9467,26 @@ $Phase11SmsSiteLogCollector = {
         $snapshot.SiteCode = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code')"
         if ($snapshot.SiteCode -notmatch '^[A-Za-z0-9]{3}$') { throw 'No valid local site code was found.' }
         $namespace = "root\SMS\site_$($snapshot.SiteCode)"
-        $bootRows = @(Get-CimInstance -Namespace $namespace -ClassName SMS_BootImagePackage `
-                -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 21)
-        if ($bootRows.Count -gt 20) { $snapshot.Errors += 'Boot-image inventory truncated to 20 rows.' }
-        $snapshot.BootImages = @($bootRows | Select-Object -First 20 -Property * -ExcludeProperty 'Cim*')
-        $bootIds = @($snapshot.BootImages | ForEach-Object { "$($_.PackageID)" } |
+        foreach ($inventory in @(
+                @{ Class = 'SMS_BootImagePackage'; Property = 'BootImages' },
+                @{ Class = 'SMS_ImagePackage'; Property = 'OSImages' },
+                @{ Class = 'SMS_OperatingSystemInstallPackage'; Property = 'OSUpgradePackages' }
+            )) {
+            try {
+                $packageRows = @(Get-CimInstance -Namespace $namespace -ClassName $inventory.Class `
+                        -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 21)
+                if ($packageRows.Count -gt 20) { $snapshot.Errors += "$($inventory.Class) inventory truncated to 20 rows." }
+                $snapshot[$inventory.Property] = @($packageRows | Select-Object -First 20 -Property * -ExcludeProperty 'Cim*')
+            }
+            catch { $snapshot.Errors += "$($inventory.Class) query failed: $($_.Exception.Message)" }
+        }
+        $packages = @($snapshot.BootImages) + @($snapshot.OSImages) + @($snapshot.OSUpgradePackages)
+        $snapshot.SourceSiteCodes = @($packages | ForEach-Object { "$($_.SourceSite)" } |
+                Where-Object { $_ -match '^[A-Za-z0-9]{3}$' } | Select-Object -Unique)
+        $packageIds = @($packages | ForEach-Object { "$($_.PackageID)" } |
                 Where-Object { $_ -match '^[A-Za-z0-9]{8}$' } | Select-Object -Unique)
-        if ($bootIds.Count) {
-            $filter = ($bootIds | ForEach-Object { "PackageID='$_'" }) -join ' OR '
+        if ($packageIds.Count) {
+            $filter = ($packageIds | ForEach-Object { "PackageID='$_'" }) -join ' OR '
             foreach ($class in @('SMS_DistributionPoint', 'SMS_PackageStatusDistPointsSummarizer', 'SMS_DistributionDPStatus')) {
                 try {
                     $rows = @(Get-CimInstance -Namespace $namespace -ClassName $class -Filter $filter `
@@ -9474,7 +9498,7 @@ $Phase11SmsSiteLogCollector = {
             }
         }
     }
-    catch { $snapshot.Errors += "Boot-image snapshot failed: $($_.Exception.Message)" }
+    catch { $snapshot.Errors += "OSD snapshot failed: $($_.Exception.Message)" }
     try { $out['OsdDistributionState.json'] = $snapshot | ConvertTo-Json -Depth 6 -ErrorAction Stop }
     catch { $diag += "OSD snapshot serialization failed: $($_.Exception.Message)" }
 
@@ -13672,6 +13696,283 @@ function Test-CMSiteWideFunctionality {
             if ($State -in 1, 2, 7) { return 'Pending' }
             return 'Problem'
         }
+
+        function ConvertFrom-MemLabsOsdTransferEvent {
+            param([Parameter(Mandatory)][string]$Line)
+
+            $entry = [regex]::Match($Line,
+                'Sending thread starting for Job:\s*\d+,\s*package:\s*(?<PackageId>[A-Za-z0-9]{8}),\s*Version:\s*(?<Version>\d+).*?\bserver:\s*(?<DP>[^,\s]+)',
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $kind = 'TransferStarted'
+            if (-not $entry.Success) {
+                $entry = [regex]::Match($Line,
+                    'Adding (?<FileName>.+) file in (?<PackageId>[A-Za-z0-9]{8})\.(?<Version>\d+)\.',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'FileCopiedToStaging'
+            }
+            if (-not $entry.Success) {
+                $entry = [regex]::Match($Line,
+                    'Finished sending SWD package (?<PackageId>[A-Za-z0-9]{8}) version (?<Version>\d+) to distribution point (?<DP>[^\s]+)',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'PackageTransferred'
+            }
+            if (-not $entry.Success) {
+                if ($Line -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package') {
+                    throw "Malformed PkgXferMgr transfer record: $Line"
+                }
+                return
+            }
+            $timestamp = [regex]::Match($Line,
+                '><(?<Date>\d{2}-\d{2}-\d{4}) (?<Time>\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?)(?<Offset>[+-]\d+)>')
+            if ($timestamp.Success) {
+                $dateText = $timestamp.Groups['Date'].Value
+                $timeText = $timestamp.Groups['Time'].Value
+                $offsetText = $timestamp.Groups['Offset'].Value
+            }
+            else {
+                $dateField = [regex]::Match($Line, '\bdate="(?<Date>\d{1,2}-\d{1,2}-\d{4})"')
+                $timeField = [regex]::Match($Line, '\btime="(?<Time>\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?)(?<Offset>[+-]\d+)"')
+                if (-not $dateField.Success -or -not $timeField.Success) {
+                    throw "No supported timestamp in PkgXferMgr transfer record: $Line"
+                }
+                $dateText = $dateField.Groups['Date'].Value
+                $timeText = $timeField.Groups['Time'].Value
+                $offsetText = $timeField.Groups['Offset'].Value
+            }
+            $stamp = [datetime]::MinValue
+            $offsetMinutes = 0
+            $sourceVersion = 0
+            if (-not [datetime]::TryParseExact("$dateText $timeText",
+                    [string[]]@('M-d-yyyy HH:mm:ss.FFFFFFF', 'M-d-yyyy HH:mm:ss'),
+                    [System.Globalization.CultureInfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::None, [ref]$stamp) -or
+                -not [int]::TryParse($offsetText, [ref]$offsetMinutes) -or
+                [math]::Abs([long]$offsetMinutes) -gt 840 -or
+                -not [int]::TryParse($entry.Groups['Version'].Value, [ref]$sourceVersion) -or
+                $sourceVersion -lt 1) {
+                throw "Invalid timestamp or version in PkgXferMgr transfer record: $Line"
+            }
+            $thread = [regex]::Match($Line, '\bthread="?(?<ThreadId>\d+)')
+            if (-not $thread.Success) { throw "No thread identity in PkgXferMgr transfer record: $Line" }
+            $atUtc = [datetimeoffset]::new($stamp, [timespan]::FromMinutes(-$offsetMinutes)).UtcDateTime
+            $startedAtUtc = $null
+            $sortOrder = 1
+            if ($kind -eq 'TransferStarted') { $startedAtUtc = $atUtc; $sortOrder = 0 }
+            [pscustomobject]@{
+                PackageId = $entry.Groups['PackageId'].Value
+                DP = $entry.Groups['DP'].Value.TrimEnd('\')
+                SourceVersion = $sourceVersion
+                Kind = $kind
+                FileName = $entry.Groups['FileName'].Value
+                ThreadId = $thread.Groups['ThreadId'].Value
+                AtUtc = $atUtc
+                StartedAtUtc = $startedAtUtc
+                SortOrder = $sortOrder
+            }
+        }
+
+        function Get-MemLabsOsdTransferEvidence {
+            param([Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Details)
+
+            $events = [System.Collections.Generic.List[object]]::new()
+            $starts = [System.Collections.Generic.List[object]]::new()
+            $progress = [System.Collections.Generic.List[object]]::new()
+            $smsDir = ''
+            foreach ($key in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                try {
+                    $smsDir = "$((Get-ItemProperty -Path $key -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory')"
+                }
+                catch {
+                    $message = "DIAG: OSD transfer-start directory lookup failed at '$key': $($_.Exception.Message)"
+                    if (-not $Details.Contains($message)) { $Details.Add($message) }
+                }
+                if ($smsDir) { break }
+            }
+            $foundLog = $false
+            if ($smsDir) {
+                foreach ($extension in @('.log', '.lo_')) {
+                    $path = Join-Path $smsDir "Logs\PkgXferMgr$extension"
+                    try {
+                        if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { continue }
+                        $foundLog = $true
+                        foreach ($line in @(Get-Content -LiteralPath $path -Tail 10000 -ErrorAction Stop |
+                                Where-Object { $_ -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package' })) {
+                            try { $events.Add((ConvertFrom-MemLabsOsdTransferEvent -Line "$line")) }
+                            catch {
+                                $message = "DIAG: OSD transfer-evidence parse failed in '$path': $($_.Exception.Message)"
+                                if (-not $Details.Contains($message)) { $Details.Add($message) }
+                            }
+                        }
+                    }
+                    catch {
+                        $message = "DIAG: OSD transfer-evidence read failed at '$path': $($_.Exception.Message)"
+                        if (-not $Details.Contains($message)) { $Details.Add($message) }
+                    }
+                }
+            }
+            if (-not $foundLog) {
+                $message = 'DIAG: PkgXferMgr transfer evidence was not measured; no readable log path was found. A pending state is not proof of progress.'
+                if (-not $Details.Contains($message)) { $Details.Add($message) }
+            }
+            $sessions = @{}
+            $uncorrelated = $false
+            foreach ($transferEvent in @($events | Sort-Object AtUtc, SortOrder)) {
+                if ($transferEvent.Kind -eq 'TransferStarted') {
+                    $sessions[$transferEvent.ThreadId] = $transferEvent
+                    $starts.Add($transferEvent)
+                }
+                elseif ($transferEvent.Kind -eq 'FileCopiedToStaging') {
+                    $session = $sessions[$transferEvent.ThreadId]
+                    if (-not $session -or $session.PackageId -ine $transferEvent.PackageId -or
+                        $session.SourceVersion -ne $transferEvent.SourceVersion -or $session.AtUtc -gt $transferEvent.AtUtc) {
+                        $uncorrelated = $true
+                        continue
+                    }
+                    $progress.Add([pscustomobject]@{
+                            PackageId = $transferEvent.PackageId; DP = $session.DP; SourceVersion = $transferEvent.SourceVersion
+                            Kind = $transferEvent.Kind; Identity = "$($transferEvent.Kind)|$($transferEvent.FileName)".ToUpperInvariant()
+                            AtUtc = $transferEvent.AtUtc; SortOrder = 1
+                        })
+                }
+                else {
+                    $progress.Add([pscustomobject]@{
+                            PackageId = $transferEvent.PackageId; DP = $transferEvent.DP; SourceVersion = $transferEvent.SourceVersion
+                            Kind = $transferEvent.Kind; Identity = $transferEvent.Kind; AtUtc = $transferEvent.AtUtc; SortOrder = 1
+                        })
+                }
+            }
+            if ($uncorrelated) {
+                $message = 'DIAG: Some file-copy records had no matching package/version sending thread in the bounded log tail; they were not used as progress.'
+                if (-not $Details.Contains($message)) { $Details.Add($message) }
+            }
+            [pscustomobject]@{ Starts = $starts.ToArray(); Progress = $progress.ToArray() }
+        }
+
+        function Get-MemLabsOsdContentWaitState {
+            param(
+                [object[]]$PendingTargets,
+                [object[]]$TransferStarts,
+                [object[]]$ProgressEvents = @(),
+                [Parameter(Mandatory)][datetime]$StartedAtUtc,
+                [Parameter(Mandatory)][datetime]$NowUtc,
+                [Parameter(Mandatory)][hashtable]$TransferClocks,
+                [hashtable]$ProgressClocks = @{},
+                [ValidateRange(1, 86400)][int]$PreparationWaitSeconds = 900,
+                [ValidateRange(1, 86400)][int]$TransferWaitSeconds = 900,
+                [ValidateRange(1, 86400)][int]$OverallWaitSeconds = 2700
+            )
+
+            if ($NowUtc -lt $StartedAtUtc) { throw 'The OSD validation clock moved backwards.' }
+            $overallDeadline = $StartedAtUtc.AddSeconds($OverallWaitSeconds)
+            $events = @(
+                foreach ($start in $TransferStarts) {
+                    [pscustomobject]@{
+                        PackageId = $start.PackageId; DP = $start.DP; SourceVersion = $start.SourceVersion
+                        Kind = 'TransferStarted'; Identity = 'TransferStarted'; AtUtc = $start.StartedAtUtc; SortOrder = 0
+                    }
+                }
+            ) + @($ProgressEvents)
+            $targets = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in $PendingTargets) {
+                $sourceVersion = 0
+                if ("$($target.PackageId)" -notmatch '^[A-Za-z0-9]{8}$' -or -not "$($target.DP)" -or
+                    -not [int]::TryParse("$($target.SourceVersion)", [ref]$sourceVersion) -or $sourceVersion -lt 1) {
+                    throw "Cannot time OSD target '$($target.PackageId)' on '$($target.DP)' with source version '$($target.SourceVersion)'."
+                }
+                $wantedDp = "$($target.DP)"
+                $key = "$($target.PackageId)|$wantedDp|$sourceVersion".ToUpperInvariant()
+                $storedVersion = 0L
+                $storedMeasured = [long]::TryParse("$($target.StoredPkgVersion)", [ref]$storedVersion) -and $storedVersion -ge 0
+                if (-not $ProgressClocks.ContainsKey($key)) {
+                    $ProgressClocks[$key] = @{
+                        LastProgressUtc = $StartedAtUtc; LastVerifiedProgressUtc = $null
+                        LastKind = 'ValidationStarted'; Seen = @{}; CopiedFiles = 0; TransferCompleted = $false
+                        SourceWasPending = ($storedMeasured -and $storedVersion -lt $sourceVersion)
+                        BrokenDeadlineUtc = $null
+                    }
+                }
+                $clock = $ProgressClocks[$key]
+                $eligible = @($events | Where-Object {
+                        $actualDp = "$($_.DP)"
+                        $sameDp = $actualDp -ieq $wantedDp -or (
+                            (-not $actualDp.Contains('.') -or -not $wantedDp.Contains('.')) -and
+                            ($actualDp -split '\.')[0] -ieq ($wantedDp -split '\.')[0])
+                        "$($_.PackageId)" -ieq "$($target.PackageId)" -and $sameDp -and
+                        $_.SourceVersion -eq $sourceVersion -and $_.AtUtc -ge $StartedAtUtc -and $_.AtUtc -le $NowUtc
+                    })
+                if ($clock.SourceWasPending -and $storedMeasured -and $storedVersion -ge $sourceVersion) {
+                    $eligible += [pscustomobject]@{
+                        Kind = 'SourceContentReady'; Identity = 'SourceContentReady'; AtUtc = $NowUtc; SortOrder = 1
+                    }
+                    $clock.SourceWasPending = $false
+                }
+                foreach ($transferEvent in @($eligible | Sort-Object AtUtc, SortOrder)) {
+                    if ($clock.Seen.ContainsKey($transferEvent.Identity)) { continue }
+                    if ($transferEvent.Kind -eq 'TransferStarted' -and $TransferClocks.ContainsKey($key)) { continue }
+                    if ($null -ne $clock.BrokenDeadlineUtc) { break }
+                    $budget = $PreparationWaitSeconds
+                    if ($TransferClocks.ContainsKey($key) -or $clock.CopiedFiles -gt 0 -or $clock.TransferCompleted) {
+                        $budget = $TransferWaitSeconds
+                    }
+                    $previousDeadline = $clock.LastProgressUtc.AddSeconds($budget)
+                    if ($transferEvent.AtUtc -gt $previousDeadline) {
+                        $clock.BrokenDeadlineUtc = $previousDeadline
+                        break
+                    }
+                    if ($transferEvent.AtUtc -gt $overallDeadline) { continue }
+                    $clock.Seen[$transferEvent.Identity] = $true
+                    if ($transferEvent.Kind -eq 'TransferStarted') { $TransferClocks[$key] = $transferEvent.AtUtc }
+                    elseif ($transferEvent.Kind -eq 'FileCopiedToStaging') { $clock.CopiedFiles++ }
+                    elseif ($transferEvent.Kind -eq 'PackageTransferred') { $clock.TransferCompleted = $true }
+                    if ($transferEvent.AtUtc -ge $clock.LastProgressUtc) {
+                        $clock.LastProgressUtc = $transferEvent.AtUtc
+                        $clock.LastKind = $transferEvent.Kind
+                        if ($transferEvent.Kind -ne 'TransferStarted') { $clock.LastVerifiedProgressUtc = $transferEvent.AtUtc }
+                    }
+                }
+                $transferStart = $null
+                $stage = 'PreparationOrUnobservedTransfer'
+                $budget = $PreparationWaitSeconds
+                $elapsedSeconds = [math]::Max(0, [int]($NowUtc - $StartedAtUtc).TotalSeconds)
+                if ($TransferClocks.ContainsKey($key)) {
+                    $transferStart = $TransferClocks[$key]
+                    $elapsedSeconds = [math]::Max(0, [int]($NowUtc - $transferStart).TotalSeconds)
+                }
+                if ($null -ne $transferStart -or $clock.CopiedFiles -gt 0 -or $clock.TransferCompleted) {
+                    $stage = 'TransferOrInstallation'
+                    $budget = $TransferWaitSeconds
+                }
+                $noProgressDeadline = $clock.LastProgressUtc.AddSeconds($budget)
+                if ($null -ne $clock.BrokenDeadlineUtc -and $clock.BrokenDeadlineUtc -lt $noProgressDeadline) {
+                    $noProgressDeadline = $clock.BrokenDeadlineUtc
+                }
+                $deadline = $noProgressDeadline
+                $limitKind = 'NoVerifiedProgress'
+                if ($overallDeadline -le $deadline) { $deadline = $overallDeadline; $limitKind = 'OverallHardCap' }
+                $noProgressSeconds = [math]::Max(0, [int]($NowUtc - $clock.LastProgressUtc).TotalSeconds)
+                $description = "${budget}s without verified forward progress; lastClockEvidence=$($clock.LastKind) atUtc=$($clock.LastProgressUtc.ToString('o')) copiedFiles=$($clock.CopiedFiles) deadlineUtc=$($deadline.ToString('o')) overallDeadlineUtc=$($overallDeadline.ToString('o')); intra-file byte progress is unmeasured"
+                $targets.Add([pscustomobject]@{
+                        Key = $key; PackageId = "$($target.PackageId)"; DP = $wantedDp
+                        SourceVersion = $sourceVersion; SourceSite = "$($target.SourceSite)"
+                        StoredPkgVersion = "$($target.StoredPkgVersion)"; StateName = "$($target.StateName)"
+                        Stage = $stage; TransferStartedAtUtc = $transferStart; DeadlineUtc = $deadline
+                        ObservedAtUtc = $NowUtc; ElapsedSeconds = $elapsedSeconds
+                        LastVerifiedProgressUtc = $clock.LastVerifiedProgressUtc; LastEvidenceKind = $clock.LastKind
+                        NoProgressSeconds = $noProgressSeconds; VerifiedCopiedFiles = $clock.CopiedFiles
+                        OverallDeadlineUtc = $overallDeadline; LimitKind = $limitKind
+                        IntraFileBytesMeasured = $false; SourceStoredVersionMeasured = $storedMeasured
+                        RemainingSeconds = [math]::Max(0, [int][math]::Ceiling(($deadline - $NowUtc).TotalSeconds))
+                        Expired = $NowUtc -ge $deadline; Description = $description
+                    })
+            }
+            $remainingSeconds = 0
+            if ($targets.Count) { $remainingSeconds = [int]($targets | Measure-Object RemainingSeconds -Minimum).Minimum }
+            [pscustomobject]@{
+                Targets = $targets.ToArray()
+                ExpiredTargets = @($targets | Where-Object { $_.Expired })
+                RemainingSeconds = $remainingSeconds
+            }
+        }
         $osdProgressActivity = "$env:COMPUTERNAME [OSD content validation]"
 
         $usePki = ($usePkiInner -eq 'True')
@@ -13695,7 +13996,13 @@ function Test-CMSiteWideFunctionality {
         $expectedBoundaries = if ([string]::IsNullOrEmpty($expectedBgCsv)) { @() } else { @($expectedBgCsv -split '\|') }
         $configOsdDpNames = if ([string]::IsNullOrEmpty($expectedOsdDpCsv)) { @() } else { @($expectedOsdDpCsv -split '\|') }
         $uncoveredOsdSubnets = if ([string]::IsNullOrEmpty($uncoveredOsdSubnetCsv)) { @() } else { @($uncoveredOsdSubnetCsv -split '\|') }
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $results = @{
+            Passed = $true
+            Details = [System.Collections.Generic.List[string]]::new()
+            OsdContentSourceSiteCodes = [System.Collections.Generic.List[string]]::new()
+            OsdContentWaitProblems = [System.Collections.Generic.List[string]]::new()
+            OsdContentWaitTargets = @()
+        }
 
         $ns = "root\SMS\site_$sc"
 
@@ -14728,11 +15035,16 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     })
             }
             $readPendingOsdContent = {
+                $results.OsdContentWaitProblems.Clear()
                 $pendingRows = [System.Collections.Generic.List[object]]::new()
                 foreach ($contentClass in $osdPackageClasses) {
                     $visibleContent = @(Get-WmiObject -Namespace $ns -Class $contentClass.Class -ErrorAction Stop)
                     $relevantContent = @(& $selectRelevantOsdContent -VisibleContent $visibleContent)
                     foreach ($contentPackage in $relevantContent) {
+                        $sourceSite = "$($contentPackage.SourceSite)"
+                        if ($sourceSite -and -not $results.OsdContentSourceSiteCodes.Contains($sourceSite)) {
+                            $results.OsdContentSourceSiteCodes.Add($sourceSite)
+                        }
                         $statusRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($contentPackage.PackageID)'" -ErrorAction Stop)
                         foreach ($requiredDp in $expectedOsdDpNames) {
                             $requiredShort = ($requiredDp -split '\.')[0]
@@ -14750,7 +15062,14 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                         DP        = "$requiredDp"
                                         State     = $stateNumber
                                         StateName = @{ 1 = 'InstallPending'; 2 = 'InstallRetrying'; 7 = 'ContentValidating' }[$stateNumber]
+                                        SourceVersion = "$($contentPackage.SourceVersion)"
+                                        StoredPkgVersion = "$($contentPackage.StoredPkgVersion)"
+                                        SourceSite = "$($contentPackage.SourceSite)"
                                     })
+                            }
+                            elseif ($statusRow.Count -eq 1 -and
+                                (Get-MemLabsContentDistributionStateKind -State ([int]$statusRow[0].State)) -eq 'Problem') {
+                                $results.OsdContentWaitProblems.Add("$($contentPackage.PackageID) on $requiredDp is State=$($statusRow[0].State)")
                             }
                             elseif ($statusRow.Count -eq 0 -and
                                 @(& $getOsdContentTargetRows "$($contentPackage.PackageID)" "$requiredDp").Count -gt 0) {
@@ -14761,6 +15080,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                         DP        = "$requiredDp"
                                         State     = -1
                                         StateName = 'TargetedNoStatus'
+                                        SourceVersion = "$($contentPackage.SourceVersion)"
+                                        StoredPkgVersion = "$($contentPackage.StoredPkgVersion)"
+                                        SourceSite = "$($contentPackage.SourceSite)"
                                     })
                             }
                         }
@@ -14768,7 +15090,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 }
                 return $pendingRows.ToArray()
             }
+            $osdPreparationWaitSeconds = 900
             $osdContentWaitSeconds = 900
+            $osdOverallWaitSeconds = 2700
             $osdContentWaitStarted = $false
             $osdContentWaitTimedOut = $false
             $osdContentWaitProbeFailed = $false
@@ -14776,6 +15100,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $osdContentWaitElapsedSeconds = 0
             $osdContentRearmed = @{}
             $osdRetryingSince = @{}
+            $osdTransferClocks = @{}
+            $osdProgressClocks = @{}
+            $osdClockDescriptions = @{}
             $pendingOsdContent = @()
             try { $pendingOsdContent = @(& $readPendingOsdContent) }
             catch {
@@ -14783,19 +15110,57 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 $osdContentWaitFailure = "pre-check failed: $($_.Exception.Message)"
                 $results.Details.Add("WARN: Could not perform the OSD content convergence pre-check: $($_.Exception.Message)")
             }
-            if ($pendingOsdContent.Count -gt 0) {
+            if ($pendingOsdContent.Count -gt 0 -and $results.OsdContentWaitProblems.Count -eq 0) {
                 $osdContentWaitStarted = $true
                 $pendingStart = Get-Date
-                $pendingDeadline = $pendingStart.AddSeconds($osdContentWaitSeconds)
                 $initialPendingSummary = @($pendingOsdContent | ForEach-Object {
-                        "$($_.PackageId) '$($_.Name)' on $($_.DP) is $($_.StateName) (State=$($_.State))"
+                        "$($_.PackageId) '$($_.Name)' on $($_.DP) is $($_.StateName) (State=$($_.State), SourceSite=$($_.SourceSite), SourceVersion=$($_.SourceVersion), StoredPkgVersion=$($_.StoredPkgVersion))"
                     }) -join '; '
-                $results.Details.Add("INFO: Waiting up to ${osdContentWaitSeconds}s for required OSD content to finish distributing: $initialPendingSummary")
-                while ($pendingOsdContent.Count -gt 0 -and (Get-Date) -lt $pendingDeadline) {
+                $results.Details.Add("INFO: Required OSD content has ${osdContentWaitSeconds}s without verified progress per package/DP/version and a ${osdOverallWaitSeconds}s overall hard cap. A first transfer start seeds its transfer window; unique staged-file confirmations, package-transfer completion and observed source-content readiness renew progress. Retries, pending states and log freshness do not: $initialPendingSummary")
+                while ($pendingOsdContent.Count -gt 0 -and $results.OsdContentWaitProblems.Count -eq 0) {
                     $now = Get-Date
                     $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
-                    $remainingSeconds = [math]::Max(0, [int]($pendingDeadline - $now).TotalSeconds)
-                    Write-Progress -Activity $osdProgressActivity -Status "Waiting for $($pendingOsdContent.Count) required OSD content target(s); ${elapsedSeconds}s elapsed, ${remainingSeconds}s remaining"
+                    try {
+                        $transferEvidence = Get-MemLabsOsdTransferEvidence -Details $results.Details
+                        $transferStarts = @($transferEvidence.Starts)
+                        $now = Get-Date
+                        $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
+                        $waitState = Get-MemLabsOsdContentWaitState -PendingTargets $pendingOsdContent `
+                            -TransferStarts $transferStarts -ProgressEvents @($transferEvidence.Progress) `
+                            -StartedAtUtc $pendingStart.ToUniversalTime() `
+                            -NowUtc $now.ToUniversalTime() -TransferClocks $osdTransferClocks `
+                            -ProgressClocks $osdProgressClocks -PreparationWaitSeconds $osdPreparationWaitSeconds `
+                            -TransferWaitSeconds $osdContentWaitSeconds -OverallWaitSeconds $osdOverallWaitSeconds
+                    }
+                    catch {
+                        $osdContentWaitProbeFailed = $true
+                        $osdContentWaitFailure = "clock recheck failed after ${elapsedSeconds}s: $($_.Exception.Message)"
+                        $results.Details.Add("WARN: OSD content convergence $osdContentWaitFailure")
+                        break
+                    }
+                    $results.OsdContentWaitTargets = @($waitState.Targets)
+                    foreach ($timing in $waitState.Targets) {
+                        if (-not $osdClockDescriptions.ContainsKey($timing.Key) -or $osdClockDescriptions[$timing.Key] -ne $timing.Description) {
+                            $results.Details.Add("DIAG: OSD timing $($timing.PackageId) on $($timing.DP), SourceSite=$($timing.SourceSite), SourceVersion=$($timing.SourceVersion), StoredPkgVersion=$($timing.StoredPkgVersion): $($timing.Description)")
+                            $osdClockDescriptions[$timing.Key] = $timing.Description
+                        }
+                    }
+                    if ($waitState.ExpiredTargets.Count -gt 0) {
+                        $osdContentWaitTimedOut = $true
+                        $results.Passed = $false
+                        $expiredSummary = @($waitState.ExpiredTargets | ForEach-Object {
+                                "$($_.PackageId) on $($_.DP): $($_.LimitKind); $($_.Description), no verified progress for $($_.NoProgressSeconds)s"
+                            }) -join '; '
+                        $results.Details.Add("FAIL: OSD content wait expired: $expiredSummary")
+                        break
+                    }
+                    $remainingSeconds = $waitState.RemainingSeconds
+                    $operation = @($waitState.Targets | Select-Object -First 3 | ForEach-Object {
+                            "$($_.PackageId)/$($_.DP): $($_.Stage), $($_.NoProgressSeconds)s without progress, $($_.RemainingSeconds)s remaining"
+                        }) -join '; '
+                    Write-Progress -Activity $osdProgressActivity `
+                        -Status "Waiting for $($pendingOsdContent.Count) required OSD content target(s); ${elapsedSeconds}s total elapsed" `
+                        -CurrentOperation $operation
                     $currentRetryKeys = @{}
                     foreach ($retrying in @($pendingOsdContent | Where-Object { $_.State -eq 2 })) {
                         $retryKey = "$($retrying.PackageId)|$($retrying.DP)".ToUpperInvariant()
@@ -14841,9 +15206,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 if (-not $osdContentWaitProbeFailed -and $pendingOsdContent.Count -eq 0) {
                     $results.Details.Add("RECOVERED: Required OSD content left its pending/retrying state after ${osdContentWaitElapsedSeconds}s.")
                 }
-                elseif (-not $osdContentWaitProbeFailed -and (Get-Date) -ge $pendingDeadline) {
-                    $osdContentWaitTimedOut = $true
-                }
+            }
+            if ($results.OsdContentWaitProblems.Count -gt 0) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Required OSD content entered a problem state; not extending the wait for other targets: $($results.OsdContentWaitProblems -join '; ')")
             }
 
             $getOsdContentFailureDiagnostic = {
@@ -14851,6 +15217,13 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
                 $parts = [System.Collections.Generic.List[string]]::new()
                 $parts.Add("package SourceVersion=$($Package.SourceVersion) StoredPkgVersion=$($Package.StoredPkgVersion) SourceSite=$($Package.SourceSite)")
+                $timing = @($results.OsdContentWaitTargets | Where-Object {
+                        $_.PackageId -eq "$($Package.PackageID)" -and $_.DP -ieq $RequiredDp -and
+                        "$($_.SourceVersion)" -eq "$($Package.SourceVersion)"
+                    } | Select-Object -First 1)
+                if ($timing.Count -eq 1) {
+                    $parts.Add("validation clock: $($timing[0].Description); observedUtc=$($timing[0].ObservedAtUtc.ToString('o')) targetElapsed=$($timing[0].ElapsedSeconds)s remaining=$($timing[0].RemainingSeconds)s expired=$($timing[0].Expired)")
+                }
                 try {
                     $targetRows = @(& $getOsdContentTargetRows "$($Package.PackageID)" "$RequiredDp")
                     if ($targetRows.Count -eq 0) {
@@ -14884,18 +15257,22 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 catch { $parts.Add("provider detail query failed: $($_.Exception.Message)") }
                 try {
                     $smsDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory'
-                    $distmgrLog = Join-Path $smsDir 'Logs\distmgr.log'
-                    $distmgrLines = @(Get-Content -LiteralPath $distmgrLog -Tail 5000 -ErrorAction Stop |
-                        Where-Object { $_ -match [regex]::Escape("$($Package.PackageID)") } |
-                        Select-Object -Last 8)
-                    if ($distmgrLines.Count -gt 0) {
-                        $parts.Add("distmgr tail: $(@($distmgrLines | ForEach-Object {
-                                    $match = [regex]::Match("$_", '<!\[LOG\[(.*?)\]LOG\]!>')
-                                    if ($match.Success) { $match.Groups[1].Value } else { "$_" }
-                                }) -join ' | ')")
+                    foreach ($logName in @('distmgr', 'PkgXferMgr', 'despool', 'sender')) {
+                        foreach ($extension in @('.log', '.lo_')) {
+                            $logPath = Join-Path $smsDir "Logs\$logName$extension"
+                            try {
+                                if (-not (Test-Path -LiteralPath $logPath -ErrorAction Stop)) { continue }
+                                $lines = @(Get-Content -LiteralPath $logPath -Tail 5000 -ErrorAction Stop |
+                                    Where-Object { $_ -match "\b$([regex]::Escape("$($Package.PackageID)"))\b" } |
+                                    Select-Object -Last 8)
+                                if ($lines.Count -gt 0) { $parts.Add("$logName$extension package tail: $($lines -join ' | ')") }
+                                else { $parts.Add("$logName$extension has no package-correlated records in its 5000-line tail") }
+                            }
+                            catch { $parts.Add("$logName$extension diagnostic failed: $($_.Exception.Message)") }
+                        }
                     }
                 }
-                catch { $parts.Add("distmgr diagnostic failed: $($_.Exception.Message)") }
+                catch { $parts.Add("site-log diagnostic failed: $($_.Exception.Message)") }
                 try {
                     $dpHost = ($RequiredDp -split '\.')[0]
                     $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 60000
@@ -14920,8 +15297,11 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             }
                             if ($dpLog) {
                                 $result.SmsDpProv = @(Get-Content -LiteralPath $dpLog -Tail 3000 -ErrorAction Stop |
-                                    Where-Object { $_ -match [regex]::Escape($PackageId) -or $_ -match 'error|failed|0x8' } |
+                                    Where-Object { $_ -match "\b$([regex]::Escape($PackageId))\b" } |
                                     Select-Object -Last 8)
+                                if ($result.SmsDpProv.Count -eq 0) {
+                                    $result.Errors += 'No package-correlated smsdpprov records in the 3000-line tail; unrelated startup errors are not evidence for this package.'
+                                }
                             }
                             else {
                                 $result.Errors += 'smsdpprov.log was not found on E:, D:, F:, or C:'
@@ -14974,6 +15354,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $osPkgProblems = @()
                     $osPkgProblemRows = [System.Collections.Generic.List[object]]::new()
                     foreach ($osPkg in $osPkgs) {
+                        $sourceSite = "$($osPkg.SourceSite)"
+                        if ($sourceSite -and -not $results.OsdContentSourceSiteCodes.Contains($sourceSite)) {
+                            $results.OsdContentSourceSiteCodes.Add($sourceSite)
+                        }
                         $rows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($osPkg.PackageID)'" -ErrorAction SilentlyContinue)
                         foreach ($wantDp in $expectedOsdDpNames) {
                             $wantShort = ($wantDp -split '\.')[0]
@@ -15037,6 +15421,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         $results.Passed = $false
                         $results.Details.Add("FAIL: $($pkgClass.Label) content cannot reach every required OSD DP: $($osPkgProblems -join '; '). PXE will boot into WinPE and the task sequence will then fail to find its content.")
                         foreach ($problemRow in $osPkgProblemRows) {
+                            Write-Progress -Activity $osdProgressActivity -Status "Collecting $($problemRow.Package.PackageID) failure evidence from $($problemRow.DP)"
                             $results.Details.Add("DIAG: $(& $getOsdContentFailureDiagnostic $problemRow.Package $problemRow.DP $problemRow.State)")
                         }
                     }
@@ -15892,16 +16277,19 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
         -AsJob -TimeoutSeconds 600 -PollProgress
 
     $osdFailureLines = @()
+    $osdSourceSiteCodes = @()
     if ($result -and $result.ScriptBlockOutput -is [hashtable]) {
         $osdFailureLines = @($result.ScriptBlockOutput.Details | Where-Object {
                 $_ -match '^FAIL:.*(?:boot image|OS image|OS upgrade|OSD|TFTP|PXE)'
             })
+        $osdSourceSiteCodes = @($result.ScriptBlockOutput.OsdContentSourceSiteCodes | Where-Object { $_ } | Select-Object -Unique)
     }
     if ($prePopulate -and $hasOsdClient -and
         (-not $result -or $result.ScriptBlockFailed -or $osdFailureLines.Count -gt 0)) {
         Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: OSD validation failed -- collecting sending-site and DP evidence, including pending/retrying boot-image failures"
         Save-Phase11OsdContentFailureLogs -VMName $VMName -CurrentItem $CurrentItem `
-            -DeployConfig $DeployConfig -DistributionPointNames @($expectedOsdDpCsv -split '\|' | Where-Object { $_ })
+            -DeployConfig $DeployConfig -DistributionPointNames @($expectedOsdDpCsv -split '\|' | Where-Object { $_ }) `
+            -SourceSiteCodes $osdSourceSiteCodes
     }
 
     # Failed/unreachable native health needs both sides of the WSUS exchange,
