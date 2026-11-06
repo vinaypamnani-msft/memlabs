@@ -161,10 +161,47 @@ function Invoke-ResumeProbeFixture {
         [string] $PendingName = 'NODE1',
         [object[]] $PendingFileRenames = @(),
         [bool] $CcmPending = $false,
-        [bool] $CcmSurfaceAbsent = $false
+        [bool] $CcmSurfaceAbsent = $false,
+        [AllowEmptyCollection()][string[]] $CcmServiceStates = @('Running'),
+        [int] $CcmFailuresBeforeSuccess = 0,
+        [string] $CcmErrorCode = 'AccessDenied',
+        [int] $CcmReturnValue = 0,
+        [bool] $CcmMalformed = $false,
+        [hashtable] $Observations = @{}
     )
 
     & {
+        $fixtureState = @{
+            ServiceReads = 0
+            CimCalls = 0
+            ElapsedSeconds = 0
+            LastServiceState = $null
+        }
+        $Observations.State = $fixtureState
+        function Get-Date {
+            ([datetime]'2026-11-05T00:00:00Z').AddSeconds($fixtureState.ElapsedSeconds)
+        }
+        function Start-Sleep {
+            param([int] $Seconds)
+            $fixtureState.ElapsedSeconds += $Seconds
+        }
+        function Get-Service {
+            [CmdletBinding()]
+            param([string] $Name)
+            if ($Name -ne 'CcmExec') { throw "Unexpected service lookup: $Name" }
+            $fixtureState.ServiceReads++
+            if ($CcmServiceStates.Count -eq 0) {
+                Write-Error -Message 'CcmExec is not installed.' -ErrorId NoServiceFoundForGivenName `
+                    -Category ObjectNotFound
+                return
+            }
+            $index = [Math]::Min($fixtureState.ServiceReads - 1, $CcmServiceStates.Count - 1)
+            $fixtureState.LastServiceState = $CcmServiceStates[$index]
+            if ($fixtureState.LastServiceState -eq 'LookupDenied') {
+                throw [UnauthorizedAccessException]::new('localized service lookup failure')
+            }
+            [pscustomobject]@{ Status = $fixtureState.LastServiceState }
+        }
         function Test-Path {
             [CmdletBinding()]
             param([string] $LiteralPath)
@@ -197,13 +234,25 @@ function Invoke-ResumeProbeFixture {
                 [string] $MethodName,
                 [int] $OperationTimeoutSec
             )
+            $fixtureState.CimCalls++
+            if ($fixtureState.LastServiceState -and $fixtureState.LastServiceState -ne 'Running') {
+                throw 'ClientSDK was queried before CcmExec was running.'
+            }
             if ($CcmSurfaceAbsent) {
                 $exception = New-Object System.Exception 'localized namespace absence'
                 $exception | Add-Member -MemberType NoteProperty `
                     -Name NativeErrorCode -Value InvalidNamespace
                 throw $exception
             }
+            if ($fixtureState.CimCalls -le $CcmFailuresBeforeSuccess) {
+                $exception = New-Object System.Exception 'localized ClientSDK failure'
+                $exception | Add-Member -MemberType NoteProperty `
+                    -Name NativeErrorCode -Value $CcmErrorCode
+                throw $exception
+            }
+            if ($CcmMalformed) { return [pscustomobject]@{ ReturnValue = 0 } }
             return [pscustomobject]@{
+                ReturnValue = $CcmReturnValue
                 RebootPending = $CcmPending
                 IsHardRebootPending = $false
             }
@@ -246,11 +295,72 @@ $ccmResult = Invoke-ResumeProbeFixture -CcmPending $true
 if ('ConfigMgrClient\RebootPending' -notin @($ccmResult.Reasons)) {
     throw 'ConfigMgr client reboot marker was not classified as actionable.'
 }
-$noCcmResult = Invoke-ResumeProbeFixture -CcmSurfaceAbsent $true
+$noCcmObservations = @{}
+$noCcmResult = Invoke-ResumeProbeFixture -CcmSurfaceAbsent $true -CcmServiceStates @() `
+    -Observations $noCcmObservations
 $noCcmReasons = @($noCcmResult.Reasons |
     Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
 if ($noCcmReasons.Count -ne 0) {
     throw 'Absent ConfigMgr client namespace incorrectly requested a reboot.'
+}
+if ($noCcmObservations.State.CimCalls -ne 0 -or $noCcmResult.CcmClientState -ne 'NotInstalled') {
+    throw 'A VM without CcmExec still queried the optional ClientSDK.'
+}
+
+$startupObservations = @{}
+$startupResult = Invoke-ResumeProbeFixture -CcmServiceStates @('Stopped', 'StartPending', 'Running') `
+    -Observations $startupObservations
+if ($startupObservations.State.CimCalls -ne 1 -or
+    $startupObservations.State.ElapsedSeconds -ne 10 -or
+    $startupResult.CcmClientState -ne 'Ready') {
+    throw 'The reboot probe did not wait read-only for CcmExec startup.'
+}
+foreach ($startupError in @('AccessDenied', 'InvalidNamespace', 'InvalidClass')) {
+    $retryObservations = @{}
+    $retryResult = Invoke-ResumeProbeFixture -CcmFailuresBeforeSuccess 2 -CcmErrorCode $startupError `
+        -CcmPending $true -Observations $retryObservations
+    if ($retryObservations.State.CimCalls -ne 3 -or
+        $retryObservations.State.ElapsedSeconds -ne 10 -or
+        'ConfigMgrClient\RebootPending' -notin @($retryResult.Reasons)) {
+        throw "The reboot probe did not recover from startup-time $startupError."
+    }
+}
+foreach ($failureScenario in @('AccessDenied', 'InvalidNamespace', 'InvalidClass', 'Stopped')) {
+    $failureObservations = @{}
+    $failureMessage = $null
+    $failureArguments = @{
+        CcmFailuresBeforeSuccess = [int]::MaxValue
+        CcmErrorCode = $failureScenario
+        Observations = $failureObservations
+    }
+    if ($failureScenario -eq 'Stopped') { $failureArguments.CcmServiceStates = @('Stopped') }
+    try { $null = Invoke-ResumeProbeFixture @failureArguments }
+    catch { $failureMessage = $_.Exception.Message }
+    if ($failureMessage -notmatch 'ConfigMgr client.*60 seconds' -or
+        $failureMessage -notmatch $failureScenario -or
+        $failureObservations.State.ElapsedSeconds -ne 60 -or
+        $failureObservations.State.CimCalls -gt 13) {
+        throw "Persistent $failureScenario did not fail explicitly within the client readiness budget: $failureMessage"
+    }
+}
+foreach ($invalidScenario in @('LookupDenied', 'InvalidParameter', 'ReturnValue', 'Malformed')) {
+    $invalidObservations = @{}
+    $invalidMessage = $null
+    $invalidArguments = @{ Observations = $invalidObservations }
+    switch ($invalidScenario) {
+        'LookupDenied' { $invalidArguments.CcmServiceStates = @('LookupDenied') }
+        'InvalidParameter' {
+            $invalidArguments.CcmFailuresBeforeSuccess = [int]::MaxValue
+            $invalidArguments.CcmErrorCode = 'InvalidParameter'
+        }
+        'ReturnValue' { $invalidArguments.CcmReturnValue = 5 }
+        'Malformed' { $invalidArguments.CcmMalformed = $true }
+    }
+    try { $null = Invoke-ResumeProbeFixture @invalidArguments }
+    catch { $invalidMessage = $_.Exception.Message }
+    if (-not $invalidMessage -or $invalidObservations.State.ElapsedSeconds -ne 0) {
+        throw "$invalidScenario was hidden as healthy client reboot state or retried as startup."
+    }
 }
 
 if ($mixedRunner -notmatch 'Invoke-NewLabFixture') {

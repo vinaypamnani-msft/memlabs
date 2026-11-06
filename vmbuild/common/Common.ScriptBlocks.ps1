@@ -1125,30 +1125,87 @@ $global:VM_Create = {
                         $reasons.Add("PendingFileRenameOperations(replace/move)=$replacementCount")
                     }
 
+                    $ccmClientState = 'NotInstalled'
+                    $ccmProbeAttempts = 0
+                    $ccmWaitSeconds = 0
+                    $ccmService = $null
                     try {
-                        $ccmReboot = Invoke-CimMethod -Namespace 'root\ccm\ClientSDK' `
-                            -ClassName CCM_ClientUtilities -MethodName DetermineIfRebootPending `
-                            -OperationTimeoutSec 5 -ErrorAction Stop
-                        if ($ccmReboot.RebootPending -or $ccmReboot.IsHardRebootPending) {
-                            $reasons.Add('ConfigMgrClient\RebootPending')
-                        }
+                        $ccmService = Get-Service -Name 'CcmExec' -ErrorAction Stop
                     }
                     catch {
-                        $nativeCimError = "$($_.Exception.NativeErrorCode)"
-                        $ccmSurfaceAbsent = $nativeCimError -in @('InvalidNamespace', 'InvalidClass') -or
-                            $_.Exception.Message -match 'Invalid namespace|Invalid class|not found'
-                        if (-not $ccmSurfaceAbsent) {
-                            throw
+                        if ($_.FullyQualifiedErrorId -notlike 'NoServiceFoundForGivenName*') {
+                            throw "ConfigMgr client service lookup failed: $($_.Exception.Message)"
+                        }
+                    }
+                    if ($ccmService) {
+                        $ccmProbeStart = Get-Date
+                        $ccmProbeDeadline = $ccmProbeStart.AddSeconds(60)
+                        $ccmClientState = 'Starting'
+                        $lastCcmFailure = "CcmExec service is '$($ccmService.Status)'"
+                        while ((Get-Date) -lt $ccmProbeDeadline) {
+                            if ($ccmService.Status -eq 'Running') {
+                                $ccmProbeAttempts++
+                                try {
+                                    $ccmReboot = Invoke-CimMethod -Namespace 'root\ccm\ClientSDK' `
+                                        -ClassName CCM_ClientUtilities -MethodName DetermineIfRebootPending `
+                                        -OperationTimeoutSec 5 -ErrorAction Stop
+                                    if ($null -eq $ccmReboot -or
+                                        -not $ccmReboot.PSObject.Properties['ReturnValue'] -or
+                                        $null -eq $ccmReboot.ReturnValue -or
+                                        $ccmReboot.RebootPending -isnot [bool] -or
+                                        $ccmReboot.IsHardRebootPending -isnot [bool]) {
+                                        throw 'ClientSDK DetermineIfRebootPending returned an incomplete reboot status.'
+                                    }
+                                    if ($ccmReboot.ReturnValue -ne 0) {
+                                        throw "ClientSDK DetermineIfRebootPending returned ReturnValue=$($ccmReboot.ReturnValue)."
+                                    }
+                                    if ($ccmReboot.RebootPending -or $ccmReboot.IsHardRebootPending) {
+                                        $reasons.Add('ConfigMgrClient\RebootPending')
+                                    }
+                                    $ccmClientState = 'Ready'
+                                    break
+                                }
+                                catch {
+                                    $nativeCimError = if ($_.Exception.PSObject.Properties['NativeErrorCode']) {
+                                        "$($_.Exception.NativeErrorCode)"
+                                    }
+                                    else { '' }
+                                    $cimHresult = '{0:X8}' -f $_.Exception.HResult
+                                    $lastCcmFailure = "native=$nativeCimError hresult=$cimHresult errorId=$($_.FullyQualifiedErrorId): $($_.Exception.Message)"
+                                    $ccmInitializing = $nativeCimError -in @('AccessDenied', 'InvalidNamespace', 'InvalidClass') -or
+                                        $cimHresult -in @('80070005', '80041003', '8004100E', '80041010') -or
+                                        $_.FullyQualifiedErrorId -match '80070005|80041003|8004100E|80041010'
+                                    if (-not $ccmInitializing) {
+                                        throw "ConfigMgr client reboot probe failed (CcmExec=$($ccmService.Status); $lastCcmFailure)"
+                                    }
+                                }
+                            }
+                            else {
+                                $lastCcmFailure = "CcmExec service is '$($ccmService.Status)'"
+                            }
+                            $remainingSeconds = [int][Math]::Ceiling(($ccmProbeDeadline - (Get-Date)).TotalSeconds)
+                            if ($remainingSeconds -le 0) { break }
+                            Start-Sleep -Seconds ([Math]::Min(5, $remainingSeconds))
+                            $ccmService = Get-Service -Name 'CcmExec' -ErrorAction Stop
+                        }
+                        $ccmWaitSeconds = [Math]::Round(((Get-Date) - $ccmProbeStart).TotalSeconds, 1)
+                        if ($ccmClientState -ne 'Ready') {
+                            throw "ConfigMgr client reboot status did not become readable within 60 seconds (CcmExec=$($ccmService.Status); attempts=$ccmProbeAttempts; lastError=$lastCcmFailure)"
                         }
                     }
 
-                    [pscustomobject]@{ Reasons = $reasons.ToArray() }
+                    [pscustomobject]@{
+                        Reasons = $reasons.ToArray()
+                        CcmClientState = $ccmClientState
+                        CcmProbeAttempts = $ccmProbeAttempts
+                        CcmWaitSeconds = $ccmWaitSeconds
+                    }
                 }
 
                 $resumeRebootProbe = $null
                 foreach ($probeAttempt in 1..2) {
                     $resumeRebootProbe = Invoke-VmCommand -VmName $currentItem.vmName `
-                        -VmDomainName $domainName -AsJob -TimeoutSeconds 45 `
+                        -VmDomainName $domainName -AsJob -TimeoutSeconds 90 `
                         -FailOnRemoteError -SuppressLog `
                         -DisplayName "Phase 0 resume reboot check (attempt $probeAttempt/2)" `
                         -ScriptBlock $resumeRebootProbeBlock
@@ -1172,6 +1229,7 @@ $global:VM_Create = {
                     return
                 }
 
+                Write-Log "[Phase 0]: $($currentItem.vmName): ConfigMgr client reboot check state=$($resumeRebootProbe.ScriptBlockOutput.CcmClientState) attempts=$($resumeRebootProbe.ScriptBlockOutput.CcmProbeAttempts) elapsed=$($resumeRebootProbe.ScriptBlockOutput.CcmWaitSeconds)s." -LogOnly
                 $resumeRebootReasons = @($resumeRebootProbe.ScriptBlockOutput.Reasons |
                     Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
                 if ($resumeRebootReasons.Count -eq 0) {

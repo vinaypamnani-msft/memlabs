@@ -617,6 +617,16 @@ success. Resuming Phase 0 cannot recreate a VM after a failed inventory lookup.
 Ordinary Windows VMs retain their guest-readiness checks. Initial OSD VM creation
 remains in Phase 1.
 
+Resume reboot checks query the ConfigMgr ClientSDK only when the `CcmExec`
+service is installed. Installed clients receive a read-only, 60-second readiness
+window per probe: service startup and SDK access-denied/missing-namespace/class
+responses retry every five seconds. Each of the two remote probes has a
+90-second job timeout. Persistent unreadable client state still fails preparation;
+it never becomes "no reboot needed." Errors identify the service state and CIM
+failure, and successful checks log client availability, call count, and elapsed
+time. Nonzero SDK return codes and incomplete results fail explicitly. The probe
+does not start services or change permissions.
+
 Phases 8 and 9 also check their DSC targets before snapshots or CM media
 preparation. Missing-node preflight failures stop dispatch. Job-wait exceptions
 and missing or malformed phase tallies fail the phase instead of advancing to
