@@ -104,7 +104,8 @@ try {
     function Invoke-MaintenanceEngineFixture {
         param([switch]$Batch, [switch]$AlwaysFail, [switch]$MissingMarker, [switch]$Console,
             [switch]$RecoveryFailure, [switch]$UnconfirmedShutdown, [switch]$LateRecovery,
-            [switch]$DelayedConsole, [switch]$SuccessfulSibling, [string]$PreparationMode = '')
+            [switch]$DelayedConsole, [switch]$SuccessfulSibling, [string]$PreparationMode = '',
+            [string]$StartupFailure = '')
         & {
             $script:Engine = @{
                 Count = 0; Stamps = 0; AlwaysFail = $AlwaysFail.IsPresent
@@ -114,6 +115,7 @@ try {
                 LateRecovery = $LateRecovery.IsPresent; PrefixCalls = 0
                 DelayedConsole = $DelayedConsole.IsPresent
                 PreparationMode = $PreparationMode; PreparationCalls = 0; CopyCalls = 0
+                StartupFailure = $StartupFailure
                 Directory = Join-Path $testRoot ([guid]::NewGuid().ToString('N'))
                 Calls = [System.Collections.Generic.List[object]]::new()
                 Events = [System.Collections.Generic.List[string]]::new()
@@ -127,6 +129,7 @@ try {
             function Write-Progress2 { param([switch]$Log, $PercentComplete, $Activity, $Status, [switch]$Force) }
             function Get-VMNote {
                 param($VMName)
+                if ($VMName -eq 'LAB-DC' -and $script:Engine.StartupFailure -eq 'DependencyMetadata') { return $null }
                 $applied = @{}
                 if ($script:Engine.PreparationMode -eq 'Applied') { $applied['Fix-ODBC18']='18.6.2.1' }
                 [pscustomobject]@{ domain = 'lab.test'; appliedFixes = [pscustomobject]$applied }
@@ -134,7 +137,14 @@ try {
             function ConvertTo-MemLabsVersion { param($Version) [version]$Version }
             function Start-VMIfNotRunning {
                 param($VMName, $VMDomain, [switch]$WaitForConnect, [switch]$Quiet)
-                [pscustomobject]@{ StartedVM = $false; StartFailed = $false }
+                $script:Engine.Events.Add("start:$VMName")
+                $failed = ($VMName -eq 'LAB-PRI' -and $script:Engine.StartupFailure -like 'Target*') -or
+                    ($VMName -eq 'LAB-DC' -and $script:Engine.StartupFailure -like 'Dependency*')
+                [pscustomobject]@{
+                    StartedVM = $failed -and $script:Engine.StartupFailure -like '*Connect'
+                    StartFailed = $failed -and $script:Engine.StartupFailure -like '*Start'
+                    ConnectFailed = $failed
+                }
             }
             function Get-VmSession {
                 param($VmName, $VmDomainName, $VmDomainAccount, [switch]$ShowVMSessionError)
@@ -226,6 +236,7 @@ try {
                     [pscustomobject]@{ Success = $succeeded; Message = 'engine fixture' }
                 }
             }
+            if ($StartupFailure -like 'Dependency*') { $definition.DependentVMs = @('LAB-DC') }
             if ($PreparationMode) {
                 $definition.PrepareScriptBlock = {
                     param($VMName, $VMDomain, $VMFix)
@@ -258,6 +269,15 @@ try {
         }
     }
     foreach ($batch in @($false, $true)) {
+        foreach ($failure in @('TargetStart', 'TargetConnect')) {
+            $probe = Invoke-MaintenanceEngineFixture -Batch:$batch -PreparationMode 'Ready' -StartupFailure $failure
+            Assert-Maintenance (-not $probe.Result.Success -and $probe.State.PreparationCalls -eq 0 -and
+                $probe.State.CopyCalls -eq 0 -and $probe.State.Count -eq 0 -and $probe.State.Stamps -eq 0 -and
+                $probe.State.Calls.Count -eq 0) 'A target startup/readiness failure ran preparation, injection, execution, or stamping.'
+            if ($failure -eq 'TargetConnect') {
+                Assert-Maintenance ($probe.Result.VMsToStop -contains 'LAB-PRI') 'A readiness failure lost the started target cleanup.'
+            }
+        }
         foreach ($fail in @($false, $true)) {
             $probe = Invoke-MaintenanceEngineFixture -Batch:$batch -AlwaysFail:$fail
             Assert-Maintenance ($probe.State.Count -eq 2 -and $probe.Result.Success -eq (-not $fail)) 'The real maintenance engine exceeded its attempt budget or lost the explicit verdict.'
@@ -268,6 +288,15 @@ try {
             Assert-Maintenance (@($probe.State.Calls | Where-Object {
                         -not $_.AsJob -or $_.Timeout -ne 1800 -or -not $_.FailOnRemoteError -or $_.Account -ne 'setupadmin'
                     }).Count -eq 0) 'A maintenance execution lost its deadline or requested account.'
+        }
+    }
+    foreach ($failure in @('DependencyStart', 'DependencyConnect', 'DependencyMetadata')) {
+        $probe = Invoke-MaintenanceEngineFixture -PreparationMode 'Ready' -StartupFailure $failure
+        Assert-Maintenance (-not $probe.Result.Success -and $probe.State.PreparationCalls -eq 0 -and
+            $probe.State.Count -eq 0 -and $probe.State.Stamps -eq 0 -and
+            -not $probe.State.Events.Contains('start:LAB-PRI')) 'A dependency readiness failure reached the target fix.'
+        if ($failure -eq 'DependencyConnect') {
+            Assert-Maintenance ($probe.Result.VMsToStop -contains 'LAB-DC') 'A readiness failure lost the started dependency cleanup.'
         }
     }
     foreach ($batch in @($false, $true)) {

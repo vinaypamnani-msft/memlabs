@@ -1542,6 +1542,30 @@ it as successfully maintained. No VM or service is restarted by this retry path.
 
 Validate this path with `vmbuild\tools\Test-VMMaintenanceNoteDiagnostics.ps1`.
 
+### Maintenance startup readiness
+
+For pending fixes, maintenance starts required dependency VMs and the target
+before inspecting `C:\Staging` or copying DSC content. Already-applied fixes do
+not start or contact the guest. Newly started VMs have a ten-minute readiness
+wait, allowing the existing PowerShell Direct recovery gate to run: three
+consecutive broken-channel probes and at least three elapsed minutes with a
+healthy heartbeat. The previous two-minute wait expired before that gate.
+The existing recovery/reset limits are unchanged; authentication errors do not
+count as broken-channel evidence.
+
+Startup/readiness failures stop both batched and individual fixes before host
+preparation, injection, execution, or applied-version stamping. A failed staging
+inspection or DSC copy also stops maintenance rather than surfacing later as an
+Edge preparation failure. VMs started for maintenance retain the existing shutdown
+policy on success, failure, and exceptions: non-DC VMs are shut down unless
+`SkipVMShutdown` is set; already-running VMs are not shut down.
+
+Validate without changing lab VMs using
+`vmbuild\tools\Test-MaintenanceStartup.ps1` and
+`vmbuild\tools\Test-MaintenanceFixRobustness.ps1` under PowerShell 7 and
+Windows PowerShell 5.1. The startup regression executes the shipped readiness
+wait with a simulated clock and mocked Hyper-V operations.
+
 ### ODBC Driver 18 maintenance
 
 ODBC Driver 17 is preserved and does not satisfy Driver 18 compliance. Both

@@ -708,73 +708,105 @@ function Start-VMFixes {
         return $true
     }
 
-    $HashArguments = @{
-        VmName       = $vmName
-        VMDomainName = $vmDomain
-        DisplayName  = "Testing for Memlabs files"
-        ScriptBlock  = { Test-Path "C:\Staging" }
-    }
-
-    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
-    if ($result.ScriptBlockOutput -eq $false) {
-        Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success
-        return $true
-    }
-
-    # Copy DSC content into the VM so fix bodies and helper scripts are available.
-    # Output is intentionally discarded; failures surface inside Copy-ItemSafe.
-    $null = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
-
-    # Determine if we can use the batched fast-path (no fixes have DependentVMs)
     $sortedFixes = $VMFixes | Sort-Object { ConvertTo-MemLabsVersion $_.FixVersion }
-    $hasDependentVMs = $sortedFixes | Where-Object { $_.DependentVMs -and $_.DependentVMs.Count -gt 0 -and $_.AppliesToThisVM }
+    $pendingFixes = @($sortedFixes | Where-Object {
+        $_.AppliesToThisVM -and -not (Test-VMFixApplied -VMNote $vmNote -FixName $_.FixName -FixVersion $_.FixVersion)
+    })
 
-    if (-not $hasDependentVMs) {
-        # Fast path: batch all fixes into a single remote call per session type
-        $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -FreshDeployOnly:$FreshDeployOnly
-        $success = $batchResult.Success
-        $toStop = $batchResult.VMsToStop
-        $fixesAppliedCount = $batchResult.AppliedCount
-        $fixesApplicableCount = $batchResult.ApplicableCount
+    try {
+        if ($pendingFixes.Count -gt 0) {
+            # Dependencies must be ready before target startup can authenticate to the domain.
+            $dependentVMs = @($pendingFixes | ForEach-Object { $_.DependentVMs } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+            foreach ($vm in $dependentVMs) {
+                $note = Get-VMNote -VMName $vm
+                if (-not $note -or [string]::IsNullOrWhiteSpace($note.domain)) {
+                    Write-Log "$VMName`: Dependent VM '$vm' has no resolvable domain; no fixes will be applied." -Failure
+                    return $false
+                }
+                $status = Start-VMIfNotRunning -VMName $vm -VMDomain $note.domain -WaitForConnect -Quiet
+                if ($status.StartedVM) { $toStop += $vm }
+                if ($status.StartFailed -or $status.ConnectFailed) {
+                    Write-Log "$VMName`: Dependent VM '$vm' startup/readiness failed; no fixes will be applied." -Failure
+                    return $false
+                }
+            }
+
+            $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
+            if ($status.StartedVM) { $toStop += $VMName }
+            if ($status.StartFailed -or $status.ConnectFailed) {
+                Write-Log "$VMName`: VM startup/readiness failed; no maintenance preflight or fixes will run." -Failure
+                return $false
+            }
+
+            $HashArguments = @{
+                VmName       = $vmName
+                VMDomainName = $vmDomain
+                DisplayName  = "Testing for Memlabs files"
+                ScriptBlock  = { Test-Path "C:\Staging" }
+            }
+            $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
+            if (-not $result -or $result.ScriptBlockFailed) {
+                $reason = if ($result) { Protect-VMFixDiagnosticText (@($result.ErrorDetails) -join '; ') } else { 'No result was returned.' }
+                Write-Log "$VMName`: Maintenance staging inspection failed: $reason. No fixes will be applied." -Failure
+                return $false
+            }
+            if ($result.ScriptBlockOutput -eq $false) {
+                Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success
+                return $true
+            }
+
+            $copied = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+            if ($copied -isnot [bool] -or -not $copied) {
+                Write-Log "$VMName`: Maintenance DSC staging failed; no fixes will be applied." -Failure
+                return $false
+            }
+        }
+
+        # Determine if we can use the batched fast-path (no fixes have DependentVMs)
+        $hasDependentVMs = $sortedFixes | Where-Object { $_.DependentVMs -and $_.DependentVMs.Count -gt 0 -and $_.AppliesToThisVM }
+        if (-not $hasDependentVMs) {
+            $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -FreshDeployOnly:$FreshDeployOnly
+            $success = $batchResult.Success
+            $toStop += $batchResult.VMsToStop
+            $fixesAppliedCount = $batchResult.AppliedCount
+            $fixesApplicableCount = $batchResult.ApplicableCount
+        }
+        else {
+            $fixesAppliedCount = 0
+            $fixesApplicableCount = 0
+            foreach ($vmFix in $sortedFixes) {
+                if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
+                $status = Start-VMFix -vmName $VMName -vmFix $vmFix -FreshDeployOnly:$FreshDeployOnly
+                $toStop += $status.VMsToStop
+                $success = $status.Success
+                if ($status.Applied) { $fixesAppliedCount++ }
+                if (-not $success) { break }
+            }
+        }
+
+        # If deploying a new VM and fixes were applicable but none actually ran
+        # their script block, something is wrong — do not stamp the version.
+        # (If zero were applicable, e.g. OSDClient/AADClient, that's expected.)
+        if ($FreshDeployOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
+            Write-Log "$VMName`: WARNING - $fixesApplicableCount maintenance fixes were applicable but none were applied. Version will NOT be stamped." -Warning
+            $success = $false
+        }
+
+        return $success
     }
-    else {
-        # Slow path: sequential per-fix execution (needed when fixes have dependent VMs)
-        $fixesAppliedCount = 0
-        $fixesApplicableCount = 0
-        foreach ($vmFix in $sortedFixes) {
-            if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
-            $status = Start-VMFix -vmName $VMName -vmFix $vmFix -FreshDeployOnly:$FreshDeployOnly
-            $toStop += $status.VMsToStop
-            $success = $status.Success
-            if ($status.Applied) { $fixesAppliedCount++ }
-            if (-not $success) {
-                break
+    finally {
+        if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
+            foreach ($vm in $toStop | Select-Object -Unique) {
+                if ([string]::IsNullOrWhiteSpace($vm)) { continue }
+                $vmNote = Get-VMNote -VMName $vm
+                if ($vmNote.role -ne "DC") {
+                    Write-Progress2 -Activity $global:MaintenanceActivity -Status "Shutting down VM "
+                    $null = Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
+                }
             }
         }
     }
-
-    # If deploying a new VM and fixes were applicable but none actually ran
-    # their script block, something is wrong — do not stamp the version.
-    # (If zero were applicable, e.g. OSDClient/AADClient, that's expected.)
-    if ($FreshDeployOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
-        Write-Log "$VMName`: WARNING - $fixesApplicableCount maintenance fixes were applicable but none were applied. Version will NOT be stamped." -Warning
-        $success = $false
-    }
-
-    if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
-        foreach ($vm in $toStop) {
-            if ([string]::IsNullOrWhiteSpace($vm)) {
-                continue
-            }
-            $vmNote = Get-VMNote -VMName $vm
-            if ($vmNote.role -ne "DC") {
-                Write-Progress2 -Activity $global:MaintenanceActivity -Status  "Shutting down VM "
-                Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
-            }
-        }
-    }
-
-    return $success
 }
 
 function Start-VMFixesBatched {
@@ -843,7 +875,10 @@ function Start-VMFixesBatched {
     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting $VMName for batched maintenance." -force
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $VMDomain -WaitForConnect -Quiet
     if ($status.StartedVM) { $return.VMsToStop += $VMName }
-    if ($status.StartFailed) { return $return }
+    if ($status.StartFailed -or $status.ConnectFailed) {
+        Write-Log "$VMName`: VM startup/readiness failed; batched fixes will not run." -Failure
+        return $return
+    }
 
     foreach ($fix in $applicableFixes) {
         $preparation = $fix.PSObject.Properties['PrepareScriptBlock']
@@ -1309,15 +1344,16 @@ function Start-VMFix {
             if ([string]::IsNullOrWhiteSpace($vm)) { continue }
             $note = Get-VMNote -VMName $vm
             if (-not $note -or [string]::IsNullOrWhiteSpace($note.domain)) {
-                Write-Log "$VMName`: Dependent VM '$vm' has no resolvable domain (note=$($null -ne $note)); skipping start." -LogOnly -Warning
-                continue
+                Write-Log "$VMName`: Dependent VM '$vm' has no resolvable domain (note=$($null -ne $note)); fix '$fixName' will not run." -Failure
+                return $return
             }
             $status = Start-VMIfNotRunning -VMName $vm -VMDomain $note.domain -WaitForConnect -Quiet
             if ($status.StartedVM) {
                 $return.VMsToStop += $vm
             }
 
-            if ($status.StartFailed) {
+            if ($status.StartFailed -or $status.ConnectFailed) {
+                Write-Log "$VMName`: Dependent VM '$vm' startup/readiness failed; fix '$fixName' will not run." -Failure
                 return $return
             }
         }
@@ -1329,7 +1365,8 @@ function Start-VMFix {
         $return.VMsToStop += $VMName
     }
 
-    if ($status.StartFailed) {
+    if ($status.StartFailed -or $status.ConnectFailed) {
+        Write-Log "$VMName`: VM startup/readiness failed; fix '$fixName' will not run." -Failure
         return $return
     }
     
@@ -1761,9 +1798,11 @@ function Start-VMIfNotRunning {
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
                 Write-Log -verbose "Waiting to connect to $vmName"
-                $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet
+                # The existing PSDirect recovery gate needs three failures and at least three minutes.
+                $connectTimeoutMinutes = 10
+                $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes $connectTimeoutMinutes -Quiet
                 if (-not $connected) {
-                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Could not connect to the VM after waiting for 2 minutes."
+                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Could not connect to the VM within the $connectTimeoutMinutes-minute maintenance readiness wait."
                     $return.ConnectFailed = $true
                 }
             }
