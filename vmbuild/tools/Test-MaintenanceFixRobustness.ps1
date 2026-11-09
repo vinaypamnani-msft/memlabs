@@ -101,6 +101,153 @@ try {
     Assert-Maintenance ($collectorText -notmatch 'Win32_Product|InstallProduct|Stop-Service|Stop-Process') 'The evidence collector can mutate guest installer/service state.'
     Remove-Item Function:\Invoke-VmCommand, Function:\Write-Log
 
+    function Invoke-MaintenanceReadFixture {
+        param([string]$Kind, [AllowNull()]$Response, [switch]$Throw,
+            [switch]$CollectDiagnostics, [switch]$EvidenceThrows)
+        & {
+            $ErrorActionPreference = 'Continue'
+            $script:ReadFixture = @{
+                Response = $Response; Throw = $Throw.IsPresent; EvidenceThrows = $EvidenceThrows.IsPresent
+                Calls = [Collections.Generic.List[object]]::new()
+                Logs = [Collections.Generic.List[object]]::new()
+                Evidence = [Collections.Generic.List[object]]::new()
+            }
+            function Invoke-VmCommand {
+                param($VmName, $VmDomainName, $VmDomainAccount, $ScriptBlock, $ArgumentList, $DisplayName,
+                    [switch]$AsJob, $TimeoutSeconds, $SessionMaxRetries, [switch]$SuppressLog, [switch]$FailOnRemoteError)
+                $script:ReadFixture.Calls.Add([pscustomobject]@{
+                    VMName = $VmName; Domain = $VmDomainName; Account = $VmDomainAccount
+                    AsJob = $AsJob.IsPresent; Timeout = $TimeoutSeconds; Retries = $SessionMaxRetries
+                    SuppressLog = $SuppressLog.IsPresent; FailOnRemoteError = $FailOnRemoteError.IsPresent
+                    Arguments = @($ArgumentList); ScriptBlock = $ScriptBlock
+                })
+                if ($script:ReadFixture.Throw) { throw "Fixture read exception -Token $secret" }
+                return $script:ReadFixture.Response
+            }
+            function Write-Log {
+                param([string]$Message, [switch]$Warning, [switch]$LogOnly)
+                $script:ReadFixture.Logs.Add([pscustomobject]@{
+                    Message = $Message; Warning = $Warning.IsPresent; LogOnly = $LogOnly.IsPresent
+                })
+            }
+            function Save-VMFixFailureEvidence {
+                param($VMName, $VMDomain, $FixName, $VMDomainAccount, $Stage)
+                $script:ReadFixture.Evidence.Add([pscustomobject]@{
+                    VMName = $VMName; Domain = $VMDomain; FixName = $FixName; Account = $VMDomainAccount; Stage = $Stage
+                })
+                if ($script:ReadFixture.EvidenceThrows) { throw "Fixture evidence exception -Token $secret" }
+            }
+            if ($Kind -eq 'Marker') {
+                $value = Get-VMFixResultMarker -VMName 'LAB-PRI' -VMDomain 'lab.test' -FixName 'Fix-ODBC18' -VMDomainAccount 'setupadmin'
+            }
+            else {
+                $value = Get-VMFixTranscript -VMName 'LAB-PRI' -VMDomain 'lab.test' -FixName 'Fix-ODBC18' `
+                    -VMDomainAccount 'setupadmin' -CollectDiagnostics:$CollectDiagnostics -Stage 'fixture-read'
+            }
+            [pscustomobject]@{ Value = $value; State = $script:ReadFixture }
+        }
+    }
+
+    $validReadJson = '{"FixName":"Fix-ODBC18","IsStructured":true,"Success":true}'
+    foreach ($kind in @('Marker', 'Transcript')) {
+        foreach ($case in @(
+            @{ Name = 'FailedWithOutput'; Response = [pscustomobject]@{
+                ScriptBlockFailed = $true; ScriptBlockOutput = $validReadJson
+                ErrorDetails = @("Fixture remote read failure -Token $secret", 'Second remote error')
+            }; Expected = 'Fixture remote read failure.+Second remote error' }
+            @{ Name = 'FailedWithoutOutput'; Response = [pscustomobject]@{
+                ScriptBlockFailed = $true; ScriptBlockOutput = $null; ErrorDetails = @('Fixture empty remote failure')
+            }; Expected = 'Fixture empty remote failure' }
+            @{ Name = 'MissingResult'; Response = $null; Expected = 'no result' }
+            @{ Name = 'MissingDetails'; Response = [pscustomobject]@{
+                ScriptBlockFailed = $true; ScriptBlockOutput = $validReadJson; ErrorDetails = @()
+            }; Expected = 'failure without error details' }
+            @{ Name = 'Throw'; Response = $null; Throw = $true; Expected = 'Fixture read exception' }
+        )) {
+            $probe = Invoke-MaintenanceReadFixture -Kind $kind -Response $case.Response -Throw:($case.Throw -eq $true) `
+                -CollectDiagnostics:($kind -eq 'Transcript')
+            Assert-Maintenance ($null -eq $probe.Value) "$kind accepted failed remote output or leaked diagnostic output ($($case.Name))."
+            Assert-Maintenance ($probe.State.Logs.Count -eq 1 -and $probe.State.Logs[0].Warning -and
+                $probe.State.Logs[0].LogOnly -and $probe.State.Logs[0].Message -match $case.Expected) `
+                "$kind did not warn once with the original remote failure ($($case.Name))."
+            Assert-Maintenance (-not ($probe.State.Logs.Message -join "`n").Contains($secret)) "$kind leaked a diagnostic secret."
+            $call = $probe.State.Calls[0]
+            Assert-Maintenance ($probe.State.Calls.Count -eq 1 -and $call.VMName -eq 'LAB-PRI' -and
+                $call.Domain -eq 'lab.test' -and $call.Account -eq 'setupadmin' -and $call.AsJob -and
+                $call.Timeout -eq 30 -and $call.Retries -eq 1 -and $call.SuppressLog -and
+                $call.FailOnRemoteError -and $call.Arguments.Count -eq 1 -and $call.Arguments[0] -eq 'Fix-ODBC18') `
+                "$kind changed its guest identity, bounded invocation, or error contract."
+            if ($kind -eq 'Transcript') {
+                $evidence = $probe.State.Evidence[0]
+                Assert-Maintenance ($probe.State.Evidence.Count -eq 1 -and $evidence.VMName -eq 'LAB-PRI' -and
+                    $evidence.Domain -eq 'lab.test' -and $evidence.FixName -eq 'Fix-ODBC18' -and
+                    $evidence.Account -eq 'setupadmin' -and $evidence.Stage -eq 'fixture-read') `
+                    'Transcript retrieval failure skipped or misrouted requested evidence collection.'
+            }
+        }
+    }
+    foreach ($success in @($true, $false)) {
+        $response = [pscustomobject]@{
+            ScriptBlockFailed = $false
+            ScriptBlockOutput = ([pscustomobject]@{ FixName = 'Fix-ODBC18'; IsStructured = $true; Success = $success } | ConvertTo-Json)
+            ErrorDetails = @()
+        }
+        $probe = Invoke-MaintenanceReadFixture -Kind 'Marker' -Response $response
+        Assert-Maintenance ($probe.Value.IsStructured -and $probe.Value.FixName -eq 'Fix-ODBC18' -and
+            $probe.Value.Success -is [bool] -and $probe.Value.Success -eq $success -and $probe.State.Logs.Count -eq 0) `
+            'A successful marker read changed the explicit fix verdict or emitted a failure warning.'
+    }
+    $markerReadScript = $probe.State.Calls[0].ScriptBlock
+    & {
+        $ErrorActionPreference = 'Continue'
+        function Test-Path { param($Path) return $true }
+        function Get-Content {
+            [CmdletBinding()]
+            param($Path, [switch]$Raw)
+            Write-Error 'Fixture unreadable marker'
+        }
+        $threw = $false
+        try { $null = & $markerReadScript 'Fix-ODBC18' } catch { $threw = $true }
+        Assert-Maintenance $threw 'The remote marker reader suppressed a content-read error instead of failing its invocation.'
+    }
+    $probe = Invoke-MaintenanceReadFixture -Kind 'Marker' -Response ([pscustomobject]@{
+        ScriptBlockFailed = $false; ScriptBlockOutput = 'not JSON'; ErrorDetails = @()
+    })
+    Assert-Maintenance ($null -eq $probe.Value -and $probe.State.Logs.Count -eq 1 -and
+        $probe.State.Logs[0].Warning -and $probe.State.Logs[0].Message -match 'Failed to read result marker') `
+        'Malformed marker JSON was not reported under Continue error handling.'
+    $probe = Invoke-MaintenanceReadFixture -Kind 'Marker' -Response ([pscustomobject]@{
+        ScriptBlockFailed = $false; ScriptBlockOutput = $null; ErrorDetails = @()
+    })
+    Assert-Maintenance ($null -eq $probe.Value) 'A missing marker became an explicit success.'
+
+    foreach ($output in @($null, @(), @('', ' ', $null))) {
+        $probe = Invoke-MaintenanceReadFixture -Kind 'Transcript' -CollectDiagnostics -Response ([pscustomobject]@{
+            ScriptBlockFailed = $false; ScriptBlockOutput = $output; ErrorDetails = @()
+        })
+        Assert-Maintenance ($null -eq $probe.Value -and $probe.State.Logs.Count -eq 1 -and
+            $probe.State.Logs[0].Warning -and $probe.State.Logs[0].Message -match 'empty' -and
+            $probe.State.Evidence.Count -eq 1) 'Empty transcript output was silent, printed a fake transcript, or skipped evidence.'
+    }
+    $probe = Invoke-MaintenanceReadFixture -Kind 'Transcript' -Response ([pscustomobject]@{
+        ScriptBlockFailed = $false
+        ScriptBlockOutput = @("first line -Token $secret", '', $null, 'PS>TerminatingError(Get-Variable): caught context probe', 'second line')
+        ErrorDetails = @()
+    })
+    Assert-Maintenance ($null -eq $probe.Value -and $probe.State.Logs.Count -eq 5 -and
+        @($probe.State.Logs | Where-Object Warning).Count -eq 0 -and $probe.State.Evidence.Count -eq 0 -and
+        ($probe.State.Logs.Message -join "`n") -match '(?s)first line.+TerminatingError.+second line' -and
+        -not ($probe.State.Logs.Message -join "`n").Contains($secret)) `
+        'A valid transcript lost its content, treated blank lines as failures, collected unrequested evidence, or leaked a secret.'
+    $probe = Invoke-MaintenanceReadFixture -Kind 'Transcript' -CollectDiagnostics -EvidenceThrows -Response ([pscustomobject]@{
+        ScriptBlockFailed = $true; ScriptBlockOutput = 'untrusted partial output'; ErrorDetails = @('Original transcript failure')
+    })
+    Assert-Maintenance ($null -eq $probe.Value -and $probe.State.Logs.Count -eq 2 -and
+        @($probe.State.Logs | Where-Object Warning).Count -eq 2 -and
+        ($probe.State.Logs.Message -join "`n") -match '(?s)Original transcript failure.+Fixture evidence exception' -and
+        -not ($probe.State.Logs.Message -join "`n").Contains($secret)) `
+        'Evidence collection replaced the original transcript failure or leaked diagnostic output.'
+
     function Invoke-MaintenanceEngineFixture {
         param([switch]$Batch, [switch]$AlwaysFail, [switch]$MissingMarker, [switch]$Console,
             [switch]$RecoveryFailure, [switch]$UnconfirmedShutdown, [switch]$LateRecovery,

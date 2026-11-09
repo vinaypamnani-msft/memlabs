@@ -1639,6 +1639,24 @@ Validate without changing lab VMs using
 Windows PowerShell 5.1. The startup regression executes the shipped readiness
 wait with a simulated clock and mocked Hyper-V operations.
 
+### Maintenance evidence read failures
+
+Result markers are trusted only when their remote read succeeds. A failed read
+returns no marker and logs the original error, even if partial output contains
+valid `Success: true` JSON. Unreadable marker files and malformed JSON are
+reported rather than silently accepted.
+
+Failed, missing, or empty transcript reads produce a warning instead of an
+INFO-level fake transcript or no log entry. Requested failure-evidence collection
+still runs when transcript retrieval fails, and collection errors are reported
+separately. Genuine transcript content remains diagnostic text: caught guest
+exceptions do not automatically change the fix verdict. Reads retain their
+30-second execution timeout, single session attempt, and requested account.
+
+Validate these failure and success paths without changing lab VMs using
+`vmbuild\tools\Test-MaintenanceFixRobustness.ps1` under PowerShell 7 and
+Windows PowerShell 5.1.
+
 ### ODBC Driver 18 maintenance
 
 ODBC Driver 17 is preserved and does not satisfy Driver 18 compliance. Both

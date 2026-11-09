@@ -2449,24 +2449,36 @@ function Get-VMFixTranscript {
     if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
     try {
         $r = Invoke-VmCommand @args
-        if ($r -and $r.ScriptBlockOutput) {
-            Write-Log "$VMName`: ===== Transcript [$FixName] BEGIN =====" -LogOnly
-            foreach ($line in @($r.ScriptBlockOutput)) {
-                if ($null -ne $line -and "$line" -ne "") {
+        if (-not $r -or $r.ScriptBlockFailed) {
+            $detail = if ($r -and $r.ErrorDetails) { @($r.ErrorDetails) -join '; ' }
+            elseif ($r) { 'Remote command reported failure without error details.' }
+            else { 'Remote command returned no result.' }
+            Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $(Protect-VMFixDiagnosticText $detail)" -LogOnly -Warning
+        }
+        else {
+            $lines = @($r.ScriptBlockOutput | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+            if ($lines.Count -eq 0) {
+                Write-Log "$VMName`: [$FixName] Transcript unavailable or empty." -LogOnly -Warning
+            }
+            else {
+                Write-Log "$VMName`: ===== Transcript [$FixName] BEGIN =====" -LogOnly
+                foreach ($line in $lines) {
                     Write-Log -LogOnly "$VMName`: [$FixName] $(Protect-VMFixDiagnosticText -Text "$line")"
                 }
-                else {
-                    Write-Log "$VMName`: [$FixName] Transcript unavailable, empty, or timed out: $($r.ErrorDetails)" -LogOnly -Warning
-                }
+                Write-Log "$VMName`: ===== Transcript [$FixName] END =====" -LogOnly
             }
-            Write-Log "$VMName`: ===== Transcript [$FixName] END =====" -LogOnly
-        }
-        if ($CollectDiagnostics) {
-            Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName $FixName -VMDomainAccount $VMDomainAccount -Stage $Stage
         }
     }
     catch {
-        Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $_" -LogOnly -Warning
+        Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $(Protect-VMFixDiagnosticText "$_")" -LogOnly -Warning
+    }
+    if ($CollectDiagnostics) {
+        try {
+            Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName $FixName -VMDomainAccount $VMDomainAccount -Stage $Stage
+        }
+        catch {
+            Write-Log "$VMName`: Failed to collect evidence for [$FixName]: $(Protect-VMFixDiagnosticText "$_")" -LogOnly -Warning
+        }
     }
 }
 
@@ -2481,7 +2493,8 @@ function Get-VMFixResultMarker {
         SEPARATE call from the fix execution so that pipeline-stream leakage from
         the fix body (cmdlet output that turns the scriptblock's return value into
         an array and coerces to a bogus Success=$true) can never affect the
-        verdict. No marker == the fix did NOT report explicit success.
+        verdict. Failed reads are rejected even if they return valid partial JSON.
+        No marker == the fix did NOT report explicit success.
     #>
     [CmdletBinding()]
     param (
@@ -2493,7 +2506,7 @@ function Get-VMFixResultMarker {
     $sb = {
         param($name)
         $p = "C:\staging\Fix\$name.result.json"
-        if (Test-Path $p) { Get-Content -Path $p -Raw -ErrorAction SilentlyContinue }
+        if (Test-Path $p) { Get-Content -Path $p -Raw -ErrorAction Stop }
     }
     $args = @{
         VmName       = $VMName
@@ -2510,15 +2523,22 @@ function Get-VMFixResultMarker {
     if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
     try {
         $r = Invoke-VmCommand @args
-        if ($r -and $r.ScriptBlockOutput) {
+        if (-not $r -or $r.ScriptBlockFailed) {
+            $detail = if ($r -and $r.ErrorDetails) { @($r.ErrorDetails) -join '; ' }
+            elseif ($r) { 'Remote command reported failure without error details.' }
+            else { 'Remote command returned no result.' }
+            Write-Log "$VMName`: Failed to read result marker for [$FixName]: $(Protect-VMFixDiagnosticText $detail)" -LogOnly -Warning
+            return $null
+        }
+        if ($r.ScriptBlockOutput) {
             $raw = (@($r.ScriptBlockOutput) -join "`n")
             if (-not [string]::IsNullOrWhiteSpace($raw)) {
-                return ($raw | ConvertFrom-Json)
+                return ($raw | ConvertFrom-Json -ErrorAction Stop)
             }
         }
     }
     catch {
-        Write-Log "$VMName`: Failed to read result marker for [$FixName]: $_" -LogOnly -Warning
+        Write-Log "$VMName`: Failed to read result marker for [$FixName]: $(Protect-VMFixDiagnosticText "$_")" -LogOnly -Warning
     }
     return $null
 }
