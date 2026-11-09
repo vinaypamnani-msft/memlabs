@@ -359,6 +359,11 @@ function Test-VmFunctionality {
         }
     }
 
+    if (-not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Checking ConfigMgr client script policy and execution"
+        [void](Test-ClientScriptFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)
+    }
+
     # A buffered failure is authoritative. Some tests enrich a remoted result
     # collection after the role check; an unsuppressed Add() can emit its index
     # alongside $false, making the multi-item result truthy in PowerShell. Do not
@@ -10154,6 +10159,216 @@ $Phase11PassiveSiteDiagCollector = {
     return $out
 }
 
+function Get-ClientScriptValidationProbe {
+    return {
+        param([bool]$ExpectLabBypass)
+
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new(); Skipped = $false }
+        try {
+            $client = @(Get-Service -ErrorAction Stop | Where-Object { $_.Name -eq 'CcmExec' })
+            if ($client.Count -eq 0) {
+                $results.Skipped = $true
+                $results.Details.Add('INFO: ConfigMgr client is not installed; client-script checks do not apply.')
+                return $results
+            }
+            if ($client.Count -ne 1 -or "$($client[0].Status)" -ne 'Running') {
+                $results.Details.Add('WARN: ConfigMgr client is not running; effective script policy and execution cannot be verified.')
+                return $results
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: ConfigMgr client presence could not be measured: $($_.Exception.Message)")
+            return $results
+        }
+
+        $machinePolicy = ''
+        try {
+            $machinePolicy = "$((Get-ExecutionPolicy -List -ErrorAction Stop |
+                Where-Object { $_.Scope -eq 'MachinePolicy' }).ExecutionPolicy)"
+            if ($ExpectLabBypass -and $machinePolicy -in @('AllSigned', 'Restricted')) {
+                $results.Details.Add("WARN: PowerShell MachinePolicy=$machinePolicy blocks unsigned lab scripts. Group Policy was not changed.")
+            }
+        }
+        catch { $results.Details.Add("WARN: PowerShell Group Policy could not be measured: $($_.Exception.Message)") }
+
+        $readClientPolicy = {
+            $configuration = @(Get-CimInstance -Namespace 'root\ccm\Policy\Machine\ActualConfig' `
+                -ClassName CCM_ClientAgentConfig -OperationTimeoutSec 10 -ErrorAction Stop |
+                Where-Object { $_.PSObject.Properties['PowerShellExecutionPolicy'] -and $null -ne $_.PowerShellExecutionPolicy })
+            if ($configuration.Count -eq 0) { return $null }
+            $values = @(
+                foreach ($item in $configuration) {
+                    $value = 0
+                    if (-not [int]::TryParse("$($item.PowerShellExecutionPolicy)", [ref]$value) -or $value -notin @(0, 1, 2, 3)) {
+                        throw "Invalid effective PowerShellExecutionPolicy '$($item.PowerShellExecutionPolicy)'."
+                    }
+                    $value
+                }
+            ) | Select-Object -Unique
+            if (@($values).Count -ne 1) { throw 'Effective client PowerShell policy has conflicting values.' }
+            return @($values)[0]
+        }
+        $policy = $null
+        try {
+            $policy = & $readClientPolicy
+            if ($ExpectLabBypass -and $policy -ne 1 -and $machinePolicy -notin @('AllSigned', 'Restricted')) {
+                $requestPolicy = {
+                    param([string]$ScheduleId)
+                    $response = Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule `
+                        -Arguments @{ sScheduleID = $ScheduleId } -OperationTimeoutSec 10 -ErrorAction Stop
+                    $returnValue = -1
+                    if (-not $response -or
+                        -not [int]::TryParse("$($response.ReturnValue)", [ref]$returnValue) -or $returnValue -ne 0) {
+                        throw "Machine-policy schedule $ScheduleId returned '$($response.ReturnValue)'."
+                    }
+                }
+                try {
+                    & $requestPolicy '{00000000-0000-0000-0000-000000000021}'
+                    & $requestPolicy '{00000000-0000-0000-0000-000000000022}'
+                }
+                catch { $results.Details.Add("WARN: Client machine-policy refresh failed: $($_.Exception.Message)") }
+                $deadline = (Get-Date).AddSeconds(60)
+                try {
+                    while ($policy -ne 1 -and (Get-Date) -lt $deadline) {
+                        $remaining = [math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+                        if ($remaining -le 0) { break }
+                        Write-Progress -Activity "$env:COMPUTERNAME [Client scripts]" -Status 'Waiting for effective lab PowerShell policy'
+                        Start-Sleep -Seconds ([math]::Min(5, $remaining))
+                        $policy = & $readClientPolicy
+                    }
+                }
+                finally { Write-Progress -Activity "$env:COMPUTERNAME [Client scripts]" -Completed }
+                if ($policy -eq 1) { $results.Details.Add('RECOVERED: Client received effective Bypass script policy after machine-policy refresh.') }
+            }
+            $policyNames = @{ 0 = 'AllSigned'; 1 = 'Bypass'; 2 = 'Restricted'; 3 = 'Unrestricted' }
+            if ($null -eq $policy) {
+                $results.Details.Add('WARN: Effective ConfigMgr PowerShell policy is not present; policy receipt is unverified.')
+            }
+            elseif ($ExpectLabBypass -and $policy -ne 1) {
+                $results.Details.Add("WARN: Effective ConfigMgr PowerShellExecutionPolicy=$policy ($($policyNames[[int]$policy])); lab Bypass policy was not verified. Check MEMLABS-powershellbypass deployment, policy receipt, and competing client settings.")
+            }
+            elseif ($ExpectLabBypass -and $machinePolicy -in @('AllSigned', 'Restricted')) {
+                $results.Details.Add("INFO: ConfigMgr PowerShellExecutionPolicy=$policy ($($policyNames[[int]$policy])); unsigned execution remains blocked by MachinePolicy=$machinePolicy.")
+            }
+            else {
+                $results.Details.Add("OK: Effective ConfigMgr PowerShellExecutionPolicy=$policy ($($policyNames[[int]$policy])).")
+            }
+        }
+        catch { $results.Details.Add("WARN: Effective ConfigMgr script policy could not be measured: $($_.Exception.Message)") }
+
+        try {
+            $baselines = @(Get-CimInstance -Namespace 'root\ccm\dcm' -ClassName SMS_DesiredConfiguration `
+                -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 101)
+            if ($baselines.Count -gt 100) {
+                $results.Details.Add('WARN: Client baseline inventory is capped at 100; additional evaluation outcomes were not checked.')
+                $baselines = @($baselines | Select-Object -First 100)
+            }
+            $evaluated = 0; $nonCompliant = 0; $errors = 0
+            foreach ($baseline in $baselines) {
+                $state = -1
+                if (-not [int]::TryParse("$($baseline.LastComplianceStatus)", [ref]$state) -or $state -notin @(0, 1, 2, 3, 4)) {
+                    throw "Invalid baseline compliance state for '$($baseline.Name)'."
+                }
+                if ($state -in @(1, 2, 3, 4)) { $evaluated++ }
+                if ($state -eq 2) { $nonCompliant++ }
+                $discoveryFailure = $state -ne 1 -and
+                    "$($baseline.ComplianceDetails)" -match '(?i)DiscoveryFailure\s*=\s*"true"|Setting Discovery Error'
+                if ($state -eq 4 -or $discoveryFailure) {
+                    $errors++
+                    $results.Details.Add("WARN: ConfigMgr baseline '$($baseline.Name)' has an execution/discovery error (state=$state; lastEval=$($baseline.LastEvalTime)). Check DCMAgent, CIAgent, and DCMReporting; non-compliance alone is not classified as an exception.")
+                }
+            }
+            $results.Details.Add("INFO: Client baseline inventory: assigned=$($baselines.Count), evaluated=$evaluated, nonCompliant=$nonCompliant, executionErrors=$errors.")
+            if ($ExpectLabBypass -and $evaluated -eq 0) {
+                $results.Details.Add('WARN: No client baseline evaluation has been observed; successful script execution is not established.')
+            }
+        }
+        catch { $results.Details.Add("WARN: Client baseline execution outcomes could not be measured: $($_.Exception.Message)") }
+
+        try {
+            $events = @(Get-WinEvent -FilterHashtable @{
+                    LogName = 'Microsoft-Windows-PowerShell/Operational'; Id = 4100; StartTime = (Get-Date).AddHours(-2)
+                } -MaxEvents 1000 -ErrorAction Stop)
+            if ($events.Count -eq 1000) { $results.Details.Add('WARN: PowerShell error-event inventory reached its 1000-event cap; earlier client errors may be omitted.') }
+            $rejected = [System.Collections.Generic.List[object]]::new()
+            foreach ($clientEvent in $events) {
+                $xml = [xml]$clientEvent.ToXml()
+                $payload = (($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'Payload' }).'#text') -join "`n"
+                if ($payload -match '(?i)\\CCM\\SystemTemp\\[0-9a-f-]+\.ps1' -and
+                    $payload -match '(?i)not digitally signed|Fully Qualified Error ID\s*=\s*UnauthorizedAccess') {
+                    $rejected.Add($clientEvent)
+                }
+            }
+            if ($rejected.Count) {
+                $samples = @($rejected | Select-Object -First 3 |
+                    ForEach-Object { "record=$($_.RecordId) at=$($_.TimeCreated.ToUniversalTime().ToString('o'))" }) -join '; '
+                $results.Details.Add("WARN: $($rejected.Count) ConfigMgr client PowerShell script rejection(s) in the last two hours ($samples). These are observed execution failures; current policy or a baseline inventory alone does not prove recovery.")
+            }
+        }
+        catch {
+            if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
+                $results.Details.Add("WARN: Client PowerShell execution-error events could not be read: $($_.Exception.Message)")
+            }
+        }
+        return $results
+    }
+}
+
+function Test-ClientScriptFunctionality {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $cmo = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $domain = $DeployConfig.vmOptions.domainName
+    $expectBypass = [bool]$cmo.PrePopulateObjects
+    $domainDC = $DeployConfig.virtualMachines | Where-Object {
+        $_.role -in @('DC', 'BDC') -and (-not $_.domain -or $_.domain -eq $domain)
+    } | Select-Object -First 1
+    if ($CurrentItem.role -in @('DomainMember', 'WorkgroupMember', 'InternetClient') -and
+        $domainDC.externalDomainJoinSiteCode -and $domainDC.externalDomainJoinSiteCode -ne 'NONE') {
+        $ownerFqdn = "$($domainDC.thisParams.ExternalSiteServer)"
+        $ownerName = ($ownerFqdn -split '\.')[0]
+        $ownerDomain = if ($ownerFqdn.Contains('.')) { $ownerFqdn.Substring($ownerFqdn.IndexOf('.') + 1) } else { '' }
+        $owners = @($DeployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.siteCode -eq $domainDC.externalDomainJoinSiteCode -and
+            $_.cmOptions -and (-not $ownerName -or $_.vmName -eq $ownerName) -and
+            (-not $ownerDomain -or $_.domain -eq $ownerDomain)
+        })
+        if ($owners.Count -eq 1) { $expectBypass = [bool]$owners[0].cmOptions.PrePopulateObjects }
+        else {
+            $expectBypass = $false
+            Add-Phase11Output "[Phase 11] $VMName [ClientScripts]: WARN: Managing-site prepopulation policy could not be resolved unambiguously; Bypass expectation is unverified." -Level Warning
+        }
+    }
+    try {
+        $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain -ScriptBlock (Get-ClientScriptValidationProbe) `
+            -ArgumentList $expectBypass -DisplayName 'Phase11-ClientScripts' `
+            -SuppressLog -AsJob -TimeoutSeconds 180 -PollProgress
+    }
+    catch {
+        Add-Phase11Output "[Phase 11] $VMName [ClientScripts]: WARN: Client script probe failed: $($_.Exception.Message)" -Level Warning
+        return $true
+    }
+    if (-not $result -or $result.ScriptBlockFailed -or $result.ScriptBlockOutput -isnot [hashtable] -or
+        -not $result.ScriptBlockOutput.Details) {
+        Add-Phase11Output "[Phase 11] $VMName [ClientScripts]: WARN: Client script policy/execution could not be verified: $($result.ErrorDetails)" -Level Warning
+        return $true
+    }
+    if ($result.ScriptBlockOutput.Skipped) {
+        Write-Log "[Phase 11] $VMName [ClientScripts]: $($result.ScriptBlockOutput.Details -join '; ')" -LogOnly
+        return $true
+    }
+    foreach ($detail in $result.ScriptBlockOutput.Details) {
+        $level = if ($detail -like 'WARN:*') { 'Warning' } elseif ($detail -like 'OK:*') { 'Success' } else { 'Info' }
+        Add-Phase11Output "[Phase 11] $VMName [ClientScripts]: $detail" -Level $level
+    }
+    return $true
+}
+
 function Test-DomainMemberFunctionality {
     <#
     .SYNOPSIS
@@ -16011,16 +16226,29 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $results.Details.Add("WARN: WSUS update count could not be measured: $($_.Exception.Message). Native synchronization health is checked independently.")
                 }
 
-                # CM-side subscription = what we EXPECT WSUS to have. WCM
-                # reads this from CM and pushes it to WSUS; a mismatch
-                # means WCM hasn't pushed (yet). Best-effort -- if we
-                # can't read CM, the parity test falls back to a plain
-                # ">0" check on the WSUS side.
+                # Read the same category inventory as the CM cmdlet without
+                # depending on the guest's current PowerShell drive.
                 $cmProdCount = $null; $cmClassCount = $null; $wcmName = $null
-                try {
-                    $cmProdCount  = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'Product'              -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed }).Count
-                    $cmClassCount = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'UpdateClassification' -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed }).Count
-                } catch {}
+                if (-not $offlineSup) {
+                    try {
+                        $cmCategories = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class 'SMS_UpdateCategoryInstance' `
+                            -Filter "IsSubscribed=TRUE AND (CategoryTypeName='Product' OR CategoryTypeName='UpdateClassification')" `
+                            -Label 'CM SUP subscription' -Details $results.Details)
+                        foreach ($category in $cmCategories) {
+                            if ($category.CategoryTypeName -notin @('Product', 'UpdateClassification') -or
+                                $category.IsSubscribed -isnot [bool] -or -not $category.IsSubscribed) {
+                                throw 'The CM provider returned an invalid subscribed product/classification row.'
+                            }
+                        }
+                        $cmProdCount = @($cmCategories | Where-Object { $_.CategoryTypeName -eq 'Product' }).Count
+                        $cmClassCount = @($cmCategories | Where-Object { $_.CategoryTypeName -eq 'UpdateClassification' }).Count
+                    }
+                    catch {
+                        $cmProdCount = $null; $cmClassCount = $null
+                        $results.WsusDiagnosticsRequired = $true
+                        $results.Details.Add("WARN: CM SUP subscription parity could not be measured: $($_.Exception.Message). WSUS subscription is checked independently; parity is unverified.")
+                    }
+                }
                 try {
                     $wcmStateVal = [int](Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER' -Name 'ConfigurationState' -ErrorAction Stop)
                     $wcmStateMap = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
@@ -16081,10 +16309,8 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     }
                 }
                 else {
-                    # Fallback: CM cmdlets unavailable; just check WSUS-side
-                    # has SOMETHING subscribed.
                     if (($subCats -is [int] -and $subCats -gt 0) -and ($subClas -is [int] -and $subClas -gt 0)) {
-                        $results.Details.Add("OK: WSUS subscription set [Products=$subCats; Classifications=$subClas$wcmBit] (CM-side parity not checked - cmdlets unavailable)")
+                        $results.Details.Add("INFO: WSUS subscription set [Products=$subCats; Classifications=$subClas$wcmBit]; CM-side parity remains unverified")
                     }
                     elseif ($isDownstreamSup) {
                         # Downstream SUP: the subscription replicates from the upstream

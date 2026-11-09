@@ -1442,6 +1442,37 @@ count is informational: an unavailable count warns, is never treated as zero,
 and cannot mask a failed or unreadable native sync. Failed/unreachable checks and
 unavailable counts trigger bounded WCM/wsyncmgr and SUP SoftwareDistribution/IIS
 evidence capture, including the configured upstream SUP for downstream faults.
+
+CM-to-WSUS subscription parity reads `SMS_UpdateCategoryInstance` through the
+site's retrying provider-query helper, without requiring a CMSite PowerShell
+drive. An unreadable or malformed CM inventory warns, requests diagnostics, and
+leaves parity explicitly unverified; WSUS-only subscription counts are not
+reported as a successful parity check. Offline SUPs retain their intentionally
+empty subscription. Validate with `vmbuild\tools\Test-SupSubscriptionParity.ps1`
+and `vmbuild\tools\Test-WsusSyncConvergence.ps1`.
+
+### ConfigMgr client script policy and execution
+
+Prepopulation reconciles the existing `MEMLABS-powershellbypass` setting and its
+All Systems deployment before deploying baselines, including on reruns. Both
+the Computer Agent policy and deployment are read back; an existing object alone
+does not prove that either is configured.
+
+Phase 11 checks running ConfigMgr clients on Windows VMs, including site servers.
+It reads effective client PowerShell policy, current baseline evaluation outcomes,
+and recent PowerShell events for rejected scripts in `CCM\SystemTemp`. When the
+lab Bypass policy is missing, one machine-policy retrieval/evaluation request and
+up to 60 seconds of polling are allowed. Group Policy is reported, never changed.
+Non-compliance alone is not treated as an execution exception.
+Cross-forest clients use their configured managing site's prepopulation policy,
+not an unrelated local site's options.
+
+These client-script checks are warning-only: missing/unreadable policy, pending
+evaluation, discovery/runtime errors, and recent script rejections are visible
+without failing Phase 11. A current policy value does not by itself establish
+recovery from an earlier execution failure. Use
+`vmbuild\tools\Get-CMBaselineDiagnostics.ps1` for full client logs and rule details;
+validate the automated checks with `vmbuild\tools\Test-ClientScriptPolicy.ps1`.
 The WSUS collector pulls the current `SoftwareDistribution.log` and up to two
 newest rolled copies (`SoftwareDistribution.log*`), retaining at most 3,000 lines
 per file. Capture diagnostics record source paths, sizes, timestamps, captured
@@ -1967,6 +1998,14 @@ WMI query helper. Recovered queries are identified explicitly; exhausted retries
 retain namespace, class, filter, exception-chain types/HRESULTs, error identity,
 and stack. Provider-job failures collect site-side logs as well as failing the
 validation; they are not reported as empty or healthy package inventories.
+
+Client-package DRS nudges share a three-attempt send helper. Deadlock, lock-wait,
+and snapshot-conflict errors (1205, 1222, 3960, 3961), including wrapped SQL errors,
+receive five-second backoff and a fresh connection. Every failed attempt is a
+visible warning; nontransient errors stop immediately. Exhaustion still leaves
+native DRS scheduling and the existing coverage gate authoritative, without
+reinitializing replication or restarting services. Validate with
+`vmbuild\tools\Test-DrsGroupSendRetry.ps1`.
 
 Secondary-only expansions now run client-package validation through their owning
 Primary, even when that unchanged Primary is absent from the partial configuration.

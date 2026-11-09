@@ -2,6 +2,80 @@
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 
+function Invoke-MemLabsDrsGroupSend {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SqlServer,
+        [Parameter(Mandatory)][string]$DatabaseName,
+        [Parameter(Mandatory)][string]$ReplicationGroup,
+        [Parameter(Mandatory)][string]$StatusTag
+    )
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($SqlServer) -or [string]::IsNullOrWhiteSpace($DatabaseName) -or
+            [string]::IsNullOrWhiteSpace($ReplicationGroup)) {
+            throw 'The DRS SQL target, database, and replication group must be nonempty.'
+        }
+        $connectionString = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+        $connectionString['Data Source'] = $SqlServer
+        $connectionString['Initial Catalog'] = $DatabaseName
+        $connectionString['Integrated Security'] = $true
+        $connectionString['Connect Timeout'] = 20
+        $connectionString['Encrypt'] = $false
+        $connectionString['TrustServerCertificate'] = $true
+    }
+    catch {
+        Write-DscStatus "$StatusTag DRS send could not initialize its SQL target: $($_.Exception.Message). Normal DRS scheduling and the client-package coverage gate remain authoritative." -Warning
+        return $false
+    }
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $connection = $null; $command = $null
+        $retry = $false
+        try {
+            $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString.ConnectionString
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            $command.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup = @rg'
+            $command.CommandTimeout = 120
+            [void]$command.Parameters.AddWithValue('@rg', $ReplicationGroup)
+            [void]$command.ExecuteNonQuery()
+            Write-DscStatus "$StatusTag ran spDRSSendChangesForGroup '$ReplicationGroup' on $DatabaseName (attempt $attempt/3)."
+            return $true
+        }
+        catch {
+            $failure = $_
+            $transient = $false
+            $exception = $failure.Exception
+            for ($depth = 0; $exception -and $depth -lt 8; $depth++) {
+                if ($exception.PSObject.Properties['Number'] -and
+                    $exception.Number -in @(1205, 1222, 3960, 3961)) { $transient = $true }
+                if ($exception -is [System.Data.SqlClient.SqlException] -and
+                    @($exception.Errors | Where-Object { $_.Number -in @(1205, 1222, 3960, 3961) }).Count) {
+                    $transient = $true
+                }
+                if ($exception.Message -match '(?i)\b(?:ERROR|SQLStatus|SQL Error)\s*[:=]?\s*(1205|1222|3960|3961)\b') {
+                    $transient = $true
+                }
+                $exception = $exception.InnerException
+            }
+            $retry = $transient -and $attempt -lt 3
+            if ($retry) {
+                Write-DscStatus "$StatusTag transient DRS send failure for '$ReplicationGroup' on attempt $attempt/3: $($failure.Exception.Message). Retrying in 5 seconds with a new SQL connection." -Warning
+            }
+            else {
+                Write-DscStatus "$StatusTag DRS send for '$ReplicationGroup' failed on attempt $attempt/3: $($failure.Exception.Message). Normal DRS scheduling and the client-package coverage gate remain authoritative." -Warning
+                return $false
+            }
+        }
+        finally {
+            if ($command) { $command.Dispose() }
+            if ($connection) { $connection.Dispose() }
+        }
+        if ($retry) { Start-Sleep -Seconds 5 }
+    }
+}
+
 function New-SqlAoNodeConnectionString {
     param([string]$Server, [string]$Port)
 

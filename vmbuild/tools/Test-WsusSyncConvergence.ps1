@@ -270,7 +270,16 @@ function Get-WsusServer {
 function Get-CMSoftwareUpdateCategory {
     [CmdletBinding()]
     param([switch] $Fast, $TypeName)
-    throw 'fixture CM subscription cmdlets unavailable'
+    throw 'CM subscription validation must not require a CMSite drive.'
+}
+function Invoke-CmWmiQueryWithRetry {
+    param($Namespace, $Class, $Filter, $Label, $Details)
+    Assert-True ($Namespace -eq 'root\SMS\site_CAS' -and $Class -eq 'SMS_UpdateCategoryInstance') `
+        'CM subscription validation queried the wrong provider namespace/class.'
+    [pscustomobject]@{ CategoryTypeName = 'Product'; IsSubscribed = $true }
+    foreach ($index in 1..3) {
+        [pscustomobject]@{ CategoryTypeName = 'UpdateClassification'; IsSubscribed = $true }
+    }
 }
 function Get-ItemPropertyValue {
     [CmdletBinding()]
@@ -283,6 +292,7 @@ function Invoke-WsusValidationFixture {
     return $results
 }
 $script:supServer = 'REMOTE-SUP.lab.test'; $script:wsusPort = 8530; $script:wsusUseSsl = $false
+$script:ns = 'root\SMS\site_CAS'
 $script:offlineSup = $false; $script:ServerUnavailable = $false
 $subscription.Result = 'Succeeded'; $subscription.State = 'NotProcessing'
 $result = Invoke-WsusValidationFixture

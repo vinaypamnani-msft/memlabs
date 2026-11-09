@@ -1278,29 +1278,14 @@ $ensureClientPkgCoverageCore = {
             $dbRaw = $sqlReg.'Database Name'
         }
         catch {
-            Write-DscStatus "Client pkg coverage: [drs-push] skipped -- could not read site SQL registry: $($_.Exception.Message)"
+            Write-DscStatus "Client pkg coverage: [drs-push] skipped -- could not read site SQL registry: $($_.Exception.Message)" -Warning
             return $false
         }
         $inst = $srv
         $dbName = $dbRaw
         if ($dbRaw -match '\\') { $inst = "$srv\$($dbRaw.Split('\')[0])"; $dbName = $dbRaw.Split('\')[1] }
-        $cn = $null
-        try {
-            $cn = New-Object System.Data.SqlClient.SqlConnection "Server=$inst;Initial Catalog=$dbName;Integrated Security=True;Connect Timeout=20;Encrypt=False;TrustServerCertificate=True"
-            $cn.Open()
-            $cmd = $cn.CreateCommand()
-            $cmd.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup'
-            $cmd.CommandTimeout = 120
-            [void]$cmd.Parameters.AddWithValue('@ReplicationGroup', $Group)
-            [void]$cmd.ExecuteNonQuery()
-            Write-DscStatus "Client pkg coverage: [drs-push] ran spDRSSendChangesForGroup '$Group' on $dbName so the parent gets our targeting row now instead of waiting for the next scheduled sync."
-            return $true
-        }
-        catch {
-            Write-DscStatus "Client pkg coverage: [drs-push] spDRSSendChangesForGroup '$Group' failed: $($_.Exception.Message). The site's own scheduler still owns the outcome."
-            return $false
-        }
-        finally { if ($cn) { try { $cn.Close() } catch { } } }
+        return (Invoke-MemLabsDrsGroupSend -SqlServer $inst -DatabaseName $dbName `
+            -ReplicationGroup $Group -StatusTag 'Client pkg coverage: [drs-push]')
     }
 
     $parentFqdn = if ($ThisVM.thisParams) { "$($ThisVM.thisParams.ParentSiteServer)" } else { '' }

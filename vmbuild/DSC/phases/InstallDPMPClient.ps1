@@ -71,29 +71,16 @@ $flushClientPackageTargetingToParent = {
     # Ask the same stored procedure used by the native DRS message builder to send
     # that group now; otherwise this targeting row can sit at the Primary for ~32m.
     if (-not $ThisVM -or $ThisVM.role -ne 'Primary' -or (-not $ThisVM.parentSiteCode -and -not $ThisVM.thisParams.ParentSiteServer)) { return $true }
-    $connection = $null
-    $succeeded = $false
     try {
         $dataSource = & $getSiteSqlDataSource $ThisVM
         $database = "CM_$SiteCode"
-        $connectionString = "Data Source=$dataSource;Initial Catalog=$database;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
-        $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString
-        $connection.Open()
-        $command = $connection.CreateCommand()
-        $command.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup = @rg'
-        $command.CommandTimeout = 120
-        [void]$command.Parameters.AddWithValue('@rg', 'Configuration Data')
-        [void]$command.ExecuteNonQuery()
-        $succeeded = $true
-        Write-DscStatus "Client package pre-stage: requested immediate DRS Configuration Data send for $PackageId after DP targeting (SQL=$dataSource/$database)."
+        return (Invoke-MemLabsDrsGroupSend -SqlServer $dataSource -DatabaseName $database `
+            -ReplicationGroup 'Configuration Data' -StatusTag "Client package pre-stage: $PackageId")
     }
     catch {
         Write-DscStatus "Client package pre-stage: immediate DRS Configuration Data send for $PackageId failed: $($_.Exception.Message). Normal DRS processing and the later coverage gate remain in place." -Warning
     }
-    finally {
-        if ($connection) { $connection.Dispose() }
-    }
-    return $succeeded
+    return $false
 }
 
 $readPkgServerTargetRow = {

@@ -76,6 +76,69 @@ Write-DscStatus "$Tag Starting perfloading"
     # Set the current location to be the site code.
     Set-Location "$($SiteCode):\" @initParams
 
+    function Sync-MemLabsClientScriptPolicy {
+        [CmdletBinding()]
+        param()
+
+        $name = 'MEMLABS-powershellbypass'
+        try {
+            $settings = @(Get-CMClientSetting -Name $name -ErrorAction Stop |
+                Where-Object { $_.Name -eq $name })
+            if ($settings.Count -eq 0) {
+                New-CMClientSetting -Name $name -Description 'Client settings for making powershell execution policy as bypass' `
+                    -Type Device -ErrorAction Stop | Out-Null
+                $settings = @(Get-CMClientSetting -Name $name -ErrorAction Stop |
+                    Where-Object { $_.Name -eq $name })
+            }
+            $settingsId = 0
+            if ($settings.Count -ne 1 -or
+                -not [int]::TryParse("$($settings[0].SettingsID)", [ref]$settingsId) -or $settingsId -lt 1) {
+                throw "Expected one custom '$name' client setting with a valid SettingsID; found $($settings.Count)."
+            }
+            $readPolicy = {
+                $configuration = @(Get-CMClientSetting -Id "$settingsId" -Setting ComputerAgent -ErrorAction Stop)
+                $agents = @(
+                    foreach ($item in $configuration) {
+                        if ($item.PSObject.Properties['PowerShellExecutionPolicy']) { $item }
+                        elseif ($item.PSObject.Properties['AgentConfigurations']) {
+                            @($item.AgentConfigurations) | Where-Object { $_.PSObject.Properties['PowerShellExecutionPolicy'] }
+                        }
+                    }
+                )
+                if ($agents.Count -eq 0) { return $null }
+                $policy = 0
+                if ($agents.Count -ne 1 -or
+                    -not [int]::TryParse("$($agents[0].PowerShellExecutionPolicy)", [ref]$policy) -or
+                    $policy -notin @(0, 1, 2, 3)) {
+                    throw "Could not read one valid Computer Agent PowerShell policy for '$name'."
+                }
+                return $policy
+            }
+            if ((& $readPolicy) -ne 1) {
+                Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $name -ErrorAction Stop | Out-Null
+            }
+            if ((& $readPolicy) -ne 1) { throw "'$name' did not read back PowerShellExecutionPolicy=1 (Bypass)." }
+
+            $assignments = @(Get-CMClientSettingDeployment -Id "$settingsId" -CollectionId SMS00001 -ErrorAction Stop)
+            if ($assignments.Count -eq 0) {
+                New-CMClientSettingDeployment -Name $name -CollectionId SMS00001 -ErrorAction Stop | Out-Null
+                $assignments = @(Get-CMClientSettingDeployment -Id "$settingsId" -CollectionId SMS00001 -ErrorAction Stop)
+            }
+            if ($assignments.Count -ne 1 -or $assignments[0].CollectionID -ne 'SMS00001' -or
+                "$($assignments[0].ClientSettingsID)" -ne "$settingsId") {
+                throw "'$name' did not read back one All Systems deployment for SettingsID=$settingsId."
+            }
+            Write-DscStatus "$Tag '$name' verified as Bypass and deployed to All Systems; effective client policy is checked in Phase 11."
+            return $true
+        }
+        catch {
+            Write-DscStatus "$Tag Client script policy reconciliation failed: $($_.Exception.Message). Unsigned baseline execution is not verified." -Warning
+            return $false
+        }
+    }
+
+    if ($isTopLevel) { [void](Sync-MemLabsClientScriptPolicy) }
+
     function Get-MemLabsManagedDistributionPointNames {
         param (
             [object[]] $VirtualMachines,
@@ -3034,24 +3097,6 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
     }
     #endregion Microsoft 365 Apps — join background download + create applications
-
-    #we have to make powershell bypass for the baselines to work as expected
-    # Custom client settings — top-level site only (replicate to child sites)
-    if ($isTopLevel) {
-    $customclientsetting = "MEMLABS-powershellbypass"
- 
-    if (!(Get-CMClientSetting -Name $customclientsetting)) {
-        New-CMClientSetting -Name $customclientsetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag $customclientsetting client setting created"
-
-        # Enable the PowerShell Execution Policy setting
-        Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
-        Write-DscStatus "$Tag Powershell policy successfully changed for $customclientsetting client setting "
-
-        New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
-        Write-DscStatus "$Tag Deployed the client setting to all systems collection"
-    }
-    } # end top-level client settings
 
     function Get-WsusDiagnostics {
         # Collect WSUS-native health signals for troubleshooting a stuck sync.
