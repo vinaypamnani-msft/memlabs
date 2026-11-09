@@ -308,6 +308,243 @@ try {
         $hostText.Contains('if ($currentStatusKey -ne $previousStatus)') -and
         $hostText.Contains('Get-JobWaitTargets -StatusText $currentStatus')) `
         'Host stall/dependency monitoring is not wired to the tested receipt progress semantics.'
+
+    $snapshotStart = $scriptAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -eq '$completedRunIdSnapshot' -and
+            $node.Right.Extent.Text -eq '$null'
+        }, $true)
+    Assert-ReceiptTest ($null -ne $snapshotStart) 'Host status snapshot initialization was not found.'
+    $monitorStatements = @($snapshotStart.Parent.Statements)
+    $snapshotIndex = [array]::IndexOf($monitorStatements, $snapshotStart)
+    $memoryAssignment = @($monitorStatements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $_.Left.Extent.Text -eq '$memoryRequest'
+        })
+    Assert-ReceiptTest ($memoryAssignment.Count -eq 1) 'Host memory-request consumption was not found.'
+    $memoryIndex = [array]::IndexOf($monitorStatements, $memoryAssignment[0])
+    $snapshotBlock = [scriptblock]::Create(($monitorStatements[$snapshotIndex..$memoryIndex].Extent.Text) -join "`n")
+    $heartbeat = @($monitorStatements | Where-Object {
+            $_ -is [Management.Automation.Language.IfStatementAst] -and $_.ElseClause -and
+            $_.ElseClause.Extent.Text -match '\$staticSeconds ='
+        })
+    $progress = @($monitorStatements | Where-Object {
+            $_ -is [Management.Automation.Language.IfStatementAst] -and
+            $_.Clauses[0].Item1.Extent.Text -eq '$statusTextSnapshot -and $statusTextSnapshot -is [string]'
+        })
+    $threshold = @($monitorStatements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $_.Left.Extent.Text -eq '$effectiveThreshold'
+        })
+    Assert-ReceiptTest ($heartbeat.Count -eq 1 -and $progress.Count -eq 1 -and $threshold.Count -eq 1) `
+        'Host heartbeat/progress handling was not unambiguous.'
+    $heartbeatBlock = [scriptblock]::Create($heartbeat[0].Extent.Text)
+    $progressBlock = [scriptblock]::Create($progress[0].Extent.Text)
+    $thresholdIndex = [array]::IndexOf($monitorStatements, $threshold[0])
+    $thresholdBlock = [scriptblock]::Create(($monitorStatements[$thresholdIndex..($thresholdIndex + 1)].Extent.Text) -join "`n")
+
+    function Invoke-HostStatusFixture {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Fixture variables are consumed by the AST-imported monitoring blocks.')]
+        [CmdletBinding()]
+        param(
+            [AllowNull()][object[]]$Results,
+            [switch]$HadStatus,
+            [switch]$RenewWarningWindow,
+            [int]$ProbeSeconds = 0
+        )
+
+        $fixtureState = @{
+            Logs = [Collections.Generic.List[object]]::new()
+            ProgressTimes = [Collections.Generic.List[datetime]]::new()
+            SupplementalReads = 0
+        }
+        function Write-Log {
+            param($Text, [switch]$Warning, [switch]$Failure, [switch]$Success, [switch]$LogOnly, [switch]$OutputStream)
+            $fixtureState.Logs.Add([pscustomobject]@{ Text = "$Text"; Warning = $Warning.IsPresent; Failure = $Failure.IsPresent })
+        }
+        function Write-ProgressElapsed { param($stopwatch, $timespan, $text, $failcount, $failcountMax) }
+        function Start-Sleep { param($Seconds) }
+        function Invoke-VmCommand {
+            param($VmName, $VmDomainName, $ScriptBlock, [switch]$SuppressLog)
+            $fixtureState.SupplementalReads++
+            [pscustomobject]@{ ScriptBlockOutput = [pscustomobject]@{ Line = $null; Stuck = $false } }
+        }
+        function Restart-VM2Smart { throw 'A status fixture attempted to restart a VM.' }
+
+        $Phase = 2
+        $currentItem = [pscustomobject]@{ vmName = 'LAB-CLIENT'; role = 'InternetClient' }
+        $domainName = 'example.test'
+        $expectedRunId = 'current-audit-run'
+        $baselineTime = [DateTime]::UtcNow.AddMinutes(-5)
+        $noStatus = -not $HadStatus.IsPresent
+        $failedHeartbeats = if ($HadStatus) { 7 } else { 99 }
+        $failedHeartbeatThreshold = 100
+        $firstRestartHeartbeatThreshold = 300
+        $forcedRestartCount = 2
+        $previousStatus = 'Earlier stage'
+        $lastStatusChangeTime = $baselineTime
+        $lastStaleWarningTime = $baselineTime
+        $lastStatusReadWarningTime = [DateTime]::MinValue
+        $deadWorkflowConfirmations = 2
+        $staleNoticeCount = 3
+        $lcmIdleSince = $baselineTime
+        $lcmRebootPendingSince = $baselineTime
+        $lcmPendingNoRebootSince = $baselineTime
+        $dscResumeCount = 1
+        $dscResumeAwaitingProgress = $false
+        $dscSeenStatuses = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        $complete = $false
+        $pollIndex = 0
+        foreach ($status in $Results) {
+            if ($RenewWarningWindow -and $pollIndex -gt 0) {
+                $lastStatusReadWarningTime = [DateTime]::UtcNow.AddSeconds(-61)
+            }
+            $stopwatch2 = [pscustomobject]@{ Elapsed = [TimeSpan]::FromSeconds($ProbeSeconds) }
+            $stopwatch2 | Add-Member -MemberType ScriptMethod -Name Stop -Value {}
+            . $snapshotBlock
+            . $heartbeatBlock
+            . $thresholdBlock
+            do { . $progressBlock } while ($false)
+            $fixtureState.ProgressTimes.Add($lastStatusChangeTime)
+            $pollIndex++
+        }
+        [pscustomobject]@{
+            NoStatus = $noStatus
+            FailedHeartbeats = $failedHeartbeats
+            EffectiveThreshold = $effectiveThreshold
+            ForcedRestarts = $forcedRestartCount
+            ProgressTime = $lastStatusChangeTime
+            BaselineTime = $baselineTime
+            PreviousStatus = $previousStatus
+            DeadConfirmations = $deadWorkflowConfirmations
+            IdleSince = $lcmIdleSince
+            Complete = $complete
+            StatusText = $statusTextSnapshot
+            CompletedRunId = $completedRunIdSnapshot
+            MemoryRequest = $memoryRequest
+            SupplementalReads = $fixtureState.SupplementalReads
+            ProgressTimes = $fixtureState.ProgressTimes.ToArray()
+            Logs = $fixtureState.Logs.ToArray()
+        }
+    }
+
+    $transportFailure = [pscustomobject]@{
+        ScriptBlockFailed = $true
+        ScriptBlockOutput = 'System.Management.Automation.Remoting.PSRemotingTransportException: Hyper-V socket target process has ended.'
+        ErrorDetails = @('Fixture transport failure')
+    }
+    $failedReceipt = [pscustomobject]@{
+        ScriptBlockFailed = $true
+        ScriptBlockOutput = [pscustomobject]@{
+            StatusText = 'Complete!'
+            CompletedRunId = 'current-audit-run'
+            MemoryRecovery = [pscustomobject]@{ RunId = 'current-audit-run'; Reason = 'OutOfMemory' }
+        }
+    }
+    $readOnlyFailure = [pscustomobject]@{ ScriptBlockFailed = $true }
+    $readOnlyFailure | Add-Member -MemberType ScriptProperty -Name ScriptBlockOutput -Value { 'Complete!' }
+    foreach ($failedResult in @(
+            $transportFailure, $failedReceipt, $readOnlyFailure, $null, $false,
+            [pscustomobject]@{ ScriptBlockOutput = 'Complete!' },
+            [pscustomobject]@{ ScriptBlockFailed = 'False'; ScriptBlockOutput = 'Complete!' },
+            [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = [pscustomobject]@{ StatusText = 'Complete!' } },
+            [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = [pscustomobject]@{ StatusText = 123; CompletedRunId = 'current-audit-run' } },
+            [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = [pscustomobject]@{ StatusText = 'Complete!'; CompletedRunId = 123 } },
+            [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @('Complete!') },
+            [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $null }
+        )) {
+        $result = Invoke-HostStatusFixture -Results @($failedResult)
+        Assert-ReceiptTest ($result.NoStatus -and $result.FailedHeartbeats -eq 100 -and $result.EffectiveThreshold -eq 300) `
+            'A failed/malformed status read weakened the first-status heartbeat safeguard.'
+        Assert-ReceiptTest ($result.ForcedRestarts -eq 2 -and $result.ProgressTime -eq $result.BaselineTime -and
+            $result.DeadConfirmations -eq 2 -and $result.IdleSince -eq $result.BaselineTime -and
+            $result.PreviousStatus -eq 'Earlier stage') 'A failed status read reset stall or recovery state.'
+        Assert-ReceiptTest (-not $result.Complete -and $null -eq $result.StatusText -and
+            $null -eq $result.CompletedRunId -and $null -eq $result.MemoryRequest -and $result.SupplementalReads -eq 0) `
+            'A failed status read became progress, completion, memory recovery, or an extra guest probe.'
+        Assert-ReceiptTest (@($result.Logs | Where-Object Warning).Count -eq 1 -and
+            ($result.Logs.Text -join ' ') -match 'DSC status read failed') 'A failed status read had no visible warning diagnostic.'
+    }
+    Assert-ReceiptTest ($readOnlyFailure.ScriptBlockOutput -eq 'Complete!') 'Snapshot handling mutated the command result.'
+    $result = Invoke-HostStatusFixture -Results @($transportFailure) -HadStatus
+    Assert-ReceiptTest (-not $result.NoStatus -and $result.FailedHeartbeats -eq 8 -and $result.EffectiveThreshold -eq 100 -and
+        $result.ProgressTime -eq $result.BaselineTime) 'A read failure changed the established-status recovery policy.'
+    $result = Invoke-HostStatusFixture -Results @($transportFailure) -ProbeSeconds 25
+    Assert-ReceiptTest ($result.FailedHeartbeats -eq 104 -and $result.EffectiveThreshold -eq 300) `
+        'Slow failed probes lost the existing elapsed-time heartbeat accounting.'
+    $result = Invoke-HostStatusFixture -Results @($transportFailure, $transportFailure, $transportFailure)
+    Assert-ReceiptTest ($result.FailedHeartbeats -eq 102 -and @($result.Logs | Where-Object Warning).Count -eq 1) `
+        'Repeated failures lost heartbeat accounting or flooded warnings inside one minute.'
+    $result = Invoke-HostStatusFixture -Results @($transportFailure, $transportFailure) -RenewWarningWindow
+    Assert-ReceiptTest (@($result.Logs | Where-Object Warning).Count -eq 2) 'Persistent failed reads stopped logging after the first warning.'
+    $result = Invoke-HostStatusFixture -Results @([pscustomobject]@{
+            ScriptBlockFailed = $true; ScriptBlockOutput = $null; ErrorDetails = @('X' * 3000)
+        })
+    $warning = @($result.Logs | Where-Object Warning)[0].Text
+    Assert-ReceiptTest ($warning.Contains('X' * 2000) -and -not $warning.Contains('X' * 2001) -and $warning.EndsWith('...')) `
+        'Status-read warning details did not honor their 2000-character bound.'
+    $warningInitializers = @($scriptAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -eq '$lastStatusReadWarningTime' -and
+            $node.Right.Extent.Text -eq '[DateTime]::MinValue'
+        }, $true))
+    Assert-ReceiptTest ($warningInitializers.Count -eq 1) 'The monitor did not initialize its failed-read warning cadence.'
+
+    $healthyStatus = [pscustomobject]@{
+        ScriptBlockFailed = $false
+        ScriptBlockOutput = [pscustomobject]@{ StatusText = 'Configuring fixture'; CompletedRunId = $null }
+    }
+    $result = Invoke-HostStatusFixture -Results @($transportFailure, $healthyStatus)
+    Assert-ReceiptTest (-not $result.NoStatus -and $result.FailedHeartbeats -eq 0 -and $result.ForcedRestarts -eq 0 -and
+        $result.ProgressTime -gt $result.BaselineTime -and -not $result.Complete) 'A healthy status after a failed read did not restore real progress.'
+    $result = Invoke-HostStatusFixture -Results @($healthyStatus, $failedReceipt)
+    Assert-ReceiptTest (-not $result.NoStatus -and $result.FailedHeartbeats -eq 1 -and -not $result.Complete -and
+        $null -eq $result.StatusText -and $null -eq $result.CompletedRunId -and
+        $result.ProgressTimes[0] -eq $result.ProgressTimes[1]) 'A later failed read reused successful snapshots or advanced their progress clock.'
+    $result = Invoke-HostStatusFixture -Results @([pscustomobject]@{
+            ScriptBlockFailed = $false
+            ScriptBlockOutput = [pscustomobject]@{
+                StatusText = $null
+                CompletedRunId = $null
+                MemoryRecovery = [pscustomobject]@{ RunId = 'current-audit-run'; Reason = 'OutOfMemory' }
+            }
+        })
+    Assert-ReceiptTest ($result.MemoryRequest.RunId -eq 'current-audit-run' -and
+        $result.MemoryRequest.Reason -eq 'OutOfMemory' -and $result.NoStatus -and $result.FailedHeartbeats -eq 0) `
+        'A valid structured probe lost its memory-recovery request or invented workflow progress.'
+    foreach ($payload in @(
+            'Complete!',
+            "Complete!`r`n",
+            [pscustomobject]@{ StatusText = 'Complete!'; CompletedRunId = $null },
+            [pscustomobject]@{ StatusText = "Complete!`r`n"; CompletedRunId = $null },
+            [pscustomobject]@{ StatusText = 'Post-install work complete'; CompletedRunId = 'current-audit-run' }
+        )) {
+        $result = Invoke-HostStatusFixture -Results @([pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $payload })
+        Assert-ReceiptTest ($result.Complete -and -not $result.NoStatus -and $result.FailedHeartbeats -eq 0) `
+            'Successful legacy text or current structured completion stopped completing the workflow.'
+    }
+    $readOnlySuccess = [pscustomobject]@{ ScriptBlockFailed = $false }
+    $readOnlySuccess | Add-Member -MemberType ScriptProperty -Name ScriptBlockOutput -Value {
+        [pscustomobject]@{ StatusText = "Complete!`r`n"; CompletedRunId = $null }
+    }
+    $result = Invoke-HostStatusFixture -Results @($readOnlySuccess)
+    Assert-ReceiptTest ($result.Complete -and $result.StatusText -ceq 'Complete!' -and
+        $readOnlySuccess.ScriptBlockOutput.StatusText -ceq "Complete!`r`n") 'Status normalization mutated a read-only successful result.'
+    $result = Invoke-HostStatusFixture -Results @([pscustomobject]@{
+            ScriptBlockFailed = $false
+            ScriptBlockOutput = [pscustomobject]@{ StatusText = $null; CompletedRunId = $null }
+        })
+    Assert-ReceiptTest ($result.NoStatus -and $result.FailedHeartbeats -eq 0 -and -not $result.Complete -and
+        $result.ProgressTime -eq $result.BaselineTime -and $result.Logs.Count -eq 0) `
+        'A responsive guest before its first status file was mistaken for a failed probe or real progress.'
+    Remove-Item -LiteralPath (Join-Path $script:ReceiptTestRoot 'ClientPackageCoverage.progress.json') -ErrorAction Stop
+    $multilineStatus = "First status line`r`nSecond status line"
+    [IO.File]::WriteAllText((Join-Path $script:ReceiptTestRoot 'DSC_Status.txt'), $multilineStatus)
+    $snapshot = & $probe $currentId $script:ReceiptTestRoot
+    Assert-ReceiptTest ($snapshot.StatusText -is [string] -and $snapshot.StatusText -ceq $multilineStatus) `
+        'The guest status probe did not preserve multiline status as one string.'
 }
 finally {
     Remove-Item -LiteralPath $script:ReceiptTestRoot -Recurse -Force -ErrorAction Stop

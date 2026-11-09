@@ -8536,6 +8536,7 @@ $global:VM_Config = {
         $staleRestartMax = 2
         $memoryRecoveryCount = 0
         $lastStaleWarningTime = [DateTime]::MinValue
+        $lastStatusReadWarningTime = [DateTime]::MinValue
         $deadWorkflowConfirmations = 0     # consecutive stale checks that proved the ScriptWorkflow task is not running
         $deadWorkflowMax = 3               # after this many, the wait is provably unclearable -- fail instead of warning forever
         $staleNoticeCount = 0              # stale notices emitted for the CURRENT status (reset on every status change)
@@ -8940,7 +8941,7 @@ $global:VM_Config = {
                 # Single round-trip: fetch DSC_Status.txt AND the completion-runid sentinel
                 $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock {
                     param($workflowRunId, [string]$workflowRoot = 'C:\staging\DSC')
-                    $statusText = Get-Content -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt') -ErrorAction SilentlyContinue
+                    $statusText = Get-Content -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt') -Raw -ErrorAction SilentlyContinue
                     $failurePath = Join-Path $workflowRoot 'ScriptWorkflow.failed.json'
                     if ($workflowRunId -and [IO.File]::Exists($failurePath)) {
                         $failure = Get-Content -LiteralPath $failurePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -8990,17 +8991,36 @@ $global:VM_Config = {
                 # be found on this object" during Phase 2 startup.
                 $completedRunIdSnapshot = $null
                 $statusTextSnapshot = $null
-                if ($status -and $status.ScriptBlockOutput -is [pscustomobject]) {
-                    $completedRunIdSnapshot = $status.ScriptBlockOutput.CompletedRunId
-                    $statusTextSnapshot = $status.ScriptBlockOutput.StatusText
+                $statusReadFailed = -not $status -or $status.ScriptBlockFailed -isnot [bool] -or $status.ScriptBlockFailed
+                $statusReadDetail = $null
+                if ($status -and $status.ScriptBlockFailed -isnot [bool]) {
+                    $statusReadDetail = 'Missing or invalid Boolean ScriptBlockFailed field.'
                 }
-                elseif ($status) {
-                    # Fallback (e.g. when the scriptblock failed before returning a pscustomobject)
-                    $statusTextSnapshot = $status.ScriptBlockOutput
+                if (-not $statusReadFailed) {
+                    $statusOutput = $status.ScriptBlockOutput
+                    if ($statusOutput -is [pscustomobject] -and
+                        $statusOutput.PSObject.Properties['StatusText'] -and
+                        $statusOutput.PSObject.Properties['CompletedRunId'] -and
+                        ($null -eq $statusOutput.StatusText -or $statusOutput.StatusText -is [string]) -and
+                        ($null -eq $statusOutput.CompletedRunId -or $statusOutput.CompletedRunId -is [string])) {
+                        $completedRunIdSnapshot = $statusOutput.CompletedRunId
+                        $statusTextSnapshot = $statusOutput.StatusText
+                    }
+                    elseif ($statusOutput -is [string]) {
+                        # Successful legacy callers can still return plain status text.
+                        $statusTextSnapshot = $statusOutput
+                    }
+                    else {
+                        $statusReadFailed = $true
+                        $statusReadDetail = 'Invalid DSC status payload; expected status text or a structured status/completion snapshot.'
+                    }
+                }
+                if ($statusTextSnapshot -is [string]) {
+                    $statusTextSnapshot = $statusTextSnapshot.TrimEnd([char[]]"`r`n")
                 }
                 $stopwatch2.Stop()
 
-                $memoryRequest = if ($status -and -not $status.ScriptBlockFailed) { $status.ScriptBlockOutput.MemoryRecovery } else { $null }
+                $memoryRequest = if (-not $statusReadFailed) { $status.ScriptBlockOutput.MemoryRecovery } else { $null }
                 if ($Phase -eq 8 -and $expectedRunId -and $memoryRequest -and
                     $memoryRequest.RunId -eq $expectedRunId -and $memoryRequest.Reason -eq 'OutOfMemory') {
                     $memoryDiagnosticTrigger = if ($memoryRecoveryCount -ge 1) { 'RecoveryExhausted' } else { 'BeforeRecovery' }
@@ -9026,7 +9046,7 @@ $global:VM_Config = {
                     continue
                 }
 
-                if (-not $status -or ($status.ScriptBlockFailed)) {
+                if ($statusReadFailed) {
                     if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
                         [int]$failedHeartbeats = [int]$failedHeartbeats + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 5, 0))
                     }
@@ -9035,7 +9055,22 @@ $global:VM_Config = {
                         start-sleep -Seconds 10
                     }
 
-                    # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
+                    if (([DateTime]::UtcNow - $lastStatusReadWarningTime).TotalSeconds -ge 60) {
+                        $lastStatusReadWarningTime = [DateTime]::UtcNow
+                        if (-not $statusReadDetail) {
+                            $statusReadDetail = if ($status) {
+                                ((@($status.ErrorDetails) + @($status.ScriptBlockOutput)) -join ' ' -replace '\s+', ' ').Trim()
+                            }
+                            else { 'No result returned.' }
+                        }
+                        if ([string]::IsNullOrWhiteSpace($statusReadDetail)) {
+                            $statusReadDetail = 'No error details returned.'
+                        }
+                        if ($statusReadDetail.Length -gt 2000) {
+                            $statusReadDetail = $statusReadDetail.Substring(0, 2000) + '...'
+                        }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC status read failed (failed heartbeats=$failedHeartbeats); probe output is not workflow progress. $statusReadDetail" -Warning -LogOnly
+                    }
                     if ($failedHeartbeats -gt 10) {
                         try {
                             Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Trying to retrieve job status from VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold

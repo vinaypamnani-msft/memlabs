@@ -50,6 +50,7 @@ function Reset-Fixture {
     $script:Rendered = New-Object 'System.Collections.Generic.List[string]'
     $script:Prompts = 0
     $script:ValidationMode = 'Valid'
+    $script:FixtureValidationResult = $null
     $script:PipelineMode = 'Valid'
     $script:Enhancements = 0
     $script:ExceptionsLogged = 0
@@ -125,6 +126,7 @@ function Test-Configuration {
     if ($script:ValidationMode -eq 'EmptyResult') { return $null }
     if ($script:ValidationMode -eq 'BindingFailure') { Test-RequiresName -VmName '' }
     if ($script:ValidationMode -eq 'UnexpectedFailure') { throw [System.IO.IOException]::new('Unexpected implementation failure') }
+    if ($script:ValidationMode -eq 'InvalidResult') { return $script:FixtureValidationResult }
     [pscustomobject]@{ Valid = $true; Failures = 0; Warnings = 0; Message = '' }
 }
 function Get-SupportedOperatingSystemsForRole {
@@ -441,6 +443,47 @@ try {
             Assert-Equal $true ($result.Failures -gt 0) "Invalid $reference was not a blocking validation failure."
         }
     }
+    foreach ($shape in 'Null', 'Scalar', 'EmptyArray', 'SingletonArray', 'MultipleArray') {
+        foreach ($validationResult in @(
+                [pscustomobject]@{ Valid = $false; Failures = 1; Warnings = 0; Message = 'Single validation error' },
+                [pscustomobject]@{ Valid = $false; Failures = 2; Warnings = 0; Message = "First validation error`r`nSecond validation error" },
+                [pscustomobject]@{ Valid = $false; Failures = 0; Warnings = 2; Message = "First validation warning`r`nSecond validation warning" }
+            )) {
+            foreach ($policy in 'Default', 'SuccessOnWarning', 'SuccessOnError') {
+                Reset-Fixture
+                $seed = [pscustomobject]@{ property = 'Existing'; Level = 'WARNING'; Message = 'Existing validation message' }
+                switch ($shape) {
+                    'Null' { $global:GenConfigErrorMessages = $null }
+                    'Scalar' { $global:GenConfigErrorMessages = $seed }
+                    'EmptyArray' { $global:GenConfigErrorMessages = @() }
+                    'SingletonArray' { $global:GenConfigErrorMessages = @($seed) }
+                    'MultipleArray' { $global:GenConfigErrorMessages = @($seed, $seed) }
+                }
+                $initialCount = @($global:GenConfigErrorMessages | Where-Object { $_ }).Count
+                $script:ValidationMode = 'InvalidResult'
+                $script:FixtureValidationResult = $validationResult
+                $parameters = @{}
+                if ($policy -ne 'Default') { $parameters[$policy] = $true }
+                $expected = $policy -eq 'SuccessOnError' -or
+                    ($policy -eq 'SuccessOnWarning' -and $validationResult.Failures -eq 0)
+                $result = Get-TestResult @parameters
+                $messages = @($validationResult.Message -split "\r\n")
+                Assert-Equal $expected $result "$shape message storage changed $policy validation policy."
+                Assert-Equal $true ($global:GenConfigErrorMessages -is [array]) "$shape validation messages did not retain an array."
+                Assert-Equal ($initialCount + $messages.Count) $global:GenConfigErrorMessages.Count "$shape validation messages were lost or duplicated."
+                $appended = @($global:GenConfigErrorMessages | Select-Object -Last $messages.Count)
+                Assert-Equal ($messages -join '|') ($appended.Message -join '|') "$shape validation message text changed."
+                Assert-Equal 0 @($appended | Where-Object { $_.Level -ne 'ERROR' -or -not [string]::IsNullOrEmpty($_.property) }).Count 'Validation result messages lost their unscoped ERROR classification.'
+                Assert-Equal 0 @($global:PendingValidationErrors).Count 'Ordinary validation results unexpectedly became persistent edit errors.'
+            }
+        }
+    }
+
+    Reset-Fixture
+    $global:GenConfigErrorMessages = $null
+    Assert-Equal $true (Get-TestResult) 'A valid configuration was rejected after clearing menu messages.'
+    Assert-Equal $null $global:GenConfigErrorMessages 'Successful validation unnecessarily changed message storage.'
+
     Reset-Fixture
     $script:ValidationMode = 'EmptyResult'
     Assert-Equal $false (Get-TestResult -SuccessOnWarning) 'An empty validation result was treated as successful validation.'

@@ -178,6 +178,10 @@ are staged as existing-VM updates; no new VM is required. Unchanged inventory
 and reverted edits do not count as queued work. The same action also handles
 new VMs and existing-VM updates together.
 
+Cleared, single-entry, and array message collections support multiple validation
+failures without runtime exceptions. This does not change which configurations
+pass validation or the existing warning/error override switches.
+
 Validate without deploying a lab:
 `.\vmbuild\tools\Test-GenConfigInvalidReferences.ps1`.
 
@@ -1374,8 +1378,17 @@ includes its start date; unavailable status falls back to dated operational even
 and failed evidence reads are explicit. Clear-status recovery also logs the original
 transport errors before its existing retry/reboot ladder.
 
+During DSC monitoring, only successful, well-formed probes can advance progress,
+reset stall/restart safeguards, or supply completion and memory-recovery evidence.
+Failed or malformed reads retain the existing heartbeat/recovery limits and emit
+bounded warning diagnostics at most once per minute; they do not count as a first
+workflow status. Successful legacy text and structured RunId receipts remain
+supported. Multiline status files stay one string, with trailing line endings
+ignored when recognizing completion.
+
 Validate with `vmbuild\tools\Test-WindowsClientSetupReadiness.ps1` and
-`vmbuild\tools\Test-DscStartFailureDiagnostics.ps1`.
+`vmbuild\tools\Test-DscStartFailureDiagnostics.ps1`; monitor progress and receipt
+handling are covered by `vmbuild\tools\Test-RemoteWorkflowDependency.ps1`.
 
 ### Shutdown cleanup after PowerShell Direct timeouts
 
