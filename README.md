@@ -1418,7 +1418,13 @@ own workflow, including in CAS hierarchies. Unrelated sites in the same deployme
 are not treated as missing systems. Missing systems or failed proxy changes
 inside the owned scope still fail the workflow for retry.
 
-Validate with `vmbuild\tools\Test-CmProxySiteScope.ps1` and
+Retained Phase 8 runs recheck site-system registration before applying proxy
+settings, even when the saved `InstallDP` step is complete. Newly configured
+role-less `SiteSystem` VMs are registered for manual role installation;
+already-ready roles and existing registrations are not reinstalled.
+
+Validate with `vmbuild\tools\Test-BareSiteSystemRegistration.ps1`,
+`vmbuild\tools\Test-CmProxySiteScope.ps1`, and
 `vmbuild\tools\Test-CmRoleQuerySiteScope.ps1`.
 
 ## Upgrade release health and recovery

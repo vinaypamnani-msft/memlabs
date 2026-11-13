@@ -246,18 +246,14 @@ if (Test-Path -Path $ConfigurationFile) {
         Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     }
 
-    # Add-to-existing: the deployConfig may contain new SiteSystem VMs that
-    # need DP/MP/SUP installed, but the previous deploy already marked
-    # InstallDP/InstallSUP as Completed. Reset those statuses when the
-    # current deployConfig has SiteSystem VMs requesting those roles so the
-    # installer scripts actually run.
+    # Add-to-existing: recheck SiteSystem registration even when no automated
+    # roles are selected. InstallDPMPClient's readiness checks skip already-ready
+    # roles and already-registered bare systems.
     $newSiteSystemVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' })
     if ($newSiteSystemVMs.Count -gt 0) {
-        $needsDP  = @($newSiteSystemVMs | Where-Object { $_.installDP }).Count -gt 0
-        $needsMP  = @($newSiteSystemVMs | Where-Object { $_.installMP }).Count -gt 0
         $needsSUP = @($newSiteSystemVMs | Where-Object { $_.installSUP -or $_.installRP }).Count -gt 0
-        if (($needsDP -or $needsMP) -and $Configuration.InstallDP -and $Configuration.InstallDP.Status -eq 'Completed') {
-            Write-DscStatus "Resetting InstallDP status (new SiteSystem VMs with DP/MP found)"
+        if ($Configuration.InstallDP -and $Configuration.InstallDP.Status -eq 'Completed') {
+            Write-DscStatus "Resetting InstallDP status (reconciling configured SiteSystem roles and registration)"
             $Configuration.InstallDP.Status = 'NotStart'
             $Configuration.InstallDP.StartTime = ''
             $Configuration.InstallDP.EndTime = ''
