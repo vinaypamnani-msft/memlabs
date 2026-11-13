@@ -118,6 +118,37 @@ Phase 11 reports an unreadable payload as **unmeasured**, not missing, and still
 fails required coverage. A successful TFTP read can serve an old boot image while
 SMB transfer of the current WIM fails with Win32 error 5.
 
+### Phase 11 probe identity and TFTP replies
+
+ConfigMgr can give `SMS_DP$\sms\bin` only SYSTEM and Local Service access.
+An elevated administrator's inability to enumerate that directory is not proof
+that the payload is absent or that the site cannot transfer content. Required
+DP-local PXE checks and DP failure captures run as SYSTEM through a uniquely named,
+bounded scheduled task. Request/result files are restricted to SYSTEM and
+Administrators, and the task and files are removed before the probe returns.
+The worker limits are 270 seconds for local validation and 120 seconds for
+failure capture, leaving cleanup time within the existing host-call deadlines.
+An invalid identity/result, timeout, worker failure, or cleanup failure is reported
+explicitly. No ConfigMgr directory permissions are changed by validation.
+
+The site-side TFTP probe binds its UDP socket before sending the request and
+temporarily allows inbound replies only from the resolved DP address to that
+socket's local port and process. TFTP's first DATA block normally comes from a
+server-selected transfer port, not UDP/69; an outbound UDP/69 request alone does
+not permit that reply through a stateful client firewall. The uniquely named
+local firewall rule is removed in `finally` on success and failure. Probe setup,
+malformed replies, and cleanup errors fail required delivery coverage.
+
+A timeout identifies the site-server probe's request/reply path, not every PXE
+client's path. If `SMSPXE.log` records the matching request and `sending`, inspect
+the return path and receiving host's firewall rather than claiming the responder
+is down or rebuilding the boot WIM. Local policy can still prevent a probe reply;
+the rule does not override explicit blocks or domain policy.
+
+For these **validation-only** corrections, update the host source and rerun
+**Phase 11**. Rerun Phase 8 only when producer access or content distribution
+actually needs repair, as described below.
+
 In a hierarchy, a CAS replication-readiness timeout is a failure, never an
 implicit ready/Active verdict. Cached ready flags are revalidated, and resumed
 Primaries also wait for an explicitly verified CAS handoff before dependent work.
@@ -159,8 +190,9 @@ settle before one recovery attempt per DP/source version. Phase 11 still require
 current Installed content and a working PXE chain; a successful TFTP first-block
 read alone does not prove that the current WIM is installed.
 
-After updating the host and guest DSC release, rerun the affected deployment from
-**Phase 8**, not just Phase 11: validation does not apply the permission repair or
+For producer-access or content-distribution fixes, update the host and guest DSC
+release and rerun the affected deployment from **Phase 8**, not just Phase 11:
+validation does not apply the permission repair or
 rerun content distribution. Check the captured Phase 8 execution timestamp, not
 only the Phase 11 host version, when confirming that new guest code ran.
 In a hierarchy, update/rerun the CAS as well as its Primaries so both sides use
@@ -174,6 +206,7 @@ Offline regression checks:
 ```powershell
 .\vmbuild\tools\Test-BootImageExpansion.ps1
 .\vmbuild\tools\Test-DpAccessRecovery.ps1
+.\vmbuild\tools\Test-Phase11PxeProbes.ps1
 .\vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1
 .\vmbuild\tools\Test-CmRoleFailureDiagnostics.ps1
 .\vmbuild\tools\Test-ReplicationFailureCapture.ps1

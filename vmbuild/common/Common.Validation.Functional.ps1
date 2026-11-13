@@ -2016,9 +2016,125 @@ function Test-SQLAOFunctionality {
 
     $sqlInstName = $CurrentItem.sqlInstanceName
     if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
+    $otherSqlPort = ($DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $otherNode } | Select-Object -First 1).sqlPort
 
     $scriptBlock = {
-        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP)
+        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $otherSqlPort)
+
+        $localSqlTarget = 'localhost'
+        $localReplicaName = $env:COMPUTERNAME
+        $otherReplicaName = $otherNode
+        $sqlServiceName = 'MSSQLSERVER'
+        if ($sqlInstName -ne 'MSSQLSERVER') {
+            $localSqlTarget += "\$sqlInstName"
+            $localReplicaName += "\$sqlInstName"
+            $otherReplicaName += "\$sqlInstName"
+            $sqlServiceName = "MSSQL`$$sqlInstName"
+        }
+        $escapedAgName = $agName.Replace("'", "''")
+
+        function Repair-SqlAoReplicaJoin {
+            param(
+                [string]$ServerInstance,
+                [string]$ReplicaName,
+                [string]$PartnerServerInstance,
+                [string]$PartnerReplicaName,
+                [string]$GroupName,
+                [System.Collections.Generic.List[string]]$Details
+            )
+
+            if (-not $GroupName -or -not $ServerInstance -or -not $ReplicaName -or
+                -not $PartnerServerInstance -or -not $PartnerReplicaName) {
+                throw 'Replica rejoin requires the configured AG and both physical SQL instances.'
+            }
+            $groupLiteral = $GroupName.Replace("'", "''")
+            $membershipQuery = @"
+SELECT ag.group_id AS GroupId, cs.replica_id AS ReplicaId,
+       cs.replica_server_name AS Replica, cs.join_state AS JoinState,
+       cs.join_state_desc AS JoinStateDescription, rs.role_desc AS LocalRole
+FROM sys.availability_groups_cluster ag
+JOIN sys.dm_hadr_availability_replica_cluster_states cs ON cs.group_id = ag.group_id
+LEFT JOIN sys.dm_hadr_availability_replica_states rs
+  ON rs.replica_id = cs.replica_id AND rs.group_id = cs.group_id AND rs.is_local = 1
+WHERE ag.name = N'$groupLiteral'
+  AND cs.replica_server_name = CONVERT(nvarchar(256), SERVERPROPERTY('ServerName'));
+"@
+            $sqlParams = @{ ConnectionTimeout = 10; QueryTimeout = 30; TrustServerCertificate = $true; ErrorAction = 'Stop' }
+            $membership = @(Invoke-Sqlcmd -ServerInstance $ServerInstance -Query $membershipQuery @sqlParams)
+            if ($membership.Count -ne 1 -or $membership[0].Replica -ine $ReplicaName -or
+                $null -eq $membership[0].JoinState -or $membership[0].JoinState -is [DBNull] -or
+                $membership[0].JoinState -notin @(0, 1, 2)) {
+                throw "Cannot establish '$ReplicaName' membership in configured AG '$GroupName' from cluster metadata; no automatic JOIN was attempted. Verify Phase 5 configuration and SQL permissions."
+            }
+            $member = $membership[0]
+            $Details.Add("INFO: AG '$GroupName' replica '$ReplicaName' cluster join state=$($member.JoinStateDescription)")
+            if ($member.JoinState -in @(1, 2)) { return }
+            if ($member.LocalRole -eq 'PRIMARY') {
+                throw "Refusing to JOIN '$ReplicaName': cluster metadata says NOT_JOINED but local SQL reports PRIMARY."
+            }
+
+            $groupId = [guid]$member.GroupId
+            $replicaId = [guid]$member.ReplicaId
+            if ($groupId -eq [guid]::Empty -or $replicaId -eq [guid]::Empty) {
+                throw "Missing group/replica identifiers for '$ReplicaName'; no automatic JOIN was attempted."
+            }
+            $replicaLiteral = $ReplicaName.Replace("'", "''")
+            $primaryQuery = @"
+SELECT ag.group_id AS GroupId, ar.replica_id AS ReplicaId,
+       CONVERT(nvarchar(256), SERVERPROPERTY('ServerName')) AS PrimaryReplica,
+       rs.role_desc AS PrimaryRole
+FROM sys.availability_groups ag
+JOIN sys.dm_hadr_availability_replica_states rs ON rs.group_id = ag.group_id AND rs.is_local = 1
+JOIN sys.availability_replicas ar ON ar.group_id = ag.group_id
+WHERE ag.name = N'$groupLiteral' AND ar.replica_server_name = N'$replicaLiteral';
+"@
+            $primary = @(Invoke-Sqlcmd -ServerInstance $PartnerServerInstance -Query $primaryQuery @sqlParams)
+            if ($primary.Count -ne 1 -or $primary[0].PrimaryRole -ne 'PRIMARY' -or
+                $primary[0].PrimaryReplica -ine $PartnerReplicaName -or
+                "$($primary[0].GroupId)" -ine "$groupId" -or "$($primary[0].ReplicaId)" -ine "$replicaId") {
+                throw "Cannot independently confirm '$PartnerReplicaName' is PRIMARY and configures the same AG/replica identifiers for '$ReplicaName'; no automatic JOIN was attempted."
+            }
+
+            $groupIdentifier = $GroupName.Replace(']', ']]')
+            # Recheck locally so a concurrent join or role change cannot trigger another JOIN.
+            $joinQuery = @"
+IF EXISTS (
+    SELECT 1 FROM sys.dm_hadr_availability_replica_cluster_states
+    WHERE group_id = '$groupId' AND replica_id = '$replicaId' AND join_state = 0
+      AND replica_server_name = CONVERT(nvarchar(256), SERVERPROPERTY('ServerName'))
+)
+AND NOT EXISTS (
+    SELECT 1 FROM sys.dm_hadr_availability_replica_states
+    WHERE group_id = '$groupId' AND is_local = 1 AND role_desc = 'PRIMARY'
+)
+BEGIN
+    ALTER AVAILABILITY GROUP [$groupIdentifier] JOIN;
+END;
+"@
+            $Details.Add("REMEDIATE: AG '$GroupName' replica '$ReplicaName' is NOT_JOINED; primary '$PartnerReplicaName' independently confirmed. Attempting guarded JOIN without database restore or reseeding.")
+            $null = Invoke-Sqlcmd -ServerInstance $ServerInstance -Query $joinQuery @sqlParams
+            $verified = @(Invoke-Sqlcmd -ServerInstance $ServerInstance -Query $membershipQuery @sqlParams)
+            if ($verified.Count -ne 1 -or $verified[0].Replica -ine $ReplicaName -or
+                "$($verified[0].GroupId)" -ine "$groupId" -or "$($verified[0].ReplicaId)" -ine "$replicaId" -or
+                $verified[0].JoinState -notin @(1, 2)) {
+                throw "Guarded JOIN did not establish membership for '$ReplicaName' in AG '$GroupName'; replica and database health remain unverified. No database was restored or reseeded."
+            }
+            $Details.Add("RECOVERED: AG '$GroupName' replica '$ReplicaName' membership verified after guarded JOIN; synchronization health still requires validation.")
+        }
+
+        function Test-SqlAoReplicaHealth {
+            param([object[]]$Replicas, [string]$LocalReplica, [string]$PartnerReplica)
+
+            if ($Replicas.Count -eq 0) { return $false }
+            $local = @($Replicas | Where-Object { $_.Replica -ieq $LocalReplica -and $_.IsLocal -eq 1 })
+            if ($local.Count -ne 1) { return $false }
+            if ($local[0].Role -eq 'PRIMARY') {
+                $partner = @($Replicas | Where-Object { $_.Replica -ieq $PartnerReplica -and $_.IsLocal -eq 0 -and $_.Role -eq 'SECONDARY' })
+                if ($Replicas.Count -ne 2 -or $partner.Count -ne 1) { return $false }
+            }
+            elseif ($local[0].Role -ne 'SECONDARY' -or $Replicas.Count -ne 1) { return $false }
+            return @($Replicas | Where-Object { $_.JoinState -notin @(1, 2) -or $_.ConnState -ne 'CONNECTED' -or $_.Health -ne 'HEALTHY' }).Count -eq 0
+        }
 
         $dnsDiagnostics = [ordered]@{
             SchemaVersion      = 1
@@ -2056,6 +2172,9 @@ function Test-SQLAOFunctionality {
         # ServerAddress across every NIC, skip loopback / APIPA / 0.0.0.0, and
         # try each candidate at the call site until one answers.
         $domain = (Get-CimInstance Win32_ComputerSystem).Domain
+        $otherSqlTarget = "$otherNode.$domain"
+        if ($sqlInstName -ne 'MSSQLSERVER') { $otherSqlTarget += "\$sqlInstName" }
+        if ($otherSqlPort -and "$otherSqlPort" -ne '1433') { $otherSqlTarget += ",$otherSqlPort" }
         $dnsCandidates = @(
             Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                 Where-Object { $_.ServerAddresses } |
@@ -2958,15 +3077,15 @@ SELECT adb.database_name, ag.name AS GroupName, drs.synchronization_state_desc
 FROM sys.dm_hadr_database_replica_states drs
 JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
 JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
-WHERE drs.is_local = 1 AND drs.is_suspended = 1
+WHERE drs.is_local = 1 AND drs.is_suspended = 1 AND ag.name = N'$escapedAgName'
 "@
-            $suspended = @(Invoke-Sqlcmd -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            $suspended = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
             if ($suspended.Count -gt 0) {
                 foreach ($db in $suspended) {
                     $results.Details.Add("REMEDIATE: Resuming suspended database '$($db.database_name)' in AG '$($db.GroupName)'")
                     try {
-                        $resumeQuery = "ALTER DATABASE [$($db.database_name)] SET HADR RESUME"
-                        Invoke-Sqlcmd -Query $resumeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $resumeQuery = "ALTER DATABASE [$($db.database_name.Replace(']', ']]'))] SET HADR RESUME"
+                        $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $resumeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Resumed '$($db.database_name)'")
                     }
                     catch {
@@ -2979,12 +3098,12 @@ WHERE drs.is_local = 1 AND drs.is_suspended = 1
 
             # 2b. Check endpoint state and restart if stopped
             $epQuery = "SELECT name, state_desc FROM sys.database_mirroring_endpoints"
-            $endpoints = @(Invoke-Sqlcmd -Query $epQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            $endpoints = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $epQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
             foreach ($ep in $endpoints) {
                 if ($ep.state_desc -ne 'STARTED') {
                     $results.Details.Add("REMEDIATE: Endpoint '$($ep.name)' is '$($ep.state_desc)', starting it")
                     try {
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name.Replace(']', ']]'))] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Endpoint '$($ep.name)' started")
                         Start-Sleep -Seconds 5
                     }
@@ -2994,14 +3113,20 @@ WHERE drs.is_local = 1 AND drs.is_suspended = 1
                 }
             }
 
+            Repair-SqlAoReplicaJoin -ServerInstance $localSqlTarget -ReplicaName $localReplicaName `
+                -PartnerServerInstance $otherSqlTarget -PartnerReplicaName $otherReplicaName `
+                -GroupName $agName -Details $results.Details
+
             # 2c. Check for DISCONNECTED replicas and cycle endpoint to force reconnection
             $disconnectedQuery = @"
 SELECT ag.name AS GroupName, rs.role_desc, rs.connected_state_desc, rs.is_local
 FROM sys.dm_hadr_availability_replica_states rs
 JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
-WHERE rs.connected_state_desc = 'DISCONNECTED'
+JOIN sys.dm_hadr_availability_replica_cluster_states cs
+  ON cs.replica_id = rs.replica_id AND cs.group_id = rs.group_id
+WHERE rs.connected_state_desc = 'DISCONNECTED' AND ag.name = N'$escapedAgName' AND cs.join_state IN (1, 2)
 "@
-            $disconnected = @(Invoke-Sqlcmd -Query $disconnectedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            $disconnected = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $disconnectedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
             if ($disconnected.Count -gt 0) {
                 $localDisc = @($disconnected | Where-Object { $_.is_local -eq 1 })
                 $remoteDisc = @($disconnected | Where-Object { $_.is_local -eq 0 })
@@ -3013,9 +3138,9 @@ WHERE rs.connected_state_desc = 'DISCONNECTED'
                 }
                 foreach ($ep in $endpoints) {
                     try {
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STOPPED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name.Replace(']', ']]'))] STATE = STOPPED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         Start-Sleep -Seconds 5
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name.Replace(']', ']]'))] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Cycled endpoint '$($ep.name)' (STOPPED -> STARTED)")
                     }
                     catch {
@@ -3026,12 +3151,12 @@ WHERE rs.connected_state_desc = 'DISCONNECTED'
                 Start-Sleep -Seconds 20
 
                 # Re-check for suspended databases after reconnect and resume them
-                $suspended2 = @(Invoke-Sqlcmd -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+                $suspended2 = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                 if ($suspended2.Count -gt 0) {
                     foreach ($db2 in $suspended2) {
                         $results.Details.Add("REMEDIATE: Resuming database '$($db2.database_name)' after endpoint cycle")
                         try {
-                            Invoke-Sqlcmd -Query "ALTER DATABASE [$($db2.database_name)] SET HADR RESUME" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                            $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER DATABASE [$($db2.database_name.Replace(']', ']]'))] SET HADR RESUME" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                             $results.Details.Add("OK: Resumed '$($db2.database_name)'")
                         }
                         catch {
@@ -3051,54 +3176,44 @@ SELECT ag.name AS GroupName,
        rs.role_desc AS Role,
        rs.connected_state_desc AS ConnState,
        rs.synchronization_health_desc AS Health,
+       rs.is_local AS IsLocal,
+       cs.join_state AS JoinState,
        ar.replica_server_name AS Replica
 FROM sys.dm_hadr_availability_replica_states rs
 JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
 JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
+LEFT JOIN sys.dm_hadr_availability_replica_cluster_states cs
+  ON cs.replica_id = rs.replica_id AND cs.group_id = rs.group_id
+WHERE ag.name = N'$escapedAgName'
 "@
             $results.Details.Add("CMD: AG health query with replica detail")
             $maxRetries = 5
             $healthy = $false
             for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
-                $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                if (-not $ag -or $ag.Count -eq 0) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: No availability group replicas found")
-                    break
-                }
-                $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                if ($unhealthy.Count -eq 0) {
-                    $healthy = $true
+                $ag = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                $healthy = Test-SqlAoReplicaHealth -Replicas $ag -LocalReplica $localReplicaName -PartnerReplica $otherReplicaName
+                if ($healthy) {
                     foreach ($r in $ag) {
                         $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
                     }
                     break
                 }
                 if ($attempt -lt $maxRetries) {
-                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries — $($unhealthy.Count) replica(s) not healthy, waiting 20s...")
+                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries -- AG '$agName' replica coverage/connectivity/health incomplete ($($ag.Count) row(s)), waiting 20s...")
                     Start-Sleep -Seconds 20
                 }
                 else {
-                    $results.Passed = $false
-                    foreach ($r in $ag) {
-                        $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
-                        $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
-                    }
+                    $results.Details.Add("WARN: AG '$agName' is not healthy after $maxRetries attempts; checking bounded restart recovery.")
                 }
             }
 
             # 3b. If still DISCONNECTED after retries, restart SQL on the appropriate node
             #
-            # Root cause: both SQLAO nodes started at different times. Each
-            # timed out trying to reach the other and neither retried. The
-            # fix is to restart SQL on the node that is NOT currently running
-            # this validation (the "other" node) so it freshly attempts to
-            # connect while we are already up and listening.  If only the
-            # local replica shows DISCONNECTED, restart locally instead.
+            # Never interrupt an unjoined partner's independent JOIN with a restart.
             if (-not $healthy) {
-                $stillDisconnected = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' })
-                $localStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.Replica -eq $env:COMPUTERNAME })
-                $remoteStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.Replica -ne $env:COMPUTERNAME })
+                $stillDisconnected = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.JoinState -in @(1, 2) })
+                $localStillDisc = @($stillDisconnected | Where-Object { $_.Replica -eq $localReplicaName })
+                $remoteStillDisc = @($stillDisconnected | Where-Object { $_.Replica -eq $otherReplicaName })
 
                 if ($stillDisconnected.Count -gt 0) {
                     # Determine restart target: prefer restarting the other node
@@ -3120,36 +3235,29 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                         try {
                             if ($restartIsRemote) {
                                 Invoke-Command -ComputerName $restartTarget -ScriptBlock {
-                                    Restart-Service MSSQLSERVER -Force -ErrorAction Stop
-                                } -ErrorAction Stop
+                                    param($serviceName)
+                                    Restart-Service -Name $serviceName -Force -ErrorAction Stop
+                                } -ArgumentList $sqlServiceName -ErrorAction Stop
                             }
                             else {
-                                Restart-Service MSSQLSERVER -Force -ErrorAction Stop
+                                Restart-Service -Name $sqlServiceName -Force -ErrorAction Stop
                             }
                             Start-Sleep -Seconds 30
                             $results.Details.Add("OK: SQL Server on '$restartTarget' restarted, rechecking AG health")
 
                             # Re-run health check after restart
                             for ($attempt2 = 1; $attempt2 -le 5; $attempt2++) {
-                                $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                                $unhealthy2 = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                                if ($unhealthy2.Count -eq 0) {
-                                    $healthy = $true
-                                    $results.Passed = $true
+                                $ag = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                                $healthy = Test-SqlAoReplicaHealth -Replicas $ag -LocalReplica $localReplicaName -PartnerReplica $otherReplicaName
+                                if ($healthy) {
                                     foreach ($r in $ag) {
                                         $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
                                     }
                                     break
                                 }
                                 if ($attempt2 -lt 5) {
-                                    $results.Details.Add("WARN: Post-restart attempt $attempt2/5 — $($unhealthy2.Count) replica(s) not healthy, waiting 20s...")
+                                    $results.Details.Add("WARN: Post-restart attempt $attempt2/5 -- AG '$agName' replica coverage/connectivity/health incomplete ($($ag.Count) row(s)), waiting 20s...")
                                     Start-Sleep -Seconds 20
-                                }
-                                else {
-                                    foreach ($r in $ag) {
-                                        $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
-                                        $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
-                                    }
                                 }
                             }
                         }
@@ -3162,14 +3270,20 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
 
             # 3c. Collect DB-level sync state for diagnostics if still unhealthy
             if (-not $healthy) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: AG '$agName' did not establish healthy expected replica coverage for '$localReplicaName' and '$otherReplicaName' ($($ag.Count) row(s)). Missing rows are not healthy replicas; verify cluster join state, database membership, and SQL error logs on both nodes.")
+                foreach ($r in $ag) {
+                    $results.Details.Add("  Replica '$($r.Replica)': role=$($r.Role), connection=$($r.ConnState), health=$($r.Health)")
+                }
                 $dbStateQuery = @"
 SELECT adb.database_name, drs.synchronization_state_desc, drs.synchronization_health_desc,
        drs.is_suspended, drs.suspend_reason_desc
 FROM sys.dm_hadr_database_replica_states drs
 JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
-WHERE drs.is_local = 1
+JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
+WHERE drs.is_local = 1 AND ag.name = N'$escapedAgName'
 "@
-                $dbStates = @(Invoke-Sqlcmd -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+                $dbStates = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                 foreach ($ds in $dbStates) {
                     $suspInfo = if ($ds.is_suspended) { " (SUSPENDED: $($ds.suspend_reason_desc))" } else { '' }
                     $results.Details.Add("  DB '$($ds.database_name)': sync=$($ds.synchronization_state_desc), health=$($ds.synchronization_health_desc)$suspInfo")
@@ -3183,14 +3297,23 @@ WHERE drs.is_local = 1
             if ($agName) {
                 $results.Details.Add("CMD: Check TESTDB membership in AG '$agName'")
                 try {
-                    $agDBs = @(Invoke-Sqlcmd -Query "SELECT database_name FROM sys.availability_databases_cluster" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                    if ($agDBs.database_name -contains 'TESTDB') {
-                        $results.Details.Add("OK: TESTDB is a member of the availability group")
+                    $membershipQuery = @"
+SELECT adb.database_name, drs.database_id AS LocalDatabaseId
+FROM sys.availability_databases_cluster adb
+JOIN sys.availability_groups_cluster ag ON ag.group_id = adb.group_id
+LEFT JOIN sys.dm_hadr_database_replica_states drs
+  ON drs.group_database_id = adb.group_database_id AND drs.is_local = 1
+WHERE ag.name = N'$escapedAgName';
+"@
+                    $agDBs = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $membershipQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                    $localTestDb = @($agDBs | Where-Object { $_.database_name -eq 'TESTDB' -and $null -ne $_.LocalDatabaseId -and $_.LocalDatabaseId -isnot [DBNull] })
+                    if ($localTestDb.Count -eq 1) {
+                        $results.Details.Add("OK: TESTDB is a local member of AG '$agName'")
                     }
                     else {
                         $results.Passed = $false
                         $dbList = if ($agDBs.Count -gt 0) { $agDBs.database_name -join ', ' } else { '(none)' }
-                        $results.Details.Add("FAIL: TESTDB not found in AG databases: $dbList")
+                        $results.Details.Add("FAIL: TESTDB is not a verified local member of AG '$agName' (cluster database list: $dbList). Replica JOIN alone does not prepare or join secondary databases; verify existing database state before manual recovery.")
                     }
                 }
                 catch {
@@ -3449,20 +3572,7 @@ WHERE drs.is_local = 1
             # node instead — that's always a network hop where Kerberos
             # should be in effect.
             if ($otherNode) {
-                # Use FQDN for the remote connection — short hostnames can
-                # prevent SqlClient from constructing the correct Kerberos
-                # SPN, causing silent NTLM fallback.
-                try { $remoteNodeFQDN = ([System.Net.Dns]::GetHostEntry($otherNode)).HostName } catch { $remoteNodeFQDN = $otherNode }
-                # GetHostEntry can return mDNS suffix (.local) instead of
-                # the AD domain suffix — Kerberos SPNs are registered under
-                # the real domain, so .local causes silent NTLM fallback.
-                if ($domain -and -not $remoteNodeFQDN.EndsWith(".$domain", [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $remoteNodeFQDN = "$otherNode.$domain"
-                }
-                $remoteConnStr = $remoteNodeFQDN
-                if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
-                    $remoteConnStr = "$remoteNodeFQDN\$sqlInstName"
-                }
+                $remoteConnStr = $otherSqlTarget
                 $results.Details.Add("CMD: Check auth_scheme on remote node '$remoteConnStr'")
                 $authQuery = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
                 $wd = Invoke-WithWatchdog -TimeoutSec 30 -MaxAttempts 3 -ArgumentList @($remoteConnStr, $authQuery) -ScriptBlock {
@@ -3510,15 +3620,14 @@ WHERE drs.is_local = 1
             # ==============================================================
             Write-Progress -Activity $progressActivity -Status "Verifying TESTDB recovery model and log backups"
             if ($otherNode -and $healthy) {
-                $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
-                $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
+                $localRole = @($ag | Where-Object { $_.IsLocal -eq 1 })[0].Role
 
                 if ($localRole -eq 'PRIMARY') {
                     # 8a. Recovery model must be FULL for AG databases
                     $results.Details.Add("CMD: Check TESTDB recovery model")
                     try {
                         $rmQuery = "SELECT name, recovery_model_desc FROM sys.databases WHERE name = 'TESTDB'"
-                        $rmResult = Invoke-Sqlcmd -Query $rmQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $rmResult = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $rmQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         if ($rmResult.recovery_model_desc -eq 'FULL') {
                             $results.Details.Add("OK: TESTDB recovery model is FULL")
                         }
@@ -3547,7 +3656,7 @@ LEFT JOIN (
 ) h ON h.job_id = j.job_id AND h.rn = 1
 WHERE j.name LIKE 'MemLabs DatabaseBackup%'
 "@
-                        $jobs = @(Invoke-Sqlcmd -Query $jobQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                        $jobs = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $jobQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                         if ($jobs.Count -eq 0) {
                             $results.Passed = $false
                             $results.Details.Add("FAIL: No MemLabs DatabaseBackup agent jobs found")
@@ -3596,7 +3705,7 @@ EXECUTE [dbo].[DatabaseBackup]
     @LogToTable = 'Y',
     @ChangeBackupType = 'Y'
 "@
-                        Invoke-Sqlcmd -Query $agBackupQuery -QueryTimeout 120 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $agBackupQuery -QueryTimeout 120 -TrustServerCertificate -ErrorAction Stop
                         $activeTestMsg = "OK: AG log backup completed successfully on primary"
                         if ($agJobLastRunFailed) {
                             $activeTestMsg += " (scheduled job failure above was transient)"
@@ -3610,12 +3719,12 @@ EXECUTE [dbo].[DatabaseBackup]
                     # 8c. Run a log backup and verify log space is recycled
                     $results.Details.Add("CMD: BACKUP LOG [TESTDB] TO DISK = 'NUL' (validate log backup works)")
                     try {
-                        Invoke-Sqlcmd -Query "BACKUP LOG [TESTDB] TO DISK = 'NUL'" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "BACKUP LOG [TESTDB] TO DISK = 'NUL'" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Log backup of TESTDB completed successfully")
 
                         # After a successful log backup, log_reuse_wait should no longer be LOG_BACKUP
                         $logQuery = "SELECT log_reuse_wait_desc FROM sys.databases WHERE name = 'TESTDB'"
-                        $logResult = Invoke-Sqlcmd -Query $logQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $logResult = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $logQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $waitReason = $logResult.log_reuse_wait_desc
                         if ($waitReason -eq 'LOG_BACKUP') {
                             $results.Details.Add("WARN: TESTDB log_reuse_wait is still LOG_BACKUP after backup (may need a checkpoint)")
@@ -3636,16 +3745,7 @@ EXECUTE [dbo].[DatabaseBackup]
             # ==============================================================
             Write-Progress -Activity $progressActivity -Status "Testing cross-node replication"
             if ($otherNode -and $healthy) {
-                # Reuse localRole from check #8 if available, otherwise query it
-                if (-not $localRole) {
-                    $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
-                    $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
-                }
-
-                $secondaryConnStr = $otherNode
-                if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
-                    $secondaryConnStr = "$otherNode\$sqlInstName"
-                }
+                $secondaryConnStr = $otherSqlTarget
 
                 if ($localRole -eq 'PRIMARY') {
                     $results.Details.Add("CMD: Cross-node replication test (write local PRIMARY, read from '$secondaryConnStr')")
@@ -3659,7 +3759,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'MemLabsValidation' AND ty
 DELETE FROM dbo.MemLabsValidation WHERE CreatedAt < DATEADD(HOUR, -1, SYSUTCDATETIME());
 INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
 "@
-                        Invoke-Sqlcmd -Query $writeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $writeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Wrote test value '$testId' to TESTDB on primary")
 
                         # SynchronousCommit hardens the log on both replicas before commit
@@ -3685,7 +3785,7 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
                     # On secondary role, verify TESTDB is readable
                     $results.Details.Add("CMD: Verify TESTDB readable on secondary role")
                     try {
-                        $readCheck = Invoke-Sqlcmd -Query "USE [TESTDB]; SELECT COUNT(*) AS Cnt FROM sys.tables" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $readCheck = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "USE [TESTDB]; SELECT COUNT(*) AS Cnt FROM sys.tables" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: TESTDB is readable on secondary ($($readCheck.Cnt) user table(s))")
                     }
                     catch {
@@ -3743,7 +3843,7 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
     # Format-TestResult records a FAIL for the VM and the phase completes.
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
-        -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP `
+        -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $otherSqlPort `
         -DisplayName "Phase11-SQLAO-Test" -SuppressLog -AsJob -TimeoutSeconds 600 -PollProgress
 
     try {
@@ -6453,7 +6553,7 @@ function Test-SiteSystemFunctionality {
                     }
                     if ($payloadProbeErrors.Count) {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: PXE payload could NOT be measured: $($payloadProbeErrors -join '; '). An unreadable path is not a missing payload. Verify SMS_DP$ share/NTFS permissions and the owning site computer's local Administrator membership; a stale payload can still answer TFTP while new content transfers fail with Access Denied.")
+                        $results.Details.Add("FAIL: PXE payload could NOT be measured: $($payloadProbeErrors -join '; '). An unreadable path is not a missing payload. This check runs as SYSTEM because ConfigMgr can restrict sms\bin to SYSTEM and Local Service. Review the configured payload path and captured DP logs; producer SMS_DP$ share access and current Installed content are separate requirements.")
                     }
                     if ($bootFiles.Count -eq 0 -and $payloadProbeErrors.Count -eq 0) {
                         $missingWhere = if ($smsBootDirs.Count) { "'$($smsBootDirs -join "', '")' contains no boot files" } else { "no SMSBoot folder exists under $($tftpRoots -join ', ')" }
@@ -6591,8 +6691,19 @@ function Test-SiteSystemFunctionality {
 
             return $results
         }
+        $localDpProbe = $localDpScript
+        if ($dpServesOsd) {
+            # Administrator elevation does not grant access to ConfigMgr's service-only bin ACL.
+            $localDpProbe = [scriptblock]::Create(@"
+param(`$dpServesOsdInner)
+function Invoke-Phase11LocalSystemProbe { $(${function:Invoke-Phase11LocalSystemProbe}) }
+`$result = Invoke-Phase11LocalSystemProbe -ScriptBlock { $localDpScript } -ArgumentList @(`$dpServesOsdInner) -TimeoutSeconds 270
+`$null = `$result.Details.Add('INFO: protected DP payload checked as SYSTEM without changing ConfigMgr permissions.')
+return `$result
+"@)
+        }
         $localDpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $localDpScript -ArgumentList ([string]$dpServesOsd) -DisplayName "Phase11-DPLocal-Test" -SuppressLog `
+            -ScriptBlock $localDpProbe -ArgumentList ([string]$dpServesOsd) -DisplayName "Phase11-DPLocal-Test" -SuppressLog `
             -AsJob -TimeoutSeconds 300
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $localDpResult)) {
             $allPassed = $false
@@ -9257,9 +9368,131 @@ function Save-Phase11OsdContentFailureLogs {
     }
     foreach ($dpName in @($DistributionPointNames | Where-Object { $_ } |
             ForEach-Object { ("$_" -split '\.')[0] } | Sort-Object -Unique)) {
+        $dpCollector = [scriptblock]::Create(@"
+function Invoke-Phase11LocalSystemProbe { $(${function:Invoke-Phase11LocalSystemProbe}) }
+Invoke-Phase11LocalSystemProbe -ScriptBlock { $Phase11DpContentLogCollector } -TimeoutSeconds 120
+"@)
         $null = Save-Phase11GuestLogs -VMName $dpName -DomainName $domain `
-            -RoleLabel 'OSD-DP' -Collector $Phase11DpContentLogCollector
+            -RoleLabel 'OSD-DP' -Collector $dpCollector
     }
+}
+
+function Invoke-Phase11LocalSystemProbe {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @(),
+        [ValidateRange(1, 270)][int]$TimeoutSeconds = 120
+    )
+
+    $taskName = "MemLabs-Phase11Pxe-$([guid]::NewGuid().ToString('N'))"
+    $workDir = Join-Path $env:windir "Temp\$taskName"
+    $inputPath = Join-Path $workDir 'request.clixml'
+    $outputPath = Join-Path $workDir 'response.clixml'
+    $pendingPath = Join-Path $workDir 'response.pending.clixml'
+    $workCreated = $false
+    $registered = $false
+    $failure = $null
+    $output = $null
+    $cleanupErrors = [System.Collections.Generic.List[string]]::new()
+    try {
+        $null = New-Item -ItemType Directory -Path $workDir -ErrorAction Stop
+        $workCreated = $true
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    ([Security.Principal.SecurityIdentifier]$sid), 'FullControl',
+                    'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+        }
+        Set-Acl -LiteralPath $workDir -AclObject $acl -ErrorAction Stop
+        [pscustomobject]@{
+            ProbeId = $taskName; ScriptText = $ScriptBlock.ToString(); ArgumentList = $ArgumentList
+        } | Export-Clixml -LiteralPath $inputPath -Depth 10 -ErrorAction Stop
+
+        $worker = {
+            param($InputPath, $OutputPath, $PendingPath)
+            $request = Import-Clixml -LiteralPath $InputPath -ErrorAction Stop
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            try { $identitySid = $identity.User.Value }
+            finally { $identity.Dispose() }
+            $response = [pscustomobject]@{
+                ProbeId = $request.ProbeId; IdentitySid = $identitySid
+                Succeeded = $false; Output = $null; Error = ''
+            }
+            try {
+                $probe = [scriptblock]::Create($request.ScriptText)
+                $arguments = @($request.ArgumentList)
+                $response.Output = & $probe @arguments
+                $response.Succeeded = $true
+            }
+            catch { $response.Error = $_.Exception.Message }
+            $response | Export-Clixml -LiteralPath $PendingPath -Depth 20 -ErrorAction Stop
+            Move-Item -LiteralPath $PendingPath -Destination $OutputPath -ErrorAction Stop
+            if (-not $response.Succeeded) { exit 1 }
+        }
+        $command = "& { $worker } '$($inputPath.Replace("'", "''"))' '$($outputPath.Replace("'", "''"))' '$($pendingPath.Replace("'", "''"))'"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $action = New-ScheduledTaskAction -Execute (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded" -ErrorAction Stop
+        $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest -ErrorAction Stop
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([timespan]::FromSeconds($TimeoutSeconds)) `
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ErrorAction Stop
+        $null = Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop
+        $registered = $true
+        $startedAt = (Get-Date).AddSeconds(-1)
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        $wait = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $outputPath -ErrorAction Stop)) {
+            if ($wait.Elapsed.TotalSeconds -ge $TimeoutSeconds) { throw "SYSTEM DP probe timed out after $TimeoutSeconds seconds." }
+            $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+            if ($info.LastRunTime -ge $startedAt -and $task.State -in @('Ready', 'Disabled') -and
+                -not (Test-Path -LiteralPath $outputPath -ErrorAction Stop)) {
+                throw "SYSTEM DP probe ended without a response (LastTaskResult=$($info.LastTaskResult))."
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $response = Import-Clixml -LiteralPath $outputPath -ErrorAction Stop
+        if (-not $response -or $response.ProbeId -ne $taskName -or $response.IdentitySid -ne 'S-1-5-18' -or
+            $response.Succeeded -isnot [bool]) {
+            throw 'SYSTEM DP probe returned an invalid identity or response envelope.'
+        }
+        if (-not $response.Succeeded) { throw "SYSTEM DP probe failed: $($response.Error)" }
+        $output = $response.Output
+    }
+    catch { $failure = $_ }
+    finally {
+        $taskStopped = -not $registered
+        if ($registered) {
+            try {
+                if ((Get-ScheduledTask -TaskName $taskName -ErrorAction Stop).State -eq 'Running') {
+                    Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                    $stopWait = [Diagnostics.Stopwatch]::StartNew()
+                    while ((Get-ScheduledTask -TaskName $taskName -ErrorAction Stop).State -eq 'Running') {
+                        if ($stopWait.Elapsed.TotalSeconds -ge 5) { throw 'SYSTEM DP probe task did not stop within five seconds.' }
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+                $taskStopped = $true
+            }
+            catch { $cleanupErrors.Add("task '$taskName': $($_.Exception.Message)") }
+        }
+        if ($workCreated -and $taskStopped) {
+            foreach ($path in @($inputPath, $pendingPath, $outputPath, $workDir)) {
+                try {
+                    if (Test-Path -LiteralPath $path -ErrorAction Stop) { Remove-Item -LiteralPath $path -ErrorAction Stop }
+                }
+                catch { $cleanupErrors.Add("'$path': $($_.Exception.Message)") }
+            }
+        }
+    }
+    if ($cleanupErrors.Count) {
+        throw "SYSTEM DP probe cleanup failed ($workDir): $($cleanupErrors -join '; '). Probe failure: $failure"
+    }
+    if ($failure) { throw $failure }
+    return $output
 }
 
 # Collector scriptblocks used by the DP / pull-DP diagnostics below. Each is
@@ -9277,7 +9510,7 @@ function Invoke-TftpReadProbe {
         host firewall, the listener and the file in one shot.
 
         The reply separates three failures that are indistinguishable from outside:
-          NoResponse    UDP/69 blocked, or nothing is listening
+          NoResponse    no reply reached this probe (request or return path)
           FileNotFound  responder IS answering, but that file is not there (error 1)
           Served        the file is actually served
 
@@ -9293,33 +9526,63 @@ function Invoke-TftpReadProbe {
 
     $out = [pscustomobject]@{ Server = $Server; FileName = $FileName; Result = 'Error'; Bytes = 0; Detail = '' }
     $udp = $null
+    $firewallRuleName = "MemLabs-Phase11Tftp-$([guid]::NewGuid().ToString('N'))"
+    $firewallRuleCreated = $false
+    $requestSent = $false
+    $localPort = 0
+    $serverAddress = $null
     try {
-        $udp = New-Object System.Net.Sockets.UdpClient
+        $serverAddress = @([System.Net.Dns]::GetHostAddresses($Server) |
+                Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork }) | Select-Object -First 1
+        if (-not $serverAddress) { throw "No IPv4 address was resolved for '$Server'." }
+        $serverEndpoint = [System.Net.IPEndPoint]::new($serverAddress, $Port)
+        $udp = New-Object System.Net.Sockets.UdpClient -ArgumentList 0
         $udp.Client.ReceiveTimeout = $TimeoutMs
+        $localPort = $udp.Client.LocalEndPoint.Port
+        # TFTP DATA comes from a server-selected transfer port, not necessarily UDP/69.
+        $rule = New-NetFirewallRule -Name $firewallRuleName -DisplayName 'MemLabs Phase 11 TFTP probe' `
+            -Direction Inbound -Action Allow -Protocol UDP -LocalPort $localPort `
+            -RemoteAddress $serverAddress.IPAddressToString -Program ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) `
+            -Profile Any -PolicyStore PersistentStore -ErrorAction Stop
+        $firewallRuleCreated = $true
+        if (-not $rule -or $rule.Name -ne $firewallRuleName) { throw 'TFTP probe firewall rule creation returned no matching rule.' }
         $req = New-Object System.Collections.Generic.List[byte]
         $req.Add(0); $req.Add(1)
         $req.AddRange([System.Text.Encoding]::ASCII.GetBytes($FileName)); $req.Add(0)
         $req.AddRange([System.Text.Encoding]::ASCII.GetBytes('octet')); $req.Add(0)
         $payload = $req.ToArray()
-        [void]$udp.Send($payload, $payload.Length, $Server, $Port)
+        [void]$udp.Send($payload, $payload.Length, $serverEndpoint)
+        $requestSent = $true
         $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
         $resp = $udp.Receive([ref]$ep)
         if ($null -eq $resp -or $resp.Length -lt 4) {
-            $out.Result = 'NoResponse'
+            $out.Result = 'Error'
             $out.Detail = 'reply was empty or truncated'
+            return $out
+        }
+        if (-not $ep.Address.Equals($serverAddress)) {
+            $out.Detail = "reply came from unexpected server $($ep.Address), expected $serverAddress"
             return $out
         }
         $opcode = ([int]$resp[0] * 256) + [int]$resp[1]
         if ($opcode -eq 3) {
+            $block = ([int]$resp[2] * 256) + [int]$resp[3]
+            if ($block -ne 1 -or $resp.Length -eq 4) {
+                $out.Detail = "expected nonempty DATA block 1, received block $block with $($resp.Length - 4) byte(s)"
+                return $out
+            }
             $out.Result = 'Served'
             $out.Bytes = $resp.Length - 4
-            $out.Detail = "DATA block $((([int]$resp[2] * 256) + [int]$resp[3])), $($out.Bytes) byte(s)"
+            $out.Detail = "DATA block $block, $($out.Bytes) byte(s), server $ep -> client UDP/$localPort"
             # Abort instead of leaving the server retransmitting block 1 until it gives up.
             try {
                 $abort = [byte[]]@(0, 5, 0, 0, 0)
                 [void]$udp.Send($abort, $abort.Length, $ep)
             }
-            catch { }
+            catch {
+                $out.Result = 'Error'
+                $out.Detail += "; aborting the test transfer failed: $($_.Exception.Message)"
+            }
         }
         elseif ($opcode -eq 5) {
             $code = ([int]$resp[2] * 256) + [int]$resp[3]
@@ -9333,16 +9596,32 @@ function Invoke-TftpReadProbe {
             $out.Detail = "unexpected TFTP opcode $opcode"
         }
     }
-    catch [System.Net.Sockets.SocketException] {
-        $out.Result = 'NoResponse'
-        $out.Detail = $_.Exception.Message
-    }
     catch {
         $out.Result = 'Error'
         $out.Detail = $_.Exception.Message
+        for ($exception = $_.Exception; $exception; $exception = $exception.InnerException) {
+            if ($exception -is [System.Net.Sockets.SocketException] -and $requestSent) {
+                $out.Result = 'NoResponse'
+                $out.Detail = "server $serverAddress -> client UDP/$localPort (TFTP replies use a server-selected transfer port): $($exception.Message)"
+                break
+            }
+        }
     }
     finally {
-        if ($udp) { try { $udp.Close() } catch { } }
+        if ($udp) {
+            try { $udp.Close() }
+            catch {
+                $out.Result = 'Error'
+                $out.Detail += "; closing the TFTP probe socket failed: $($_.Exception.Message)"
+            }
+        }
+        if ($firewallRuleCreated) {
+            try { Remove-NetFirewallRule -Name $firewallRuleName -PolicyStore PersistentStore -ErrorAction Stop }
+            catch {
+                $out.Result = 'Error'
+                $out.Detail += "; removing probe firewall rule '$firewallRuleName' failed: $($_.Exception.Message)"
+            }
+        }
     }
     return $out
 }
@@ -15687,17 +15966,19 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             }
                             elseif ($probe.Result -eq 'NoResponse') {
                                 $results.Passed = $false
-                                $results.Details.Add("FAIL: no TFTP response from $tftpDp on UDP/69 for '$($probe.FileName)' [$($probe.Detail)]. Every PXE boot stops here. The responder service is down, or UDP/69 is blocked between this site server and that DP -- content state and DP settings all look fine and cannot see this.")
+                                $results.Details.Add("FAIL: no TFTP reply reached this site-server probe from $tftpDp for '$($probe.FileName)' [$($probe.Detail)]. Check both the UDP/69 request and the return path from the responder's transfer port, including the receiving host's firewall. A request/sending entry in SMSPXE.log proves the responder received the request; this timeout alone does not prove the responder is down or that PXE clients on another path cannot boot.")
                             }
                             else {
-                                $results.Details.Add("WARN: TFTP read of '$($probe.FileName)' from $tftpDp was inconclusive [$($probe.Detail)] -- treat as NOT measured")
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: TFTP read of '$($probe.FileName)' from $tftpDp was inconclusive [$($probe.Detail)] -- required PXE delivery was NOT measured")
                             }
                         }
                     }
                 }
             }
             catch {
-                $results.Details.Add("WARN: TFTP read probe could not run, so PXE file delivery was NOT measured: $($_.Exception.Message)")
+                $results.Passed = $false
+                $results.Details.Add("FAIL: TFTP read probe could not run, so required PXE file delivery was NOT measured: $($_.Exception.Message)")
             }
         }
 

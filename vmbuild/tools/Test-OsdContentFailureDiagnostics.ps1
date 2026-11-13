@@ -36,6 +36,7 @@ function Get-TestDefinition {
     [scriptblock]::Create($definitions[0].Extent.Text)
 }
 
+. (Get-TestDefinition 'Invoke-Phase11LocalSystemProbe')
 . (Get-TestDefinition 'Save-Phase11OsdContentFailureLogs')
 & {
     $Phase11SmsSiteLogCollector = { 'site' }
@@ -47,7 +48,12 @@ function Get-TestDefinition {
     }
     function Save-Phase11GuestLogs {
         param($VMName, $DomainName, $RoleLabel, $Collector, $TimeoutSeconds)
-        $state.Calls.Add([pscustomobject]@{ VM = $VMName; Kind = $Collector.ToString().Trim(); Domain = $DomainName })
+        $kind = $Collector.ToString().Trim()
+        if ($RoleLabel -eq 'OSD-DP') {
+            Assert-True ($kind.Contains('Invoke-Phase11LocalSystemProbe -ScriptBlock')) 'Protected DP failure evidence is not collected as SYSTEM.'
+            $kind = "'dp'"
+        }
+        $state.Calls.Add([pscustomobject]@{ VM = $VMName; Kind = $kind; Domain = $DomainName })
     }
     function Add-Phase11Output { param($Message) }
     function Write-Log {

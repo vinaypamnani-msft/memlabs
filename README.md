@@ -2119,3 +2119,26 @@ read. Standalone and other non-SQLAO SQL instances retain their existing setting
 Serial execution is a lab policy, not a guaranteed fix for SQL engine error 5243.
 Validate with `vmbuild\tools\Test-SqlAoMaxDop.ps1` and
 `vmbuild\tools\Test-SqlAoSetupCanaryRecovery.ps1`.
+
+Phase 11 can rejoin a SQLAO replica only when cluster metadata explicitly reports
+`NOT_JOINED` for the configured AG and physical instance, and a direct query to
+the configured partner independently confirms it is the primary with matching
+group and replica IDs. The guarded `JOIN` is followed by membership readback and
+bounded health checks. Missing/ambiguous metadata or SQL errors fail visibly;
+they never justify a speculative join. No database is dropped, restored,
+reseeded, or force-failed over. Joining a replica does not prepare its secondary
+databases: unverified local TESTDB membership still fails and requires review of
+the existing database state before manual recovery.
+
+AG checks are scoped to the configured group and SQL instance. A primary must
+report both expected replicas joined, connected, and healthy; a secondary must
+report its own joined, connected, healthy replica. Empty or incomplete results
+never pass, including after a restart, and successful AG recovery does not erase
+unrelated failures.
+Any existing restart recovery targets the configured SQL service, including named
+instances; partner SQL connections retain their configured physical port.
+Endpoint cycling and service restarts skip unjoined replicas so parallel
+validation cannot interrupt the partner's guarded join.
+Validate without changing guests with `vmbuild\tools\Test-Phase11SqlAoRecovery.ps1`.
+For the SYSTEM-identity and TFTP-reply probe corrections, see
+[Phase 11 probe identity and TFTP replies](vmbuild/tools/OsdContentDiagnostics.md#phase-11-probe-identity-and-tftp-replies).
