@@ -29,12 +29,26 @@ process {
                     throw "Invalid JSON in '$($file.FullName)' at line $lineNumber`: $($_.Exception.Message)"
                 }
 
-                if ($record.PackageId) {
+                if ($record.PackageId -or $record.Type -eq 'ClientPackageCoverage') {
                     $summaries = @($record.Summarizer | ForEach-Object {
                             "$($_.Server)=$($_.StateName)(v$($_.SourceVersion))"
                         })
                     $targets = @($record.Targeting | ForEach-Object {
-                            "$($_.Server)=stored:$($_.StoredPkgVersion)/source:$($_.SourceVersion)/refresh:$($_.RefreshNow)"
+                            $targetState = [System.Collections.Generic.List[string]]::new()
+                            if ($_.PSObject.Properties['StoredPkgVersion'] -and
+                                -not [string]::IsNullOrWhiteSpace("$($_.StoredPkgVersion)")) {
+                                $targetState.Add("stored:$($_.StoredPkgVersion)")
+                            }
+                            if ($_.PSObject.Properties['SourceVersion'] -and
+                                -not [string]::IsNullOrWhiteSpace("$($_.SourceVersion)")) {
+                                $targetState.Add("source:$($_.SourceVersion)")
+                            }
+                            if ($_.PSObject.Properties['SiteCode'] -and
+                                -not [string]::IsNullOrWhiteSpace("$($_.SiteCode)")) {
+                                $targetState.Add("site:$($_.SiteCode)")
+                            }
+                            $targetState.Add("refresh:$($_.RefreshNow)")
+                            "$($_.Server)=$($targetState -join '/')"
                         })
                     $nodes = @($record.Nodes | ForEach-Object {
                             if ($_.Error) {

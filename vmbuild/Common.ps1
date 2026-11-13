@@ -112,7 +112,7 @@ Function Write-ProgressDiagLog {
             $diagPath = Join-Path $base "progressdiag.log"
             $global:ProgressDiagPath = $diagPath
         }
-        $line = "{0} [pid:{1}] {2}`r`n" -f (Get-Date -Format "HH:mm:ss.fff"), $PID, $Message
+        $line = Protect-MemLabsLogText ("{0} [pid:{1}] {2}`r`n" -f (Get-Date -Format "HH:mm:ss.fff"), $PID, $Message)
         [System.IO.File]::AppendAllText($diagPath, $line)
     }
     catch {}
@@ -397,6 +397,41 @@ if (-not $global:MemLabsRunId) {
     }
 }
 
+function Protect-MemLabsLogText {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $commonState = $ExecutionContext.SessionState.PSVariable.GetValue('Common')
+    if ($null -eq $commonState) { return $Text }
+    $credential = $null
+    if ($commonState -is [System.Collections.IDictionary]) {
+        $credential = $commonState['LocalAdmin']
+    }
+    else {
+        $property = $commonState.PSObject.Properties['LocalAdmin']
+        if ($property) { $credential = $property.Value }
+    }
+    if ($credential -isnot [System.Management.Automation.PSCredential]) { return $Text }
+
+    # The cache file's loaded value can appear anywhere in native errors, not just password fields.
+    $password = $credential.GetNetworkCredential().Password
+    if ([string]::IsNullOrEmpty($password)) { return $Text }
+    $variants = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    [void]$variants.Add($password)
+    [void]$variants.Add($password.Replace("'", "''"))
+    $jsonEscaped = Get-JsonLogEscaped -Value $password
+    [void]$variants.Add($jsonEscaped)
+    [void]$variants.Add($jsonEscaped.Replace("'", '\u0027').Replace('<', '\u003c').Replace('>', '\u003e').Replace('&', '\u0026'))
+    $serialized = ConvertTo-Json -InputObject $password -Compress
+    [void]$variants.Add($serialized.Substring(1, $serialized.Length - 2))
+    [void]$variants.Add([System.Security.SecurityElement]::Escape($password))
+    [void]$variants.Add([Uri]::EscapeDataString($password))
+    foreach ($variant in @($variants | Sort-Object -Property Length -Descending)) {
+        $Text = $Text.Replace($variant, '[REDACTED]')
+    }
+    return $Text
+}
+
 function Get-JsonLogEscaped {
     # Minimal RFC-8259 string escaping for a single JSON value. The text has
     # already been stripped of control/non-ASCII chars (except TAB) upstream in
@@ -438,6 +473,7 @@ function Add-LogBufferText {
     # MemLabs.LogFlusher timer callback. StringBuilder is not thread-safe, and an
     # Append landing between the flusher's ToString() and its clear used to vanish.
     param([object]$Entry, [string]$Text)
+    $Text = Protect-MemLabsLogText -Text $Text
     [System.Threading.Monitor]::Enter($Entry.Builder)
     try { [void]$Entry.Builder.Append($Text) }
     finally { [System.Threading.Monitor]::Exit($Entry.Builder) }
@@ -450,6 +486,7 @@ function Add-LogTextToFile {
     # measured 144 records silently clobbered across 8 writers. Let the OS reject the
     # second writer and retry: a sharing violation must cost latency, not a record.
     param([string]$Path, [string]$Text, [int]$Attempts = 12)
+    $Text = Protect-MemLabsLogText -Text $Text
     for ($i = 1; $i -le $Attempts; $i++) {
         try {
             [System.IO.File]::AppendAllText($Path, $Text, [System.Text.Encoding]::UTF8)
@@ -542,8 +579,8 @@ function Flush-LogBuffer {
             if ($entry.Builder.Length -gt $global:LogBufferHardCapBytes) {
                 $lost = $entry.Builder.Length
                 $entry.Builder.Length = 0
-                [void]$entry.Builder.AppendLine(
-                    "*** MemLabs logging DROPPED $lost buffered chars for $Path : $($_.Exception.Message) ***")
+                [void]$entry.Builder.AppendLine((Protect-MemLabsLogText (
+                    "*** MemLabs logging DROPPED $lost buffered chars for $Path : $($_.Exception.Message) ***")))
                 $entry.LastFlushUtc = [DateTime]::UtcNow
             }
         }
@@ -864,6 +901,8 @@ function Write-Log {
     }
 
     if ($Text -is [string]) { $Text = $Text.ToString().Trim() }
+    $protectedText = Protect-MemLabsLogText -Text "$Text"
+    if ($Text -is [string] -or $protectedText -cne "$Text") { $Text = $protectedText }
     # $Text = "[$caller] $Text"
 
     if ($ShowNotification.IsPresent) {
@@ -1107,7 +1146,7 @@ function Write-Log {
             try {
                 # Last-resort direct append; ignore failure.
                 if ($logText -and $Common -and $Common.LogPath) {
-                    $logText | Out-File -LiteralPath $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
+                    Protect-MemLabsLogText -Text $logText | Out-File -LiteralPath $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
                 }
             }
             catch {
@@ -1166,16 +1205,49 @@ function Write-Exception {
     $sb = [System.Text.StringBuilder]::new()
 
     $parentFunctionName = (Get-PSCallStack)[1].FunctionName
-    $msg = "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
+    $msg = Protect-MemLabsLogText "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
     [void]$sb.AppendLine($msg)
     Write-Host2 $msg -ForegroundColor Red
+
+    $exception = $null
+    $errorId = '<not supplied>'
+    $category = '<not supplied>'
+    if ($ExceptionInfo -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $ExceptionInfo.Exception
+        $errorId = $ExceptionInfo.FullyQualifiedErrorId
+        $category = "$($ExceptionInfo.CategoryInfo)"
+    }
+    elseif ($ExceptionInfo -is [System.Exception]) {
+        $exception = $ExceptionInfo
+    }
+    $exceptionType = '<not supplied>'
+    $hresult = '<not supplied>'
+    if ($null -ne $exception) {
+        $exceptionType = $exception.GetType().FullName
+        $hresult = '0x{0:X8}' -f $exception.HResult
+    }
+    # ErrorRecord.ToString() may replace the native cause with ErrorDetails.
+    $rootMessage = if ($null -ne $exception) { $exception.Message } else { "$ExceptionInfo" }
+    $logMessage = Protect-MemLabsLogText "`n=== $parentFunctionName`: An error occurred: $rootMessage"
+    if ($logMessage -cne $msg) { [void]$sb.AppendLine($logMessage) }
+    Write-Log -LogOnly $logMessage -Failure
+    if ($ExceptionInfo -is [System.Management.Automation.ErrorRecord] -and
+        $null -ne $ExceptionInfo.ErrorDetails -and
+        -not [string]::IsNullOrWhiteSpace($ExceptionInfo.ErrorDetails.Message)) {
+        $detailMessage = Protect-MemLabsLogText "ErrorDetails=$($ExceptionInfo.ErrorDetails.Message)"
+        [void]$sb.AppendLine($detailMessage)
+        Write-Log -LogOnly $detailMessage -Failure
+    }
+    $msg = Protect-MemLabsLogText "ExceptionType=$exceptionType; HResult=$hresult; FullyQualifiedErrorId=$errorId; Category=$category; CrashReportPath=$crashFile"
+    [void]$sb.AppendLine($msg)
+    Write-Log -LogOnly $msg -Failure
 
     $msg = "`n=== Exception.ScriptStackTrace:`n"
     [void]$sb.AppendLine($msg)
     Write-Host2 $msg -ForegroundColor Red
     Write-Log -LogOnly $msg -Failure
 
-    $msg = $ExceptionInfo.ScriptStackTrace
+    $msg = Protect-MemLabsLogText $ExceptionInfo.ScriptStackTrace
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
     Write-Log -LogOnly $msg -Failure
@@ -1185,7 +1257,10 @@ function Write-Exception {
     Write-Host2 $msg -ForegroundColor Red
     Write-Log -LogOnly $msg -Failure
 
-    $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
+    $msg = (Get-PSCallStack | Select-Object Command, Location,
+        @{ Name = 'Arguments'; Expression = { Protect-MemLabsLogText "$($_.Arguments)" } } |
+        Format-Table | Out-String).Trim()
+    $msg = Protect-MemLabsLogText $msg
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
     Write-Log -LogOnly $msg -Failure
@@ -1193,15 +1268,14 @@ function Write-Exception {
         $msg = "`n=== Additional Information:`n"
         [void]$sb.AppendLine($msg)
         Write-Host2 "$msg" -ForegroundColor Red
-        Write-Host "Dumped to $crashFile"
         Write-Log -LogOnly $msg -Failure
-        Write-Log -LogOnly  "Dumped to $crashFile" -Failure
-        $msg = ($AdditionalInfo | Out-String).Trim()
+        $msg = Protect-MemLabsLogText ($AdditionalInfo | Out-String).Trim()
         [void]$sb.AppendLine($msg)
         Write-Log -LogOnly $msg -Failure
     }
 
-    $sb.ToString() | Out-File -FilePath $crashFile -Force
+    Protect-MemLabsLogText $sb.ToString() | Out-File -FilePath $crashFile -Force -ErrorAction Stop
+    Write-Host "Dumped to $crashFile"
     Write-Host
 }
 
@@ -3276,13 +3350,8 @@ function Repair-CimProxyTempPath {
     # use actually exists, recreating any that vanished. Returns $true if it had
     # to recreate at least one directory (i.e. a retry is worthwhile).
     #
-    # NOTE: a FULL temp dir is NOT this failure (that surfaces as an
-    # IOException / "not enough space on the disk"). But every CIM/CDXML import
-    # LEAKS a remoteIpMoProxy_* folder here, and on a long-lived lab host these
-    # accumulate into the thousands -- bloating enumeration and raising the odds
-    # of a name collision during proxy generation. So we also opportunistically
-    # prune stale leaked proxy folders (age-gated so an in-flight import is
-    # never touched).
+    # Proxy folders may still back modules loaded by other long-lived processes.
+    # Keep cleanup explicit; age alone does not establish ownership or non-use.
     $recreated = $false
     $tempPaths = @(
         ([System.IO.Path]::GetTempPath()),
@@ -3296,35 +3365,15 @@ function Repair-CimProxyTempPath {
                 New-Item -ItemType Directory -Path $tp -Force -ErrorAction Stop | Out-Null
                 Write-Log "Repair-CimProxyTempPath: Recreated missing temp directory '$tp' (CIM proxy module generation needs it)." -Warning
                 $recreated = $true
-                continue   # freshly created -- nothing to prune
+                continue
             }
-
-            # Hygiene: prune leaked CIM proxy folders older than 1 hour. The
-            # 1-hour age gate guarantees we never delete the proxy folder of a
-            # currently-running import (those are minutes old at most), so this
-            # is safe to run unconditionally before every import. Only acts when
-            # the leak has actually built up (>200 folders) to keep it cheap.
-            $leaked = @(Get-ChildItem -LiteralPath $tp -Directory -Filter 'remoteIpMoProxy_*' -ErrorAction SilentlyContinue)
-            if ($leaked.Count -gt 200) {
-                $cutoff = (Get-Date).AddHours(-1)
-                $stale = @($leaked | Where-Object { $_.LastWriteTime -lt $cutoff })
-                $pruned = 0
-                foreach ($dir in $stale) {
-                    try {
-                        Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
-                        $pruned++
-                    }
-                    catch {
-                        # In-use / locked folder -- skip it, it'll age out later.
-                    }
-                }
-                if ($pruned -gt 0) {
-                    Write-Log "Repair-CimProxyTempPath: Pruned $pruned stale leaked CIM proxy folder(s) from '$tp' ($($leaked.Count) total)." -LogOnly
-                }
+            $proxies = @(Get-ChildItem -LiteralPath $tp -Directory -Filter 'remoteIpMoProxy_*' -ErrorAction Stop)
+            if ($proxies.Count -gt 200) {
+                Write-Log "Repair-CimProxyTempPath: Found $($proxies.Count) CIM proxy folders in '$tp'. Shared proxies were preserved; run tools\Clear-CimProxyTempFolders.ps1 during explicit maintenance after stopping other PowerShell sessions." -LogOnly
             }
         }
         catch {
-            Write-Log "Repair-CimProxyTempPath: Failed to ensure/clean temp directory '$tp': $_" -Warning
+            Write-Log "Repair-CimProxyTempPath: Failed to ensure temp directory '$tp': $_" -Warning
         }
     }
 
@@ -3494,7 +3543,7 @@ function Start-DHCP {
     # but Import-Module fails with "module could not be loaded".
     #
     # Proactively ensure the temp dir the CIM proxy generator writes to exists
-    # (and prune any leaked proxy folders) BEFORE importing, so the common
+    # BEFORE importing, so the common
     # "Could not find a part of the path '...remoteIpMoProxy_...format.ps1xml'"
     # failure is avoided outright rather than only handled after it throws.
     # Reset the cached WinPS-compat proxy if EITHER the temp dir had to be
@@ -3508,13 +3557,22 @@ function Start-DHCP {
         Reset-CimProxyModuleState | Out-Null
     }
 
+    $dhcpImport = @{ Name = 'DhcpServer'; Force = $true; ErrorAction = 'Stop' }
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $dhcpImport.SkipEditionCheck = $true
+    }
+
     $moduleLoaded = $false
     try {
-        Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+        Import-Module @dhcpImport
         $moduleLoaded = $true
     }
     catch {
         $importError = $_
+        if ($importError.Exception -is [System.Management.Automation.ParameterBindingException]) {
+            Write-Log "Start-DHCP: Invalid DhcpServer module import parameters; restarting WMI cannot fix this: $importError" -Failure
+            return $false
+        }
         Write-Log "Start-DHCP: DhcpServer module failed to load: $importError" -Warning
 
         # First, classify the "missing temp path" failure explicitly. This is
@@ -3530,7 +3588,7 @@ function Start-DHCP {
             Repair-CimProxyTempPath | Out-Null
             Reset-CimProxyModuleState | Out-Null
             try {
-                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                Import-Module @dhcpImport
                 $moduleLoaded = $true
                 Write-GreenCheck "DhcpServer module loaded after repairing the CIM-proxy temp directory and resetting the cached compat proxy."
             }
@@ -3552,7 +3610,7 @@ function Start-DHCP {
             Start-Service DHCPServer -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
             try {
-                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                Import-Module @dhcpImport
                 $moduleLoaded = $true
                 Write-GreenCheck "DhcpServer module loaded after WMI service restart."
             }
@@ -3570,9 +3628,14 @@ function Start-DHCP {
                     $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
                 }
                 if ($installed -and $installed.Success) {
-                    Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction SilentlyContinue
-                    $moduleLoaded = $true
-                    Write-GreenCheck "DHCP management tools reinstalled."
+                    try {
+                        Import-Module @dhcpImport
+                        $moduleLoaded = $true
+                        Write-GreenCheck "DHCP management tools reinstalled."
+                    }
+                    catch {
+                        Write-Log "Start-DHCP: DhcpServer module still won't load after reinstalling management tools: $_" -Failure
+                    }
                 }
                 else {
                     Write-Log "Start-DHCP: Failed to reinstall DHCP management tools. Run 'Install-WindowsFeature RSAT-DHCP' manually." -Failure
@@ -3585,6 +3648,14 @@ function Start-DHCP {
     }
 
     if (-not $moduleLoaded) {
+        return $false
+    }
+
+    try {
+        Initialize-MemLabsDhcpServer
+    }
+    catch {
+        Write-Log "Start-DHCP: DHCP post-install configuration failed: $_" -Failure
         return $false
     }
 
@@ -5798,6 +5869,9 @@ Specifies whether the virtual machine is an OSD client.
 .PARAMETER tpmEnabled
 Specifies whether the virtual machine has TPM enabled.
 
+.PARAMETER DisableAutomaticCheckpoints
+Disables automatic checkpoints before the virtual machine is started.
+
 .PARAMETER Migrate
 Specifies whether to migrate the virtual machine.
 
@@ -5937,12 +6011,11 @@ function Set-DeployConfigIPAddresses {
     $defaultNetwork = $DeployConfig.vmOptions.network
     if (-not $defaultNetwork) {
         Write-Log "Set-DeployConfigIPAddresses: No default network in vmOptions. Cannot allocate IPs." -Failure
-        return
+        return $false
     }
 
     if (Test-MemLabsUsesDhcpAppliance) {
-        $null = Set-DnsmasqDeployConfigIPAddresses -DeployConfig $DeployConfig
-        return
+        return (Set-DnsmasqDeployConfigIPAddresses -DeployConfig $DeployConfig)
     }
 
     # Verify DHCP service is running before we try to allocate
@@ -5952,12 +6025,13 @@ function Set-DeployConfigIPAddresses {
         $dhcp = Start-DHCP
         if (-not $dhcp) {
             Write-Log "Set-DeployConfigIPAddresses: Could not start DHCP service. IP pre-allocation will be skipped." -Failure
-            return
+            return $false
         }
     }
 
     # Track IPs we've allocated to prevent duplicates within this run
     $allocatedIps = [System.Collections.Generic.HashSet[string]]::new()
+    $liveScopeAddresses = [System.Collections.Generic.List[object]]::new()
     $vmCount = 0
     $skipCount = 0
     $reuseCount = 0
@@ -5967,6 +6041,7 @@ function Set-DeployConfigIPAddresses {
 
     # Collect all scopes we'll use and verify they exist
     $scopesNeeded = [System.Collections.Generic.HashSet[string]]::new()
+    $scopeById = @{}
     foreach ($vm in $DeployConfig.virtualMachines) {
         if ($vm.hidden -or $vm.role -eq 'OSDClient') { continue }
         $sid = if ($vm.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($vm.network) { $vm.network } else { $defaultNetwork } }
@@ -5978,6 +6053,7 @@ function Set-DeployConfigIPAddresses {
             Write-Log "Set-DeployConfigIPAddresses: DHCP scope $sid does not exist! VMs on this scope will not get pre-assigned IPs." -Warning
         }
         else {
+            $scopeById["$sid"] = $scope
             $stats = Get-DhcpServerv4ScopeStatistics -ScopeId $sid -ErrorAction SilentlyContinue
             if ($stats) {
                 Write-Log "Set-DeployConfigIPAddresses: Scope $sid ($($scope.Name)): $($stats.Free) free, $($stats.InUse) in use, $($stats.Reserved) reserved" -LogOnly
@@ -6003,6 +6079,7 @@ function Set-DeployConfigIPAddresses {
     if ($domainName) {
         $validMacs = [System.Collections.Generic.HashSet[string]]::new()
         $domainVmNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $allocatingVmNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
         $existingDomainVMs = @()
         try { $existingDomainVMs = @(Get-List -Type VM -DomainName $domainName -SmartUpdate) } catch {}
@@ -6011,20 +6088,55 @@ function Set-DeployConfigIPAddresses {
         }
         foreach ($cvm in $DeployConfig.virtualMachines) {
             if ($cvm.vmName) { $null = $domainVmNames.Add($cvm.vmName) }
+            if ($cvm.vmName -and -not $cvm.hidden -and $cvm.role -ne 'OSDClient') {
+                $null = $allocatingVmNames.Add($cvm.vmName)
+            }
         }
 
-        # Live NIC MACs for VMs that still exist (the only legitimate reservation owners).
-        foreach ($evm in $existingDomainVMs) {
-            try {
-                $liveVm = Get-VM2 -Name $evm.vmName -ErrorAction SilentlyContinue
-                if (-not $liveVm) { continue }
-                foreach ($nic in ($liveVm | Get-VMNetworkAdapter -ErrorAction SilentlyContinue)) {
-                    if ($nic.MacAddress -and $nic.MacAddress -ne '000000000000') {
-                        $null = $validMacs.Add(($nic.MacAddress -replace '-', '').ToUpperInvariant())
-                    }
-                }
+        # Live NIC MACs for VMs that still exist (the only legitimate reservation
+        # owners), plus every live address on a scope this deployment will allocate
+        # from. Hidden retained VMs are deliberately absent from the allocation loop
+        # below, but their static addresses still occupy the subnet. Ignoring those
+        # addresses let DHCP return CT5-CS1SQLAO1's live 192.168.50.23 to
+        # CT5-LINUXDESK1: Linux initially won ARP, then SQLAO reclaimed it, producing
+        # the misleading "ping + SMB healthy, SSH refused" failure.
+        $allLiveAdapters = @()
+        try {
+            $allLiveAdapters = @(Get-VM -ErrorAction Stop |
+                Get-VMNetworkAdapter -ErrorAction Stop)
+        }
+        catch {
+            Write-Log "Set-DeployConfigIPAddresses: Could not inventory live Hyper-V NIC addresses before DHCP allocation: $($_.Exception.Message). Refusing to allocate while existing ownership is unknown." -Failure
+            return $false
+        }
+        foreach ($nic in $allLiveAdapters) {
+            $normalizedMac = if ($nic.MacAddress) {
+                ($nic.MacAddress -replace '[-:]', '').ToUpperInvariant()
             }
-            catch {}
+            else { '' }
+            if ($normalizedMac -and $normalizedMac -ne '000000000000') {
+                $null = $validMacs.Add($normalizedMac)
+            }
+            if (-not $normalizedMac) { continue }
+            foreach ($liveAddress in @($nic.IPAddresses)) {
+                $liveIp = "$liveAddress"
+                $parsedLiveIp = $null
+                if (-not [System.Net.IPAddress]::TryParse($liveIp, [ref]$parsedLiveIp) -or
+                    $parsedLiveIp.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork -or
+                    $liveIp -like '127.*' -or $liveIp -like '169.254.*' -or
+                    $liveIp -eq '0.0.0.0') {
+                    continue
+                }
+                $liveScopeId = (($liveIp.Split('.') | Select-Object -First 3) -join '.') + '.0'
+                if (-not $scopesNeeded.Contains($liveScopeId)) { continue }
+                $liveScopeAddresses.Add([pscustomobject]@{
+                        VmName      = "$($nic.VMName)"
+                        ScopeId     = $liveScopeId
+                        IPAddress   = $liveIp
+                        MacAddress  = $normalizedMac
+                        SwitchName  = "$($nic.SwitchName)"
+                    })
+            }
         }
 
         $orphansRemoved = 0
@@ -6083,6 +6195,62 @@ function Set-DeployConfigIPAddresses {
         }
         if ($orphansRemoved -gt 0) {
             Write-Log "Set-DeployConfigIPAddresses: Cleaned up $orphansRemoved orphaned DHCP reservation(s) for domain $domainName"
+        }
+
+        # Protect every live, retained address before asking DHCP for a free one.
+        # Addresses inside the lease pool get a durable reservation tied to the
+        # owning NIC. That is preferable to a temporary exclusion: orphan cleanup
+        # can later reclaim a reservation when the VM/MAC disappears.
+        $liveAddressConflict = $false
+        foreach ($group in @($liveScopeAddresses | Group-Object ScopeId, IPAddress)) {
+            $owners = @($group.Group | ForEach-Object {
+                    "$($_.VmName)|$($_.MacAddress)"
+                } | Select-Object -Unique)
+            if ($owners.Count -gt 1) {
+                $sample = $group.Group[0]
+                Write-Log "Set-DeployConfigIPAddresses: LIVE IP COLLISION on $($sample.IPAddress) in scope $($sample.ScopeId): $($owners -join ', '). Refusing new allocations until the existing collision is resolved." -Failure
+                $liveAddressConflict = $true
+            }
+        }
+        if ($liveAddressConflict) { return $false }
+
+        foreach ($liveAddress in @($liveScopeAddresses |
+                Sort-Object ScopeId, IPAddress, VmName -Unique)) {
+            # A non-hidden VM in this deploy may already exist on a rerun. Its own
+            # live address is reconciled in the per-VM loop below so it can reuse
+            # that address without colliding with this retained-owner seed.
+            if ($allocatingVmNames.Contains($liveAddress.VmName)) { continue }
+            $null = $allocatedIps.Add($liveAddress.IPAddress)
+            $scope = $scopeById["$($liveAddress.ScopeId)"]
+            if (-not $scope) { continue }
+
+            $liveIpNumber = ConvertTo-IpSortable -IPAddress $liveAddress.IPAddress
+            $scopeStartNumber = ConvertTo-IpSortable -IPAddress "$($scope.StartRange)"
+            $scopeEndNumber = ConvertTo-IpSortable -IPAddress "$($scope.EndRange)"
+            if ($null -eq $liveIpNumber -or $null -eq $scopeStartNumber -or
+                $null -eq $scopeEndNumber -or $liveIpNumber -lt $scopeStartNumber -or
+                $liveIpNumber -gt $scopeEndNumber) {
+                Write-Log "Set-DeployConfigIPAddresses: Protected live IP $($liveAddress.IPAddress) for $($liveAddress.VmName) in the in-memory allocation set (outside DHCP pool)." -LogOnly
+                continue
+            }
+
+            Add-DHCPReservationIsolated -ScopeId $liveAddress.ScopeId `
+                -IPAddress $liveAddress.IPAddress -Mac $liveAddress.MacAddress `
+                -Description "Reservation for $($liveAddress.VmName) (existing live IP)" `
+                -LogContext "$($liveAddress.VmName) live-IP protection"
+
+            $protectedReservation = @(Get-DhcpServerv4Reservation `
+                    -ScopeId $liveAddress.ScopeId -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        "$($_.IPAddress)" -eq $liveAddress.IPAddress -and
+                        (("$($_.ClientId)" -replace '[-:]', '').ToUpperInvariant()) -eq
+                        $liveAddress.MacAddress
+                    })
+            if ($protectedReservation.Count -ne 1) {
+                Write-Log "Set-DeployConfigIPAddresses: Could not protect live IP $($liveAddress.IPAddress) for $($liveAddress.VmName) (MAC $($liveAddress.MacAddress)) with a DHCP reservation. Refusing new allocations on this potentially unsafe scope." -Failure
+                return $false
+            }
+            Write-Log "Set-DeployConfigIPAddresses: Protected retained VM $($liveAddress.VmName) live IP $($liveAddress.IPAddress) with MAC $($liveAddress.MacAddress) before new allocation." -LogOnly
         }
     }
 
@@ -6387,7 +6555,62 @@ function Set-DeployConfigIPAddresses {
                         $reuseCount++
                     }
                     else {
-                        Write-Log "$($vm.vmName): VM exists (MAC=$($vmnet.MacAddress)) but no DHCP reservation found in scope $scopeId" -LogOnly
+                        # A prior revision may have made this address static without
+                        # leaving a DHCP reservation (the exact SQLAO .23 condition
+                        # that caused CT5's collision). Reuse the one live address
+                        # this VM owns inside the scope's DHCP pool and make its
+                        # ownership durable before allocating anything else.
+                        $scope = $scopeById["$scopeId"]
+                        $scopeStartNumber = if ($scope) {
+                            ConvertTo-IpSortable -IPAddress "$($scope.StartRange)"
+                        }
+                        else { $null }
+                        $scopeEndNumber = if ($scope) {
+                            ConvertTo-IpSortable -IPAddress "$($scope.EndRange)"
+                        }
+                        else { $null }
+                        $liveCandidates = @($liveScopeAddresses | Where-Object {
+                                if ($_.VmName -ine $vm.vmName -or
+                                    $_.ScopeId -ne $scopeId) {
+                                    return $false
+                                }
+                                $candidateNumber = ConvertTo-IpSortable -IPAddress $_.IPAddress
+                                $null -ne $candidateNumber -and
+                                $null -ne $scopeStartNumber -and
+                                $null -ne $scopeEndNumber -and
+                                $candidateNumber -ge $scopeStartNumber -and
+                                $candidateNumber -le $scopeEndNumber
+                            } | Select-Object -ExpandProperty IPAddress -Unique)
+                        if ($liveCandidates.Count -eq 1) {
+                            $ip = $liveCandidates[0]
+                            $ipSource = 'existing-live-ip'
+                            Add-DHCPReservationIsolated -ScopeId $scopeId `
+                                -IPAddress $ip -Mac $vmnet.MacAddress `
+                                -Description "Reservation for $($vm.vmName) (existing live IP)" `
+                                -LogContext "$($vm.vmName) live-IP reuse"
+                            $reservation = @(Get-DhcpServerv4Reservation `
+                                    -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                                    Where-Object {
+                                        "$($_.IPAddress)" -eq $ip -and
+                                        (("$($_.ClientId)" -replace '[-:]', '').ToUpperInvariant()) -eq
+                                        (($vmnet.MacAddress -replace '[-:]', '').ToUpperInvariant())
+                                    })
+                            if ($reservation.Count -ne 1) {
+                                Write-Log "$($vm.vmName): Could not reserve its existing live IP $ip (MAC=$($vmnet.MacAddress)) in scope $scopeId. Refusing to allocate a replacement while the VM still owns this address." -Failure
+                                $failCount++
+                                continue
+                            }
+                            $reuseCount++
+                            Write-Log "$($vm.vmName): Reusing and reserving existing live IP $ip (MAC=$($vmnet.MacAddress), scope $scopeId)." -LogOnly
+                        }
+                        elseif ($liveCandidates.Count -gt 1) {
+                            Write-Log "$($vm.vmName): VM has multiple live DHCP-pool addresses in scope $scopeId ($($liveCandidates -join ', ')); refusing to guess which address to retain." -Failure
+                            $failCount++
+                            continue
+                        }
+                        else {
+                            Write-Log "$($vm.vmName): VM exists (MAC=$($vmnet.MacAddress)) but has no DHCP reservation or unique live pool address in scope $scopeId" -LogOnly
+                        }
                     }
                 }
                 else {
@@ -6469,7 +6692,14 @@ function Set-DeployConfigIPAddresses {
         }
 
         if (-not $allocatedIps.Add($ip)) {
-            throw "$($vm.vmName): IP $ip is already allocated to another VM or SQLAO virtual endpoint in this deployment (source=$ipSource)."
+            Write-Log "$($vm.vmName): DUPLICATE — IP $ip is already owned by a retained VM, another allocation, or a SQLAO virtual endpoint in this deploy (source=$ipSource). Refusing to stamp an ambiguous address." -Failure
+            if ($ipSource -eq 'dhcp-pool') {
+                Remove-DhcpServerv4ExclusionRange -ScopeId $scopeId `
+                    -StartRange $ip -EndRange $ip -ErrorAction SilentlyContinue |
+                    Out-Null
+            }
+            $failCount++
+            continue
         }
 
         $vm | Add-Member -MemberType NoteProperty -Name 'AssignedIP' -Value $ip -Force
@@ -6489,6 +6719,7 @@ function Set-DeployConfigIPAddresses {
     }
 
     Write-Log "Pre-allocated IPs for $vmCount VM(s): $dynamicCount dynamic, $fixedCount fixed-role, $reuseCount reused, $failCount failed, $skipCount skipped. Cleaned $cleanedExclusions temp exclusions."
+    return ($failCount -eq 0)
 }
 
 function New-VirtualMachine {
@@ -6524,6 +6755,8 @@ function New-VirtualMachine {
         [Parameter(Mandatory = $false)]
         [switch]$tpmEnabled,
         [Parameter(Mandatory = $false)]
+        [switch]$DisableAutomaticCheckpoints,
+        [Parameter(Mandatory = $false)]
         [switch]$Migrate,
         [Parameter(Mandatory = $false, HelpMessage = "MACs already holding a DHCP reservation at phase start; lets the by-MAC purge scan be skipped. Null = unknown, so scan.")]
         [hashtable]$KnownReservedMacs,
@@ -6541,7 +6774,7 @@ function New-VirtualMachine {
     try {
         # WhatIf
         if ($WhatIf) {
-            Write-Log "WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew"
+            Write-Log "WhatIf: Will create VM $VmName in $VmPath using VHDX $SourceDiskPath, Memory: $Memory, Processors: $Processors, Generation: $Generation, AdditionalDisks: $AdditionalDisks, SwitchName: $SwitchName, ForceNew: $ForceNew, DisableAutomaticCheckpoints: $DisableAutomaticCheckpoints"
             return $true
         }
 
@@ -6640,6 +6873,17 @@ function New-VirtualMachine {
             Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
             Write-Log "$($_.ScriptStackTrace)" -LogOnly
             return $false
+        }
+
+        if ($DisableAutomaticCheckpoints.IsPresent) {
+            try {
+                Set-VM -VM $vm -AutomaticCheckpointsEnabled $false -ErrorAction Stop
+                Write-Log "$VmName`: Disabled automatic checkpoints for deterministic disk capture."
+            }
+            catch {
+                Write-Log "$VmName`: Failed to disable automatic checkpoints. $_" -Failure
+                return $false
+            }
         }
 
         Write-Progress2 $Activity -Status "Hyper-V VM Object created. Waiting for Disk Creation" -percentcomplete 30 -force
@@ -7040,6 +7284,167 @@ function Get-AvailableMemoryGB {
     return $availableMemory
 }
 
+function Get-MemLabsWindowsClientSetupStateBlock {
+    $path = Join-Path $PSScriptRoot 'DSC\phases\WindowsSetupReadiness.ps1'
+    $source = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+    return [scriptblock]::Create("$source`nGet-MemLabsWindowsClientSetupState")
+}
+
+function Wait-MemLabsWindowsClientSetup {
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [string]$VmDomainName = 'WORKGROUP',
+        [ValidateRange(1, 3600)][int]$TimeoutSeconds = 1800
+    )
+
+    $probeBlock = Get-MemLabsWindowsClientSetupStateBlock
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $budget = [TimeSpan]::FromSeconds($TimeoutSeconds)
+    $lastDetail = 'No setup state has been received.'
+    $lastLoggedDetail = ''
+    $lastLoggedAt = -30
+    try {
+        do {
+            $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
+            if ($remaining -le 0) { break }
+            Write-ProgressElapsed -showTimeout -stopwatch $watch -timespan $budget `
+                -text "$VmName`: verifying Windows client setup completion"
+            $probeResults = @(Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob `
+                -TimeoutSeconds ([Math]::Max(1, [Math]::Min(30, [int][Math]::Floor($remaining)))) `
+                -SessionMaxRetries 1 -SuppressLog -ScriptBlock $probeBlock)
+            if ($watch.Elapsed -ge $budget) {
+                $lastDetail = 'The guest probe exceeded the remaining readiness deadline; a late reply cannot establish readiness.'
+                break
+            }
+            $issues = [Collections.Generic.List[string]]::new()
+            $states = @()
+            if ($probeResults.Count -ne 1 -or $null -eq $probeResults[0]) {
+                $issues.Add('Expected one non-null guest-command result envelope.')
+            }
+            else {
+                $probe = $probeResults[0]
+                foreach ($name in @('ScriptBlockFailed', 'ScriptBlockOutput')) {
+                    if (-not $probe.PSObject.Properties[$name]) { $issues.Add("Missing envelope field '$name'.") }
+                }
+                $failedProperty = $probe.PSObject.Properties['ScriptBlockFailed']
+                if ($failedProperty) {
+                    if ($failedProperty.Value -isnot [bool]) { $issues.Add("Invalid envelope field 'ScriptBlockFailed'.") }
+                    elseif ($failedProperty.Value) { $issues.Add('Guest command reported ScriptBlockFailed=True.') }
+                }
+                $outputProperty = $probe.PSObject.Properties['ScriptBlockOutput']
+                if ($outputProperty) { $states = @($outputProperty.Value) }
+            }
+            if ($states.Count -ne 1 -or $null -eq $states[0]) {
+                $issues.Add('Expected one non-null setup-state object.')
+            }
+            else {
+                $state = $states[0]
+                $fieldNames = @('Version', 'Required', 'Ready', 'Reason', 'Detail')
+                $requiredProperty = $state.PSObject.Properties['Required']
+                $readyProperty = $state.PSObject.Properties['Ready']
+                if ($requiredProperty -and $requiredProperty.Value -is [bool] -and -not $requiredProperty.Value) {
+                    $fieldNames += 'ProductType'
+                }
+                elseif ($requiredProperty -and $requiredProperty.Value -is [bool] -and $requiredProperty.Value -and
+                    $readyProperty -and $readyProperty.Value -is [bool] -and $readyProperty.Value) {
+                    $fieldNames += @('ProductType', 'NativeOobeComplete', 'ImageState', 'ActiveName', 'PendingName',
+                        'SetupType', 'SystemSetupInProgress', 'OOBEInProgress')
+                    if ($state.PSObject.Properties['Reason'] -and $state.Reason -is [string] -and
+                        $state.Reason -eq 'MachineCompleteAwaitingFirstLogon') {
+                        $fieldNames += @('WinRtOobeState', 'SetupExeCompletion', 'OobeProcessCount', 'OobeBlockingProcessCount', 'OobeProcesses', 'Diagnostics')
+                    }
+                }
+                $missingFields = @($fieldNames | Where-Object { -not $state.PSObject.Properties[$_] })
+                if ($missingFields.Count) {
+                    $issues.Add("Missing setup fields=[$($missingFields -join ', ')].")
+                }
+                else {
+                    $checks = [ordered]@{
+                        Version = $state.Version -is [int] -and $state.Version -eq 1
+                        Required = $state.Required -is [bool]
+                        Ready = $state.Ready -is [bool]
+                        Reason = $state.Reason -is [string] -and -not [string]::IsNullOrWhiteSpace($state.Reason)
+                        Detail = $state.Detail -is [string] -and -not [string]::IsNullOrWhiteSpace($state.Detail)
+                    }
+                    if ($checks.Required -and $checks.Ready) {
+                        if (-not $state.Required) {
+                            $checks['Ready'] = $state.Ready
+                            $checks['ProductType'] = $state.ProductType -is [int] -and $state.ProductType -in @(2, 3)
+                            $checks['Reason'] = $checks.Reason -and $state.Reason -eq 'NotWindowsClient'
+                        }
+                        elseif ($state.Ready) {
+                            $checks['ProductType'] = $state.ProductType -is [int] -and $state.ProductType -eq 1
+                            $checks['ImageState'] = $state.ImageState -is [string] -and $state.ImageState -eq 'IMAGE_STATE_COMPLETE'
+                            if ($checks.Reason -and $state.Reason -eq 'MachineCompleteAwaitingFirstLogon') {
+                                $checks['NativeOobeComplete'] = $state.NativeOobeComplete -is [bool] -and -not $state.NativeOobeComplete
+                                $checks['WinRtOobeState'] = $state.WinRtOobeState -is [string] -and $state.WinRtOobeState -eq 'NotStarted'
+                                $checks['SetupExeCompletion'] = ($state.SetupExeCompletion -is [int] -or
+                                    $state.SetupExeCompletion -is [uint32]) -and $state.SetupExeCompletion -eq 3
+                                $checks['OobeProcessCount'] = $state.OobeProcessCount -is [int] -and $state.OobeProcessCount -ge 0
+                                $checks['OobeBlockingProcessCount'] = $state.OobeBlockingProcessCount -is [int] -and $state.OobeBlockingProcessCount -eq 0
+                                $checks['OobeProcesses'] = $checks.OobeProcessCount -and
+                                    @($state.OobeProcesses).Count -eq $state.OobeProcessCount -and
+                                    @(@($state.OobeProcesses) | Where-Object {
+                                            $_ -isnot [string] -or $_ -ine 'CloudExperienceHostBroker.exe'
+                                        }).Count -eq 0
+                                $checks['Diagnostics'] = @($state.Diagnostics).Count -eq 0
+                            }
+                            else {
+                                $checks['NativeOobeComplete'] = $state.NativeOobeComplete -is [bool] -and $state.NativeOobeComplete
+                                $checks['Reason'] = $checks.Reason -and $state.Reason -eq 'Complete'
+                            }
+                            $checks['ActiveName'] = $state.ActiveName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.ActiveName)
+                            $checks['PendingName'] = $state.PendingName -is [string] -and -not [string]::IsNullOrWhiteSpace($state.PendingName)
+                            foreach ($name in @('SetupType', 'SystemSetupInProgress', 'OOBEInProgress')) {
+                                $checks[$name] = ($state.$name -is [int] -or $state.$name -is [uint32]) -and $state.$name -eq 0
+                            }
+                        }
+                    }
+                    $invalidFields = @($checks.Keys | Where-Object { -not $checks[$_] })
+                    if ($invalidFields.Count) { $issues.Add("Invalid setup fields=[$($invalidFields -join ', ')].") }
+                }
+            }
+            if ($issues.Count -eq 0) {
+                $lastDetail = $state.Detail
+                if ($state.Ready) {
+                    Write-Log "$VmName`: Windows client setup gate passed. $lastDetail"
+                    return $true
+                }
+            }
+            else {
+                $envelopeTypes = @(foreach ($item in $probeResults) {
+                        if ($null -eq $item) { '<null>' } else { $item.GetType().FullName }
+                    })
+                $stateTypes = @(foreach ($item in $states) {
+                        if ($null -eq $item) { '<null>' } else { $item.GetType().FullName }
+                    })
+                $errors = @(foreach ($item in $probeResults) {
+                        if ($null -ne $item) {
+                            $errorProperty = $item.PSObject.Properties['ErrorDetails']
+                            if ($errorProperty) { @($errorProperty.Value) }
+                        }
+                    })
+                $lastDetail = "Windows client setup state is unreadable or malformed. " +
+                    "envelopeCount=$($probeResults.Count) envelopeTypes=[$($envelopeTypes -join ', ')]; " +
+                    "stateCount=$($states.Count) stateTypes=[$($stateTypes -join ', ')]; $($issues -join ' ')"
+                if ($errors.Count) {
+                    $lastDetail += " Command errors: $($errors -join '; ')"
+                }
+            }
+            if ($lastDetail -ne $lastLoggedDetail -or $watch.Elapsed.TotalSeconds - $lastLoggedAt -ge 30) {
+                Write-Log "$VmName`: waiting for Windows client setup. $lastDetail" -Warning
+                $lastLoggedDetail = $lastDetail
+                $lastLoggedAt = $watch.Elapsed.TotalSeconds
+            }
+            $remaining = $TimeoutSeconds - $watch.Elapsed.TotalSeconds
+            if ($remaining -gt 0) { Start-Sleep -Seconds ([Math]::Min(5, [int][Math]::Ceiling($remaining))) }
+        } while ($watch.Elapsed -lt $budget)
+    }
+    finally { $watch.Stop() }
+    Write-Log "$VmName`: Windows client setup did not become ready within ${TimeoutSeconds}s. $lastDetail Collect offline setup diagnostics before retrying; no setup repair or reboot was requested by this gate." -Warning
+    return $false
+}
+
 function Wait-ForVm {
 
     param (
@@ -7063,6 +7468,8 @@ function Wait-ForVm {
         [switch]$Quiet,
         [Parameter(Mandatory = $false)]
         [switch]$SkipDiskTest,
+        [Parameter(Mandatory = $false, ParameterSetName = "VmState", HelpMessage = "Return false on a state timeout without forcing the VM into the requested state.")]
+        [switch]$NoForceStateOnTimeout,
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
@@ -7102,7 +7509,7 @@ function Wait-ForVm {
                 $ready = $false
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
-        if (-not $ready -and ($vmState -eq "Off")) {
+        if (-not $ready -and ($vmState -eq "Off") -and -not $NoForceStateOnTimeout.IsPresent) {
             stop-vm2 -name $VMName
         }
     }
@@ -7178,7 +7585,7 @@ function Wait-ForVm {
         # once: re-reading uptime every iteration would put the Get-VM storm back.
         [int]$oobeBootOffset = 0
         try {
-            $vmForUptime = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmForUptime = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
             if ($vmForUptime -and "$($vmForUptime.State)" -eq 'Running') {
                 $oobeBootOffset = [int]$vmForUptime.Uptime.TotalSeconds
             }
@@ -7231,7 +7638,7 @@ function Wait-ForVm {
             if ($oobeLastProbeFailed -and -not $readyOobe -and $failures -lt ($maxFailures / 2)) {
                 $swHbGate = [System.Diagnostics.Stopwatch]::StartNew()
                 while ($swHbGate.Elapsed.TotalSeconds -lt 12) {
-                    $vmHbNow = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmHbNow = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     if ("$($vmHbNow.Heartbeat)" -like 'Ok*' -or "$($vmHbNow.State)" -ne 'Running') { break }
                     Start-Sleep -Seconds 2
                 }
@@ -7272,7 +7679,7 @@ function Wait-ForVm {
                     # Before power-cycling, check if the VM is running but has no heartbeat.
                     # NoContact after 2+ min means no OS loaded (boot failure).
                     # OkApplicationsUnknown/OkApplicationsHealthy = OS is booting normally.
-                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Uptime.TotalMinutes -ge 2 -and $vmCheck.Heartbeat -eq "NoContact") {
                         Write-Log "$VmName`: VM is Running (uptime $([int]$vmCheck.Uptime.TotalMinutes)min) with heartbeat NoContact — possible boot failure. Check VM console: vmconnect localhost $VmName" -Warning
                     }
@@ -7534,7 +7941,7 @@ function Wait-ForVm {
 
             # Log a detailed failure summary so the root cause is visible without scrolling
             $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
-            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
             $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
             $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
             $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
@@ -7579,7 +7986,7 @@ function Wait-ForVm {
                 # admin account is wiped so PSDirect can't authenticate. If the VM
                 # heartbeat is OK, this means OOBE is active (the only time the
                 # VM is running but has no usable local accounts).
-                $hbCheck = (Get-VM2 -Name $VmName -ErrorAction SilentlyContinue).Heartbeat
+                $hbCheck = (Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue).Heartbeat
                 if ($hbCheck -and $hbCheck -match 'Ok') {
                     $ready = $true
                     Write-Log "$VmName`: OOBE detected via auth failure (post-sysprep, heartbeat=$hbCheck). Local accounts wiped — VM is at OOBE." -Verbose
@@ -7599,7 +8006,7 @@ function Wait-ForVm {
                 # After half the timeout has elapsed with NoContact heartbeat,
                 # try one power-cycle as a last resort.
                 if (-not $powerCycleEligible -and $stopWatch.Elapsed.TotalMinutes -ge ($TimeoutMinutes / 2)) {
-                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Heartbeat -eq "NoContact") {
                         $powerCycleEligible = $true
                     }
@@ -7611,7 +8018,7 @@ function Wait-ForVm {
                 if ($powerCycleEligible -and $powerCycles -lt $maxPowerCycles) {
                     $powerCycles++
                     $powerCycleEligible = $false
-                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
                     Write-Log "$VmName`: OOBE not starting after $([int]$stopWatch.Elapsed.TotalMinutes) min with heartbeat NoContact. Power-cycling VM (attempt $powerCycles/$maxPowerCycles). VM state: $vmState" -Warning
                     stop-vm2 -name $VmName -TurnOff | Out-Null
@@ -7628,7 +8035,7 @@ function Wait-ForVm {
 
             # Log a detailed failure summary
             $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
-            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
             $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
             $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
             $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
@@ -7743,7 +8150,7 @@ function Wait-ForVm {
                 else {
                     # VM is not responding to PSDirect at all.
                     # Check heartbeat to decide whether to hard-restart.
-                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
                     $hb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
 
                     # Detect channel-broken from the actual session diagnostics.
@@ -7825,7 +8232,7 @@ function Wait-ForVm {
 
             # Log a detailed failure summary
             $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
-            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmCheck = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
             $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
             $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
             $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
@@ -7921,6 +8328,18 @@ function Invoke-VmCommand {
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
+    $return = [PSCustomObject]@{
+        CommandResult     = $false
+        ScriptBlockFailed = $false
+        ScriptBlockOutput = $null
+        ErrorDetails      = $null
+        ChannelBroken     = $false
+        TimedOut          = $false
+        Rebooted          = $false
+    }
+    $inflightToken = $null
+    $caughtException = $null
+    $jobFailureReason = $null
     try {
         # Set display name for logging
         if (-not $DisplayName) {
@@ -7936,24 +8355,16 @@ function Invoke-VmCommand {
 
         # Fatal failure
         if ($null -eq $Common.LocalAdmin) {
-            Write-Log "$VmName`: Skip running '$DisplayName' since Local Admin creds not available" -Failure
-            return $false
+            $return.ScriptBlockFailed = $true
+            $return.ErrorDetails = @("Local admin credentials are unavailable; cannot run '$DisplayName' on '$VmName'.")
+            $return.ScriptBlockOutput = $return.ErrorDetails[0]
+            Write-Log "$VmName`: $($return.ErrorDetails[0])" -Failure -LogOnly:$SuppressLog
+            return $return
         }
 
         # Log entry
         if (-not $SuppressLog) {
             Write-Log "$VmName`: Running '$DisplayName'" -Verbose
-        }
-
-        # Create return object
-        $return = [PSCustomObject]@{
-            CommandResult     = $false
-            ScriptBlockFailed = $false
-            ScriptBlockOutput	= $null
-            ErrorDetails      = $null
-            ChannelBroken     = $false
-            TimedOut          = $false
-            Rebooted          = $false
         }
 
         # Prepare args
@@ -8025,8 +8436,6 @@ function Invoke-VmCommand {
         }
 
         # Run script block inside VM
-        $inflightToken = $null
-        $jobFailureReason = $null
         if (-not $failed) {
             # Mark this scriptblock as in-flight on $ps so a concurrent pipeline on
             # the SAME cached session (the suspected cause of "An error occurred while
@@ -8099,7 +8508,7 @@ function Invoke-VmCommand {
                         }
                     }
                     else {
-                        $job | Wait-Job -Timeout $TimeoutSeconds
+                        $job | Wait-Job -Timeout $TimeoutSeconds | Out-Null
                     }
                     if ($job.State -eq "Completed") {
                         # Read the child's error stream BEFORE Receive-Job drains it.
@@ -8257,6 +8666,7 @@ function Invoke-VmCommand {
                         catch {}
                         if ($jobTimedOut) {
                             $OutErr = "remote pipeline still running after ${TimeoutSeconds}s"
+                            $jobFailureReason = $OutErr
                         }
                         elseif ($Err2.Count -ne 0) {
                             $OutErr = "$($Err2[0].ToString().Trim())"
@@ -8641,10 +9051,18 @@ function Invoke-VmCommand {
         }
     }
     catch {
-        Write-Log "$VmName`: Invoke-VMCommand Exception $_"
+        $commandError = $_
+        $return.CommandResult = $false
+        $return.ScriptBlockFailed = $true
+        $return.ErrorDetails = @($return.ErrorDetails | Where-Object { $_ })
+        $return.ErrorDetails += "$($commandError.Exception.ToString()); HRESULT=$($commandError.Exception.HResult); FQID=$($commandError.FullyQualifiedErrorId); stack=$($commandError.ScriptStackTrace)"
+        if ($null -eq $return.ScriptBlockOutput) { $return.ScriptBlockOutput = $return.ErrorDetails[0] }
+        try { Write-Log "$VmName`: Invoke-VMCommand Exception $($commandError.Exception.Message)" -LogOnly:$SuppressLog }
+        catch { $return.ErrorDetails += "Could not log the command failure: $($_.Exception.Message)" }
         # Ensure the in-flight marker is released even on an unexpected throw, so a
         # leaked entry can't produce a false-positive concurrency reading later.
-        Exit-VmSessionInflight -Token $inflightToken
+        try { Exit-VmSessionInflight -Token $inflightToken }
+        catch { $return.ErrorDetails += "Could not release the command's inflight marker: $($_.Exception.Message)" }
     }
     return $return
 
@@ -8965,8 +9383,9 @@ function New-PSSessionWithTimeout {
     # 120s later instead -- disposing a session with a still-running abandoned job riding
     # it, which is the disposed-object crash those paths were written to avoid. Its only
     # guard, RunspaceAvailability -ne 'Busy', is documented in this same file as a
-    # false-ready signal. Reaping happens where it is safe: Clear-VmSessionCache in each
-    # worker's finally (that VM's phase work is over) and the -Force pass at end of run.
+    # false-ready signal. Cleanup in each worker's finally and at end of run must
+    # still verify that parked work is terminal; removing jobs does not finish a
+    # New-PSSession call that remains blocked inside VMBus.
 
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $rs.Open()
@@ -9037,7 +9456,7 @@ function New-PSSessionWithTimeout {
 # open runspaces against just 18 cached sessions.
 # Deferring rather than never disposing: the reason these are abandoned is that a
 # late transport callback on an already-disposed object crashes the phase process,
-# so give them a settle window and only then reclaim.
+# so keep them alive until their associated work is terminal before reclaiming.
 $global:ps_orphanRunspaces = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 
 # Create-vs-dispose ledger for PSDirect sessions. Held on the APPDOMAIN, not in
@@ -9147,6 +9566,16 @@ function Get-VmSessionCredentialUserNames {
         }
         catch { }
     }
+    if ([string]::IsNullOrWhiteSpace($DomainNetBiosName)) {
+        # Older VM Notes predate domainNetBiosName. The default AD NetBIOS name
+        # is the first DNS label; trying that additional principal is safe
+        # because domain-required sessions still validate the guest DNS domain
+        # and requested account before any command can run.
+        $dnsLabel = @("$VmDomainName".Split('.', 2))[0].Trim()
+        if ($dnsLabel -and $dnsLabel.Length -le 15 -and $dnsLabel -notmatch '[\\/:*?"<>|]') {
+            $DomainNetBiosName = $dnsLabel.ToUpperInvariant()
+        }
+    }
     $DomainNetBiosName = "$DomainNetBiosName".Trim()
     if (-not $DomainNetBiosName -or $DomainNetBiosName.Length -gt 15 -or
         $DomainNetBiosName -match '[\\/:*?"<>|]') {
@@ -9158,6 +9587,153 @@ function Get-VmSessionCredentialUserNames {
         $users.Add($netBiosUser)
     }
     return $users.ToArray()
+}
+
+function Invoke-VmSessionCredentialDiagnostics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][guid]$VmId,
+        [Parameter(Mandatory = $true)][string]$VmDomainName,
+        [Parameter(Mandatory = $true)][string]$RequestedAccount,
+        [string[]]$PrimaryUserNames = @(),
+        [scriptblock]$ConnectOperation,
+        [scriptblock]$ProbeOperation
+    )
+
+    if (-not $Common.LocalAdmin -or -not $Common.LocalAdmin.Password) {
+        Write-Log "$VmName`: Alternate credential diagnostics skipped because the MemLabs credential is unavailable." -Warning -LogOnly
+        return @()
+    }
+
+    $candidates = [System.Collections.Generic.List[hashtable]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($primaryName in @($PrimaryUserNames | Where-Object { $_ })) {
+        $null = $seen.Add("$primaryName")
+    }
+
+    $note = $null
+    try { $note = Get-VMNote -VMName $VmName }
+    catch {
+        Write-Log "$VmName`: Could not read VM Notes while preparing alternate credential diagnostics: $($_.Exception.Message)" -Warning -LogOnly
+    }
+    $domainAdmin = if ($note -and $note.adminName) { "$($note.adminName)".Trim() }
+    elseif ($note -and $note.domainAdmin) { "$($note.domainAdmin)".Trim() }
+    else { '' }
+    $domainNetBiosName = if ($note -and $note.domainNetBiosName) { "$($note.domainNetBiosName)".Trim() } else { '' }
+
+    if ($domainAdmin) {
+        $domainAdminNames = @(Get-VmSessionCredentialUserNames -VmName $VmName `
+                -VmDomainName $VmDomainName -AccountName $domainAdmin -DomainNetBiosName $domainNetBiosName)
+        for ($i = 0; $i -lt $domainAdminNames.Count; $i++) {
+            if ($seen.Add($domainAdminNames[$i])) {
+                $tag = if ($i -eq 0) { 'configured-domain-admin' } else { 'configured-domain-admin-netbios' }
+                $candidates.Add(@{ Tag = $tag; Username = $domainAdminNames[$i] })
+            }
+        }
+    }
+
+    $localUser = "$VmName\$($Common.LocalAdmin.UserName)"
+    if ($seen.Add($localUser)) {
+        $candidates.Add(@{ Tag = 'local-vmbuildadmin'; Username = $localUser })
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Log "$VmName`: Alternate credential diagnostics found no identities beyond the failed primary set." -LogOnly
+        return @()
+    }
+
+    if (-not $ConnectOperation) {
+        $ConnectOperation = {
+            param($TargetName, $TargetId, $Credential)
+            New-PSSessionWithTimeout -Name $TargetName -VMId $TargetId -Credential $Credential -TimeoutSec 10
+        }
+    }
+    if (-not $ProbeOperation) {
+        $ProbeOperation = {
+            param($Session, $DomainName)
+            Invoke-Command -Session $Session -ErrorAction Stop -ScriptBlock {
+                param($ExpectedDomain)
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+                $secureChannel = $null
+                $secureChannelError = $null
+                try { $secureChannel = Test-ComputerSecureChannel -ErrorAction Stop }
+                catch { $secureChannelError = $_.Exception.Message }
+                $localAccount = $null
+                try {
+                    $local = Get-LocalUser -Name 'vmbuildadmin' -ErrorAction Stop
+                    $localAccount = [ordered]@{
+                        Exists          = $true
+                        Enabled         = [bool]$local.Enabled
+                        PasswordExpires = $local.PasswordExpires
+                    }
+                }
+                catch {
+                    $localAccount = [ordered]@{
+                        Exists = $false
+                        Error  = $_.Exception.Message
+                    }
+                }
+                [pscustomobject]@{
+                    Identity           = $identity
+                    ComputerName       = $env:COMPUTERNAME
+                    UserDomain         = $env:USERDOMAIN
+                    UserDnsDomain      = $env:USERDNSDOMAIN
+                    ExpectedDomain     = $ExpectedDomain
+                    PartOfDomain       = [bool]$computerSystem.PartOfDomain
+                    ComputerDomain     = "$($computerSystem.Domain)"
+                    SecureChannel      = $secureChannel
+                    SecureChannelError = $secureChannelError
+                    LocalVmbuildAdmin  = $localAccount
+                }
+            } -ArgumentList $DomainName
+        }
+    }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in $candidates) {
+        $session = $null
+        $status = 'failed'
+        $detail = $null
+        try {
+            $credential = [pscredential]::new($candidate.Username, $Common.LocalAdmin.Password)
+            $connectResult = & $ConnectOperation $VmName $VmId $credential
+            $session = $connectResult.Session
+            if (-not $session -or "$($session.Availability)" -ne 'Available') {
+                $errorText = "$($connectResult.ErrorMessage)" -replace '\s+', ' '
+                if ($connectResult.TimedOut) { $errorText = 'PowerShell Direct connection timed out after 10 seconds' }
+                if ([string]::IsNullOrWhiteSpace($errorText)) { $errorText = 'PowerShell Direct returned no available session' }
+                if ($errorText.Length -gt 400) { $errorText = $errorText.Substring(0, 400) + '...[truncated]' }
+                $detail = $errorText
+                Write-Log "$VmName`: Alternate credential diagnostic '$($candidate.Tag)' ($($candidate.Username)) could not authenticate: $errorText" -Warning -LogOnly
+                continue
+            }
+
+            $probe = & $ProbeOperation $session $VmDomainName
+            $status = 'authenticated'
+            $detail = $probe
+            $probeJson = $probe | ConvertTo-Json -Depth 5 -Compress
+            if ($probeJson.Length -gt 3000) { $probeJson = $probeJson.Substring(0, 3000) + '...[truncated]' }
+            Write-Log "$VmName`: Alternate credential diagnostic '$($candidate.Tag)' ($($candidate.Username)) authenticated; maintenance remains blocked because a domain identity is required. Guest evidence: $probeJson" -Warning -LogOnly
+        }
+        catch {
+            $errorText = "$($_.Exception.Message)" -replace '\s+', ' '
+            if ($errorText.Length -gt 400) { $errorText = $errorText.Substring(0, 400) + '...[truncated]' }
+            $detail = $errorText
+            Write-Log "$VmName`: Alternate credential diagnostic '$($candidate.Tag)' ($($candidate.Username)) failed: $errorText" -Warning -LogOnly
+        }
+        finally {
+            if ($session) { Remove-VmSession $session }
+            $results.Add([pscustomobject]@{
+                    Tag      = $candidate.Tag
+                    Username = $candidate.Username
+                    Status   = $status
+                    Detail   = $detail
+                })
+        }
+    }
+    return $results.ToArray()
 }
 
 function Get-VmSessionGuestIdentity {
@@ -9488,34 +10064,41 @@ function Clear-OrphanRunspaces {
     .SYNOPSIS
     Dispose parked runspaces once they are safe to touch.
     .PARAMETER Force
-    End-of-run: reclaim regardless of age. Jobs have already been removed by then,
-    so the late-callback hazard that made these unsafe is gone.
+    Reclaim regardless of age, but never bypass active-work safety checks.
     #>
     [CmdletBinding()]
     param([switch]$Force, [int]$MinAgeSeconds = 120)
 
     $reclaimed = 0
+    $deferred = 0
     try {
         foreach ($entry in @($global:ps_orphanRunspaces)) {
             if (-not $entry) { continue }
             $age = ((Get-Date) - $entry.At).TotalSeconds
             if (-not $Force -and $age -lt $MinAgeSeconds) { continue }
-            # Still executing: leave it. A Dispose() here is the documented crash.
-            if (-not $Force) {
-                # An ABANDONED JOB is still riding this session. Invoke-VmCommand's timeout /
-                # channel-broken paths StopJobAsync the job and leak the session precisely so a
-                # later transport break finds a LIVE object; disposing here re-creates the crash
-                # they were avoiding, and turns "leaked, reaped at process exit" into "disposed
-                # 120s later". RunspaceAvailability cannot see this -- it is a documented
-                # false-ready signal that reads Available while the server-side pipeline lives.
-                if ($entry.Job) {
-                    $jobState = $null
-                    try { $jobState = "$($entry.Job.State)" } catch { }
-                    if ($jobState -notin @('Completed', 'Failed', 'Stopped')) { continue }
+            # Force bypasses age, not liveness. Dispose() synchronously calls Stop()
+            # even in Stopping state, so a timed-out VMBus connect can hang cleanup.
+            # Availability alone can also report Available while work is still live.
+            try {
+                $invocationState = if ($entry.Ps) { "$($entry.Ps.InvocationStateInfo.State)" } else { '' }
+                $jobState = if ($entry.Job) { "$($entry.Job.State)" } else { '' }
+                $availability = if ($entry.Rs) { "$($entry.Rs.RunspaceAvailability)" } else { '' }
+            }
+            catch {
+                $deferred++
+                Write-Log "Could not verify orphaned work for '$($entry.VmName)'; leaving it parked: $($_.Exception.Message)" -Warning
+                continue
+            }
+            if ($entry.Ps -and $invocationState -notin @('NotStarted', 'Completed', 'Failed', 'Stopped')) {
+                if ($invocationState -notin @('Running', 'Stopping', 'Disconnected')) {
+                    Write-Log "Could not verify orphaned work for '$($entry.VmName)' with invocation state '$invocationState'; leaving it parked." -Warning
                 }
-                $avail = $null
-                try { $avail = $entry.Rs.RunspaceAvailability } catch { }
-                if ("$avail" -eq 'Busy') { continue }
+                $deferred++
+                continue
+            }
+            if (($entry.Job -and $jobState -notin @('Completed', 'Failed', 'Stopped')) -or $availability -eq 'Busy') {
+                $deferred++
+                continue
             }
             try { if ($entry.Ps) { $entry.Ps.Dispose() } } catch { }
             # Release the PSSession BEFORE its owner runspace -- the session's
@@ -9558,6 +10141,9 @@ function Clear-OrphanRunspaces {
     catch { }
     if ($reclaimed -gt 0) {
         try { Write-Log "Reclaimed $reclaimed orphaned runspace(s); $($global:ps_orphanRunspaces.Count) still parked." -LogOnly } catch { }
+    }
+    if ($deferred -gt 0) {
+        Write-Log "Deferred $deferred orphaned runspace(s) with active or unverified work (force=$($Force.IsPresent)); leaving them parked until terminal or process exit." -LogOnly
     }
     return $reclaimed
 }
@@ -10217,6 +10803,39 @@ function Get-VmSession {
     $swVmLookup.Stop()
     if (-not $vm) {
         Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
+        $lookupContext = [ordered]@{
+            ComputerName = $env:COMPUTERNAME
+            JobContext   = [bool]$Common.InJob
+            LookupMs    = $swVmLookup.ElapsedMilliseconds
+            VmmsState    = 'unavailable'
+            GetVmResult  = 'not queried'
+        }
+        try {
+            $vmms = Get-Service -Name vmms -ErrorAction Stop
+            $lookupContext.VmmsState = [string]$vmms.Status
+        }
+        catch {
+            $message = $_.Exception.Message
+            if ($message.Length -gt 400) { $message = $message.Substring(0, 400) + ' ...[truncated]' }
+            $lookupContext.VmmsState = "query failed: $message"
+        }
+        try {
+            $directVm = Get-VM -Name $VmName -ErrorAction Stop
+            if ($directVm) {
+                $lookupContext.GetVmResult = "found by direct name lookup (state=$($directVm.State))"
+            }
+            else {
+                $lookupContext.GetVmResult = 'no VM returned by direct name lookup'
+            }
+        }
+        catch {
+            $message = $_.Exception.Message
+            if ($message.Length -gt 400) { $message = $message.Substring(0, 400) + ' ...[truncated]' }
+            $lookupContext.GetVmResult = "direct name lookup failed: $message"
+        }
+        $lookupText = ($lookupContext.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join '; '
+        if ($lookupText.Length -gt 1500) { $lookupText = $lookupText.Substring(0, 1500) + ' ...[truncated]' }
+        Write-Log "[Get-VMSession] $VmName`: Hyper-V lookup diagnostics: $lookupText" -Warning
         return $null
     }
 
@@ -10317,6 +10936,9 @@ function Get-VmSession {
     $sessionHeartbeatWaitSec = 12
     [double]$swHeartbeatWaitMs = 0
     $heartbeatAtConnect = 'n/a'
+    $credentialDiagnosticsRun = $false
+    $diagnosticRetryGranted = $false
+    $diagnosticRetryUsed = $false
     while ($true) {
         $ps = $null
         $failCount++
@@ -10325,13 +10947,21 @@ function Get-VmSession {
         }
 
         if ($failCount -gt $MaxRetries) {
-            break
+            if ($diagnosticRetryGranted -and -not $diagnosticRetryUsed) {
+                $diagnosticRetryUsed = $true
+            }
+            else {
+                break
+            }
         }
 
         # Skip New-PSSession entirely if the VM is not running.
         # Avoids 30s+ timeout per credential attempt on a dead/rebooting VM.
         $swStateCheck = [System.Diagnostics.Stopwatch]::StartNew()
-        $vmNow = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+        # Fresh staging VMs do not have MemLabs VM notes and therefore are not
+        # represented in Get-List. Allow the targeted Get-VM fallback so
+        # PowerShell Direct can connect before a deployment cache entry exists.
+        $vmNow = Get-VM2 -Name $VmName -Fallback -ErrorAction SilentlyContinue
         $vmState = $vmNow.State
         $swStateCheck.Stop()
         $swStateCheckTotalMs += $swStateCheck.Elapsed.TotalMilliseconds
@@ -10510,6 +11140,17 @@ function Get-VmSession {
         }
         else {
             Write-Log $sessionFailureMessage -Warning -Verbose
+        }
+
+        if ($requireDomain -and -not $credentialDiagnosticsRun -and
+            -not $sawChannelBroken -and $failReasons -contains 'auth-or-other') {
+            $credentialDiagnosticsRun = $true
+            $null = Invoke-VmSessionCredentialDiagnostics -VmName $VmName -VmId $vm.vmID `
+                -VmDomainName $requestedDomainName -RequestedAccount $requestedAccount `
+                -PrimaryUserNames $credentialUserNames
+            $diagnosticRetryGranted = $true
+            Write-Log "$VmName`: Alternate credential diagnostics completed; waiting 60 seconds before retrying the required domain credential." -Warning
+            Start-Sleep -Seconds 60
         }
     }
     # Populate diagnostics for the caller so it knows WHY we failed
@@ -12926,6 +13567,9 @@ Function Install-HostToServer2025 {
         }
 
         $expandLocation = "C:\temp\Upgrade2025"
+        if (-not (Test-Path -LiteralPath $expandLocation -PathType Container)) {
+            $null = New-Item -ItemType Directory -Path $expandLocation -Force -ErrorAction Stop
+        }
 
         powershell.exe -NoProfile -Command "Expand-Archive -Path '$filename' -DestinationPath '$expandLocation' -Force"
     }

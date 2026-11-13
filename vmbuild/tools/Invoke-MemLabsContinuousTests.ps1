@@ -15,7 +15,9 @@ param(
     [double] $MinimumFreeStorageGB = 250,
     [int] $MaximumRetainedLabs = 2,
     [int] $RetentionDays = 7,
-    [int] $WaitSeconds = 60
+    [int] $WaitSeconds = 60,
+    [string[]] $SkipTest,
+    [switch] $SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +30,13 @@ $removeLabPath = Join-Path $VmbuildRoot 'Remove-Lab.ps1'
 . (Join-Path $PSScriptRoot 'Common.TestRetention.ps1')
 . (Join-Path $PSScriptRoot 'Common.AttachedProcess.ps1')
 $loadedCommit = Get-MemLabsCurrentCommit -RepositoryRoot $repositoryRoot
+$skipTestNames = @($SkipTest | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+if ($skipTestNames.Count -gt 0) {
+    Write-Host "Continuous scheduler skipping: $($skipTestNames -join ', ')" -ForegroundColor Yellow
+}
+if ($SkipTests) {
+    Write-Host 'SKIP TESTS: continuous deployment-only emergency mode; skipped validation does not qualify a test pass.' -ForegroundColor Yellow
+}
 if (-not $HistoryPath) { $HistoryPath = Get-MemLabsTestHistoryPath }
 if (-not $RetentionPath) { $RetentionPath = Get-MemLabsTestRetentionPath }
 
@@ -256,7 +265,10 @@ try {
             else {
                 $retentions = @(Read-MemLabsTestRetentions -Path $RetentionPath)
             }
-            $ranked = @(Select-MemLabsNextTest -VmbuildRoot $VmbuildRoot -HistoryPath $HistoryPath)
+            $ranked = @(Select-MemLabsNextTest -VmbuildRoot $VmbuildRoot -HistoryPath $HistoryPath -DeploymentOnly:$SkipTests)
+            if ($skipTestNames.Count -gt 0) {
+                $ranked = @($ranked | Where-Object { $_.Family -notin $skipTestNames })
+            }
             $candidate = $ranked | Where-Object {
                 $_.FitsHost -and $_.CandidateKey -notin @($retentions.CandidateKey)
             } | Select-Object -First 1
@@ -309,6 +321,7 @@ try {
                 Reasons = @($candidate.Reasons); AvailableMemoryGB = $candidate.AvailableMemoryGB
                 RequiredMemoryGB = $candidate.RequiredMemoryGB
                 CrossRevisionStateRoot = "$($candidate.CrossRevisionStateRoot)"
+                TestsSkipped = [bool]$SkipTests
             })
         Write-Host "`nSELECTED: $($candidate.CandidateKey)" -ForegroundColor Magenta
         Write-Host "  score  : $($candidate.Score)"
@@ -316,6 +329,7 @@ try {
         Write-Host "  why    : $($candidate.Reasons -join '; ')"
 
         $arguments = @('-NoLogo', '-NoProfile', '-File', $startTestPath, '-Test', $candidate.Family, '-Automated')
+        if ($SkipTests) { $arguments += '-SkipTests' }
         if ($candidate.Mode -eq 'CrossRevision') {
             $arguments += '-MainToDevelopExpansion'
             $arguments += @('-DevelopRevision', $candidate.CurrentCommit)
@@ -326,7 +340,10 @@ try {
         }
         $exitCode = Invoke-MemLabsAttachedPowerShell -Arguments $arguments
         if ($exitCode -eq 0) {
-            Write-Host "PASS: $($candidate.CandidateKey)" -ForegroundColor Green
+            if ($SkipTests) {
+                Write-Host "DEPLOYMENT COMPLETE: $($candidate.CandidateKey) (tests skipped, unqualified)." -ForegroundColor Yellow
+            }
+            else { Write-Host "PASS: $($candidate.CandidateKey)" -ForegroundColor Green }
         }
         else {
             Write-Host "FAIL: $($candidate.CandidateKey) exited $exitCode" -ForegroundColor Red
@@ -341,6 +358,7 @@ try {
                     Error = "Attached Start-Test child exited $exitCode."
                     Domains = @($candidate.Domains); CoverageTags = @($candidate.CoverageTags)
                     NeedsRerun = $true
+                    TestsSkipped = [bool]$SkipTests
                 })
             if ($exitCode -eq 2) {
                 Write-Host 'The child stopped before a safe lab mutation (lease/setup failure); no retention or cleanup was attempted.' -ForegroundColor Yellow

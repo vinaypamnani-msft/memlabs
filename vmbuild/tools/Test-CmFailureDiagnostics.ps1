@@ -16,6 +16,12 @@ $definition = @($ast.FindAll({
         }, $true))
 if ($definition.Count -ne 1) { throw "Expected one Save-CMSetupLogsFromVm function, found $($definition.Count)." }
 . ([scriptblock]::Create($definition[0].Extent.Text))
+$sqlDefinition = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-CMSetupSqlFailureEvidence'
+        }, $true))
+if ($sqlDefinition.Count -ne 1) { throw "Expected one Save-CMSetupSqlFailureEvidence function, found $($sqlDefinition.Count)." }
+. ([scriptblock]::Create($sqlDefinition[0].Extent.Text))
 
 $script:Failures = 0
 function Assert-Equal {
@@ -27,7 +33,39 @@ function Assert-Equal {
 
 $collectorText = Get-Content -LiteralPath $collectorPath -Raw
 $commonText = Get-Content -LiteralPath $commonPath -Raw
-foreach ($logName in @('SMSProv.log', 'SMSProv.lo_', 'dmpdownloader.log', 'dmpdownloader.lo_', 'cmupdate.log', 'cmupdate.lo_', 'hman.log', 'hman.lo_', 'distmgr.log', 'smsexec.log', 'ConfigMgrPrereq.log', 'SmsAdminUI')) {
+$manifestArrays = [ordered]@{
+    PrereqArtifacts = 'prereqArtifacts'
+    AdkArtifacts = 'artifacts'
+    CmArtifacts = 'cmArtifacts'
+    ProductLogInventory = 'productLogInventory'
+}
+foreach ($entry in $manifestArrays.GetEnumerator()) {
+    $field = if ($entry.Key -eq 'ProductLogInventory') { $entry.Key } else { '\$out\.' + $entry.Key }
+    $expression = [regex]::Match($definition[0].Extent.Text,
+        "(?m)^\s*$field\s*=\s*(?<Expression>[^\r\n]+)")
+    Assert-Equal $true $expression.Success "$($entry.Key) manifest expression exists"
+    if (-not $expression.Success) { continue }
+    $convert = [scriptblock]::Create(
+        "param(`$$($entry.Value))`n[pscustomobject]@{ Items = $($expression.Groups['Expression'].Value) }")
+    foreach ($count in @(0, 2)) {
+        $items = New-Object System.Collections.Generic.List[object]
+        for ($index = 0; $index -lt $count; $index++) {
+            $items.Add([pscustomobject]@{ Name = "evidence-$index.log"; Content = "evidence-$index" })
+        }
+        try { $converted = & $convert $items }
+        catch {
+            Assert-Equal '' $_.Exception.Message "$($entry.Key) converts $count artifact(s) without a binder failure: $($_.Exception.Message)"
+            continue
+        }
+        Assert-Equal $true ($converted.Items -is [object[]]) "$($entry.Key) preserves an object array for $count artifact(s)"
+        Assert-Equal $count @($converted.Items).Count "$($entry.Key) preserves the artifact count"
+        if ($count -gt 0) {
+            Assert-Equal 'evidence-0.log' $converted.Items[0].Name "$($entry.Key) preserves artifact metadata"
+            Assert-Equal 'evidence-1' $converted.Items[1].Content "$($entry.Key) preserves artifact content"
+        }
+    }
+}
+foreach ($logName in @('SMSProv.log', 'SMSProv.lo_', 'dmpdownloader.log', 'dmpdownloader.lo_', 'cmupdate.log', 'cmupdate.lo_', 'hman.log', 'hman.lo_', 'distmgr.log', 'smsexec.log', 'rcmctrl.log', 'rcmctrl.lo_', 'replmgr.log', 'replmgr.lo_', 'sender.log', 'sender.lo_', 'despool.log', 'despool.lo_', 'DRSReadinessFailure.json', 'ConfigMgrPrereq.log', 'SmsAdminUI')) {
     Assert-Equal $true $collectorText.Contains($logName) "failure collector names $logName"
 }
 foreach ($className in @(
@@ -39,7 +77,9 @@ foreach ($className in @(
         'SMS_DPGroupMembers',
         'SMS_DPGroupPackages',
         'SMS_DPGroupCollections',
-        'SMS_DistributionPointInfo'
+        'SMS_DistributionPointInfo',
+        'SMS_ReplicationLinkSummary',
+        'SMS_ReplicationGroup'
     )) {
     Assert-Equal $true $collectorText.Contains("'$className'") "failure snapshot queries $className"
 }
@@ -74,6 +114,14 @@ Assert-Equal $true ($commonText -match 'function Copy-ItemFromVmBounded') 'bound
 Assert-Equal $true ($commonText -match 'Copy-Item -FromSession') 'bounded copy helper uses PSDirect file transfer'
 Assert-Equal $true ($commonText -match 'WaitForExit\(\$TimeoutSeconds \* 1000\)') 'bounded copy helper enforces its process timeout'
 Assert-Equal $true ($commonText -match 'Stop-Process -Id \$process\.Id') 'bounded copy helper terminates only its known worker PID'
+Assert-Equal $true ($commonText -match 'Hyper-V lookup diagnostics: \$lookupText') 'missing VM reports host-side lookup diagnostics'
+Assert-Equal $true ($commonText -match 'ComputerName = \$env:COMPUTERNAME[\s\S]{0,250}VmmsState') 'missing VM diagnostic identifies the host and VMMS state'
+Assert-Equal $false ($collectorText -match '\$selfExplainedErrors\s*=\s*@\([^)]*(?:4060|18456)') 'SQL login/database-open failures are not treated as self-explaining'
+Assert-Equal $true ($collectorText -match '\$collectSqlState\s*=\s*\(\$sqlErrNum -in @\(4060, 18456\)\)') 'SQL login/database-open errors trigger a bounded state snapshot'
+Assert-Equal $true ($collectorText -match 'DatabaseStates\s*=\s*@\(\)') 'SQL evidence result includes database/AG state'
+Assert-Equal $true ($collectorText -match 'synchronization_health_desc') 'SQL state snapshot includes AG synchronization health'
+Assert-Equal $true ($collectorText -match 'site\.\?control') 'post-database site-control failures trigger SQL evidence'
+Assert-Equal $true ($collectorText -match '\\\[\(4060\|18456\)\\\]') 'numbered login/database-open errors trigger SQL evidence'
 
 $workDir = Join-Path ([IO.Path]::GetTempPath()) ('cm-failure-diag-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $workDir
@@ -84,6 +132,7 @@ try {
     $script:CollectorCopies = New-Object System.Collections.Generic.List[object]
     $script:FailBaselineCapture = $false
     $script:FailProductCapture = $false
+    $script:EmptyProductCapture = $false
     $script:FailProviderCapture = $false
     $script:UseBundleCapture = $false
     $script:FailBundleCopy = $false
@@ -91,7 +140,9 @@ try {
     $bundleSourceDir = Join-Path $workDir 'bundle-source'
     $null = New-Item -ItemType Directory -Path $bundleSourceDir
     [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'ConfigMgrSetup.log'), 'synthetic setup evidence')
-    [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'InstallCMLog.log'), 'synthetic wrapper evidence')
+    $contractEvidence = 'Perfloading preflight failed before object creation: Perfloading contract invalid: path=C:\Windows\temp\ProvisionScript\Perfloading.ps1; sha256=FIXTURE; PowerShell=5.1; helpers=Confirm-MemLabsWsusSyncHealth(lines=3507,scriptScope=0,total=1)'
+    $wrapperEvidence = "synthetic wrapper evidence`r`n$contractEvidence"
+    [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'InstallCMLog.log'), $wrapperEvidence)
     [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'DSC_Log.log'), 'synthetic DSC evidence')
     [IO.File]::WriteAllText((Join-Path $bundleSourceDir 'ClientPackageTimeline.jsonl'), '{"Classification":"Installed"}')
     $script:BundleTemplate = Join-Path $workDir 'synthetic-cm-logs.zip'
@@ -105,6 +156,41 @@ try {
     function Invoke-VmCommand {
         param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, [switch]$SuppressLog, $DisplayName, [switch]$AsJob, [int]$TimeoutSeconds, [int]$SessionMaxRetries)
         $script:CollectorInvocations.Add([pscustomobject]@{ DisplayName = $DisplayName; AsJob = $AsJob.IsPresent; TimeoutSeconds = $TimeoutSeconds; SessionMaxRetries = $SessionMaxRetries })
+        if ($script:UseSqlFailureEvidence -and $DisplayName -eq 'Read ConfigMgrSetup.log tail for SQL error') {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = $script:SqlFailureTail
+            }
+        }
+        if ($script:UseSqlFailureEvidence -and $DisplayName -eq 'Collect SQL evidence from SQL-A') {
+            $script:SqlEvidenceArguments = $ArgumentList
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = [pscustomobject]@{
+                    ErrorLogPath = $null
+                    ErrorLog = $null
+                    LogScan = @('ERRORLOG | Error: 18456, Severity: 14, State: 38.')
+                    LogScanNote = 'scanned one ERRORLOG generation'
+                    Assertions = @()
+                    DumpFiles = @()
+                    DumpNote = '0 dumps'
+                    SuspectPages = @()
+                    DatabaseStates = @(
+                        [pscustomobject]@{
+                            DbName = 'CM_PRI'
+                            StateDesc = 'ONLINE'
+                            RoleDesc = 'PRIMARY'
+                            SynchronizationState = 'SYNCHRONIZED'
+                            SynchronizationHealth = 'HEALTHY'
+                            IsSuspended = '0'
+                            SuspendReason = ''
+                        }
+                    )
+                    Checks = @()
+                    Error = $null
+                }
+            }
+        }
         if ($DisplayName -eq 'Capture ConfigMgr provider state') {
             if ($script:FailProviderCapture) {
                 return [pscustomobject]@{
@@ -127,6 +213,17 @@ try {
                 ScriptBlockOutput = $null
                 TimedOut          = $true
                 ErrorDetails      = @('synthetic product-log timeout')
+            }
+        }
+        if ($DisplayName -eq 'Pull ConfigMgr failure diagnostics' -and $script:EmptyProductCapture) {
+            return [pscustomobject]@{
+                ScriptBlockFailed = $false
+                ScriptBlockOutput = [pscustomobject]@{
+                    CmArtifacts = @()
+                    UpdateDiagnostics = $null
+                }
+                TimedOut          = $false
+                ErrorDetails      = @()
             }
         }
         if ($DisplayName -like 'Package CM setup logs*' -and $script:FailBaselineCapture) {
@@ -199,6 +296,23 @@ try {
         return $true
     }
 
+    $script:UseSqlFailureEvidence = $true
+    $script:SqlFailureTail = @(
+        '*** EXEC sp_configure ''show advanced options'', 1'
+        '*** [HY000][18456]Login failed for user cstest5\admin. Cannot open database requested by the login.'
+        'Failed to set Service Broker certificate.'
+    ) -join "`n"
+    $sqlFailureMessageStart = $script:CollectorMessages.Count
+    Save-CMSetupSqlFailureEvidence -VmName 'CM-SITE' -DomainName 'example.test' -Phase 8 -DeployConfig ([pscustomobject]@{
+        virtualMachines = @(
+            [pscustomobject]@{ vmName = 'CM-SITE'; remoteSQLVM = 'SQL-A' },
+            [pscustomobject]@{ vmName = 'SQL-A'; OtherNode = $null }
+        )
+    })
+    $script:UseSqlFailureEvidence = $false
+    Assert-Equal $true ($script:SqlEvidenceArguments.Count -ge 5 -and $script:SqlEvidenceArguments[3] -eq $false -and $script:SqlEvidenceArguments[4] -eq $true) '18456 triggers SQL database/AG state collection without CHECKDB'
+    Assert-Equal $true ((@($script:CollectorMessages | Select-Object -Skip $sqlFailureMessageStart) -join "`n") -match 'CM database state on SQL-A: CM_PRI state=ONLINE, role=PRIMARY, sync=SYNCHRONIZED, health=HEALTHY') 'SQL failure log reports current CM database and AG state'
+
     Save-CMSetupLogsFromVm -VmName 'DIAG-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
     $baseInvocation = @($script:CollectorInvocations | Where-Object DisplayName -like 'Package CM setup logs*')
     Assert-Equal 1 $baseInvocation.Count 'baseline logs use their independent packaging command'
@@ -244,6 +358,19 @@ try {
     Assert-Equal $true ($messages -match 'Pulled ConfigMgr update/provider state') 'collector reports snapshot capture'
     Assert-Equal $true ($messages -match 'Captured bounded ConfigMgr provider state') 'collector reports independently bounded provider capture'
 
+    $script:CollectorInvocations.Clear()
+    $script:CollectorMessages.Clear()
+    $script:EmptyProductCapture = $true
+    Save-CMSetupLogsFromVm -VmName 'EMPTY-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    $emptySnapshot = @(Get-ChildItem -LiteralPath $workDir -Filter 'EMPTY-PS1SITE-Phase8-*-ConfigMgrUpdateDiagnostics.json' -File)
+    Assert-Equal 1 $emptySnapshot.Count 'empty product probe writes a durable inventory status'
+    if ($emptySnapshot.Count -eq 1) {
+        $emptySnapshotJson = Get-Content -LiteralPath $emptySnapshot[0].FullName -Raw | ConvertFrom-Json
+        Assert-Equal 'GuestReturnedNoProductLogInventory' $emptySnapshotJson.CaptureStatus 'empty product probe records its capture status'
+        Assert-Equal 0 $emptySnapshotJson.ArtifactsReturned 'empty product probe records returned artifact count'
+    }
+    $script:EmptyProductCapture = $false
+
     $bundleWorkDir = Join-Path $workDir 'bundle-success'
     $null = New-Item -ItemType Directory -Path $bundleWorkDir
     $script:Common.LogPath = Join-Path $bundleWorkDir 'VMBuild.test.log'
@@ -258,7 +385,7 @@ try {
     }
     foreach ($expected in @(
             @{ Name = 'ConfigMgrSetup.log'; Text = 'synthetic setup evidence' },
-            @{ Name = 'InstallCMLog.log'; Text = 'synthetic wrapper evidence' },
+            @{ Name = 'InstallCMLog.log'; Text = $wrapperEvidence },
             @{ Name = 'DSC_Log.log'; Text = 'synthetic DSC evidence' },
             @{ Name = 'ClientPackageTimeline.jsonl'; Text = '{"Classification":"Installed"}' }
         )) {
@@ -269,6 +396,14 @@ try {
         }
     }
     Assert-Equal 0 @(Get-ChildItem -LiteralPath $bundleWorkDir -Filter '*-BaselineCaptureStatus.json' -File).Count 'successful bundle writes no fallback status'
+
+    $script:Common.LogPath = Join-Path $bundleWorkDir 'VMBuild.test.log'
+    Save-CMSetupLogsFromVm -VmName 'CONTRACTFAIL-PS1SITE' -DomainName 'example.test' -Phase 8 -Mode 'Failure'
+    $contractLogs = @(Get-ChildItem -LiteralPath $bundleWorkDir -Filter 'CONTRACTFAIL-PS1SITE-Phase8-*-InstallCMLog.log' -File)
+    Assert-Equal 1 $contractLogs.Count 'Phase 8 contract failure collects the full guest install log'
+    if ($contractLogs.Count -eq 1) {
+        Assert-Equal $wrapperEvidence ([IO.File]::ReadAllText($contractLogs[0].FullName).Trim()) 'contract failure source hash, engine, helper location and scope survive ZIP transport'
+    }
 
     $bundleMismatchWorkDir = Join-Path $workDir 'bundle-size-mismatch'
     $null = New-Item -ItemType Directory -Path $bundleMismatchWorkDir

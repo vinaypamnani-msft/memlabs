@@ -79,5 +79,9 @@ Assert-True ($startTestSource -match "Resolve-MemLabsTestSuite -VmbuildRoot \`$P
     'Start-Test -All is no longer mapped to Core.'
 Assert-True ($startTestSource.Contains("'-TestsCsv'")) 'Start-Test does not forward curated upgrade families.'
 Assert-True ($runnerSource.Contains('[string] $TestsCsv')) 'Cross-revision runner does not accept a curated family list.'
+Assert-True ($startTestSource.Contains('[string[]]$SkipTest')) 'Start-Test does not expose -SkipTest.'
+Assert-True ($startTestSource.Contains('skipTestSet.Contains')) 'Start-Test does not filter skipped suite families.'
+$continuousSource = Get-Content -LiteralPath (Join-Path $RootPath 'tools\Invoke-MemLabsContinuousTests.ps1') -Raw
+Assert-True ($continuousSource.Contains('$skipTestNames')) 'Continuous scheduling does not receive skip exclusions.'
 
 Write-Host "PASS -- suites cover $($ordinaryFamilies.Count) ordinary families; Core=$($core.Families.Count), Upgrade=$($upgrade.Families.Count), Specialized=$($specialized.Families.Count), Stress=$($stress.Families.Count)."

@@ -92,15 +92,29 @@ $replicaMPs = @($deployConfig.virtualMachines | Where-Object {
         $_.role -eq 'SiteSystem' -and $_.installMP -and
         (Test-MPReplicaEnabled -Value $_.useDatabaseReplica) -and $_.siteCode -eq $SiteCode
     })
+$explicitReplicaIntent = @($deployConfig.virtualMachines | Where-Object {
+        $_.role -eq 'SiteSystem' -and $_.installMP -and $_.siteCode -eq $SiteCode -and
+        $_.PSObject.Properties.Name -contains 'useDatabaseReplica'
+    })
+$cleanupRequested = $replicaMPs.Count -eq 0 -and
+    $explicitReplicaIntent.Count -gt 0 -and
+    @($explicitReplicaIntent | Where-Object {
+            Test-MPReplicaEnabled -Value $_.useDatabaseReplica
+        }).Count -eq 0
 
-if ($replicaMPs.Count -eq 0) {
-    Write-DscStatus "$Tag No MP database replicas configured for site $SiteCode. Nothing to do."
+if ($replicaMPs.Count -eq 0 -and -not $cleanupRequested) {
+    Write-DscStatus "$Tag No authoritative MP database replica intent is present for site $SiteCode. Nothing to do."
     Set-MPReplicaStatus -Status 'Completed'
     return
 }
 
 Set-MPReplicaStatus -Status 'Running'
-Write-DscStatus "$Tag Configuring $($replicaMPs.Count) MP database replica(s) for site $SiteCode (site DB $siteSqlConn\$siteDbName)."
+if ($cleanupRequested) {
+    Write-DscStatus "$Tag Every explicitly represented MP has useDatabaseReplica=false. Removing stale MemLabs MP replica site artifacts."
+}
+else {
+    Write-DscStatus "$Tag Configuring $($replicaMPs.Count) MP database replica(s) for site $SiteCode (site DB $siteSqlConn\$siteDbName)."
+}
 
 $invalidReplicaMps = @()
 foreach ($replicaMp in $replicaMPs) {
@@ -247,6 +261,211 @@ function Invoke-ReplSql {
     finally {
         $conn.Dispose()
     }
+}
+
+function Remove-StaleMPReplicaSiteArtifacts {
+    [CmdletBinding()]
+    param()
+
+    $siteSqlMachine = ($siteSqlServer -split '\\')[0]
+    $siteSqlShort = ($siteSqlMachine -split '\.')[0]
+    $siteSqlMachineFqdn = if ($siteSqlMachine -like '*.*') {
+        $siteSqlMachine
+    }
+    else {
+        "$siteSqlMachine.$DomainFullName"
+    }
+    $isSiteSqlLocal = $siteSqlShort -ieq $env:COMPUTERNAME
+    $jobPrefix = "$siteSqlShort-$siteDbName-".Replace("'", "''")
+
+    $inventory = @(Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+DECLARE @publicationCount int = 0;
+DECLARE @subscriptionCount int = 0;
+DECLARE @publicationCatalogPresent bit =
+    CASE WHEN OBJECT_ID(N'dbo.syspublications') IS NULL THEN 0 ELSE 1 END;
+DECLARE @subscriptionCatalogComplete bit =
+    CASE WHEN OBJECT_ID(N'dbo.syssubscriptions') IS NOT NULL
+              AND OBJECT_ID(N'dbo.sysarticles') IS NOT NULL
+         THEN 1 ELSE 0 END;
+
+IF @publicationCatalogPresent = 1
+BEGIN
+    EXEC sys.sp_executesql
+        N'SELECT @result = COUNT(*)
+          FROM dbo.syspublications
+          WHERE name = N''ConfigMgr_MPReplica'';',
+        N'@result int OUTPUT',
+        @result = @publicationCount OUTPUT;
+END;
+
+IF @publicationCount > 0 AND @subscriptionCatalogComplete = 1
+BEGIN
+    EXEC sys.sp_executesql
+        N'SELECT @result = COUNT(*)
+          FROM dbo.syssubscriptions s
+          JOIN dbo.sysarticles a ON a.artid = s.artid
+          JOIN dbo.syspublications p ON p.pubid = a.pubid
+          WHERE p.name = N''ConfigMgr_MPReplica'';',
+        N'@result int OUTPUT',
+        @result = @subscriptionCount OUTPUT;
+END;
+
+SELECT
+    PublicationCount = @publicationCount,
+    SubscriptionCount = @subscriptionCount,
+    PublicationCatalogPresent = @publicationCatalogPresent,
+    SubscriptionCatalogComplete = @subscriptionCatalogComplete,
+    DatabaseIsPublished = (
+        SELECT CONVERT(bit, is_published)
+        FROM sys.databases
+        WHERE name = DB_NAME()
+    ),
+    AgentJobCount = (
+        SELECT COUNT(*)
+        FROM msdb.dbo.sysjobs j
+        LEFT JOIN msdb.dbo.syscategories c ON c.category_id = j.category_id
+        WHERE j.name LIKE N'%-ConfigMgr[_]MPReplica-%'
+           OR (c.name = N'REPL-LogReader' AND j.name LIKE N'$jobPrefix%')
+    );
+"@)
+    $state = $inventory | Select-Object -First 1
+    if (-not $state) {
+        throw 'MP replica cleanup inventory returned no SQL result.'
+    }
+    $publicationCount = [int]$state.PublicationCount
+    $subscriptionCount = [int]$state.SubscriptionCount
+    $agentJobCount = [int]$state.AgentJobCount
+    $publicationCatalogPresent = [int]$state.PublicationCatalogPresent -eq 1
+    $subscriptionCatalogComplete = [int]$state.SubscriptionCatalogComplete -eq 1
+    $databaseIsPublished = [int]$state.DatabaseIsPublished -eq 1
+    if ($databaseIsPublished -and -not $publicationCatalogPresent) {
+        throw 'Refusing automatic MP replica teardown: the site database is marked published but its publication catalog is unavailable, so publication ownership and live subscriptions cannot be ruled out.'
+    }
+    if ($publicationCount -gt 0 -and -not $subscriptionCatalogComplete) {
+        throw 'Refusing automatic MP replica teardown: publication ConfigMgr_MPReplica exists but its article/subscription catalogs are incomplete, so live subscriptions cannot be ruled out.'
+    }
+    if ($subscriptionCount -gt 0) {
+        throw "Refusing automatic MP replica teardown: publication ConfigMgr_MPReplica still has $subscriptionCount subscription(s). Hydrate the owning MP replica configuration or remove it explicitly."
+    }
+
+    if ($publicationCount -gt 0 -or $agentJobCount -gt 0) {
+        $cleanupRows = @(Invoke-ReplSql -Instance $siteSqlConn -Database $siteDbName -Query @"
+DECLARE @remainingPublications int = 0;
+
+IF OBJECT_ID(N'dbo.syspublications') IS NOT NULL
+BEGIN
+    EXEC sys.sp_executesql
+        N'IF EXISTS (
+              SELECT 1
+              FROM dbo.syspublications
+              WHERE name = N''ConfigMgr_MPReplica''
+          )
+          BEGIN
+              EXEC dbo.sp_droppublication @publication = N''ConfigMgr_MPReplica'';
+          END;
+          SELECT @result = COUNT(*) FROM dbo.syspublications;',
+        N'@result int OUTPUT',
+        @result = @remainingPublications OUTPUT;
+END;
+
+IF @remainingPublications = 0
+   AND EXISTS (
+       SELECT 1
+       FROM sys.databases
+       WHERE name = DB_NAME()
+         AND is_published = 1
+   )
+BEGIN
+    EXEC master.dbo.sp_replicationdboption
+        @dbname = N'$($siteDbName.Replace("'", "''"))',
+        @optname = N'publish',
+        @value = N'false';
+END;
+
+DECLARE @jobName sysname;
+DECLARE stale_jobs CURSOR LOCAL FAST_FORWARD FOR
+    SELECT j.name
+    FROM msdb.dbo.sysjobs j
+    LEFT JOIN msdb.dbo.syscategories c ON c.category_id = j.category_id
+    WHERE j.name LIKE N'%-ConfigMgr[_]MPReplica-%'
+       OR (@remainingPublications = 0
+           AND c.name = N'REPL-LogReader'
+           AND j.name LIKE N'$jobPrefix%');
+OPEN stale_jobs;
+FETCH NEXT FROM stale_jobs INTO @jobName;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    EXEC msdb.dbo.sp_delete_job @job_name = @jobName, @delete_unused_schedule = 1;
+    FETCH NEXT FROM stale_jobs INTO @jobName;
+END;
+CLOSE stale_jobs;
+DEALLOCATE stale_jobs;
+
+SELECT
+    PublicationCount = @remainingPublications,
+    AgentJobCount = (
+        SELECT COUNT(*)
+        FROM msdb.dbo.sysjobs j
+        LEFT JOIN msdb.dbo.syscategories c ON c.category_id = j.category_id
+        WHERE j.name LIKE N'%-ConfigMgr[_]MPReplica-%'
+           OR (@remainingPublications = 0
+               AND c.name = N'REPL-LogReader'
+               AND j.name LIKE N'$jobPrefix%')
+    );
+"@)
+        $cleanupState = $cleanupRows | Select-Object -First 1
+        if (-not $cleanupState -or [int]$cleanupState.PublicationCount -ne 0 -or
+            [int]$cleanupState.AgentJobCount -ne 0) {
+            throw "MP replica SQL teardown did not converge (publication=$($cleanupState.PublicationCount), jobs=$($cleanupState.AgentJobCount))."
+        }
+        Write-DscStatus "$Tag Removed stale ConfigMgr_MPReplica publication and $agentJobCount owned SQL Agent job(s) from $siteSqlConn\$siteDbName."
+    }
+    else {
+        Write-DscStatus "$Tag No stale ConfigMgr_MPReplica publication or owned SQL Agent jobs were found."
+    }
+
+    $cleanupShare = {
+        $messages = [System.Collections.Generic.List[string]]::new()
+        $share = Get-SmbShare -Name 'ConfigMgr_MPReplica' -ErrorAction SilentlyContinue
+        if ($share) {
+            $sharePath = "$($share.Path)"
+            Remove-SmbShare -Name 'ConfigMgr_MPReplica' -Force -Confirm:$false -ErrorAction Stop
+            $messages.Add("removed share ConfigMgr_MPReplica")
+            if ($sharePath -and
+                [IO.Path]::GetFileName($sharePath.TrimEnd('\')) -ieq 'ConfigMgr_MPReplica' -and
+                (Test-Path -LiteralPath $sharePath -PathType Container)) {
+                Remove-Item -LiteralPath $sharePath -Recurse -Force -ErrorAction Stop
+                $messages.Add("removed owned snapshot directory $sharePath")
+            }
+        }
+        if (Get-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -ErrorAction SilentlyContinue) {
+            Remove-LocalGroup -Name 'ConfigMgr_MPReplicaAccess' -ErrorAction Stop
+            $messages.Add('removed local group ConfigMgr_MPReplicaAccess')
+        }
+        return [string[]]$messages.ToArray()
+    }
+    $messages = if ($isSiteSqlLocal) {
+        & $cleanupShare
+    }
+    else {
+        Invoke-Command -ComputerName $siteSqlMachineFqdn -ScriptBlock $cleanupShare -ErrorAction Stop
+    }
+    foreach ($message in @($messages)) {
+        if ($message) { Write-DscStatus "$Tag [SiteSqlHost $siteSqlShort] $message" }
+    }
+    return $true
+}
+
+if ($cleanupRequested) {
+    try {
+        $null = Remove-StaleMPReplicaSiteArtifacts
+        Set-MPReplicaStatus -Status 'Completed'
+    }
+    catch {
+        Write-DscStatus "$Tag Stale MP replica teardown failed: $($_.Exception.Message)" -Failure
+        Set-MPReplicaStatus -Status 'Failed'
+    }
+    return
 }
 
 function Get-MPReplicaAgentJobState {

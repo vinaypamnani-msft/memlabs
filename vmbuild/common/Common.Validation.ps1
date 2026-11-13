@@ -567,8 +567,9 @@ function Test-MachineNameExists {
 
     )
 
-    if (-not $name) {
-        throw "Test-ValidMachineName called without a VMName"
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        Add-ValidationMessage -Message "VM Validation: A referenced VM name cannot be empty." -ReturnObject $ReturnObject -Failure
+        return
     }
 
     write-log "Testing $name" -Verbose
@@ -577,7 +578,7 @@ function Test-MachineNameExists {
     $vm = Get-List2 -deployConfig $config -SmartUpdate | where-object { $_.vmName -eq $name -or $_.vmName -eq $nameWithPrefix }
 
     if (-not $vm) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid reference VM: $name. VM does not exist." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid reference VM: $name. VM does not exist." -ReturnObject $ReturnObject -Failure
     }
 }
 
@@ -590,8 +591,9 @@ function Test-ValidMachineName {
         [switch] $FailOnLength
     )
 
-    if (-not $name) {
-        throw "Test-ValidMachineName called without a VMName"
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        Add-ValidationMessage -Message "VM Validation: A VM or computer name cannot be empty." -ReturnObject $ReturnObject -Failure
+        return
     }
 
     write-log "Testing $name" -Verbose
@@ -705,20 +707,38 @@ function Test-ValidUserName {
 function Test-ValidSiteRoleFlags {
     param (
         [object] $VM,
+        [object] $ConfigObject,
         [object] $ReturnObject
     )
 
     $requestedRoles = @(
-        [pscustomobject]@{ Name = 'installMP'; Value = [bool]$VM.installMP },
-        [pscustomobject]@{ Name = 'installDP'; Value = [bool]$VM.installDP },
-        [pscustomobject]@{ Name = 'installSUP'; Value = [bool]$VM.installSUP },
-        [pscustomobject]@{ Name = 'installRP'; Value = [bool]$VM.installRP },
-        [pscustomobject]@{ Name = 'installSMSProv'; Value = [bool]$VM.installSMSProv }
-    ) | Where-Object { $_.Value }
+        @(
+            [pscustomobject]@{ Name = 'installMP'; Value = [bool]$VM.installMP },
+            [pscustomobject]@{ Name = 'installDP'; Value = [bool]$VM.installDP },
+            [pscustomobject]@{ Name = 'installSUP'; Value = [bool]$VM.installSUP },
+            [pscustomobject]@{ Name = 'installRP'; Value = [bool]$VM.installRP },
+            [pscustomobject]@{ Name = 'installSMSProv'; Value = [bool]$VM.installSMSProv }
+        ) | Where-Object { $_.Value }
+    )
     if ($requestedRoles.Count -eq 0) { return }
 
     $siteCapableRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'WSUS')
     if ($VM.role -notin $siteCapableRoles) {
+        $isRemoteSqlReportingPoint = $VM.role -eq 'DomainMember' -and
+            $VM.sqlVersion -and
+            $requestedRoles.Count -eq 1 -and
+            $requestedRoles[0].Name -eq 'installRP'
+        if ($isRemoteSqlReportingPoint) {
+            $owners = @($ConfigObject.virtualMachines | Where-Object {
+                    $_.role -in @('CAS', 'Primary') -and
+                    -not [string]::IsNullOrWhiteSpace("$($_.siteCode)") -and
+                    "$($_.remoteSQLVM)".Equals(
+                        "$($VM.vmName)", [StringComparison]::OrdinalIgnoreCase)
+                })
+            if ($owners.Count -eq 1) { return }
+            Add-ValidationMessage -Message "VM Validation: [$($VM.vmName)] requests installRP as a DomainMember SQL host, but it is not the unambiguous remoteSQLVM of exactly one configured CAS/Primary with a siteCode. Reporting Point on a DomainMember is supported only when co-located with that site's remote SQL/SSRS host." -ReturnObject $ReturnObject -Failure
+            return
+        }
         Add-ValidationMessage -Message "VM Validation: [$($VM.vmName)] role [$($VM.role)] cannot host ConfigMgr site-system flags [$($requestedRoles.Name -join ', ')]. Change the VM to a supported SiteSystem/site-server role and specify its owning siteCode before deploying roles." -ReturnObject $ReturnObject -Failure
     }
 }
@@ -730,11 +750,17 @@ function Test-ValidVmSupported {
         [object] $ReturnObject
     )
 
-    if (-not $VM) {
-        throw "No VM provided"
+    if ($null -eq $VM -or [string]::IsNullOrWhiteSpace($VM.vmName)) {
+        Add-ValidationMessage -Message "VM Validation: Each VM entry must contain a non-empty vmName." -ReturnObject $ReturnObject -Failure
+        return
     }
 
     $vmName = $VM.vmName
+    foreach ($reference in 'remoteSQLVM', 'replicaSqlServerVM', 'wsusDataBaseServer', 'fileServerVM', 'pullDPSourceDP', 'OtherNode', 'remoteContentLibVM', 'PatchMyPCFileServer') {
+        if ($VM.PSObject.Properties[$reference] -and [string]::IsNullOrWhiteSpace($VM.$reference)) {
+            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an empty '$reference' VM reference. Select a valid VM or remove the unused property." -ReturnObject $ReturnObject -Failure
+        }
+    }
 
     $vmName = Add-VmNamePrefix -Name $vmName -Prefix $ConfigObject.vmOptions.prefix
     $isLinuxVm = Test-VmIsLinux -Vm $VM
@@ -872,7 +898,7 @@ function Test-ValidVmSupported {
         }
     }
 
-    Test-ValidSiteRoleFlags -VM $VM -ReturnObject $ReturnObject
+    Test-ValidSiteRoleFlags -VM $VM -ConfigObject $ConfigObject -ReturnObject $ReturnObject
 }
 
 function Test-ValidVmMemory {
@@ -1237,9 +1263,9 @@ function Test-ValidRoleSiteServer {
 
         $psInConfig = $ConfigObject.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $VM.parentSiteCode }
         if (-not $psInConfig) {
-            $primary = Get-SiteServerForSiteCode -deployConfig $ConfigObject -sitecode $VM.parentSiteCode -type VM
+            $primary = Get-List2 -deployConfig $ConfigObject | Where-Object { $_.Role -eq 'Primary' -and $_.SiteCode -eq $VM.parentSiteCode }
             if (-not $primary) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains parentSiteCode [$($VM.parentSiteCode)], but a primary site with this siteCode was not found." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains parentSiteCode [$($VM.parentSiteCode)], but a primary site with this siteCode was not found." -ReturnObject $ReturnObject -Failure
             }
         }
     }
@@ -1766,7 +1792,9 @@ function Test-Configuration {
         [Parameter(Mandatory = $false, HelpMessage = "Final Test")]
         [switch]$Final,
         [Parameter(Mandatory = $false, HelpMessage = "Start phase for the deployment; URLs only needed by earlier phases are skipped.")]
-        [int]$StartPhase = 0
+        [int]$StartPhase = 0,
+        [Parameter(Mandatory = $false, HelpMessage = "Require at least one new or staged existing VM before deploying.")]
+        [switch]$RequireDeploymentTargets
     )
     #Get-PSCallStack | out-host
 
@@ -1782,7 +1810,7 @@ function Test-Configuration {
     # skip the full revalidation pass (New-DeployConfig + ~25 Test-Valid* calls).
     $fastCacheJson = $null
     $fastCacheKey = $null
-    $fastCacheEligible = ($Fast.IsPresent -and -not $Final.IsPresent -and $InputObject -and $OrigSmartUpdateValue -eq $true)
+    $fastCacheEligible = ($Fast.IsPresent -and -not $Final.IsPresent -and -not $RequireDeploymentTargets.IsPresent -and $InputObject -and $OrigSmartUpdateValue -eq $true)
     if ($fastCacheEligible) {
         try {
             $fastCacheJson = $InputObject | ConvertTo-Json -Depth 5 -Compress
@@ -1875,17 +1903,29 @@ function Test-Configuration {
         #     }
         # }
 
+        $vmIndex = 0
+        foreach ($candidate in $configObject.virtualMachines) {
+            $vmIndex++
+            if ($null -eq $candidate -or [string]::IsNullOrWhiteSpace($candidate.vmName)) {
+                Add-ValidationMessage -Message "VM Validation: virtualMachines entry $vmIndex must contain a non-empty vmName." -ReturnObject $return -Failure
+            }
+        }
+        if ($return.Failures -eq 0 -and ($RequireDeploymentTargets.IsPresent -or $Final.IsPresent)) {
+            # Check queued VMs before enhancement adds unmodified domain dependencies.
+            $deploymentTargets = @($configObject.virtualMachines | Where-Object { $_ })
+            if ($deploymentTargets.Count -eq 0) {
+                Add-ValidationMessage -Message "Deployment Validation: Nothing to deploy or update. Add a new VM or modify an existing VM before deploying." -ReturnObject $return -Failure
+            }
+        }
+        if ($return.Failures -gt 0) {
+            $return.DeployConfig = $configObject
+            $return.Message = $return.Message.ToString().Trim()
+            return $return
+        }
+
         # Get deployConfig without existing VM's for validation
         Write-Progress2 -Activity "Validating Configuration" -Status "Creating DeployConfig" -PercentComplete 5
         $deployConfig = New-DeployConfig -configObject $configObject
-
-        #if ($deployConfig.virtualMachines.Count -eq 0) {
-        #    $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
-        #    $return.Problems += 1
-        #$return.Failures += 1
-        #    Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
-        #    return $return
-        #}
 
         $virtualMachinesNoExisting = $deployConfig.virtualMachines | Where-Object { -not $_.Hidden }
         # Contains roles
@@ -2698,8 +2738,13 @@ function Test-Configuration {
 
             # Add thisParams
 
-            $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
-            $return.DeployConfig = $deployConfigEx
+            if ($return.Failures -eq 0) {
+                $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
+                $return.DeployConfig = $deployConfigEx
+            }
+            else {
+                $return.DeployConfig = $deployConfig
+            }
 
             # Disk space validation for VHDX copies (slow: disk I/O for file sizes, drive query)
             Write-Progress2 -Activity "Validating Configuration" -Status "Checking Disk Space" -PercentComplete 92
@@ -2734,9 +2779,9 @@ function Test-Configuration {
         return $return
     }
     catch {
-        $return.Message = $_
-        $return.Problems += 1
-        #$return.Failures += 1
+        $return.Valid = $false
+        Add-ValidationMessage -Message "Configuration validation could not complete: $($_.Exception.Message)" -ReturnObject $return -Failure
+        $return.Message = $return.Message.ToString().Trim()
         Write-Exception -ExceptionInfo $_
         Write-Progress2 -Activity "Validating Configuration"  -Completed        
         return $return

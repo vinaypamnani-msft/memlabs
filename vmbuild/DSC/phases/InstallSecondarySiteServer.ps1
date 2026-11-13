@@ -802,17 +802,19 @@ $Install_Secondary = {
             Write-DscStatus "Secondary site replication link is 'Active'." -MachineName $SecondaryName
             $secondaryHttpsReady = -not $usePKI
             if ($usePKI) {
-                $existingMpApp = $null
+                $existingMpIis = $false
                 try {
-                    $existingMpApp = Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
+                    $existingMpIis = Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
                         Import-Module WebAdministration -ErrorAction Stop
-                        Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
+                        Test-Path -LiteralPath 'IIS:\Sites\Default Web Site\SMS_MP' -ErrorAction Stop
                     } -ErrorAction Stop
                 }
-                catch { }
+                catch {
+                    Write-DscStatus "Could not inspect the SMS_MP IIS endpoint on $secondaryFQDN`: $($_.Exception.Message). The bounded MP readiness wait continues." -Warning -MachineName $SecondaryName
+                }
                 $mpBindingRepaired = Confirm-MPHttpsBinding -MPFQDN $secondaryFQDN
                 $secondaryHttpsReady = Test-MPHttpsBinding -MPFQDN $secondaryFQDN
-                if (-not $existingMpApp -or $mpBindingRepaired) {
+                if (-not $existingMpIis -or $mpBindingRepaired) {
                     try {
                         Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
                             Restart-Service -Name SMS_SITE_COMPONENT_MANAGER -Force -ErrorAction Stop
@@ -843,18 +845,18 @@ $Install_Secondary = {
                 -Probe {
                     Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
                         Import-Module WebAdministration -ErrorAction Stop
-                        Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
+                        Test-Path -LiteralPath 'IIS:\Sites\Default Web Site\SMS_MP' -ErrorAction Stop
                     } -ErrorAction Stop
                 }
             if ($secondaryDp -and $secondaryMp -and $secondaryMpIis -and $secondaryHttpsReady) {
-                Write-DscStatus "Secondary DP and MP on $secondaryFQDN are provider-visible, and the SMS_MP IIS application is ready." -MachineName $SecondaryName
+                Write-DscStatus "Secondary DP and MP on $secondaryFQDN are provider-visible, and the SMS_MP IIS endpoint is ready." -MachineName $SecondaryName
                 $secondaryInstallSucceeded = $true
             }
             else {
                 $missingRoles = @()
                 if (-not $secondaryDp) { $missingRoles += 'DP provider role' }
                 if (-not $secondaryMp) { $missingRoles += 'MP provider role' }
-                elseif (-not $secondaryMpIis) { $missingRoles += 'SMS_MP IIS application' }
+                elseif (-not $secondaryMpIis) { $missingRoles += 'SMS_MP IIS endpoint' }
                 if (-not $secondaryHttpsReady) { $missingRoles += 'healthy IIS HTTPS binding' }
                 Write-DscStatus "Secondary site '$secondarySiteCode' is Active, but implicit role readiness failed after bounded waits: $($missingRoles -join ', ')." -Failure -MachineName $SecondaryName
             }

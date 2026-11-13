@@ -238,7 +238,7 @@ Assert-Equal $false $script:WaitPhaseCalled 'an inventory enumeration failure ne
 # --- Scenario F: an interrupted deployment leaves inProgress=true. Ordinary
 #     maintenance retains its safety guard, while the mutex-owned Phase 0 path
 #     still applies required fixes instead of making maintenance skippable. ---
-function Get-VMNote {
+function Get-VMMaintenanceNote {
     param($VMName)
     return [pscustomobject]@{
         vmName     = $VMName

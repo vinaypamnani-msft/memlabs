@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Tests the main-to-develop expansion runner without changing Hyper-V.
+    Tests expansion scopes, workflow failures and diagnostic recovery without changing Hyper-V.
 #>
 [CmdletBinding()]
 param([string] $RootPath)
@@ -12,9 +12,11 @@ $startTestPath = Join-Path $RootPath 'Start-Test.ps1'
 $childLauncherPath = Join-Path $PSScriptRoot 'Invoke-PinnedChildScript.ps1'
 $newLabPath = Join-Path $RootPath 'New-Lab.ps1'
 $phasesPath = Join-Path $RootPath 'common\Common.Phases.ps1'
+$functionalValidationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
 $script:Failures = 0
 $script:MockVms = @{}
 $script:MockDisks = @{}
+$script:MockVhds = @{}
 $script:MockDomainSid = 'S-1-5-21-100-200-300'
 $script:LastCredentialUser = $null
 $script:CredentialAttempts = [System.Collections.Generic.List[string]]::new()
@@ -22,9 +24,13 @@ $script:RejectedCredentialUsers = @()
 $script:MockIdentityDnsDomain = 'nocm.com'
 $script:MockIdentityUser = $null
 $script:MockGetVmFailure = $false
+Write-Host 'Initial defect coverage: complete maintenance scopes, terminal workflow failures, and timeline sharing recovery.'
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; DnsAddresses = @('10.220.201.20')
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+    NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+    DnsAddresses = @('10.220.201.20')
 }
+$script:MockDomainHealthSequence = [System.Collections.Generic.Queue[object]]::new()
 
 function Write-TestResult {
     param([bool] $Passed, [string] $What, [string] $Detail = '')
@@ -60,6 +66,14 @@ Assert-True ($childLauncherText -match 'Console\.CancelKeyPress' -and
     $childLauncherText -match 'InstallImmediateCancelExit') `
     'pinned child launcher converts Ctrl-C into immediate Job Object teardown'
 
+$functionalValidationText = Get-Content -LiteralPath $functionalValidationPath -Raw
+Assert-True ($functionalValidationText -match
+    '(?s)\$scStableSamples\s*=\s*0.+?nltest\.exe\s+"/sc_query:\$expectedDomain".+?\$scStableSamples\s*-ge\s*2') `
+    'Phase 11 requires consecutive cmdlet and nltest secure-channel samples'
+Assert-True ($functionalValidationText -match
+    '(?s)\$repairStableSamples\s*=\s*0.+?\$repairStableSamples\s*-ge\s*2') `
+    'Phase 11 repair is revalidated with consecutive healthy samples'
+
 function Import-TestFunction {
     param([string] $Path, [string] $Name)
 
@@ -88,6 +102,14 @@ function Get-VMHardDiskDrive {
     return @($script:MockDisks[$VMName])
 }
 
+function Get-VHD {
+    param([string] $Path, [object] $ErrorAction)
+    if ($script:MockVhds.ContainsKey($Path)) {
+        return $script:MockVhds[$Path]
+    }
+    return [pscustomobject]@{ Path = $Path; ParentPath = $null }
+}
+
 function Invoke-Command {
     param([string] $VMName, [pscredential] $Credential, [scriptblock] $ScriptBlock, [object[]] $ArgumentList, [object] $ErrorAction)
     $script:LastCredentialUser = $Credential.UserName
@@ -105,12 +127,25 @@ function Invoke-Command {
         'admin2'
     }
     if ($script:MockIdentityUser) { $identityUser = $script:MockIdentityUser }
-    if ("$ScriptBlock" -like '*Test-ComputerSecureChannel*') {
+    if ("$ScriptBlock" -like '*Get-CimInstance Win32_ComputerSystem*') {
+        $script:LastDomainProbeScript = $ScriptBlock
+        $health = if ($script:MockDomainHealthSequence.Count -gt 0) {
+            $script:MockDomainHealthSequence.Dequeue()
+        }
+        else {
+            $script:MockDomainHealth
+        }
         return [pscustomobject]@{
-            PartOfDomain = $script:MockDomainHealth.PartOfDomain
-            Domain = $script:MockDomainHealth.Domain
-            SecureChannel = $script:MockDomainHealth.SecureChannel
-            DnsAddresses = @($script:MockDomainHealth.DnsAddresses)
+            PartOfDomain = $health.PartOfDomain
+            Domain = $health.Domain
+            SecureChannel = $health.SecureChannel
+            SecureChannelError = "$($health.SecureChannelError)"
+            NltestHealthy = $health.NltestHealthy
+            NltestExitCode = $health.NltestExitCode
+            NltestOutput = "$($health.NltestOutput)"
+            TrustedDc = "$($health.TrustedDc)"
+            LogonServer = "$($health.LogonServer)"
+            DnsAddresses = @($health.DnsAddresses)
             _MemLabsIdentity = "NOCM\$identityUser"
             _MemLabsUserDnsDomain = $script:MockIdentityDnsDomain
             _MemLabsUserName = $identityUser
@@ -131,7 +166,7 @@ if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
 
 $stateRoot = Join-Path ([IO.Path]::GetTempPath()) "memlabs-crossrevision-plan-$PID"
 Remove-Item -LiteralPath $stateRoot -Recurse -Force -ErrorAction SilentlyContinue
-$pwshPath = Join-Path $PSHOME 'pwsh.exe'
+$pwshPath = (Get-Command pwsh.exe -ErrorAction Stop).Source
 
 $allOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $runnerPath `
         -RepositoryRoot $repoRoot -All -PlanOnly -StateRoot $stateRoot 2>&1 | ForEach-Object { "$_" })
@@ -221,6 +256,8 @@ $parameterPath = Join-Path $scopeTestRoot 'parameters.clixml'
 $resultPath = Join-Path $scopeTestRoot 'result.txt'
 $exitScriptPath = Join-Path $scopeTestRoot 'Exit-Code.ps1'
 $continueScriptPath = Join-Path $scopeTestRoot 'Continue-Error.ps1'
+$resumeScriptPath = Join-Path $scopeTestRoot 'Resume-Metadata.ps1'
+$launcherResultPath = Join-Path $scopeTestRoot 'launcher-result.json'
 $launcherPidPath = Join-Path $scopeTestRoot 'launcher.pid'
 try {
     $null = New-Item -ItemType Directory -Path $scopeTestRoot -Force
@@ -263,6 +300,28 @@ $global:StartPhase = $StartPhase
     & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
         -ScriptPath $exitScriptPath -ParameterPath $parameterPath
     Assert-Equal 55 $LASTEXITCODE 'child launcher preserves restart exit codes'
+
+    [IO.File]::WriteAllText($resumeScriptPath, @'
+[CmdletBinding()]
+param()
+$global:NewLabResumeCommand = './New-Lab.ps1 -Configuration "fixture.json" -startPhase 8 -restore'
+$global:NewLabResumeInfo = [pscustomobject]@{
+    Configuration = 'fixture.json'
+    Phase = 8
+    Restore = $true
+}
+exit 2
+'@)
+    [ordered]@{} | Export-Clixml -LiteralPath $parameterPath
+    $resultToken = [guid]::NewGuid().ToString('N')
+    & $pwshPath -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
+        -ScriptPath $resumeScriptPath -ParameterPath $parameterPath `
+        -InvocationToken $resultToken -ResultPath $launcherResultPath
+    Assert-Equal 2 $LASTEXITCODE 'child launcher preserves failed deployment exit code while publishing a result'
+    $launcherResult = Get-Content -LiteralPath $launcherResultPath -Raw | ConvertFrom-Json
+    Assert-Equal $resultToken $launcherResult.InvocationToken 'child result is bound to its invocation token'
+    Assert-Equal 8 $launcherResult.ResumeInfo.Phase 'child result carries structured resume phase'
+    Assert-Equal $true $launcherResult.ResumeInfo.Restore 'child result carries structured restore mode'
 
     [IO.File]::WriteAllText($continueScriptPath, @'
 [CmdletBinding()]
@@ -309,13 +368,19 @@ $invokeChildFunction = Import-TestFunction -Path $runnerPath -Name Invoke-ChildS
 . (Import-TestFunction -Path $runnerPath -Name Get-ExpectedVmNames)
 . (Import-TestFunction -Path $runnerPath -Name Get-DomainVms)
 . (Import-TestFunction -Path $runnerPath -Name Get-ExistingNamedVms)
+. (Import-TestFunction -Path $runnerPath -Name Resolve-CrossRevisionVhdBasePath)
+. (Import-TestFunction -Path $runnerPath -Name Get-CrossRevisionVmDiskIdentity)
+. (Import-TestFunction -Path $runnerPath -Name Test-CrossRevisionLegacySnapshotDiskMatch)
 . (Import-TestFunction -Path $runnerPath -Name Get-VmIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-BaselineIdentity)
+. (Import-TestFunction -Path $runnerPath -Name Save-CrossRevisionExpansionIdentity)
+. (Import-TestFunction -Path $runnerPath -Name Get-CrossRevisionMaintenanceTargets)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DevelopStageComplete)
 . (Import-TestFunction -Path $runnerPath -Name Resolve-CrossRevisionDomainNetBiosName)
 . (Import-TestFunction -Path $runnerPath -Name New-DomainCredentials)
 . (Import-TestFunction -Path $runnerPath -Name New-DomainCredential)
 . (Import-TestFunction -Path $runnerPath -Name Invoke-CrossRevisionDomainProbe)
+. (Import-TestFunction -Path $runnerPath -Name Wait-CrossRevisionRetainedVmReady)
 . (Import-TestFunction -Path $runnerPath -Name Get-DomainIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainIdentity)
 . (Import-TestFunction -Path $runnerPath -Name Assert-DomainJoinedVmHealth)
@@ -385,6 +450,7 @@ $cancelState = Join-Path $cancelRoot 'state'
 $cancelWorktree = Join-Path $cancelRoot 'worktree'
 $cancelMarker = Join-Path $cancelRoot 'started.txt'
 $cancelPids = Join-Path $cancelRoot 'pids.txt'
+$cancelConsole = Join-Path $cancelRoot 'console.txt'
 $cancelCheckpoint = Join-Path $cancelRoot 'checkpoint.txt'
 $cancelLocationResult = Join-Path $cancelRoot 'location.txt'
 $cancelPs = $null
@@ -392,9 +458,23 @@ try {
     $null = New-Item -ItemType Directory -Path (Join-Path $cancelSource 'vmbuild\logs') -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $cancelWorktree 'vmbuild') -Force
     $cancelChild = Join-Path $cancelWorktree 'vmbuild\CancelChild.ps1'
+    $cancelDescendant = Join-Path $cancelWorktree 'vmbuild\Cancel Descendant.ps1'
+    [IO.File]::WriteAllText($cancelDescendant, @'
+param([string] $ConsolePath)
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CancellationConsoleNative { [DllImport("kernel32.dll", ExactSpelling=true)] public static extern IntPtr GetConsoleWindow(); }' -ErrorAction Stop
+[IO.File]::WriteAllText($ConsolePath, [CancellationConsoleNative]::GetConsoleWindow().ToInt64().ToString())
+Start-Sleep -Seconds 120
+'@)
     [IO.File]::WriteAllText($cancelChild, @'
-param([string] $MarkerPath, [string] $PidPath)
-$descendant = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120') -PassThru
+param([string] $MarkerPath, [string] $PidPath, [string] $DescendantPath, [string] $ConsolePath)
+$startInfo = [Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = Join-Path $PSHOME 'pwsh.exe'
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $DescendantPath, '-ConsolePath', $ConsolePath)) {
+    $null = $startInfo.ArgumentList.Add($argument)
+}
+$descendant = [Diagnostics.Process]::Start($startInfo)
 [IO.File]::WriteAllText($PidPath, "$PID|$($descendant.Id)")
 [IO.File]::WriteAllText($MarkerPath, 'started')
 Start-Sleep -Seconds 120
@@ -412,6 +492,8 @@ Start-Sleep -Seconds 120
             [string] $Pwsh,
             [string] $Marker,
             [string] $Pids,
+            [string] $Descendant,
+            [string] $Console,
             [string] $LocationResult
         )
         . ([scriptblock]::Create($StopFunctionText))
@@ -423,7 +505,7 @@ Start-Sleep -Seconds 120
         $initialLocation = (Get-Location).Path
         try {
             Invoke-ChildScript -WorktreePath $Worktree -ScriptName 'CancelChild.ps1' `
-                -Parameters ([ordered]@{ MarkerPath = $Marker; PidPath = $Pids }) -Label 'cancel-test'
+                -Parameters ([ordered]@{ MarkerPath = $Marker; PidPath = $Pids; DescendantPath = $Descendant; ConsolePath = $Console }) -Label 'cancel-test'
         }
         finally {
             [IO.File]::WriteAllText($LocationResult, "$(Get-Location)")
@@ -441,10 +523,13 @@ Start-Sleep -Seconds 120
         AddArgument($pwshPath).
         AddArgument($cancelMarker).
         AddArgument($cancelPids).
+        AddArgument($cancelDescendant).
+        AddArgument($cancelConsole).
         AddArgument($cancelLocationResult)
     $cancelAsync = $cancelPs.BeginInvoke()
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    while (-not (Test-Path -LiteralPath $cancelMarker -PathType Leaf) -and [DateTime]::UtcNow -lt $deadline) {
+    while ((-not (Test-Path -LiteralPath $cancelMarker -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $cancelConsole -PathType Leaf)) -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 100
     }
     $publishedPids = if (Test-Path -LiteralPath $cancelPids) {
@@ -454,6 +539,14 @@ Start-Sleep -Seconds 120
         @()
     }
     Assert-Equal 2 $publishedPids.Count 'cancellation fixture publishes launcher and descendant IDs'
+    $consoleHandle = if (Test-Path -LiteralPath $cancelConsole -PathType Leaf) {
+        (Get-Content -LiteralPath $cancelConsole -Raw).Trim()
+    } else { '<missing>' }
+    Assert-Equal '0' $consoleHandle 'cancellation descendant starts without a console or Terminal window'
+    if ($publishedPids.Count -eq 2) {
+        Assert-True ($null -ne (Get-Process -Id $publishedPids[1] -ErrorAction SilentlyContinue)) `
+            'windowless cancellation descendant is alive before teardown'
+    }
     $cancelPs.Stop()
     try { $null = $cancelPs.EndInvoke($cancelAsync) } catch [Management.Automation.PipelineStoppedException] { }
     Start-Sleep -Seconds 1
@@ -661,6 +754,14 @@ try {
 catch {
     Write-TestResult -Passed $false -What 'interrupted exact-main checkpoint advances to current develop recovery code' -Detail $_.Exception.Message
 }
+$rollingState.CurrentStep = "nocm|maintenance|post|2|NOCM-B-AddWin11.json|$rollingOldDevelop"
+Assert-ThrowsLike {
+    Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
+} -Pattern "*cannot advance candidates*current runner checkout*-DevelopRevision $rollingOldDevelop*" `
+    -What 'interrupted maintenance preserves the candidate and explains how to use the updated runner with the old pin'
+Assert-Equal $rollingOldDevelop $rollingState.DevelopRevision 'rejected maintenance advance preserves the pinned candidate'
+Assert-Equal "nocm|maintenance|post|2|NOCM-B-AddWin11.json|$rollingOldDevelop" $rollingState.CurrentStep `
+    'rejected maintenance advance preserves the exact interrupted qualification step'
 
 $familyResetState = [ordered]@{
     MainRevision = '6f165b5f2d370598d65bf7091c2537f101909dcf'
@@ -722,6 +823,14 @@ catch {
 $runnerTokens = $null
 $runnerErrors = $null
 $runnerAst = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$runnerTokens, [ref]$runnerErrors)
+$runtimeDomainHealthCalls = @($runnerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Assert-DomainJoinedVmHealth'
+        }, $true))
+Assert-Equal 0 $runtimeDomainHealthCalls.Count 'the entire extra domain-health test is bypassed on both deployment and completed-stage resume paths'
+Assert-True ($runnerText -like '*BYPASS: extra independent domain-health validation is disabled*') `
+    'the runner explicitly reports the complete domain-health bypass'
 foreach ($helperName in @('Write-CrossRevisionStateFile', 'Reset-CrossRevisionFamilyState', 'Resolve-CrossRevisionResetFamily', 'Resolve-CrossRevisionActiveResetFamily')) {
     $definition = @($runnerAst.FindAll({
                 param($node)
@@ -748,6 +857,9 @@ Assert-True ($processGuardIndex -gt $mainLockIndex -and
 Assert-True ($runnerText -notmatch 'Move-Item -LiteralPath \$activeCheckpoint\.Path' -and
     $runnerText -match 'refusing to archive completed family progress') `
     'repeated reset cannot archive a checkpoint after its active family was already cleared'
+Assert-True ($runnerText.LastIndexOf('Assert-CrossRevisionCheckpointCanAdvance -State $checkpointState') -lt
+    $runnerText.LastIndexOf('Write-Host "ROLLING RESUME: preserving')) `
+    'rolling resume is announced only after candidate advancement has been permitted'
 $rollingState.CurrentStep = 'nocm|cleanup|nocm.com'
 try {
     Assert-CrossRevisionCheckpointCanAdvance -State $rollingState -Plan $rollingPlan -NewDevelopCommit $rollingNewDevelop
@@ -932,20 +1044,52 @@ try {
     $null = New-Item -ItemType Directory -Path (Join-Path $recoverCliSource 'vmbuild\logs') -Force
     $null = New-Item -ItemType Directory -Path $recoverCliLogs -Force
     [IO.File]::WriteAllText((Join-Path $recoverCliLogs 'VMBuild.recover.log'), 'recover-only')
+    # Qualification runs in a child of the real host-lock owner. Recovery must
+    # refuse that context rather than moving evidence during an active cycle.
+    $recoverLockProbe = [Threading.Mutex]::new($false, 'Global\MemLabsTestMutationLock')
+    $recoverLockAvailable = $false
+    try {
+        try { $recoverLockAvailable = $recoverLockProbe.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $recoverLockAvailable = $true }
+    }
+    finally {
+        if ($recoverLockAvailable) { $recoverLockProbe.ReleaseMutex() }
+        $recoverLockProbe.Dispose()
+    }
     $recoverOutput = @(& $pwshPath -NoLogo -NoProfile -NonInteractive -File $runnerPath `
             -RecoverLogsOnly -RepositoryRoot $recoverCliSource -StateRoot $recoverCliState 2>&1 |
             ForEach-Object { "$_" })
-    Assert-Equal 0 $LASTEXITCODE 'recover-logs-only mode exits successfully without a test selection'
-    Assert-True (($recoverOutput -join "`n") -like '*PASS: cross-revision logs now write under*') `
-        'recover-logs-only mode reports the normal log destination'
-    Assert-Equal 'Junction' (Get-Item -LiteralPath $recoverCliLogs -Force).LinkType `
-        'recover-logs-only mode links an existing pinned worktree'
-    Assert-Equal 'recover-only' (Get-Content -LiteralPath (Join-Path $recoverCliSource `
-                'vmbuild\logs\CrossRevision\develop-recover\VMBuild.recover.log') -Raw) `
-        'recover-logs-only mode moves stranded evidence under normal logs'
+    $recoverExitCode = $LASTEXITCODE
+    $recoverText = $recoverOutput -join "`n"
+    $recoveredEvidence = Join-Path $recoverCliSource 'vmbuild\logs\CrossRevision\develop-recover\VMBuild.recover.log'
+    if ($recoverLockAvailable) {
+        Assert-True ($recoverExitCode -eq 0) 'recover-logs-only mode exits successfully without a test selection' `
+            -Detail "exit=[$recoverExitCode] output=[$recoverText]"
+        Assert-True ($recoverText -like '*PASS: cross-revision logs now write under*') `
+            'recover-logs-only mode reports the normal log destination' -Detail $recoverText
+        Assert-Equal 'Junction' (Get-Item -LiteralPath $recoverCliLogs -Force).LinkType `
+            'recover-logs-only mode links an existing pinned worktree'
+        Assert-Equal 'recover-only' (Get-Content -LiteralPath $recoveredEvidence -Raw) `
+            'recover-logs-only mode moves stranded evidence under normal logs'
+    }
+    else {
+        Assert-Equal 1 $recoverExitCode 'recover-logs-only mode refuses a parent-held host mutation lock'
+        Assert-True ($recoverText -like '*Another MemLabs test cycle owns the host mutation lock; recover logs after it stops.*') `
+            'recover-logs-only mode reports host-lock contention explicitly' -Detail $recoverText
+        Assert-True (-not ((Get-Item -LiteralPath $recoverCliLogs -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) `
+            'blocked log recovery does not replace the original log directory'
+        Assert-Equal 'recover-only' (Get-Content -LiteralPath (Join-Path $recoverCliLogs 'VMBuild.recover.log') -Raw) `
+            'blocked log recovery preserves stranded evidence in place'
+        Assert-True (-not (Test-Path -LiteralPath $recoveredEvidence)) 'blocked log recovery does not publish moved evidence'
+    }
 }
 finally {
-    if (Test-Path -LiteralPath $recoverCliLogs) { Remove-Item -LiteralPath $recoverCliLogs -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $recoverCliLogs) {
+        $recoverLogItem = Get-Item -LiteralPath $recoverCliLogs -Force
+        if ($recoverLogItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Remove-Item -LiteralPath $recoverCliLogs -Force -ErrorAction Stop
+        }
+    }
     Remove-Item -LiteralPath $recoverCliRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -1051,6 +1195,386 @@ Assert-Equal 'resume|main|A' $failedRecoveryState.CurrentStep `
 Assert-Equal 'nocm|complete' ($failedRecoveryState.CompletedSteps -join ',') `
     'failed automatic cleanup preserves completed family progress'
 
+& {
+    $vmId = [guid]::NewGuid()
+    $target = [pscustomobject]@{ Name = 'READY-SITE'; Id = "$vmId"; Domain = 'ready.test' }
+    $script:ReadyStates = [Collections.Generic.Queue[string]]::new()
+    $script:ReadyState = 'Off'
+    $script:ReadyStarts = 0
+    $script:ReadyProbes = 0
+    $script:ReadyOutcome = 'Completed'
+    $script:ReadyId = $vmId
+    $script:ReadyComputer = 'READY-SITE'
+    $script:ReadyDomain = 'ready.test'
+    $script:ReadyIdentity = 'READY\admin'
+    $script:ReadyIdentitiesByCredential = @{}
+    $script:ReadyIdentitySequence = [Collections.Generic.Queue[string]]::new()
+    $script:ReadyEnvironmentUserName = 'admin'
+    $script:ReadyProbeScript = $null
+    $script:ReadyTimeouts = @()
+    $script:ReadyStops = 0
+    $script:ReadyRemovals = 0
+    $script:ReadyTransientFailures = 0
+    $script:ReadyEmptyProbe = $false
+    $script:ReadyProbeCopies = 1
+    $script:ReadyNotes = '{"domain":"ready.test","adminName":"admin","domainNetBiosName":"READY"}'
+    $script:ReadyRejectedUsers = @()
+    $script:ReadyCredentialAttempts = @()
+    function Get-VM {
+        param($Name, $ErrorAction)
+        if ($script:ReadyStates.Count) { $script:ReadyState = $script:ReadyStates.Dequeue() }
+        [pscustomobject]@{
+            Name = $Name; Id = $script:ReadyId; State = $script:ReadyState
+            Heartbeat = 'OkApplicationsHealthy'; Status = 'fixture'; Uptime = [timespan]::FromSeconds(15)
+            Notes = $script:ReadyNotes
+        }
+    }
+    function Start-VM {
+        param($VM, $ErrorAction)
+        Assert-Equal "$vmId" "$($VM.Id)" 'retained VM start uses the verified Hyper-V object'
+        $script:ReadyStarts++
+        $script:ReadyState = 'Running'
+    }
+    function New-DomainCredentials {
+        param($Domain, $AdminName, $DomainNetBiosName, $VmName, $AdminCachePath)
+        [pscredential]::new('READY\admin', [securestring]::new())
+    }
+    function Invoke-Command {
+        param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
+        Assert-True ($AsJob -and "$VMId" -eq "$($target.Id)") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
+        $script:ReadyProbes++
+        $script:ReadyCredentialAttempts += $Credential.UserName
+        if ($Credential.UserName -in $script:ReadyRejectedUsers) {
+            throw 'An error has occurred which PowerShell cannot handle. A remote session might have ended.'
+        }
+        if ($script:ReadyTransientFailures -gt 0) {
+            $script:ReadyTransientFailures--
+            throw 'fixture: guest transport is still starting'
+        }
+        $script:ReadyProbeScript = $ScriptBlock
+        $job = [pscustomobject]@{ State = $script:ReadyOutcome; CredentialUserName = $Credential.UserName }
+        $job | Add-Member ScriptMethod StopJobAsync { $script:ReadyStops++ }
+        return $job
+    }
+    function Wait-Job { param($Job, $Timeout) $script:ReadyTimeouts += $Timeout }
+    function Receive-Job {
+        param($Job, $ErrorAction)
+        if ($script:ReadyEmptyProbe) { return }
+        $previousEnvironment = @($env:COMPUTERNAME, $env:USERNAME, $env:USERDNSDOMAIN)
+        try {
+            $injectedIdentity = $script:ReadyIdentitySequence.Count -gt 0 -or
+                $script:ReadyIdentitiesByCredential.ContainsKey("$($Job.CredentialUserName)")
+            $probeIdentity = if ($script:ReadyIdentitySequence.Count -gt 0) {
+                $script:ReadyIdentitySequence.Dequeue()
+            }
+            elseif ($script:ReadyIdentitiesByCredential.ContainsKey("$($Job.CredentialUserName)")) {
+                $script:ReadyIdentitiesByCredential[$Job.CredentialUserName]
+            }
+            else { $script:ReadyIdentity }
+            $env:COMPUTERNAME = $script:ReadyComputer
+            $env:USERNAME = if ($injectedIdentity) { ($probeIdentity -split '\\')[-1] } else { $script:ReadyEnvironmentUserName }
+            $env:USERDNSDOMAIN = $script:ReadyDomain
+            # Execute the guest probe, substituting only the guest's Windows token.
+            $source = $script:ReadyProbeScript.ToString().Replace(
+                '[Security.Principal.WindowsIdentity]::GetCurrent().Name', '$probeIdentity')
+            for ($copy = 0; $copy -lt $script:ReadyProbeCopies; $copy++) {
+                & ([scriptblock]::Create($source))
+            }
+        }
+        finally {
+            $env:COMPUTERNAME = $previousEnvironment[0]
+            $env:USERNAME = $previousEnvironment[1]
+            $env:USERDNSDOMAIN = $previousEnvironment[2]
+        }
+    }
+    function Remove-Job { param($Job, [switch]$Force, $ErrorAction) $script:ReadyRemovals++ }
+    function Start-Sleep { param($Seconds) [Threading.Thread]::Sleep(20) }
+
+    Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    Assert-True ($script:ReadyStarts -eq 1 -and $script:ReadyProbes -eq 1) 'retained Off VM starts once and proves PSDirect identity before validation'
+    Assert-True ($script:ReadyRemovals -eq 1 -and $script:ReadyTimeouts[0] -le 5) 'readiness probe cleanup and timeout stay within the overall budget'
+    Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    Assert-Equal 1 $script:ReadyStarts 'already Running retained VM is not started or rebooted again'
+    Assert-Equal 2 $script:ReadyProbes 'already Running retained VM still proves PSDirect identity before domain validation'
+    $guestProbeTest = @'
+$ErrorActionPreference = 'Stop'
+$expectedIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+$expectedUser = ($expectedIdentity -split '\\')[-1]
+$env:USERNAME = 'MemLabs-Stale-Environment-Fixture'
+$env:USERDNSDOMAIN = 'readiness.fixture.test'
+$result = @(& {
+__GUEST_PROBE__
+})
+if ($result.Count -ne 1 -or $result[0].Identity -ne $expectedIdentity -or
+    $result[0].UserName -ne $expectedUser -or $result[0].UserName -eq $env:USERNAME -or
+    $result[0].EnvironmentUserName -ne $env:USERNAME -or
+    $result[0].ComputerName -ne $env:COMPUTERNAME -or $result[0].Domain -ne $env:USERDNSDOMAIN) {
+    throw 'Guest readiness probe did not return the actual Windows token and environment evidence.'
+}
+Write-Output 'Guest readiness token verified'
+'@
+    $guestProbeTest = $guestProbeTest.Replace('__GUEST_PROBE__', $script:ReadyProbeScript.ToString())
+    $encodedProbeTest = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($guestProbeTest))
+    $guestEngine = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $guestProbeOutput = @(& $guestEngine -NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedProbeTest 2>&1)
+    Assert-True ($LASTEXITCODE -eq 0 -and ($guestProbeOutput -join "`n") -eq 'Guest readiness token verified') `
+        'Windows PowerShell 5.1 executes the actual guest probe with a stale environment username' ($guestProbeOutput -join "`n")
+    $script:ReadyEnvironmentUserName = 'Administrator'
+    $identityError = $null
+    $startsBefore = $script:ReadyStarts
+    try {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    }
+    catch { $identityError = $_.Exception.Message }
+    Assert-True (-not $identityError) 'readiness accepts the authenticated user despite a stale environment username' $identityError
+    Assert-Equal $startsBefore $script:ReadyStarts 'stale environment username never restarts the retained VM'
+    $script:ReadyEnvironmentUserName = 'admin'
+    foreach ($state in @('Stopping', 'Off', 'Starting', 'Running')) { $script:ReadyStates.Enqueue($state) }
+    Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    Assert-Equal 2 $script:ReadyStarts 'late completion of the previous shutdown is observed and the Off VM is started once'
+    $script:ReadyTransientFailures = 1
+    $previousProbes = $script:ReadyProbes
+    Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    Assert-True ($script:ReadyProbes -eq $previousProbes + 2 -and $script:ReadyStarts -eq 2) 'transient guest boot transport failure retries without restarting the VM'
+    foreach ($state in @('Off', 'Off')) { $script:ReadyStates.Enqueue($state) }
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 5
+    } '*returned to Off after its one start request*' 'a guest that powers off again is not restarted in a loop'
+    $script:ReadyId = [guid]::NewGuid()
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } '*replaced*No power action permitted*' 'replacement VM is rejected before power action'
+    $script:ReadyId = $vmId
+    foreach ($state in @('Saved', 'Paused', 'RunningCritical', 'OffCritical', '')) {
+        $script:ReadyState = $state
+        Assert-ThrowsLike {
+            Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+        } '*cannot be prepared automatically*' "retained '$state' VM is not silently resumed or reset"
+    }
+    $script:ReadyState = 'Stopping'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } '*readiness timed out*state=Stopping*' 'stuck shutdown times out with state evidence without power-off'
+    $script:ReadyState = 'Off'
+    $script:ReadyComputer = 'WRONG-VM'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } "*readiness identity mismatch*expected computer='READY-SITE'*actual computer='WRONG-VM'*" `
+        'boot readiness rejects a different guest computer identity with expected and actual evidence'
+    $script:ReadyComputer = 'READY-SITE'
+    $script:ReadyState = 'Off'
+    $script:ReadyDomain = 'wrong.test'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } "*readiness identity mismatch*expected*DNS domain='ready.test'*actual*DNS domain='wrong.test'*" `
+        'boot readiness rejects a different authenticated domain with expected and actual evidence'
+    $script:ReadyDomain = 'ready.test'
+    $script:ReadyState = 'Running'
+    $script:ReadyIdentity = 'READY\other-admin'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } "*readiness identity mismatch*expected*user='admin'*actual*user='other-admin'*identity='READY\other-admin'*USERNAME='admin'*" `
+        'readiness rejects the wrong authenticated user even when the environment username matches'
+    $script:ReadyIdentity = ''
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } '*readiness identity mismatch*' 'readiness rejects a missing authenticated Windows identity'
+    $script:ReadyIdentity = 'READY\admin'
+    $script:ReadyProbeCopies = 2
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 0 -TimeoutSeconds 1
+    } '*readiness identity mismatch*results=2*' 'readiness rejects duplicate identity results with the actual result count'
+    $script:ReadyProbeCopies = 1
+    $script:ReadyEmptyProbe = $true
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } '*readiness timed out*returned no identity*' 'an empty completed probe fails with an explicit diagnostic'
+    $script:ReadyEmptyProbe = $false
+    $script:ReadyState = 'Off'
+    $script:ReadyOutcome = 'Running'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target $target -RetrySeconds 1 -TimeoutSeconds 1
+    } '*readiness timed out*PSDirect probe timed out*' 'a hung boot probe is bounded and fails with transport evidence'
+    Assert-True ($script:ReadyStops -gt 0) 'timed-out boot jobs are stopped asynchronously without disposing active callbacks'
+    Assert-ThrowsLike {
+        Wait-CrossRevisionRetainedVmReady -Target ([pscustomobject]@{ Name = 'OTHER'; Id = '' })
+    } '*saved VM name and GUID*' 'missing saved identity cannot select an unrelated VM to start'
+
+    & {
+        . (Import-TestFunction -Path $runnerPath -Name New-DomainCredentials)
+        $savedState = $script:State
+        $credentialFile = Join-Path ([IO.Path]::GetTempPath()) "memlabs-readiness-credential-$PID.txt"
+        try {
+            'fixture-not-a-real-password' | Set-Content -LiteralPath $credentialFile
+            $script:State = @{
+                DomainIdentities = @{ baseline = @{ Domain = 'ready.test'; DomainNetBiosName = 'EXACT-NB' } }
+                DevelopDomainIdentities = @{ other = @{ Domain = 'other.test'; DomainNetBiosName = 'OTHER' } }
+            }
+            $script:ReadyNotes = '{"domain":"ready.test","adminName":"admin"}'
+            $script:ReadyState = 'Running'
+            $script:ReadyOutcome = 'Completed'
+            $script:ReadyRejectedUsers = @('admin@ready.test')
+            $script:ReadyCredentialAttempts = @()
+            $startsBefore = $script:ReadyStarts
+            Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 0 -TimeoutSeconds 5
+            Assert-Equal 'admin@ready.test|EXACT-NB\admin' ($script:ReadyCredentialAttempts -join '|') `
+                'missing legacy VM-note NetBIOS name uses the saved exact domain name after UPN transport rejection'
+            Assert-Equal $startsBefore $script:ReadyStarts 'credential fallback never reboots the healthy retained VM'
+            $script:ReadyRejectedUsers = @()
+            $script:ReadyIdentitiesByCredential = @{
+                'admin@ready.test' = 'EXACT-NB\vmbuildadmin'
+                'EXACT-NB\admin' = 'EXACT-NB\admin'
+            }
+            foreach ($notes in @(
+                    '{"domain":"ready.test","adminName":"admin"}',
+                    '{"domain":"ready.test","adminName":"admin","domainNetBiosName":"EXACT-NB"}'
+                )) {
+                $script:ReadyNotes = $notes
+                $script:ReadyCredentialAttempts = @()
+                $fallbackError = $null
+                $fallbackLog = ''
+                try {
+                    $fallbackLog = @(Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile `
+                            -RetrySeconds 0 -TimeoutSeconds 5 6>&1) -join "`n"
+                }
+                catch { $fallbackError = $_.Exception.Message }
+                Assert-True (-not $fallbackError) 'a UPN job returning vmbuildadmin can recover only through a verified exact-admin alternate' $fallbackError
+                Assert-Equal 'admin@ready.test|EXACT-NB\admin' ($script:ReadyCredentialAttempts -join '|') `
+                    'authenticated UPN identity mismatch still tries the exact NetBIOS credential from notes or saved state'
+                Assert-True ($fallbackLog -like "*REJECT:*identity='EXACT-NB\vmbuildadmin'*credential='admin@ready.test'*" -and
+                    $fallbackLog -like "*PASS:*credential='EXACT-NB\admin'*identity='EXACT-NB\admin'*") `
+                    'readiness logs the rejected principal and the exact credential and principal that actually passed'
+            }
+            $script:ReadyNotes = '{"domain":"ready.test","adminName":"admin"}'
+            $script:ReadyIdentitiesByCredential.Clear()
+            foreach ($identity in @('EXACT-NB\vmbuildadmin', 'EXACT-NB\other-admin', 'EXACT-NB\admin')) {
+                $script:ReadyIdentitySequence.Enqueue($identity)
+            }
+            $script:ReadyCredentialAttempts = @()
+            $recoveryError = $null
+            try {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 5
+            }
+            catch { $recoveryError = $_.Exception.Message }
+            Assert-True (-not $recoveryError) 'wrong identities on the first poll can recover through a fresh verified session within the existing budget' $recoveryError
+            Assert-Equal 'admin@ready.test|EXACT-NB\admin|admin@ready.test' ($script:ReadyCredentialAttempts -join '|') `
+                'fresh-session recovery does not accept either rejected first-poll identity'
+            $script:ReadyIdentitySequence.Clear()
+            $script:ReadyIdentitiesByCredential = @{
+                'admin@ready.test' = 'EXACT-NB\vmbuildadmin'
+                'EXACT-NB\admin' = 'EXACT-NB\other-admin'
+            }
+            $script:ReadyCredentialAttempts = @()
+            $rejectedLog = [Collections.Generic.List[object]]::new()
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile `
+                    -RetrySeconds 1 -TimeoutSeconds 1 6>&1 | ForEach-Object { $rejectedLog.Add($_) }
+            } "*readiness timed out*identity='EXACT-NB\vmbuildadmin'*credential='admin@ready.test'*identity='EXACT-NB\other-admin'*credential='EXACT-NB\admin'*" `
+                'all wrong authenticated identities fail with both credential results preserved at the deadline'
+            Assert-True (($rejectedLog -join "`n") -notlike '*PASS: retained VM*') 'a wrong authenticated identity is never converted into readiness success'
+            Assert-Equal 'admin@ready.test|EXACT-NB\admin' (($script:ReadyCredentialAttempts | Select-Object -Unique) -join '|') `
+                'identity retries never guess another account or domain credential'
+            $script:ReadyIdentitiesByCredential.Clear()
+            $script:ReadyComputer = 'WRONG-VM'
+            $script:ReadyCredentialAttempts = @()
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+            } "*readiness identity mismatch*actual computer='WRONG-VM'*" 'a wrong guest identity remains immediately fatal even with alternate credentials available'
+            Assert-Equal 'admin@ready.test' ($script:ReadyCredentialAttempts -join '|') 'a wrong guest never triggers credential fallback'
+            $script:ReadyComputer = 'READY-SITE'
+            $script:ReadyProbeCopies = 2
+            $script:ReadyCredentialAttempts = @()
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+            } '*readiness identity mismatch*results=2*' 'malformed duplicate guest replies remain immediately fatal'
+            Assert-Equal 'admin@ready.test' ($script:ReadyCredentialAttempts -join '|') 'malformed guest replies never trigger credential fallback'
+            $script:ReadyProbeCopies = 1
+            Assert-Equal $startsBefore $script:ReadyStarts 'identity fallback and fresh-session retries never restart or reset the retained VM'
+            $script:State.DevelopDomainIdentities.expansion = $script:State.DomainIdentities.baseline
+            $script:State.DomainIdentities.Clear()
+            Assert-Equal 'EXACT-NB' (Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name) `
+                'expansion-domain checkpoint also supplies the exact legacy credential fallback'
+            $script:State.DomainIdentities.conflict = @{ Domain = 'ready.test'; DomainNetBiosName = 'CONFLICT' }
+            Assert-ThrowsLike {
+                Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name
+            } '*Conflicting saved NetBIOS*' 'conflicting saved domain names fail instead of guessing credentials'
+            $script:State.DomainIdentities.Clear()
+            $script:ReadyRejectedUsers = @('admin@ready.test', 'EXACT-NB\admin')
+            & {
+                $script:ReadyCredentialAttempts = @()
+                function New-ReadinessTestClock {
+                    $script:ReadyClock = [pscustomobject]@{ Elapsed = [timespan]::Zero }
+                    return $script:ReadyClock
+                }
+                function Start-Sleep {
+                    param($Seconds)
+                    $script:ReadyClock.Elapsed = [timespan]::FromSeconds(0.5)
+                }
+                function Invoke-Command {
+                    param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
+                    Assert-True ($AsJob -and "$VMId" -eq "$($target.Id)") 'boot readiness uses an asynchronous GUID-scoped PSDirect probe'
+                    $script:ReadyCredentialAttempts += $Credential.UserName
+                    $attempt = $script:ReadyCredentialAttempts.Count
+                    if ($attempt -eq 3) { $script:ReadyClock.Elapsed = [timespan]::FromSeconds(1) }
+                    throw [Management.Automation.ErrorRecord]::new(
+                        [InvalidOperationException]::new("fixture transport failure attempt $attempt"),
+                        "ReadinessTransport$attempt", [Management.Automation.ErrorCategory]::ConnectionError, $Credential.UserName)
+                }
+                $readinessSource = (Import-TestFunction -Path $runnerPath -Name Wait-CrossRevisionRetainedVmReady).ToString()
+                if (-not $readinessSource.Contains('[Diagnostics.Stopwatch]::StartNew()')) {
+                    throw 'Cannot attach the deterministic readiness test clock.'
+                }
+                . ([scriptblock]::Create($readinessSource.Replace('[Diagnostics.Stopwatch]::StartNew()', '(New-ReadinessTestClock)')))
+                Assert-ThrowsLike {
+                    Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+                } '*admin@ready.test*attempt 3*errorId=ReadinessTransport3*EXACT-NB\admin*attempt 2*errorId=ReadinessTransport2*' `
+                    'readiness timeout preserves every credential transport error and error ID after a partial final poll'
+                Assert-Equal 'admin@ready.test|EXACT-NB\admin|admin@ready.test' ($script:ReadyCredentialAttempts -join '|') `
+                    'readiness deadline prevents another credential probe after the budget expires'
+                $script:ReadyIdentitiesByCredential = @{ 'admin@ready.test' = 'EXACT-NB\vmbuildadmin' }
+                $script:ReadyCredentialAttempts = @()
+                function Invoke-Command {
+                    param($VMId, [pscredential]$Credential, [switch]$AsJob, $ErrorAction, $ScriptBlock)
+                    Assert-True ($AsJob -and "$VMId" -eq "$($target.Id)") 'identity retry remains an asynchronous GUID-scoped probe'
+                    $script:ReadyCredentialAttempts += $Credential.UserName
+                    $attempt = $script:ReadyCredentialAttempts.Count
+                    if ($attempt -eq 3) { $script:ReadyClock.Elapsed = [timespan]::FromSeconds(1) }
+                    if ($Credential.UserName -eq 'admin@ready.test') {
+                        $script:ReadyProbeScript = $ScriptBlock
+                        return [pscustomobject]@{ State = 'Completed'; CredentialUserName = $Credential.UserName }
+                    }
+                    throw [Management.Automation.ErrorRecord]::new(
+                        [InvalidOperationException]::new('fixture alternate transport failure'),
+                        'AlternateReadinessTransport', [Management.Automation.ErrorCategory]::ConnectionError, $Credential.UserName)
+                }
+                Assert-ThrowsLike {
+                    Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+                } "*readiness timed out*identity='EXACT-NB\vmbuildadmin'*credential='admin@ready.test'*EXACT-NB\admin*fixture alternate transport failure*errorId=AlternateReadinessTransport*" `
+                    'mixed identity and transport failures retain both results when the final credential poll is cut short'
+                Assert-Equal 'admin@ready.test|EXACT-NB\admin|admin@ready.test' ($script:ReadyCredentialAttempts -join '|') `
+                    'an identity mismatch cannot start another probe after the readiness deadline'
+                $script:ReadyIdentitiesByCredential.Clear()
+            }
+            $script:State.DevelopDomainIdentities.Clear()
+            Assert-True ($null -eq (Resolve-CrossRevisionDomainNetBiosName -Domain 'ready.test' -VmName $target.Name)) `
+                'missing saved NetBIOS metadata does not guess from the DNS label'
+            $script:ReadyRejectedUsers = @()
+            $script:ReadyIdentitiesByCredential = @{ 'admin@ready.test' = 'EXACT-NB\vmbuildadmin' }
+            $script:ReadyCredentialAttempts = @()
+            Assert-ThrowsLike {
+                Wait-CrossRevisionRetainedVmReady -Target $target -AdminCachePath $credentialFile -RetrySeconds 1 -TimeoutSeconds 1
+            } "*readiness identity mismatch*identity='EXACT-NB\vmbuildadmin'*" 'a mismatched UPN cannot pass when no exact alternate domain credential exists'
+            Assert-Equal 'admin@ready.test' (($script:ReadyCredentialAttempts | Select-Object -Unique) -join '|') `
+                'missing NetBIOS metadata does not invent an identity fallback'
+            $script:ReadyIdentitiesByCredential.Clear()
+        }
+        finally {
+            $script:State = $savedState
+            Remove-Item -LiteralPath $credentialFile -Force
+        }
+    }
+}
+
 $baselineId = [guid]::NewGuid()
 $script:MockVms['NOC-DC1'] = [pscustomobject]@{
     Name = 'NOC-DC1'; Id = $baselineId; Notes = '{"success":true,"inProgress":false,"lastPhaseComplete":11}'
@@ -1059,8 +1583,128 @@ $script:MockDisks['NOC-DC1'] = @([pscustomobject]@{
         ControllerType = 'SCSI'; ControllerNumber = 0; ControllerLocation = 0; Path = 'E:\VirtualMachines\NOC-DC1.vhdx'
     })
 $identity = @(Get-VmIdentity -VmNames @('NOC-DC1'))
+foreach ($invalidIdentity in @(@(), @($null), @(@{ Id = 'id-only' }), @(@{ Name = 'name-only' }))) {
+    Assert-ThrowsLike -Action { Assert-BaselineIdentity -Identity $invalidIdentity } `
+        -Pattern '*identity checkpoint*' -What 'invalid saved identity fails explicitly before Hyper-V parameter binding'
+    Assert-ThrowsLike -Action { Get-CrossRevisionMaintenanceTargets -Identity $invalidIdentity } `
+        -Pattern '*Maintenance scope*' -What 'invalid maintenance scope fails explicitly before Hyper-V parameter binding'
+}
+& {
+    $scopeVms = @{}
+    foreach ($entry in @(
+            @{ Name = 'SCOPE-DC'; Role = 'DC'; OS = 'Server 2022' },
+            @{ Name = 'SCOPE-PRI'; Role = 'Primary'; OS = 'Server 2022' },
+            @{ Name = 'SCOPE-SQL'; Role = 'DomainMember'; OS = 'Server 2019' },
+            @{ Name = 'SCOPE-PROXY'; Role = 'Proxy'; OS = 'Server 2022' },
+            @{ Name = 'SCOPE-LINUX'; Role = 'DomainMember'; OS = 'Ubuntu' }
+        )) {
+        $scopeVms[$entry.Name] = [pscustomobject]@{
+            Name = $entry.Name; Id = [guid]::NewGuid()
+            Notes = (@{ role = $entry.Role; operatingSystem = $entry.OS; domain = 'scope.test' } | ConvertTo-Json -Compress)
+        }
+    }
+    function Get-VM {
+        param($Name, $ErrorAction)
+        if (-not $scopeVms.ContainsKey($Name)) { throw "Unexpected maintenance target '$Name'." }
+        return $scopeVms[$Name]
+    }
+    function Get-CrossRevisionVmDiskIdentity { param($VmName) return @() }
+    $saved = @(Get-VmIdentity -VmNames @($scopeVms.Keys))
+    $plain = @($saved | ForEach-Object { @{ Name = $_.Name; Id = $_.Id } })
+    foreach ($shape in @(
+            @{ Label = 'fresh ordered dictionaries'; Values = $saved },
+            @{ Label = 'plain hashtables'; Values = $plain },
+            @{ Label = 'checkpoint objects'; Values = @($saved | ConvertTo-Json -Depth 12 | ConvertFrom-Json) },
+            @{ Label = 'checkpoint hashtables'; Values = @($saved | ConvertTo-Json -Depth 12 | ConvertFrom-Json -AsHashtable) },
+            @{ Label = 'overlapping baseline and expansion'; Values = @($saved) + @($saved) }
+        )) {
+        $scoped = @(Get-CrossRevisionMaintenanceTargets -Identity $shape.Values)
+        Assert-Equal 'SCOPE-DC,SCOPE-PRI,SCOPE-SQL' ($scoped.Name -join ',') `
+            "maintenance retains the complete independently expected supported scope for $($shape.Label)"
+        Assert-Equal 1 @($scoped | Where-Object Role -eq 'Primary').Count `
+            "maintenance cannot turn a CM family into N/A for $($shape.Label)"
+        foreach ($vm in $scoped) {
+            Assert-Equal "$($scopeVms[$vm.Name].Id)" $vm.Id "maintenance preserves the saved GUID for $($vm.Name)"
+        }
+    }
+    $conflict = [ordered]@{ Name = 'scope-pri'; Id = [guid]::NewGuid().ToString() }
+    Assert-ThrowsLike {
+        Get-CrossRevisionMaintenanceTargets -Identity (@($saved) + @($conflict))
+    } '*conflicting saved identities*' 'maintenance rejects conflicting duplicates before deduplication can hide replacement'
+}
+$savedTestState = $script:State
+try {
+    & {
+        $script:State = @{ DevelopIdentities = @{}; DevelopDomainIdentities = @{} }
+        $script:ExpansionIdentitySaves = 0
+        function Save-State { $script:ExpansionIdentitySaves++ }
+        function Get-DomainIdentity { param($Config, $AdminCachePath) return @{ Sid = 'first-domain-sid' } }
+        function Assert-DomainIdentity {
+            param($Identity, $AdminCachePath)
+            if ($Identity.Sid -ne 'first-domain-sid') { throw 'Domain SID changed.' }
+        }
+        $config = [pscustomobject]@{ virtualMachines = @([pscustomobject]@{ role = 'DC' }) }
+        $key = 'nocm|followon.json'
+        Save-CrossRevisionExpansionIdentity -IdentityKey $key -VmNames @('NOC-DC1') -Config $config
+        Assert-Equal "$baselineId" $script:State.DevelopIdentities[$key][0].Id 'fresh first pass persists VM identity before marking the stage complete'
+        Assert-Equal 'first-domain-sid' $script:State.DevelopDomainIdentities[$key].Sid 'fresh first pass persists domain identity'
+        $persisted = $script:State | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+        Assert-BaselineIdentity -Identity @($persisted.DevelopIdentities.$key)
+        Assert-Equal "$baselineId" $persisted.DevelopIdentities.$key[0].Id 'first-pass identity survives checkpoint JSON round trip for pass two'
+        Save-CrossRevisionExpansionIdentity -IdentityKey $key -VmNames @('NOC-DC1') -Config $config
+        Assert-Equal 2 $script:ExpansionIdentitySaves 'unchanged resumed stage revalidates the original saved identity'
+        $script:MockVms['NOC-DC1'].Id = [guid]::NewGuid()
+        Assert-ThrowsLike -Action {
+            Save-CrossRevisionExpansionIdentity -IdentityKey $key -VmNames @('NOC-DC1') -Config $config
+        } -Pattern '*was replaced*' -What 'resume never overwrites first-pass identity with a replacement VM'
+        Assert-Equal "$baselineId" $script:State.DevelopIdentities[$key][0].Id 'failed resume preserves first-pass identity'
+        $script:MockVms['NOC-DC1'].Id = $baselineId
+    }
+}
+finally {
+    $script:State = $savedTestState
+    $script:MockVms['NOC-DC1'].Id = $baselineId
+}
+$runnerTokens = $null
+$runnerErrors = $null
+$runnerAst = [Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$runnerTokens, [ref]$runnerErrors)
+$captureCalls = @($runnerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Save-CrossRevisionExpansionIdentity'
+        }, $true))
+Assert-Equal 2 $captureCalls.Count 'fresh and resumed expansion paths both checkpoint first-pass identity'
+$readinessCalls = @($runnerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Wait-CrossRevisionRetainedVmReady'
+        }, $true))
+Assert-Equal 4 $readinessCalls.Count 'baseline, skipped-stage, pass-two and maintenance paths all prepare retained VM power readiness'
+$skipCheck = $runnerText.IndexOf('Write-Host "SKIP: completed $step"')
+$skipEnd = $runnerText.IndexOf('if ($cleanupStarted)', $skipCheck)
+$skipText = $runnerText.Substring($skipCheck, $skipEnd - $skipCheck)
+$skipVmCheck = $skipText.IndexOf('Assert-BaselineIdentity -Identity $readinessIdentity')
+$skipPowerCheck = $skipText.IndexOf('Wait-CrossRevisionRetainedVmReady')
+$skipCapture = $skipText.IndexOf('Save-CrossRevisionExpansionIdentity')
+Assert-True ($skipVmCheck -ge 0 -and $skipPowerCheck -gt $skipVmCheck -and $skipCapture -gt $skipPowerCheck) `
+    'skipped-stage resume verifies saved disk/VM identity and readies power before identity capture'
+$freshCapture = $captureCalls | Select-Object -Last 1
+$captureGuard = $freshCapture.Parent
+while ($captureGuard -and $captureGuard -isnot [Management.Automation.Language.IfStatementAst]) {
+    $captureGuard = $captureGuard.Parent
+}
+Assert-Equal '$pass -eq 1' $captureGuard.Clauses[0].Item1.Extent.Text 'fresh identity is recorded only on the first pass'
+$stageStatements = @($captureGuard.Parent.Statements)
+$captureIndex = [array]::IndexOf($stageStatements, $captureGuard)
+Assert-True ($captureIndex -gt 0 -and
+    $stageStatements[$captureIndex - 1].Extent.Text -like 'Assert-DevelopStageComplete*' -and
+    $stageStatements[$captureIndex + 1].Extent.Text -like '*Invoke-CrossRevisionMaintenanceGate*' -and
+    $stageStatements[-1].Extent.Text -like 'Complete-Step*') `
+    'fresh identity is persisted after stage-completion checks and before maintenance gates and checkpoint completion'
 Assert-Equal "$baselineId" $identity[0].Id 'baseline identity captures the Hyper-V VM ID'
-Assert-Equal 'E:\VirtualMachines\NOC-DC1.vhdx' $identity[0].VhdPaths[0] 'baseline identity captures disk attachment paths'
+Assert-Equal 'E:\VirtualMachines\NOC-DC1.vhdx' $identity[0].VhdPaths[0] 'baseline identity captures stable base-VHD lineage'
+Assert-Equal 2 $identity[0].DiskIdentityVersion 'baseline identity records stable disk schema version'
+Assert-Equal 'SCSI' $identity[0].Disks[0].ControllerType 'baseline identity captures disk controller slot'
 
 try {
     Assert-BaselineIdentity -Identity $identity
@@ -1078,6 +1722,185 @@ $script:MockVms['NOC-DC1'].Id = $originalId
 $script:MockDisks['NOC-DC1'][0].Path = 'E:\VirtualMachines\replacement.vhdx'
 Assert-ThrowsLike -Action { Assert-BaselineIdentity -Identity $identity } -Pattern '*disk attachment paths changed*' -What 'baseline disk replacement fails the cycle'
 $script:MockDisks['NOC-DC1'][0].Path = 'E:\VirtualMachines\NOC-DC1.vhdx'
+$script:MockDisks['NOC-DC1'][0].ControllerLocation = 1
+Assert-ThrowsLike -Action {
+    Assert-BaselineIdentity -Identity $identity
+} -Pattern '*disk attachment paths changed*' `
+    -What 'baseline disk controller-slot replacement fails the cycle'
+$script:MockDisks['NOC-DC1'][0].ControllerLocation = 0
+
+$snapshotPath = 'E:\VirtualMachines\NOC-DC1_11111111-2222-3333-4444-555555555555.avhdx'
+$script:MockDisks['NOC-DC1'][0].Path = $snapshotPath
+$script:MockVhds[$snapshotPath] = [pscustomobject]@{
+    Path = $snapshotPath
+    ParentPath = 'E:\VirtualMachines\NOC-DC1.vhdx'
+}
+$snapshotIdentity = @(Get-VmIdentity -VmNames @('NOC-DC1'))
+Assert-Equal 'E:\VirtualMachines\NOC-DC1.vhdx' $snapshotIdentity[0].VhdPaths[0] `
+    'checkpoint attachment resolves to stable base-VHD lineage'
+$script:MockDisks['NOC-DC1'][0].Path = 'E:\VirtualMachines\NOC-DC1.vhdx'
+try {
+    Assert-BaselineIdentity -Identity $snapshotIdentity
+    Write-TestResult -Passed $true -What 'snapshot merge preserves stable disk identity'
+}
+catch {
+    Write-TestResult -Passed $false -What 'snapshot merge preserves stable disk identity' -Detail $_.Exception.Message
+}
+
+$legacySnapshotIdentity = @([pscustomobject]@{
+        Name = 'NOC-DC1'
+        Id = "$baselineId"
+        VhdPaths = @($snapshotPath)
+    })
+try {
+    Assert-BaselineIdentity -Identity $legacySnapshotIdentity
+    Write-TestResult -Passed $true -What 'legacy AVHDX identity accepts matching snapshot merge'
+}
+catch {
+    Write-TestResult -Passed $false -What 'legacy AVHDX identity accepts matching snapshot merge' -Detail $_.Exception.Message
+}
+$legacySnapshotIdentity[0].VhdPaths = @(
+    'E:\VirtualMachines\replacement_11111111-2222-3333-4444-555555555555.avhdx')
+Assert-ThrowsLike -Action {
+    Assert-BaselineIdentity -Identity $legacySnapshotIdentity
+} -Pattern '*disk attachment paths changed*' `
+    -What 'legacy AVHDX identity still rejects a different base disk'
+$script:MockVhds.Remove($snapshotPath)
+
+function Test-CrossRevisionDiskIdentityRaces {
+    $basePath = 'E:\VirtualMachines\pstest2.com\PT2-SS2SITE\PT2-SS2SITE_DATA_0.vhdx'
+    $checkpointPath = 'E:\VirtualMachines\pstest2.com\PT2-SS2SITE\PT2-SS2SITE_DATA_0_453DA23E-9A6F-4CB5-A42F-33C1B82C6E0D.avhdx'
+    $raceParentPath = 'E:\VirtualMachines\pstest2.com\PT2-SS2SITE\parent.avhdx'
+    $osPath = 'E:\VirtualMachines\pstest2.com\PT2-SS2SITE\os.vhdx'
+    $replacementPath = 'E:\VirtualMachines\replacement.vhdx'
+    $vmId = '11111111-1111-1111-1111-111111111111'
+    function Get-VM {
+        [CmdletBinding()]
+        param([string]$Name)
+        [pscustomobject]@{ Name = $Name; Id = $vmId }
+    }
+    function Get-VMHardDiskDrive {
+        [CmdletBinding()]
+        param([string]$VMName)
+        if ($VMName -ne 'DISK-RACE') { throw "Unexpected disk inventory target '$VMName'." }
+        $script:DiskRaceInventoryReads++
+        $paths = @($script:DiskRaceLivePaths)
+        if ($script:DiskRaceScenario -eq 'stale-attachment' -and $script:DiskRaceInventoryReads -le 2) {
+            $paths = @($checkpointPath)
+        }
+        if ($script:DiskRaceScenario -eq 'unstable-attachments') {
+            $paths = @(if ($script:DiskRaceInventoryReads % 2) { $basePath } else { $replacementPath })
+        }
+        for ($slot = 0; $slot -lt $paths.Count; $slot++) {
+            [pscustomobject]@{
+                ControllerType = 'SCSI'; ControllerNumber = 0; ControllerLocation = $slot; Path = $paths[$slot]
+            }
+        }
+    }
+    function Get-VHD {
+        [CmdletBinding()]
+        param([string]$Path)
+        $script:DiskRaceVhdReads.Add($Path)
+        if ($Path -notin @($basePath, $checkpointPath, $raceParentPath, $osPath, $replacementPath)) {
+            throw "Unexpected VHD lookup '$Path'."
+        }
+        if ($Path -eq $checkpointPath) {
+            switch ($script:DiskRaceScenario) {
+                { $_ -in @('deleted-leaf', 'stale-attachment', 'partial-inventory', 'missing-checkpoint') } {
+                    $script:DiskRaceMissingPath = $Path
+                    if ($_ -ne 'missing-checkpoint') {
+                        $script:DiskRaceLivePaths = @(if ($_ -eq 'partial-inventory') { $osPath }; $basePath)
+                    }
+                    throw [IO.IOException]::new("Synthetic checkpoint disk '$Path' is not an existing virtual hard disk file.")
+                }
+                'access-denied' { throw [UnauthorizedAccessException]::new('Synthetic VHD access denied.') }
+                'deleted-parent' { return [pscustomobject]@{ ParentPath = $raceParentPath } }
+                'parent-cycle' { return [pscustomobject]@{ ParentPath = $checkpointPath } }
+            }
+            return [pscustomobject]@{ ParentPath = $basePath }
+        }
+        if ($Path -eq $raceParentPath) {
+            $script:DiskRaceMissingPath = $Path
+            $script:DiskRaceLivePaths = @($basePath)
+            throw [IO.IOException]::new("Synthetic checkpoint parent '$Path' disappeared.")
+        }
+        if ($Path -eq $basePath) {
+            if ($script:DiskRaceScenario -eq 'attachment-changed') { $script:DiskRaceLivePaths = @($basePath) }
+            if ($script:DiskRaceScenario -eq 'disk-replaced') { $script:DiskRaceLivePaths = @($replacementPath) }
+            if ($script:DiskRaceScenario -eq 'missing-base') {
+                throw [IO.FileNotFoundException]::new("Synthetic missing base disk '$Path'.", $Path)
+            }
+        }
+        [pscustomobject]@{ ParentPath = $null }
+    }
+    function Test-Path {
+        [CmdletBinding()]
+        param([string]$LiteralPath, [string]$PathType)
+        [void]$PathType
+        return $LiteralPath -ne $script:DiskRaceMissingPath
+    }
+    function Start-Sleep {
+        param([int]$Seconds)
+        $script:DiskRaceSleeps.Add($Seconds)
+    }
+    foreach ($case in @(
+            @{ Name = 'deleted-leaf'; Reads = 3; Sleeps = 1; Count = 1 },
+            @{ Name = 'stale-attachment'; Reads = 4; Sleeps = 2; Count = 1 },
+            @{ Name = 'deleted-parent'; Reads = 3; Sleeps = 1; Count = 1 },
+            @{ Name = 'attachment-changed'; Reads = 4; Sleeps = 1; Count = 1 },
+            @{ Name = 'partial-inventory'; Reads = 3; Sleeps = 1; Count = 2 },
+            @{ Name = 'disk-replaced'; Reads = 4; Sleeps = 1; Error = '*disk attachment paths changed*' },
+            @{ Name = 'missing-checkpoint'; Reads = 12; Sleeps = 11; Error = "*VM 'DISK-RACE'*12 attempts*453DA23E*not an existing virtual hard disk file*" },
+            @{ Name = 'unstable-attachments'; Reads = 24; Sleeps = 11; Error = "*VM 'DISK-RACE'*12 attempts*attachments changed*" },
+            @{ Name = 'missing-base'; Reads = 1; Sleeps = 0; Error = '*Synthetic missing base disk*' },
+            @{ Name = 'access-denied'; Reads = 1; Sleeps = 0; Error = '*Synthetic VHD access denied*' },
+            @{ Name = 'parent-cycle'; Reads = 1; Sleeps = 0; Error = '*parent chain contains a cycle*' }
+        )) {
+        $script:DiskRaceScenario = $case.Name
+        $script:DiskRaceInventoryReads = 0
+        $script:DiskRaceVhdReads = [Collections.Generic.List[string]]::new()
+        $script:DiskRaceSleeps = [Collections.Generic.List[int]]::new()
+        $script:DiskRaceMissingPath = $null
+        $script:DiskRaceLivePaths = @(if ($case.Name -eq 'partial-inventory') { $osPath }; $checkpointPath)
+        if ($case.Name -eq 'missing-base') { $script:DiskRaceLivePaths = @($basePath) }
+        $message = $null
+        $disks = @()
+        try {
+            if ($case.Name -eq 'disk-replaced') {
+                Assert-BaselineIdentity -Identity @([ordered]@{
+                        Name = 'DISK-RACE'; Id = $vmId
+                        Disks = @([ordered]@{
+                                ControllerType = 'SCSI'; ControllerNumber = 0; ControllerLocation = 0; BasePath = $basePath
+                            })
+                    })
+            }
+            else {
+                $disks = @(Get-CrossRevisionVmDiskIdentity -VmName 'DISK-RACE')
+            }
+        }
+        catch { $message = $_.Exception.Message }
+        if ($case.Error) {
+            Assert-True ($message -like $case.Error) "$($case.Name): disk identity fails closed" "actual=[$message]"
+        }
+        else {
+            Assert-True (-not $message -and $disks.Count -eq $case.Count) "$($case.Name): captures a complete stable disk identity" "actual=[$message]; disks=$($disks.Count)"
+            if (-not $message -and $disks.Count) {
+                Assert-Equal $basePath $disks[-1].BasePath "$($case.Name): resolves the verified base VHD"
+                Assert-Equal $basePath $disks[-1].AttachedPath "$($case.Name): discards the stale checkpoint attachment"
+                Assert-Equal ($case.Count - 1) $disks[-1].ControllerLocation "$($case.Name): retains the disk controller slot"
+            }
+        }
+        Assert-Equal $case.Reads $script:DiskRaceInventoryReads "$($case.Name): re-enumeration is bounded"
+        Assert-Equal $case.Sleeps $script:DiskRaceSleeps.Count "$($case.Name): only transient disk reads wait"
+        Assert-True (@($script:DiskRaceSleeps | Where-Object { $_ -ne 5 }).Count -eq 0) "$($case.Name): retry delay stays bounded"
+        if ($case.Name -eq 'partial-inventory') {
+            Assert-Equal 2 @($script:DiskRaceVhdReads | Where-Object { $_ -eq $osPath }).Count `
+                'partial-inventory: retries the entire inventory instead of leaking partially resolved disks'
+        }
+    }
+}
+Test-CrossRevisionDiskIdentityRaces
+
 Assert-ThrowsLike -Action {
     Assert-DomainsAbsent -Domains @('unrelated.test') -VmNames @('NOC-DC1')
 } -Pattern '*already exist*' -What 'VM-name collision fails even when domain-note matching cannot help'
@@ -1138,44 +1961,148 @@ Assert-ThrowsLike -Action {
 } -Pattern '*incomplete*' -What 'string-valued false success cannot pass by truthiness'
 $script:MockVms['NOC-W11CLIENT1'].Notes = '{"success":true,"inProgress":false,"lastPhaseComplete":11}'
 try {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
-    Write-TestResult -Passed $true -What 'domain member independently passes join, secure-channel, and DNS checks'
+    $healthyLog = @(Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' `
+            -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0 6>&1) -join "`n"
+    Write-TestResult -Passed $true -What 'domain member independently passes join, Netlogon-status, and DNS checks'
+    Assert-True ($healthyLog -like '*CHECK SCOPE:*does not run Test-ComputerSecureChannel*' -and
+        $healthyLog -notlike '*Test-ComputerSecureChannel=*') 'domain readiness explicitly reports its reduced check scope'
+    Assert-True ($healthyLog -like '*sample 1/2 passed (1/2 consecutive healthy samples*' -and
+        $healthyLog -notlike '*not yet stable*') 'a healthy first sample is logged as passed and awaiting confirmation, not as an unhealthy retry'
+    Assert-True ($healthyLog -like "*PASS: NOC-W11CLIENT1 domain convergence confirmed (2/2 consecutive healthy samples) for 'nocm.com'.*") `
+        'the final healthy domain sample prints an explicit per-VM confirmation'
 }
 catch {
-    Write-TestResult -Passed $false -What 'domain member independently passes join, secure-channel, and DNS checks' -Detail $_.Exception.Message
+    Write-TestResult -Passed $false -What 'domain member independently passes join, Netlogon-status, and DNS checks' -Detail $_.Exception.Message
 }
+$script:MockDomainHealth.SecureChannel = $false
+try {
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'removed-cmdlet-gate' `
+        -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0
+    Write-TestResult -Passed $true -What 'a legacy False secure-channel value cannot block the remaining independent readiness checks'
+}
+catch {
+    Write-TestResult -Passed $false -What 'a legacy False secure-channel value cannot block the remaining independent readiness checks' -Detail $_.Exception.Message
+}
+finally { $script:MockDomainHealth.SecureChannel = $true }
+& {
+    $script:RemovedChannelCalls = 0
+    function Test-ComputerSecureChannel {
+        $script:RemovedChannelCalls++
+        throw 'The removed independent secure-channel cmdlet was invoked.'
+    }
+    function Get-CimInstance {
+        param($ClassName, $ErrorAction)
+        Assert-Equal 'Win32_ComputerSystem' $ClassName 'domain probe still queries joined-domain membership'
+        [pscustomobject]@{ PartOfDomain = $true; Domain = 'nocm.com' }
+    }
+    function nltest.exe {
+        param($Operation)
+        Assert-Equal '/sc_query:nocm.com' $Operation 'domain probe still queries Netlogon status'
+        $global:LASTEXITCODE = 0
+        'Trusted DC Name \\NOC-DC1.nocm.com'
+    }
+    function Resolve-DnsName {
+        param($Name, $Type, $ErrorAction)
+        Assert-Equal 'A' $Type 'domain probe still checks DNS registration'
+        [pscustomobject]@{ IPAddress = '10.220.201.20' }
+    }
+    $probeValues = @(& $script:LastDomainProbeScript 'nocm.com')
+    Assert-Equal 1 $probeValues.Count 'the reduced guest readiness probe returns exactly one result'
+    Assert-Equal 0 $script:RemovedChannelCalls 'the actual guest readiness probe never invokes Test-ComputerSecureChannel'
+    Assert-True ($probeValues[0].PartOfDomain -and $probeValues[0].NltestHealthy -and
+        $probeValues[0].Domain -eq 'nocm.com' -and $probeValues[0].DnsAddresses.Count -eq 1) `
+        'the actual guest probe preserves domain membership, Netlogon status, and DNS evidence'
+    Assert-True (-not $probeValues[0].PSObject.Properties['SecureChannel'] -and
+        -not $probeValues[0].PSObject.Properties['SecureChannelError']) 'the removed cmdlet result is not emitted by the guest probe'
+}
+$savedDomainHealth = $script:MockDomainHealth
+foreach ($membership in @(
+        @{ PartOfDomain = $false; Domain = 'WORKGROUP' },
+        @{ PartOfDomain = $true; Domain = 'wrong.test' }
+    )) {
+    $script:MockDomainHealth = [pscustomobject]@{
+        PartOfDomain = $membership.PartOfDomain; Domain = $membership.Domain
+        NltestHealthy = $true; NltestExitCode = 0; DnsAddresses = @('10.220.201.20')
+    }
+    Assert-ThrowsLike {
+        Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'invalid-membership' `
+            -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0
+    } "*outside 'nocm.com'*" 'missing or wrong joined-domain membership still blocks the runner'
+}
+$script:MockDomainHealth = $savedDomainHealth
 $script:CredentialAttempts.Clear()
 $script:RejectedCredentialUsers = @('admin2@nocm.com')
 try {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -RetrySeconds 0
     Write-TestResult -Passed $true -What 'Server 2019-style UPN rejection falls back to the exact NetBIOS domain principal'
 }
 catch {
     Write-TestResult -Passed $false -What 'Server 2019-style UPN rejection falls back to the exact NetBIOS domain principal' -Detail $_.Exception.Message
 }
-Assert-Equal 'admin2@nocm.com|NOCM\admin2' ($script:CredentialAttempts -join '|') 'domain probe tries UPN then NetBIOS in order'
+Assert-Equal 'admin2@nocm.com|NOCM\admin2|admin2@nocm.com|NOCM\admin2' ($script:CredentialAttempts -join '|') 'domain probe tries UPN then NetBIOS in order for both stable samples'
 Assert-Equal 'NOCM\admin2' $script:LastCredentialUser 'successful fallback uses the NetBIOS domain principal'
 $script:RejectedCredentialUsers = @()
 $script:MockIdentityDnsDomain = 'fabrikam.com'
 Assert-ThrowsLike -Action {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0
 } -Pattern '*Identity mismatch*' -What 'runner rejects a credential that authenticates into the wrong DNS domain'
 $script:MockIdentityDnsDomain = 'nocm.com'
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $false; DnsAddresses = @('10.220.201.20')
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $false
+    NltestExitCode = 5; TrustedDc = 'NOC-DC2.nocm.com'; LogonServer = '\\NOC-DC2'
+    NltestOutput = 'Status = 5 0x5 ERROR_ACCESS_DENIED'; DnsAddresses = @('10.220.201.20')
 }
 Assert-ThrowsLike -Action {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
-} -Pattern '*broken secure channel*' -What 'independent secure-channel failure stops the cycle'
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -MaximumAttempts 3 -RetrySeconds 0
+} -Pattern '*unhealthy Netlogon query status*' -What 'an unhealthy Netlogon query still stops the cycle'
+$script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
+        PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $false; NltestHealthy = $false
+        NltestExitCode = 1355; TrustedDc = 'NOC-DC2.nocm.com'; LogonServer = '\\NOC-DC2'
+        DnsAddresses = @('10.220.201.20')
+    })
+$script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
+        PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+        NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+        DnsAddresses = @('10.220.201.20')
+    })
+$script:MockDomainHealthSequence.Enqueue([pscustomobject]@{
+        PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+        NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+        DnsAddresses = @('10.220.201.20')
+    })
+try {
+    $transientLog = @(Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'transient-channel' `
+            -AdminCachePath $credentialPath -MaximumAttempts 4 -RetrySeconds 0 6>&1) -join "`n"
+    Write-TestResult -Passed $true -What 'transient Netlogon-status lag converges before runner failure'
+    Assert-True ($transientLog -like '*sample 1/4 is not yet stable*' -and
+        $transientLog -like '*sample 2/4 passed (1/2 consecutive healthy samples*' -and
+        $transientLog -like '*PASS: NOC-W11CLIENT1 domain convergence confirmed (2/2 consecutive healthy samples)*') `
+        'unhealthy retries and healthy confirmation progress remain distinct after a transient failure'
+}
+catch {
+    Write-TestResult -Passed $false -What 'transient Netlogon-status lag converges before runner failure' -Detail $_.Exception.Message
+}
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; DnsAddresses = @()
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+    NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+    DnsAddresses = @()
 }
 Assert-ThrowsLike -Action {
-    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'NOCM-B-AddWin11.json' -AdminCachePath $credentialPath -MaximumAttempts 2 -RetrySeconds 0
 } -Pattern '*without an A record*' -What 'missing DNS registration stops the cycle'
 $script:MockDomainHealth = [pscustomobject]@{
-    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; DnsAddresses = @('10.220.201.20')
+    PartOfDomain = $true; Domain = 'nocm.com'; SecureChannel = $true; NltestHealthy = $true
+    NltestExitCode = 0; TrustedDc = 'NOC-DC1.nocm.com'; LogonServer = '\\NOC-DC1'
+    DnsAddresses = @('10.220.201.20')
 }
+$shortHealthLog = [Collections.Generic.List[object]]::new()
+Assert-ThrowsLike {
+    Assert-DomainJoinedVmHealth -Config $stageConfig -FixtureName 'insufficient-confirmation' `
+        -AdminCachePath $credentialPath -MaximumAttempts 1 -RetrySeconds 0 6>&1 |
+        ForEach-Object { $shortHealthLog.Add($_) }
+} -Pattern '*without 2 consecutive healthy domain samples*' -What 'one healthy sample still cannot complete domain validation'
+Assert-True (($shortHealthLog -join "`n") -notlike '*PASS: NOC-W11CLIENT1 domain convergence confirmed*') `
+    'insufficient healthy samples never print a successful domain confirmation'
 Remove-Item -LiteralPath $credentialPath -Force -ErrorAction SilentlyContinue
 
 $specialConfig = [pscustomobject]@{
@@ -1229,6 +2156,17 @@ Assert-Equal $true ([bool](Test-StepComplete -Step 'nocm|main|A')) 'completed st
 Assert-Equal 'nocm|main|A' $completedState.CompletedSteps 'completed step is persisted atomically'
 Assert-Equal $false (Test-Path -LiteralPath "$script:StatePath.$PID.tmp") 'atomic checkpoint leaves no temporary file'
 Remove-Item -LiteralPath $script:StatePath -Force -ErrorAction SilentlyContinue
+
+foreach ($regression in @(
+        @{ Name = 'Test-RemoteWorkflowDependency'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' },
+        @{ Name = 'Test-RemoteWorkflowDependency'; Engine = (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'); Label = 'PS51' },
+        @{ Name = 'Test-Phase8DiagnosticTelemetry'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' },
+        @{ Name = 'Test-EmergencySkipTests'; Engine = (Join-Path $PSHOME 'pwsh.exe'); Label = 'PS7' }
+    )) {
+    & $regression.Engine -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File (Join-Path $PSScriptRoot "$($regression.Name).ps1")
+    Write-TestResult -Passed ($LASTEXITCODE -eq 0) -What "early defect coverage: $($regression.Name) ($($regression.Label))"
+}
 
 Write-Host ''
 if ($script:Failures -gt 0) {

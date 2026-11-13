@@ -186,6 +186,10 @@ try {
     $parseErrors = $null
     $functionalAst = [Management.Automation.Language.Parser]::ParseFile($functionalPath, [ref]$tokens, [ref]$parseErrors)
     if ($parseErrors) { throw "Could not parse ${functionalPath}: $($parseErrors[0].Message)" }
+    $sqlAoSource = @($functionalAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-SQLAOFunctionality'
+            }, $true))[0].Extent.Text
     $basicSqlAst = @($functionalAst.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-SQLFunctionality'
@@ -634,7 +638,7 @@ try {
     ) 'SQLAO SkipAsSource reconciliation is idempotent across registration events'
 
     Assert-Validation ($functionalSource -match '(?s)else \{\s+\$results\.Passed = \$false\s+\$mismatches\+\+.+?FAIL: DNS') 'failed exact DNS postcondition fails Phase 11'
-    Assert-Validation (-not ($functionalSource -match '\$results\.Passed = \$true')) 'SQLAO recovery never resets the aggregate verdict to success'
+    Assert-Validation (-not ($sqlAoSource -match '\$results\.Passed = \$true')) 'SQLAO recovery never resets the aggregate verdict to success'
     Assert-Validation ($functionalSource -match "FAIL: SQL connection via listener '.+did not succeed after bounded recovery") 'terminal listener timeout/error is a hard failure'
     Assert-Validation ($functionalSource -match 'Wait-SqlAoReplicatedTestValue.+?-ServerInstance \$secondaryConnStr') 'cross-node replication validation uses bounded secondary-read convergence'
     Assert-Validation ($functionalSource -match 'redo_queue_size AS RedoQueueKB' -and $functionalSource -match 'log_send_queue_size AS LogSendQueueKB') 'replication timeout reports send and redo queue diagnostics'

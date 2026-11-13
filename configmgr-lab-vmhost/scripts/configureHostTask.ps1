@@ -89,6 +89,11 @@ $filePath = "$env:windir\temp\configureHost.ps1"
 Write-HostLog "Downloading configureHost.ps1 to $filePath"
 Start-BitsTransfer -Source $ScriptUrl -Destination $filePath -Priority Foreground -ErrorAction Stop
 
+$prereqPath = "$env:windir\temp\Common.Prereqs.ps1"
+$prereqUrl = [Uri]::new([Uri]$ScriptUrl, '../../vmbuild/common/Common.Prereqs.ps1').AbsoluteUri
+Write-HostLog "Downloading host prerequisite helpers to $prereqPath"
+Start-BitsTransfer -Source $prereqUrl -Destination $prereqPath -Priority Foreground -ErrorAction Stop
+
 Write-HostLog "Installing required roles"
 Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
 Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools

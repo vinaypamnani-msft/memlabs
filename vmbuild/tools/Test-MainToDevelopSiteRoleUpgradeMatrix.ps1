@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $repoRoot = Split-Path -Parent $RootPath
 $configPath = Join-Path $RootPath 'common\Common.Config.ps1'
+$configSource = Get-Content -LiteralPath $configPath -Raw
 $phasesPath = Join-Path $RootPath 'common\Common.Phases.ps1'
 $validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
 $phase7Path = Join-Path $RootPath 'DSC\phases\Phase7.ps1'
@@ -92,6 +93,9 @@ function Get-VMNote {
 . (Import-TestFunction -Path $validationPath -Name 'Get-Phase11ProjectedVmNetwork')
 . (Import-TestFunction -Path $phase7Path -Name 'Test-MemLabsSupSyncsFromMicrosoftUpdate')
 
+Assert-True ($configSource -match '(?s)externalDomainJoinSiteCode.+?Add-ExistingVMToDeployConfig -vmName \$RemoteSiteServer\.vmName.+?\$remoteWorkflowVm.+?phase11Validate') `
+    'Cross-forest site hydration does not mark the remote site server for workflow repair and validation.'
+
 $mainCommon = @(git -C $repoRoot show "${MainRevision}:vmbuild/Common.ps1")
 if ($LASTEXITCODE -ne 0 -or $mainCommon.Count -eq 0) { throw "Could not read exact-main Common.ps1 from $MainRevision." }
 $mainText = $mainCommon -join "`n"
@@ -157,6 +161,10 @@ $existing = @(
     [pscustomobject]@{
         vmName = 'FOREIGNDP'; role = 'SiteSystem'; domain = 'foreign.test'; siteCode = 'PRI'
         network = '10.20.2.0'; installDP = $true; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'FOREIGNPRI'; role = 'Primary'; domain = 'foreign.test'; siteCode = 'PRI'
+        network = '10.40.1.0'; cmOptions = $cmOptions; state = 'Running'
     }
 )
 $script:Inventory = @($existing)
@@ -217,6 +225,21 @@ Assert-Equal 'DP1,MP1,RP1,SUP1' (@($plan.ExistingRoleVmNames | Sort-Object) -joi
     'Role upgrade did not include every existing main-era explicit site role in the owner site.'
 Assert-True ('OTHERDP' -notin $plan.ExistingRoleVmNames) 'Another site leaked into the role repair plan.'
 Assert-True ('FOREIGNDP' -notin $plan.ExistingRoleVmNames) 'Another domain leaked into the role repair plan.'
+
+$foreignConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'upgrade.test'; network = '10.20.1.0' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'FOREIGNNEWROLE'; role = 'SiteSystem'; domain = 'foreign.test'
+            siteCode = 'PRI'; network = '10.40.2.0'; installDP = $true
+        }
+    )
+}
+$foreignPlan = Get-ExistingConfigMgrRoleUpgradePlan -Config $foreignConfig -ExistingVMs $existing
+Assert-Equal 'FOREIGNPRI' (@($foreignPlan.OwnerSiteVmNames) -join ',') `
+    'Explicit cross-domain role trigger did not select its same-domain site owner.'
+Assert-Equal 'FOREIGNDP' (@($foreignPlan.ExistingRoleVmNames) -join ',') `
+    'Explicit cross-domain role trigger did not isolate existing roles to its owner domain.'
 
 $applyConfig = [pscustomobject]@{
     vmOptions = [pscustomobject]@{ domainName = 'upgrade.test'; network = '10.20.1.0' }
@@ -394,6 +417,56 @@ Assert-ThrowsLike {
     }
 } '*Failed to add remote SQL dependency ''SQL-MISSING''*' `
     'Missing parent hierarchy support dependency did not fail closed.'
+
+$crossForestSupportConfig = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ domainName = 'client.test' }
+    virtualMachines = @(
+        [pscustomobject]@{
+            vmName = 'SITE-PRI'; role = 'Primary'; siteCode = 'PRI'; parentSiteCode = 'CAS'
+            domain = 'site.test'; hidden = $true; phase11Validate = $true
+        }
+    )
+}
+$crossForestSupportInventory = @(
+    [pscustomobject]@{
+        vmName = 'SITE-CAS'; role = 'CAS'; siteCode = 'CAS'; domain = 'site.test'
+        cmOptions = [pscustomobject]@{ Version = 'current-branch'; Install = $true; UsePKI = $true }
+        state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'SITE-DPMP'; role = 'SiteSystem'; siteCode = 'PRI'; domain = 'site.test'
+        installDP = $true; installMP = $true; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'SITE-PRI-P'; role = 'PassiveSite'; siteCode = 'PRI'; domain = 'site.test'
+        remoteContentLibVM = 'SITE-FS'; state = 'Running'
+    },
+    [pscustomobject]@{
+        vmName = 'SITE-FS'; role = 'FileServer'; domain = 'site.test'; state = 'Running'
+    }
+)
+$script:Inventory = @($crossForestSupportInventory)
+$crossForestSupportNames = @(Add-Phase11HierarchyParentsToDeployConfig `
+        -Config $crossForestSupportConfig -ExistingVMs $crossForestSupportInventory)
+$script:Inventory = @($savedInventory)
+Assert-Equal 'SITE-CAS,SITE-DPMP,SITE-PRI-P' `
+    (@($crossForestSupportNames | Sort-Object) -join ',') `
+    'Cross-forest Primary did not hydrate its child-site roles and parent CAS.'
+foreach ($supportName in @('SITE-PRI', 'SITE-CAS', 'SITE-DPMP', 'SITE-PRI-P')) {
+    $supportVm = $crossForestSupportConfig.virtualMachines | Where-Object vmName -eq $supportName | Select-Object -First 1
+    Assert-Equal $true ([bool]$supportVm.phase11Validate) `
+        "Cross-forest workflow VM '$supportName' was not scheduled for validation."
+    Assert-Equal 'site.test' "$($supportVm.domain)" `
+        "Cross-forest workflow VM '$supportName' lost its owning domain."
+}
+Assert-True ($crossForestSupportConfig.virtualMachines.vmName -contains 'SITE-FS') `
+    'Cross-forest Passive content-library dependency was not hydrated.'
+$null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $crossForestSupportConfig `
+    -ExistingVMs $crossForestSupportInventory
+$crossForestPrimary = $crossForestSupportConfig.virtualMachines |
+    Where-Object vmName -eq 'SITE-PRI' | Select-Object -First 1
+Assert-Equal $true ([bool]$crossForestPrimary.cmOptions.UsePKI) `
+    'Cross-forest Primary did not recover the remote hierarchy PKI mode.'
 
 $cstest3Inventory = @(
     [pscustomobject]@{

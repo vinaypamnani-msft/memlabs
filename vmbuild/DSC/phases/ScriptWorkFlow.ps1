@@ -8,28 +8,53 @@ param(
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
-# There was no top-level handler, so any unhandled terminating error below exited
-# the scheduled task silently and the host saw only 'last result 0x00000001'.
-# Log what killed it, then let it die -- the guest watchdog owns the restart /
-# JOBFAILURE decision, so do not pre-empt it by stamping a status here.
+$ExpectedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.expected.runid'
+$CompletedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.completed.runid'
+$FailedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.failed.json'
+$ScriptWorkflowRunId = $null
+
+# Publish the captured invocation's failure, never a later deployment's RunId.
 trap {
+    $workflowError = $_
+    $workflowErrorSummary = $workflowError.Exception.Message
     try {
+        $workflowErrorSummary = Get-MemLabsExceptionSummary -Exception $workflowError.Exception
         "ScriptWorkflow TERMINATING ERROR: $($_.Exception.Message)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  Type  : $($_.Exception.GetType().FullName)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  At    : $($_.InvocationInfo.ScriptName) line $($_.InvocationInfo.ScriptLineNumber)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  Line  : $("$($_.InvocationInfo.Line)".Trim())" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
         "  Stack : $($_.ScriptStackTrace)" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 3
+        Write-MemLabsExceptionDetails -ErrorRecord $workflowError -Component 'ScriptWorkflow'
     }
-    catch { }
+    catch {
+        Write-Warning "ScriptWorkflow could not write full exception diagnostics: $($_.Exception.Message). Original failure: $workflowErrorSummary"
+    }
     # A death before ScriptWorkflow.json exists leaves no evidence the DSC watchdog
     # (TemplateHelpDSC WaitForEvent) or the host can reach, so drop one here.
     try {
-        $crumbScript = try { Split-Path "$($_.InvocationInfo.ScriptName)" -Leaf } catch { 'ScriptWorkflow.ps1' }
-        $crumbText = "{0} line {1}: {2}" -f $crumbScript, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message
+        $crumbScript = try { Split-Path "$($workflowError.InvocationInfo.ScriptName)" -Leaf } catch { 'ScriptWorkflow.ps1' }
+        $crumbText = "{0} line {1}: {2}" -f $crumbScript, $workflowError.InvocationInfo.ScriptLineNumber, $workflowErrorSummary
         ($crumbText -replace '\s+', ' ').Trim() | Out-File -FilePath 'C:\staging\DSC\ScriptWorkflow.lasterror.txt' -Force
     }
     catch { }
+    if ($ScriptWorkflowRunId) {
+        try {
+            Write-ScriptWorkflowFailureReceipt -RunId $ScriptWorkflowRunId `
+                -Message "$($workflowError.InvocationInfo.ScriptName) line $($workflowError.InvocationInfo.ScriptLineNumber): $workflowErrorSummary"
+        }
+        catch {
+            Write-Warning "ScriptWorkflow could not publish its terminal failure receipt: $($_.Exception.Message)"
+        }
+    }
     break
+}
+
+if (Test-Path -LiteralPath $ExpectedRunIdFile) {
+    $ScriptWorkflowRunId = (Get-Content -LiteralPath $ExpectedRunIdFile -Raw -ErrorAction Stop).Trim()
+    Write-DscStatus "ScriptWorkflow.ps1 RunId for this deploy: $ScriptWorkflowRunId"
+}
+if (Test-Path -LiteralPath $FailedRunIdFile) {
+    Remove-Item -LiteralPath $FailedRunIdFile -Force -ErrorAction Stop
 }
 
 # The breadcrumb must describe the MOST RECENT run, not an earlier one.
@@ -91,18 +116,6 @@ catch {
 }
 
 Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
-
-# Read the per-deploy RunId stamped by the orchestrator (Common.ScriptBlocks.ps1)
-# right before it began monitoring this phase. We'll echo it back into
-# ScriptWorkflow.completed.runid at the very end so the orchestrator can
-# detect completion authoritatively (immune to status-string overwrites).
-$ExpectedRunIdFile  = 'C:\staging\DSC\ScriptWorkflow.expected.runid'
-$CompletedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.completed.runid'
-$ScriptWorkflowRunId = $null
-if (Test-Path $ExpectedRunIdFile) {
-    $ScriptWorkflowRunId = (Get-Content $ExpectedRunIdFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-    Write-DscStatus "ScriptWorkflow.ps1 RunId for this deploy: $ScriptWorkflowRunId"
-}
 
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
@@ -224,27 +237,23 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $firstRun = $true
 
 if (Test-Path -Path $ConfigurationFile) {
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $firstRun = $false
     # Immediately reset status so WaitForEvent won't find stale "Completed" from a previous run
     if ($Configuration.ScriptWorkflow -and $Configuration.ScriptWorkflow.Status -eq "Completed") {
         $Configuration.ScriptWorkflow.Status = "Running"
         $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     }
 
-    # Add-to-existing: the deployConfig may contain new SiteSystem VMs that
-    # need DP/MP/SUP installed, but the previous deploy already marked
-    # InstallDP/InstallSUP as Completed. Reset those statuses when the
-    # current deployConfig has SiteSystem VMs requesting those roles so the
-    # installer scripts actually run.
+    # Add-to-existing: recheck SiteSystem registration even when no automated
+    # roles are selected. InstallDPMPClient's readiness checks skip already-ready
+    # roles and already-registered bare systems.
     $newSiteSystemVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' })
     if ($newSiteSystemVMs.Count -gt 0) {
-        $needsDP  = @($newSiteSystemVMs | Where-Object { $_.installDP }).Count -gt 0
-        $needsMP  = @($newSiteSystemVMs | Where-Object { $_.installMP }).Count -gt 0
         $needsSUP = @($newSiteSystemVMs | Where-Object { $_.installSUP -or $_.installRP }).Count -gt 0
-        if (($needsDP -or $needsMP) -and $Configuration.InstallDP -and $Configuration.InstallDP.Status -eq 'Completed') {
-            Write-DscStatus "Resetting InstallDP status (new SiteSystem VMs with DP/MP found)"
+        if ($Configuration.InstallDP -and $Configuration.InstallDP.Status -eq 'Completed') {
+            Write-DscStatus "Resetting InstallDP status (reconciling configured SiteSystem roles and registration)"
             $Configuration.InstallDP.Status = 'NotStart'
             $Configuration.InstallDP.StartTime = ''
             $Configuration.InstallDP.EndTime = ''
@@ -266,7 +275,7 @@ if (Test-Path -Path $ConfigurationFile) {
             # feature. Add the step so the dot-source guard runs it.
             Write-DscStatus "Adding ConfigureMPReplica step (new SiteSystem MPs with database replica found)"
             $Configuration | Add-Member -NotePropertyName 'ConfigureMPReplica' -NotePropertyValue ([pscustomobject]@{ Status = 'NotStart'; StartTime = ''; EndTime = '' }) -Force
-            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+            Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
         }
         if ($needsReplica -and $Configuration.ConfigureMPReplica -and $Configuration.ConfigureMPReplica.Status -eq 'Completed') {
             Write-DscStatus "Resetting ConfigureMPReplica status (new SiteSystem MPs with database replica found)"
@@ -434,11 +443,21 @@ if (-not $Configuration.ConfigureCMProxy) {
 
 $Configuration.ScriptWorkflow.Status = "Running"
 $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
-# Force AD Replication (only on first run)
+# Force AD replication on first run; directory discovery is only an optimization.
 if ($firstRun) {
-    $domainControllers = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
+    $domainControllers = @()
+    try {
+        $domainControllers = @(Get-ADDomainController -Filter * -ErrorAction Stop)
+        if ($domainControllers.Count -gt 1) {
+            $domainDistinguishedName = (Get-ADDomain -ErrorAction Stop).DistinguishedName
+        }
+    }
+    catch {
+        $domainControllers = @()
+        Write-DscStatus "Skipping optional first-run AD replication: directory discovery failed: $($_.Exception.Message). Continuing with normal AD replication." -Warning -NoStatus
+    }
     if ($domainControllers.Count -gt 1) {
         Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
         # Run repadmin in a job with a hard timeout. If a DC's NTDS is still
@@ -446,7 +465,6 @@ if ($firstRun) {
         # indefinitely waiting for RPC. A job + Wait-Job is the only reliable
         # kill switch in PS 5.1.
         $dcNames = @($domainControllers.Name)
-        $domainDistinguishedName = (Get-ADDomain).DistinguishedName
         $replJob = Start-Job -ScriptBlock {
             param($dcNames, $dn)
             $dcNames | ForEach-Object { repadmin /syncall $_ $dn /AdeP 2>&1 | Out-Null }
@@ -466,10 +484,10 @@ if ($scenario -eq "MultiDomain") {
     Set-Location $LogPath
     Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $Configuration.ScriptWorkflow.Status = "Completed"
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     Write-DscStatus "Complete!"
     # Stamp completion RunId for the orchestrator's race-proof completion check
     if ($ScriptWorkflowRunId) {
@@ -484,7 +502,13 @@ if ($scenario -eq "Standalone") {
     Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
     Set-Location $LogPath
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+    # Fresh workers cannot reuse the console session loaded before the site upgrade.
+    Write-DscStatus "$scenario Running Upgrade-Console.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+    Set-Location $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
     # Enable HTTPS/eHTTP early so the site component manager has maximum
     # time to republish the updated OperationalXml (SecurityModeMaskEx) to
@@ -506,7 +530,7 @@ if ($scenario -eq "Standalone") {
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         Set-Location $LogPath
         Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
-        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
         if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
             Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
             return
@@ -522,6 +546,7 @@ if ($scenario -eq "Standalone") {
         try {
             Set-Location $LogPath
             . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+            if (-not (Disable-MemLabsAutomaticClientPush -SiteCode $SiteCode)) { return }
             $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
             Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
             Invoke-CMSystemDiscovery
@@ -551,7 +576,7 @@ if ($scenario -eq "Standalone") {
     Write-DscStatus "$scenario Running InstallRoles.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
     Set-Location $LogPath
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
     # Configure MP database replicas (SQL transactional replication + Service
     # Broker). Runs after InstallRoles so the MP roles exist. Self-skips when no
@@ -588,7 +613,12 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
         Set-Location $LogPath
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+
+        Write-DscStatus "$scenario Running Upgrade-Console.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         # Enable HTTPS/eHTTP early on CAS too (same reasoning as Standalone).
         $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
@@ -604,7 +634,7 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         # ConfigureCMProxy is cheap and idempotent; always run.
         Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
@@ -620,8 +650,13 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
             Set-Location $LogPath
-            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
         }
+
+        Write-DscStatus "$scenario Primary Running Upgrade-Console.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         # Enable HTTPS/eHTTP early on Primary too (same reasoning as Standalone).
         $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
@@ -640,7 +675,7 @@ if ($scenario -eq "Hierarchy") {
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
             Set-Location $LogPath
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
-            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+            $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
             if ($Configuration.InstallDP.Status -ne 'Completed' -or $Configuration.InstallMP.Status -ne 'Completed') {
                 Write-DscStatus "$scenario DP/MP installation did not complete. Stopping before boundary, content, and perfloading work that depends on physically ready roles." -Failure
                 return
@@ -656,6 +691,7 @@ if ($scenario -eq "Hierarchy") {
             try {
                 Set-Location $LogPath
                 . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+                if (-not (Disable-MemLabsAutomaticClientPush -SiteCode $SiteCode)) { return }
                 $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
                 Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
                 Invoke-CMSystemDiscovery
@@ -685,7 +721,7 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
-        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         # Configure MP database replicas (SQL transactional replication + Service
         # Broker). Runs after InstallRoles so the MP roles exist. Self-skips when no
@@ -795,7 +831,7 @@ if ($containsPassive) {
         $passiveRan = $true
     }
     else {
-        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+        $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
         $DomainFullName = $deployConfig.vmOptions.domainName
         $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
         $passiveQueryFailed = $false
@@ -933,10 +969,10 @@ Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
 if ($CurrentRole -eq "CAS") {
     #If we are on the CAS, we can mark this early, to allow the primary to start while we run other tasks.
     # Mark ScriptWorkflow completed for DSC to move on.
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $Configuration.ScriptWorkflow.Status = "Completed"
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 }
 
@@ -1027,7 +1063,7 @@ function Invoke-PerfloadingWithProviderRecovery {
             if ($perfAttempt -gt 1) {
                 Write-DscStatus "Retrying perfloading (attempt $perfAttempt of $MaxAttempts) after SMS Provider recovery"
             }
-            $null = Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+            $null = Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow -CallerOwnsRetry
             return $true
         }
         catch {
@@ -1061,6 +1097,13 @@ function Invoke-PerfloadingWithProviderRecovery {
 if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateObjects -eq $true) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
+    try {
+        Assert-MemLabsPerfloadingContract -Script $ScriptFile
+    }
+    catch {
+        Write-DscStatus "Perfloading preflight failed before object creation: $($_.Exception.Message)" -Failure
+        return
+    }
     Set-Location $LogPath
     # Perfloading is idempotent, but a provider host that returned 0x8004108A
     # remained unhealthy across the old fixed 30-second delays. Wait on the
@@ -1143,17 +1186,17 @@ if ($CurrentRole -eq "CAS") {
     Write-DscStatus "Complete!"
 }
 
-# PushClients first so auto-push has maximum time to install the agent on
+# PushClients first so explicit pushes have maximum time to install the agent on
 # all targets while EnableBLM configures policies and collections.
 if ($ThisVM.role -ne "CAS") {
     # Cross-tier PKI pre-stage handshake. ScriptWorkflow runs inside the guest
     # and cannot PSDirect into the client VMs, but the HOST monitor can. Emit a
-    # sentinel status the host watches for, then pause ~60s so the host can
+    # sentinel status the host watches for, then wait for its matching receipt to
     # pulse + verify the offline-root/sub-CA chain into every push client's
-    # LocalMachine cert stores BEFORE auto-push runs ccmsetup. Without the full
+    # LocalMachine cert stores BEFORE explicit push runs ccmsetup. Without the full
     # chain the client fails GetDPLocations (0x87d00454) over HTTPS.
     #
-    # Only emit the sentinel (and pay the 60s pause + trigger the host pulse)
+    # Only request the verified host pre-stage
     # when there is actually a push target that is NOT yet a registered client.
     # The Primary IS the site server, so we query our own SMS provider: if every
     # push target already shows SMS_R_System.Client = 1 the agent is already
@@ -1198,8 +1241,13 @@ if ($ThisVM.role -ne "CAS") {
             Write-DscStatus "Client-state check failed ($($_.Exception.Message)); requesting host cert pre-stage to be safe." -Warning
         }
         if ($needCertPulse) {
-            Write-DscStatus "MEMLABS-PULSE-CERTS: Waiting for host to refresh certificates on clients"
-            Start-Sleep -Seconds 60
+            try {
+                Wait-MemLabsClientCertificatePrestage -RunId $ScriptWorkflowRunId -Targets $pushTargets
+            }
+            catch {
+                Write-DscStatus "PKI pre-stage failed before client push: $($_.Exception.Message)" -Failure
+                return
+            }
         }
 
         # A fresh HTTPS flip leaves each MP's RUNNING http.sys/Schannel/IIS holding
@@ -1213,7 +1261,7 @@ if ($ThisVM.role -ne "CAS") {
         # and the push succeeds. (Single-MP sites happen to get cycled at the right
         # moment; a SECOND MP that never gets a post-HTTPS restart keeps failing
         # deterministically -- the multi-MP delta we hit.) So bounce every MP in
-        # THIS site once, right before auto-push:
+        # THIS site once, right before explicit push:
         #   - remote MPs: full reboot (flushes http.sys SSL cache AND the
         #     LSASS/Schannel trusted-issuer cache, which iisreset alone does not),
         #   - the local site-server MP: iisreset + CcmExec restart (we run inside
@@ -1268,7 +1316,7 @@ if ($ThisVM.role -ne "CAS") {
                         Start-Sleep -Seconds 30
                     }
                     if (-not $mpHealthy) {
-                        Write-DscStatus "MP TLS bounce: $($mp.vmName) not confirmed healthy after reboot; continuing (auto-push will retry)" -Warning
+                        Write-DscStatus "MP TLS bounce: $($mp.vmName) not confirmed healthy after reboot; the bounded pre-push health check still must pass" -Warning
                     }
                 }
             }
@@ -1485,14 +1533,15 @@ if ($ThisVM.role -ne "CAS") {
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
         }
         catch {
-            Write-DscStatus "PushClients.ps1 failed: $_" -Warning
+            Write-DscStatus "PushClients.ps1 failed: $_" -Warning -NoStatus
+            throw
         }
     }
 }
 
 # EnableBLM only needs AD-discovered devices (not pushed clients) for its
 # collection query rules, so it is safe to run after PushClients kicks off
-# auto-push. If PushClients fails, EnableBLM still runs.
+# explicit pushes. Nonfatal warnings allow EnableBLM; reported push failures stop the workflow.
 if ($CurrentRole -eq "Primary") {
     Write-DscStatus "Running EnableBLM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
@@ -1639,7 +1688,7 @@ if ($CurrentRole -ne "CAS" -and $CurrentRole -in @("Primary", "Secondary")) {
 
 # Force a FULL collection re-evaluation on every MEMLABS-* device collection
 # (plus All Unknown Computers) when this site has client-push targets and
-# PushClients + auto-push + first-contact
+# PushClients + explicit push + first-contact
 # Heartbeat Discovery have had time to register the agent and flip
 # SMS_R_System.Client to 1 for every freshly-pushed VM. Without this,
 # SMS_FullCollectionMembership.IsClient is the value colleval snapshotted
@@ -1696,10 +1745,10 @@ if ($CurrentRole -in @("Primary", "Secondary")) {
 # Non-CAS: mark completion now that PushClients, EnableBLM, component
 # resets, and component stabilization are done.
 if ($CurrentRole -ne "CAS") {
-    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile
     $Configuration.ScriptWorkflow.Status = "Completed"
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     Write-DscStatus "Complete!"
 }
 

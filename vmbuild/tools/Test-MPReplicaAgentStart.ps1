@@ -26,13 +26,39 @@ function Import-MPReplicaFunction {
 
 . (Import-MPReplicaFunction -Name 'Get-MPReplicaAgentJobState')
 . (Import-MPReplicaFunction -Name 'Start-MPReplicaAgentJob')
+. (Import-MPReplicaFunction -Name 'Remove-StaleMPReplicaSiteArtifacts')
 
 $script:StateQueue = [System.Collections.Generic.Queue[object]]::new()
 $script:StateQueries = [System.Collections.Generic.List[string]]::new()
 $script:StartCalls = 0
 $script:StartFailure = ''
+$script:CleanupMode = $false
+$script:CleanupQueries = [System.Collections.Generic.List[string]]::new()
+$script:CleanupPublicationCount = 1
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 1
+$script:CleanupSubscriptionCatalogComplete = 1
+$script:CleanupDatabaseIsPublished = 1
+$script:CleanupAgentJobCount = 2
 function Invoke-ReplSql {
     param([string]$Instance, [string]$Query, [string]$Database)
+    if ($script:CleanupMode) {
+        $script:CleanupQueries.Add($Query)
+        if ($script:CleanupQueries.Count -eq 1) {
+            return [pscustomobject]@{
+                PublicationCount = $script:CleanupPublicationCount
+                SubscriptionCount = $script:CleanupSubscriptionCount
+                PublicationCatalogPresent = $script:CleanupPublicationCatalogPresent
+                SubscriptionCatalogComplete = $script:CleanupSubscriptionCatalogComplete
+                DatabaseIsPublished = $script:CleanupDatabaseIsPublished
+                AgentJobCount = $script:CleanupAgentJobCount
+            }
+        }
+        return [pscustomobject]@{
+            PublicationCount = 0
+            AgentJobCount = 0
+        }
+    }
     if ($Query -match 'sysjobactivity') {
         $script:StateQueries.Add($Query)
         if ($script:StateQueue.Count -eq 0) { return }
@@ -47,6 +73,15 @@ function Invoke-ReplSql {
 }
 function Start-Sleep { param([int]$Seconds) }
 function Write-DscStatus { param([string]$Message) }
+function Invoke-Command {
+    param(
+        [string]$ComputerName,
+        [scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList,
+        [string]$ErrorAction
+    )
+    return @('removed share ConfigMgr_MPReplica', 'removed local group ConfigMgr_MPReplicaAccess')
+}
 function New-State {
     param(
         [bool]$Running,
@@ -171,6 +206,84 @@ if ($failedOutcome -notmatch 'completed with run_status=0') {
     throw "A collided job with a failed outcome did not fail closed: '$failedOutcome'."
 }
 
+$script:CleanupMode = $true
+$script:CleanupQueries.Clear()
+$siteSqlServer = 'REMOTE-SQL'
+$siteSqlConn = 'REMOTE-SQL'
+$siteDbName = 'CM_PRI'
+$DomainFullName = 'lab.test'
+$Tag = '[test]'
+$cleanupResult = Remove-StaleMPReplicaSiteArtifacts
+$script:CleanupMode = $false
+if (-not $cleanupResult -or $script:CleanupQueries.Count -ne 2) {
+    throw 'Zero-subscription stale MP replica artifacts were not removed and verified.'
+}
+if ($script:CleanupQueries[0] -notmatch 'JOIN dbo\.sysarticles' -or
+    $script:CleanupQueries[0] -notmatch 'EXEC sys\.sp_executesql' -or
+    $script:CleanupQueries[1] -notmatch 'sp_droppublication' -or
+    $script:CleanupQueries[1] -notmatch 'EXEC sys\.sp_executesql' -or
+    $script:CleanupQueries[1] -notmatch 'sp_replicationdboption' -or
+    $script:CleanupQueries[1] -notmatch 'sp_delete_job') {
+    throw 'Stale MP replica cleanup did not inventory subscriptions or remove every owned SQL artifact.'
+}
+foreach ($unsafeStaticCatalogPattern in @(
+        'PublicationCount\s*=\s*CASE\s+WHEN\s+OBJECT_ID',
+        'DECLARE\s+@remainingPublications\s+int\s*=\s*CASE',
+        'ELSE\s+\(SELECT\s+COUNT\(\*\)\s+FROM\s+dbo\.syspublications'
+    )) {
+    if ($script:CleanupQueries[0] -match $unsafeStaticCatalogPattern -or
+        $script:CleanupQueries[1] -match $unsafeStaticCatalogPattern) {
+        throw "Absent replication catalogs can still fail SQL batch compilation: $unsafeStaticCatalogPattern"
+    }
+}
+
+$script:CleanupMode = $true
+$script:CleanupQueries.Clear()
+$script:CleanupPublicationCount = 0
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 0
+$script:CleanupSubscriptionCatalogComplete = 0
+$script:CleanupDatabaseIsPublished = 0
+$script:CleanupAgentJobCount = 0
+$freshDatabaseResult = Remove-StaleMPReplicaSiteArtifacts
+if (-not $freshDatabaseResult -or $script:CleanupQueries.Count -ne 1) {
+    throw 'A fresh unpublished site database did not converge as a zero-artifact cleanup state.'
+}
+
+$script:CleanupQueries.Clear()
+$script:CleanupPublicationCount = 1
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 1
+$script:CleanupSubscriptionCatalogComplete = 0
+$script:CleanupDatabaseIsPublished = 1
+$script:CleanupAgentJobCount = 0
+$incompleteCatalogFailure = $null
+try { $null = Remove-StaleMPReplicaSiteArtifacts }
+catch { $incompleteCatalogFailure = $_.Exception.Message }
+if ($incompleteCatalogFailure -notmatch 'live subscriptions cannot be ruled out') {
+    throw "Incomplete replication catalogs did not fail closed: '$incompleteCatalogFailure'."
+}
+
+$script:CleanupQueries.Clear()
+$script:CleanupPublicationCount = 0
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 0
+$script:CleanupSubscriptionCatalogComplete = 0
+$script:CleanupDatabaseIsPublished = 1
+$publishedCatalogFailure = $null
+try { $null = Remove-StaleMPReplicaSiteArtifacts }
+catch { $publishedCatalogFailure = $_.Exception.Message }
+if ($publishedCatalogFailure -notmatch 'site database is marked published') {
+    throw "A published database with an unavailable publication catalog did not fail closed: '$publishedCatalogFailure'."
+}
+$script:CleanupPublicationCount = 1
+$script:CleanupSubscriptionCount = 0
+$script:CleanupPublicationCatalogPresent = 1
+$script:CleanupSubscriptionCatalogComplete = 1
+$script:CleanupDatabaseIsPublished = 1
+$script:CleanupAgentJobCount = 2
+$script:CleanupMode = $false
+
 Reset-TestState
 $script:StateQueue.Enqueue((New-State -Running $true -AgentRunning $false -ActivitySaysRunning $true))
 $agentDownFailure = $null
@@ -219,6 +332,26 @@ if ($missingFailure -notmatch 'No SQL Agent job was found') {
 $sourceText = Get-Content -LiteralPath $sourcePath -Raw
 if ($sourceText -notmatch 'Test-MPReplicaEnabled -Value \$_.useDatabaseReplica') {
     throw 'ConfigureMPReplica still treats non-empty string False as enabled.'
+}
+if ($sourceText -notmatch '(?s)\$explicitReplicaIntent.+?\$cleanupRequested.+?useDatabaseReplica=false' -or
+    $sourceText -notmatch '(?s)if \(\$cleanupRequested\).+?Remove-StaleMPReplicaSiteArtifacts') {
+    throw 'Explicitly disabled MP replicas do not invoke ownership-scoped stale-artifact cleanup.'
+}
+if ($sourceText -notmatch 'Refusing automatic MP replica teardown:.+subscription') {
+    throw 'Stale MP replica cleanup can remove a publication that still has live subscriptions.'
+}
+foreach ($requiredCleanupSignal in @(
+        'sp_droppublication',
+        'sp_replicationdboption',
+        'sp_delete_job'
+    )) {
+    if ($sourceText -notmatch [regex]::Escape($requiredCleanupSignal)) {
+        throw "Stale MP replica cleanup lost required ownership boundary '$requiredCleanupSignal'."
+    }
+}
+if ($sourceText -notmatch
+    "(?s)GetFileName\(\`$sharePath\.TrimEnd\(.+?\)\)\s+-ieq\s+'ConfigMgr_MPReplica'") {
+    throw 'Stale MP replica cleanup can recursively delete a directory not owned by the exact ConfigMgr_MPReplica share.'
 }
 if ($sourceText -notmatch '(?s)replicaSqlServerVM is missing.+?Stopping before STEP 1.+?-Failure') {
     throw 'ConfigureMPReplica no longer fails invalid replica targets before STEP 1.'

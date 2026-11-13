@@ -199,9 +199,6 @@
             $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
 
-
-       
-
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"

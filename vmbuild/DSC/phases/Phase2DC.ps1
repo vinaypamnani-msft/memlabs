@@ -971,9 +971,10 @@
                 $waitOnDependency = "[InstallRootCertificate]InstallRootCertificate"
 
                 RunPkiSync RunPkiSync {
-                    SourceForest = $ThisVM.ForestTrust
-                    TargetForest = $DomainName
-                    DependsOn    = $waitOnDependency
+                    SourceForest        = $ThisVM.ForestTrust
+                    TargetForest        = $DomainName
+                    DependsOn           = $waitOnDependency
+                    PsDscRunAsCredential = $DomainCreds
                 }
                 $waitOnDependency = "[RunPkiSync]RunPkiSync"
             }

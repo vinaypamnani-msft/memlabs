@@ -3,14 +3,30 @@ param (
     # Re-entry point: the removal relaunches this script with this switch so the uninstaller runs in
     # its own process and can never delay the VMBuild launch that is waiting on maintenance.
     [switch] $WindowsAdminCenterRemovalOnly,
-    [switch] $ScheduledTask
+    [switch] $ScheduledTask,
+    [switch] $BackgroundUpgradeWorker,
+    [switch] $UserWinGetTask
 )
 
 $ErrorActionPreference = 'Continue'
 
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $logsPath = Join-Path $scriptPath 'logs'
-$logPrefix = if ($WindowsAdminCenterRemovalOnly) { 'WacRemoval' } elseif ($ScheduledTask) { 'ScheduledMaintenance' } else { 'Maintenance' }
+$logPrefix = if ($WindowsAdminCenterRemovalOnly) {
+    'WacRemoval'
+}
+elseif ($UserWinGetTask) {
+    'UserWinGetMaintenance'
+}
+elseif ($BackgroundUpgradeWorker) {
+    'BackgroundMaintenance'
+}
+elseif ($ScheduledTask) {
+    'ScheduledMaintenance'
+}
+else {
+    'Maintenance'
+}
 $logFile = Join-Path $logsPath "${logPrefix}_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 if (-not (Test-Path $logsPath)) {
@@ -53,6 +69,44 @@ function Test-ChocoAvailable {
     return ($null -ne (Get-Command choco -ErrorAction SilentlyContinue))
 }
 
+function New-MemLabsMaintenanceMutex {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string] $Name
+    )
+
+    $security = [Security.AccessControl.MutexSecurity]::new()
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $callerSid = $identity.User }
+    finally { $identity.Dispose() }
+    foreach ($sid in @(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            $callerSid
+        )) {
+        $security.AddAccessRule([Security.AccessControl.MutexAccessRule]::new(
+                $sid, [Security.AccessControl.MutexRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow))
+    }
+
+    $created = $false
+    try {
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            return [Threading.MutexAcl]::Create($false, $Name, [ref]$created, $security)
+        }
+        return [Threading.Mutex]::new($false, $Name, [ref]$created, $security)
+    }
+    catch [UnauthorizedAccessException] {
+        # Existing mutexes may permit waiting/releasing without granting full control.
+        $rights = [Security.AccessControl.MutexRights]::Synchronize -bor [Security.AccessControl.MutexRights]::Modify
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            return [Threading.MutexAcl]::OpenExisting($Name, $rights)
+        }
+        return [Threading.Mutex]::OpenExisting($Name, $rights)
+    }
+}
+
 function Invoke-WithMemLabsMaintenanceMutex {
     [CmdletBinding()]
     param (
@@ -67,12 +121,12 @@ function Invoke-WithMemLabsMaintenanceMutex {
     $acquired = $false
     try {
         try {
-            $mutex = [System.Threading.Mutex]::new($false, $Name)
+            $mutex = New-MemLabsMaintenanceMutex -Name $Name
         }
         catch {
-            Write-LogMessage "Maintenance mutex is unavailable; running without serialization ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -Level 'WARNING'
-            & $ScriptBlock | Out-Host
-            return $true
+            Write-LogMessage "Maintenance mutex '$Name' is unavailable; skipping guarded maintenance ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -Level 'ERROR'
+            $script:MaintenanceHadFailure = $true
+            return $false
         }
 
         try {
@@ -87,6 +141,52 @@ function Invoke-WithMemLabsMaintenanceMutex {
         }
 
         & $ScriptBlock | Out-Host
+        return $true
+    }
+    finally {
+        if ($mutex) {
+            if ($acquired) {
+                try { $mutex.ReleaseMutex() } catch {}
+            }
+            try { $mutex.Dispose() } catch {}
+        }
+    }
+}
+
+function Invoke-WithMemLabsRuntimeUpgradeLease {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList = @(),
+        [ValidateRange(0, 3600)]
+        [int] $TimeoutSeconds = 0,
+        [string] $Name = 'Global\MemLabsTestMutationLock'
+    )
+
+    $mutex = $null
+    $acquired = $false
+    try {
+        try {
+            $mutex = New-MemLabsMaintenanceMutex -Name $Name
+        }
+        catch {
+            Write-LogMessage "The host mutation lease '$Name' is unavailable; deferring runtime upgrades: $($_.Exception.Message)" -Level 'WARNING'
+            return $false
+        }
+
+        try {
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+
+        if (-not $acquired) {
+            return $false
+        }
+
+        & $ScriptBlock @ArgumentList | Out-Host
         return $true
     }
     finally {
@@ -131,6 +231,43 @@ function Install-MemLabsMaintenanceScheduledTask {
     Write-LogMessage "Scheduled task '$TaskPath$TaskName' is current (daily at 11:00 PM; missed starts run when available)."
 }
 
+function Install-MemLabsUserWinGetScheduledTask {
+    [CmdletBinding()]
+    param (
+        [string] $TaskName = 'MemLabs User WinGet Maintenance',
+        [string] $TaskPath = '\',
+        [string] $MaintenanceScriptPath = $PSCommandPath,
+        [string] $UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    )
+
+    if (-not (Test-Path -LiteralPath $MaintenanceScriptPath -PathType Leaf)) {
+        throw "Maintenance script not found at '$MaintenanceScriptPath'."
+    }
+    if ([string]::IsNullOrWhiteSpace($UserId)) {
+        throw 'The current-user WinGet maintenance task requires a user identity.'
+    }
+
+    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -UserWinGetTask' -f $MaintenanceScriptPath
+    $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments -WorkingDirectory (Split-Path -Parent $MaintenanceScriptPath)
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserId
+    $trigger.Delay = 'PT2M'
+    $principal = New-ScheduledTaskPrincipal -UserId $UserId -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    $definition = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+        -Description 'Updates WinGet-managed MemLabs host applications for the signed-in user at most once per day.'
+
+    Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -InputObject $definition -Force -ErrorAction Stop | Out-Null
+
+    $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+    $registeredAction = @($task.Actions)[0]
+    if ($null -eq $registeredAction -or $registeredAction.Execute -ne $powerShellPath -or $registeredAction.Arguments -ne $arguments) {
+        throw "Scheduled task '$TaskPath$TaskName' did not retain the expected current-user WinGet action."
+    }
+
+    Write-LogMessage "Scheduled task '$TaskPath$TaskName' is current for '$UserId' (two minutes after logon; upgrades run at most once per 24 hours)."
+}
+
 function Get-WindowsAdminCenterRemovalLockPath {
     $programData = if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { 'C:\ProgramData' } else { $env:ProgramData }
     $stateDirectory = Join-Path $programData 'memlabs'
@@ -162,20 +299,366 @@ function Get-InstalledPwshVersion {
     return $null
 }
 
-function Get-ChocoAvailablePackageVersion {
+function Copy-MemLabsDiagnosticLog {
+    [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)]
-        [string]$PackageId
+        [Parameter(Mandatory = $true)][IO.FileInfo] $File,
+        [Parameter(Mandatory = $true)][string] $DestinationPath,
+        [ValidateRange(0, 33554432)][long] $MaximumBytes = 4MB
     )
 
-    $output = @(& choco search $PackageId --exact --limit-output)
-    $searchRc = $LASTEXITCODE
+    $source = $null
+    $destination = $null
+    try {
+        if ($File.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing to copy native diagnostic reparse point '$($File.FullName)'."
+        }
+        $source = [IO.File]::Open($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $length = $source.Length
+        $headerBytes = [byte[]]::new(16384)
+        $headerLength = $source.Read($headerBytes, 0, $headerBytes.Length)
+        $header = [Text.Encoding]::UTF8.GetString($headerBytes, 0, $headerLength)
+        $commandLine = $null
+        if ($header -match '(?m)Command line(?: Args)?:\s*([^\r\n]+)') {
+            $commandLine = $Matches[1]
+        }
+        $bytesToCopy = [Math]::Min($length, $MaximumBytes)
+        if ($bytesToCopy -le 0 -and $length -gt 0) {
+            throw 'The native diagnostic byte budget has been exhausted.'
+        }
+        [void]$source.Seek($length - $bytesToCopy, [IO.SeekOrigin]::Begin)
+        $destination = [IO.File]::Open($DestinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $buffer = [byte[]]::new(65536)
+        $copiedBytes = 0L
+        while ($copiedBytes -lt $bytesToCopy) {
+            $read = $source.Read($buffer, 0, [int][Math]::Min($buffer.Length, $bytesToCopy - $copiedBytes))
+            if ($read -eq 0) { break }
+            $destination.Write($buffer, 0, $read)
+            $copiedBytes += $read
+        }
+        return [pscustomobject]@{
+            Source = $File.FullName
+            File = [IO.Path]::GetFileName($DestinationPath)
+            LastWriteTimeUtc = $File.LastWriteTimeUtc.ToString('o')
+            OriginalBytes = $length
+            CapturedBytes = $copiedBytes
+            Truncated = ($copiedBytes -lt $length)
+            CommandLine = $commandLine
+        }
+    }
+    finally {
+        if ($destination) { $destination.Dispose() }
+        if ($source) { $source.Dispose() }
+    }
+}
+
+function Get-MemLabsLogFileState {
+    [CmdletBinding()]
+    param ([Parameter(Mandatory = $true)][string] $Path)
+
+    try {
+        $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+    }
+    catch [System.Management.Automation.ItemNotFoundException] {
+        return [pscustomobject]@{ Path = $Path; Exists = $false; Length = 0L; LastWriteTimeUtc = $null }
+    }
+    if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "The query log is not a regular file: '$Path'."
+    }
+    return [pscustomobject]@{
+        Path = $Path
+        Exists = $true
+        Length = $file.Length
+        LastWriteTimeUtc = $file.LastWriteTimeUtc.ToString('o')
+    }
+}
+
+function Save-ChocoSearchFailureDiagnostics {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string] $ChocoPath,
+        [Parameter(Mandatory = $true)][string] $LogPrefix,
+        [Parameter(Mandatory = $true)][string[]] $QueryLogPaths,
+        [Parameter(Mandatory = $true)][Collections.IDictionary] $RunContext
+    )
+
+    $logDirectory = Split-Path -Parent $LogPrefix
+    $directory = "$LogPrefix.diagnostics"
+    New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $warnings = [Collections.Generic.List[string]]::new()
+    $capturedFiles = [Collections.Generic.List[object]]::new()
+    try {
+        $olderDirectories = @(Get-ChildItem -LiteralPath $logDirectory -Directory -Filter 'ChocoSearch_*.diagnostics' -ErrorAction Stop |
+            Where-Object {
+                $_.FullName -ne $directory -and
+                $_.Name -match '^ChocoSearch_\d{8}_\d{6}_\d{3}_[0-9a-f]{8}\.diagnostics$' -and
+                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            } | Sort-Object CreationTimeUtc -Descending)
+        foreach ($oldDirectory in @($olderDirectories | Select-Object -Skip 2)) {
+            Remove-Item -LiteralPath $oldDirectory.FullName -Recurse -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        $warnings.Add("Could not prune older Chocolatey diagnostics: $($_.Exception.Message)")
+    }
+
+    $candidates = [Collections.Generic.List[object]]::new()
+    foreach ($path in $QueryLogPaths) {
+        try {
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($file.PSIsContainer) { throw "The query log is a directory: '$path'." }
+            $candidates.Add([pscustomobject]@{ File = $file; Scope = 'Query' })
+        }
+        catch {
+            $warnings.Add("Could not locate query log '$path': $($_.Exception.Message)")
+        }
+    }
+
+    $nativeDirectory = $null
+    try {
+        $installRoot = $env:ChocolateyInstall
+        if ([string]::IsNullOrWhiteSpace($installRoot)) {
+            $installRoot = Split-Path -Parent $ChocoPath
+            if ((Split-Path -Leaf $installRoot) -eq 'bin') { $installRoot = Split-Path -Parent $installRoot }
+        }
+        $nativeDirectory = Join-Path $installRoot 'logs'
+        $sourceDirectory = Get-Item -LiteralPath $nativeDirectory -ErrorAction Stop
+        if (-not $sourceDirectory.PSIsContainer -or ($sourceDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The native diagnostic directory is not a regular directory: '$nativeDirectory'."
+        }
+        $nativeLogs = @(Get-ChildItem -LiteralPath $nativeDirectory -File -Filter '*.log*' -ErrorAction Stop |
+            Where-Object Name -Match '^(?:chocolatey|choco\.summary)\.log(?:\.\d+)?$' |
+            Sort-Object LastWriteTimeUtc -Descending)
+        if ($nativeLogs.Count -eq 0) { $warnings.Add("No native Chocolatey logs were found in '$nativeDirectory'.") }
+        if ($nativeLogs.Count -gt 10) { $warnings.Add("Only the newest 10 of $($nativeLogs.Count) native Chocolatey logs will be collected.") }
+        foreach ($file in @($nativeLogs | Select-Object -First 10)) {
+            $candidates.Add([pscustomobject]@{ File = $file; Scope = 'SharedHostContext' })
+        }
+    }
+    catch {
+        $warnings.Add("Native Chocolatey diagnostic collection failed: $($_.Exception.Message)")
+    }
+
+    $totalBytes = 0L
+    foreach ($candidate in $candidates) {
+        try {
+            if ($totalBytes -ge 32MB -and $candidate.File.Length -gt 0) {
+                $warnings.Add('The 32 MiB native diagnostic limit was reached; remaining logs were not copied.')
+                break
+            }
+            $captured = Copy-MemLabsDiagnosticLog -File $candidate.File `
+                -DestinationPath (Join-Path $directory $candidate.File.Name) -MaximumBytes ([Math]::Min(4MB, 32MB - $totalBytes))
+            $totalBytes += $captured.CapturedBytes
+            $captured | Add-Member -NotePropertyName Scope -NotePropertyValue $candidate.Scope
+            $capturedFiles.Add($captured)
+            if ($captured.Truncated) {
+                $warnings.Add("Native log '$($captured.File)' was truncated; captured its last $($captured.CapturedBytes) of $($captured.OriginalBytes) bytes.")
+            }
+        }
+        catch {
+            $warnings.Add("Could not collect native log '$($candidate.File.FullName)': $($_.Exception.Message)")
+        }
+    }
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $identityName = $identity.Name }
+    finally { $identity.Dispose() }
+    $summary = [ordered]@{}
+    foreach ($key in $RunContext.Keys) { $summary[$key] = $RunContext[$key] }
+    $summary.Executable = $ChocoPath
+    $summary.Identity = $identityName
+    $summary.HostProcessId = $PID
+    $summary.SessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $summary.PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    $summary.PowerShellEdition = $PSVersionTable.PSEdition
+    $summary.NativeLogDirectory = $nativeDirectory
+    $summary.SharedLogsEstablishQueryProgress = $false
+    $summary.Files = @($capturedFiles.ToArray())
+    $summary.Warnings = @($warnings.ToArray())
+    $summary.Limits = @{ NativeFiles = 10; FileBytes = 4MB; TotalBytes = 32MB; RetainedRuns = 3 }
+    $summary | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $directory 'summary.json') -Encoding utf8 -ErrorAction Stop
+    return [pscustomobject]@{ Directory = $directory; Warnings = @($warnings.ToArray()) }
+}
+
+function Get-ChocoAvailablePackageVersion {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
+        [string]$PackageId,
+        [ValidateRange(1, 3600)]
+        [Alias('TimeoutSeconds')]
+        [int]$IdleTimeoutSeconds = 60,
+        [ValidateRange(1, 3600)]
+        [int]$MaxRuntimeSeconds = 600,
+        [string]$LogDirectory = $logsPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        throw 'The Chocolatey search log directory was not provided.'
+    }
+    if (-not (Test-Path -LiteralPath $LogDirectory)) {
+        New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    $choco = Get-Command choco -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $runId = '{0}_{1}' -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $logPrefix = Join-Path $LogDirectory "ChocoSearch_$runId"
+    $stdoutPath = "$logPrefix.stdout.log"
+    $stderrPath = "$logPrefix.stderr.log"
+    $nativePath = "$logPrefix.native.log"
+    $diagnostics = "Output: $stdoutPath; errors: $stderrPath; native log: $nativePath"
+    Write-LogMessage "Checking Chocolatey version for '$PackageId' (inactivity timeout: ${IdleTimeoutSeconds}s; maximum runtime: ${MaxRuntimeSeconds}s). $diagnostics"
+
+    $process = [System.Diagnostics.Process]::new()
+    $processStarted = $false
+    $stdoutStream = $null
+    $stderrStream = $null
+    try {
+        $stdoutStream = [IO.FileStream]::new($stdoutPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 1, [IO.FileOptions]::Asynchronous)
+        $stderrStream = [IO.FileStream]::new($stderrPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 1, [IO.FileOptions]::Asynchronous)
+        $logStates = [ordered]@{}
+        foreach ($path in @($stdoutPath, $stderrPath, $nativePath)) {
+            $state = Get-MemLabsLogFileState -Path $path
+            $state | Add-Member -NotePropertyName LastChangeElapsedSeconds -NotePropertyValue 0.0
+            $state | Add-Member -NotePropertyName ChangeCount -NotePropertyValue 0
+            $logStates[$path] = $state
+        }
+        $process.StartInfo.FileName = $choco.Source
+        $process.StartInfo.Arguments = "search $PackageId --exact --limit-output --log-file=`"$nativePath`""
+        $process.StartInfo.UseShellExecute = $false
+        $process.StartInfo.CreateNoWindow = $true
+        $process.StartInfo.RedirectStandardOutput = $true
+        $process.StartInfo.RedirectStandardError = $true
+        $started = Get-Date
+        $queryWatch = [Diagnostics.Stopwatch]::StartNew()
+        $processStarted = $process.Start()
+        if (-not $processStarted) { throw "Could not start choco search $PackageId. $diagnostics" }
+
+        # Stream both pipes to disk so their growth is observable while the query runs.
+        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+        $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
+        Write-LogMessage "choco search $PackageId started (PID $($process.Id))."
+        $lastProgressSeconds = 0.0
+        $lastProgressPath = $null
+        $nextProgressReport = [Math]::Min($IdleTimeoutSeconds, 60)
+        $timeoutReason = $null
+        while (-not $process.WaitForExit(250)) {
+            foreach ($state in $logStates.Values) {
+                $observed = Get-MemLabsLogFileState -Path $state.Path
+                if ($state.Exists -ne $observed.Exists -or $state.Length -ne $observed.Length -or $state.LastWriteTimeUtc -ne $observed.LastWriteTimeUtc) {
+                    $state.Exists = $observed.Exists
+                    $state.Length = $observed.Length
+                    $state.LastWriteTimeUtc = $observed.LastWriteTimeUtc
+                    $state.ChangeCount++
+                    $lastProgressSeconds = $queryWatch.Elapsed.TotalSeconds
+                    $state.LastChangeElapsedSeconds = $lastProgressSeconds
+                    $lastProgressPath = $state.Path
+                }
+            }
+            $elapsedSeconds = $queryWatch.Elapsed.TotalSeconds
+            $idleSeconds = $elapsedSeconds - $lastProgressSeconds
+            if ($elapsedSeconds -ge $MaxRuntimeSeconds) { $timeoutReason = 'MaximumRuntime'; break }
+            if ($idleSeconds -ge $IdleTimeoutSeconds) { $timeoutReason = 'NoLogProgress'; break }
+            if ($elapsedSeconds -ge $nextProgressReport) {
+                Write-LogMessage ("choco search {0} is still running: elapsed {1:N1}s, no log movement for {2:N1}s; last changed log: {3}." -f $PackageId, $elapsedSeconds, $idleSeconds, $lastProgressPath)
+                $nextProgressReport = $elapsedSeconds + [Math]::Min($IdleTimeoutSeconds, 60)
+            }
+        }
+
+        $failure = $null
+        if ($timeoutReason) {
+            $failure = if ($timeoutReason -eq 'NoLogProgress') {
+                "choco search $PackageId timed out after $IdleTimeoutSeconds seconds without log progress."
+            }
+            else {
+                "choco search $PackageId timed out at the maximum runtime of $MaxRuntimeSeconds seconds."
+            }
+            $failure += " Daily upgrades were not started. $diagnostics"
+            Write-LogMessage $failure -Level 'ERROR'
+            try {
+                $runContext = [ordered]@{
+                    Failure = $failure
+                    TimeoutReason = $timeoutReason
+                    Command = $process.StartInfo.Arguments
+                    QueryProcessId = $process.Id
+                    QueryHasExited = $process.HasExited
+                    Started = $started.ToString('o')
+                    Collected = (Get-Date).ToString('o')
+                    ElapsedSeconds = $queryWatch.Elapsed.TotalSeconds
+                    IdleSeconds = $queryWatch.Elapsed.TotalSeconds - $lastProgressSeconds
+                    IdleTimeoutSeconds = $IdleTimeoutSeconds
+                    MaxRuntimeSeconds = $MaxRuntimeSeconds
+                    LastProgressLog = $lastProgressPath
+                    LogProgress = @($logStates.Values)
+                }
+                $bundle = Save-ChocoSearchFailureDiagnostics -ChocoPath $choco.Source -LogPrefix $logPrefix `
+                    -QueryLogPaths @($stdoutPath, $stderrPath, $nativePath) -RunContext $runContext
+                foreach ($warningMessage in $bundle.Warnings) { Write-LogMessage $warningMessage -Level 'WARNING' }
+                $failure += " Diagnostics: $($bundle.Directory)."
+                Write-LogMessage "Chocolatey timeout diagnostics collected before stopping PID $($process.Id): $($bundle.Directory)"
+            }
+            catch {
+                $failure += " Diagnostic collection failed: $($_.Exception.Message)."
+                Write-LogMessage $failure -Level 'ERROR'
+            }
+            try {
+                if (-not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                }
+                if (-not $process.WaitForExit(5000)) {
+                    throw "Query PID $($process.Id) is still running."
+                }
+            }
+            catch {
+                throw "$failure Could not stop timed-out query PID $($process.Id): $($_.Exception.Message)"
+            }
+        }
+
+        try {
+            $outputTasks = [System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask)
+            if (-not [System.Threading.Tasks.Task]::WaitAll($outputTasks, 5000)) {
+                throw "choco search $PackageId output capture did not finish within 5 seconds of process exit. $diagnostics"
+            }
+            $stdoutStream.Flush()
+            $stderrStream.Flush()
+        }
+        catch {
+            if ($failure) { throw "$failure Output capture failed: $($_.Exception.Message)" }
+            throw
+        }
+        if ($failure) { throw $failure }
+        $searchRc = $process.ExitCode
+    }
+    catch {
+        $originalFailure = $_
+        if ($processStarted -and -not $process.HasExited) {
+            try {
+                Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                if (-not $process.WaitForExit(5000)) { throw "Query PID $($process.Id) is still running." }
+            }
+            catch {
+                Write-LogMessage "Could not stop query after failure '$originalFailure': $($_.Exception.Message)" -Level 'ERROR'
+            }
+        }
+        throw $originalFailure
+    }
+    finally {
+        if ($stdoutStream) { $stdoutStream.Dispose() }
+        if ($stderrStream) { $stderrStream.Dispose() }
+        $process.Dispose()
+    }
 
     if (-not (Test-ChocoSuccessCode -Code $searchRc)) {
-        Write-LogMessage "choco search $PackageId returned exit code $searchRc; cannot determine the available version." -Level 'WARNING'
+        Write-LogMessage "choco search $PackageId returned exit code $searchRc; cannot determine the available version. $diagnostics" -Level 'WARNING'
         return $null
     }
 
+    Write-LogMessage "choco search $PackageId completed (exit code: $searchRc). $diagnostics"
+    $output = @(Get-Content -LiteralPath $stdoutPath -ErrorAction Stop)
     $idPattern = '^{0}\|(\d+(?:\.\d+){{1,3}})' -f [regex]::Escape($PackageId)
     foreach ($line in $output) {
         if ($line -match $idPattern) {
@@ -183,7 +666,7 @@ function Get-ChocoAvailablePackageVersion {
         }
     }
 
-    Write-LogMessage "choco search $PackageId reported no usable version; cannot compare it against the installed build." -Level 'WARNING'
+    Write-LogMessage "choco search $PackageId reported no usable version; cannot compare it against the installed build. $diagnostics" -Level 'WARNING'
     return $null
 }
 
@@ -700,11 +1183,344 @@ function Invoke-DotNet6Maintenance {
     Write-LogMessage '.NET 6 maintenance completed.'
 }
 
-function Get-InstalledEntry {
+function Get-InstalledAspNetCoreRuntime {
+    $nativeArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    $nativeArchitecture = switch ($nativeArchitecture) {
+        'AMD64' { 'x64' }
+        'ARM64' { 'arm64' }
+        'x86' { 'x86' }
+        default { throw "Cannot identify the native .NET architecture '$nativeArchitecture'." }
+    }
+    $nativeProgramFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+    $nativeRoot = Join-Path $nativeProgramFiles 'dotnet'
+    $roots = @([pscustomobject]@{ Architecture = $nativeArchitecture; Path = $nativeRoot })
+    if ($nativeArchitecture -ne 'x86' -and ${env:ProgramFiles(x86)}) {
+        $roots += [pscustomobject]@{ Architecture = 'x86'; Path = Join-Path ${env:ProgramFiles(x86)} 'dotnet' }
+    }
+    if ($nativeArchitecture -eq 'arm64') {
+        $roots += [pscustomobject]@{ Architecture = 'x64'; Path = Join-Path $nativeRoot 'x64' }
+    }
+
+    foreach ($root in $roots) {
+        $sharedPath = Join-Path $root.Path 'shared\Microsoft.AspNetCore.App'
+        if (-not (Test-Path -LiteralPath $sharedPath -PathType Container -ErrorAction Stop)) { continue }
+
+        foreach ($directory in @(Get-ChildItem -LiteralPath $sharedPath -Directory -ErrorAction Stop)) {
+            if ($directory.Name -notmatch '^\d+\.\d+\.\d+$') {
+                Write-LogMessage "Preserving non-stable/unrecognized ASP.NET Core directory '$($directory.FullName)'; automatic servicing covers stable patches only." -Level 'WARNING'
+                continue
+            }
+            $version = [version]$directory.Name
+            [pscustomobject]@{
+                Architecture = $root.Architecture
+                Channel = "$($version.Major).$($version.Minor)"
+                Version = $version
+                Path = $directory.FullName
+            }
+        }
+    }
+}
+
+function Invoke-AspNetCoreInstaller {
     param (
-        [Parameter(Mandatory = $true)][string] $NameLike
+        [Parameter(Mandatory = $true)][string] $FilePath,
+        [Parameter(Mandatory = $true)][string] $Arguments,
+        [ValidateRange(1, 3600)][int] $TimeoutSeconds = 600,
+        [switch] $Uninstall
     )
 
+    $signature = Get-AuthenticodeSignature -LiteralPath $FilePath -ErrorAction Stop
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
+        throw "ASP.NET Core installer has no valid Microsoft signature: '$FilePath' (status=$($signature.Status))."
+    }
+
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -WindowStyle Hidden -ErrorAction Stop
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        Stop-ProcessTree -ProcessId $process.Id
+        throw "ASP.NET Core installer timed out after $TimeoutSeconds seconds: '$FilePath'."
+    }
+    if (-not (Test-ChocoSuccessCode -Code $process.ExitCode) -and -not ($Uninstall -and $process.ExitCode -in @(1605, 1614))) {
+        throw "ASP.NET Core installer failed with exit code $($process.ExitCode): '$FilePath'."
+    }
+    if ($process.ExitCode -in @(1641, 3010)) {
+        Write-LogMessage 'ASP.NET Core servicing requires a host restart; no restart will be initiated by maintenance.' -Level 'WARNING'
+    }
+}
+
+function Get-InstalledAspNetCoreEntry {
+    foreach ($entry in @(Get-InstalledEntry -NameLike '*ASP.NET Core*' -Strict)) {
+        if ($entry.DisplayName -match '^(?:Microsoft )?ASP\.NET Core (?:Runtime - )?(?<Version>\d+\.\d+\.\d+)(?:(?: -)? Shared Framework)?(?: \((?<Architecture>x64|x86|arm64)\))?$') {
+            [pscustomobject]@{
+                Entry = $entry
+                Version = [version]$Matches.Version
+                Architecture = $Matches.Architecture
+            }
+        }
+    }
+}
+
+function Get-SupersededAspNetCoreEntry {
+    param (
+        [Parameter(Mandatory = $true)][version] $MinimumVersion,
+        [Parameter(Mandatory = $true)][ValidateSet('x64', 'x86', 'arm64')][string] $Architecture
+    )
+
+    Get-InstalledAspNetCoreEntry | Where-Object {
+        (-not $_.Architecture -or $_.Architecture -eq $Architecture) -and
+        $_.Version.ToString(2) -eq $MinimumVersion.ToString(2) -and $_.Version -lt $MinimumVersion
+    }
+}
+
+function Remove-SupersededAspNetCoreRuntime {
+    param (
+        [Parameter(Mandatory = $true)][pscustomobject] $Runtime,
+        [Parameter(Mandatory = $true)][version] $MinimumVersion
+    )
+
+    $inventory = @(Get-InstalledAspNetCoreRuntime)
+    $old = @($inventory | Where-Object { $_.Path -eq $Runtime.Path -and $_.Version -eq $Runtime.Version -and $_.Architecture -eq $Runtime.Architecture })
+    if ($old.Count -ne 1 -or $Runtime.Channel -ne $MinimumVersion.ToString(2) -or $Runtime.Version -ge $MinimumVersion) {
+        throw "Security cleanup requires an inventoried runtime below $MinimumVersion in the same branch: '$($Runtime.Path)'."
+    }
+    $frameworkPath = Split-Path -Parent $Runtime.Path
+    $sharedPath = Split-Path -Parent $frameworkPath
+    $dotNetRoot = Split-Path -Parent $sharedPath
+    foreach ($path in @($dotNetRoot, $sharedPath, $frameworkPath, $Runtime.Path)) {
+        $directory = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Security runtime cleanup refuses a non-directory or reparse path: '$path'."
+        }
+    }
+    $files = @(Get-ChildItem -LiteralPath $Runtime.Path -Force -ErrorAction Stop)
+    foreach ($file in $files) {
+        if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $file.Name -notmatch '^(?:\.version|Microsoft\.AspNetCore\.App\.(?:deps|runtimeconfig)\.json|.+\.dll|THIRD-PARTY-NOTICES\.txt)$') {
+            throw "Runtime cleanup found a nested, linked, or unexpected item; manual removal is required and remediation is NOT complete: '$($file.FullName)'."
+        }
+    }
+
+    Write-LogMessage "SECURITY: Removing superseded ASP.NET Core '$($Runtime.Path)' below required patch $MinimumVersion. SDK/application dependencies do not exempt this version from removal." -Level 'WARNING'
+    $handles = [Collections.Generic.List[IO.FileStream]]::new()
+    try {
+        # Check every file before deleting any, and prevent new readers while allowing our deletes.
+        foreach ($file in $files) {
+            $handles.Add([IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Delete))
+        }
+        foreach ($file in $files) {
+            if ($file.Attributes -band [IO.FileAttributes]::ReadOnly) {
+                [IO.File]::SetAttributes($file.FullName, ($file.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly)))
+            }
+            [IO.File]::Delete($file.FullName)
+        }
+    }
+    catch {
+        throw "SECURITY REMEDIATION INCOMPLETE at '$($Runtime.Path)': $_. Stop processes locking these files or restart the host and rerun maintenance; the old version is not exempt."
+    }
+    finally {
+        foreach ($handle in $handles) { $handle.Dispose() }
+    }
+    [IO.Directory]::Delete($Runtime.Path, $false)
+    if (Test-Path -LiteralPath $Runtime.Path -ErrorAction Stop) { throw "Superseded runtime directory still exists: '$($Runtime.Path)'." }
+    Write-LogMessage "Removed superseded ASP.NET Core $($Runtime.Version) ($($Runtime.Architecture))."
+}
+
+function Invoke-AspNetCoreMaintenanceCore {
+    param (
+        [ValidateRange(1, 3600)][int] $InstallerTimeoutSeconds = 600,
+        [string] $LogDirectory = $logsPath
+    )
+
+    Write-LogMessage 'Starting ASP.NET Core shared runtime maintenance...'
+    $installed = @(Get-InstalledAspNetCoreRuntime)
+    if ($installed.Count -eq 0) {
+        $registered = @(Get-InstalledAspNetCoreEntry)
+        if ($registered.Count -gt 0) {
+            throw "ASP.NET Core runtime files are absent, but runtime uninstall entries remain: $(($registered.Entry.DisplayName) -join '; '). Nothing will be installed; these registrations must be repaired/removed before remediation can be verified."
+        }
+        Write-LogMessage 'No stable system-wide ASP.NET Core runtimes found; nothing will be installed.'
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        throw 'The ASP.NET Core maintenance log directory was not provided.'
+    }
+
+    $metadataRoot = 'https://builds.dotnet.microsoft.com/dotnet/release-metadata'
+    $releaseMetadata = @{}
+    $hadFailure = $false
+    $index = $null
+    try {
+        $index = Invoke-RestMethod -Uri "$metadataRoot/releases-index.json" -TimeoutSec 60 -ErrorAction Stop
+    }
+    catch {
+        $hadFailure = $true
+        Write-LogMessage "ASP.NET Core release metadata failed: $_. Removal below an already-installed newer patch will still run." -Level 'ERROR'
+    }
+
+    foreach ($group in @($installed | Group-Object Channel, Architecture)) {
+        $newest = $group.Group | Sort-Object Version -Descending | Select-Object -First 1
+        $channel = $newest.Channel
+        $architecture = $newest.Architecture
+        try {
+            Write-LogMessage "Checking ASP.NET Core $channel ($architecture): $($group.Group.Version -join ', ')."
+            $targetVersion = $newest.Version
+            $branchHadFailure = $false
+            try {
+                if ($null -eq $index) { throw 'Release metadata is unavailable; the latest secure patch cannot be verified.' }
+                $channelInfo = $index.'releases-index' | Where-Object { $_.'channel-version' -eq $channel } | Select-Object -First 1
+                if (-not $channelInfo -or $channelInfo.'support-phase' -notin @('active', 'maintenance')) {
+                    throw "No supported stable servicing channel exists for $channel. Migration or removal of this unsupported branch is required."
+                }
+                $latestText = [string]$channelInfo.'latest-runtime'
+                if ($latestText -notmatch ('^{0}\.\d+$' -f [regex]::Escape($channel))) {
+                    throw "Invalid latest runtime version '$latestText' in Microsoft's $channel release metadata."
+                }
+                if ([version]$latestText -gt $targetVersion) { $targetVersion = [version]$latestText }
+
+                if ($newest.Version -lt $targetVersion) {
+                    if (-not $releaseMetadata.ContainsKey($channel)) {
+                        $releaseMetadata[$channel] = Invoke-RestMethod -Uri "$metadataRoot/$channel/releases.json" -TimeoutSec 60 -ErrorAction Stop
+                    }
+                    $release = $releaseMetadata[$channel].releases |
+                        Where-Object { $_.'aspnetcore-runtime'.version -eq $targetVersion.ToString(3) } | Select-Object -First 1
+                    $file = $release.'aspnetcore-runtime'.files |
+                        Where-Object { $_.rid -eq "win-$architecture" -and $_.name -eq "aspnetcore-runtime-win-$architecture.exe" } |
+                        Select-Object -First 1
+                    if (-not $file -or "$($file.hash)" -notmatch '^[a-fA-F0-9]{128}$') {
+                        throw "No SHA-512-verified Windows ASP.NET Core $targetVersion ($architecture) installer is listed."
+                    }
+                    $downloadUri = [uri]$file.url
+                    if ($downloadUri.Scheme -ne 'https' -or $downloadUri.Host -notin @('builds.dotnet.microsoft.com', 'download.visualstudio.microsoft.com')) {
+                        throw "Untrusted ASP.NET Core installer URL '$($file.url)'."
+                    }
+
+                    $null = New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop
+                    $installerLog = Join-Path $LogDirectory ("AspNetCore_{0}_{1}_{2}.log" -f $targetVersion, $architecture, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+                    $installerPath = Join-Path $env:TEMP ("memlabs-aspnetcore-{0}-{1}-{2}.exe" -f $targetVersion, $architecture, [guid]::NewGuid().ToString('N'))
+                    try {
+                        Write-LogMessage "Updating ASP.NET Core $channel ($architecture) to $targetVersion using Microsoft's installer. Installer log: $installerLog"
+                        Invoke-WebRequest -Uri $downloadUri.AbsoluteUri -OutFile $installerPath -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop | Out-Null
+                        $hash = Get-FileHash -LiteralPath $installerPath -Algorithm SHA512 -ErrorAction Stop
+                        if ($hash.Hash -ine $file.hash) { throw "ASP.NET Core installer SHA-512 mismatch: '$installerPath'." }
+                        Invoke-AspNetCoreInstaller -FilePath $installerPath -Arguments "/install /quiet /norestart /log `"$installerLog`"" -TimeoutSeconds $InstallerTimeoutSeconds
+                    }
+                    finally {
+                        if (Test-Path -LiteralPath $installerPath) {
+                            try { Remove-Item -LiteralPath $installerPath -Force -ErrorAction Stop }
+                            catch { Write-LogMessage "Could not remove temporary ASP.NET Core installer '$installerPath': $_" -Level 'WARNING' }
+                        }
+                    }
+                }
+            }
+            catch {
+                $hadFailure = $branchHadFailure = $true
+                Write-LogMessage "ASP.NET Core $channel ($architecture) patching failed: $_. SECURITY: removal of identified superseded versions below $targetVersion will still run, even if applications break." -Level 'ERROR'
+            }
+
+            $targetPath = Join-Path (Split-Path -Parent $newest.Path) $targetVersion.ToString(3)
+            $components = @()
+            try {
+                $components = @(Get-SupersededAspNetCoreEntry -MinimumVersion $targetVersion -Architecture $architecture)
+            }
+            catch {
+                $hadFailure = $branchHadFailure = $true
+                Write-LogMessage "Could not inventory registered ASP.NET Core components: $_. SECURITY: file cleanup will still run." -Level 'ERROR'
+            }
+            foreach ($component in $components) {
+                $entry = $component.Entry
+                try {
+                    $command = ConvertTo-QuietUninstallCommand -Entry $entry
+                    $invocation = if ($command) { Split-UninstallCommand -CommandLine $command } else { $null }
+                    if ($entry.WindowsInstaller -eq 1 -or ($invocation -and [IO.Path]::GetFileName($invocation.FilePath) -match '^msiexec(?:\.exe)?$')) {
+                        $productCode = [guid]::Empty
+                        if (-not [guid]::TryParse([string]$entry.PSChildName, [ref]$productCode)) {
+                            throw "No valid MSI product code exists for '$($entry.DisplayName)'."
+                        }
+                        $null = New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop
+                        $uninstallLog = Join-Path $LogDirectory ("AspNetCore_Remove_{0}_{1}_{2}.log" -f $component.Version, $architecture, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+                        $invocation = [pscustomobject]@{
+                            FilePath = Join-Path $env:SystemRoot 'System32\msiexec.exe'
+                            Arguments = "/x $($productCode.ToString('B')) /qn /norestart /log `"$uninstallLog`""
+                        }
+                    }
+                    elseif ($null -eq $invocation -or [IO.Path]::GetExtension($invocation.FilePath) -ine '.exe') {
+                        throw "No supported registered uninstall command exists for '$($entry.DisplayName)'."
+                    }
+                    Write-LogMessage "SECURITY: Uninstalling superseded ASP.NET Core '$($entry.DisplayName)', including hidden/SDK-owned runtime components." -Level 'WARNING'
+                    Invoke-AspNetCoreInstaller -FilePath $invocation.FilePath -Arguments $invocation.Arguments -TimeoutSeconds $InstallerTimeoutSeconds -Uninstall
+                }
+                catch {
+                    $hadFailure = $branchHadFailure = $true
+                    Write-LogMessage "Registered ASP.NET Core removal failed for '$($entry.DisplayName)': $_. SECURITY: remaining old runtime files will still be removed." -Level 'ERROR'
+                }
+            }
+
+            $remaining = @(Get-InstalledAspNetCoreRuntime | Where-Object {
+                    $_.Channel -eq $channel -and $_.Architecture -eq $architecture -and $_.Version -lt $targetVersion
+                })
+            foreach ($runtime in $remaining) {
+                Remove-SupersededAspNetCoreRuntime -Runtime $runtime -MinimumVersion $targetVersion
+            }
+            $remaining = @(Get-InstalledAspNetCoreRuntime | Where-Object {
+                    $_.Channel -eq $channel -and $_.Architecture -eq $architecture -and $_.Version -lt $targetVersion
+                })
+            if ($remaining.Count -gt 0) {
+                throw "SECURITY REMEDIATION INCOMPLETE: superseded ASP.NET Core files remain: $($remaining.Path -join '; '). Stop processes locking these files or restart the host, then rerun maintenance."
+            }
+            $registered = @(Get-SupersededAspNetCoreEntry -MinimumVersion $targetVersion -Architecture $architecture)
+            if ($registered.Count -gt 0) {
+                throw "Superseded ASP.NET Core remains registered after file cleanup: $(($registered.Entry.DisplayName) -join '; '). Installer repair could restore the removed version; remediation is NOT complete."
+            }
+            foreach ($requiredFile in @('Microsoft.AspNetCore.App.deps.json', 'Microsoft.AspNetCore.dll', '.version')) {
+                if (-not (Test-Path -LiteralPath (Join-Path $targetPath $requiredFile) -PathType Leaf -ErrorAction Stop)) {
+                    throw "ASP.NET Core $targetVersion ($architecture) is missing after cleanup at '$targetPath'."
+                }
+            }
+            if ([IO.File]::ReadAllLines((Join-Path $targetPath '.version')) -notcontains $targetVersion.ToString(3)) {
+                throw "ASP.NET Core version marker does not verify the required patch at '$targetPath'."
+            }
+            if ($branchHadFailure) {
+                Write-LogMessage "Superseded ASP.NET Core $channel ($architecture) files/registrations are gone, but servicing errors prevent a successful maintenance result." -Level 'ERROR'
+            }
+            else {
+                Write-LogMessage "ASP.NET Core $channel ($architecture) is current at $targetVersion; no superseded stable runtime directories or matching runtime registrations remain."
+            }
+        }
+        catch {
+            $hadFailure = $true
+            Write-LogMessage "ASP.NET Core $channel ($architecture) maintenance failed: $_" -Level 'ERROR'
+        }
+    }
+    if ($hadFailure) { throw 'One or more ASP.NET Core runtime branches could not be serviced or verified. See the preceding errors.' }
+}
+
+function Invoke-AspNetCoreMaintenance {
+    param (
+        [ValidateRange(1, 3600)][int] $InstallerTimeoutSeconds = 600,
+        [string] $LogDirectory = $logsPath,
+        [string] $TestMutationMutexName = 'Global\MemLabsTestMutationLock'
+    )
+
+    $ran = Invoke-WithMemLabsRuntimeUpgradeLease -Name $TestMutationMutexName -TimeoutSeconds 0 `
+        -ArgumentList $InstallerTimeoutSeconds, $LogDirectory -ScriptBlock {
+        param ([int] $Timeout, [string] $Directory)
+        Invoke-AspNetCoreMaintenanceCore -InstallerTimeoutSeconds $Timeout -LogDirectory $Directory
+    }
+    if (-not $ran) {
+        Write-LogMessage 'SECURITY: The host mutation lease is unavailable or held by a test cycle. ASP.NET Core security remediation will not be deferred; applications and tests may be interrupted.' -Level 'WARNING'
+        Invoke-AspNetCoreMaintenanceCore -InstallerTimeoutSeconds $InstallerTimeoutSeconds -LogDirectory $LogDirectory
+    }
+}
+
+function Get-InstalledEntry {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string] $NameLike,
+        [switch] $Strict
+    )
+
+    if ($Strict -and [Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        throw 'Strict runtime registration verification requires 64-bit PowerShell on this host.'
+    }
     $paths = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
@@ -712,12 +1528,409 @@ function Get-InstalledEntry {
 
     $found = @()
     foreach ($path in $paths) {
-        foreach ($item in @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue)) {
+        if ($Strict -and -not (Test-Path -LiteralPath (Split-Path -Parent $path) -ErrorAction Stop)) { continue }
+        $registryErrorAction = if ($Strict) { 'Stop' } else { 'SilentlyContinue' }
+        foreach ($item in @(Get-ItemProperty -Path $path -ErrorAction $registryErrorAction)) {
             if ($item.DisplayName -like $NameLike) { $found += $item }
         }
     }
 
     return $found
+}
+
+function Save-WinGetFailureDiagnostics {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string] $WinGetPath,
+        [Parameter(Mandatory = $true)][string] $LogFile,
+        [Parameter(Mandatory = $true)][datetime] $Started,
+        [Parameter(Mandatory = $true)][datetime] $Finished,
+        [Parameter(Mandatory = $true)][string] $Failure
+    )
+
+    $logDirectory = Split-Path -Parent $LogFile
+    $directory = Join-Path $logDirectory "$([IO.Path]::GetFileNameWithoutExtension($LogFile)).diagnostics"
+    New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    $warnings = [Collections.Generic.List[string]]::new()
+    $capturedFiles = [Collections.Generic.List[object]]::new()
+    try {
+        $olderDirectories = @(Get-ChildItem -LiteralPath $logDirectory -Directory -Filter 'WinGetUpgrade_*.diagnostics' -ErrorAction Stop |
+            Where-Object {
+                $_.FullName -ne $directory -and
+                $_.Name -match '^WinGetUpgrade_\d{8}_\d{6}_\d{3}_[0-9a-f]{8}\.diagnostics$' -and
+                -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            } | Sort-Object CreationTimeUtc -Descending)
+        foreach ($oldDirectory in @($olderDirectories | Select-Object -Skip 2)) {
+            Remove-Item -LiteralPath $oldDirectory.FullName -Recurse -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        $warnings.Add("Could not prune older WinGet diagnostics: $($_.Exception.Message)")
+    }
+
+    $nativeDirectory = $null
+    $upgradeLogFound = $false
+    $totalBytes = 0L
+    try {
+        if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            throw 'LOCALAPPDATA is unavailable; the packaged WinGet native log directory cannot be located.'
+        }
+        $nativeDirectory = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir'
+        $sourceDirectory = Get-Item -LiteralPath $nativeDirectory -ErrorAction Stop
+        if (-not $sourceDirectory.PSIsContainer -or ($sourceDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The native diagnostic directory is not a regular directory: '$nativeDirectory'."
+        }
+        $nativeLogs = @(Get-ChildItem -LiteralPath $nativeDirectory -File -Filter '*.log' -ErrorAction Stop |
+            Where-Object {
+                $_.LastWriteTimeUtc -ge $Started.ToUniversalTime().AddSeconds(-2) -and
+                $_.LastWriteTimeUtc -le $Finished.ToUniversalTime().AddSeconds(2)
+            } | Sort-Object LastWriteTimeUtc -Descending)
+        if ($nativeLogs.Count -gt 10) {
+            $warnings.Add("Only the newest 10 of $($nativeLogs.Count) native logs overlapping the failed run will be collected.")
+        }
+        foreach ($file in @($nativeLogs | Select-Object -First 10)) {
+            try {
+                if ($totalBytes -ge 32MB -and $file.Length -gt 0) {
+                    $warnings.Add('The 32 MiB native diagnostic limit was reached; remaining logs were not copied.')
+                    break
+                }
+                $captured = Copy-MemLabsDiagnosticLog -File $file -DestinationPath (Join-Path $directory $file.Name) `
+                    -MaximumBytes ([Math]::Min(4MB, 32MB - $totalBytes))
+                $totalBytes += $captured.CapturedBytes
+                $matchesUpgrade = $captured.CommandLine -match '\bupgrade\s+--all\b'
+                $captured | Add-Member -NotePropertyName MatchesUpgradeCommand -NotePropertyValue $matchesUpgrade
+                $capturedFiles.Add($captured)
+                if ($captured.Truncated) {
+                    $warnings.Add("Native log '$($file.Name)' was truncated; captured its last $($captured.CapturedBytes) of $($captured.OriginalBytes) bytes.")
+                }
+                if ($matchesUpgrade) { $upgradeLogFound = $true }
+            }
+            catch {
+                $warnings.Add("Could not collect native log '$($file.FullName)': $($_.Exception.Message)")
+            }
+        }
+    }
+    catch {
+        $warnings.Add("Native WinGet diagnostic collection failed: $($_.Exception.Message)")
+    }
+    if (-not $upgradeLogFound) {
+        $warnings.Add('No native upgrade --all log was found for the failed run. Logs from concurrent commands do not establish that the failed upgrade initialized logging; verify the native log location with winget --info under the maintenance identity.')
+    }
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $identityName = $identity.Name }
+    finally { $identity.Dispose() }
+    $summaryPath = Join-Path $directory 'summary.json'
+    [ordered]@{
+        Failure = $Failure
+        Command = 'upgrade --all --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs'
+        Executable = $WinGetPath
+        Identity = $identityName
+        ProcessId = $PID
+        SessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+        PowerShellEdition = $PSVersionTable.PSEdition
+        WorkingDirectory = (Get-Location).Path
+        LocalAppData = $env:LOCALAPPDATA
+        Temp = $env:TEMP
+        Started = $Started.ToString('o')
+        Finished = $Finished.ToString('o')
+        NativeLogDirectory = $nativeDirectory
+        UpgradeLogFound = $upgradeLogFound
+        Files = @($capturedFiles.ToArray())
+        Warnings = @($warnings.ToArray())
+        Limits = @{ Files = 10; FileBytes = 4MB; TotalBytes = 32MB; RetainedRuns = 3 }
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding utf8 -ErrorAction Stop
+
+    return [pscustomobject]@{ Directory = $directory; Warnings = @($warnings.ToArray()) }
+}
+
+function Invoke-WinGetMaintenance {
+    param (
+        [switch] $WaitForCompletion,
+        [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade',
+        [string] $LogDirectory = $logsPath
+    )
+
+    Write-LogMessage 'Starting WinGet package maintenance...'
+
+    if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        throw 'The WinGet maintenance log directory was not provided.'
+    }
+    if (-not (Test-Path -LiteralPath $LogDirectory)) {
+        New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    $wingetLogs = @(Get-ChildItem -LiteralPath $LogDirectory -Filter 'WinGetUpgrade_*.log' -File -ErrorAction SilentlyContinue |
+        Sort-Object CreationTime -Descending)
+    if ($wingetLogs.Count -gt 3) {
+        $wingetLogs | Select-Object -Skip 3 | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    $runId = '{0}_{1}' -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $wingetLogFile = Join-Path $LogDirectory "WinGetUpgrade_$runId.log"
+
+    $winget = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $winget) {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        Write-LogMessage "WinGet is unavailable for '$identity' (session=$([Diagnostics.Process]::GetCurrentProcess().SessionId), LOCALAPPDATA='$env:LOCALAPPDATA'). Skipping WinGet package upgrades. WinGet/App Installer must be installed and registered for the maintenance task's user, not only an interactive administrator. Verify Get-Command winget.exe and Get-AppxPackage Microsoft.DesktopAppInstaller under that identity." -Level 'WARNING'
+        return $false
+    }
+
+    $arguments = @(
+        'upgrade',
+        '--all',
+        '--source', 'winget',
+        '--silent',
+        '--accept-package-agreements',
+        '--accept-source-agreements',
+        '--disable-interactivity',
+        '--verbose-logs'
+    )
+
+    if (-not $WaitForCompletion) {
+        $wingetScriptPath = Join-Path $env:TEMP 'memlabs_winget_upgrade.ps1'
+        $wingetPath = "$($winget.Source)".Replace("'", "''")
+        $escapedWingetLogFile = $wingetLogFile.Replace("'", "''")
+        $scriptLines = @(
+            'function New-MemLabsMaintenanceMutex {'
+            ${function:New-MemLabsMaintenanceMutex}.ToString()
+            '}'
+            'function Copy-MemLabsDiagnosticLog {'
+            ${function:Copy-MemLabsDiagnosticLog}.ToString()
+            '}'
+            'function Save-WinGetFailureDiagnostics {'
+            ${function:Save-WinGetFailureDiagnostics}.ToString()
+            '}'
+            '$Host.UI.RawUI.WindowTitle = "MemLabs - WinGet Upgrades"'
+            "`$wingetLogFile = '$escapedWingetLogFile'"
+            "`$wingetPath = '$wingetPath'"
+            '$transcriptStarted = $false'
+            'try {'
+            '    Start-Transcript -LiteralPath $wingetLogFile -Force -ErrorAction Stop | Out-Null'
+            '    $transcriptStarted = $true'
+            '} catch {'
+            '    Write-Host "Could not start WinGet transcript at $wingetLogFile`: $_" -ForegroundColor Yellow'
+            '}'
+            'try {'
+            "Write-Host 'Upgrading all WinGet-matched packages...' -ForegroundColor Cyan"
+            '$mutex = $null'
+            '$acquired = $false'
+            '$wingetStarted = $null'
+            '$wingetFailure = $null'
+            'try {'
+            "    `$mutex = New-MemLabsMaintenanceMutex -Name '$($UpgradeMutexName.Replace("'", "''"))'"
+            '    try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(120)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }'
+            "    if (-not `$acquired) { Write-Host 'Another package upgrade is already running. Skipping.' -ForegroundColor Yellow; exit 0 }"
+            '    $wingetStarted = Get-Date'
+            "    & '$wingetPath' upgrade --all --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs"
+            '    $upgradeExitCode = $LASTEXITCODE'
+            '    if ($upgradeExitCode -eq 0 -or $upgradeExitCode -eq -1978335189) {'
+            "        Write-Host 'WinGet package maintenance completed successfully.' -ForegroundColor Green"
+            '    } else {'
+            '        $wingetFailure = "WinGet package maintenance failed (exit code: $upgradeExitCode)."'
+            '        Write-Host $wingetFailure -ForegroundColor Yellow'
+            '        if ($upgradeExitCode -eq -1978335188) {'
+            "            `$vscodeQuery = @(& '$wingetPath' list --id Microsoft.VisualStudioCode --exact --source winget --upgrade-available --accept-source-agreements --disable-interactivity --verbose-logs 2>&1)"
+            "            if (`$vscodeQuery -match 'Microsoft\.VisualStudioCode') {"
+            "                Write-Host 'VS Code still has an available update. Requesting a graceful close before retrying...' -ForegroundColor Cyan"
+            '                $codeWindows = @(Get-Process -Name Code -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })'
+            '                if ($codeWindows.Count -eq 0) {'
+            "                    Write-Host 'No VS Code main window can be closed gracefully. The update will remain pending.' -ForegroundColor Yellow"
+            '                } else {'
+            '                    foreach ($process in $codeWindows) { $null = $process.CloseMainWindow() }'
+            '                    $deadline = [DateTime]::UtcNow.AddSeconds(30)'
+            '                    do {'
+            '                        Start-Sleep -Seconds 1'
+            '                        $remainingCode = @(Get-Process -Name Code -ErrorAction SilentlyContinue)'
+            '                    } while ($remainingCode.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)'
+            '                    if ($remainingCode.Count -eq 0) {'
+            "                        Write-Host 'VS Code exited cleanly. Retrying its update...' -ForegroundColor Cyan"
+            "                        & '$wingetPath' upgrade --id Microsoft.VisualStudioCode --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --verbose-logs"
+            '                        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq -1978335189) {'
+            "                            Write-Host 'VS Code update completed successfully.' -ForegroundColor Green"
+            '                        } else {'
+            '                            Write-Host "VS Code update retry failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
+            '                        }'
+            '                    } else {'
+            "                        Write-Host 'VS Code did not exit within 30 seconds, possibly because it is waiting to save work. It will not be force-closed.' -ForegroundColor Yellow"
+            '                    }'
+            '                }'
+            '            }'
+            '        }'
+            '    }'
+            '} catch {'
+            '    $wingetFailure = "WinGet invocation failed: $_"'
+            '    Write-Host "WinGet package maintenance could not run safely: $_" -ForegroundColor Red'
+            '    exit 1'
+            '} finally {'
+            '    if ($wingetFailure -and $wingetStarted) {'
+            '        try {'
+            '            $diagnostics = Save-WinGetFailureDiagnostics -WinGetPath $wingetPath -LogFile $wingetLogFile -Started $wingetStarted -Finished (Get-Date) -Failure $wingetFailure'
+            '            Write-Host "WinGet failure diagnostics: $($diagnostics.Directory)" -ForegroundColor Yellow'
+            '            foreach ($warningMessage in $diagnostics.Warnings) { Write-Host $warningMessage -ForegroundColor Yellow }'
+            '        } catch {'
+            '            Write-Host "WinGet diagnostic collection failed; original failure: $wingetFailure; collection error: $_" -ForegroundColor Red'
+            '        }'
+            '    }'
+            '    if ($mutex) {'
+            '        if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }'
+            '        try { $mutex.Dispose() } catch {}'
+            '    }'
+            '}'
+            "Write-Host ''"
+            "Write-Host 'Done. This window will close in 10 seconds...' -ForegroundColor Cyan"
+            'Start-Sleep -Seconds 10'
+            'if ($wingetFailure) { exit 1 }'
+            '} finally {'
+            '    if ($transcriptStarted) { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null }'
+            '}'
+        )
+        $scriptLines -join "`n" | Out-File $wingetScriptPath -Encoding utf8
+
+        Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wingetScriptPath -WindowStyle Normal
+        Write-LogMessage "WinGet package upgrades launched in a new window (non-blocking). Full output: $wingetLogFile"
+        return $true
+    }
+
+    $wingetStarted = Get-Date
+    $output = @()
+    $exitCode = $null
+    $invocationError = $null
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $winget.Source @arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        $invocationError = $_.Exception.Message
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    $wingetFinished = Get-Date
+    $outputLogFailure = $null
+    try {
+        @(
+            "WinGet package maintenance started: $($wingetStarted.ToString('o'))"
+            "Executable: $($winget.Source)"
+            "Command: winget $($arguments -join ' ')"
+            ''
+            @($output | ForEach-Object { "$_" })
+            ''
+            "Exit code: $exitCode"
+            "Invocation error: $invocationError"
+            "WinGet package maintenance completed: $($wingetFinished.ToString('o'))"
+        ) | Set-Content -LiteralPath $wingetLogFile -Encoding utf8 -ErrorAction Stop
+    }
+    catch {
+        $outputLogFailure = $_.Exception.Message
+        Write-LogMessage "Could not save WinGet console output to '$wingetLogFile': $outputLogFailure" -Level 'WARNING'
+    }
+
+    # WinGet uses this documented HRESULT when the installed build is already current.
+    if (-not $invocationError -and $exitCode -eq -1978335189 -and -not $outputLogFailure) {
+        Write-LogMessage "All WinGet-matched packages are already current. Full output: $wingetLogFile"
+        return $true
+    }
+
+    if ($invocationError -or ($exitCode -ne 0 -and $exitCode -ne -1978335189)) {
+        $failure = if ($invocationError) {
+            "winget upgrade --all invocation failed: $invocationError."
+        }
+        else {
+            "winget upgrade --all failed with exit code $exitCode."
+        }
+        try {
+            $diagnostics = Save-WinGetFailureDiagnostics -WinGetPath "$($winget.Source)" -LogFile $wingetLogFile `
+                -Started $wingetStarted -Finished $wingetFinished -Failure $failure
+            foreach ($warningMessage in $diagnostics.Warnings) {
+                Write-LogMessage $warningMessage -Level 'WARNING'
+            }
+            $failure += " Diagnostics: $($diagnostics.Directory)."
+        }
+        catch {
+            $failure += " Diagnostic collection failed: $($_.Exception.Message)."
+            Write-LogMessage $failure -Level 'WARNING'
+        }
+        if ($outputLogFailure) { $failure += " Console output could not be saved: $outputLogFailure." }
+        $detail = (@($output | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' | ')
+        if ($detail) { throw "$failure Full output: $wingetLogFile. $detail" }
+        throw "$failure Full output: $wingetLogFile."
+    }
+    if ($outputLogFailure) { throw "WinGet completed, but its console log could not be saved: $outputLogFailure" }
+
+    Write-LogMessage "WinGet package upgrades completed successfully. Full output: $wingetLogFile"
+    return $true
+}
+
+function Get-MemLabsUserWinGetTimestampPath {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        throw 'LOCALAPPDATA is unavailable; the current-user WinGet maintenance cadence cannot be tracked.'
+    }
+
+    return (Join-Path $env:LOCALAPPDATA 'MemLabs\winget_upgrade.timestamp')
+}
+
+function Test-MemLabsUserWinGetMaintenanceDue {
+    [CmdletBinding()]
+    param (
+        [string] $TimestampPath = (Get-MemLabsUserWinGetTimestampPath),
+        [ValidateRange(1, 168)]
+        [int] $MinimumIntervalHours = 24
+    )
+
+    if (-not (Test-Path -LiteralPath $TimestampPath -PathType Leaf)) {
+        return $true
+    }
+
+    try {
+        $lastRun = [DateTimeOffset]::Parse((Get-Content -LiteralPath $TimestampPath -Raw -ErrorAction Stop).Trim())
+    }
+    catch {
+        Write-LogMessage "The current-user WinGet timestamp '$TimestampPath' is invalid; maintenance will run: $_" -Level 'WARNING'
+        return $true
+    }
+
+    $elapsed = [DateTimeOffset]::Now - $lastRun
+    if ($elapsed.TotalSeconds -lt 0) {
+        Write-LogMessage "The current-user WinGet timestamp '$TimestampPath' is in the future; maintenance will run." -Level 'WARNING'
+        return $true
+    }
+
+    if ($elapsed -lt [TimeSpan]::FromHours($MinimumIntervalHours)) {
+        Write-LogMessage ("Current-user WinGet maintenance is not due (last successful run: {0}; {1:N1} hours ago)." -f $lastRun.ToString('yyyy-MM-dd HH:mm'), $elapsed.TotalHours)
+        return $false
+    }
+
+    return $true
+}
+
+function Invoke-MemLabsDueUserWinGetMaintenance {
+    [CmdletBinding()]
+    param (
+        [string] $TimestampPath = (Get-MemLabsUserWinGetTimestampPath),
+        [ValidateRange(1, 168)]
+        [int] $MinimumIntervalHours = 24
+    )
+
+    if (-not (Test-MemLabsUserWinGetMaintenanceDue -TimestampPath $TimestampPath -MinimumIntervalHours $MinimumIntervalHours)) {
+        return $false
+    }
+
+    $completed = Invoke-WinGetMaintenance -WaitForCompletion
+    if (-not $completed) {
+        return $false
+    }
+
+    $timestampDirectory = Split-Path -Parent $TimestampPath
+    if (-not (Test-Path -LiteralPath $timestampDirectory -PathType Container)) {
+        New-Item -Path $timestampDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    }
+    [DateTimeOffset]::Now.ToString('o') | Set-Content -LiteralPath $TimestampPath -Encoding ascii -NoNewline -ErrorAction Stop
+    Write-LogMessage "Recorded successful current-user WinGet maintenance at '$TimestampPath'."
+    return $true
 }
 
 function ConvertTo-QuietUninstallCommand {
@@ -998,7 +2211,7 @@ function Invoke-SevenZipMaintenance {
     else { Write-LogMessage '7-Zip is not installed on this host.' }
 
     if ($owner) {
-        Write-LogMessage "Chocolatey package '$owner' owns it, so the weekly 'choco upgrade all' keeps it current."
+        Write-LogMessage "Chocolatey package '$owner' owns it, so the daily 'choco upgrade all' keeps it current."
     }
     elseif (-not (Test-ChocoAvailable)) {
         Write-LogMessage 'No Chocolatey package owns 7-Zip and the CLI is missing, so nothing on this host can update it. Its currency is UNKNOWN, not current.' -Level 'WARNING'
@@ -1006,10 +2219,10 @@ function Invoke-SevenZipMaintenance {
     else {
         # MEASURED on a lab host 2026-09-01: 7-Zip 24.08 with InstallSource '<repo>\vmbuild\azureFiles\tools\'
         # and no package owning it, so 'choco upgrade all' could never reach it. Adopting it is what
-        # puts it under the existing weekly upgrade; measured to take 24.08 to 26.02 in place.
+        # puts it under the existing daily upgrade; measured to take 24.08 to 26.02 in place.
         # 7zip.install, never 7zip.portable: portable only shims chocolatey\bin, which Get-SevenZipPath
         # reaches last, so a stale Program Files copy would keep winning and the upgrades go unused.
-        Write-LogMessage 'No Chocolatey package owns 7-Zip. Adopting it so the weekly upgrade covers it...'
+        Write-LogMessage 'No Chocolatey package owns 7-Zip. Adopting it so the daily upgrade covers it...'
         & choco install 7zip.install -y | Out-Null
         $chocoRc = $LASTEXITCODE
         Write-LogMessage "choco install 7zip.install returned exit code: $chocoRc"
@@ -1424,23 +2637,23 @@ function Invoke-RdcManMaintenance {
     Write-LogMessage 'RDCMan maintenance completed.'
 }
 
-function Invoke-WeeklyUpgrades {
+function Invoke-DailyUpgradesCore {
     param (
         [switch] $WaitForCompletion,
         [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade'
     )
 
-    Write-LogMessage 'Starting weekly upgrades...'
+    Write-LogMessage 'Starting daily upgrades...'
 
     if (-not (Test-ChocoAvailable)) {
-        Write-LogMessage 'Chocolatey CLI not found. Skipping weekly upgrades.' -Level 'WARNING'
+        Write-LogMessage 'Chocolatey CLI not found. Skipping daily upgrades.' -Level 'WARNING'
         return
     }
 
     $ps7Flag = Join-Path $env:ProgramData 'memlabs\ps7_upgrade.timestamp'
     $chocoAllFlag = Join-Path $env:ProgramData 'memlabs\choco_all_upgrade.timestamp'
     $now = Get-Date
-    $weeklyInterval = [TimeSpan]::FromDays(7)
+    $dailyInterval = [TimeSpan]::FromDays(1)
 
     # Ensure the directory exists
     $flagDir = Join-Path $env:ProgramData 'memlabs'
@@ -1451,7 +2664,7 @@ function Invoke-WeeklyUpgrades {
         $lastRun = Get-Date (Get-Content $ps7Flag -ErrorAction SilentlyContinue)
         $elapsed = $now - $lastRun
         Write-LogMessage "Last PowerShell 7 upgrade: $($lastRun.ToString('yyyy-MM-dd HH:mm')) ($([int]$elapsed.TotalDays) days ago)"
-        if ($elapsed -lt $weeklyInterval) {
+        if ($elapsed -lt $dailyInterval) {
             $doPs7Upgrade = $false
         }
     }
@@ -1461,7 +2674,7 @@ function Invoke-WeeklyUpgrades {
         $lastChocoRun = Get-Date (Get-Content $chocoAllFlag -ErrorAction SilentlyContinue)
         $chocoElapsed = $now - $lastChocoRun
         Write-LogMessage "Last Chocolatey upgrade all: $($lastChocoRun.ToString('yyyy-MM-dd HH:mm')) ($([int]$chocoElapsed.TotalDays) days ago)"
-        if ($chocoElapsed -lt $weeklyInterval) {
+        if ($chocoElapsed -lt $dailyInterval) {
             $doChocoUpgrade = $false
         }
     }
@@ -1517,7 +2730,7 @@ function Invoke-WeeklyUpgrades {
         }
     }
     else {
-        Write-LogMessage 'PowerShell 7 upgrade skipped (less than 7 days since last run).'
+        Write-LogMessage 'PowerShell 7 upgrade skipped (less than 24 hours since last run).'
     }
 
     if ($doChocoUpgrade) {
@@ -1545,22 +2758,26 @@ function Invoke-WeeklyUpgrades {
                 }
             }
             if (-not $upgradeRan) {
-                Write-LogMessage 'Another Chocolatey upgrade is already running; skipping this scheduled upgrade.'
+                Write-LogMessage 'The Chocolatey upgrade mutex is busy or unavailable; skipping this scheduled upgrade.'
             }
 
-            Write-LogMessage 'Weekly upgrades maintenance completed.'
+            Write-LogMessage 'Daily upgrades maintenance completed.'
             return
         }
 
-        # Interactive launches retain the non-blocking upgrade window used by VMBuild.
+        # Non-waiting callers retain the separate upgrade window.
         Write-LogMessage 'Launching Chocolatey upgrade all in new window...'
-        $scriptLines = @()
+        $scriptLines = @(
+            'function New-MemLabsMaintenanceMutex {'
+            ${function:New-MemLabsMaintenanceMutex}.ToString()
+            '}'
+        )
         $scriptLines += '$Host.UI.RawUI.WindowTitle = "MemLabs - Chocolatey Upgrades"'
         $scriptLines += "Write-Host 'Upgrading all Chocolatey packages...' -ForegroundColor Cyan"
         $scriptLines += '$mutex = $null'
         $scriptLines += '$acquired = $false'
         $scriptLines += 'try {'
-        $scriptLines += "    `$mutex = [System.Threading.Mutex]::new(`$false, '$UpgradeMutexName')"
+        $scriptLines += "    `$mutex = New-MemLabsMaintenanceMutex -Name '$($UpgradeMutexName.Replace("'", "''"))'"
         $scriptLines += '    try { $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(120)) } catch [System.Threading.AbandonedMutexException] { $acquired = $true }'
         $scriptLines += "    if (-not `$acquired) { Write-Host 'Another Chocolatey upgrade is already running. Skipping.' -ForegroundColor Yellow; exit 0 }"
 
@@ -1579,6 +2796,9 @@ function Invoke-WeeklyUpgrades {
         $scriptLines += '    } else {'
         $scriptLines += '        Write-Host "Chocolatey package upgrade failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
         $scriptLines += '    }'
+        $scriptLines += '} catch {'
+        $scriptLines += '    Write-Host "Chocolatey package maintenance could not run safely: $_" -ForegroundColor Red'
+        $scriptLines += '    exit 1'
         $scriptLines += '} finally {'
         $scriptLines += '    if ($mutex) {'
         $scriptLines += '        if ($acquired) { try { $mutex.ReleaseMutex() } catch {} }'
@@ -1598,10 +2818,72 @@ function Invoke-WeeklyUpgrades {
         Write-LogMessage 'Chocolatey upgrade all launched in a new window (non-blocking).'
     }
     else {
-        Write-LogMessage 'Chocolatey upgrade all skipped (less than 7 days since last run).'
+        Write-LogMessage 'Chocolatey upgrade all skipped (less than 24 hours since last run).'
     }
 
-    Write-LogMessage 'Weekly upgrades maintenance completed.'
+    Write-LogMessage 'Daily upgrades maintenance completed.'
+}
+
+function Invoke-DailyUpgrades {
+    param (
+        [switch] $WaitForCompletion,
+        [string] $UpgradeMutexName = 'Global\MemLabs_ChocolateyUpgrade',
+        [string] $TestMutationMutexName = 'Global\MemLabsTestMutationLock'
+    )
+
+    $upgradeRan = Invoke-WithMemLabsRuntimeUpgradeLease -Name $TestMutationMutexName -TimeoutSeconds 0 `
+        -ArgumentList $WaitForCompletion.IsPresent, $UpgradeMutexName -ScriptBlock {
+        param (
+            [bool] $Wait,
+            [string] $MutexName
+        )
+
+        Invoke-DailyUpgradesCore -WaitForCompletion:$Wait -UpgradeMutexName $MutexName
+    }
+    if (-not $upgradeRan) {
+        Write-LogMessage 'The host mutation lease is busy or unavailable; deferring daily upgrades so the live PowerShell runtime is not replaced.' -Level 'WARNING'
+    }
+}
+
+function Invoke-MemLabsOrderedPackageMaintenance {
+    [CmdletBinding()]
+    param (
+        [switch] $IncludeWinGet,
+        [switch] $UseUserWinGetCadence,
+        [switch] $IncludeDailyUpgrades
+    )
+
+    if ($IncludeWinGet) {
+        if ($UseUserWinGetCadence) {
+            try { $null = Invoke-MemLabsDueUserWinGetMaintenance } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        }
+        else {
+            try { $null = Invoke-WinGetMaintenance -WaitForCompletion } catch { Write-LogMessage "WinGet package maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        }
+    }
+
+    if ($IncludeDailyUpgrades) {
+        try { Invoke-DailyUpgrades -WaitForCompletion } catch { Write-LogMessage "Daily upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+    }
+
+    try { Invoke-AspNetCoreMaintenance } catch { Write-LogMessage "ASP.NET Core maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+}
+
+function Start-MemLabsBackgroundUpgradeMaintenance {
+    [CmdletBinding()]
+    param (
+        [string] $MaintenanceScriptPath = $PSCommandPath
+    )
+
+    if (-not (Test-Path -LiteralPath $MaintenanceScriptPath -PathType Leaf)) {
+        throw "Maintenance script not found at '$MaintenanceScriptPath'."
+    }
+
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Normal -ArgumentList @(
+        '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', "`"$MaintenanceScriptPath`"", '-BackgroundUpgradeWorker'
+    )
+    Write-LogMessage 'WinGet, daily package upgrades, and final ASP.NET Core security verification launched in a visible background maintenance window.'
 }
 
 if ($WindowsAdminCenterRemovalOnly) {
@@ -1633,6 +2915,59 @@ if ($WindowsAdminCenterRemovalOnly) {
     exit $workerExitCode
 }
 
+if ($BackgroundUpgradeWorker -or $UserWinGetTask) {
+    $workerStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $workerName = if ($UserWinGetTask) { 'Current-user WinGet maintenance task' } else { 'Background upgrade maintenance worker' }
+    if ($BackgroundUpgradeWorker) {
+        try { $Host.UI.RawUI.WindowTitle = 'MemLabs - Background Maintenance' } catch {}
+    }
+
+    Write-LogMessage '========================================'
+    Write-LogMessage "$workerName started"
+    Write-LogMessage "Script path: $scriptPath"
+    Write-LogMessage "Log file: $logFile"
+    Write-LogMessage '========================================'
+
+    $workerState = [pscustomobject]@{ PackagePhasesRan = $false }
+    $workerRan = Invoke-WithMemLabsMaintenanceMutex -TimeoutSeconds 120 -ScriptBlock {
+        $workerState.PackagePhasesRan = Invoke-WithMemLabsMaintenanceMutex -Name 'Global\MemLabs_ChocolateyUpgrade' -TimeoutSeconds 120 -ScriptBlock {
+            Invoke-MemLabsOrderedPackageMaintenance -IncludeWinGet -UseUserWinGetCadence -IncludeDailyUpgrades:$BackgroundUpgradeWorker
+        }
+    }
+
+    if (-not $workerRan) {
+        Write-LogMessage 'The host maintenance mutex is busy or unavailable; skipping this background worker.' -Level 'WARNING'
+    }
+    elseif (-not $workerState.PackagePhasesRan) {
+        Write-LogMessage 'The package maintenance mutex is busy or unavailable; skipping this background worker.' -Level 'WARNING'
+    }
+
+    $workerStopwatch.Stop()
+    $workerResult = if ($script:MaintenanceHadFailure) {
+        'FAILED'
+    }
+    elseif (-not $workerRan -or -not $workerState.PackagePhasesRan) {
+        'SKIPPED'
+    }
+    else {
+        'SUCCESS'
+    }
+    $workerResultLevel = if ($workerResult -eq 'FAILED') { 'ERROR' } elseif ($workerResult -eq 'SKIPPED') { 'WARNING' } else { 'INFO' }
+
+    Write-LogMessage '========================================'
+    Write-LogMessage "$workerName completed"
+    Write-LogMessage ("Maintenance result: {0}; elapsed: {1:N1}s" -f $workerResult, $workerStopwatch.Elapsed.TotalSeconds) -Level $workerResultLevel
+    Write-LogMessage "Log file: $logFile"
+    Write-LogMessage '========================================'
+
+    if ($BackgroundUpgradeWorker) {
+        Write-Host 'This maintenance window will close in 10 seconds.'
+        Start-Sleep -Seconds 10
+    }
+    if ($script:MaintenanceHadFailure) { exit 1 }
+    exit 0
+}
+
 $maintenanceStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 Write-LogMessage '========================================' 
 Write-LogMessage 'Maintenance script started'
@@ -1649,6 +2984,7 @@ Write-LogMessage '========================================'
 if (-not $ScheduledTask) {
     try { Invoke-MemLabsFileAssociationMaintenance } catch { Write-LogMessage "File association maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
     try { Install-MemLabsMaintenanceScheduledTask -MaintenanceScriptPath $PSCommandPath } catch { Write-LogMessage "Scheduled task maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+    try { Install-MemLabsUserWinGetScheduledTask -MaintenanceScriptPath $PSCommandPath } catch { Write-LogMessage "Current-user WinGet scheduled task maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 }
 
 $mutexTimeoutSeconds = if ($ScheduledTask) { 0 } else { 120 }
@@ -1664,24 +3000,30 @@ $maintenanceRan = Invoke-WithMemLabsMaintenanceMutex -TimeoutSeconds $mutexTimeo
         # Before mRemoteNG: that phase needs 7z.exe to unpack the nightly .rar.
         try { Invoke-SevenZipMaintenance } catch { Write-LogMessage "7-Zip maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
         try { Invoke-MRemoteNGMaintenance -SkipUserConfiguration:$ScheduledTask } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
-        try { Invoke-WeeklyUpgrades -WaitForCompletion:$ScheduledTask } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+        if ($ScheduledTask) {
+            Invoke-MemLabsOrderedPackageMaintenance -IncludeDailyUpgrades
+        }
     }
+}
+
+if (-not $ScheduledTask) {
+    try { Start-MemLabsBackgroundUpgradeMaintenance -MaintenanceScriptPath $PSCommandPath } catch { Write-LogMessage "Background upgrade maintenance launch threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 }
 
 if (-not $maintenanceRan) {
     if ($ScheduledTask) {
-        Write-LogMessage 'Another maintenance run is active; skipping this scheduled run.'
+        Write-LogMessage 'The host maintenance mutex is busy or unavailable; skipping this scheduled run.'
     }
     else {
-        Write-LogMessage 'Another maintenance run remained active for 120 seconds; continuing VMBuild without starting overlapping maintenance.' -Level 'WARNING'
+        Write-LogMessage 'The host maintenance mutex is busy or unavailable; continuing VMBuild without starting overlapping maintenance.' -Level 'WARNING'
     }
 }
 elseif (-not $maintenanceRunState.PackagePhasesRan) {
     if ($ScheduledTask) {
-        Write-LogMessage 'Another Chocolatey operation is active; skipping this scheduled maintenance run.'
+        Write-LogMessage 'The Chocolatey upgrade mutex is busy or unavailable; skipping this scheduled maintenance run.'
     }
     else {
-        Write-LogMessage 'Another Chocolatey operation remained active for 120 seconds; continuing VMBuild without overlapping package maintenance.' -Level 'WARNING'
+        Write-LogMessage 'The Chocolatey upgrade mutex is busy or unavailable; continuing VMBuild without overlapping package maintenance.' -Level 'WARNING'
     }
 }
 

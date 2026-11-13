@@ -229,7 +229,8 @@ Assert-Equal $true ($hierarchySource -match 'Running at preflight stage; resetti
 Assert-Equal $true ($hierarchySource -match 'InstallPSForHierarchy\.setup\.stage') 'hierarchy setup persists resumable stage metadata'
 Assert-Equal $true ($hierarchySource -match "'LaunchConfirmed'") 'hierarchy setup distinguishes confirmed launch from preflight'
 Assert-Equal $true ($hierarchySource -match "'SetupCompleted'") 'hierarchy setup resumes failed postflight without reinstalling'
-Assert-Equal $true ($hierarchySource -match 'AddHours\(2\)') 'hierarchy Primary readiness wait has a hard deadline'
+Assert-Equal $true ($hierarchySource -match '\$psReadyMin -ge \$casDependencyWaitMaxMinutes' -and
+    $hierarchySource -match '\$casDependencyWaitMaxMinutes = 240') 'hierarchy Primary readiness wait has a hard deadline'
 Assert-Equal $true ($hierarchySource -match "'MSF Enabled'") 'hierarchy setup converges ConfigMgr MSF registry state'
 Assert-Equal 'RetrySetup' (Get-HierarchyRecoveryAction -Stage 'Preflight' -SiteReady $false -ModulePresent $false) 'hierarchy preflight failure is safely retryable'
 Assert-Equal 'RequireCheckpoint' (Get-HierarchyRecoveryAction -Stage 'LaunchConfirmed' -SiteReady $false -ModulePresent $false) 'hierarchy partial setup requires checkpoint recovery'

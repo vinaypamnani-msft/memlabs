@@ -112,6 +112,70 @@ Write-DscStatus "$Tag Starting perfloading"
         }
         return $probeSucceeded
     }
+
+    function Sync-MemLabsClientScriptPolicy {
+        [CmdletBinding()]
+        param()
+
+        $name = 'MEMLABS-powershellbypass'
+        try {
+            $settings = @(Get-CMClientSetting -Name $name -ErrorAction Stop |
+                Where-Object { $_.Name -eq $name })
+            if ($settings.Count -eq 0) {
+                New-CMClientSetting -Name $name -Description 'Client settings for making powershell execution policy as bypass' `
+                    -Type Device -ErrorAction Stop | Out-Null
+                $settings = @(Get-CMClientSetting -Name $name -ErrorAction Stop |
+                    Where-Object { $_.Name -eq $name })
+            }
+            $settingsId = 0
+            if ($settings.Count -ne 1 -or
+                -not [int]::TryParse("$($settings[0].SettingsID)", [ref]$settingsId) -or $settingsId -lt 1) {
+                throw "Expected one custom '$name' client setting with a valid SettingsID; found $($settings.Count)."
+            }
+            $readPolicy = {
+                $configuration = @(Get-CMClientSetting -Id "$settingsId" -Setting ComputerAgent -ErrorAction Stop)
+                $agents = @(
+                    foreach ($item in $configuration) {
+                        if ($item.PSObject.Properties['PowerShellExecutionPolicy']) { $item }
+                        elseif ($item.PSObject.Properties['AgentConfigurations']) {
+                            @($item.AgentConfigurations) | Where-Object { $_.PSObject.Properties['PowerShellExecutionPolicy'] }
+                        }
+                    }
+                )
+                if ($agents.Count -eq 0) { return $null }
+                $policy = 0
+                if ($agents.Count -ne 1 -or
+                    -not [int]::TryParse("$($agents[0].PowerShellExecutionPolicy)", [ref]$policy) -or
+                    $policy -notin @(0, 1, 2, 3)) {
+                    throw "Could not read one valid Computer Agent PowerShell policy for '$name'."
+                }
+                return $policy
+            }
+            if ((& $readPolicy) -ne 1) {
+                Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $name -ErrorAction Stop | Out-Null
+            }
+            if ((& $readPolicy) -ne 1) { throw "'$name' did not read back PowerShellExecutionPolicy=1 (Bypass)." }
+
+            $assignments = @(Get-CMClientSettingDeployment -Id "$settingsId" -CollectionId SMS00001 -ErrorAction Stop)
+            if ($assignments.Count -eq 0) {
+                New-CMClientSettingDeployment -Name $name -CollectionId SMS00001 -ErrorAction Stop | Out-Null
+                $assignments = @(Get-CMClientSettingDeployment -Id "$settingsId" -CollectionId SMS00001 -ErrorAction Stop)
+            }
+            if ($assignments.Count -ne 1 -or $assignments[0].CollectionID -ne 'SMS00001' -or
+                "$($assignments[0].ClientSettingsID)" -ne "$settingsId") {
+                throw "'$name' did not read back one All Systems deployment for SettingsID=$settingsId."
+            }
+            Write-DscStatus "$Tag '$name' verified as Bypass and deployed to All Systems; effective client policy is checked in Phase 11."
+            return $true
+        }
+        catch {
+            Write-DscStatus "$Tag Client script policy reconciliation failed: $($_.Exception.Message). Unsigned baseline execution is not verified." -Warning
+            return $false
+        }
+    }
+
+    if ($isTopLevel) { [void](Sync-MemLabsClientScriptPolicy) }
+
     function Get-MemLabsManagedDistributionPointNames {
         param (
             [object[]] $VirtualMachines,
@@ -275,6 +339,51 @@ Write-DscStatus "$Tag Starting perfloading"
         return $null
     }
 
+    function Get-MemLabsBootImagePayloadRepairTargets {
+        param (
+            [string] $PackageId,
+            [int] $SourceVersion,
+            [string[]] $DistributionPointNames,
+            [object[]] $DistributionStatusRows,
+            [string] $StatusTag
+        )
+
+        if ($SourceVersion -le 0) { throw 'Boot-image SourceVersion was not measured; payload repair cannot be evaluated.' }
+        foreach ($dpName in $DistributionPointNames) {
+            $installed = @($DistributionStatusRows | Where-Object {
+                    (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $dpName -and
+                    "$($_.State)" -eq '0' -and "$($_.SourceVersion)" -and
+                    [int]$_.SourceVersion -ge $SourceVersion
+                })
+            if ($installed.Count -eq 0) { continue }
+            $dpBin = "FileSystem::\\$dpName\SMS_DP`$\sms\bin"
+            try {
+                if (($dpName -split '\.')[0] -ieq $env:COMPUTERNAME) {
+                    $responder = Get-CimInstance -ClassName Win32_Service -Filter "Name='SccmPxe'" -OperationTimeoutSec 10 -ErrorAction Stop
+                    if ($responder -and "$($responder.PathName)" -match '^\s*"?(.+?\.exe)"?(?:\s|$)') {
+                        $dpBin = Split-Path -Path ([Environment]::ExpandEnvironmentVariables($Matches[1])) -Parent
+                    }
+                    else {
+                        $dpBin = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name RootFolder -ErrorAction Stop).RootFolder
+                        if (-not $dpBin) { throw 'No active PXE payload root was found for this site-server DP.' }
+                        $dpBin = [Environment]::ExpandEnvironmentVariables("$dpBin")
+                    }
+                }
+                $null = Get-Item -LiteralPath $dpBin -Force -ErrorAction Stop
+                try {
+                    $payload = Get-Item -LiteralPath "$dpBin\SMSBoot\$PackageId\x64\wdsmgfw.efi" -Force -ErrorAction Stop
+                    if ($payload.PSIsContainer) { $dpName }
+                }
+                catch [System.Management.Automation.ItemNotFoundException] {
+                    $dpName
+                }
+            }
+            catch {
+                Write-DscStatus "$StatusTag Could not measure PXE payload on $dpName`: $($_.Exception.Message). No boot-image rebuild was requested for this unreadable DP." -Warning
+            }
+        }
+    }
+
     function Get-MemLabsDistributionPointGroup {
         param (
             [string] $SiteCode,
@@ -286,8 +395,9 @@ Write-DscStatus "$Tag Starting perfloading"
         $namespace = "root\SMS\site_$SiteCode"
         if ($GroupId) {
             $escapedGroupId = $GroupId.Replace("'", "''")
-            $idGroups = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPointGroup -Filter "GroupID='$escapedGroupId'" -ErrorAction Stop |
-                Where-Object { $null -ne $_ })
+            $idGroups = @(Get-MemLabsProjectedCimRows -Namespace $namespace `
+                    -ClassName SMS_DistributionPointGroup -Filter "GroupID='$escapedGroupId'" `
+                    -Property @('Name', 'GroupID', 'SourceSite') -Attempts 6 -RetrySeconds 10)
             if ($idGroups.Count -eq 0) {
                 if ($AllowMissing) { return $null }
                 throw "distribution point group ID '$GroupId' was not found"
@@ -301,8 +411,9 @@ Write-DscStatus "$Tag Starting perfloading"
         }
 
         $escapedGroupName = $GroupName.Replace("'", "''")
-        $groups = @(Get-WmiObject -Namespace $namespace -Class SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" -ErrorAction Stop |
-            Where-Object { $null -ne $_ })
+        $groups = @(Get-MemLabsProjectedCimRows -Namespace $namespace `
+                -ClassName SMS_DistributionPointGroup -Filter "Name='$escapedGroupName'" `
+                -Property @('Name', 'GroupID', 'SourceSite') -Attempts 6 -RetrySeconds 10)
         if ($groups.Count -eq 0) {
             if ($AllowMissing) { return $null }
             throw "distribution point group '$GroupName' was not found"
@@ -2752,6 +2863,62 @@ if ($licensed) { Write-Output 'Activated' }
     $bootStageDir = Join-Path $folderPath 'boot\x64'
     $stagedBootWim = Join-Path $bootStageDir 'boot.wim'
 
+    function Get-MemLabsLegacyBootImageHealth {
+        param(
+            [Parameter(Mandatory = $true)][object[]] $TaskSequences,
+            [Parameter(Mandatory = $true)][string] $OwningSiteCode
+        )
+
+        $ids = @($TaskSequences | ForEach-Object { "$($_.BootImageID)" } |
+                Where-Object { $_ } | Select-Object -Unique)
+        $problems = [System.Collections.Generic.List[string]]::new()
+        if ($ids.Count -eq 0) {
+            $problems.Add('task sequences expose no readable BootImageID')
+        }
+        $allBootImages = @(Get-CMBootImage)
+        foreach ($id in $ids) {
+            $bootImage = @($allBootImages | Where-Object {
+                    "$($_.PackageID)" -ieq $id
+                }) | Select-Object -First 1
+            if (-not $bootImage) {
+                $problems.Add("boot image object '$id' is missing")
+                continue
+            }
+
+            $wmi = Get-WmiObject -Namespace "root\SMS\site_$OwningSiteCode" `
+                -Class SMS_BootImagePackage -Filter "PackageID='$id'" `
+                -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($wmi) { try { $wmi.Get() } catch { } }
+            $sourcePaths = @("$($wmi.ImagePath)", "$($wmi.PkgSourcePath)") |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+            if ($sourcePaths.Count -eq 0) {
+                $problems.Add("boot image '$id' has no readable ImagePath or PkgSourcePath")
+                continue
+            }
+            $sourcePresent = $false
+            foreach ($path in $sourcePaths) {
+                $probe = if ($path -like '\\*') { "FileSystem::$path" } else { $path }
+                try {
+                    if (Test-Path -LiteralPath $probe) {
+                        $sourcePresent = $true
+                        break
+                    }
+                }
+                catch { }
+            }
+            if (-not $sourcePresent) {
+                $problems.Add("boot image '$id' source is missing ($($sourcePaths -join ', '))")
+            }
+        }
+
+        return [pscustomobject]@{
+            Healthy  = $ids.Count -gt 0 -and $problems.Count -eq 0
+            PackageIds = [string[]]$ids
+            Problems = [string[]]$problems.ToArray()
+        }
+    }
+
     $existingMemlabsTaskSequences = @(Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" -and "$($_.PackageID)" -like "$SiteCode*" })
     $BootImage = @(Get-CMBootImage | Where-Object { $_.Name -eq $memlabsBootImageName }) | Select-Object -First 1
 
@@ -2761,8 +2928,20 @@ if ($licensed) { Write-Output 'Activated' }
         # at would be ~700MB of waste plus another object for Phase 11 to flag. Rebuild the
         # lab rather than converting it: Set-CMTaskSequence -BootImagePackageId across five
         # TSes fails in ways that leave a TS unusable.
-        $legacyBootImageIds = @($existingMemlabsTaskSequences | ForEach-Object { "$($_.BootImageID)" } | Where-Object { $_ } | Select-Object -Unique)
-        Write-DscStatus "$Tag $($existingMemlabsTaskSequences.Count) MEMLABS task sequence(s) already exist and pin boot image(s) $(if ($legacyBootImageIds.Count) { $legacyBootImageIds -join ', ' } else { '<none readable>' }), and '$memlabsBootImageName' does not exist. This lab predates site-owned boot images -- leaving its boot image alone. Rebuild the lab to get one this site owns." -Warning
+        $legacyHealth = Get-MemLabsLegacyBootImageHealth `
+            -TaskSequences $existingMemlabsTaskSequences -OwningSiteCode $SiteCode
+        $legacyIds = if ($legacyHealth.PackageIds.Count) {
+            $legacyHealth.PackageIds -join ', '
+        }
+        else {
+            '<none readable>'
+        }
+        if ($legacyHealth.Healthy) {
+            Write-DscStatus "$Tag $($existingMemlabsTaskSequences.Count) existing MEMLABS task sequence(s) intentionally retain healthy main-era boot image(s) $legacyIds. '$memlabsBootImageName' is not created because nothing references it."
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: $($existingMemlabsTaskSequences.Count) existing MEMLABS task sequence(s) pin legacy boot image(s) $legacyIds, but preservation health failed: $($legacyHealth.Problems -join '; '). '$memlabsBootImageName' is not created because the existing task sequences would still reference the unhealthy image." -Warning
+        }
     }
     elseif ($BootImage) {
         $packageId = "$($BootImage.PackageID)"
@@ -3023,34 +3202,28 @@ if ($licensed) { Write-Output 'Activated' }
                 Write-DscStatus "$Tag Boot image '$biName' ($packageId) has NO content destination on $($unTargetedOsdDps -join ', ') after 3 confirmations$(if ($bootDistError) { " (distribution error: $bootDistError)" }). Content is never installed to an untargeted DP, so the coverage wait cannot clear -- skipping it rather than spending the full budget. PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
             }
             else {
-                # A PXE flag that was ALREADY correct -- set by hand in the console, or by an
-                # earlier run -- arms nothing here, so a DP that never extracted would stay
-                # broken through every re-run. Probe the payload itself and republish when it
-                # is POSITIVELY absent. An unreachable DP is skipped rather than counted as
-                # missing, so no permission problem can trigger a pointless 350MB republish.
-                # FileSystem:: because this script runs on the CMSite provider drive, where a
-                # bare UNC reads as absent regardless of what is actually there.
+                # Missing payload is expected during a new DP's first transfer. Only repair
+                # an Installed, current-version DP whose boot file is measurably absent.
                 $pxePayloadMissingOn = @()
                 if (-not $pxeBootFlagSet -and $osdDpFqdns.Count -gt 0) {
-                    foreach ($odp in $osdDpFqdns) {
-                        try {
-                            $dpBin = "FileSystem::\\$odp\SMS_DP`$\sms\bin"
-                            if (-not (Test-Path -LiteralPath $dpBin)) { continue }
-                            if (-not (Test-Path -LiteralPath "$dpBin\SMSBoot\$packageId")) { $pxePayloadMissingOn += $odp }
-                        }
-                        catch { }
+                    try {
+                        $payloadStatusRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction Stop)
+                        $pxePayloadMissingOn = @(Get-MemLabsBootImagePayloadRepairTargets -PackageId $packageId `
+                            -SourceVersion ([int]$biFlags.SourceVersion) -DistributionPointNames $osdDpFqdns `
+                            -DistributionStatusRows $payloadStatusRows -StatusTag $Tag)
+                    }
+                    catch {
+                        Write-DscStatus "$Tag Could not establish Installed/current boot-image state before checking payload repair: $($_.Exception.Message). First-time distribution continues without an unverified rebuild." -Warning
                     }
                     if ($pxePayloadMissingOn.Count -gt 0) {
-                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is already flagged for PXE, but $($pxePayloadMissingOn -join ', ') has no SMSBoot\$packageId -- republishing so the DP extracts it."
+                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is Installed/current, but $($pxePayloadMissingOn -join ', ') has no SMSBoot\$packageId\x64\wdsmgfw.efi -- republishing so the DP extracts it."
                     }
                 }
 
                 # Set-CMBootImage changes the provider property, but clients keep using
                 # the old WIM until Update Distribution Points rebuilds and republishes it.
-                # Publish only after the assignment above exists. A newly targeted DP also
-                # needs this update when command support was enabled on an earlier run that
-                # had no OSD targets yet.
-                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0 -or $missingOsdDps.Count -gt 0
+                # A new content destination needs the existing WIM, not a site-wide rebuild.
+                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0
                 if ($bootImagePublicationNeeded) {
                     $bootImagePublicationError = $null
                     $bootPublicationBaselineError = ''
@@ -3113,6 +3286,7 @@ if ($licensed) { Write-Output 'Activated' }
                 $bootCoverageProblems = @()
                 $bootCoverageObservedSourceVersion = ''
                 $bootCoverageLastArm = @{}
+                $bootCoverageIncompleteSince = @{}
                 $bootStoredVersion = ''
                 $bootSourceVersion = ''
                 $bootCoverageTerminalProblem = if ($bootImagePublicationNeeded -and -not $bootImagePublicationStarted) {
@@ -3154,6 +3328,7 @@ if ($licensed) { Write-Output 'Activated' }
                         if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
                             $bootCoverageObservedSourceVersion = $bootSourceVersion
                             $bootCoverageLastArm = @{}
+                            $bootCoverageIncompleteSince = @{}
                         }
                         $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
                         foreach ($expectedDp in $osdDpFqdns) {
@@ -3174,10 +3349,23 @@ if ($licensed) { Write-Output 'Activated' }
                     }
                     if ($bootCoverageProblems.Count -eq 0) { break }
 
-                    # ContentValidating can sit until ConfigMgr's 30-minute retry fires. Re-arm
-                    # the existing target without rebuilding the WIM or changing SourceVersion.
+                    # Do not interrupt a first transfer or its hash validation. Give a retry
+                    # five minutes, then re-arm once per DP/version without rebuilding the WIM.
                     foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
                         $armKey = $incompleteDp.ToUpperInvariant()
+                        $armStatus = @($bootDpRows | Where-Object {
+                                (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $incompleteDp
+                            } | Select-Object -First 1)
+                        if ($armStatus.Count -gt 0 -and [int]$armStatus[0].State -in 1, 7) {
+                            $bootCoverageIncompleteSince.Remove($armKey)
+                            continue
+                        }
+                        if ($bootCoverageLastArm.ContainsKey($armKey)) { continue }
+                        if (-not $bootCoverageIncompleteSince.ContainsKey($armKey)) {
+                            $bootCoverageIncompleteSince[$armKey] = Get-Date
+                        }
+                        if (((Get-Date) - $bootCoverageIncompleteSince[$armKey]).TotalSeconds -lt 300) { continue }
+                        $bootCoverageLastArm[$armKey] = Get-Date
                         try {
                             $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
                                     Where-Object { (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $incompleteDp })
@@ -3186,15 +3374,12 @@ if ($licensed) { Write-Output 'Activated' }
                                 Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"
                             }
                             else {
-                                $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $null }
-                                if ($lastArm -and ((Get-Date) - $lastArm).TotalMinutes -lt 5) { continue }
                                 foreach ($targetRow in $targetRows) {
                                     $targetRow.RefreshNow = $true
                                     [void]$targetRow.Put()
                                 }
                                 Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow at SourceVersion=$bootSourceVersion (StoredPkgVersion=$bootStoredVersion)"
                             }
-                            $bootCoverageLastArm[$armKey] = Get-Date
                         }
                         catch {
                             Write-DscStatus "$Tag Boot image coverage: re-arm failed for $incompleteDp`: $($_.Exception.Message)"
@@ -4079,24 +4264,6 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
     }
 
-    #we have to make powershell bypass for the baselines to work as expected
-    # Custom client settings — top-level site only (replicate to child sites)
-    if ($isTopLevel) {
-    $customclientsetting = "MEMLABS-powershellbypass"
- 
-    if (!(Get-CMClientSetting -Name $customclientsetting)) {
-        New-CMClientSetting -Name $customclientsetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag $customclientsetting client setting created"
-
-        # Enable the PowerShell Execution Policy setting
-        Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
-        Write-DscStatus "$Tag Powershell policy successfully changed for $customclientsetting client setting "
-
-        New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
-        Write-DscStatus "$Tag Deployed the client setting to all systems collection"
-    }
-    } # end top-level client settings
-
     function Get-WsusDiagnostics {
         # Collect WSUS-native health signals for troubleshooting a stuck sync.
         # Returns an array of human-readable diagnostic lines. Never throws.
@@ -4182,48 +4349,20 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
     function Write-WsusDiagnostics {
         param([string]$Reason = "WSUS diagnostics")
         Write-DscStatus "$Tag --- $Reason ---"
-        foreach ($l in (Get-WsusDiagnostics)) {
-            Write-DscStatus "$Tag   $l"
-        }
-        Write-DscStatus "$Tag --- end $Reason ---"
-    }
-
-    function Set-WsusPoolHardened {
-        # Uncap WsusPool memory + raise the queue so the pool survives a full
-        # Microsoft Update sync. Mirrors the install-time hardening in
-        # ConfigureWSUS (TemplateHelpDSC.psm1). The reactive repair path MUST
-        # reharden BEFORE restarting — otherwise the pool comes back with the
-        # default ~1.8 GB cap and the next sync dies the same way.
-        try {
-            Import-Module WebAdministration -ErrorAction Stop
-        }
-        catch {
-            Write-DscStatus "$Tag WsusPool hardening skipped — WebAdministration unavailable: $_"
-            return
-        }
-        $poolPath = 'IIS:\AppPools\WsusPool'
-        if (-not (Test-Path $poolPath)) {
-            Write-DscStatus "$Tag WsusPool not found — skipping hardening"
-            return
-        }
-        $settings = @(
-            @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
-            @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
-            @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
-            @{ Name = 'queueLength'; Value = 25000 }
-            @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
-            @{ Name = 'startMode'; Value = 'AlwaysRunning' }
-            @{ Name = 'failure.rapidFailProtection'; Value = $false }
-        )
-        foreach ($s in $settings) {
+        foreach ($supVm in @($Sups)) {
+            $supHost = "$($supVm.vmName).$DomainFullName"
             try {
-                Set-ItemProperty -Path $poolPath -Name $s.Name -Value $s.Value -ErrorAction Stop
+                $lines = Invoke-CMRoleTargetCommand -ComputerName $supHost -ScriptBlock {
+                    param($diagnosticText)
+                    & ([scriptblock]::Create($diagnosticText))
+                } -ArgumentList @(${function:Get-WsusDiagnostics}.ToString())
+                foreach ($line in $lines) { Write-DscStatus "$Tag [$supHost] $line" }
             }
             catch {
-                Write-DscStatus "$Tag WsusPool: failed to set $($s.Name): $_"
+                Write-DscStatus "$Tag WSUS diagnostics on ${supHost} failed: $($_.Exception.Message)" -Warning
             }
         }
-        Write-DscStatus "$Tag WsusPool hardened (privateMemory uncapped, queueLength=25000)"
+        Write-DscStatus "$Tag --- end $Reason ---"
     }
 
     function Repair-WsusSync {
@@ -4235,17 +4374,35 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # SQL, leaving the sync status frozen at 6704 indefinitely.
         # Capture WSUS-native health BEFORE remediation so the log shows WHY.
         Write-WsusDiagnostics -Reason "WSUS health before repair"
-        # Reharden the pool (uncap memory) BEFORE restarting — otherwise it comes
-        # back with the default ~1.8 GB cap and the next sync dies the same way.
-        Set-WsusPoolHardened
-        Write-DscStatus "$Tag Restarting WsusPool app pool..."
-        try {
-            Import-Module WebAdministration -ErrorAction Stop
-            Restart-WebAppPool WsusPool
-            Write-DscStatus "$Tag WsusPool restarted"
-        }
-        catch {
-            Write-DscStatus "$Tag Could not restart WsusPool: $_"
+        foreach ($supVm in @($Sups)) {
+            $supHost = "$($supVm.vmName).$DomainFullName"
+            $repair = Invoke-CMRoleTargetCommand -ComputerName $supHost -ScriptBlock {
+                Import-Module WebAdministration -ErrorAction Stop
+                $poolPath = 'IIS:\AppPools\WsusPool'
+                if ((Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value -eq 'Started') {
+                    [void][Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                    $subscription = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer().GetSubscription()
+                    if ("$($subscription.GetSynchronizationStatus())" -eq 'Running') {
+                        return [pscustomobject]@{ Skipped = $true; Detail = 'Native WSUS sync is running; no service was restarted.' }
+                    }
+                }
+                foreach ($setting in @(
+                    @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
+                    @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
+                    @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
+                    @{ Name = 'queueLength'; Value = 25000 }
+                    @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
+                    @{ Name = 'startMode'; Value = 'AlwaysRunning' }
+                    @{ Name = 'failure.rapidFailProtection'; Value = $false }
+                )) {
+                    Set-ItemProperty -Path $poolPath -Name $setting.Name -Value $setting.Value -ErrorAction Stop
+                }
+                Restart-WebAppPool -Name WsusPool -ErrorAction Stop
+                [pscustomobject]@{ Skipped = $false; Detail = 'WsusPool hardened and restarted on the SUP.' }
+            }
+            if (-not $repair) { throw "WSUS repair on $supHost returned no result." }
+            Write-DscStatus "$Tag WSUS repair on ${supHost}: $($repair.Detail)"
+            if ($repair.Skipped) { return }
         }
         # Give the app pool time to fully initialize before wsyncmgr reconnects
         Start-Sleep -Seconds 15
@@ -4258,7 +4415,7 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             Write-DscStatus "$Tag SMS_EXECUTIVE restarted"
         }
         catch {
-            Write-DscStatus "$Tag Could not restart SMS_EXECUTIVE: $_"
+            throw "Could not restart SMS_EXECUTIVE for WSUS recovery: $($_.Exception.Message)"
         }
         # Now trigger a fresh sync. Force the drop: the pool restart above just
         # aborted any in-flight sync, so CM's lingering 'running' state is stale
@@ -4275,6 +4432,16 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # CM's lingering 'running' state is stale-by-definition and a fresh
         # trigger MUST be dropped regardless of the reported timestamp.
         param([switch]$Force)
+        if (-not $Force) {
+            $native = Get-WsusSyncLiveness
+            if (-not $native.ProbeSucceeded) {
+                throw "Cannot safely trigger WSUS sync: $($native.Detail)"
+            }
+            if ($native.WsusRunning) {
+                Write-DscStatus "$Tag Native WSUS sync is running on the configured SUP; skipping full.syn drop."
+                return
+            }
+        }
         $currentSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $siteCode } | Select-Object -First 1
         if (-not $Force -and $currentSync.LastSyncState -in @(6701, 6704, 6705, 6706)) {
             $syncStateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
@@ -4290,13 +4457,14 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         $syncFile = Join-Path $syncFolder "full.syn"
         if (Test-Path $syncFolder) {
             try {
-                New-Item -Path $syncFile -ItemType File -Force | Out-Null
+                New-Item -Path $syncFile -ItemType File -Force -ErrorAction Stop | Out-Null
                 Write-DscStatus "$Tag Triggered full WSUS sync (dropped full.syn)"
             }
             catch {
-                Write-DscStatus "$Tag Error creating 'full.syn': $_"
+                throw "Error creating '$syncFile': $($_.Exception.Message)"
             }
         }
+        else { throw "WSUS sync inbox '$syncFolder' was not found." }
     }
 
     function Get-WsusSyncLiveness {
@@ -4319,50 +4487,44 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         #   UpdateCount    : SUSDB update count (informational only; 0 until the
         #                    first full sync completes).
         $r = [PSCustomObject]@{
+            ProbeSucceeded = $true
+            Detail         = ''
+            HasFailedIdleSync = $false
             PoolUp         = $false
             WsusRunning    = $false
             Phase          = $null
             TotalItems     = -1
             ProcessedItems = -1
             LastResult     = 'Unknown'
+            LastError      = ''
+            LastErrorText  = ''
             UpdateCount    = -1
         }
-        try {
-            $srv = Get-WsusServer -ErrorAction Stop
-            try { $r.UpdateCount = $srv.GetStatus().UpdateCount } catch { }
-            $sub = $srv.GetSubscription()
-            try {
-                $syncStatus = $sub.GetSynchronizationStatus()
-                $r.WsusRunning = ($syncStatus.ToString() -eq 'Running')
+        $states = @(
+            foreach ($supVm in @($Sups)) {
+                Invoke-CMWsusReplicaHealthCheck -ServerFQDN "$($supVm.vmName).$DomainFullName"
             }
-            catch { }
-            if ($r.WsusRunning) {
-                try {
-                    $prog = $sub.GetSynchronizationProgress()
-                    $r.Phase = $prog.Phase.ToString()
-                    $r.TotalItems = [int]$prog.TotalItems
-                    $r.ProcessedItems = [int]$prog.ProcessedItems
-                }
-                catch { }
-            }
-            try {
-                $lastInfo = $sub.GetLastSynchronizationInfo()
-                $r.LastResult = $lastInfo.Result.ToString()
-            }
-            catch { }
+        )
+        $r.ProbeSucceeded = $states.Count -gt 0 -and @($states | Where-Object { -not $_.ProbeSucceeded }).Count -eq 0
+        $r.PoolUp = $r.ProbeSucceeded -and @($states | Where-Object { -not $_.PoolUp }).Count -eq 0
+        $r.WsusRunning = @($states | Where-Object { $_.WsusRunning }).Count -gt 0
+        $failed = @($states | Where-Object { -not $_.WsusRunning -and $_.LastResult -in @('Failed', 'Canceled') })
+        $r.HasFailedIdleSync = $failed.Count -gt 0
+        if ($failed.Count) {
+            $r.LastResult = $failed[0].LastResult
+            $r.LastError = $failed[0].LastError
+            $r.LastErrorText = $failed[0].LastErrorText
         }
-        catch { }
-
-        # Pool liveness: Started state AND a live w3wp worker for WsusPool.
-        try {
-            Import-Module WebAdministration -ErrorAction Stop
-            $poolState = (Get-WebAppPoolState -Name WsusPool -ErrorAction SilentlyContinue).Value
-            $w3wp = Get-WmiObject Win32_Process -Filter "Name='w3wp.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -match 'WsusPool' } | Select-Object -First 1
-            $r.PoolUp = ($poolState -eq 'Started') -and ($null -ne $w3wp)
+        elseif ($r.ProbeSucceeded -and @($states | Where-Object { $_.LastResult -ne 'Succeeded' }).Count -eq 0) {
+            $r.LastResult = 'Succeeded'
         }
-        catch { }
-
+        $r.Detail = (@($states | ForEach-Object { "$($_.Server): $($_.Detail)" }) -join ' | ')
+        $running = $states | Where-Object { $_.WsusRunning } | Select-Object -First 1
+        if ($running) {
+            $r.Phase = $running.Phase
+            $r.ProcessedItems = $running.ProcessedItems
+            $r.TotalItems = $running.TotalItems
+        }
         return $r
     }
 
@@ -4406,6 +4568,18 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
             Start-Sleep -Seconds 30
             $status = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            $live = Get-WsusSyncLiveness
+            if (-not $live.ProbeSucceeded) {
+                Write-DscStatus "$Tag $Label native SUP health is unreadable (attempt $attempt of $MaxAttempts): $($live.Detail)" -Warning
+                continue
+            }
+            if ($live.WsusRunning) {
+                Write-DscStatus "$Tag $Label native sync is running (phase=$($live.Phase), items=$($live.ProcessedItems)/$($live.TotalItems)); preserving the active sync (CM state=$($status.LastSyncState), attempt $attempt of $MaxAttempts)."
+                $falsePositive6702Streak = 0
+                $poolDownStreak = 0
+                $desyncStreak = 0
+                continue
+            }
 
             if ($status.LastSyncState -eq 6702) {
                 # Cross-check the WSUS-side LastResult before accepting CM's 6702.
@@ -4414,7 +4588,6 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                 # Set-CMSoftwareUpdatePointComponent -AddProduct to silently no-op
                 # against an empty catalog later (every -AddProduct name is dropped
                 # unless it exists in SMS_UpdateCategoryInstance, which mirrors WSUS).
-                $live = Get-WsusSyncLiveness
                 if ($live.LastResult -in @('Canceled', 'Failed')) {
                     $falsePositive6702Streak++
                     if ($falsePositive6702Streak -ge 2) {
@@ -4437,8 +4610,11 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                         continue
                     }
                 }
-                Write-DscStatus "$Tag $Label completed (attempt $attempt, WSUS LastResult=$($live.LastResult))"
-                return $true
+                if ($live.LastResult -eq 'Succeeded') {
+                    Write-DscStatus "$Tag $Label completed (attempt $attempt, WSUS LastResult=$($live.LastResult))"
+                    return $true
+                }
+                Write-DscStatus "$Tag $Label CM reports completion but native result is $($live.LastResult); waiting for measured success." -Warning
             }
             elseif ($status.LastSyncState -eq 6703) {
                 if ($attempt % 3 -eq 0) {
@@ -4455,8 +4631,6 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             }
             elseif ($status.LastSyncState -in @(6701, 6704, 6705, 6706)) {
                 $age = (Get-Date) - $status.LastSyncStateTime
-                $live = Get-WsusSyncLiveness
-
                 if (-not $live.PoolUp) {
                     # CM reports running but the WsusPool worker is gone / pool
                     # stopped -- the pool crashed mid-sync (the classic memory-cap
@@ -4533,6 +4707,132 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         return $false
     }
 
+    function Confirm-MemLabsWsusSyncHealth {
+        if (-not $Sups) { return }
+        $live = Get-WsusSyncLiveness
+        if (-not $live.ProbeSucceeded) {
+            throw "Cannot verify the configured SUP(s): $($live.Detail)"
+        }
+        if ($live.WsusRunning -and -not $live.HasFailedIdleSync) {
+            Write-DscStatus "$Tag WSUS sync remains in progress on the configured SUP(s); preserving background synchronization. $($live.Detail)"
+            return
+        }
+        $status = Get-CMSoftwareUpdateSyncStatus |
+            Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+        if ($live.LastResult -ne 'Succeeded' -or $status.LastSyncState -eq 6703) {
+            Write-WsusDiagnostics -Reason 'Final WSUS health requires recovery'
+            $completed = Wait-WsusSyncCompletion -Label 'Final WSUS recovery' -MaxAttempts 40 -TriggerFirst
+            $live = Get-WsusSyncLiveness
+            if (-not $live.ProbeSucceeded) {
+                throw "Cannot verify the configured SUP(s) after final WSUS recovery: $($live.Detail)"
+            }
+            if ($live.WsusRunning -and -not $live.HasFailedIdleSync) {
+                Write-DscStatus "$Tag Final WSUS recovery started a native sync that remains in progress; preserving background synchronization. Completion is pending, not proven. $($live.Detail)"
+                return
+            }
+            if (-not $completed -or $live.LastResult -ne 'Succeeded') {
+                throw "WSUS synchronization did not recover within the bounded final health check. $($live.Detail)"
+            }
+        }
+        else {
+            Write-DscStatus "$Tag Final WSUS native result=$($live.LastResult), CM state=$($status.LastSyncState). $($live.Detail)"
+        }
+    }
+
+    function Repair-DownstreamWsusReplicaSync {
+        param([object[]] $SoftwareUpdatePoints)
+
+        if ($isTopLevel -or -not $SoftwareUpdatePoints) { return $true }
+
+        $initialStates = [System.Collections.Generic.List[object]]::new()
+        foreach ($supVm in @($SoftwareUpdatePoints | Sort-Object vmName -Unique)) {
+            $supHost = "$($supVm.vmName)"
+            if ([string]::IsNullOrWhiteSpace($supHost)) { continue }
+            if (-not $supHost.Contains('.')) { $supHost = "$supHost.$DomainFullName" }
+            $state = Invoke-CMWsusReplicaHealthCheck -ServerFQDN $supHost `
+                -RepairContractMismatch
+            $initialStates.Add($state)
+        }
+
+        $unreadable = @($initialStates | Where-Object { -not $_.ProbeSucceeded })
+        $repairFailed = @($initialStates | Where-Object {
+                $_.ContractMismatch -and -not $_.RepairSucceeded -and -not $_.WsusRunning
+            })
+        if ($unreadable.Count -gt 0 -or $repairFailed.Count -gt 0) {
+            $bad = @($unreadable + $repairFailed | ForEach-Object {
+                    "$($_.Server): $($_.Detail)"
+                } | Select-Object -Unique)
+            Write-DscStatus "$Tag Downstream WSUS replica repair could not establish a healthy repair boundary: $($bad -join ' | ')" -Failure
+            return $false
+        }
+
+        $failed = @($initialStates | Where-Object {
+                $_.LastResult -in @('Failed', 'Canceled') -and -not $_.WsusRunning
+            })
+        if ($failed.Count -eq 0) {
+            Write-DscStatus "$Tag Downstream WSUS replicas do not have a failed native sync to recover."
+            return $true
+        }
+
+        $upstreamReady = $false
+        for ($attempt = 1; $attempt -le 40; $attempt++) {
+            $upstreamStatus = Get-CMSoftwareUpdateSyncStatus |
+                Where-Object { "$($_.SiteCode)" -ieq "$HierarchySiteCode" } |
+                Select-Object -First 1
+            if ($upstreamStatus -and [int]$upstreamStatus.LastSyncState -eq 6702) {
+                Write-DscStatus "$Tag Upstream site $HierarchySiteCode completed its SUP sync; downstream replica recovery may start."
+                $upstreamReady = $true
+                break
+            }
+            if ($upstreamStatus -and
+                [int]$upstreamStatus.LastSyncState -notin @(6701, 6704, 6705, 6706)) {
+                Write-DscStatus "$Tag Upstream site $HierarchySiteCode is not ready for replica recovery (state=$($upstreamStatus.LastSyncState), error=$($upstreamStatus.LastSyncErrorCode))." -Failure
+                return $false
+            }
+            $state = if ($upstreamStatus) { "$($upstreamStatus.LastSyncState)" } else { 'no-row' }
+            Write-DscStatus "$Tag Waiting for upstream site $HierarchySiteCode SUP sync before repairing child replicas (state=$state, attempt $attempt of 40)."
+            if ($attempt -lt 40) { Start-Sleep -Seconds 30 }
+        }
+        if (-not $upstreamReady) {
+            Write-DscStatus "$Tag Upstream site $HierarchySiteCode did not complete its SUP sync within 20 minutes; downstream replica retry was not started." -Failure
+            return $false
+        }
+
+        Write-DscStatus "$Tag Recovering failed downstream WSUS replica sync on $(@($failed.Server) -join ', ') after upstream/product convergence."
+        $syncRecovered = Wait-WsusSyncCompletion -Label 'Downstream replica recovery' `
+            -MaxAttempts 40 -TriggerFirst
+        if (-not $syncRecovered) {
+            Write-DscStatus "$Tag Downstream WSUS replica synchronization did not recover within the bounded retry window." -Failure
+            return $false
+        }
+
+        $deadline = (Get-Date).AddMinutes(2)
+        do {
+            $remainingFailures = [System.Collections.Generic.List[object]]::new()
+            foreach ($supVm in @($SoftwareUpdatePoints | Sort-Object vmName -Unique)) {
+                $supHost = "$($supVm.vmName)"
+                if ([string]::IsNullOrWhiteSpace($supHost)) { continue }
+                if (-not $supHost.Contains('.')) { $supHost = "$supHost.$DomainFullName" }
+                $state = Invoke-CMWsusReplicaHealthCheck -ServerFQDN $supHost
+                if (-not $state.ProbeSucceeded -or
+                    ($state.LastResult -ne 'Succeeded' -and -not $state.WsusRunning)) {
+                    $remainingFailures.Add($state)
+                }
+            }
+            if ($remainingFailures.Count -eq 0) {
+                Write-DscStatus "$Tag Every downstream WSUS replica is running or has a successful native sync."
+                return $true
+            }
+            if ((Get-Date) -lt $deadline) { Start-Sleep -Seconds 20 }
+        } while ((Get-Date) -lt $deadline)
+
+        $details = @($remainingFailures | ForEach-Object {
+                "$($_.Server): LastResult=$($_.LastResult), Running=$($_.WsusRunning), $($_.Detail)"
+            })
+        Write-DscStatus "$Tag ConfigMgr reported recovery, but downstream WSUS replicas remained unhealthy: $($details -join ' | ')" -Failure
+        return $false
+    }
+
     # Resolve a curated product name to the ACTUAL CM/WSUS catalog title.
     # Microsoft spells the same product differently across the WSUS
     # (Get-WsusProduct.Title) and CM (Get-CMSoftwareUpdateCategory's
@@ -4592,10 +4892,15 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
     # Kick off WSUS sync early so it runs in background while we create collections
     $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
     $syncNeeded = $false
+    $manageSupSubscription = [bool]($Sups -and $isTopLevel)
 
     if ($cmo.OfflineSUP) {
         $Sups = $false
+        $manageSupSubscription = $false
         Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"
+    }
+    elseif ($Sups -and -not $isTopLevel) {
+        Write-DscStatus "$Tag Downstream SUP product subscriptions are owned by top-level site '$HierarchySiteCode'; retaining product demand for local ADRs but skipping subscription mutation and forced sync"
     }
 
     if ($Sups) {
@@ -4609,8 +4914,10 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # and we don't pull thousands of irrelevant updates into the lab catalog.
         $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
         $hierarchyTopSiteCode = if ($ThisVM.parentSiteCode) { "$($ThisVM.parentSiteCode)" } else { "$SiteCode" }
+        $hierarchyDomain = if ($ThisVM.domain) { "$($ThisVM.domain)" } else { "$DomainFullName" }
         $clientInventory = @($deployConfig.phase8SoftwareUpdateProductInventory | Where-Object {
-                "$($_.TopSiteCode)" -ieq $hierarchyTopSiteCode
+                "$($_.TopSiteCode)" -ieq $hierarchyTopSiteCode -and
+                (-not $_.TopSiteDomain -or "$($_.TopSiteDomain)" -ieq $hierarchyDomain)
             })
         $clientByName = @{}
         foreach ($client in $clientInventory) {
@@ -4703,33 +5010,38 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         $catalogHasOurProducts = ($coreProducts.Count -gt 0) -and ($coreInCatalog.Count -eq $coreProducts.Count)
 
         if ($missingproducts.Count -gt 0) {
-            $syncNeeded = $true
             Write-DscStatus "$Tag SUP products missing ($($missingproducts.Count)): $($missingproducts -join ', ')"
-            if ($catalogHasOurProducts) {
-                # Our target products exist in the catalog from a previous sync —
-                # no need to trigger or wait for sync 1. Skip straight to subscribing.
-                Write-DscStatus "$Tag Target products found in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait"
-            }
-            else {
-                # First run: catalog doesn't have our products yet, need sync 1.
-                $missingFromCatalog = @($products | Where-Object { $_ -notin $allCatalogProducts })
-                Write-DscStatus "$Tag Products missing from catalog ($($missingFromCatalog.Count)/$($products.Count)): $($missingFromCatalog -join ', ')"
-                # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
-                # will fail with 'WSUS server not configured' and block WCM from
-                # finishing its subscription setup (deadlock).
-                $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
-                try {
-                    $wcmEarlyState = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
-                } catch { $wcmEarlyState = -1 }
-                if ($wcmEarlyState -eq 2) {
-                    Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
-                    Invoke-FullSync
+            if ($manageSupSubscription) {
+                $syncNeeded = $true
+                if ($catalogHasOurProducts) {
+                    # Our target products exist in the catalog from a previous sync —
+                    # no need to trigger or wait for sync 1. Skip straight to subscribing.
+                    Write-DscStatus "$Tag Target products found in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait"
                 }
                 else {
-                    $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
-                    $wcmName = if ($wcmStateNames.ContainsKey($wcmEarlyState)) { $wcmStateNames[$wcmEarlyState] } else { "UNKNOWN($wcmEarlyState)" }
-                    Write-DscStatus "$Tag WCM state is $wcmName — skipping early sync to avoid blocking WCM"
+                    # First run: catalog doesn't have our products yet, need sync 1.
+                    $missingFromCatalog = @($products | Where-Object { $_ -notin $allCatalogProducts })
+                    Write-DscStatus "$Tag Products missing from catalog ($($missingFromCatalog.Count)/$($products.Count)): $($missingFromCatalog -join ', ')"
+                    # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
+                    # will fail with 'WSUS server not configured' and block WCM from
+                    # finishing its subscription setup (deadlock).
+                    $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+                    try {
+                        $wcmEarlyState = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                    } catch { $wcmEarlyState = -1 }
+                    if ($wcmEarlyState -eq 2) {
+                        Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
+                        Invoke-FullSync
+                    }
+                    else {
+                        $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                        $wcmName = if ($wcmStateNames.ContainsKey($wcmEarlyState)) { $wcmStateNames[$wcmEarlyState] } else { "UNKNOWN($wcmEarlyState)" }
+                        Write-DscStatus "$Tag WCM state is $wcmName — skipping early sync to avoid blocking WCM"
+                    }
                 }
+            }
+            else {
+                Write-DscStatus "$Tag Downstream SUP inherits product subscriptions from '$HierarchySiteCode'; skipping local subscription mutation"
             }
         }
         else {
@@ -5330,7 +5642,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         Write-DscStatus "$Tag No SUP installed for this site, skipping the SUP product check and sync"
     }
 
-    if ($Sups -and $syncNeeded) {
+    if ($manageSupSubscription -and $syncNeeded) {
         # Safety net: InstallRoles owns the cab import (launch +
         # verify+retry). By the time perfloading runs, the state file
         # is normally already removed and this call is a no-op. The
@@ -5352,7 +5664,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         # products immediately without waiting for any current sync.
         $sync1Done = $false
         if ($ThisVM.hidden) {
-            # This Primary is hidden => it's an existing, already-deployed site
+            # This top-level site is hidden => it's an existing, already-deployed site
             # server pulled into the config only so a *new* VM (e.g. a client added
             # to an existing domain) can get PushClients re-run. There is no actual
             # deployment happening to this site server, so blocking here for up to
@@ -5360,14 +5672,11 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             # background sync off (only when the catalog still needs our products) so
             # the catalog refreshes on its own, and proceed without monitoring it.
             if ($catalogHasOurProducts) {
-                Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) and products already in catalog — skipping sync 1 wait"
-            }
-            elseif ($isTopLevel) {
-                Write-DscStatus "$Tag Primary is hidden (re-run for a new VM) — triggering background sync 1 and NOT waiting"
-                Invoke-FullSync
+                Write-DscStatus "$Tag Top-level site is hidden (re-run for a new VM) and products already in catalog — skipping sync 1 wait"
             }
             else {
-                Write-DscStatus "$Tag Hidden downstream Primary (parent=$($ThisVM.parentSiteCode)) - not forcing sync 1 before the upstream subscription/catalog replicates"
+                Write-DscStatus "$Tag Top-level site is hidden (re-run for a new VM) — triggering background sync 1 and NOT waiting"
+                Invoke-FullSync
             }
             $sync1Done = $true
         }
@@ -5525,27 +5834,12 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         # otherwise wsyncmgr sees 'WSUS server not configured' and the sync
         # blocks WCM from setting the subscription (deadlock).
         #
-        # That sync is the wait's ONLY consumer, and a downstream SUP must never
-        # force one (see the $isTopLevel gate further down), so downstream the
-        # wait is pure cost: measured 2026-08-22, CT3-PS1SITE read
-        # ConfigurationState=FAILED on 20/20 polls -- 714s -- on four consecutive
-        # runs, while every top-level SUP in the same log set exited after 4-8
-        # polls and never saw FAILED.
-        #
         # Budget 20 -> 8, sized from the outcome distribution over 181 guest logs:
         # 71 successes across BOTH WCM waits, attempts 1-6, MAX 6. Attempts 7+ have
         # never once produced a success, while a give-up costs ~570s. CS2-CS1SITE
-        # (a CAS, so top-level and not covered by the gate above) burned the full
-        # budget at SUBSCRIPTION_PENDING three times.
+        # burned the full budget at SUBSCRIPTION_PENDING three times.
         $wcmMaxAttempts = 8
-        $wcmSkipReason = ''
-        if (-not $isTopLevel) {
-            $wcmMaxAttempts = 0
-            $wcmSkipReason = "Downstream SUP (parent=$($ThisVM.parentSiteCode)) - skipping the WCM reconfiguration wait and the early sync trigger; WCM reconfigures on its own schedule and the catalog replicates from the upstream SUP."
-        }
-        else {
-            Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
-        }
+        Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
 
         $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
         $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
@@ -5615,10 +5909,6 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             }
         }
         else {
-            if ($wcmSkipReason) {
-                Write-DscStatus "$Tag $wcmSkipReason"
-            }
-            else {
             Write-DscStatus "$Tag WCM did not reach SUCCESS after $wcmMaxAttempts attempts. Skipping sync trigger — wsyncmgr will sync on schedule."
             # Log diagnostics so we can investigate
             $diag = @()
@@ -5636,9 +5926,13 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 }
             }
             Write-DscStatus "$Tag WCM timeout diag: $($diag -join ' | ')"
-            }
         }
         } # end accepted-products block
+    }
+    if ($Sups -and -not $isTopLevel) {
+        if (-not (Repair-DownstreamWsusReplicaSync -SoftwareUpdatePoints @($Sups))) {
+            throw 'Downstream WSUS replica recovery did not converge.'
+        }
     }
     if ($Sups) {
         # Define ADR Names
@@ -5803,9 +6097,16 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         } # end Primary-only update packages/ADR block
     }
 
-    $collection = Get-CMCollection -Name "All Unknown Computers"
-    if ($Collection -and $Collection.CollectionID) {
-        try { Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID } catch {}
+    Confirm-MemLabsWsusSyncHealth
+
+    try {
+        $collection = Get-CMCollection -Name "All Unknown Computers" -ErrorAction Stop
+        if ($collection -and $collection.CollectionID) {
+            Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Could not refresh All Unknown Computers: $($_.Exception.Message)" -Warning
     }
 
     # Delay approval until the other provider operations have given the

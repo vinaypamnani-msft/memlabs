@@ -21,6 +21,8 @@ if ($ThisVM.cmInstallDir) {
 }
 
 # SQL FQDN
+$installToAO = $false
+$sqlAoMaxDopParameters = $null
 if ($ThisVM.remoteSQLVM) {
     $sqlServerName = $ThisVM.remoteSQLVM
     $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlServerName }
@@ -33,6 +35,13 @@ if ($ThisVM.remoteSQLVM) {
     }
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
+        $sqlNode2Vm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $SQLVM.OtherNode }
+        $sqlAoMaxDopParameters = @{
+            Node1 = $SQLVM.vmName
+            Node2 = $SQLVM.OtherNode
+            Node1Port = "$sqlPort"
+            Node2Port = $(if ($sqlNode2Vm.sqlPort) { "$($sqlNode2Vm.sqlPort)" } else { "$sqlPort" })
+        }
         $sqlServerName = $SQLVM.AlwaysOnListenerName
         $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
         $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
@@ -80,7 +89,7 @@ function Get-HierarchyRecoveryAction {
 function Stop-HierarchyInstall {
     param([Parameter(Mandatory)][string]$Message)
     Write-DscStatus $Message -Failure
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }
 
 $multiSubnetHierarchy = $installToAO -and $SQLVM.thisParams.SQLAO.MultiSubnetFailover
@@ -92,18 +101,37 @@ if ($ThisVM.siteCode) {
 
 # Read Actions file
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+$Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile `
+    -RequiredSteps @('WaitingForCASFinishedInstall', 'InstallSCCM')
 $setupStagePath = Join-Path -Path $LogPath -ChildPath 'InstallPSForHierarchy.setup.stage'
+
+if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
 # Set Install action as Running
 $Configuration.WaitingForCASFinishedInstall.Status = 'Running'
 $Configuration.WaitingForCASFinishedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 # Read Actions file on CAS
 $LogFolder = Split-Path $LogPath -Leaf
 $CSFilePath = "\\$CSName\$LogFolder"
 $CSConfigurationFile = Join-Path -Path $CSFilePath -ChildPath "ScriptWorkflow.json"
+$casWorkflowFileWaitMaxMinutes = 60
+$casDependencyWaitMaxMinutes = 240
+
+function Assert-CasWorkflowStepCanContinue {
+    param(
+        [Parameter(Mandatory)]$CasConfiguration,
+        [Parameter(Mandatory)][string]$Step
+    )
+
+    foreach ($dependency in @('InstallSCCM', 'UpgradeSCCM', $Step) | Select-Object -Unique) {
+        $status = "$($CasConfiguration.$dependency.Status)"
+        if ($status -in @('Error', 'Failed', 'Failure')) {
+            throw "$CSName reported $dependency=$status in '$CSConfigurationFile'. Stopping the primary before dependent setup; inspect the CAS Phase 8 diagnostics."
+        }
+    }
+}
 
 # Wait for ScriptWorkflow.json to exist on CAS
 Write-DscStatus "Waiting for $CSName to begin installation"
@@ -117,6 +145,9 @@ while (!(Test-Path $CSConfigurationFile)) {
     # Elapsed goes in the TEXT: the host only records status CHANGES, so a constant
     # message is indistinguishable from a hang for the whole wait.
     $casBeginMin = [int]((Get-Date) - $casBeginStart).TotalMinutes
+    if ($casBeginMin -ge $casWorkflowFileWaitMaxMinutes) {
+        throw "$CSName did not publish '$CSConfigurationFile' within $casWorkflowFileWaitMaxMinutes minutes."
+    }
     Write-DscStatus "Waiting for $CSName to begin installation (${casBeginMin}m elapsed)" -RetrySeconds 30
     Start-Sleep -Seconds 30
 }
@@ -124,43 +155,45 @@ while (!(Test-Path $CSConfigurationFile)) {
 # Read CAS actions file, wait for install to finish
 Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr"
 $casInstallStart = Get-Date
-$casInstallDeadline = $casInstallStart.AddHours(3)
-$CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-while ($CSConfiguration.$("InstallSCCM").Status -ne "Completed") {
-    if ((Get-Date) -ge $casInstallDeadline) {
-        Stop-HierarchyInstall "Timed out after 3 hours waiting for $CSName InstallSCCM to complete. Resolve the CAS failure before retrying this child Primary."
-        return
-    }
+$CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+    -RequiredSteps @('InstallSCCM', 'UpgradeSCCM')
+while ($CSConfiguration.InstallSCCM.Status -ne "Completed") {
+    Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step 'InstallSCCM'
     $casInstallMin = [int]((Get-Date) - $casInstallStart).TotalMinutes
+    if ($casInstallMin -ge $casDependencyWaitMaxMinutes) {
+        throw "$CSName did not finish InstallSCCM within $casDependencyWaitMaxMinutes minutes (last state: $($CSConfiguration.InstallSCCM.Status))."
+    }
     $casInstallState = "$($CSConfiguration.InstallSCCM.Status)"
     Write-DscStatus "Waiting for $CSName to finish installing ConfigMgr (${casInstallMin}m elapsed, CAS InstallSCCM=$casInstallState)" -RetrySeconds 30
     Start-Sleep -Seconds 30
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+        -RequiredSteps @('InstallSCCM', 'UpgradeSCCM')
 }
 Write-DscStatus "$CSName finished installing ConfigMgr ($([int]((Get-Date) - $casInstallStart).TotalMinutes)m elapsed)."
 
 # Read CAS actions file, wait for upgrade to finish
 Write-DscStatus "Checking if $CSName is upgrading ConfigMgr"
 $casUpgradeStart = Get-Date
-$casUpgradeDeadline = $casUpgradeStart.AddHours(3)
-$CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
-    if ((Get-Date) -ge $casUpgradeDeadline) {
-        Stop-HierarchyInstall "Timed out after 3 hours waiting for $CSName UpgradeSCCM to complete. Resolve the CAS upgrade before retrying this child Primary."
-        return
-    }
+$CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+    -RequiredSteps @('UpgradeSCCM')
+while ($CSConfiguration.UpgradeSCCM.Status -ne "Completed") {
+    Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step 'UpgradeSCCM'
     $casUpgradeMin = [int]((Get-Date) - $casUpgradeStart).TotalMinutes
+    if ($casUpgradeMin -ge $casDependencyWaitMaxMinutes) {
+        throw "$CSName did not finish UpgradeSCCM within $casDependencyWaitMaxMinutes minutes (last state: $($CSConfiguration.UpgradeSCCM.Status))."
+    }
     $casUpgradeState = "$($CSConfiguration.UpgradeSCCM.Status)"
     Write-DscStatus "Waiting for $CSName to finish upgrading ConfigMgr (${casUpgradeMin}m elapsed, CAS UpgradeSCCM=$casUpgradeState)" -RetrySeconds 30
     Start-Sleep -Seconds 30
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
+    $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+        -RequiredSteps @('UpgradeSCCM')
 }
 Write-DscStatus "$CSName finished upgrading ConfigMgr ($([int]((Get-Date) - $casUpgradeStart).TotalMinutes)m elapsed)."
 
 # Write actions file, wait finished
 $Configuration.WaitingForCASFinishedInstall.Status = 'Completed'
-$Configuration.WaitingForCASFinishedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+$Configuration.WaitingForCASFinishedInstall.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
 $resumeHierarchyPostflight = $false
 if ($Configuration.InstallSCCM.Status -eq 'Running') {
@@ -185,7 +218,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
         Write-DscStatus "InstallSCCM.Status is Running at preflight stage; resetting the hierarchy install for a safe retry."
         $Configuration.InstallSCCM.Status = 'NotStart'
         $Configuration.InstallSCCM.StartTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     }
     elseif ($recoveryAction -eq 'ResumePostflight') {
         Write-DscStatus "Resuming hierarchy postflight from stage '$setupStage': registry and SMS_Site confirm child Primary $SiteCode is installed."
@@ -205,7 +238,7 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and
     # Set Install action as Running
     $Configuration.InstallSCCM.Status = 'Running'
     $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     Set-Content -LiteralPath $setupStagePath -Value 'Preflight' -Force -ErrorAction Stop
 
     # Create $CM dir, before creating the ini
@@ -409,6 +442,7 @@ CurrentBranch=1
         Stop-HierarchyInstall "Hierarchy child Primary setup did not complete: $failureDetail. Restore the Phase 8 checkpoint before retrying."
         return
     }
+    if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
     $uiInstallDirectory = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'UI Installation Directory' -ErrorAction SilentlyContinue
     $configurationManagerModule = if ($uiInstallDirectory) { Join-Path $uiInstallDirectory 'bin\ConfigurationManager.psd1' } else { '' }
@@ -469,30 +503,35 @@ WHERE ip_address IN
     # Delete ini file?
     # Remove-Item $CMINIPath
 
-    # Wait for Site ready
-    $CSConfiguration = Get-Content -Path $CSConfigurationFile -ErrorAction Ignore | ConvertFrom-Json
-    Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
-    $propName = "PSReadyToUse" + $ThisVm.VmName
-    # This is the largest single wait in Phase 8 (1,217-2,219s measured over 10 child-primary
-    # installs) - it is the CAS waiting for the CAS<->child DRS link to activate. Elapsed goes in
-    # the TEXT at the poll cadence, like the three CAS waits above: the host only records status
-    # CHANGES, and at the old 600s -NoLog cadence the guest log carried ONE line for the whole wait.
-    $psReadyStart = Get-Date
-    $psReadyDeadline = $psReadyStart.AddHours(2)
-    while ($CSConfiguration.$propName.Status -ne "Completed") {
-        if ((Get-Date) -ge $psReadyDeadline) {
-            Stop-HierarchyInstall "Timed out after 2 hours waiting for $CSName to report $propName Completed. Check CAS/child DRS initialization before retrying."
-            return
-        }
-        $psReadyMin = [int]((Get-Date) - $psReadyStart).TotalMinutes
-        Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use (${psReadyMin}m elapsed)" -RetrySeconds 30
-        Start-Sleep -Seconds 30
-        $CSConfiguration = Get-Content -Path $CSConfigurationFile | ConvertFrom-Json
-    }
-    Write-DscStatus "$CSName reports Primary is ready to use ($([int]((Get-Date) - $psReadyStart).TotalMinutes)m elapsed)."
-
-    $Configuration.InstallSCCM.Status = 'Completed'
-    $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    Remove-Item -LiteralPath $setupStagePath -Force -ErrorAction SilentlyContinue
 }
+
+# Recheck the CAS handshake on resumes too; an old Completed flag may be unverified.
+$propName = "PSReadyToUse" + $ThisVm.VmName
+$CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+    -RequiredSteps @($propName)
+Write-DscStatus "Waiting for $CSName to indicate Primary is ready to use"
+$psReadyStart = Get-Date
+$casReady = $CSConfiguration.$propName
+while ($casReady.Status -ne 'Completed' -or
+    -not ($casReady.PSObject.Properties['ReplicationVerified'] -and
+        $casReady.ReplicationVerified -is [bool] -and $casReady.ReplicationVerified)) {
+    Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step $propName
+    $psReadyMin = [int]((Get-Date) - $psReadyStart).TotalMinutes
+    if ($psReadyMin -ge $casDependencyWaitMaxMinutes) {
+        throw "$CSName did not verify $propName within $casDependencyWaitMaxMinutes minutes (last state: $($casReady.Status))."
+    }
+    $proof = $casReady.PSObject.Properties['ReplicationVerified']
+    $proofText = if ($proof) { "$($proof.Value)" } else { 'missing; update and rerun Phase 8 on the CAS too' }
+    Write-DscStatus "Waiting for $CSName to verify Primary replication readiness (${psReadyMin}m elapsed, status=$($casReady.Status), ReplicationVerified=$proofText)" -RetrySeconds 30
+    Start-Sleep -Seconds 30
+    $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
+        -RequiredSteps @($propName)
+    $casReady = $CSConfiguration.$propName
+}
+Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step $propName
+Write-DscStatus "$CSName verified Primary replication readiness ($([int]((Get-Date) - $psReadyStart).TotalMinutes)m elapsed)."
+
+$Configuration.InstallSCCM.Status = 'Completed'
+$Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+Remove-Item -LiteralPath $setupStagePath -Force -ErrorAction SilentlyContinue

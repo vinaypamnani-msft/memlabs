@@ -276,7 +276,7 @@ function Get-MemLabsBuildStatsEvidence {
             'CrossRevision'
         }
         else { 'Standard' }
-        $completedUtc = try { ([DateTime]"$($stats.Timestamp)").ToUniversalTime() } catch { $file.LastWriteTimeUtc }
+        $completedUtc = try { ([DateTime]$stats.Timestamp).ToUniversalTime() } catch { $file.LastWriteTimeUtc }
         $evidence += [pscustomobject]@{
             CandidateKey = "$mode|$family"; Family = $family; Mode = $mode
             Success = [bool]$stats.Success; Commit = "$($stats.Source.Commit)"
@@ -299,11 +299,13 @@ function Get-MemLabsHistoryEvidence {
             ForEach-Object {
                 [pscustomobject]@{
                     CandidateKey = "$($_.CandidateKey)"; Family = "$($_.Family)"; Mode = "$($_.Mode)"
-                    Success = [bool]$_.Success; Commit = "$($_.Commit)"
-                    CompletedUtc = [DateTime]"$($_.CompletedUtc)"
+                    Success = [bool]$_.Success -and -not [bool]$_.TestsSkipped; Commit = "$($_.Commit)"
+                    DeploymentSucceeded = [bool]$_.Success; TestsSkipped = [bool]$_.TestsSkipped
+                    StartedUtc = if ($_.StartedUtc) { ([DateTime]$_.StartedUtc).ToUniversalTime() } else { $null }
+                    CompletedUtc = ([DateTime]$_.CompletedUtc).ToUniversalTime()
                     DurationSeconds = [double]$_.DurationSeconds
                     EvidenceType = 'History'; SourcePath = $Path
-                    NeedsRerun = [bool]$_.NeedsRerun
+                    NeedsRerun = [bool]$_.NeedsRerun -or [bool]$_.TestsSkipped
                 }
             }
         $records |
@@ -315,7 +317,9 @@ function Get-MemLabsHistoryEvidence {
                 [pscustomobject]@{
                     CandidateKey = "$($_.CandidateKey)"; Family = "$($_.Family)"; Mode = "$($_.Mode)"
                     Success = $false; Commit = "$($_.Commit)"
-                    CompletedUtc = [DateTime]"$($_.RecordedUtc)"
+                    DeploymentSucceeded = $false; TestsSkipped = [bool]$_.TestsSkipped
+                    StartedUtc = if ($_.StartedUtc) { ([DateTime]$_.StartedUtc).ToUniversalTime() } else { ([DateTime]$_.RecordedUtc).ToUniversalTime() }
+                    CompletedUtc = if ($_.TestsSkipped) { [DateTime]::UtcNow } else { ([DateTime]$_.RecordedUtc).ToUniversalTime() }
                     DurationSeconds = 0
                     EvidenceType = 'Interrupted'; SourcePath = $Path
                     NeedsRerun = $true
@@ -340,7 +344,8 @@ function Select-MemLabsNextTest {
     param(
         [Parameter(Mandatory = $true)][string] $VmbuildRoot,
         [string] $HistoryPath = (Get-MemLabsTestHistoryPath),
-        [double] $AvailableMemoryGB = -1
+        [double] $AvailableMemoryGB = -1,
+        [switch] $DeploymentOnly
     )
 
     $repositoryRoot = Split-Path -Parent $VmbuildRoot
@@ -363,7 +368,15 @@ function Select-MemLabsNextTest {
         $candidateEvidence = @($evidence | Where-Object { $_.CandidateKey -ieq $candidate.CandidateKey } |
                 Sort-Object CompletedUtc -Descending)
         $latest = $candidateEvidence | Select-Object -First 1
-        $latestSuccess = $candidateEvidence | Where-Object { $_.Success } | Select-Object -First 1
+        $skippedRuns = @($candidateEvidence | Where-Object { $_.TestsSkipped -and $_.StartedUtc })
+        $latestSuccess = $candidateEvidence | Where-Object {
+            if ($DeploymentOnly) { return $_.Success -or $_.DeploymentSucceeded }
+            if (-not $_.Success -or $_.TestsSkipped) { return $false }
+            $item = $_
+            return $item.EvidenceType -ne 'BuildStats' -or @($skippedRuns | Where-Object {
+                    $item.CompletedUtc -ge $_.StartedUtc -and $item.CompletedUtc -le $_.CompletedUtc
+                }).Count -eq 0
+        } | Select-Object -First 1
         $score = 0.0
         $reasons = @()
         if (-not $latestSuccess) {
@@ -388,11 +401,17 @@ function Select-MemLabsNextTest {
                 }
             }
         }
-        if ($latest -and -not $latest.Success) {
+        if ($latest -and $latest.TestsSkipped -and -not $DeploymentOnly) {
+            $score += 1000
+            $reasons += 'tests skipped; qualification required'
+        }
+        elseif ($latest -and -not ($latest.Success -or ($DeploymentOnly -and $latest.DeploymentSucceeded))) {
             $score += 1000
             $reasons += 'latest run failed'
         }
-        $latestRerunRequest = $candidateEvidence | Where-Object { $_.NeedsRerun } | Select-Object -First 1
+        $latestRerunRequest = $candidateEvidence | Where-Object {
+            $_.NeedsRerun -and (-not $DeploymentOnly -or -not $_.TestsSkipped -or -not $_.DeploymentSucceeded)
+        } | Select-Object -First 1
         if ($latestRerunRequest -and
             (-not $latestSuccess -or $latestRerunRequest.CompletedUtc -ge $latestSuccess.CompletedUtc)) {
             $score += 1200

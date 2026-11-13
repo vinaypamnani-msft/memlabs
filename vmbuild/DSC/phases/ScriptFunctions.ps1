@@ -2,6 +2,205 @@
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 
+function Invoke-MemLabsDrsGroupSend {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SqlServer,
+        [Parameter(Mandatory)][string]$DatabaseName,
+        [Parameter(Mandatory)][string]$ReplicationGroup,
+        [Parameter(Mandatory)][string]$StatusTag
+    )
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($SqlServer) -or [string]::IsNullOrWhiteSpace($DatabaseName) -or
+            [string]::IsNullOrWhiteSpace($ReplicationGroup)) {
+            throw 'The DRS SQL target, database, and replication group must be nonempty.'
+        }
+        $connectionString = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+        $connectionString['Data Source'] = $SqlServer
+        $connectionString['Initial Catalog'] = $DatabaseName
+        $connectionString['Integrated Security'] = $true
+        $connectionString['Connect Timeout'] = 20
+        $connectionString['Encrypt'] = $false
+        $connectionString['TrustServerCertificate'] = $true
+    }
+    catch {
+        Write-DscStatus "$StatusTag DRS send could not initialize its SQL target: $($_.Exception.Message). Normal DRS scheduling and the client-package coverage gate remain authoritative." -Warning
+        return $false
+    }
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $connection = $null; $command = $null
+        $retry = $false
+        try {
+            $connection = New-Object System.Data.SqlClient.SqlConnection $connectionString.ConnectionString
+            $connection.Open()
+            $command = $connection.CreateCommand()
+            $command.CommandText = 'EXEC dbo.spDRSSendChangesForGroup @ReplicationGroup = @rg'
+            $command.CommandTimeout = 120
+            [void]$command.Parameters.AddWithValue('@rg', $ReplicationGroup)
+            [void]$command.ExecuteNonQuery()
+            Write-DscStatus "$StatusTag ran spDRSSendChangesForGroup '$ReplicationGroup' on $DatabaseName (attempt $attempt/3)."
+            return $true
+        }
+        catch {
+            $failure = $_
+            $transient = $false
+            $exception = $failure.Exception
+            for ($depth = 0; $exception -and $depth -lt 8; $depth++) {
+                if ($exception.PSObject.Properties['Number'] -and
+                    $exception.Number -in @(1205, 1222, 3960, 3961)) { $transient = $true }
+                if ($exception -is [System.Data.SqlClient.SqlException] -and
+                    @($exception.Errors | Where-Object { $_.Number -in @(1205, 1222, 3960, 3961) }).Count) {
+                    $transient = $true
+                }
+                if ($exception.Message -match '(?i)\b(?:ERROR|SQLStatus|SQL Error)\s*[:=]?\s*(1205|1222|3960|3961)\b') {
+                    $transient = $true
+                }
+                $exception = $exception.InnerException
+            }
+            $retry = $transient -and $attempt -lt 3
+            if ($retry) {
+                Write-DscStatus "$StatusTag transient DRS send failure for '$ReplicationGroup' on attempt $attempt/3: $($failure.Exception.Message). Retrying in 5 seconds with a new SQL connection." -Warning
+            }
+            else {
+                Write-DscStatus "$StatusTag DRS send for '$ReplicationGroup' failed on attempt $attempt/3: $($failure.Exception.Message). Normal DRS scheduling and the client-package coverage gate remain authoritative." -Warning
+                return $false
+            }
+        }
+        finally {
+            if ($command) { $command.Dispose() }
+            if ($connection) { $connection.Dispose() }
+        }
+        if ($retry) { Start-Sleep -Seconds 5 }
+    }
+}
+
+function New-SqlAoNodeConnectionString {
+    param([string]$Server, [string]$Port)
+
+    $target = $Server
+    if ($Port -and $Port -ne '1433') { $target = "$Server,$Port" }
+    return "Driver={SQL Server};AutoTranslate=no;Server=$target;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes;Connection Timeout=10"
+}
+
+function Invoke-SqlAoCommand {
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$CommandText,
+        [int]$TimeoutSeconds = 120,
+        [switch]$Scalar,
+        [hashtable]$TestHooks
+    )
+
+    if ($TestHooks -and $TestHooks.Command) {
+        return (& $TestHooks.Command $ConnectionString $CommandText $TimeoutSeconds $Scalar.IsPresent)
+    }
+    $connection = New-Object System.Data.Odbc.OdbcConnection $ConnectionString
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        try {
+            $command.CommandTimeout = $TimeoutSeconds
+            $command.CommandText = $CommandText
+            if ($Scalar) { return $command.ExecuteScalar() }
+            $null = $command.ExecuteNonQuery()
+        }
+        finally { $command.Dispose() }
+    }
+    finally {
+        $connection.Close()
+        $connection.Dispose()
+    }
+}
+
+function Set-SqlAoLabMaxDop {
+    param(
+        [Parameter(Mandatory)][string]$Node1,
+        [string]$Node2,
+        [Parameter(Mandatory)][string]$Node1Port,
+        [string]$Node2Port,
+        [hashtable]$TestHooks
+    )
+
+    if ($Node2 -and -not $Node2Port) {
+        Write-DscStatus "SQLAO MAXDOP policy failed: physical SQL port is missing for [$Node2]." -Failure
+        return $false
+    }
+    $replicas = @(@{ Name = $Node1; Port = $Node1Port })
+    if ($Node2) { $replicas += @{ Name = $Node2; Port = $Node2Port } }
+    $failures = [Collections.Generic.List[string]]::new()
+    foreach ($replica in $replicas) {
+        try {
+            $connectionString = New-SqlAoNodeConnectionString -Server $replica.Name -Port $replica.Port
+            $effectiveMaxDop = Invoke-SqlAoCommand -ConnectionString $connectionString -TimeoutSeconds 60 `
+                -Scalar -TestHooks $TestHooks -CommandText @"
+SET NOCOUNT ON;
+IF NOT EXISTS
+(
+    SELECT 1 FROM sys.configurations
+    WHERE name = N'max degree of parallelism'
+      AND CONVERT(int, value) = 1 AND CONVERT(int, value_in_use) = 1
+)
+BEGIN
+    DECLARE @advanced int =
+        (SELECT CONVERT(int, value_in_use) FROM sys.configurations WHERE name = N'show advanced options');
+    BEGIN TRY
+        IF @advanced = 0
+        BEGIN
+            EXEC sys.sp_configure N'show advanced options', 1;
+            RECONFIGURE;
+        END;
+        EXEC sys.sp_configure N'max degree of parallelism', 1;
+        RECONFIGURE;
+    END TRY
+    BEGIN CATCH
+        DECLARE @originalError nvarchar(2048) = ERROR_MESSAGE();
+        IF @advanced = 0
+        BEGIN
+            BEGIN TRY
+                EXEC sys.sp_configure N'show advanced options', 0;
+                RECONFIGURE;
+            END TRY
+            BEGIN CATCH
+                DECLARE @combinedError nvarchar(2048) =
+                    LEFT(@originalError + N'; restoring show advanced options also failed: ' + ERROR_MESSAGE(), 2048);
+                THROW 51002, @combinedError, 1;
+            END CATCH;
+        END;
+        THROW;
+    END CATCH;
+    IF @advanced = 0
+    BEGIN
+        EXEC sys.sp_configure N'show advanced options', 0;
+        RECONFIGURE;
+    END;
+END;
+IF NOT EXISTS
+(
+    SELECT 1 FROM sys.configurations
+    WHERE name = N'max degree of parallelism'
+      AND CONVERT(int, value) = 1 AND CONVERT(int, value_in_use) = 1
+)
+    THROW 51003, 'SQLAO lab policy requires configured and effective MAXDOP = 1.', 1;
+SELECT CONVERT(int, value_in_use) FROM sys.configurations WHERE name = N'max degree of parallelism';
+"@
+            if ($null -eq $effectiveMaxDop -or [int]$effectiveMaxDop -ne 1) {
+                throw "MAXDOP verification returned '$effectiveMaxDop', expected 1."
+            }
+            Write-DscStatus "SQLAO MAXDOP: [$($replica.Name),$($replica.Port)] configured=1; effective=1."
+        }
+        catch {
+            $failures.Add("[$($replica.Name),$($replica.Port)]: $($_.Exception.Message)")
+        }
+    }
+    if ($failures.Count -gt 0) {
+        Write-DscStatus "SQLAO MAXDOP policy failed: $($failures -join ' | '). Refusing to continue without serial execution on all configured replicas." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Test-PushClientRequested {
     param([object]$VM)
 
@@ -15,6 +214,22 @@ function Test-PushClientRequested {
         return -not [string]::IsNullOrWhiteSpace($VM.pushClient)
     }
     return $false
+}
+
+function Disable-MemLabsAutomaticClientPush {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$SiteCode)
+
+    try {
+        Write-DscStatus "Disabling automatic client push at site $SiteCode; client push uses explicit per-VM targets."
+        Set-CMClientPushInstallation -SiteCode $SiteCode -EnableAutomaticClientPushInstallation $false -ErrorAction Stop |
+            Write-StatusLogEntry
+        return $true
+    }
+    catch {
+        Write-DscStatus "Cannot enforce per-VM client-push opt-outs at site ${SiteCode}: $($_.Exception.Message). Refusing discovery/client push." -Failure
+        return $false
+    }
 }
 
 
@@ -144,6 +359,34 @@ function Write-StatusLogEntry {
     }
 }
 
+function Get-MemLabsExceptionSummary {
+    param([Parameter(Mandatory = $true)][System.Exception]$Exception)
+
+    $messages = [System.Collections.Generic.List[string]]::new()
+    while ($Exception) {
+        # Keep the root cause ahead of wrappers when host status/receipt fields are bounded.
+        $messages.Insert(0, "$($Exception.GetType().FullName): $(($Exception.Message -replace '\s+', ' ').Trim())")
+        $Exception = $Exception.InnerException
+    }
+    return $messages -join ' <-- '
+}
+
+function Write-MemLabsExceptionDetails {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory = $true)][string]$Component,
+        [ValidateSet(2, 3)][int]$Type = 3
+    )
+
+    @(
+        "Error ID: $($ErrorRecord.FullyQualifiedErrorId)"
+        "Category: $($ErrorRecord.CategoryInfo)"
+        $ErrorRecord.Exception.ToString()
+        "Position: $($ErrorRecord.InvocationInfo.PositionMessage)"
+        "PowerShell stack: $($ErrorRecord.ScriptStackTrace)"
+    ) -join [Environment]::NewLine | Write-StatusLogEntry -Component $Component -Type $Type
+}
+
 function Get-CmSslStateNote {
     # Short "  [ssl=63]" tag for the Invoke-DotSource boundary lines, so a revert of
     # IISSSLState can be attributed to the script whose window it happened in.
@@ -160,6 +403,76 @@ function Get-CmSslStateNote {
     return $note
 }
 
+function Invoke-MemLabsGuestMemoryReclaim {
+    param([string]$Context = 'guest workflow boundary')
+
+    $process = $null
+    $workingBeforeMb = -1
+    $privateBeforeMb = -1
+    $managedBeforeMb = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+    try {
+        $process = Get-Process -Id $PID -ErrorAction Stop
+        $workingBeforeMb = [math]::Round($process.WorkingSet64 / 1MB, 1)
+        $privateBeforeMb = [math]::Round($process.PrivateMemorySize64 / 1MB, 1)
+    }
+    catch { }
+    finally {
+        if ($process) { $process.Dispose() }
+    }
+
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+    [GC]::Collect()
+
+    $managedAfterMb = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+    Write-DscStatus "[MemoryReclaim] $Context`: pid=$PID working=${workingBeforeMb}MB private=${privateBeforeMb}MB managed=${managedBeforeMb}MB->$managedAfterMb MB." -NoStatus
+    return [pscustomobject]@{
+        Context         = $Context
+        WorkingBeforeMb = $workingBeforeMb
+        PrivateBeforeMb = $privateBeforeMb
+        ManagedBeforeMb = $managedBeforeMb
+        ManagedAfterMb  = $managedAfterMb
+    }
+}
+
+function Assert-MemLabsPerfloadingContract {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Script)
+
+    $hash = (Get-FileHash -LiteralPath $Script -Algorithm SHA256 -ErrorAction Stop).Hash
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $Script, [ref]$tokens, [ref]$parseErrors)
+    $identity = "path=$Script; sha256=$hash; PowerShell=$($PSVersionTable.PSVersion)"
+    if ($parseErrors.Count -gt 0) {
+        throw "Perfloading contract invalid: $identity; parse errors=$($parseErrors -join '; ')"
+    }
+
+    $required = @('Get-WsusDiagnostics', 'Write-WsusDiagnostics', 'Repair-WsusSync',
+        'Invoke-FullSync', 'Get-WsusSyncLiveness', 'Wait-WsusSyncCompletion',
+        'Confirm-MemLabsWsusSyncHealth', 'Repair-DownstreamWsusReplicaSync')
+    $definitions = @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+            }, $true))
+    $invalid = @()
+    $locations = foreach ($name in $required) {
+        $helperDefinitions = @($definitions | Where-Object Name -eq $name)
+        $atScriptScope = @($helperDefinitions | Where-Object { $_.Parent -eq $ast.EndBlock })
+        if ($helperDefinitions.Count -ne 1 -or $atScriptScope.Count -ne 1) {
+            $invalid += $name
+        }
+        $lines = @($helperDefinitions | ForEach-Object { $_.Extent.StartLineNumber }) -join ','
+        "$name(lines=$lines,scriptScope=$($atScriptScope.Count),total=$($helperDefinitions.Count))"
+    }
+    $evidence = "$identity; helpers=$($locations -join '; ')"
+    if ($invalid.Count -gt 0) {
+        throw "Perfloading contract invalid: required helpers must each have exactly one script-scope definition: $($invalid -join ', '); $evidence"
+    }
+    Write-DscStatus "[PerfloadingContract] PASS: $evidence" -NoStatus
+}
+
 function Invoke-DotSource {
     # Wrapper for dot-sourcing scripts with error handling.
     # Catches parse errors, execution policy blocks, and other failures
@@ -170,11 +483,18 @@ function Invoke-DotSource {
         [object[]]$Arguments,
         # By default a runtime exception in the dot-sourced script is logged as a
         # WARNING and swallowed (see the catch note below). Set -Rethrow when the
-        # CALLER owns retry/recovery for that script (e.g. the perfloading retry
-        # loop in ScriptWorkFlow.ps1): the exception is still logged, then re-thrown
-        # so the caller's try/catch can act on it.
-        [switch]$Rethrow
+        # caller must observe the exception. Set -CallerOwnsRetry with -Rethrow
+        # when the caller will retry or downgrade exhaustion: the exception is
+        # logged as a warning before it is re-thrown, rather than publishing a
+        # premature JOBFAILURE. An explicit Write-DscStatus -Failure is always
+        # preserved and re-thrown regardless of these switches.
+        [switch]$Rethrow,
+        [switch]$CallerOwnsRetry
     )
+
+    if ($CallerOwnsRetry -and -not $Rethrow) {
+        throw 'Invoke-DotSource -CallerOwnsRetry requires -Rethrow.'
+    }
 
     # HARDENING: `. $Script` runs the script in THIS function's scope, so any
     # variable the dot-sourced script assigns clobbers a like-named local here.
@@ -189,6 +509,7 @@ function Invoke-DotSource {
     # itself before the script body runs, so they can't be clobbered in flight.)
     $__idsScriptName = Split-Path $Script -Leaf
     $__idsRethrow = [bool]$Rethrow
+    $__idsCallerOwnsRetry = [bool]$CallerOwnsRetry
 
     # Pre-flight: verify the file exists
     if (-not (Test-Path $Script)) {
@@ -226,18 +547,54 @@ function Invoke-DotSource {
     # and the scripts have their own retry logic; marking them as JOBFAILURE
     # would abort the phase prematurely.
     $__idsStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $__idsOutOfMemory = $false
+    $__idsReportedFailure = $false
+    $__idsFailureSequenceBefore = [int]$global:MemLabsFailureSequence
     Write-DscStatus "[Invoke-DotSource] START $__idsScriptName$(Get-CmSslStateNote)" -NoStatus
     try {
         & $Script @Arguments
+        if ([int]$global:MemLabsFailureSequence -gt $__idsFailureSequenceBefore) {
+            $__idsReportedFailure = $true
+            throw "Critical guest script reported a failure without throwing: $global:MemLabsLastFailureStatus"
+        }
     }
     catch {
-        Write-DscStatus "WARNING: exception in ${__idsScriptName}: $_"
-        if ($__idsRethrow) { throw }
+        $__idsErrorRecord = $_
+        if ([int]$global:MemLabsFailureSequence -gt $__idsFailureSequenceBefore) {
+            $__idsReportedFailure = $true
+        }
+        $__idsOutOfMemory = Test-MemLabsOutOfMemoryError -ErrorRecord $__idsErrorRecord
+        $__idsStack = (($__idsErrorRecord.ScriptStackTrace -replace '\s+', ' ').Trim())
+        if ($__idsStack.Length -gt 1200) { $__idsStack = $__idsStack.Substring(0, 1200) + '...' }
+        $__idsFailure = "exception in ${__idsScriptName}: $(Get-MemLabsExceptionSummary -Exception $__idsErrorRecord.Exception); stack=$__idsStack"
+        $__idsDetailType = if ($__idsReportedFailure -or ($__idsRethrow -and -not $__idsCallerOwnsRetry)) { 3 } else { 2 }
+        Write-MemLabsExceptionDetails -ErrorRecord $__idsErrorRecord -Component 'Invoke-DotSource' -Type $__idsDetailType
+        if ($__idsReportedFailure) {
+            Write-DscStatus "FAILED: $__idsFailure" -NoStatus -Warning
+            throw
+        }
+        if ($__idsRethrow) {
+            if ($__idsCallerOwnsRetry) {
+                Write-DscStatus "WARNING: $__idsFailure" -Warning
+            }
+            else {
+                Write-DscStatus "FAILED: $__idsFailure" -Failure
+            }
+            throw
+        }
+        Write-DscStatus "WARNING: $__idsFailure" -Warning
     }
     finally {
         $__idsStopwatch.Stop()
         $__idsElapsed = $__idsStopwatch.Elapsed.ToString('hh\:mm\:ss')
         Write-DscStatus "[Invoke-DotSource] END   $__idsScriptName  ($__idsElapsed elapsed)$(Get-CmSslStateNote)" -NoStatus
+        if ($__idsOutOfMemory -or $__idsStopwatch.Elapsed.TotalMinutes -ge 15) {
+            try {
+                $reason = if ($__idsOutOfMemory) { 'out-of-memory recovery' } else { 'long-running script boundary' }
+                $null = Invoke-MemLabsGuestMemoryReclaim -Context "$__idsScriptName $reason"
+            }
+            catch { }
+        }
     }
 }
 
@@ -379,6 +736,124 @@ function Invoke-WithScriptWorkflowJsonMutex {
     }
 }
 
+function Write-ScriptWorkflowJsonAtomic {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Configuration,
+        [Parameter(Mandatory)]
+        [string]$ConfigurationFile,
+        [int]$MaximumAttempts = 5,
+        [int]$RetryMilliseconds = 200
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($ConfigurationFile)
+    $directory = [System.IO.Path]::GetDirectoryName($fullPath)
+    if (-not [System.IO.Directory]::Exists($directory)) {
+        throw "ScriptWorkflow directory does not exist: $directory"
+    }
+
+    $tempPath = Join-Path $directory (".$([System.IO.Path]::GetFileName($fullPath)).$([guid]::NewGuid().ToString('N')).tmp")
+    $backupPath = "$tempPath.bak"
+    try {
+        $json = $Configuration | ConvertTo-Json -Depth 20 -ErrorAction Stop
+        $json | Out-File -LiteralPath $tempPath -Encoding utf8 -ErrorAction Stop
+        $null = Get-Content -LiteralPath $tempPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+
+        $lastError = $null
+        for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+            try {
+                if ([System.IO.File]::Exists($fullPath)) {
+                    [System.IO.File]::Replace($tempPath, $fullPath, $backupPath)
+                }
+                else {
+                    [System.IO.File]::Move($tempPath, $fullPath)
+                }
+                return
+            }
+            catch {
+                $lastError = $_
+                if ($attempt -lt $MaximumAttempts) {
+                    Start-Sleep -Milliseconds ($RetryMilliseconds * $attempt)
+                }
+            }
+        }
+
+        throw "Could not atomically persist ScriptWorkflow state to '$fullPath' after $MaximumAttempts attempts: $($lastError.Exception.Message)"
+    }
+    finally {
+        if ([System.IO.File]::Exists($tempPath)) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+        if ([System.IO.File]::Exists($backupPath)) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Write-ScriptWorkflowFailureReceipt {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$RunId,
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Message,
+        [string]$Root = 'C:\staging\DSC'
+    )
+
+    $expected = (Get-Content -LiteralPath (Join-Path $Root 'ScriptWorkflow.expected.runid') -Raw -ErrorAction Stop).Trim()
+    if (-not $RunId.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Cannot publish failure for superseded ScriptWorkflow RunId '$RunId' (expected '$expected')."
+    }
+    $detail = ($Message -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($detail)) { throw 'ScriptWorkflow failure message must not be empty.' }
+    if ($detail.Length -gt 4000) { $detail = $detail.Substring(0, 4000) }
+    $receipt = [ordered]@{
+        SchemaVersion = 1
+        RunId = $RunId
+        Status = 'Failed'
+        Message = $detail
+        FailedAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    Write-ScriptWorkflowJsonAtomic -Configuration $receipt -ConfigurationFile (Join-Path $Root 'ScriptWorkflow.failed.json')
+}
+
+function Read-ScriptWorkflowData {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigurationFile,
+        [string[]]$RequiredSteps = @(),
+        [int]$MaximumAttempts = 5,
+        [int]$RetryMilliseconds = 500
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            $raw = Get-Content -LiteralPath $ConfigurationFile -Raw -ErrorAction Stop
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                throw "file is empty"
+            }
+            $configuration = $raw | ConvertFrom-Json -ErrorAction Stop
+            foreach ($step in $RequiredSteps) {
+                if ($configuration.PSObject.Properties.Name -notcontains $step) {
+                    throw "required step '$step' is absent"
+                }
+            }
+            return $configuration
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt $MaximumAttempts) {
+                Write-DscStatus "[ScriptWorkflow] Read attempt $attempt/$MaximumAttempts failed for '$ConfigurationFile': $($_.Exception.Message). Retrying." -NoStatus
+                Start-Sleep -Milliseconds ($RetryMilliseconds * $attempt)
+            }
+        }
+    }
+
+    throw "Could not read valid ScriptWorkflow state from '$ConfigurationFile' after $MaximumAttempts attempts: $($lastError.Exception.Message)"
+}
+
 # Atomically update one step's fields in ScriptWorkflow.json under the mutex.
 # This is the safe replacement for the scattered
 #   $c = Get-Content $ConfigurationFile | ConvertFrom-Json
@@ -412,7 +887,7 @@ function Set-ScriptWorkflowStep {
             if ($stampStart) { $cfg.$step.StartTime = $now }
             if ($stampEnd) { $cfg.$step.EndTime = $now }
             elseif ($clearEnd) { $cfg.$step.EndTime = '' }
-            $cfg | ConvertTo-Json | Out-File -FilePath $file -Force
+            Write-ScriptWorkflowJsonAtomic -Configuration $cfg -ConfigurationFile $file
             return $cfg
         })
 }
@@ -700,8 +1175,14 @@ function Write-DscStatus {
     }
 
     if ($Failure.IsPresent) {
+        $global:MemLabsFailureSequence = [int]$global:MemLabsFailureSequence + 1
+        $global:MemLabsLastFailureStatus = "$status"
         # Add prefix that host job can use to acknowledge failure
         $status = "JOBFAILURE: $status"
+    }
+
+    if ($script:MemLabsCoverageProgressPath -and $script:MemLabsCoverageProgressState) {
+        Set-MemLabsClientPackageProgress -Message "$status"
     }
 
     if (-not $NoStatus.IsPresent) {
@@ -1052,6 +1533,177 @@ function Get-VmSqlConnectionTarget {
     return $target
 }
 
+function Initialize-CMConsoleAssemblyResolver {
+    param([Parameter(Mandatory = $true)][string]$ModulePath)
+
+    if ($PSVersionTable.PSEdition -ne 'Desktop') { return }
+
+    $consoleDirectory = Split-Path -Parent $ModulePath
+    $configurationPath = Join-Path $consoleDirectory 'Microsoft.ConfigurationManagement.exe.config'
+    if (-not (Test-Path -LiteralPath $configurationPath -PathType Leaf)) {
+        Write-DscStatus "ConfigMgr console binding policy not found at '$configurationPath'; retaining normal CLR assembly resolution." -NoStatus -Warning
+        return
+    }
+
+    # CLR callbacks can run without a PowerShell runspace.
+    if (-not ('MemLabs.ConfigMgrConsoleAssemblyResolver' -as [type])) {
+        Add-Type -ReferencedAssemblies 'System.dll', 'System.Xml.dll' -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Xml;
+
+namespace MemLabs {
+    public static class ConfigMgrConsoleAssemblyResolver {
+        private sealed class Redirect {
+            public string Name, Token, Culture, Directory, FilePath;
+            public Version Minimum, Maximum, Target;
+
+            public bool SameIdentity(AssemblyName identity) {
+                return String.Equals(Name, identity.Name, StringComparison.OrdinalIgnoreCase)
+                    && String.Equals(Token, PublicKeyToken(identity), StringComparison.OrdinalIgnoreCase)
+                    && String.Equals(Culture, NormalizeCulture(identity.CultureName), StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private static readonly object Gate = new object();
+        private static readonly Dictionary<string, List<Redirect>> Policies =
+            new Dictionary<string, List<Redirect>>(StringComparer.OrdinalIgnoreCase);
+        private static bool registered;
+
+        private static string PublicKeyToken(AssemblyName identity) {
+            byte[] token = identity.GetPublicKeyToken();
+            return token == null ? "" : BitConverter.ToString(token).Replace("-", "").ToLowerInvariant();
+        }
+
+        private static string NormalizeCulture(string culture) {
+            return String.IsNullOrEmpty(culture) || culture == "neutral" ? "" : culture;
+        }
+
+        private static string Attribute(XmlNode node, string name, string fallback) {
+            XmlAttribute value = node.Attributes[name];
+            if (value != null) return value.Value;
+            if (fallback != null) return fallback;
+            throw new FormatException("Missing '" + name + "' in ConfigMgr console binding policy.");
+        }
+
+        public static int Register(string directory, string configurationPath) {
+            string root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var document = new XmlDocument();
+            var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
+            using (XmlReader reader = XmlReader.Create(configurationPath, settings)) {
+                document.Load(reader);
+            }
+            var namespaces = new XmlNamespaceManager(document.NameTable);
+            namespaces.AddNamespace("asm", "urn:schemas-microsoft-com:asm.v1");
+            var redirects = new List<Redirect>();
+            foreach (XmlNode entry in document.SelectNodes(
+                    "/configuration/runtime/asm:assemblyBinding/asm:dependentAssembly[asm:bindingRedirect]", namespaces)) {
+                XmlNode identity = entry.SelectSingleNode("asm:assemblyIdentity", namespaces);
+                XmlNode binding = entry.SelectSingleNode("asm:bindingRedirect", namespaces);
+                if (identity == null) throw new FormatException("Missing assemblyIdentity in ConfigMgr console binding policy.");
+                string name = Attribute(identity, "name", null);
+                if (name.Length == 0 || name != Path.GetFileName(name)) {
+                    throw new FormatException("Invalid assembly name in ConfigMgr console binding policy: " + name);
+                }
+                string[] range = Attribute(binding, "oldVersion", null).Split('-');
+                if (range.Length < 1 || range.Length > 2) {
+                    throw new FormatException("Invalid version range in ConfigMgr console binding policy: " + name);
+                }
+                var redirect = new Redirect {
+                    Name = name,
+                    Token = Attribute(identity, "publicKeyToken", "").Replace("null", "").ToLowerInvariant(),
+                    Culture = NormalizeCulture(Attribute(identity, "culture", "")),
+                    Minimum = new Version(range[0]),
+                    Maximum = new Version(range[range.Length - 1]),
+                    Target = new Version(Attribute(binding, "newVersion", null)),
+                    Directory = root,
+                    FilePath = Path.Combine(root, name + ".dll")
+                };
+                if (redirect.Minimum.CompareTo(redirect.Maximum) > 0) {
+                    throw new FormatException("Reversed version range in ConfigMgr console binding policy: " + name);
+                }
+                redirects.Add(redirect);
+            }
+            lock (Gate) {
+                Policies[root] = redirects;
+                if (!registered) {
+                    AppDomain.CurrentDomain.AssemblyResolve += Resolve;
+                    registered = true;
+                }
+            }
+            return redirects.Count;
+        }
+
+        private static void AddOrigin(List<string> origins, Assembly assembly) {
+            if (assembly != null && !assembly.IsDynamic && !String.IsNullOrEmpty(assembly.Location)) {
+                origins.Add(Path.GetFullPath(assembly.Location));
+            }
+        }
+
+        private static List<string> RequestOrigins(Assembly requester) {
+            var origins = new List<string>();
+            if (requester != null) {
+                AddOrigin(origins, requester);
+            } else {
+                // PowerShell can reissue a bind without RequestingAssembly; require a console call frame.
+                foreach (StackFrame frame in new StackTrace().GetFrames() ?? new StackFrame[0]) {
+                    MethodBase method = frame.GetMethod();
+                    if (method != null) AddOrigin(origins, method.Module.Assembly);
+                }
+            }
+            return origins;
+        }
+
+        private static Assembly Resolve(object sender, ResolveEventArgs args) {
+            var requested = new AssemblyName(args.Name);
+            var candidates = new List<Redirect>();
+            lock (Gate) {
+                foreach (var policy in Policies) {
+                    foreach (Redirect redirect in policy.Value) {
+                        if (redirect.SameIdentity(requested) && requested.Version != null
+                                && requested.Version.CompareTo(redirect.Minimum) >= 0
+                                && requested.Version.CompareTo(redirect.Maximum) <= 0) {
+                            candidates.Add(redirect);
+                        }
+                    }
+                }
+            }
+            if (candidates.Count == 0) return null;
+            Redirect match = null;
+            List<string> origins = RequestOrigins(args.RequestingAssembly);
+            foreach (Redirect redirect in candidates) {
+                foreach (string origin in origins) {
+                    if (origin.StartsWith(redirect.Directory, StringComparison.OrdinalIgnoreCase)) {
+                        match = redirect;
+                        break;
+                    }
+                }
+                if (match != null) break;
+            }
+            if (match == null) return null;
+            if (!File.Exists(match.FilePath)) {
+                throw new FileNotFoundException("ConfigMgr console binding redirect target is missing: "
+                    + match.Name + ", Version=" + match.Target, match.FilePath);
+            }
+            AssemblyName target = AssemblyName.GetAssemblyName(match.FilePath);
+            if (!match.SameIdentity(target) || !match.Target.Equals(target.Version)) {
+                throw new FileLoadException("ConfigMgr console binding redirect target identity mismatch. Expected "
+                    + match.Name + ", Version=" + match.Target + "; found " + target.FullName, match.FilePath);
+            }
+            return Assembly.LoadFrom(match.FilePath);
+        }
+    }
+}
+'@
+    }
+
+    $redirectCount = [MemLabs.ConfigMgrConsoleAssemblyResolver]::Register($consoleDirectory, $configurationPath)
+    Write-DscStatus "Registered $redirectCount ConfigMgr console binding redirect(s) from '$configurationPath' for Windows PowerShell." -NoStatus
+}
+
 function Set-CMSiteProvider {
     param($SiteCode, $ProviderFQDN)
 
@@ -1061,6 +1713,8 @@ function Set-CMSiteProvider {
     $uiInstallPath = $subKey.GetValue("UI Installation Directory")
     $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
     $initParams = @{}
+
+    Initialize-CMConsoleAssemblyResolver -ModulePath $modulePath
 
     # Import the ConfigurationManager.psd1 module
     if ($null -eq (Get-Module ConfigurationManager)) {
@@ -1619,6 +2273,185 @@ function Invoke-CMRoleTargetCommand {
         -ArgumentList $ArgumentList -SessionOption $sessionOption -ErrorAction Stop
 }
 
+function Test-MemLabsOutOfMemoryError {
+    param([Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $exception = $ErrorRecord.Exception
+    while ($exception) {
+        if ($exception -is [System.OutOfMemoryException] -or
+            $exception.HResult -in @(-2147024882, -2147217402) -or
+            $exception.Message -match '(?i)out\s*of\s*memory|0x8007000E|0x80041006|not enough (storage|memory)') {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Test-MemLabsProviderDisabledError {
+    param([Parameter(Mandatory = $true)] [System.Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $pattern = '(?i)\b(0x8004108A|WBEM_E_PROVIDER_DISABLED)\b'
+    if ($ErrorRecord.FullyQualifiedErrorId -match $pattern) { return $true }
+    $exception = $ErrorRecord.Exception
+    while ($exception) {
+        if ($exception.HResult -eq -2147217270 -or $exception.Message -match $pattern) {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Request-MemLabsGuestMemoryRecovery {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Context,
+        [System.Management.Automation.ErrorRecord] $ErrorRecord
+    )
+
+    $root = 'C:\staging\DSC'
+    $expectedPath = Join-Path $root 'ScriptWorkflow.expected.runid'
+    if (-not (Test-Path -LiteralPath $expectedPath)) {
+        Write-DscStatus "Cannot request host memory recovery for ${Context}: no deployment RunId is available." -Warning -NoStatus
+        return
+    }
+    $runId = (Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop).Trim()
+    if (-not $runId) { throw 'Cannot request host memory recovery: deployment RunId is empty.' }
+    $requestPath = Join-Path $root 'ScriptWorkflow.memory-recovery.json'
+    $request = [ordered]@{
+        RunId = $runId
+        Reason = 'OutOfMemory'
+        Context = $Context
+        RequestedAtUtc = [DateTime]::UtcNow.ToString('o')
+    }
+    $originProcess = $null
+    try {
+        $originProcess = [Diagnostics.Process]::GetCurrentProcess()
+        $request['Origin'] = [ordered]@{
+            ProcessId = $PID
+            Is64BitProcess = [Environment]::Is64BitProcess
+            PrivateMB = [math]::Round($originProcess.PrivateMemorySize64 / 1MB, 1)
+            WorkingSetMB = [math]::Round($originProcess.WorkingSet64 / 1MB, 1)
+            VirtualMB = [math]::Round($originProcess.VirtualMemorySize64 / 1MB, 1)
+            ManagedMB = [math]::Round([GC]::GetTotalMemory($false) / 1MB, 1)
+            Handles = $originProcess.HandleCount
+            Error = if ($ErrorRecord) { $ErrorRecord.Exception.Message } else { $null }
+            HResult = if ($ErrorRecord) { $ErrorRecord.Exception.HResult } else { $null }
+        }
+    }
+    catch {
+        $request['OriginCaptureError'] = $_.Exception.Message
+        Write-DscStatus "Memory recovery origin snapshot failed: $($_.Exception.Message)" -Warning -NoStatus
+    }
+    finally {
+        if ($originProcess) { $originProcess.Dispose() }
+    }
+    $request | ConvertTo-Json -Compress |
+        Set-Content -LiteralPath "$requestPath.tmp" -Encoding UTF8 -ErrorAction Stop
+    Move-Item -LiteralPath "$requestPath.tmp" -Destination $requestPath -Force -ErrorAction Stop
+    Write-DscStatus "CIM memory retries exhausted for ${Context}; requested a host-managed reboot and workflow retry (RunId=$runId)." -Failure
+}
+
+function Get-MemLabsProjectedCimRows {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Namespace,
+        [Parameter(Mandatory = $true)]
+        [string] $ClassName,
+        [string] $Filter,
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string[]] $Property,
+        [ValidateRange(1, 10)]
+        [int] $Attempts = 3,
+        [ValidateRange(0, 60)]
+        [int] $RetrySeconds = 5,
+        [ValidateRange(1, 300)]
+        [int] $OperationTimeoutSeconds = 30,
+        [ValidateRange(0, 300)]
+        [int] $ProviderRetryTimeoutSeconds = 120
+    )
+
+    $providerRetryDeadlineUtc = $null
+    $providerRetryError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $instances = @()
+        $queryTimeoutSeconds = $OperationTimeoutSeconds
+        if ($providerRetryError) {
+            $remainingSeconds = [int][math]::Ceiling(($providerRetryDeadlineUtc - (Get-Date).ToUniversalTime()).TotalSeconds)
+            if ($remainingSeconds -le 0) {
+                Write-DscStatus "CIM query $Namespace/$ClassName remained disabled (WBEM_E_PROVIDER_DISABLED, 0x8004108A) after the ${ProviderRetryTimeoutSeconds}-second provider retry budget. ErrorId=$($providerRetryError.FullyQualifiedErrorId)" -Warning
+                $PSCmdlet.ThrowTerminatingError($providerRetryError)
+            }
+            $queryTimeoutSeconds = [math]::Min($queryTimeoutSeconds, $remainingSeconds)
+        }
+        try {
+            $query = @{
+                Namespace           = $Namespace
+                ClassName           = $ClassName
+                Property            = $Property
+                OperationTimeoutSec = $queryTimeoutSeconds
+                ErrorAction         = 'Stop'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($Filter)) {
+                $query.Filter = $Filter
+            }
+            $instances = @(Get-CimInstance @query | Where-Object { $null -ne $_ })
+            return @($instances | ForEach-Object {
+                    $projected = [ordered]@{}
+                    foreach ($propertyName in $Property) {
+                        $projected[$propertyName] = $_.$propertyName
+                    }
+                    [pscustomobject]$projected
+                })
+        }
+        catch {
+            $isOutOfMemory = Test-MemLabsOutOfMemoryError -ErrorRecord $_
+            if (-not $isOutOfMemory -and (Test-MemLabsProviderDisabledError -ErrorRecord $_)) {
+                $providerRetryError = $_
+                if (-not $providerRetryDeadlineUtc) {
+                    $providerRetryDeadlineUtc = (Get-Date).ToUniversalTime().AddSeconds($ProviderRetryTimeoutSeconds)
+                }
+                $remainingSeconds = [int][math]::Ceiling(($providerRetryDeadlineUtc - (Get-Date).ToUniversalTime()).TotalSeconds)
+                if ($remainingSeconds -le 0) {
+                    Write-DscStatus "CIM query $Namespace/$ClassName remained disabled (WBEM_E_PROVIDER_DISABLED, 0x8004108A) after the ${ProviderRetryTimeoutSeconds}-second provider retry budget. ErrorId=$($_.FullyQualifiedErrorId)" -Warning
+                    throw
+                }
+                $delaySeconds = [math]::Min($RetrySeconds, $remainingSeconds)
+                Write-DscStatus "CIM query $Namespace/$ClassName hit an unloaded SMS Provider (WBEM_E_PROVIDER_DISABLED, 0x8004108A). Retrying in $delaySeconds second(s), provider budget remaining=${remainingSeconds}s; no memory reboot requested. ErrorId=$($_.FullyQualifiedErrorId)" -Warning
+                if ($delaySeconds -gt 0) { Start-Sleep -Seconds $delaySeconds }
+                $attempt--
+                continue
+            }
+            $providerRetryError = $null
+            if (-not $isOutOfMemory) {
+                throw
+            }
+            if ($attempt -ge $Attempts) {
+                Request-MemLabsGuestMemoryRecovery -Context "$Namespace/$ClassName" -ErrorRecord $_
+                throw
+            }
+            foreach ($instance in $instances) {
+                if ($instance -is [System.IDisposable]) { $instance.Dispose() }
+            }
+            $instances = @()
+            Write-DscStatus "CIM query $Namespace/$ClassName hit an out-of-memory boundary on attempt $attempt/$Attempts. Disposing projected rows, forcing finalizers, and retrying in $RetrySeconds second(s)." -Warning
+            [GC]::Collect()
+            [GC]::WaitForPendingFinalizers()
+            [GC]::Collect()
+            if ($RetrySeconds -gt 0) { Start-Sleep -Seconds $RetrySeconds }
+        }
+        finally {
+            foreach ($instance in @($instances)) {
+                if ($instance -is [System.IDisposable]) {
+                    try { $instance.Dispose() } catch { }
+                }
+            }
+        }
+    }
+}
+
 function Get-CMRoleRequiredWindowsFeatures {
     param(
         [Parameter(Mandatory = $true)]
@@ -1807,7 +2640,12 @@ function Get-CMRoleTargetPrerequisiteState {
                         -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
                 foreach ($marker in $markers) {
                     try {
-                        $recorded = @((Get-Content -LiteralPath $marker.FullName -TotalCount 1 -ErrorAction Stop) -split ',' |
+                        $receipt = @(Get-Content -LiteralPath $marker.FullName -TotalCount 2 -ErrorAction Stop)
+                        if ($receipt.Count -ne 2 -or ([string]$receipt[1]).Trim() -ne 'MemLabsFeatureStateVerified=1') {
+                            $probeWarnings += "Unverified Phase 3 feature receipt '$($marker.FullName)'; rerun Phase 3 to verify installed feature state."
+                            continue
+                        }
+                        $recorded = @(([string]$receipt[0]) -split ',' |
                                 ForEach-Object { "$_".Trim() } |
                                 Where-Object { $_ })
                         $unverified = @($Requirements.RequiredFeatures | Where-Object { $recorded -notcontains $_ })
@@ -2060,6 +2898,185 @@ function Confirm-CMRoleTargetPrerequisites {
     return $false
 }
 
+function Get-CMDistributionPointShareAccess {
+    param([Parameter(Mandatory = $true)][string]$ServerFQDN)
+
+    $job = $null
+    try {
+        $job = Start-Job -ArgumentList $ServerFQDN -ScriptBlock {
+            param($Server)
+            $path = "\\$Server\SMS_DP`$"
+            try {
+                if (($Server -split '\.')[0] -ieq $env:COMPUTERNAME) {
+                    $path = (Get-SmbShare -Name 'SMS_DP$' -ErrorAction Stop).Path
+                }
+                $null = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                $null = Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Select-Object -First 1
+                [pscustomobject]@{ Ready = $true; Category = ''; Error = '' }
+            }
+            catch {
+                $denied = $_.CategoryInfo.Category -eq 'PermissionDenied'
+                for ($exception = $_.Exception; $exception; $exception = $exception.InnerException) {
+                    if ($exception -is [UnauthorizedAccessException] -or ($exception.HResult -band 0xFFFF) -eq 5) { $denied = $true }
+                }
+                $category = if ($denied) { 'AccessDenied' } else { 'Unreadable' }
+                [pscustomobject]@{ Ready = $false; Category = $category; Error = "$path : $($_.Exception.Message)" }
+            }
+        }
+        if (-not (Wait-Job -Job $job -Timeout 20)) {
+            return [pscustomobject]@{ Ready = $false; Category = 'TimedOut'; Error = 'SMS_DP$ access probe timed out after 20 seconds.' }
+        }
+        $result = @(Receive-Job -Job $job -ErrorAction Stop) | Select-Object -Last 1
+        if (-not $result -or $result.Ready -isnot [bool]) { throw 'SMS_DP$ access probe returned no structured readiness result.' }
+        return $result
+    }
+    catch {
+        return [pscustomobject]@{ Ready = $false; Category = 'Unreadable'; Error = "SMS_DP$ access probe failed: $($_.Exception.Message)" }
+    }
+    finally {
+        if ($job) {
+            if ($job.State -eq 'Running') { Stop-Job -Job $job -ErrorAction SilentlyContinue }
+            Remove-Job -Job $job -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Repair-CMDistributionPointAccess {
+    param([Parameter(Mandatory = $true)][string]$ServerFQDN)
+
+    $repairScript = {
+        param([string]$SiteAccount, [string]$SiteAccountSid)
+
+        $changes = [System.Collections.Generic.List[string]]::new()
+        try {
+            if ($SiteAccount -notmatch '\\[^\\]+\$$' -or $SiteAccountSid -notmatch '^S-1-5-21-(\d+-){3}\d+$') {
+                throw 'The owning site computer account was not resolved to a domain SID.'
+            }
+            $administrators = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]'S-1-5-32-544') -ErrorAction Stop
+            $members = @(Get-LocalGroupMember -Group $administrators.Name -ErrorAction Stop)
+            $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction Stop
+            $root = [IO.Path]::GetFullPath("$($share.Path)").TrimEnd('\')
+            if ($root -notmatch '^[A-Za-z]:\\SMS_DP\$$') { throw "Refusing automatic ACL repair outside a local drive's SMS_DP$ root: '$root'." }
+            $shareAccess = @(Get-SmbShareAccess -Name 'SMS_DP$' -ErrorAction Stop)
+            if (@($shareAccess | Where-Object { "$($_.AccessControlType)" -eq 'Deny' }).Count) {
+                throw 'SMS_DP$ has an explicit share deny. Review the policy instead of overriding it.'
+            }
+            $paths = @($root)
+            if (-not (Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue)) {
+                $paths += @((Join-Path $root 'sms'), (Join-Path $root 'sms\bin'))
+            }
+            $acls = @{}
+            foreach ($path in $paths) {
+                $acls[$path] = Get-Acl -LiteralPath $path -ErrorAction Stop
+                if (@($acls[$path].GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                            Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny }).Count) {
+                    throw "'$path' has a deny ACE. Review the policy instead of resetting permissions."
+                }
+            }
+
+            $siteComputerName = ($SiteAccount -split '\\')[-1].TrimEnd('$')
+            if ($siteComputerName -ine $env:COMPUTERNAME -and
+                @($members | Where-Object { "$($_.SID)" -eq $SiteAccountSid }).Count -eq 0) {
+                Add-LocalGroupMember -Group $administrators.Name -Member $SiteAccountSid -ErrorAction Stop
+                if (@(Get-LocalGroupMember -Group $administrators.Name -ErrorAction Stop |
+                            Where-Object { "$($_.SID)" -eq $SiteAccountSid }).Count -eq 0) {
+                    throw "Could not verify '$SiteAccount' in local Administrators."
+                }
+                $changes.Add("added owning site computer '$SiteAccount' ($SiteAccountSid) to local Administrators")
+            }
+            $adminAccount = ([Security.Principal.SecurityIdentifier]'S-1-5-32-544').Translate([Security.Principal.NTAccount]).Value
+            if (@($shareAccess | Where-Object {
+                        "$($_.AccountName)" -in @($adminAccount, 'S-1-5-32-544') -and
+                        "$($_.AccessControlType)" -eq 'Allow' -and "$($_.AccessRight)" -eq 'Full'
+                    }).Count -eq 0) {
+                $null = Grant-SmbShareAccess -Name 'SMS_DP$' -AccountName $adminAccount -AccessRight Full -Force -ErrorAction Stop
+                $verifiedShare = @(Get-SmbShareAccess -Name 'SMS_DP$' -ErrorAction Stop | Where-Object {
+                        "$($_.AccountName)" -in @($adminAccount, 'S-1-5-32-544') -and
+                        "$($_.AccessControlType)" -eq 'Allow' -and "$($_.AccessRight)" -eq 'Full'
+                    })
+                if ($verifiedShare.Count -eq 0) { throw 'Could not verify the Administrators Full grant on SMS_DP$.' }
+                $changes.Add('restored Administrators Full on the SMS_DP$ share')
+            }
+            foreach ($path in $paths) {
+                $changed = $false
+                foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+                    $rules = @($acls[$path].GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                            Where-Object {
+                                $_.IdentityReference.Value -eq $sidValue -and
+                                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                                ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+                                ($_.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0
+                            })
+                    if ($rules.Count) { continue }
+                    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                        ([Security.Principal.SecurityIdentifier]$sidValue),
+                        [Security.AccessControl.FileSystemRights]::FullControl,
+                        ([Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit),
+                        [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+                    $acls[$path].SetAccessRule($rule)
+                    $changed = $true
+                }
+                if (-not $changed) { continue }
+                Set-Acl -LiteralPath $path -AclObject $acls[$path] -ErrorAction Stop
+                $verifiedAcl = Get-Acl -LiteralPath $path -ErrorAction Stop
+                foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+                    $verifiedRules = @($verifiedAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                            Where-Object {
+                                $_.IdentityReference.Value -eq $sidValue -and
+                                $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+                                ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+                                ($_.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0
+                            })
+                    if ($verifiedRules.Count -eq 0) { throw "Could not verify the required '$sidValue' grant on '$path'." }
+                }
+                $changes.Add("restored SYSTEM/Administrators Full on '$path' without an ACL reset")
+            }
+            [pscustomobject]@{ Succeeded = $true; Changes = $changes.ToArray(); Error = '' }
+        }
+        catch {
+            [pscustomobject]@{ Succeeded = $false; Changes = $changes.ToArray(); Error = $_.Exception.Message }
+        }
+    }
+    try {
+        $computer = Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 10 -ErrorAction Stop
+        if (-not $computer.PartOfDomain -or -not $computer.Domain -or -not $computer.Name) {
+            throw 'The owning site server domain identity could not be established.'
+        }
+        $account = [Security.Principal.NTAccount]::new("$($computer.Domain)", "$($computer.Name)`$")
+        $sid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
+        $result = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock $repairScript `
+            -ArgumentList @($account.Value, $sid) -OperationTimeoutMs 90000
+        if (-not $result -or $result.Succeeded -isnot [bool]) { throw 'DP access repair returned no structured result.' }
+        return $result
+    }
+    catch {
+        return [pscustomobject]@{ Succeeded = $false; Changes = @(); Error = $_.Exception.Message }
+    }
+}
+
+function Confirm-CMDistributionPointAccess {
+    param(
+        [Parameter(Mandatory = $true)][string]$ServerFQDN,
+        [Parameter(Mandatory = $true)][string]$SiteCode,
+        [Parameter(Mandatory = $true)][object]$Readiness
+    )
+
+    if ($Readiness.AccessErrorCategory -ne 'AccessDenied') { return $true }
+    Write-DscStatus "DP '$ServerFQDN' is registered but required SMS_DP$ access is denied. Checking the owning site computer and standard DP permissions." -Warning
+    $repair = Repair-CMDistributionPointAccess -ServerFQDN $ServerFQDN
+    foreach ($change in @($repair.Changes)) { Write-DscStatus "DP access repair on $ServerFQDN`: $change" }
+    if (-not $repair.Succeeded) {
+        Write-DscStatus "DP access repair on $ServerFQDN failed: $($repair.Error). No content-library ACL reset or deny-policy override is attempted." -Failure
+        return $false
+    }
+    $verified = Get-CMDistributionPointReadiness -ServerFQDN $ServerFQDN -SiteCode $SiteCode
+    if (-not $verified.AccessReady) {
+        Write-DscStatus "DP access remains unverified on $ServerFQDN after checking required grants ($($verified.Detail)). Check authentication, share/NTFS denies and the site-system installation account; refusing another blind content wait." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Get-CMDistributionPointReadiness {
     param(
         [Parameter(Mandatory = $true)]
@@ -2072,6 +3089,8 @@ function Get-CMDistributionPointReadiness {
     $configuration = $null
     $providerInfo = $null
     $shareReady = $false
+    $siteServerAdmin = $false
+    $access = [pscustomobject]@{ Ready = $false; Category = 'NotMeasured'; Error = '' }
     $errors = @()
     try {
         $configuration = Get-CMDistributionPoint -SiteSystemServerName $ServerFQDN -SiteCode $SiteCode -ErrorAction Stop
@@ -2088,18 +3107,42 @@ function Get-CMDistributionPointReadiness {
     }
     catch { $errors += "provider: $($_.Exception.Message)" }
     try {
-        $shareReady = [bool](Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock {
-                [bool](Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue)
-            })
+        $computer = Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 10 -ErrorAction Stop
+        $guest = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN `
+            -ArgumentList @("$env:COMPUTERNAME", "$($computer.Domain)") -ScriptBlock {
+                param([string]$SiteComputer, [string]$SiteDomain)
+                $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
+                $adminReady = $SiteComputer -ieq $env:COMPUTERNAME
+                if ($share -and -not $adminReady) {
+                    $account = [Security.Principal.NTAccount]::new($SiteDomain, "$SiteComputer`$")
+                    $sid = $account.Translate([Security.Principal.SecurityIdentifier]).Value
+                    $administrators = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]'S-1-5-32-544') -ErrorAction Stop
+                    $adminReady = @(Get-LocalGroupMember -Group $administrators.Name -ErrorAction Stop |
+                            Where-Object { "$($_.SID)" -eq $sid }).Count -gt 0
+                }
+                [pscustomobject]@{ ShareReady = [bool]$share; SiteServerAdmin = $adminReady }
+            }
+        $shareReady = [bool]($guest -and $guest.ShareReady)
+        $siteServerAdmin = [bool]($guest -and $guest.SiteServerAdmin)
     }
     catch { $errors += "SMS_DP`$: $($_.Exception.Message)" }
+    if ($configuration -and $providerInfo -and $shareReady) {
+        if ($siteServerAdmin) { $access = Get-CMDistributionPointShareAccess -ServerFQDN $ServerFQDN }
+        else {
+            $access = [pscustomobject]@{ Ready = $false; Category = 'AccessDenied'; Error = "Owning site computer '$env:COMPUTERNAME`$' is not a local Administrator on the DP." }
+        }
+        if (-not $access.Ready) { $errors += "SMS_DP`$ content access: $($access.Error)" }
+    }
 
     [pscustomobject]@{
-        Ready                = [bool]($configuration -and $providerInfo -and $shareReady)
+        Ready                = [bool]($configuration -and $providerInfo -and $shareReady -and $access.Ready)
         ConfigurationVisible = [bool]$configuration
         ProviderVisible      = [bool]$providerInfo
         ShareReady           = [bool]$shareReady
-        Detail               = "configuration=$([bool]$configuration), providerInfo=$([bool]$providerInfo), SMS_DP`$=$([bool]$shareReady)$(if ($errors.Count) { "; errors=$($errors -join ' | ')" })"
+        SiteServerAdmin      = $siteServerAdmin
+        AccessReady          = [bool]$access.Ready
+        AccessErrorCategory  = "$($access.Category)"
+        Detail               = "configuration=$([bool]$configuration), providerInfo=$([bool]$providerInfo), SMS_DP`$=$([bool]$shareReady), contentAccess=$([bool]$access.Ready)$(if ($errors.Count) { "; errors=$($errors -join ' | ')" })"
     }
 }
 
@@ -2122,17 +3165,20 @@ function Get-CMManagementPointReadiness {
         $guestState = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN -ScriptBlock {
             $registryReady = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\MP'
             $iisReady = $false
+            $probeErrors = @()
             try {
                 Import-Module WebAdministration -ErrorAction Stop
-                $iisReady = [bool](Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue)
+                $iisReady = Test-Path -LiteralPath 'IIS:\Sites\Default Web Site\SMS_MP' -ErrorAction Stop
             }
-            catch {}
+            catch { $probeErrors += "IIS: $($_.Exception.Message)" }
             [pscustomobject]@{
                 RegistryReady = [bool]$registryReady
                 IisReady      = [bool]$iisReady
                 W3SvcRunning  = [bool]((Get-Service -Name W3SVC -ErrorAction SilentlyContinue).Status -eq 'Running')
+                Errors        = @($probeErrors)
             }
         }
+        $errors += @($guestState.Errors | Where-Object { $_ })
     }
     catch { $errors += "guest: $($_.Exception.Message)" }
 
@@ -2314,6 +3360,501 @@ function Confirm-CMWsusPoolHardening {
     return $false
 }
 
+function Test-CMWsusReplicaContractMismatch {
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $ErrorText
+    )
+
+    return [bool]($ErrorText -match
+        "(?is)spGetUpdatesForBulkHideInReplicaSync.+expects parameter\s+'?@xmlAllUpdateIds'?.+not supplied")
+}
+
+function Get-CMWsusPostinstallArguments {
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string] $SqlServerName,
+        [Parameter(Mandatory = $true)]
+        [string] $ContentPath
+    )
+
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    $arguments.Add('postinstall')
+    if (-not [string]::IsNullOrWhiteSpace($SqlServerName) -and
+        $SqlServerName -notmatch '(?i)(MICROSOFT##WID|##WID|\\pipe\\MICROSOFT##WID)') {
+        $arguments.Add("SQL_INSTANCE_NAME=$SqlServerName")
+    }
+    $arguments.Add("CONTENT_DIR=$ContentPath")
+    return [string[]]$arguments.ToArray()
+}
+
+function Wait-CMWsusPostinstallProgress {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process] $Process,
+        [Parameter(Mandatory = $true)]
+        [string[]] $OutputPaths,
+        [ValidateRange(100, 60000)]
+        [int] $PollMilliseconds = 10000,
+        [ValidateRange(1000, 86400000)]
+        [int] $StallMilliseconds = 1800000
+    )
+
+    $startedUtc = [DateTime]::UtcNow
+    $lastProgressUtc = $startedUtc
+    $progressEvents = 0
+    $lastFingerprint = ''
+
+    $getProgressFingerprint = {
+        $signals = [System.Collections.Generic.List[string]]::new()
+        $trackedPaths = [System.Collections.Generic.List[string]]::new()
+        foreach ($path in @($OutputPaths)) {
+            if (-not [string]::IsNullOrWhiteSpace($path)) { $trackedPaths.Add($path) }
+        }
+        foreach ($tempRoot in @($env:TEMP, (Join-Path $env:windir 'Temp'))) {
+            if ([string]::IsNullOrWhiteSpace($tempRoot) -or
+                -not (Test-Path -LiteralPath $tempRoot -PathType Container)) {
+                continue
+            }
+            foreach ($tempLog in @(Get-ChildItem -LiteralPath $tempRoot -File -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.LastWriteTimeUtc -ge $startedUtc.AddMinutes(-5) -and
+                        $_.Name -match '(?i)^WSUS.*\.(log|tmp)$'
+                    })) {
+                $trackedPaths.Add($tempLog.FullName)
+            }
+        }
+
+        foreach ($path in @($trackedPaths | Select-Object -Unique)) {
+            try {
+                $item = Get-Item -LiteralPath $path -ErrorAction Stop
+                $signals.Add("file=$path|bytes=$($item.Length)|write=$($item.LastWriteTimeUtc.Ticks)")
+            }
+            catch { }
+        }
+
+        try {
+            $processState = Get-CimInstance -ClassName Win32_Process `
+                -Filter "ProcessId = $($Process.Id)" -OperationTimeoutSec 5 `
+                -ErrorAction Stop
+            if ($processState) {
+                $signals.Add(
+                    "io=$($processState.ReadOperationCount)/$($processState.WriteOperationCount)/" +
+                    "$($processState.OtherOperationCount)/$($processState.ReadTransferCount)/" +
+                    "$($processState.WriteTransferCount)/$($processState.OtherTransferCount)"
+                )
+            }
+        }
+        catch { }
+
+        return (@($signals | Sort-Object) -join ';')
+    }
+
+    $lastFingerprint = & $getProgressFingerprint
+    while (-not $Process.WaitForExit($PollMilliseconds)) {
+        $Process.Refresh()
+        $fingerprint = & $getProgressFingerprint
+        if ($fingerprint -ne $lastFingerprint) {
+            $lastFingerprint = $fingerprint
+            $lastProgressUtc = [DateTime]::UtcNow
+            $progressEvents++
+        }
+
+        $elapsedSeconds = [int]([DateTime]::UtcNow - $startedUtc).TotalSeconds
+        $stalledSeconds = [int]([DateTime]::UtcNow - $lastProgressUtc).TotalSeconds
+        $cpuSeconds = 0
+        try { $cpuSeconds = [math]::Round($Process.TotalProcessorTime.TotalSeconds, 1) } catch { }
+        Write-Progress -Activity 'WSUS postinstall repair' `
+            -Status "elapsed=${elapsedSeconds}s; no observable progress=${stalledSeconds}s; progressEvents=$progressEvents; processCpu=${cpuSeconds}s" `
+            -PercentComplete -1
+
+        if (($stalledSeconds * 1000) -ge $StallMilliseconds) {
+            $tails = [System.Collections.Generic.List[string]]::new()
+            foreach ($path in @($OutputPaths)) {
+                try {
+                    $tail = (Get-Content -LiteralPath $path -Tail 6 -ErrorAction Stop) -join ' | '
+                    if ($tail) { $tails.Add("$path`: $tail") }
+                }
+                catch { }
+            }
+            try { Stop-Process -Id $Process.Id -Force -ErrorAction Stop } catch { }
+            try { [void]$Process.WaitForExit(5000) } catch { }
+            $stallMinutes = [math]::Round($StallMilliseconds / 60000, 1)
+            throw "wsusutil postinstall made no observable progress for $stallMinutes minute(s) " +
+                "(elapsed=${elapsedSeconds}s, progressEvents=$progressEvents, signal='$lastFingerprint'). " +
+                "Output tail: $($tails -join ' || ')"
+        }
+    }
+
+    Write-Progress -Activity 'WSUS postinstall repair' -Completed
+    $Process.WaitForExit()
+    $Process.Refresh()
+    return [pscustomobject]@{
+        ElapsedSeconds         = [int]([DateTime]::UtcNow - $startedUtc).TotalSeconds
+        LastProgressAgeSeconds = [int]([DateTime]::UtcNow - $lastProgressUtc).TotalSeconds
+        ProgressEvents         = $progressEvents
+    }
+}
+
+function Invoke-CMWsusReplicaHealthCheck {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $ServerFQDN,
+        [switch] $RepairContractMismatch
+    )
+
+    $probe = {
+        param(
+            [bool] $AllowRepair,
+            [string] $PostinstallArgumentBuilderText,
+            [string] $PostinstallProgressMonitorText
+        )
+
+        $result = [ordered]@{
+            Server             = $env:COMPUTERNAME
+            ProbeSucceeded     = $false
+            WsusRunning        = $false
+            LastResult         = 'Unknown'
+            LastError          = ''
+            LastErrorText      = ''
+            PoolUp             = $false
+            Phase              = ''
+            ProcessedItems     = -1
+            TotalItems         = -1
+            UpdateCount        = -1
+            ContractMismatch   = $false
+            RepairAttempted    = $false
+            RepairSucceeded    = $false
+            PostinstallExitCode = $null
+            Detail             = ''
+        }
+
+        try {
+            [void][System.Reflection.Assembly]::LoadWithPartialName(
+                'Microsoft.UpdateServices.Administration')
+            $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+            $subscription = $wsus.GetSubscription()
+            $result.WsusRunning =
+                "$($subscription.GetSynchronizationStatus())" -eq 'Running'
+            if ($result.WsusRunning) {
+                $progress = $subscription.GetSynchronizationProgress()
+                $result.Phase = "$($progress.Phase)"
+                $result.ProcessedItems = [int]$progress.ProcessedItems
+                $result.TotalItems = [int]$progress.TotalItems
+            }
+            Import-Module WebAdministration -ErrorAction Stop
+            $result.PoolUp = (Get-WebAppPoolState -Name WsusPool -ErrorAction Stop).Value -eq 'Started'
+
+            $history = @($subscription.GetSynchronizationHistory() |
+                Sort-Object StartTime -Descending | Select-Object -First 1)
+            if ($history.Count -gt 0) {
+                $latest = $history[0]
+                $result.LastResult = "$($latest.Result)"
+                $result.LastError = "$($latest.Error)"
+                $result.LastErrorText = "$($latest.ErrorText)"
+            }
+            $result.ProbeSucceeded = $true
+            $result.ContractMismatch = [bool]($result.LastErrorText -match
+                "(?is)spGetUpdatesForBulkHideInReplicaSync.+expects parameter\s+'?@xmlAllUpdateIds'?.+not supplied")
+            if (-not $result.ContractMismatch -or -not $AllowRepair -or $result.WsusRunning) {
+                $result.RepairSucceeded = -not $result.ContractMismatch
+                $result.Detail = if ($result.ContractMismatch -and $result.WsusRunning) {
+                    'Prior sync reported a WSUS replica API/SUSDB contract mismatch; native synchronization is active, so repair is deferred'
+                }
+                elseif ($result.ContractMismatch) {
+                    'WSUS replica API/SUSDB contract mismatch detected'
+                }
+                else {
+                    "LastResult=$($result.LastResult), Running=$($result.WsusRunning), Error=$($result.LastError), ErrorText=$($result.LastErrorText)"
+                }
+                return [pscustomobject]$result
+            }
+
+            $result.RepairAttempted = $true
+            $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
+            if (-not (Test-Path -LiteralPath $wsusUtil -PathType Leaf)) {
+                throw "wsusutil.exe was not found at '$wsusUtil'"
+            }
+            $setup = Get-ItemProperty `
+                -Path 'HKLM:\SOFTWARE\Microsoft\Update Services\Server\Setup' `
+                -ErrorAction Stop
+            $contentPath = "$($setup.ContentDir)"
+            if ([string]::IsNullOrWhiteSpace($contentPath)) {
+                throw 'WSUS ContentDir is empty in the server setup registry'
+            }
+            $sqlServerName = "$($setup.SqlServerName)"
+            $argumentBuilder = [scriptblock]::Create($PostinstallArgumentBuilderText)
+            $progressMonitor = [scriptblock]::Create($PostinstallProgressMonitorText)
+            $arguments = @(& $argumentBuilder -SqlServerName $sqlServerName `
+                    -ContentPath $contentPath)
+
+            $stdoutPath = [System.IO.Path]::GetTempFileName()
+            $stderrPath = [System.IO.Path]::GetTempFileName()
+            $process = $null
+            try {
+                $process = Start-Process -FilePath $wsusUtil -ArgumentList $arguments `
+                    -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
+                    -WindowStyle Hidden -PassThru -ErrorAction Stop
+                $monitorResult = & $progressMonitor -Process $process `
+                    -OutputPaths @($stdoutPath, $stderrPath)
+                $result.PostinstallExitCode = [int]$process.ExitCode
+                $output = @(
+                    [System.IO.File]::ReadAllText($stdoutPath)
+                    [System.IO.File]::ReadAllText($stderrPath)
+                ) -join "`n"
+                if ($process.ExitCode -ne 0 -or
+                    $output -match '(?im)^\s*(Fatal Error|Exception|Post install failed)') {
+                    $tail = (($output -split '\r?\n' | Select-Object -Last 12) -join ' | ').Trim()
+                    throw "wsusutil postinstall failed (exit $($process.ExitCode)): $tail"
+                }
+            }
+            finally {
+                foreach ($path in @($stdoutPath, $stderrPath)) {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            Restart-Service -Name WsusService -Force -ErrorAction Stop
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                if (Test-Path -LiteralPath 'IIS:\AppPools\WsusPool') {
+                    Restart-WebAppPool -Name WsusPool -ErrorAction Stop
+                }
+            }
+            catch {
+                throw "WSUS postinstall succeeded, but WsusPool restart failed: $($_.Exception.Message)"
+            }
+            [void][Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+            $result.RepairSucceeded = $true
+            $result.Detail =
+                "wsusutil postinstall repaired the local WSUS database contract " +
+                "(SQL='$sqlServerName', ContentDir='$contentPath', elapsed=$($monitorResult.ElapsedSeconds)s, " +
+                "progressEvents=$($monitorResult.ProgressEvents))"
+        }
+        catch {
+            $result.ProbeSucceeded = $false
+            $result.Detail = $_.Exception.Message
+        }
+
+        return [pscustomobject]$result
+    }
+
+    try {
+        $argumentBuilderText = ${function:Get-CMWsusPostinstallArguments}.ToString()
+        $progressMonitorText = ${function:Wait-CMWsusPostinstallProgress}.ToString()
+        $state = Invoke-CMRoleTargetCommand -ComputerName $ServerFQDN `
+            -ScriptBlock $probe -ArgumentList @(
+                [bool]$RepairContractMismatch, $argumentBuilderText,
+                $progressMonitorText
+            ) `
+            -OperationTimeoutMs 300000
+        $state = @($state | Where-Object { $_ -and
+                $_.PSObject.Properties.Name -contains 'ProbeSucceeded' }) | Select-Object -Last 1
+    }
+    catch {
+        $state = [pscustomobject]@{
+            Server = $ServerFQDN; ProbeSucceeded = $false; WsusRunning = $false
+            LastResult = 'Unknown'; LastError = ''; LastErrorText = ''
+            ContractMismatch = $false; RepairAttempted = $false
+            RepairSucceeded = $false; PostinstallExitCode = $null
+            Detail = $_.Exception.Message
+        }
+    }
+
+    if (-not $state) {
+        $state = [pscustomobject]@{
+            Server = $ServerFQDN; ProbeSucceeded = $false; WsusRunning = $false
+            LastResult = 'Unknown'; LastError = ''; LastErrorText = ''
+            ContractMismatch = $false; RepairAttempted = $false
+            RepairSucceeded = $false; PostinstallExitCode = $null
+            Detail = 'WSUS replica health probe returned no structured result'
+        }
+    }
+
+    $level = if (-not $state.ProbeSucceeded -or
+        ($state.ContractMismatch -and -not $state.RepairSucceeded -and -not $state.WsusRunning)) {
+        'Failure'
+    }
+    else {
+        ''
+    }
+    $message = "WSUS replica health on $ServerFQDN`: LastResult=$($state.LastResult), " +
+        "Running=$($state.WsusRunning), ContractMismatch=$($state.ContractMismatch), " +
+        "RepairAttempted=$($state.RepairAttempted), RepairSucceeded=$($state.RepairSucceeded); " +
+        "$($state.Detail)"
+    if ($level -eq 'Failure') {
+        Write-DscStatus $message -Failure
+    }
+    else {
+        Write-DscStatus $message
+    }
+    return $state
+}
+
+function New-MemLabsClientCertificateMutex {
+    param([Parameter(Mandatory)][string]$Name)
+
+    $security = [Security.AccessControl.MutexSecurity]::new()
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $callerSid = $identity.User }
+    finally { $identity.Dispose() }
+    foreach ($sid in @(
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+            [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),
+            $callerSid
+        )) {
+        $rule = [Security.AccessControl.MutexAccessRule]::new(
+            $sid, [Security.AccessControl.MutexRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)
+        $security.AddAccessRule($rule)
+    }
+    $created = $false
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        return [Threading.MutexAcl]::Create($false, $Name, [ref]$created, $security)
+    }
+    return [Threading.Mutex]::new($false, $Name, [ref]$created, $security)
+}
+
+function Invoke-MemLabsClientCertificateStateLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StateDirectory,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList,
+        [ValidateRange(0, 30)][int]$TimeoutSeconds = 10
+    )
+
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $pathBytes = [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($StateDirectory).ToUpperInvariant())
+        $key = [BitConverter]::ToString($hash.ComputeHash($pathBytes)).Replace('-', '')
+    }
+    finally { $hash.Dispose() }
+    $mutex = $null
+    $owned = $false
+    try {
+        $mutex = New-MemLabsClientCertificateMutex -Name "Global\MemLabs_PkiPrestage_$key"
+        try { $owned = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds)) }
+        catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw "Timed out acquiring PKI pre-stage state lock for '$StateDirectory'." }
+        & $ScriptBlock @ArgumentList
+    }
+    finally {
+        if ($mutex) {
+            try { if ($owned) { $mutex.ReleaseMutex() } }
+            finally { $mutex.Dispose() }
+        }
+    }
+}
+
+function Assert-MemLabsClientCertificateReceipt {
+    param(
+        [Parameter(Mandatory)]$Receipt,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$RequestId,
+        [Parameter(Mandatory)][string[]]$Targets
+    )
+
+    if ($Receipt.RunId -isnot [string] -or $Receipt.RequestId -isnot [string] -or
+        $Receipt.RunId -ne $RunId -or $Receipt.RequestId -ne $RequestId -or
+        $Receipt.Success -isnot [bool]) {
+        throw 'Invalid PKI pre-stage receipt identity or Boolean Success value.'
+    }
+    $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($target in $Targets) {
+        if ([string]::IsNullOrWhiteSpace($target)) { throw 'PKI pre-stage target names must not be empty.' }
+        [void]$expected.Add($target)
+    }
+    $rows = @($Receipt.Results)
+    if ($rows.Count -ne $expected.Count) {
+        throw "Invalid PKI pre-stage receipt: expected $($expected.Count) target result(s), received $($rows.Count)."
+    }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($row in $rows) {
+        if ($row.Target -isnot [string] -or -not $expected.Contains($row.Target) -or
+            -not $seen.Add($row.Target) -or $row.Ready -isnot [bool]) {
+            throw 'Invalid PKI pre-stage receipt: missing, duplicate, unrequested, or untyped target result.'
+        }
+        if ($Receipt.Success -and -not $row.Ready) {
+            throw "Invalid PKI pre-stage receipt: success claimed while '$($row.Target)' is not ready."
+        }
+    }
+    if (-not $Receipt.Success -and @($rows | Where-Object { -not $_.Ready }).Count -eq 0) {
+        throw 'Invalid PKI pre-stage receipt: failure summary contradicts all-ready target results.'
+    }
+}
+
+function Publish-MemLabsClientCertificateReceipt {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Json,
+        [Parameter(Mandatory)][string]$ExpectedRunId,
+        [Parameter(Mandatory)][string]$ExpectedRequestId
+    )
+
+    $receipt = $Json | ConvertFrom-Json -ErrorAction Stop
+    # Request publication and receipt commit share this lock, not just an atomic rename.
+    Invoke-MemLabsClientCertificateStateLock -StateDirectory $Root -ScriptBlock {
+        param($directory, $value, $runId, $requestId)
+        $expected = (Get-Content -LiteralPath (Join-Path $directory 'ScriptWorkflow.expected.runid') -Raw -ErrorAction Stop).Trim()
+        if ($expected -ne $runId) { throw 'Deployment changed before PKI pre-stage receipt could be written.' }
+        $current = Read-ScriptWorkflowData -ConfigurationFile (Join-Path $directory 'ScriptWorkflow.pki-request.json') `
+            -RequiredSteps @('RunId', 'RequestId', 'Targets')
+        if ($current.RunId -ne $runId -or $current.RequestId -ne $requestId) {
+            return [pscustomobject]@{
+                Status = 'Superseded'; RunId = $runId; RequestId = $requestId
+                CurrentRequestId = $current.RequestId
+            }
+        }
+        Assert-MemLabsClientCertificateReceipt -Receipt $value -RunId $runId -RequestId $requestId -Targets @($current.Targets)
+        Write-ScriptWorkflowJsonAtomic -Configuration $value -ConfigurationFile (Join-Path $directory 'ScriptWorkflow.pki-result.json')
+        [pscustomobject]@{ Status = 'Written'; RunId = $runId; RequestId = $requestId }
+    } -ArgumentList @($Root, $receipt, $ExpectedRunId, $ExpectedRequestId)
+}
+
+function Wait-MemLabsClientCertificatePrestage {
+    param(
+        [Parameter(Mandatory = $true)][string] $RunId,
+        [Parameter(Mandatory = $true)][string[]] $Targets
+    )
+
+    $root = 'C:\staging\DSC'
+    $seenTargets = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $normalizedTargets = [Collections.Generic.List[string]]::new()
+    foreach ($target in $Targets) {
+        if ([string]::IsNullOrWhiteSpace($target)) { throw 'PKI pre-stage target names must not be empty.' }
+        if ($seenTargets.Add($target)) { $normalizedTargets.Add($target) }
+    }
+    $Targets = $normalizedTargets.ToArray()
+    $requestId = [guid]::NewGuid().ToString()
+    $request = [ordered]@{ RunId = $RunId; RequestId = $requestId; Targets = @($Targets) }
+    $requestPath = Join-Path $root 'ScriptWorkflow.pki-request.json'
+    $receiptPath = Join-Path $root 'ScriptWorkflow.pki-result.json'
+    Invoke-MemLabsClientCertificateStateLock -StateDirectory (Split-Path -Parent $requestPath) -ScriptBlock {
+        param($value, $path)
+        Write-ScriptWorkflowJsonAtomic -Configuration $value -ConfigurationFile $path
+    } -ArgumentList @($request, $requestPath)
+    Write-DscStatus "MEMLABS-PULSE-CERTS: Request=$requestId waiting for verified certificates on $($Targets -join ', ')"
+    $deadline = (Get-Date).AddSeconds(120 + 120 * $Targets.Count)
+    do {
+        if (Test-Path -LiteralPath $receiptPath) {
+            $receipt = Read-ScriptWorkflowData -ConfigurationFile $receiptPath -RequiredSteps @('RunId', 'RequestId', 'Success')
+            if ($receipt.RunId -eq $RunId -and $receipt.RequestId -eq $requestId) {
+                Assert-MemLabsClientCertificateReceipt -Receipt $receipt -RunId $RunId -RequestId $requestId -Targets $Targets
+                if ($receipt.Success -ne $true) {
+                    throw "PKI client pre-stage failed: $($receipt.Detail). See host per-target PKI readiness diagnostics before retrying Phase 8."
+                }
+                Write-DscStatus "Host verified PKI client readiness for $($Targets.Count) target(s) (Request=$requestId)."
+                return
+            }
+        }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+    throw "PKI client pre-stage timed out without a matching host receipt (RunId=$RunId, Request=$requestId, targets=$($Targets -join ', ')). Client push was not started."
+}
+
 function Get-CMReportingPointReadiness {
     param(
         [Parameter(Mandatory = $true)]
@@ -2454,12 +3995,14 @@ function Write-CMRoleProvisioningDiagnostics {
                 'C:\SMS\Logs\mpsetup.log',
                 'C:\Windows\Logs\DISM\dism.log',
                 'C:\Windows\Logs\CBS\CBS.log',
+                'C:\PBIRS\PBIRS\LogFiles\ReportingServicesService*.log',
                 'C:\Program Files\Microsoft Power BI Report Server\PBIRS\LogFiles\ReportingServicesService*.log'
             )
             $dpShare = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
             if ($dpShare) { $candidateLogs += (Join-Path $dpShare.Path 'sms\logs\smsdpprov.log') }
             foreach ($candidate in $candidateLogs) {
-                foreach ($log in @(Get-Item -Path $candidate -ErrorAction SilentlyContinue)) {
+                foreach ($log in @(Get-Item -Path $candidate -ErrorAction SilentlyContinue |
+                            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 2)) {
                     $lines = @(Get-Content -LiteralPath $log.FullName -Tail 30 -ErrorAction SilentlyContinue |
                             Where-Object { $_ -match 'error|fail|0x8|exception|fatal' } |
                             Select-Object -Last 5)
@@ -2507,6 +4050,7 @@ function Install-DP {
     $dpinstalled = $false
 
     $initialDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+    if (-not (Confirm-CMDistributionPointAccess -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode -Readiness $initialDpReadiness)) { return $false }
     if (-not $initialDpReadiness.Ready -and
         -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $DPFQDN -RoleName 'DP')) {
         return $false
@@ -2637,6 +4181,7 @@ function Install-PullDP {
     $dpinstalled = $false
 
     $initialDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode
+    if (-not (Confirm-CMDistributionPointAccess -ServerFQDN $DPFQDN -SiteCode $ServerSiteCode -Readiness $initialDpReadiness)) { return $false }
     if (-not $initialDpReadiness.Ready -and
         -not (Confirm-CMRoleTargetPrerequisites -ServerFQDN $DPFQDN -RoleName 'DP')) {
         return $false
@@ -3205,25 +4750,9 @@ function Write-ScriptWorkFlowData {
         $ConfigurationFile
     )
 
-    $mtx = $null
-    try {
-        $mtx = New-Object System.Threading.Mutex($false, "ScriptWorkflow")
-        [void]$mtx.WaitOne()
-    }
-    catch {
-        # Mutex creation can fail after snapshot restore if a stale kernel
-        # object exists with a different security context.  Proceed without
-        # synchronization — ScriptWorkflow runs sequentially.
-        $mtx = $null
-    }
-    try {
-        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    }
-    finally {
-        if ($mtx) {
-            [void]$mtx.ReleaseMutex()
-            [void]$mtx.Dispose()
-        }
+    $null = Invoke-WithScriptWorkflowJsonMutex -ArgumentList $Configuration, $ConfigurationFile -ScriptBlock {
+        param($configurationToWrite, $file)
+        Write-ScriptWorkflowJsonAtomic -Configuration $configurationToWrite -ConfigurationFile $file
     }
 }
 

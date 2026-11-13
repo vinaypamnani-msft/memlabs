@@ -39,7 +39,7 @@ $Fix_UpgradeConsole = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-Upgrade-Console"
-    FixVersion        = "261002.1"
+    FixVersion        = "261019.1"
     NeededOnFreshDeploy = $true
     AppliesToExisting   = $true
     AppliesToRoles    = @("Primary", "CAS")

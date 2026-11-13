@@ -80,7 +80,7 @@ function Connect-CMProvider {
 $providerConnected = Connect-CMProvider -SiteCode $SiteCode
 
 if (-not $providerConnected) {
-    Write-DscStatus "[PushClients] Failed to connect to CM provider. Skipping client push." -Warning
+    Write-DscStatus "[PushClients] Failed to connect to CM provider; client-push policy and requests could not be applied." -Failure:($CurrentRole -ne 'CAS') -Warning:($CurrentRole -eq 'CAS')
     return
 }
 
@@ -89,6 +89,7 @@ $cm_svc_file = "$LogPath\cm_svc.txt"
 
 # Only set client push account if not CAS
 if ($CurrentRole -ne "CAS") {
+    if (-not (Disable-MemLabsAutomaticClientPush -SiteCode $SiteCode)) { return }
     Write-DscStatus "[ClientPush] Starting client push account configuration."
     if ((Test-Path $cm_svc_file -PathType Leaf) -and ((Get-Content $cm_svc_file | Where-Object { $_.Trim() -ne '' }))) {
         Write-DscStatus "[ClientPush] Found non-empty cm_svc.txt at $cm_svc_file. Proceeding with account configuration."
@@ -145,9 +146,9 @@ if ($CurrentRole -ne "CAS") {
             }
             if (-not $found) {
                 try {
-                    Write-DscStatus "[ClientPush][Retry $retries] Running: Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc"
+                    Write-DscStatus "[ClientPush][Retry $retries] Running: Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc"
                     Write-DscStatus "[ClientPush][Retry $retries] Setting the Client Push Account"
-                    Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Write-StatusLogEntry
+                    Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Write-StatusLogEntry
                     Start-Sleep -Seconds 5
                     if ($retries -gt 5) {
                         Write-DscStatus "[ClientPush][Retry $retries] Running: Restart-Service -DisplayName 'SMS_Executive'"
@@ -582,9 +583,8 @@ foreach ($client in $ClientNameList) {
 
     Write-DscStatus "[ClientPush] ($clientIndex/$($ClientNameList.Count)) Testing SMB to $client..."
     if (-not (Test-TcpPortFast -ComputerName $client -Port 445)) {
-        # Don't wait for client to appear in collection if it's not online
-        Write-DscStatus "Could not test SMB connection to $client. Skipping."
-        continue
+        Write-DscStatus "Client push could not reach $client over SMB. Automatic push is disabled; restore connectivity and re-run Phase 8." -Failure
+        return
     }
 
     # Machine-sourced short-circuit. The CM-side pre-check above can only see
@@ -599,9 +599,8 @@ foreach ($client in $ClientNameList) {
     $success = $true
     while ($machinelist -notcontains $client) {
         if ((Get-Date) -ge $discoveryDeadline) {
-            Write-DscStatus "[ClientPush] Shared ${discoveryBudgetMinutes}m discovery budget exhausted; $client never appeared in '$CollectionName'. Skipping." -Warning
-            $success = $false
-            break
+            Write-DscStatus "[ClientPush] Shared ${discoveryBudgetMinutes}m discovery budget exhausted; $client never appeared in '$CollectionName'. Automatic push is disabled; repair discovery and re-run Phase 8." -Failure
+            return
         }
 
         # Discovery is site-wide, so re-triggering it per client is wasted work.
@@ -621,11 +620,10 @@ foreach ($client in $ClientNameList) {
     }
     if ($success) {
         # Re-check if client is already installed or ccmsetup is already running
-        # (automatic push may have beaten us). A second push races with the first
-        # and can cause E_ABORT (0x80004004).
+        # from an earlier request. A second push can race and cause E_ABORT.
         $device = Get-CMDevice -Name $client -ErrorAction SilentlyContinue
         if ($device.IsClient) {
-            Write-DscStatus "[ClientPush] $client already has the CM client (auto-push succeeded). Skipping manual push."
+            Write-DscStatus "[ClientPush] $client already has the CM client. Skipping manual push."
         }
         else {
             $ccmRunning = $false
@@ -635,11 +633,11 @@ foreach ($client in $ClientNameList) {
                 } -ErrorAction SilentlyContinue)
             } catch {}
             if ($ccmRunning) {
-                Write-DscStatus "[ClientPush] ccmsetup.exe already running on $client (auto-push in progress). Skipping manual push."
+                Write-DscStatus "[ClientPush] ccmsetup.exe already running on $client. Skipping manual push."
             }
             else {
                 Write-DscStatus "Pushing client to $client."
-                Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
+                Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true -ErrorAction Stop *>&1 | Write-StatusLogEntry
                 Start-Sleep -Seconds 5
             }
         }
@@ -654,12 +652,14 @@ catch {
         Start-Sleep -Seconds 30
         $reconnected = Connect-CMProvider -SiteCode $SiteCode -MaxRetries 4 -DelaySec 30 -Tag "[ClientPush-Reconnect]"
         if (-not $reconnected) {
-            Write-DscStatus "[ClientPush] Provider reconnect failed. Giving up." -Warning
-            break
+            Write-DscStatus "[ClientPush] Provider reconnect failed; requested client pushes remain incomplete." -Failure
+            return
         }
         Write-DscStatus "[ClientPush] Provider reconnected. Retrying push operation..."
         continue
     }
+    Write-DscStatus "[ClientPush] Client push failed after $pushMaxAttempts attempts: $_. Automatic push is disabled; correct the failure and re-run Phase 8." -Failure
+    return
 }
 
 # If we get here without catching, the push succeeded — break out of the retry loop

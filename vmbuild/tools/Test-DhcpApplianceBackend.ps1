@@ -451,7 +451,8 @@ $validClientDeploy = [pscustomobject]@{
 }
 $phaseOutput = @(Set-DeployConfigIPAddresses -DeployConfig $validClientDeploy)
 Assert-Equal 1 $script:AllocatorCalls 'Phase 1 allocation routes to appliance allocator once'
-Assert-Equal 0 $phaseOutput.Count 'Phase 1 appliance allocation does not pollute Start-Phase output'
+Assert-Equal 1 $phaseOutput.Count 'Phase 1 appliance allocation returns one readiness result'
+Assert-True ($phaseOutput[0] -is [bool] -and $phaseOutput[0]) 'Phase 1 appliance allocation proves readiness for the caller to consume'
 
 function Get-VMNote { return $null }
 function Set-VMNote { param($vmName, $vmNote); $script:CapturedPartnerNote = $vmNote }
@@ -469,6 +470,8 @@ function Get-DhcpServerv4Scope { param($ScopeId); return [pscustomobject]@{ Name
 function Get-DhcpServerv4ScopeStatistics { return $null }
 function Get-DhcpServerv4Reservation { return @() }
 function Get-VM2 { return $null }
+function Get-VM { [CmdletBinding()]param(); return @() }
+function Get-VMNetworkAdapter { [CmdletBinding()]param([Parameter(ValueFromPipeline)]$VM); process {} }
 function Get-DhcpServerv4FreeIPAddress {
     param($ScopeId)
     if (-not $script:NextNativeIp) { $script:NextNativeIp = @{} }

@@ -501,7 +501,10 @@ function Write-JobProgress {
                     # it with a status reads as "this step has taken 8 minutes" when the step
                     # actually took 4 seconds and something later went quiet. Track when the
                     # status text last changed so the bar can say which it is.
-                    $statusSince = if ($lastEntry -and $lastEntry.StatusSince -and $lastEntry.Status -eq $latestStatus) { $lastEntry.StatusSince } else { $now }
+                    $statusUnchanged = $lastEntry -and
+                        (Get-WorkflowReceiptProgressKey -StatusText "$($lastEntry.Status)") -eq
+                        (Get-WorkflowReceiptProgressKey -StatusText "$latestStatus")
+                    $statusSince = if ($statusUnchanged -and $lastEntry.StatusSince) { $lastEntry.StatusSince } else { $now }
                     if ($changed -or $stale) {
                         # Status is kept unconcatenated (Line mixes in id/activity/percent) so
                         # Wait-Phase can read "Waiting on <VM> to Complete" and spot a wait on a
@@ -1009,6 +1012,44 @@ function Set-CmMediaMountAndShare {
             try { $attached = [bool](@(Get-VMDvdDrive -VMName $vmName -ErrorAction SilentlyContinue) | Where-Object { $_.Path -eq $isoPath }) } catch { $attached = $false }
         }
 
+        # A VM that is still powering on cannot answer a guest probe. Starting an
+        # attached-media target here is safe and avoids repeated expected
+        # vm-not-running warnings while the normal phase startup catches up.
+        $vmState = $null
+        try { $vmState = [string](Get-VM -Name $vmName -ErrorAction Stop).State } catch { }
+        if ($vmState -and $vmState -ne 'Running') {
+            if ($attempt -eq 1 -or $lastProbeFailure -ne "VM state is $vmState") {
+                Write-Log "[Phase $Phase]: $($vmName): CM media probe deferred while VM state is $vmState." -LogOnly
+            }
+            $lastProbeFailure = "VM state is $vmState"
+            if ($vmState -eq 'Off') {
+                try {
+                    Start-VM -Name $vmName -ErrorAction Stop
+                    Write-Log "[Phase $Phase]: $($vmName): started VM for attached CM media enumeration." -LogOnly
+                }
+                catch {
+                    Write-Log "[Phase $Phase]: $($vmName): could not start VM for CM media enumeration: $($_.Exception.Message)" -Warning
+                }
+            }
+            $null = Wait-ForVm -VmName $vmName -VmDomainName $domain -PathToVerify "C:\Windows\System32\cmd.exe" -TimeoutMinutes 3 -Quiet
+            Start-Sleep -Seconds 5
+            continue
+        }
+        $vmUptimeSeconds = $null
+        try {
+            $vmUptime = (Get-VM -Name $vmName -ErrorAction Stop).Uptime
+            if ($vmUptime -is [TimeSpan]) { $vmUptimeSeconds = $vmUptime.TotalSeconds }
+        }
+        catch { }
+        if ($null -ne $vmUptimeSeconds -and $vmUptimeSeconds -lt 90) {
+            if ($lastProbeFailure -ne 'VM is in post-boot settling interval') {
+                Write-Log "[Phase $Phase]: $($vmName): CM media probe deferred during the first 90 seconds after boot." -LogOnly
+            }
+            $lastProbeFailure = 'VM is in post-boot settling interval'
+            Start-Sleep -Seconds 10
+            continue
+        }
+
         # DETECTION FIX + DIAG: run the media probe on a FRESH PSDirect session.
         # Get-VmSession hands Invoke-VmCommand a LONG-LIVED cached session (one per
         # VM, reused for the whole build). A cached runspace created BEFORE the CM
@@ -1305,18 +1346,28 @@ function Resolve-WaitPhaseResult {
     )
 
     $items = @($Raw)
-    if ($items.Count -eq 1) { return $Raw }
-
-    $shape = ($items | ForEach-Object { if ($null -eq $_) { '<null>' } else { $_.GetType().Name } }) -join ', '
-    if ($shape.Length -gt 300) { $shape = $shape.Substring(0, 300) + '...' }
-    Write-Log "[Phase $Phase] Wait-Phase returned $($items.Count) object(s) instead of one tally. Shape: [$shape]. Something in it leaked to the success stream; suppress it with `$null = or drop -OutputStream (that switch is for job scriptblocks only)." -Warning
+    if ($items.Count -ne 1) {
+        $shape = ($items | ForEach-Object { if ($null -eq $_) { '<null>' } else { $_.GetType().Name } }) -join ', '
+        if ($shape.Length -gt 300) { $shape = $shape.Substring(0, 300) + '...' }
+        Write-Log "[Phase $Phase] Wait-Phase returned $($items.Count) object(s) instead of one tally. Shape: [$shape]. Something in it leaked to the success stream; suppress it with `$null = or drop -OutputStream (that switch is for job scriptblocks only)." -Warning
+    }
 
     $tally = @($items | Where-Object { $_ -and ($_.PSObject.Properties.Name -contains 'Crashed') })
     if ($tally.Count -eq 0) {
-        Write-Log "[Phase $Phase] Wait-Phase returned no tally object at all; the phase result cannot be judged." -Failure
-        return $Raw
+        throw "[Phase $Phase] Wait-Phase returned no tally object; treating the phase as FAILED."
     }
-    return $tally[-1]
+    $result = $tally[-1]
+    foreach ($field in @('Failed', 'Success', 'Warning')) {
+        $count = $result.$field
+        if (($count -isnot [int] -and $count -isnot [long]) -or $count -lt 0) {
+            throw "[Phase $Phase] Wait-Phase returned an invalid '$field' count; treating the phase as FAILED."
+        }
+    }
+    if ($result.Elapsed -isnot [timespan] -or $result.Elapsed -lt [timespan]::Zero -or
+        $null -eq $result.Crashed -or $result.Crashed -isnot [System.Collections.IEnumerable] -or $result.Crashed -is [string]) {
+        throw "[Phase $Phase] Wait-Phase returned an invalid elapsed time or crash list; treating the phase as FAILED."
+    }
+    return $result
 }
 
 function Start-Phase {
@@ -1330,6 +1381,26 @@ function Start-Phase {
     if ($WhatIf) {
         Write-Log "[WhatIf] Will Start Phase $Phase"
         return $true
+    }
+
+    if ($Phase -eq 0) {
+        try {
+            $registeredNames = @((Get-VM -ErrorAction Stop).Name)
+            $missingRequiredVMs = @($deployConfig.virtualMachines | Where-Object {
+                    ($_.hidden -or ($deployConfig.parameters.RequireExistingVMs -and
+                        -not ($_.role -eq 'AADClient' -and $deployConfig.parameters.AllowAADClientRecovery))) -and
+                    $_.vmName -notin $registeredNames
+                })
+            if ($missingRequiredVMs.Count -gt 0) {
+                Write-RedX "[Phase 0] Required VMs do not exist in Hyper-V: $($missingRequiredVMs.vmName -join ', '). Aborting before VM preparation. Re-run from Phase 1 to create missing lab VMs; restore missing hidden/external dependencies separately." -WriteLog
+                return $false
+            }
+        }
+        catch {
+            Write-Exception -ExceptionInfo $_
+            Write-RedX "[Phase 0] Hyper-V inventory could not be verified; aborting before VM preparation." -WriteLog
+            return $false
+        }
     }
 
     # ExistingDCName only means a VM with role DC exists on this host -- not that it is
@@ -1533,7 +1604,11 @@ function Start-Phase {
             Write-Log "[Phase 1] Memory pre-flight check skipped (non-fatal): $_" -LogOnly
         }
 
-        Set-DeployConfigIPAddresses -DeployConfig $deployConfig
+        $ipAllocationReady = Set-DeployConfigIPAddresses -DeployConfig $deployConfig
+        if (-not $ipAllocationReady) {
+            Write-RedX "[Phase 1] Aborting before VM creation: deterministic IP pre-allocation could not prove unique ownership for every requested address." -WriteLog
+            return $false
+        }
         # GenConfig can author a relay to a new dynamically addressed DPMP
         # before that VM has an AssignedIP. Re-resolve immediately after the
         # serial allocator stamps every VM so Phase 1 notes and all later
@@ -1634,18 +1709,6 @@ function Start-Phase {
     # came up letterless -> false "media not visible" -> CMCB share never created
     # -> DC extadsch deadlock) can no longer happen. No-op for URL-download CM
     # versions; idempotent on -StartPhase reruns.
-    if ($Phase -eq 8) {
-        # Re-stamp the source-supported LocalSystem IE proxy before setupdl,
-        # including on checkpoints created by revisions that wrote a malformed
-        # DefaultConnectionSettings blob. Keep/reconcile the host deny ACL so
-        # the setup prerequisite download cannot silently fall back to direct.
-        Write-Log "[Phase 8] Reconciling ConfigMgr setup proxy clients before prerequisite download." -LogOnly
-        if (-not (Sync-CmSetupProxyClients -deployConfig $deployConfig)) {
-            Write-Log "[Phase 8] ConfigMgr setup proxy reconciliation failed; refusing to run setupdl with unverified proxy-only egress." -Failure
-            return $false
-        }
-        $null = Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
-    }
     if ($Phase -eq 8 -or $Phase -eq 9) {
         # Only mount CM media when this phase actually has DSC work. Phase 9
         # (multi-forest secondary/passive add) is a NO-OP unless there is a hidden
@@ -1660,13 +1723,37 @@ function Start-Phase {
         # returns null when no Windows DSC node needs the phase). Call the builder
         # directly -- NOT Get-ConfigurationData -- to avoid its critical-VM
         # verification side effect running twice.
-        $cmPhaseHasWork = if ($Phase -eq 9) {
-            [bool](Get-Phase9ConfigurationData -deployConfig $deployConfig)
+        try {
+            $cmConfigurationData = if ($Phase -eq 9) {
+                Get-Phase9ConfigurationData -deployConfig $deployConfig
+            }
+            else {
+                Get-Phase8ConfigurationData -deployConfig $deployConfig
+            }
+            $missingCmNodes = @(Get-MissingHyperVNodes -ConfigurationData $cmConfigurationData | Select-Object -Unique)
+            if ($missingCmNodes.Count -gt 0) {
+                Write-RedX "[Phase $Phase] Required DSC VMs do not exist in Hyper-V: $($missingCmNodes -join ', '). Aborting before snapshots, CM media preparation, or job dispatch. Re-run from Phase 1 to re-create them, or remove them from the config." -WriteLog
+                return $false
+            }
         }
-        else {
-            [bool](Get-Phase8ConfigurationData -deployConfig $deployConfig)
+        catch {
+            Write-Exception -ExceptionInfo $_
+            Write-RedX "[Phase $Phase] CM configuration/inventory preflight failed; aborting before snapshots, CM media preparation, or job dispatch." -WriteLog
+            return $false
         }
-        if ($cmPhaseHasWork) {
+        if ($cmConfigurationData) {
+            if ($Phase -eq 8) {
+                Write-Log "[Phase 8] Reconciling ConfigMgr setup proxy clients before prerequisite download." -LogOnly
+                if (-not (Sync-CmSetupProxyClients -deployConfig $deployConfig)) {
+                    Write-Log "[Phase 8] ConfigMgr setup proxy reconciliation failed; refusing to run setupdl with unverified proxy-only egress." -Failure
+                    return $false
+                }
+                $snapshotReady = Invoke-Phase8PreInstallSnapshot -deployConfig $deployConfig
+                if (-not $snapshotReady) {
+                    Write-RedX "[Phase 8] Required pre-install rollback snapshot failed; aborting before CM media preparation or job dispatch." -WriteLog
+                    return $false
+                }
+            }
             $null = Mount-CmIsoForPhase -deployConfig $deployConfig -Phase $Phase
         }
         else {
@@ -1680,7 +1767,10 @@ function Start-Phase {
     # couldn't remediate. Returning $false here breaks the New-Lab phase loop
     # immediately so other VMs don't sit waiting through CM Setup's own multi-
     # hour internal timeouts on dependencies that we already know are broken.
-    if ($start -and $start.PreflightFailed) {
+    if (-not $start -or $start.Applicable -isnot [bool] -or
+        $start.Failed -isnot [int] -or $start.Failed -lt 0 -or
+        $start.PreflightFailed -or ($start.Applicable -and -not $start.Jobs) -or
+        (-not $start.Applicable -and $start.Failed -gt 0)) {
         Write-RedX "[Phase $Phase] Preflight checks failed; aborting before any per-VM jobs are dispatched. See log for details." -WriteLog
         return $false
     }
@@ -1693,7 +1783,16 @@ function Start-Phase {
     }
     $global:PhaseSkipped = $false
 
-    $result = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
+    try {
+        $result = Resolve-WaitPhaseResult -Raw (Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig) -Phase $Phase
+    }
+    catch {
+        Write-Exception -ExceptionInfo $_
+        Write-RedX "[Phase $Phase] Job waiting or result validation failed; aborting the deployment. $($_.Exception.Message)" -WriteLog
+        return $false
+    }
+
+    $result.Failed += $start.Failed
 
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
     # zips from previous runs that are no longer referenced.
@@ -1826,6 +1925,7 @@ function Start-NormalJobs {
         [Object]$argument1,
         [Object]$argument2,
         [Object]$argument3,
+        [switch]$MaintenanceDiagnostics,
         # When set and Start-ThreadJob is available (PS7+ with ThreadJob
         # module), spawn ThreadJobs instead of Start-Job. ThreadJobs share
         # the parent process and its already-loaded modules/assemblies, so
@@ -1881,6 +1981,7 @@ function Start-NormalJobs {
     $azureFileList = if ($Common) { $Common.AzureFileList } else { $null }
     $localAdmin = if ($Common) { $Common.LocalAdmin } else { $null }
     $hasArgumentList = [bool]$argument1 -or [bool]$argument2 -or [bool]$argument3
+    if ($MaintenanceDiagnostics) { Write-VMMaintenanceHostDiagnostics -VMName 'Maintenance-parent' }
     foreach ($currentItem in $machines) {
         $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
         if ($currentItem.vmName.Length -gt $maxVmNameLength) {
@@ -1891,7 +1992,16 @@ function Start-NormalJobs {
         }
 
         Write-Log -verbose "Starting Job for $jobName $argument2, $argument3"
-        if ($useThreadJob) {
+        if ($MaintenanceDiagnostics) {
+            $maintenanceIdentity = Write-VMMaintenanceIdentityDiagnostics -Target $currentItem -Stage parent
+            if ($useThreadJob) {
+                $job = Start-ThreadJob -ScriptBlock $scriptBlock -Name $jobName -ThrottleLimit $ThreadJobThrottle -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot, $maintenanceIdentity
+            }
+            else {
+                $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot, $maintenanceIdentity
+            }
+        }
+        elseif ($useThreadJob) {
             if ($hasArgumentList) {
                 $job = Start-ThreadJob -ScriptBlock $scriptBlock -Name $jobName -ThrottleLimit $ThreadJobThrottle -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
             }
@@ -2196,11 +2306,12 @@ function Start-PhaseJobs {
         if ($missingDispatchNodes.Count -gt 0) {
             Write-Log "[Phase $Phase] ConfigurationData contains DSC node(s) with no dispatchable VM worker: $($missingDispatchNodes -join ', '). Aborting before the DC readiness handshake." -Failure
             return [PSCustomObject]@{
-                Failed         = $missingDispatchNodes.Count
-                Success        = 0
-                Jobs           = 0
-                Applicable     = $true
-                AdditionalData = $null
+                Failed          = $missingDispatchNodes.Count
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
             }
         }
 
@@ -2215,11 +2326,12 @@ function Start-PhaseJobs {
         if ($missingHyperVNodes.Count -gt 0) {
             Write-Log "[Phase $Phase] ConfigurationData contains DSC node(s) that do not exist in Hyper-V: $($missingHyperVNodes -join ', '). They cannot be configured and will fail the compile for every other node. Re-run from Phase 1 to re-create them, or remove them from the config." -Failure
             return [PSCustomObject]@{
-                Failed         = $missingHyperVNodes.Count
-                Success        = 0
-                Jobs           = 0
-                Applicable     = $true
-                AdditionalData = $null
+                Failed          = $missingHyperVNodes.Count
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
             }
         }
     }
@@ -2959,6 +3071,7 @@ DROP TABLE #memlabs_idxprobe;
     $phase10SkipSet = @{}
     $offByDesignRoles = @('StandaloneRootCA')
     if ($Phase -eq 10) {
+        Write-VMMaintenanceHostDiagnostics -VMName 'Phase10-parent'
         $allFixDefs = Get-VMFixes -ReturnDummyList
         $relevantFixes = @($allFixDefs | Where-Object { $_.AppliesToExisting -eq $true })
         $vmNoteCache = @{}
@@ -3271,9 +3384,18 @@ DROP TABLE #memlabs_idxprobe;
         $global:preparePhasePercent++
         Write-Progress2 "Preparing Phase $Phase" -Status "Evaluating virtual machine $($currentItem.vmName)" -PercentComplete $global:preparePhasePercent
 
-        # Don't touch non-hidden VM's in Phase 0
+        # Ordinary Phase 0 prepares hidden existing dependencies only. A
+        # -StartPhase resume explicitly asks Phase 0 to prepare every retained
+        # VM, including an originally non-hidden VM created before the failure.
         if ($Phase -eq 0 -and -not $currentItem.hidden) {
-            continue
+            $resumePreparation = [bool](
+                $deployConfig.parameters -and
+                $deployConfig.parameters.ResumePreparation -eq $true
+            )
+            if (-not $resumePreparation -or
+                $currentItem.vmName -notin @($existingVMs.vmName)) {
+                continue
+            }
         }
 
         # Don't touch hidden VMs in Phase 1 or 10. Phase 11 is read-only, so include
@@ -3459,11 +3581,12 @@ DROP TABLE #memlabs_idxprobe;
                 # NeededOnFreshDeploy). Per-fix version check inside
                 # Start-VMFixes still no-ops fixes already at version, so this
                 # stays cheap on a fresh deploy.
+                $maintenanceIdentity = Write-VMMaintenanceIdentityDiagnostics -Target $currentItem -Stage parent
                 if ($usePhaseThreadJob) {
-                    $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                    $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot, $maintenanceIdentity -ErrorAction Stop -ErrorVariable Err
                 }
                 else {
-                    $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                    $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot, $maintenanceIdentity -ErrorAction Stop -ErrorVariable Err
                 }
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
@@ -3671,6 +3794,13 @@ DROP TABLE #memlabs_idxprobe;
 # where X owns this job's progress and stranding it strands this job too -- PL-PICKLE
 # held Phase 8 for 55m+ on "[PL-MELT]: ..." after PL-MELT had already failed, and in
 # that shape its status never contains the word "Waiting".
+function Get-WorkflowReceiptProgressKey {
+    param([string]$StatusText)
+
+    # A receipt's age is diagnostic output, not work advancing.
+    return $StatusText -replace '(Waiting for ScriptWorkflow receipt on [A-Za-z0-9.\-]+ \()elapsed=[0-9]+(?:[.,][0-9]+)?m,\s*', '$1'
+}
+
 function Get-JobWaitTargets {
     param([string]$StatusText)
 
@@ -3681,7 +3811,10 @@ function Get-JobWaitTargets {
 
     # [regex]::Match, not -match: a nested -match would clobber the caller's $Matches.
     # WaitFor is joined with ',' so one status can name several VMs.
-    $waitMatch = [regex]::Match($StatusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
+    $waitMatch = [regex]::Match($StatusText, 'Waiting for ScriptWorkflow receipt on ([A-Za-z0-9\-]+)')
+    if (-not $waitMatch.Success) {
+        $waitMatch = [regex]::Match($StatusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
+    }
     if ($waitMatch.Success) {
         foreach ($w in ($waitMatch.Groups[1].Value -split ',')) {
             $t = "$w".Trim().ToUpperInvariant()
@@ -3694,6 +3827,49 @@ function Get-JobWaitTargets {
         if ($t) { [void]$targets.Add($t) }
     }
     return $targets.ToArray()
+}
+
+function Get-Phase8HostReliabilityEvents {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][datetime]$Since,
+        [ValidateRange(1, 100)][int]$MaximumEvents = 50
+    )
+
+    $providers = @(
+        'disk',
+        'Ntfs',
+        'storahci',
+        'stornvme',
+        'storport',
+        'volmgr',
+        'volsnap',
+        'Microsoft-Windows-WHEA-Logger',
+        'Microsoft-Windows-Resource-Exhaustion-Detector',
+        'Microsoft-Windows-Hyper-V-StorageVSP',
+        'Microsoft-Windows-Hyper-V-VMMS',
+        'Microsoft-Windows-Hyper-V-Worker'
+    )
+    $events = @(Get-WinEvent -FilterHashtable @{
+            LogName   = 'System'
+            StartTime = $Since
+            Level     = 1, 2, 3
+        } -ErrorAction Stop |
+        Where-Object { $_.ProviderName -in $providers } |
+        Select-Object -First $MaximumEvents)
+
+    return @($events | Sort-Object TimeCreated | ForEach-Object {
+            $message = "$($_.Message)" -replace '\s+', ' '
+            if ($message.Length -gt 1000) { $message = $message.Substring(0, 1000) }
+            [ordered]@{
+                TimeCreatedUtc = if ($_.TimeCreated) { ([datetime]$_.TimeCreated).ToUniversalTime().ToString('o') } else { $null }
+                Provider       = "$($_.ProviderName)"
+                EventId        = $_.Id
+                Level          = "$($_.LevelDisplayName)"
+                RecordId       = $_.RecordId
+                Message        = $message
+            }
+        })
 }
 
 function Write-Phase8DiagnosticSnapshot {
@@ -3829,6 +4005,14 @@ function Write-Phase8DiagnosticSnapshot {
             $hostMetrics['VMs'] = $vmRows.ToArray()
         }
         catch { $hostMetrics['VmError'] = $_.Exception.Message }
+        try {
+            $eventWindowStart = $now.AddMinutes(-6)
+            if ($PhaseStart -gt $eventWindowStart) { $eventWindowStart = $PhaseStart }
+            $hostMetrics['RecentReliabilityEvents'] = @(
+                Get-Phase8HostReliabilityEvents -Since $eventWindowStart -MaximumEvents 50
+            )
+        }
+        catch { $hostMetrics['ReliabilityEventError'] = $_.Exception.Message }
 
         $snapshot['Host'] = $hostMetrics
     }
@@ -3838,7 +4022,7 @@ function Write-Phase8DiagnosticSnapshot {
         [void](New-Item -Path $parent -ItemType Directory -Force -ErrorAction Stop)
     }
     $line = $snapshot | ConvertTo-Json -Depth 9 -Compress -ErrorAction Stop -WarningAction SilentlyContinue
-    [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+    Add-LogTextToFile -Path $Path -Text ($line + [Environment]::NewLine)
 }
 
 function Wait-Phase {
@@ -3925,8 +4109,24 @@ function Wait-Phase {
                 Write-Log "[Phase 8] Critical-path diagnostics will be written to $phase8TimelinePath" -LogOnly
             }
             catch {
-                Write-Log "[Phase 8] Could not initialize critical-path diagnostics: $($_.Exception.Message)" -LogOnly
+                Write-Log "[Phase 8] Could not initialize critical-path diagnostics: $($_.Exception.Message)" -Warning
                 $phase8TimelinePath = $null
+            }
+        }
+        $writePhase8FinalSnapshot = {
+            param([string]$Trigger)
+            if ($phase8TimelinePath) {
+                try {
+                    foreach ($phase8Job in @($jobs)) {
+                        if ($phase8Job) { $phase8SeenJobs[$phase8Job.Id] = $phase8Job }
+                    }
+                    $null = Write-Phase8DiagnosticSnapshot -Path $phase8TimelinePath -Jobs @($phase8SeenJobs.Values) `
+                        -PhaseStart $StartTime -Trigger $Trigger -DeployConfig $DeployConfig -IncludeHostMetrics
+                    Write-Log "[Phase 8] Critical-path diagnostics captured '$Trigger' -> $phase8TimelinePath" -LogOnly
+                }
+                catch {
+                    Write-Log "[Phase 8] Final critical-path diagnostic snapshot failed: $($_.Exception.Message)" -Warning
+                }
             }
         }
 
@@ -4471,6 +4671,8 @@ function Wait-Phase {
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try { $jobs | Stop-Job } catch {}
                             $return.Failed++
+                            & $writePhase8FinalSnapshot 'critical-failure'
+                            $return.Elapsed = $(get-date) - $StartTime
                             return $return
                         }
                         continue
@@ -4486,6 +4688,8 @@ function Wait-Phase {
                             }
                             catch {}
                             $return.Failed++
+                            & $writePhase8FinalSnapshot 'critical-failure'
+                            $return.Elapsed = $(get-date) - $StartTime
                             return $return
                         }
                     }
@@ -4628,7 +4832,7 @@ function Wait-Phase {
                     $phase8FingerprintParts = foreach ($phase8Job in $runningJobs) {
                         $phase8History = $global:JobProgressHistory[$phase8Job.Id]
                         '{0}|{1}|{2}' -f $phase8Job.Id, $phase8Job.State,
-                            $(if ($phase8History) { "$($phase8History.Status)" } else { '' })
+                            $(if ($phase8History) { Get-WorkflowReceiptProgressKey -StatusText "$($phase8History.Status)" } else { '' })
                     }
                     $phase8Fingerprint = @($phase8FingerprintParts) -join "`n"
                     $phase8NowUtc = [DateTime]::UtcNow
@@ -4649,8 +4853,10 @@ function Wait-Phase {
                     }
                 }
                 catch {
-                    Write-Log "[Phase 8] Critical-path diagnostic snapshot failed: $($_.Exception.Message)" -LogOnly
-                    $phase8TimelinePath = $null
+                    Write-Log "[Phase 8] Critical-path diagnostic snapshot failed; later and final captures remain enabled: $($_.Exception.Message)" -Warning
+                    $phase8NextPeriodicUtc = [DateTime]::UtcNow.AddMinutes(5)
+                    $phase8CapturedFingerprint = $phase8Fingerprint
+                    $phase8LastChangeSnapshotUtc = [DateTime]::UtcNow
                 }
             }
 
@@ -4691,22 +4897,13 @@ function Wait-Phase {
         }
         catch { Write-Log "[Phase $Phase] PSDirect leak diag failed: $_" -LogOnly -Verbose }
 
-        if ($phase8TimelinePath) {
-            try {
-                $null = Write-Phase8DiagnosticSnapshot -Path $phase8TimelinePath -Jobs @($phase8SeenJobs.Values) `
-                    -PhaseStart $StartTime -Trigger 'phase-complete' -DeployConfig $DeployConfig -IncludeHostMetrics
-                Write-Log "[Phase 8] Critical-path diagnostics completed -> $phase8TimelinePath" -LogOnly
-            }
-            catch {
-                Write-Log "[Phase 8] Final critical-path diagnostic snapshot failed: $($_.Exception.Message)" -LogOnly
-            }
-        }
+        & $writePhase8FinalSnapshot 'phase-complete'
 
         $return.Elapsed = $(get-date) - $StartTime
         return $return
     }
     catch {
-        Write-Exception -ExceptionInfo $_
+        throw
     }
     finally {
         $Global:ProgressPreference = $OriginalProgressPreference
@@ -4721,20 +4918,18 @@ function Wait-Phase {
 # left untouched for the whole phase. Gating is unchanged from the old inline
 # block: only snapshot when a CAS/Primary in the Phase 8 set has never finished
 # Phase 8 (the risky first CM install), honoring $global:MemLabsNoSnapshot and an
-# existing snapshot of the same name.
+# existing snapshot of the same name. Returns $false when a requested snapshot
+# cannot be captured consistently across the domain.
 function Invoke-Phase8PreInstallSnapshot {
     param([object]$deployConfig)
 
-    if ($global:MemLabsNoSnapshot) { return }
+    if ($global:MemLabsNoSnapshot) { return $true }
     $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
-    if (-not $cd) { return }
+    if (-not $cd) { return $true }
 
     $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Global:ConfigurationShort
-    $snapshot = $null
-    $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
-    if ($dc) {
-        $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
-    }
+    $snapshotReady = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig `
+        -SnapshotNamePattern "*$autoSnapshotName*"
 
     # Snapshot decision is based ONLY on CAS/Primary site servers in the Phase 8
     # set. They are the ones actually running CM setup; other Phase 8 VMs (DPMP,
@@ -4771,15 +4966,25 @@ function Invoke-Phase8PreInstallSnapshot {
         else {
             Write-Log "[Phase 8] Skipping auto-snapshot: CAS/Primary already completed Phase 8 (re-run)" -LogOnly
         }
+        return $true
     }
-    elseif (-not $snapshot) {
+    if ($snapshotReady) { return $true }
+
+    $takeSnapshot = [bool]$global:MemLabsAutoSnapshot
+    if (-not $takeSnapshot) {
         $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
-        if (-not ($response -eq "n")) {
-            Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
-            write-log -HostOnly ""
-            write-log "Auto Snapshot $autoSnapshotName completed."
-        }
+        $takeSnapshot = $response -ne "n"
     }
+    if (-not $takeSnapshot) { return $true }
+
+    $snapshotSucceeded = Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
+    if (-not $snapshotSucceeded) {
+        Write-Log "[Phase 8] Pre-install rollback snapshot is incomplete. Refusing to launch ConfigMgr setup." -Failure
+        return $false
+    }
+    write-log -HostOnly ""
+    write-log "Auto Snapshot $autoSnapshotName completed."
+    return $true
 }
 
 function Get-ConfigurationData {

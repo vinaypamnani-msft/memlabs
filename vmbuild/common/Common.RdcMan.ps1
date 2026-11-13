@@ -88,14 +88,9 @@ function Save-RDCManPinnedCopy {
     return $false
 }
 
-# Put the pinned build in MemLabs' own directory. Cache first, storage account second. Never
-# touches C:\tools -- that belongs to chocolatey.
-function Restore-RDCManPinnedVersion {
-    [CmdletBinding(SupportsShouldProcess = $true)]
+function Get-RDCManPinnedSource {
+    [CmdletBinding()]
     param([switch]$Quiet)
-
-    $exe = Join-Path $global:RDCManPinnedDir 'RDCMan.exe'
-    if ((Get-RDCManVersion -Path $exe) -eq $global:RDCManPinnedVersion) { return $true }
 
     $null = Save-RDCManPinnedCopy
     $source = $null
@@ -120,8 +115,22 @@ function Restore-RDCManPinnedVersion {
             Write-Log ("RDCMan $global:RDCManPinnedVersion is not cached and not in storage; falling back to the sysinternals copy. " +
                 "Add a SupportFiles entry with id '$global:RDCManStorageFileId' pointing at support\$global:RDCManCacheFileName to pin it.") -LogOnly -Verbose
         }
-        return $false
+        return $null
     }
+    return $source
+}
+
+# Put the pinned build in MemLabs' own directory. Cache first, storage account second. Never
+# touches C:\tools -- that belongs to chocolatey.
+function Restore-RDCManPinnedVersion {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([switch]$Quiet)
+
+    $exe = Join-Path $global:RDCManPinnedDir 'RDCMan.exe'
+    if ((Get-RDCManVersion -Path $exe) -eq $global:RDCManPinnedVersion) { return $true }
+
+    $source = Get-RDCManPinnedSource -Quiet:$Quiet
+    if (-not $source) { return $false }
 
     if (-not $PSCmdlet.ShouldProcess($exe, "Install RDCMan $global:RDCManPinnedVersion")) { return $false }
 
@@ -461,9 +470,134 @@ function Install-RDCman {
     # Point .rdg at whichever build was actually resolved, so the association can never
     # disagree with the version the rest of this file makes decisions from.
     & cmd /c assoc .rdg=rdcman | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not associate .rdg files with RDCMan (exit code $LASTEXITCODE)." }
     & cmd /c ftype rdcman=$exe | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not register RDCMan at '$exe' (exit code $LASTEXITCODE)." }
 }
 
+<#
+.SYNOPSIS
+    Prepare the pinned RDCMan build and refresh connection files during startup.
+.DESCRIPTION
+    Resolve the pinned installer before stopping RDCMan. Regenerate both remote
+    connection files when installing the pin, replacing a newer running client,
+    or repairing a missing, invalid, or newer-format RDG. Healthy pinned clients
+    are left running. A stopped client is restarted using the pinned executable,
+    not its previously running newer binary.
+#>
+function Initialize-RDCManAtStartup {
+    [CmdletBinding()]
+    param([switch]$WhatIf)
+
+    if ($WhatIf.IsPresent) {
+        Write-Log "[WhatIf] Will prepare pinned RDCMan and refresh connection files at startup, if needed."
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Common.FatalError)) {
+        Write-Log "Skipping RDCMan startup preparation because MemLabs initialization reported a fatal error. Existing connection files were left unchanged." -Warning
+        return
+    }
+
+    $pinnedExe = Join-Path $global:RDCManPinnedDir 'RDCMan.exe'
+    $needsInstall = (Get-RDCManVersion -Path $pinnedExe) -ne $global:RDCManPinnedVersion
+    $needsRefresh = $needsInstall
+    $running = @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq 'RDCMan' })
+    foreach ($process in $running) {
+        if ((Get-RDCManVersion -Path $process.Path) -gt $global:RDCManPinnedVersion) {
+            $needsRefresh = $true
+        }
+    }
+
+    if (Test-Path -LiteralPath $Common.RdcManFilePath) {
+        $document = [System.Xml.XmlDocument]::new()
+        try {
+            $document.Load($Common.RdcManFilePath)
+            $fileVersion = $null
+            if ($document.DocumentElement.Name -ne 'RDCMan' -or
+                $null -eq $document.SelectSingleNode('/RDCMan/file') -or
+                -not [version]::TryParse($document.DocumentElement.GetAttribute('programVersion'), [ref]$fileVersion)) {
+                Write-Log "The existing RDCMan file at '$($Common.RdcManFilePath)' is invalid and requires regeneration." -Warning
+                $needsRefresh = $true
+            }
+            elseif ($fileVersion -gt $global:RDCManPinnedVersion) {
+                $needsRefresh = $true
+            }
+        }
+        catch [System.Xml.XmlException], [System.IO.IOException], [System.UnauthorizedAccessException] {
+            Write-Log "Could not read the RDCMan file at '$($Common.RdcManFilePath)'; it requires regeneration. $($_.Exception.Message)" -Warning
+            $needsRefresh = $true
+        }
+    }
+    else {
+        $needsRefresh = $true
+    }
+
+    $restartRDCMan = $false
+    if ($needsRefresh) {
+        if ($needsInstall -and -not (Get-RDCManPinnedSource)) {
+            Write-Log "RDCMan $global:RDCManPinnedVersion is not available from cache or storage. Leaving RDCMan and connection files unchanged." -Warning
+            return
+        }
+
+        $vmInventory = @(Get-List -Type VM -FailOnError)
+        Write-Log "Preparing RDCMan $global:RDCManPinnedVersion and regenerating remote connection files at startup."
+        $restartRDCMan = Stop-RDCMan
+        if (-not (Restore-RDCManPinnedVersion)) {
+            throw "Could not install RDCMan $global:RDCManPinnedVersion. Connection files were left unchanged; RDCMan has not been restarted."
+        }
+    }
+
+    Install-RDCman
+    if ($needsRefresh) {
+        New-RDCManFileFromHyperV -rdcmanfile $Common.RdcManFilePath -OverWrite:$true -NoActivity -RestartRDCMan:$restartRDCMan -VmInventory $vmInventory
+        New-MRemoteNGFileFromHyperV -MRemoteNGFile $Common.MRemoteNGFilePath -OverWrite:$true -NoActivity -VmInventory $vmInventory
+    }
+}
+
+
+function Stop-RDCMan {
+    [CmdletBinding()]
+    param()
+
+    $processes = @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq 'RDCMan' })
+    foreach ($process in $processes) {
+        if ($process.HasExited) { continue }
+        Write-Log "Closing RDCMan (PID $($process.Id)) before updating connection files." -LogOnly
+        $closed = $false
+        try {
+            $closed = $process.CloseMainWindow() -and $process.WaitForExit(5000)
+        }
+        catch [System.Management.Automation.MethodInvocationException] {
+            Write-Log "RDCMan (PID $($process.Id)) could not close cleanly. $($_.Exception.Message)" -LogOnly -Verbose
+        }
+        if ($closed -or $process.HasExited) { continue }
+
+        Write-Log "RDCMan (PID $($process.Id)) did not close cleanly; force-killing it before updating connection files." -Warning
+        try {
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+        }
+        catch {
+            if (-not $process.HasExited) {
+                Write-Log "Could not force-kill RDCMan (PID $($process.Id)). Close it completely and retry. $($_.Exception.Message)" -Failure
+                throw
+            }
+            Write-Log "RDCMan (PID $($process.Id)) exited before the force-kill request." -LogOnly -Verbose
+        }
+        if (-not $process.WaitForExit(10000)) {
+            $message = "RDCMan (PID $($process.Id)) did not exit within 10 seconds after the force-kill request. Close it completely and retry; regeneration has been cancelled."
+            Write-Log $message -Failure
+            throw $message
+        }
+    }
+
+    $remaining = @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq 'RDCMan' })
+    if ($remaining.Count -gt 0) {
+        $message = "RDCMan is still running (PID(s): $($remaining.Id -join ', ')). Close it completely and retry; regeneration has been cancelled."
+        Write-Log $message -Failure
+        throw $message
+    }
+    return ($processes.Count -gt 0)
+}
 
 function Save-RdcManSettingsFile {
     param(
@@ -613,13 +747,7 @@ function Save-RdcManSettingsFile {
 
     if ($modified) {
         Write-Verbose "Stopping RDCMan and Saving $existingfile"
-        $proc = Get-Process -Name rdcman -ea Ignore
-        $killed = $false
-        if ($proc) {
-            $killed = $true
-        }
-        $proc | Stop-Process
-        Start-Sleep 1
+        $killed = Stop-RDCMan
 
         If (-not (test-path $existingfile)) {
             $existingdir = Split-Path $existingfile
@@ -762,6 +890,17 @@ function Get-RDCManOSShortName {
     }
 }
 
+<#
+.SYNOPSIS
+    Update the lab's RDCMan connection file.
+.DESCRIPTION
+    Before creating, replacing, or saving RDCMan files, request a normal close
+    and allow up to five seconds per process for exit. Force-kill any instance
+    that cannot close cleanly (including a blocking dialog), then wait up to ten
+    seconds for exit. If shutdown cannot be confirmed, fail without continuing
+    file updates. Restart RDCMan afterward only if it was stopped for the update,
+    including a caller that stopped it before installing the pinned build.
+#>
 function New-RDCManFileFromHyperV {
     [CmdletBinding()]
     param(
@@ -770,7 +909,10 @@ function New-RDCManFileFromHyperV {
         [switch]$NoActivity,
         [switch]$UseIP,
         [switch]$NoReconnect,
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [switch]$RestartRDCMan,
+        [Parameter(DontShow = $true)]
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
     )
 
     if ($WhatIf.IsPresent) {
@@ -778,6 +920,9 @@ function New-RDCManFileFromHyperV {
         return
     }
 
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity:$Activity
 
@@ -806,19 +951,18 @@ function New-RDCManFileFromHyperV {
     # lookups during Get-VMFromHyperV are instant instead of ~3s each.
     Invoke-VMNetworkBulkWarmup
 
+    $killedAlready = $RestartRDCMan.IsPresent
+    if ($OverWrite -or -not (Test-Path -LiteralPath $rdcmanfile)) {
+        if (-not $rdcExePath) {
+            $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
+            if ($proc) { $rdcExePath = $proc.Path }
+        }
+        if (Stop-RDCMan) { $killedAlready = $true }
+    }
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
             Write-Log "Stopping RDCMan.exe, deleting $rdcmanfile, and regenerating a new MEMLabs.RDG."
-            $p = @(Get-Process -Name rdcman -ea Ignore)
-            Write-Log "[RDCMan restart] OverWrite path: found $($p.Count) rdcman process(es) to stop." -LogOnly
-            if ($p.Count -gt 0) {
-                if (-not $rdcExePath) { $rdcExePath = ($p | Select-Object -First 1).Path }
-                $p | Stop-Process -force
-                $killedAlready = $true
-                Write-Log "[RDCMan restart] Stopped rdcman (killedAlready=true); exe path now '$rdcExePath'." -LogOnly
-            }
-            Start-Sleep 1
-            Remove-Item -LiteralPath $rdcmanfile -Force
+            Remove-Item -LiteralPath $rdcmanfile -Force -ErrorAction Stop
         }
         $shouldSave = $true
     }
@@ -830,7 +974,7 @@ function New-RDCManFileFromHyperV {
         if ($null -eq $template) {
             Write-Log "Could not locate $templatefile" -Failure
             if ($OverWrite -eq $false) {
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect -RestartRDCMan:$RestartRDCMan -VmInventory $VmInventory
             }
             else {
                 return
@@ -848,7 +992,7 @@ function New-RDCManFileFromHyperV {
         if ($null -eq $file) {
             Write-Log "Could not load File section from $rdcmanfile" -Failure
             if ($OverWrite -eq $false) {
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect -RestartRDCMan:$RestartRDCMan -VmInventory $VmInventory
             }
             else {
                 return
@@ -859,7 +1003,7 @@ function New-RDCManFileFromHyperV {
         if ($null -eq $group) {
             if ($OverWrite -eq $false) {
                 Write-Log "No groups remain in $rdcmanfile. Regenerating it from the template." -LogOnly -Verbose
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect -RestartRDCMan:$RestartRDCMan -VmInventory $VmInventory
             }
             else {
                 Write-Log "Could not load group section from $rdcmanfile" -Failure
@@ -897,14 +1041,15 @@ function New-RDCManFileFromHyperV {
     }
     catch {
         if ($OverWrite -eq $false) {
-            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect
+            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -NoReconnect:$NoReconnect -RestartRDCMan:$RestartRDCMan -VmInventory $VmInventory
         }
     }
     Install-RDCman
     # Dormant while pinned to 3.12: the node is a 3.21+ concept and that client never reads
     # it. Capture into VM notes still runs, so the pin can be lifted without a re-collection.
     $emitCertTrust = Test-RDCManCertTrustSupported
-    $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
+    $domainList = @($VmInventory | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Domain) } |
+        Select-Object -ExpandProperty Domain -Unique)
     foreach ($domain in $domainList) {
         Write-Verbose "Adding all machines from Domain $domain"
         $findGroup = $null
@@ -913,11 +1058,11 @@ function New-RDCManFileFromHyperV {
             Write-Log "Failed to find group to modify" -Failure
             return
         }
-        if (Remove-MissingServersFromGroup -findgroup $findGroup) {
+        if (Remove-MissingServersFromGroup -findgroup $findGroup -VmInventory $VmInventory) {
             $shouldSave = $true
         }
         # Set user/pass on the group
-        $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
+        $username = ($VmInventory | Where-Object { $_.Domain -eq $domain -and $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
 
         if ($null -eq $username) {
             Write-Log "Could not determine username from DC config for domain $domain. Assuming username is 'admin'"
@@ -947,8 +1092,7 @@ function New-RDCManFileFromHyperV {
                 $shouldSave = $true
             }
         }
-        # $vmList = (Get-List -Type VM -domain $domain).VmName
-        $vmListFull = (Get-List -Type VM -domain $domain)
+        $vmListFull = @($VmInventory | Where-Object { $_.Domain -eq $domain })
 
         $dcVM = $vmListFull | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1
         $cmDomainDefaults = if ($dcVM) { $dcVM.domainDefaults } else { $null }
@@ -1406,11 +1550,11 @@ function New-RDCManFileFromHyperV {
 
     }
 
-    if (Remove-MissingDomainsFromFile -file $file) {
+    if (Remove-MissingDomainsFromFile -file $file -VmInventory $VmInventory) {
         $shouldSave = $true
     }
     $unknownVMs = @()
-    $unknownVMs += get-list -type vm | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
+    $unknownVMs += $VmInventory | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
         Write-Verbose "New-RDCManFileFromHyperV: Adding Unknown VMs"
         $findGroup = $null
@@ -1473,16 +1617,14 @@ function New-RDCManFileFromHyperV {
             $proc = $null
             $proc = Get-Process -Name rdcman -ea Ignore | Select-Object -First 1
             if ($proc) {
-                $killed = $true
                 if (-not $rdcExePath) { $rdcExePath = $proc.Path }
-                Write-Log "[RDCMan restart] Save path: rdcman still/again running (PID $($proc.Id)); stopping it (killed=true)." -LogOnly
-                Get-Process -Name rdcman -ea Ignore | Stop-Process
             }
-            Start-Sleep 1
+            if (Stop-RDCMan) { $killed = $true }
             $existing.save($rdcmanfile) | Out-Null
         }
         catch {
             Write-RedX "Could not update $rdcmanfile. $_"
+            throw
         }
     }
     else {
@@ -1536,12 +1678,16 @@ function New-RDCManFileFromHyperV {
 function Remove-MissingServersFromGroup {
     [CmdletBinding()]
     param(
-        [object]$findgroup
+        [object]$findgroup,
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
     )
 
     $return = $false
 
-    $completeServerList = Get-List -Type VM | Select-Object -ExpandProperty vmName
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
+    $completeServerList = @($VmInventory | Select-Object -ExpandProperty vmName)
     # Search all child groups (and direct children) for servers to remove
     foreach ($item in @($findgroup.SelectNodes('.//server'))) {
         if ($item.properties.displayName -in $completeServerList -or $item.properties.name -in $completeServerList) {
@@ -1557,10 +1703,15 @@ function Remove-MissingServersFromGroup {
 function Remove-MissingDomainsFromFile {
     [CmdletBinding()]
     param(
-        [object]$file
+        [object]$file,
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
     )
     $return = $false
-    $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
+    $domainList = @($VmInventory | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Domain) } |
+        Select-Object -ExpandProperty Domain -Unique)
     Write-Verbose "[Remove-MissingDomainsFromFile] DomainList: $($domainList -join ",")"
     foreach ($group in $file.SelectNodes("group")) {
         if ($group.properties.name -in $domainList) {

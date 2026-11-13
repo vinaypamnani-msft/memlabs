@@ -142,7 +142,8 @@ Assert-Equal 'W32Time counter query failed: unavailable' ($structuredWithCollect
 $sourceEvidence = & $timeSyncEvidence $japaneseW32tm 0 @() ([pscustomobject]@{ NTPClientTimeSourceCount = 1 }) $testNow @()
 Assert-Equal $false $sourceEvidence.Synchronized 'active W32Time source alone does not prove successful synchronization'
 
-$englishEvidence = & $timeSyncEvidence @('Last Successful Sync Time: 9/8/2026 11:23:23 AM') 0 @() $null $testNow @()
+$englishSyncText = $testNow.AddMinutes(-30).ToLocalTime().ToString('G', [Globalization.CultureInfo]::CurrentCulture)
+$englishEvidence = & $timeSyncEvidence @("Last Successful Sync Time: $englishSyncText") 0 @() $null $testNow @()
 Assert-Equal $true $englishEvidence.Synchronized 'older English systems retain the w32tm text fallback'
 
 $missingTimeEvidence = & $timeSyncEvidence $japaneseW32tm 0 @() ([pscustomobject]@{ NTPClientTimeSourceCount = 0 }) $testNow @()

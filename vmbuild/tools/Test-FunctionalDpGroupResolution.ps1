@@ -29,6 +29,7 @@ function Import-TestFunction {
 }
 
 $validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
+. (Import-TestFunction -Path $validationPath -Name 'Get-MemLabsValidationProjectedCimRows')
 . (Import-TestFunction -Path $validationPath -Name 'Get-MemLabsDistributionPointGroupValidationState')
 
 $tokens = $null
@@ -59,12 +60,19 @@ Assert-Equal $true ($null -ne $helperScope -and $null -ne $callScope -and $helpe
 $script:Groups = @()
 $script:Members = @{}
 $script:Filters = New-Object System.Collections.Generic.List[string]
-function Get-WmiObject {
-    param([string]$Namespace, [string]$Class, [string]$Filter, $ErrorAction)
+function Get-CimInstance {
+    param(
+        [string]$Namespace,
+        [string]$ClassName,
+        [string]$Filter,
+        [string[]]$Property,
+        [int]$OperationTimeoutSec,
+        $ErrorAction
+    )
 
-    $script:Filters.Add("$Class|$Filter")
-    if ($Class -eq 'SMS_DistributionPointGroup') { return $script:Groups }
-    if ($Class -eq 'SMS_DPGroupMembers' -and $Filter -match "^GroupID='([^']+)'$") {
+    $script:Filters.Add("$ClassName|$Filter")
+    if ($ClassName -eq 'SMS_DistributionPointGroup') { return $script:Groups }
+    if ($ClassName -eq 'SMS_DPGroupMembers' -and $Filter -match "^GroupID='([^']+)'$") {
         return @($script:Members[$Matches[1]] | ForEach-Object {
                 [pscustomobject]@{ DPNALPath = "[`"Display=\\$_`"]MSWNET:[`"SMS_SITE=ABC`"]\\$_\" }
             })

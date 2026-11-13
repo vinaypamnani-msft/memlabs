@@ -33,11 +33,16 @@ $validationText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.V
 if ($newLabText -notmatch '\$global:MemLabsNoSnapshot\s*=\s*\[bool\]\$NoSnapshot\.IsPresent') {
     throw 'New-Lab does not publish NoSnapshot under a non-parameter global name.'
 }
+if ($newLabText -notmatch '\$global:MemLabsAutoSnapshot\s*=\s*\[bool\]\$AutoSnapshot\.IsPresent') {
+    throw 'New-Lab does not publish AutoSnapshot under a non-parameter global name.'
+}
 if ($newLabText -notmatch '\$global:MemLabsSkipValidation\s*=\s*\[bool\]\$SkipValidation\.IsPresent') {
     throw 'New-Lab does not publish SkipValidation under a non-parameter global name.'
 }
-if ($phaseText -notmatch '\$global:MemLabsNoSnapshot' -or $phaseText -match '\$global:NoSnapshot') {
-    throw 'Phase orchestration does not consume only the non-colliding snapshot global.'
+if ($phaseText -notmatch '\$global:MemLabsNoSnapshot' -or
+    $phaseText -notmatch '\$global:MemLabsAutoSnapshot' -or
+    $phaseText -match '\$global:(NoSnapshot|AutoSnapshot)') {
+    throw 'Phase orchestration does not consume only the non-colliding snapshot globals.'
 }
 if ($validationText -notmatch '\$global:MemLabsSkipValidation' -or $validationText -match '\$global:SkipValidation') {
     throw 'Configuration validation does not consume only the non-colliding validation global.'

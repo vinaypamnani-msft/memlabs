@@ -29,12 +29,25 @@ function Set-BackgroundImage {
         return 
     }
     
+    $settingsLock = $null
+    $temporaryPath = $null
     try {
         $LocalAppData = $env:LOCALAPPDATA
         $SettingsJson = (Join-Path $LocalAppData "Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json")
         if (-not (Test-Path $SettingsJson)) {
             return 
         }
+        $settingsLock = [IO.File]::Open("$SettingsJson.memlabs.lock", [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $originalBytes = [IO.File]::ReadAllBytes($SettingsJson)
+        $originalText = [Text.Encoding]::UTF8.GetString($originalBytes).TrimStart([char]0xFEFF)
+        $document = ConvertFrom-Json -InputObject ('{"settings":' + $originalText + '}') -ErrorAction Stop
+        $a = $document.settings
+        if ($a -isnot [pscustomobject]) { throw 'Terminal settings must contain a JSON object.' }
+        if (-not $a.PSObject.Properties.Match('profiles').Count) {
+            $a | Add-Member -MemberType NoteProperty -Name 'profiles' -Value ([pscustomobject]@{})
+        }
+        if ($a.profiles -isnot [pscustomobject]) { throw 'Terminal profiles must contain a JSON object.' }
 
         if ($opacityPercent -lt 5) {
             $opacityPercent = 5        
@@ -46,7 +59,6 @@ function Set-BackgroundImage {
 
     
 
-        $a = Get-Content $SettingsJson | ConvertFrom-Json   
         $a | Add-Member -MemberType NoteProperty -Name "tabWidthMode" -Value "titleLength" -Force
         $a | Add-Member -MemberType NoteProperty -Name "initialRows" -Value 40 -Force
         $a | Add-Member -MemberType NoteProperty -Name "initialCols" -Value 140 -Force
@@ -103,9 +115,36 @@ function Set-BackgroundImage {
     
         }
     
-        $a | ConvertTo-Json -Depth 100 | Out-File -encoding utf8 $SettingsJson
+        $json = $a | ConvertTo-Json -Depth 100 -ErrorAction Stop
+        $temporaryPath = "$SettingsJson.memlabs-$([guid]::NewGuid().ToString('N')).tmp"
+        $encoding = [Text.UTF8Encoding]::new($true)
+        $bytes = $encoding.GetPreamble() + $encoding.GetBytes($json)
+        $stream = [IO.File]::Open($temporaryPath, [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        }
+        finally { $stream.Dispose() }
+        $null = Get-Content -LiteralPath $temporaryPath -Raw -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($SettingsJson)) -cne
+            [Convert]::ToBase64String($originalBytes)) {
+            throw 'Terminal settings changed during the update; refusing to overwrite the newer settings.'
+        }
+        # Never truncate the live file: replacement and last-good backup are one filesystem operation.
+        [IO.File]::Replace($temporaryPath, $SettingsJson, "$SettingsJson.memlabs.bak")
     }
-    catch {}
+    catch {
+        Write-Warning "Windows Terminal appearance update skipped; existing settings were not overwritten: $($_.Exception.Message)" -WarningAction Continue
+    }
+    finally {
+        if ($temporaryPath -and [IO.File]::Exists($temporaryPath)) {
+            try { [IO.File]::Delete($temporaryPath) }
+            catch { Write-Warning "Could not remove Terminal settings staging file '$temporaryPath': $($_.Exception.Message)" -WarningAction Continue }
+        }
+        if ($settingsLock) { $settingsLock.Dispose() }
+    }
 }
 function Get-Animate {
     # Clear the screen

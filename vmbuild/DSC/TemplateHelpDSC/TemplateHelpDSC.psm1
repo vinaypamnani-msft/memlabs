@@ -2,6 +2,10 @@
 # WmiPrvSE -> Winmgmt -> WinRM, and block the engine if that client never drains them.
 $ProgressPreference = 'SilentlyContinue'
 
+if (-not (Test-Path -LiteralPath 'C:\temp' -PathType Container)) {
+    $null = New-Item -ItemType Directory -Path 'C:\temp' -Force -ErrorAction Stop
+}
+
 enum Ensure {
     Absent
     Present
@@ -57,7 +61,7 @@ function Get-InstalledProducts {
 }
 
 function Get-MsiProductVersion {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [hashtable]$InstallerState)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "MSI not found at $Path"
@@ -66,6 +70,12 @@ function Get-MsiProductVersion {
     $database = $null
     $view = $null
     $record = $null
+    $codeView = $null
+    $codeRecord = $null
+    $upgradeView = $null
+    $upgradeRecord = $null
+    $relatedCodes = $null
+    $summaryInfo = $null
     try {
         $installer = New-Object -ComObject WindowsInstaller.Installer
         $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
@@ -73,16 +83,115 @@ function Get-MsiProductVersion {
         $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
         $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
         if (-not $record) { throw "MSI Property table has no ProductVersion row" }
-        return [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+        $versionText = [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+        if ($null -ne $InstallerState) {
+            $InstallerState.Clear()
+            $codeView = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database, @('SELECT `Value` FROM `Property` WHERE `Property`=''ProductCode'''))
+            $null = $codeView.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $codeView, $null)
+            $codeRecord = $codeView.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $codeView, $null)
+            if (-not $codeRecord) { throw 'MSI Property table has no ProductCode row' }
+            $productCode = [string]$codeRecord.GetType().InvokeMember('StringData', 'GetProperty', $null, $codeRecord, @(1))
+            $summaryInfo = $database.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null, $database, @(0))
+            $InstallerState.ProductCode = ([guid]$productCode).ToString('B')
+            $InstallerState.PackageCode = ([guid]$summaryInfo.GetType().InvokeMember('Property', 'GetProperty', $null, $summaryInfo, @(9))).ToString('B')
+            $productState = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($productCode))
+            $InstallerState.State = [int]$productState
+            $InstallerState.Installed = $productState -eq 5
+            $InstallerState.CoreState = -1
+            $InstallerState.PackageName = 'msodbcsql.msi'
+            if ($InstallerState.Installed) {
+                $InstallerState.CoreState = $installer.GetType().InvokeMember('FeatureState', 'GetProperty', $null, $installer, @($productCode, 'SQL_SQLODBC_CORE'))
+            }
+            if ($productState -in @(1, 5)) {
+                $InstallerState.PackageName = [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($productCode, 'PackageName'))
+            }
+            $packageName = "$($InstallerState.PackageName)"
+            if ([string]::IsNullOrWhiteSpace($packageName) -or
+                $packageName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+                [IO.Path]::GetExtension($packageName) -ine '.msi') {
+                throw "ODBC MSI reports an invalid source package name '$packageName'"
+            }
+            $upgradeView = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database, @('SELECT `Value` FROM `Property` WHERE `Property`=''UpgradeCode'''))
+            $null = $upgradeView.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $upgradeView, $null)
+            $upgradeRecord = $upgradeView.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $upgradeView, $null)
+            if (-not $upgradeRecord) { throw 'MSI Property table has no UpgradeCode row' }
+            $upgradeCode = [string]$upgradeRecord.GetType().InvokeMember('StringData', 'GetProperty', $null, $upgradeRecord, @(1))
+            $InstallerState.UpgradeCode = ([guid]$upgradeCode).ToString('B')
+            $relatedCodes = $installer.GetType().InvokeMember('RelatedProducts', 'GetProperty', $null, $installer, @($upgradeCode))
+            $relatedProducts = [System.Collections.Generic.List[object]]::new()
+            foreach ($relatedCode in $relatedCodes) {
+                if ($relatedCode -ieq $productCode) { continue }
+                $relatedState = $installer.GetType().InvokeMember('ProductState', 'GetProperty', $null, $installer, @($relatedCode))
+                # VersionString is unavailable for advertised products.
+                [uint32]$packedVersion = $installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'Version'))
+                $relatedVersion = [version]::new(
+                    [int]($packedVersion -shr 24), [int](($packedVersion -shr 16) -band 255), [int]($packedVersion -band 65535))
+                $cachedPackage = if ($relatedState -eq 5) {
+                    [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'LocalPackage'))
+                } else { '' }
+                $relatedProducts.Add([pscustomobject]@{
+                        ProductCode = ([guid]$relatedCode).ToString('B')
+                        Version = $relatedVersion
+                        State = [int]$relatedState
+                        PackageCode = ([guid]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'PackageCode'))).ToString('B')
+                        UpgradeCode = $InstallerState.UpgradeCode
+                        PackageName = [string]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'PackageName'))
+                        Language = [int]$installer.GetType().InvokeMember('ProductInfo', 'GetProperty', $null, $installer, @($relatedCode, 'Language'))
+                        CachedPackagePresent = [bool]($cachedPackage -and (Test-Path -LiteralPath $cachedPackage -PathType Leaf))
+                    })
+            }
+            $InstallerState.RelatedProducts = $relatedProducts.ToArray()
+        }
+        return $versionText
     }
     finally {
-        foreach ($comObject in @($record, $view, $database, $installer)) {
+        foreach ($comObject in @($summaryInfo, $relatedCodes, $upgradeRecord, $upgradeView, $codeRecord, $codeView, $record, $view, $database, $installer)) {
             if ($comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
                 try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($comObject) }
                 catch { Write-Verbose "Could not release Windows Installer COM object: $($_.Exception.Message)" }
             }
         }
     }
+}
+
+function Save-MemLabsOdbcRecoveryPackage {
+    param([Parameter(Mandatory)]$Product)
+
+    $releaseLinks = @{
+        '18.0.1' = 2186919; '18.1.1' = 2202930; '18.1.2' = 2214634
+        '18.2.1' = 2223270; '18.2.2' = 2239549; '18.3.1' = 2242886
+        '18.3.2' = 2249006; '18.3.3' = 2266640; '18.4.1' = 2280794
+        '18.5.1' = 2307162; '18.5.2' = 2335671; '18.6.1' = 2345415
+        '18.6.2' = 2358430
+    }
+    $release = $Product.Version.ToString(3)
+    if (-not $releaseLinks.ContainsKey($release)) {
+        throw "No verified Microsoft recovery source is known for legacy ODBC $release ($($Product.ProductCode))"
+    }
+    $packageName = "$($Product.PackageName)"
+    if ([string]::IsNullOrWhiteSpace($packageName) -or
+        $packageName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+        [IO.Path]::GetExtension($packageName) -ine '.msi') {
+        throw "Legacy ODBC reports an invalid source package name '$packageName'"
+    }
+    $directory = Join-Path $env:ProgramData "MemLabs\Installers\ODBC18\$release\$($Product.ProductCode.Trim('{}'))"
+    $null = New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop
+    $path = Join-Path $directory $packageName
+    $language = '0x{0:X}' -f $Product.Language
+    $url = "https://go.microsoft.com/fwlink/?linkid=$($releaseLinks[$release])&clcid=$language"
+    $null = Invoke-DownloadFile -url $url -dest $path -BypassCache
+    $signature = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') {
+        throw "Legacy ODBC recovery MSI has no valid Microsoft signature: $path; status=$($signature.Status); signer='$($signature.SignerCertificate.Subject)'; guestUtc=$([datetime]::UtcNow.ToString('o'))"
+    }
+    $identity = @{}
+    $null = Get-MsiProductVersion -Path $path -InstallerState $identity
+    if ($identity.ProductCode -ine $Product.ProductCode -or
+        $identity.PackageCode -ine $Product.PackageCode -or
+        $identity.UpgradeCode -ine $Product.UpgradeCode) {
+        throw "Legacy ODBC recovery MSI identity mismatch; expected product/package/family '$($Product.ProductCode)'/'$($Product.PackageCode)'/'$($Product.UpgradeCode)', downloaded '$($identity.ProductCode)'/'$($identity.PackageCode)'/'$($identity.UpgradeCode)'. The package was not installed. Download: $path"
+    }
+    return $path
 }
 
 function Get-MemLabsOdbcCatalogState {
@@ -123,6 +232,78 @@ function Get-MemLabsOdbcCatalogState {
 function Get-MemLabsOdbcRequiredVersion {
     param([string]$DeployConfigPath = 'C:\staging\DSC\deployConfig.json')
     return (Get-MemLabsOdbcCatalogState -DeployConfigPath $DeployConfigPath).Version
+}
+
+function Get-MemLabsInstalledOdbc18Version {
+    $values = [System.Collections.Generic.List[string]]::new()
+    $driverRegistered = $false
+    try {
+        $value = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\MSODBCSQL18' `
+            -Name 'InstalledVersion' -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace("$value")) {
+            $values.Add("$value")
+        }
+    }
+    catch { }
+
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+        $baseKey = $null
+        $subKey = $null
+        $odbcKey = $null
+        $uninstallKey = $null
+        try {
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                [Microsoft.Win32.RegistryHive]::LocalMachine,
+                $view
+            )
+            $subKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\MSODBCSQL18')
+            $value = if ($subKey) { $subKey.GetValue('InstalledVersion', $null) } else { $null }
+            if (-not [string]::IsNullOrWhiteSpace("$value")) {
+                $values.Add("$value")
+            }
+
+            $odbcKey = $baseKey.OpenSubKey('SOFTWARE\ODBC\ODBCINST.INI\ODBC Driver 18 for SQL Server')
+            $value = if ($odbcKey) { $odbcKey.GetValue('Version', $null) } else { $null }
+            if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+            $driverPath = if ($odbcKey) { "$($odbcKey.GetValue('Driver', ''))".Trim() } else { '' }
+            if ($driverPath -and (Test-Path -LiteralPath $driverPath -PathType Leaf)) {
+                $driverRegistered = $true
+            }
+
+            $uninstallKey = $baseKey.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+            if ($uninstallKey) {
+                foreach ($subKeyName in $uninstallKey.GetSubKeyNames()) {
+                    $productKey = $null
+                    try {
+                        $productKey = $uninstallKey.OpenSubKey($subKeyName)
+                        if ($productKey -and
+                            "$($productKey.GetValue('DisplayName', ''))" -eq 'Microsoft ODBC Driver 18 for SQL Server') {
+                            $value = $productKey.GetValue('DisplayVersion', $null)
+                            if (-not [string]::IsNullOrWhiteSpace("$value")) { $values.Add("$value") }
+                        }
+                    }
+                    catch { }
+                    finally {
+                        if ($productKey) { $productKey.Dispose() }
+                    }
+                }
+            }
+        }
+        catch { }
+        finally {
+            if ($uninstallKey) { $uninstallKey.Dispose() }
+            if ($odbcKey) { $odbcKey.Dispose() }
+            if ($subKey) { $subKey.Dispose() }
+            if ($baseKey) { $baseKey.Dispose() }
+        }
+    }
+
+    if (-not $driverRegistered) { return $null }
+    $versions = foreach ($value in $values) {
+        [version]$parsed = $null
+        if ([version]::TryParse($value.Trim(), [ref]$parsed)) { $parsed }
+    }
+    return @($versions | Sort-Object -Descending | Select-Object -First 1)[0]
 }
 
 
@@ -471,8 +652,10 @@ function Invoke-DownloadFile {
 # completion and can inspect ExitCode, capture a verbose log, and optionally
 # verify a registry marker proving the install registered.
 function Install-MSIPackage {
+    [CmdletBinding(DefaultParameterSetName = 'Path')]
     param(
-        [Parameter(Mandatory)][string] $MsiPath,
+        [Parameter(Mandatory, ParameterSetName = 'Path')][string] $MsiPath,
+        [Parameter(Mandatory, ParameterSetName = 'Product')][guid] $ProductCode,
         [Parameter(Mandatory)][string] $DisplayName,
         [string[]] $AdditionalArguments = @(),
         [string] $LogPath,
@@ -483,12 +666,13 @@ function Install-MSIPackage {
         [ValidateRange(1, 300)][int] $InstallBusyRetrySeconds = 30
     )
 
-    if (-not (Test-Path -Path $MsiPath)) {
+    $installTarget = if ($PSCmdlet.ParameterSetName -eq 'Product') { $ProductCode.ToString('B') } else { $MsiPath }
+    if ($PSCmdlet.ParameterSetName -eq 'Path' -and -not (Test-Path -Path $MsiPath)) {
         throw "$DisplayName install failed: MSI not found at $MsiPath"
     }
 
     if (-not $LogPath) {
-        $base = [IO.Path]::GetFileNameWithoutExtension($MsiPath)
+        $base = [IO.Path]::GetFileNameWithoutExtension($installTarget)
         $LogPath = "C:\temp\$base.install.log"
     }
     $logDir = Split-Path -Path $LogPath -Parent
@@ -496,15 +680,16 @@ function Install-MSIPackage {
         New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
 
-    $msiArgs = @("/i", "`"$MsiPath`"", "/qn", "/norestart") + $AdditionalArguments + @("/l*v", "`"$LogPath`"")
+    $msiArgs = @("/i", "`"$installTarget`"", "/qn", "/norestart") + $AdditionalArguments + @("/l*v", "`"$LogPath`"")
+    $msiArgumentLine = $msiArgs -join ' '
 
-    Write-Status "Installing $DisplayName from $MsiPath ..."
-    Write-Verbose ("Commandline: msiexec.exe $($msiArgs -join ' ')")
+    Write-Status "Installing $DisplayName from $installTarget ..."
+    Write-Verbose "Commandline: msiexec.exe $msiArgumentLine"
 
     $installAttempt = 0
     do {
         $installAttempt++
-        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
+        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgumentLine -Wait -PassThru -NoNewWindow
         $exit = $proc.ExitCode
         if ($exit -ne 1618 -or $installAttempt -ge $InstallBusyMaxAttempts) { break }
         Write-Status "Windows Installer is busy installing another package (exit 1618). Retrying $DisplayName in $InstallBusyRetrySeconds seconds (attempt $installAttempt of $InstallBusyMaxAttempts)."
@@ -1886,7 +2071,8 @@ class InstallODBCDriver {
 
         [version]$requiredVersionParsed = $catalog.Version
         [version]$payloadVersion = $null
-        $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath
+        $msiState = @{}
+        $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath -InstallerState $msiState
         if (-not [version]::TryParse($payloadVersionText, [ref]$payloadVersion)) {
             throw "Microsoft ODBC Driver 18 MSI at $_odbcpath has invalid ProductVersion '$payloadVersionText'"
         }
@@ -1894,25 +2080,105 @@ class InstallODBCDriver {
             Write-Status "Cached Microsoft ODBC Driver 18 MSI is stale (payload $payloadVersion, required $requiredVersionParsed). Retrying once from $($_URL) without the cache DVD."
             Remove-Item -LiteralPath $_odbcpath -Force -ErrorAction SilentlyContinue
             Invoke-DownloadFile $_URL $_odbcpath -BypassCache
-            $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath
+            $payloadVersionText = Get-MsiProductVersion -Path $_odbcpath -InstallerState $msiState
             $payloadVersion = $null
             if (-not [version]::TryParse($payloadVersionText, [ref]$payloadVersion) -or $payloadVersion -lt $requiredVersionParsed) {
                 throw "Microsoft ODBC Driver 18 network MSI is stale: payload '$payloadVersionText' is below required $requiredVersionParsed"
             }
         }
 
-        Install-MSIPackage `
-            -MsiPath $_odbcpath `
-            -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
-            -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1") `
-            -LogPath "C:\temp\odbcinstallation.log" `
-            -VerifyRegistryPath "HKLM:\Software\Microsoft\MSODBCSQL18" `
-            -VerifyRegistryValueName "InstalledVersion"
+        $sourceDirectory = Join-Path $env:ProgramData "MemLabs\Installers\ODBC18\$payloadVersion"
+        $null = New-Item -Path $sourceDirectory -ItemType Directory -Force -ErrorAction Stop
+        $installerSource = Join-Path $sourceDirectory $msiState.PackageName
+        Copy-Item -LiteralPath $_odbcpath -Destination $installerSource -Force -ErrorAction Stop
+        Write-Status "ODBC before install: required=$requiredVersionParsed payload=$payloadVersion SHA256=$((Get-FileHash -LiteralPath $installerSource -Algorithm SHA256 -ErrorAction Stop).Hash); MSI state=$($msiState | ConvertTo-Json -Depth 6 -Compress)"
 
-        $installedVersionText = [string](Get-ItemPropertyValue -Path 'HKLM:\Software\Microsoft\MSODBCSQL18' -Name 'InstalledVersion' -ErrorAction SilentlyContinue)
+        $payloadMsiVersion = [version]::new($payloadVersion.Major, $payloadVersion.Minor, $payloadVersion.Build)
+        foreach ($legacyProduct in @($msiState.RelatedProducts | Where-Object {
+                    $_.State -in @(1, 5) -and ($_.State -eq 1 -or -not $_.CachedPackagePresent) -and
+                        $_.Version -lt $payloadMsiVersion
+                })) {
+            $legacyLogPath = "C:\temp\odbcinstallation.legacy-$($legacyProduct.ProductCode.Trim('{}')).log"
+            Write-Status "Restoring ODBC Driver 18 $($legacyProduct.Version) registration/cache ($($legacyProduct.ProductCode)) before upgrade. Log: $legacyLogPath"
+            try {
+                Install-MSIPackage `
+                    -ProductCode $legacyProduct.ProductCode `
+                    -DisplayName "Microsoft ODBC Driver 18 legacy registration recovery" `
+                    -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1", "ADDLOCAL=ALL") `
+                    -LogPath $legacyLogPath -InstallBusyMaxAttempts 3
+            }
+            catch {
+                Write-Status "Legacy registration recovery failed; obtaining the exact original Microsoft MSI before retrying. Log: $legacyLogPath. $($_.Exception.Message)"
+                $sourceLogPath = "$legacyLogPath.source.log"
+                try {
+                    $legacySource = Save-MemLabsOdbcRecoveryPackage -Product $legacyProduct
+                    Install-MSIPackage `
+                        -MsiPath $legacySource `
+                        -DisplayName "Microsoft ODBC Driver 18 original-source recovery" `
+                        -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1", "ADDLOCAL=ALL", "REINSTALLMODE=vomus") `
+                        -LogPath $sourceLogPath -InstallBusyMaxAttempts 3
+                }
+                catch {
+                    throw "Legacy ODBC registration/source recovery failed; upgrade was not started and no driver was explicitly uninstalled. Initial log: $legacyLogPath; source recovery log: $sourceLogPath. $($_.Exception.Message)"
+                }
+            }
+            $recoveredState = @{}
+            $null = Get-MsiProductVersion -Path $installerSource -InstallerState $recoveredState
+            if (-not @($recoveredState.RelatedProducts | Where-Object {
+                        $_.ProductCode -eq $legacyProduct.ProductCode -and $_.State -eq 5 -and $_.CachedPackagePresent
+                    }).Count) {
+                throw "Legacy ODBC product $($legacyProduct.ProductCode) registration/cache did not recover; upgrade was not started. Log: $legacyLogPath"
+            }
+        }
+
+        $installFailed = $false
+        try {
+            Install-MSIPackage `
+                -MsiPath $installerSource `
+                -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
+                -AdditionalArguments @(
+                    "IACCEPTMSODBCSQLLICENSETERMS=YES", "SKIPPENDINGREBOOTCHECK=1", "ADDLOCAL=ALL",
+                    $(if ($msiState.State -in @(1, 5)) { "REINSTALLMODE=vomus" })
+                ) `
+                -LogPath "C:\temp\odbcinstallation.log"
+        }
+        catch {
+            $installFailed = $true
+            Write-Status "Microsoft ODBC Driver 18 installation failed; attempting feature repair from the validated payload. $($_.Exception.Message)"
+        }
+
         [version]$installedVersion = $null
-        if (-not [version]::TryParse($installedVersionText, [ref]$installedVersion) -or $installedVersion -lt $requiredVersionParsed) {
-            throw "Microsoft ODBC Driver 18 install completed but InstalledVersion '$installedVersionText' is below required $requiredVersionParsed"
+        $verificationDeadline = (Get-Date).AddSeconds(60)
+        do {
+            $installedVersion = Get-MemLabsInstalledOdbc18Version
+            if ($installFailed) { break }
+            if ($installedVersion -and $installedVersion -ge $requiredVersionParsed) { break }
+            Start-Sleep -Seconds 2
+        } while ((Get-Date) -lt $verificationDeadline)
+        if ($installFailed -or -not $installedVersion -or $installedVersion -lt $requiredVersionParsed) {
+            $null = Get-MsiProductVersion -Path $installerSource -InstallerState $msiState
+            Write-Status "Microsoft ODBC Driver 18 is absent or unregistered after installation. Forcing a repair before reporting failure."
+            Install-MSIPackage `
+                -MsiPath $installerSource `
+                -DisplayName "Microsoft ODBC Driver 18 for SQL Server repair" `
+                -AdditionalArguments @(
+                    "IACCEPTMSODBCSQLLICENSETERMS=YES",
+                    "SKIPPENDINGREBOOTCHECK=1",
+                    "ADDLOCAL=ALL",
+                    $(if ($msiState.CoreState -eq 3) { "REINSTALL=ALL" }),
+                    $(if ($msiState.State -in @(1, 5) -or $msiState.Installed) { "REINSTALLMODE=vomus" })
+                ) `
+                -LogPath "C:\temp\odbcinstallation.repair.log"
+
+            $repairDeadline = (Get-Date).AddSeconds(60)
+            do {
+                $installedVersion = Get-MemLabsInstalledOdbc18Version
+                if ($installedVersion -and $installedVersion -ge $requiredVersionParsed) { break }
+                Start-Sleep -Seconds 2
+            } while ((Get-Date) -lt $repairDeadline)
+            if (-not $installedVersion -or $installedVersion -lt $requiredVersionParsed) {
+                throw "Microsoft ODBC Driver 18 remained unavailable after a successful forced repair; detected version '$installedVersion', required $requiredVersionParsed"
+            }
         }
         Write-Status "Microsoft ODBC Driver 18 converged to $installedVersion (required $requiredVersionParsed; payload $payloadVersion)"
     }
@@ -1921,33 +2187,15 @@ class InstallODBCDriver {
         Write-Status "Checking ODBC Driver 18 installation status"
 
         try {
-            $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
-
-            if (Test-Path -Path $ODBCRegistryPath) {
-                try {
-                    # Get the InstalledVersion only if the path exists
-                    $ODBCVersion = Get-ItemProperty -Path $ODBCRegistryPath -Name "InstalledVersion" -ErrorAction SilentlyContinue
-                }
-                catch {
-                    $ErrorMessage = $_.Exception.Message
-                    Write-Verbose "Microsoft ODBC Driver 18 for SQL Server Error $($ErrorMessage)!"
-
-                    return $false
-                }
-            }
-            else {
-                return $false
-            }
-
             [version]$requiredVersionParsed = $null
-            [version]$installedVersion = $null
             $requiredVersionParsed = Get-MemLabsOdbcRequiredVersion
-            if ([version]::TryParse([string]$ODBCVersion.InstalledVersion, [ref]$installedVersion) -and $installedVersion -ge $requiredVersionParsed) {
+            $installedVersion = Get-MemLabsInstalledOdbc18Version
+            if ($installedVersion -and $installedVersion -ge $requiredVersionParsed) {
                 Write-Status "Microsoft ODBC Driver 18 $installedVersion is installed (required $requiredVersionParsed)"
                 return $true
             }
 
-            Write-Status "Microsoft ODBC Driver 18 '$($ODBCVersion.InstalledVersion)' is below required $requiredVersionParsed"
+            Write-Status "Microsoft ODBC Driver 18 '$installedVersion' is below required $requiredVersionParsed"
             return $false
         }
         catch {
@@ -2645,6 +2893,107 @@ class WaitForEvent {
     }
 
     [WaitForEvent] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
+class WaitForWorkflowReceipt {
+
+    [DscProperty(Key)]
+    [string] $MachineName
+
+    [DscProperty(Mandatory)]
+    [string] $LogFolder
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(NotConfigurable)]
+    [Nullable[datetime]] $CreationTime
+
+    [string] GetReceiptRoot() {
+        if ($this.MachineName -eq $env:COMPUTERNAME) {
+            return (Join-Path $env:SystemDrive "staging\$($this.LogFolder)")
+        }
+        return "\\$($this.MachineName)\$($this.LogFolder)"
+    }
+
+    [string] GetFailureMessage([string] $ExpectedRunId) {
+        $failedPath = Join-Path $this.GetReceiptRoot() 'ScriptWorkflow.failed.json'
+        if (-not (Test-Path -LiteralPath $failedPath -PathType Leaf)) { return '' }
+        $failure = Get-Content -LiteralPath $failedPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($failure.RunId -isnot [string] -or [string]::IsNullOrWhiteSpace($failure.RunId)) {
+            throw "Invalid ScriptWorkflow failure RunId on $($this.MachineName)."
+        }
+        if (-not $ExpectedRunId.Equals($failure.RunId, [StringComparison]::OrdinalIgnoreCase)) { return '' }
+        if ($failure.SchemaVersion -ne 1 -or $failure.Status -cne 'Failed' -or
+            $failure.Message -isnot [string] -or [string]::IsNullOrWhiteSpace($failure.Message)) {
+            throw "Invalid ScriptWorkflow failure receipt on $($this.MachineName) for RunId '$ExpectedRunId'."
+        }
+        return $failure.Message
+    }
+
+    [bool] ReceiptMatches() {
+        try {
+            $root = $this.GetReceiptRoot()
+            $expectedPath = Join-Path $root 'ScriptWorkflow.expected.runid'
+            $completedPath = Join-Path $root 'ScriptWorkflow.completed.runid'
+            if (-not (Test-Path -LiteralPath $expectedPath -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $completedPath -PathType Leaf)) {
+                return $false
+            }
+            $expected = "$(Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop)".Trim()
+            $completed = "$(Get-Content -LiteralPath $completedPath -Raw -ErrorAction Stop)".Trim()
+            return -not [string]::IsNullOrWhiteSpace($expected) -and
+                $expected.Equals($completed, [StringComparison]::OrdinalIgnoreCase) -and
+                [string]::IsNullOrEmpty($this.GetFailureMessage($expected))
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [void] Set() {
+        $started = Get-Date
+        while (-not $this.ReceiptMatches()) {
+            $root = $this.GetReceiptRoot()
+            $expected = '<missing>'
+            $completed = '<missing>'
+            try {
+                $expectedPath = Join-Path $root 'ScriptWorkflow.expected.runid'
+                if (Test-Path -LiteralPath $expectedPath -PathType Leaf) {
+                    $expected = "$(Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop)".Trim()
+                }
+            }
+            catch { $expected = "<unreadable: $($_.Exception.Message)>" }
+            try {
+                $completedPath = Join-Path $root 'ScriptWorkflow.completed.runid'
+                if (Test-Path -LiteralPath $completedPath -PathType Leaf) {
+                    $completed = "$(Get-Content -LiteralPath $completedPath -Raw -ErrorAction Stop)".Trim()
+                }
+            }
+            catch { $completed = "<unreadable: $($_.Exception.Message)>" }
+            if ($expected -ne '<missing>' -and $expected -notlike '<unreadable:*') {
+                $failureMessage = $this.GetFailureMessage($expected)
+                if ($failureMessage) {
+                    $message = "JOBFAILURE: ScriptWorkflow on $($this.MachineName) failed for RunId '$expected': $failureMessage"
+                    Write-Status $message
+                    throw $message
+                }
+            }
+            $elapsedMinutes = [math]::Round(((Get-Date) - $started).TotalMinutes, 1)
+            Write-Status "Waiting for ScriptWorkflow receipt on $($this.MachineName) (elapsed=${elapsedMinutes}m, expected='$expected', completed='$completed')."
+            Start-Sleep -Seconds 30
+        }
+        Write-Status "ScriptWorkflow receipt matched on $($this.MachineName)."
+    }
+
+    [bool] Test() {
+        return $this.ReceiptMatches()
+    }
+
+    [WaitForWorkflowReceipt] Get() {
         return $this
     }
 }
@@ -5788,6 +6137,144 @@ class OpenFirewallPortForSCCM {
 
 }
 
+function Install-MemLabsRequiredWindowsFeature {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string[]]$Name)
+
+    $wuPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    $policyTargets = @(
+        [pscustomobject]@{ Path = "$wuPath\AU"; Name = 'NoAutoUpdate'; During = 1 }
+        [pscustomobject]@{ Path = $wuPath; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; During = 0 }
+        [pscustomobject]@{ Path = $wuPath; Name = 'DisableWindowsUpdateAccess'; During = 0 }
+        [pscustomobject]@{ Path = "$wuPath\AU"; Name = 'UseWUServer'; During = 0 }
+    )
+    $readPolicy = {
+        param($Target)
+        $present = $false
+        $kind = $null
+        $value = $null
+        if (Test-Path -LiteralPath $Target.Path -ErrorAction Stop) {
+            $key = Get-Item -LiteralPath $Target.Path -ErrorAction Stop
+            try {
+                $present = $Target.Name -in $key.GetValueNames()
+                if ($present) {
+                    $kind = "$($key.GetValueKind($Target.Name))"
+                    $value = $key.GetValue($Target.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                }
+            }
+            finally { $key.Dispose() }
+        }
+        [pscustomobject]@{ Path = $Target.Path; Name = $Target.Name; Present = $present; Kind = $kind; Value = $value; During = $Target.During }
+    }
+    $restorePolicy = {
+        param($Snapshot)
+        if ($Snapshot.Present) {
+            $null = New-ItemProperty -LiteralPath $Snapshot.Path -Name $Snapshot.Name `
+                -PropertyType $Snapshot.Kind -Value $Snapshot.Value -Force -ErrorAction Stop
+        }
+        else {
+            $live = & $readPolicy $Snapshot
+            if ($live.Present) {
+                Remove-ItemProperty -LiteralPath $Snapshot.Path -Name $Snapshot.Name -Force -ErrorAction Stop
+            }
+        }
+        $live = & $readPolicy $Snapshot
+        if ($live.Present -ne $Snapshot.Present -or $live.Kind -ne $Snapshot.Kind -or $live.Value -ne $Snapshot.Value) {
+            throw "Restoration of update policy '$($Snapshot.Name)' could not be verified."
+        }
+    }
+
+    # Snapshot everything before opening access; automatic updates remain disabled.
+    $policies = @(foreach ($target in $policyTargets) {
+            $record = & $readPolicy $target
+            if ($record.Present -and ($record.Kind -ne 'DWord' -or
+                    ($record.Value -isnot [int] -and $record.Value -isnot [uint32]) -or $record.Value -notin @(0, 1))) {
+                throw "Unexpected update policy type/value for '$($record.Name)'; no feature-source changes were started."
+            }
+            $record
+        })
+    $service = Get-Service -Name wuauserv -ErrorAction Stop
+    $originalStatus = "$($service.Status)"
+    $originalStartup = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\wuauserv' `
+            -Name Start -ErrorAction Stop).Start
+    if ($originalStartup -notin @(2, 3, 4) -or $originalStatus -notin @('Running', 'Stopped')) {
+        throw "Windows Update service is not in a stable state (Start=$originalStartup, Status=$originalStatus); no feature-source changes were started."
+    }
+    $result = $null
+    $failure = $null
+    $restoreErrors = [System.Collections.Generic.List[string]]::new()
+    try {
+        Write-Status "Temporarily allowing Windows Update payload access for required features: $($Name -join ', '). Automatic updates remain disabled."
+        foreach ($record in $policies) {
+            if (-not (Test-Path -LiteralPath $record.Path -ErrorAction Stop)) {
+                $null = New-Item -Path $record.Path -Force -ErrorAction Stop
+            }
+            $null = New-ItemProperty -LiteralPath $record.Path -Name $record.Name -PropertyType DWord `
+                -Value $record.During -Force -ErrorAction Stop
+        }
+        foreach ($record in $policies) {
+            $live = & $readPolicy $record
+            if (-not $live.Present -or $live.Kind -ne 'DWord' -or $live.Value -ne $record.During) {
+                throw "Temporary feature-source policy '$($record.Name)' was not applied or was reapplied externally."
+            }
+        }
+        # Restart only this service to reload policy; do not start Update Orchestrator.
+        if ($originalStartup -eq 4) { Set-Service -Name wuauserv -StartupType Manual -ErrorAction Stop }
+        if ("$($service.Status)" -ne 'Stopped') {
+            $service.Stop()
+            $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        }
+        $service.Start()
+        $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+        $result = Install-WindowsFeature -Name $Name -IncludeManagementTools -ErrorAction Stop
+    }
+    catch { $failure = $_ }
+    finally {
+        foreach ($record in @($policies | Where-Object { $_.Name -ne 'NoAutoUpdate' })) {
+            try { & $restorePolicy $record }
+            catch { $restoreErrors.Add("$($record.Name): $($_.Exception.Message)") }
+        }
+        try {
+            $service.Refresh()
+            if ("$($service.Status)" -ne 'Stopped') {
+                $service.Stop()
+                $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+            }
+        }
+        catch { $restoreErrors.Add("Stop wuauserv: $($_.Exception.Message)") }
+        try {
+            $service.Refresh()
+            if ($originalStatus -eq 'Running' -and "$($service.Status)" -ne 'Running') {
+                $service.Start()
+                $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+            }
+            if ($originalStartup -eq 4) { Set-Service -Name wuauserv -StartupType Disabled -ErrorAction Stop }
+            $service.Refresh()
+            $restoredStartup = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\wuauserv' `
+                    -Name Start -ErrorAction Stop).Start
+            if ($restoredStartup -ne $originalStartup -or "$($service.Status)" -ne $originalStatus) {
+                throw "Expected Start=$originalStartup, Status=$originalStatus; got Start=$restoredStartup, Status=$($service.Status)."
+            }
+        }
+        catch { $restoreErrors.Add("Restore wuauserv: $($_.Exception.Message)") }
+        if ($restoreErrors.Count -eq 0) {
+            try { & $restorePolicy $policies[0] }
+            catch { $restoreErrors.Add("NoAutoUpdate: $($_.Exception.Message)") }
+        }
+        else {
+            $restoreErrors.Add('NoAutoUpdate remains enabled as a safety block until the restoration failure is corrected.')
+        }
+    }
+    if ($failure -or $restoreErrors.Count) {
+        $details = @()
+        if ($failure) { $details += "$($failure.Exception.Message) [FQID=$($failure.FullyQualifiedErrorId)]" }
+        if ($restoreErrors.Count) { $details += "Windows Update settings restoration failed: $($restoreErrors -join ' | ')" }
+        throw ($details -join ' ')
+    }
+    Write-Status 'Required-feature payload access finished; original Windows Update policy and service state restored.'
+    return $result
+}
+
 [DscResource()]
 class InstallFeatureForSCCM {
     [DscProperty(Key)]
@@ -5815,6 +6302,10 @@ class InstallFeatureForSCCM {
         $_Role = $this.Role
 
         Write-Status "Installing Windows Features for Role $_Role"
+        $markerPath = $this.MarkerPath()
+        if (Test-Path -LiteralPath $markerPath -ErrorAction Stop) {
+            Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+        }
 
         # Install on all devices. This read "dism / online / Enable-Feature / FeatureName:..."
         # for years: PowerShell tokenizes each bare "/" as its own argument, so dism got
@@ -5854,12 +6345,40 @@ class InstallFeatureForSCCM {
             }
             else {
                 Write-Status "Installing $($missingFeatures.Count) missing Windows Features: $($missingFeatures -join ', ')"
-                $result = Install-WindowsFeature -Name $missingFeatures -IncludeManagementTools
+                try {
+                    $result = Install-MemLabsRequiredWindowsFeature -Name $missingFeatures -ErrorAction Stop
+                }
+                catch {
+                    $message = "Required Windows feature installation failed for role $_Role ($($missingFeatures -join ', ')): $($_.Exception.Message). No verified completion receipt was written. Review CBS.log and DISM\dism.log on this VM."
+                    Write-Status "JOBFAILURE: $message"
+                    throw $message
+                }
+                if (-not $result -or $result.Success -ne $true) {
+                    $message = "Required Windows feature installation did not succeed for role $_Role (Success=$($result.Success), ExitCode=$($result.ExitCode), RestartNeeded=$($result.RestartNeeded)). No verified completion receipt was written."
+                    Write-Status "JOBFAILURE: $message"
+                    throw $message
+                }
                 if ($result.RestartNeeded -eq "Yes") {
                     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                     $global:DSCMachineStatus = 1
                 }
                 else {
+                    $verifiedState = @($this.GetFeatureState($featureList))
+                    $pendingVerification = @($verifiedState | Where-Object { ([string]$_.InstallState) -like "*Pending" })
+                    if ($pendingVerification.Count -gt 0) {
+                        Write-Status "Windows Features remain pending restart after installation: $($pendingVerification.Name -join ', ')"
+                        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                        $global:DSCMachineStatus = 1
+                        $this.WriteMarker('Finished')
+                        return
+                    }
+                    $stillMissing = @($verifiedState | Where-Object { $_.InstallState -ne "Installed" } |
+                            ForEach-Object { "$($_.Name)=$($_.InstallState)" })
+                    if ($stillMissing.Count -gt 0) {
+                        $message = "Windows feature installation reported success, but required features are not Installed: $($stillMissing -join ', '). No verified completion receipt was written."
+                        Write-Status "JOBFAILURE: $message"
+                        throw $message
+                    }
                     $stamp = $this.FeatureSignature($featureList)
                 }
             }
@@ -5936,11 +6455,14 @@ class InstallFeatureForSCCM {
             Write-Status "IIS globalModule DLL(s) missing, w3wp cannot start: $($missingModules -join '; ')"
             return $false
         }
-        try {
-            $recorded = Get-Content -Path $this.MarkerPath() -TotalCount 1 -ErrorAction Stop
-            if ($recorded -and ([string]$recorded).Trim() -eq $signature) { return $true }
+        # Older one-line receipts could be written after a failed feature install.
+        if (Test-Path -LiteralPath $this.MarkerPath() -ErrorAction Stop) {
+            $recorded = @(Get-Content -LiteralPath $this.MarkerPath() -TotalCount 2 -ErrorAction Stop)
+            if ($recorded.Count -eq 2 -and ([string]$recorded[0]).Trim() -eq $signature -and
+                ([string]$recorded[1]).Trim() -eq $this.ReceiptVerificationStamp()) {
+                return $true
+            }
         }
-        catch {}
 
         $featureState = @($this.GetFeatureState($featureList))
         $missing = @($featureState | Where-Object { $_.InstallState -ne "Installed" })
@@ -5955,6 +6477,10 @@ class InstallFeatureForSCCM {
 
     [string] FeatureSignature([string[]] $featureList) {
         return (($featureList | Sort-Object -Unique) -join ',')
+    }
+
+    [string] ReceiptVerificationStamp() {
+        return 'MemLabsFeatureStateVerified=1'
     }
 
     # Every DLL applicationHost.config registers as a globalModule must exist or EVERY
@@ -5979,13 +6505,14 @@ class InstallFeatureForSCCM {
     }
 
     [void] WriteMarker([string] $content) {
-        try {
-            $markerPath = $this.MarkerPath()
-            $markerDir = Split-Path -Parent $markerPath
-            if (-not (Test-Path $markerDir)) { New-Item -ItemType Directory -Path $markerDir -Force | Out-Null }
-            $content | Out-File -FilePath $markerPath -Force -Encoding ascii
+        $markerPath = $this.MarkerPath()
+        $markerDir = Split-Path -Parent $markerPath
+        if (-not (Test-Path -LiteralPath $markerDir -ErrorAction Stop)) {
+            New-Item -ItemType Directory -Path $markerDir -Force -ErrorAction Stop | Out-Null
         }
-        catch {}
+        $lines = @($content)
+        if ($content -ne 'Finished') { $lines += $this.ReceiptVerificationStamp() }
+        $lines | Set-Content -LiteralPath $markerPath -Force -Encoding ascii -ErrorAction Stop
     }
 
     [object[]] GetFeatureState([string[]] $featureList) {
@@ -10439,6 +10966,8 @@ class RunPkiSync {
         write-Status "Running PKISync from $($this.SourceForest) to $($this.TargetForest)"
         $MaxRetries = 20
         $retry = 0
+        $TargetForObj = $null
+        $SourceForObj = $null
         while ($true) {
 
             if ($retry -ge $MaxRetries) {
@@ -10484,7 +11013,130 @@ class RunPkiSync {
         }
 
         Write-Status "Running C:\staging\DSC\phases\PKISync.Ps1"
-        C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest -targetforest $this.TargetForest -f
+        $sourceDc = "$($SourceForObj.RootDomain.PdcRoleOwner.Name)"
+        $targetDc = "$($TargetForObj.RootDomain.PdcRoleOwner.Name)"
+
+        # Run on the TARGET DC as its Enterprise Admin. The source CA grants the
+        # target forest's Domain Computers SID in parallel, so wait for that exact
+        # DACL state before copying the template. This replaces a fragile second
+        # sync on the source CA under a foreign run-as credential.
+        $targetRootDse = [ADSI]"LDAP://$targetDc/RootDSE"
+        $targetDomainEntry = [ADSI]"LDAP://$targetDc/$($targetRootDse.defaultNamingContext)"
+        $targetDomainSid = [System.Security.Principal.SecurityIdentifier]::new(
+            [byte[]]$targetDomainEntry.Properties['objectSid'].Value, 0).Value
+        $targetComputersSid = "$targetDomainSid-515"
+        $sourceRootDse = [ADSI]"LDAP://$sourceDc/RootDSE"
+        $sourceTemplatePath = "LDAP://$sourceDc/CN=ConfigMgrClientCertificate,CN=Certificate Templates,CN=Public Key Services,CN=Services,$($sourceRootDse.configurationNamingContext)"
+        if (-not [System.DirectoryServices.DirectoryEntry]::Exists($sourceTemplatePath)) {
+            throw "Source forest '$($this.SourceForest)' has no ConfigMgrClientCertificate template to synchronize."
+        }
+        $enrollGuid = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
+        $autoEnrollGuid = 'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+        $templateAclReady = $false
+        for ($aclAttempt = 1; $aclAttempt -le 90 -and -not $templateAclReady; $aclAttempt++) {
+            $sourceTemplate = [ADSI]$sourceTemplatePath
+            $sourceTemplate.psbase.Options.SecurityMasks = [System.DirectoryServices.SecurityMasks]::Dacl
+            $granted = @()
+            foreach ($ace in @($sourceTemplate.psbase.ObjectSecurity.Access | Where-Object { $null -ne $_ })) {
+                if ("$($ace.AccessControlType)" -ne 'Allow') { continue }
+                $aceSid = "$($ace.IdentityReference)"
+                try { $aceSid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch {}
+                if ($aceSid -ne $targetComputersSid) { continue }
+                $objectType = "$($ace.ObjectType)"
+                if ($objectType -eq $enrollGuid) { $granted += 'Enroll' }
+                elseif ($objectType -eq $autoEnrollGuid) { $granted += 'AutoEnroll' }
+                elseif ("$($ace.ActiveDirectoryRights)" -match 'GenericRead|GenericAll') { $granted += 'Read' }
+            }
+            $granted = @($granted | Select-Object -Unique)
+            $templateAclReady = $granted -contains 'Read' -and
+                $granted -contains 'Enroll' -and $granted -contains 'AutoEnroll'
+            if (-not $templateAclReady) {
+                if ($aclAttempt -eq 1 -or $aclAttempt % 6 -eq 0) {
+                    Write-Status "Waiting for source ConfigMgrClientCertificate to grant $targetComputersSid Read+Enroll+AutoEnroll (attempt $aclAttempt/90; current=$($granted -join '+'))"
+                }
+                Start-Sleep -Seconds 10
+            }
+        }
+        if (-not $templateAclReady) {
+            throw "Source ConfigMgrClientCertificate did not grant target Domain Computers SID $targetComputersSid Read+Enroll+AutoEnroll within 15 minutes."
+        }
+        Write-Status "Source ConfigMgrClientCertificate grants $targetComputersSid Read+Enroll+AutoEnroll; starting authoritative copy"
+
+        # First copy only objects that are missing. Never force-overwrite all of
+        # the target forest's built-in templates; their protected DACLs reject
+        # that operation and they are unrelated to cross-forest ConfigMgr.
+        $syncOutput = @(
+            & C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest `
+                -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc 2>&1
+        )
+        if (-not $?) {
+            throw "PKISync missing-object copy failed: $(@($syncOutput | Select-Object -Last 20) -join ' | ')"
+        }
+
+        # The source CA publication can change as templates are issued, and the
+        # ConfigMgr client template DACL just gained this target forest's SID.
+        # Refresh only those cross-forest objects with force.
+        $caSyncOutput = @(
+            & C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest `
+                -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc `
+                -type CA -f 2>&1
+        )
+        if (-not $?) {
+            throw "PKISync issuing-CA refresh failed: $(@($caSyncOutput | Select-Object -Last 20) -join ' | ')"
+        }
+        $templateSyncOutput = @(
+            & C:\staging\DSC\phases\PKISync.Ps1 -sourceforest $this.SourceForest `
+                -targetforest $this.TargetForest -sourcedc $sourceDc -targetdc $targetDc `
+                -type Template -cn ConfigMgrClientCertificate -f 2>&1
+        )
+        if (-not $?) {
+            throw "PKISync ConfigMgr client-template refresh failed: $(@($templateSyncOutput | Select-Object -Last 20) -join ' | ')"
+        }
+
+        $sourceRoot = $SourceForObj.RootDomain.GetDirectoryEntry()
+        $targetRoot = $TargetForObj.RootDomain.GetDirectoryEntry()
+        $sourcePath = [regex]::Replace($sourceRoot.psbase.Path, 'LDAP://\S*/', "LDAP://$sourceDc/")
+        $targetPath = [regex]::Replace($targetRoot.psbase.Path, 'LDAP://\S*/', "LDAP://$targetDc/")
+        $sourceBoundRoot = New-Object System.DirectoryServices.DirectoryEntry $sourcePath
+        $targetBoundRoot = New-Object System.DirectoryServices.DirectoryEntry $targetPath
+        $sourcePki = $sourceBoundRoot.psbase.get_Children().find('CN=Public Key Services,CN=Services,CN=Configuration')
+        $targetPki = $targetBoundRoot.psbase.get_Children().find('CN=Public Key Services,CN=Services,CN=Configuration')
+        foreach ($relativeDn in @('CN=Enrollment Services', 'CN=Certificate Templates', 'CN=OID')) {
+            $sourceContainer = $sourcePki.psbase.get_Children().find($relativeDn)
+            $targetContainer = $targetPki.psbase.get_Children().find($relativeDn)
+            $sourceNames = @($sourceContainer.psbase.get_Children() | ForEach-Object { "$($_.Properties['cn'].Value)" } | Where-Object { $_ })
+            $targetNames = @($targetContainer.psbase.get_Children() | ForEach-Object { "$($_.Properties['cn'].Value)" } | Where-Object { $_ })
+            $missing = @($sourceNames | Where-Object { $targetNames -notcontains $_ })
+            if ($relativeDn -eq 'CN=Enrollment Services' -and $sourceNames.Count -eq 0) {
+                throw "Source forest '$($this.SourceForest)' has no issuing CA in Enrollment Services."
+            }
+            if ($missing.Count -gt 0) {
+                throw "PKISync verification failed for $relativeDn on $targetDc; missing: $($missing -join ', ')"
+            }
+            if ($relativeDn -eq 'CN=Enrollment Services') {
+                foreach ($caName in $sourceNames) {
+                    $sourceCa = $sourceContainer.psbase.get_Children().find("CN=$caName")
+                    $targetCa = $targetContainer.psbase.get_Children().find("CN=$caName")
+                    $sourceCerts = @($sourceCa.psbase.Properties['cACertificate'] |
+                            ForEach-Object { [Convert]::ToBase64String([byte[]]$_) })
+                    $targetCerts = @($targetCa.psbase.Properties['cACertificate'] |
+                            ForEach-Object { [Convert]::ToBase64String([byte[]]$_) })
+                    $missingCerts = @($sourceCerts | Where-Object { $targetCerts -notcontains $_ })
+                    if ($sourceCerts.Count -eq 0 -or $missingCerts.Count -gt 0) {
+                        throw "PKISync Enrollment Services certificate verification failed for '$caName' on $targetDc."
+                    }
+                    $sourceTemplates = @($sourceCa.psbase.Properties['certificateTemplates'] |
+                            ForEach-Object { "$_" } | Where-Object { $_ })
+                    $targetTemplates = @($targetCa.psbase.Properties['certificateTemplates'] |
+                            ForEach-Object { "$_" } | Where-Object { $_ })
+                    $missingTemplates = @($sourceTemplates | Where-Object { $targetTemplates -notcontains $_ })
+                    if ($missingTemplates.Count -gt 0) {
+                        throw "PKISync Enrollment Services template verification failed for '$caName' on $targetDc; missing: $($missingTemplates -join ', ')"
+                    }
+                }
+            }
+            Write-Status "PKISync verified $($sourceNames.Count) object(s) in $relativeDn on $targetDc"
+        }
     }
 
     [bool] Test() {

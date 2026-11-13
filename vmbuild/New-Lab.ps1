@@ -50,8 +50,10 @@ param (
     [switch]$Migrate,
     [Parameter(Mandatory = $false, HelpMessage = "Activate restore menu before deployment")]
     [switch]$Restore,
-    [Parameter(Mandatory = $false, HelpMessage = "No prompt for domain snapshot")]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip the Phase 8 pre-install rollback snapshot")]
     [switch]$NoSnapshot,
+    [Parameter(Mandatory = $false, HelpMessage = "Take the Phase 8 pre-install rollback snapshot without prompting")]
+    [switch]$AutoSnapshot,
     [Parameter(Mandatory = $false, HelpMessage = "Do not auto-remove Phase 1 VMs on failure (keep them around for forensics).")]
     [switch]$KeepFailedVMs,
     [Parameter(Mandatory = $false, HelpMessage = "Release retained ErrorRecords when returning to a long-lived launcher.")]
@@ -66,12 +68,18 @@ param (
 )
 
 if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion -lt [version] '7.4') {
-    Write-Host 'ERROR: MemLabs requires PowerShell 7.4 or newer. Run VMBuild.cmd to locate or install it.' -ForegroundColor Red
+    Write-Host "ERROR: New-Lab requires PowerShell 7.4 or above (current: $($PSVersionTable.PSVersion)). Use VMBuild.cmd to install or launch the supported version, or run this script from pwsh.exe. Host initialization has not run." -ForegroundColor Red
     exit 1
 }
 
+if ($NoSnapshot.IsPresent -and $AutoSnapshot.IsPresent) {
+    throw '-NoSnapshot and -AutoSnapshot cannot be used together.'
+}
+
 $global:MemLabsNoSnapshot = [bool]$NoSnapshot.IsPresent
+$global:MemLabsAutoSnapshot = [bool]$AutoSnapshot.IsPresent
 $global:NewLabResumeCommand = $null
+$global:NewLabResumeInfo = $null
 
 function Write-NewLabResumeCommand {
     [CmdletBinding()]
@@ -86,6 +94,11 @@ function Write-NewLabResumeCommand {
     $resumeCommand = "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $Phase"
     if ($Restore.IsPresent) { $resumeCommand += " -restore" }
     $global:NewLabResumeCommand = $resumeCommand
+    $global:NewLabResumeInfo = [pscustomobject]@{
+        Configuration = $Configuration
+        Phase         = $Phase
+        Restore       = [bool]$Restore.IsPresent
+    }
     Write-Log $resumeCommand
     Add-CmdHistory $resumeCommand
 }
@@ -303,6 +316,13 @@ if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Ad
 
 if (-not (Initialize-NewLabHyperVPrerequisite)) {
     exit 1
+}
+
+try {
+    Initialize-RDCManAtStartup -WhatIf:$WhatIf
+}
+catch {
+    Write-Log "Could not prepare RDCMan at startup. $($_.Exception.Message)" -Warning
 }
 
 if ($DisableMouse) {
@@ -711,6 +731,13 @@ try {
     # Test Config
     try {
         $testConfigResult = Test-Configuration -InputObject $userConfig -Final -StartPhase ([int]$StartPhase)
+        if (-not $testConfigResult -or -not $testConfigResult.DeployConfig) {
+            Write-Host
+            Write-Log "Configuration validation did not produce a deployConfig. Deployment cannot continue, even with validation bypassed." -Failure
+            if ($testConfigResult) { Write-ValidationMessages -TestObject $testConfigResult }
+            Write-Host
+            exit 1
+        }
         if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
             # Skip validation in phased run or when asked to skip
             $deployConfig = $testConfigResult.DeployConfig
@@ -722,7 +749,7 @@ try {
 
                 if ($runPhase1 -eq $false -and -not $SkipValidation.IsPresent) {         
                     Write-Host       
-                    $response = Read-YesOrNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (Y/n)" -HideHelp -Default "y" -timeout 15
+                    $response = Read-YesOrNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (y/N)" -HideHelp -Default "n" -timeout 15
                     if (-not [String]::IsNullOrWhiteSpace($response)) {
                         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {                           
                             write-host
@@ -811,8 +838,8 @@ try {
 
     # The deploy config JSON is written to a sidecar file next to the log
     # (<logbase>.config.json) instead of a giant single line inside the log,
-    # so the log stays readable/greppable while the deployment remains
-    # self-contained.
+    # so the log stays readable/greppable. Diagnostic copies exclude secrets;
+    # the runtime deployConfig remains unchanged.
     $configSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".config.json")
     $jsonlSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".jsonl")
     $sourceSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".source.json")
@@ -844,8 +871,7 @@ try {
         Write-Log -verbose "Could not rename existing $($Common.LogPath)"
     }
 
-    # Banner: stamp the fresh log with session details and a copy of the config
-    # so the deployment is self-contained even if the JSON on disk is removed.
+    # Retain session details and redacted settings even if the source config is removed.
     Write-Log "========================================" -LogOnly
     Write-Log "Deployment log started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -LogOnly
     Write-Log "Configuration: $Configuration" -LogOnly
@@ -937,16 +963,22 @@ try {
         Write-Log "Source identity sidecar write failed: $($_.Exception.Message)" -Warning
     }
     $configSidecarWritten = $false
+    $diagnosticConfigJson = $null
     try {
         # Pretty-print (no -Compress) to the sidecar so it's readable + diffable.
-        ($deployConfig | ConvertTo-Json -Depth 10) | Set-Content -Path $configSidecar -Encoding UTF8 -ErrorAction Stop
+        $diagnosticConfigJson = ConvertTo-ConfigDiagnosticJson -Config $deployConfig
+        $diagnosticConfigJson | Set-Content -Path $configSidecar -Encoding UTF8 -ErrorAction Stop
         $configSidecarWritten = $true
         Write-Log "Deploy config JSON written to: $configSidecar" -LogOnly
     }
     catch {
-        # Fall back to inline if the sidecar can't be written, so the deployment stays self-contained.
-        Write-Log "Deploy config JSON (sidecar write failed: $($_.Exception.Message)):" -LogOnly
-        Write-Log ($deployConfig | ConvertTo-Json -Depth 10 -Compress) -LogOnly
+        if ($diagnosticConfigJson) {
+            Write-Log "Deploy config JSON (sidecar write failed: $($_.Exception.Message)):" -LogOnly
+            Write-Log ($diagnosticConfigJson | ConvertFrom-Json -ErrorAction Stop | ConvertTo-Json -Depth 10 -Compress -ErrorAction Stop) -LogOnly
+        }
+        else {
+            Write-Log 'Deploy config diagnostic redaction failed; configuration omitted from diagnostic output.' -Warning
+        }
     }
     if ($RequireCleanSource -and
         (-not $sourceIdentity.Reproducible -or -not $sourceSidecarWritten -or -not $configSidecarWritten)) {
@@ -1175,7 +1207,21 @@ try {
         return $deployConfig
     }
 
-    # Prepare existing VM - Phase 0
+    # Prepare existing VM - Phase 0. A non-restore -StartPhase invocation is a
+    # resumable retry: Phase 0 owns the readiness check and performs a
+    # graceful-first reboot only when the guest proves one is needed.
+    $resumePreparation = [bool]($StartPhase -gt 0 -and -not $Restore.IsPresent)
+    if (-not $deployConfig.parameters) {
+        $deployConfig | Add-Member -MemberType NoteProperty -Name parameters `
+            -Value ([pscustomobject]@{}) -Force
+    }
+    $deployConfig.parameters | Add-Member -MemberType NoteProperty `
+        -Name ResumePreparation -Value $resumePreparation -Force
+    $requireExistingVMs = [bool]($StartPhase -gt 1 -or ($Phase -and 1 -notin $Phase) -or 1 -in $SkipPhase)
+    $deployConfig.parameters | Add-Member -MemberType NoteProperty `
+        -Name RequireExistingVMs -Value $requireExistingVMs -Force
+    $deployConfig.parameters | Add-Member -MemberType NoteProperty `
+        -Name AllowAADClientRecovery -Value ([bool]($StartPhase -gt 1 -and (-not $Phase -or 1 -in $Phase) -and 1 -notin $SkipPhase)) -Force
     $prepared = $true
     # Default true like $prepared: if every phase is skipped (-Phase / -SkipPhase /
     # -StartPhase past the end) the loop never assigns it, and the end-of-run gate
@@ -1183,157 +1229,133 @@ try {
     # ran, and nothing failed, as FINISHED WITH FAILURES.
     $configured = $true
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
-    if ($containsHidden) {
+    if ($containsHidden -or $resumePreparation -or $requireExistingVMs) {
         Write-Phase -Phase 0
         $prepared = Resolve-PhaseResult -Raw (Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf) -Phase 0
     }
 
-    # Phase 0 maintenance gate (mandatory, non-interactive). feature/wsus-prefix
-    # intentionally stopped running Start-Maintenance before GenConfig (DHCP-appliance
-    # reconciliation needs a deployment config to exist first), and this deployment
-    # already reconciled DHCP/networking above, before Phase 0. A VM that does NOT yet
-    # exist on the host cannot be maintained here -- Phase 1 has to create it first --
-    # so only genuinely new (not-yet-created) VMs continue to receive fixes the normal
-    # way, through DSC and Phase 10, exactly as before. Every VM already deployed is a
-    # required target here, whether or not it is Hidden and whether or not it carries an
-    # ExistingVM marker: neither flag reliably means "not a real dependency" (a hidden
-    # dependency-only VM added by Add-ExistingVMToDeployConfig never gets ExistingVM set
-    # at all, yet the deployment depends on it being current too), so targeting is
-    # decided purely by whether the VM already exists in live Hyper-V inventory. Later
-    # phases can assume any such already-existing VM is already current (e.g. Phase 8/11
-    # SQL logic assumes the current ODBC driver is already installed), and Phase 10 runs
-    # far too late to catch a problem before hours of unrelated work have already
-    # happened. So, still as part of Phase 0 and strictly before Phase 1 dispatch below,
-    # enforce every pending AppliesToExisting fix on every already-existing VM this
-    # deploy config targets, and abort the deployment outright if any required fix
-    # actually fails, if a required target is found in use by another operation, or if
-    # live Hyper-V inventory cannot even be enumerated (fail closed). Each fix's own
-    # AppliesToRoles/NotAppliesToRoles and Windows/Linux/offline-root-CA applicability
-    # rules still decide whether a given target needs that fix's work at all; an
-    # inapplicable fix/VM is a successful no-op, not a gate failure. There is no
-    # decline/skip path here, unlike the interactive GenConfig "Apply Pending VM
-    # Maintenance" menu action.
-    Write-Log "[Phase 0] Running mandatory existing-VM maintenance gate." -Activity
-    $requiredExistingMaintenanceOk = Start-RequiredExistingVMMaintenance -DeployConfig $deployConfig -OwnedMutexVmNames @($deployConfig.virtualMachines.vmName)
-    if (-not $requiredExistingMaintenanceOk) {
-        Write-Log "[Phase 0] Required maintenance failed for one or more existing VM deployment targets. Aborting deployment." -Failure
-        exit 1
-    }
+    if ($prepared) {
+        # DHCP-appliance reconciliation runs before Phase 0; existing dependencies
+        # must receive required maintenance before any deployment phase continues.
+        Write-Log "[Phase 0] Running mandatory existing-VM maintenance gate." -Activity
+        $requiredExistingMaintenanceOk = Start-RequiredExistingVMMaintenance -DeployConfig $deployConfig -OwnedMutexVmNames @($deployConfig.virtualMachines.vmName)
+        if (-not $requiredExistingMaintenanceOk) {
+            Write-Log "[Phase 0] Required maintenance failed for one or more existing VM deployment targets. Aborting deployment." -Failure
+            exit 1
+        }
 
-    # AADClient idempotency: if an AADClient VM exists from a prior interrupted
-    # run but never reached oobeComplete, it is in an unrecoverable state
-    # (partial DSC, half-sysprepped, etc.). Delete it now so Phase 1 can
-    # re-create from a fresh VHDX. If -StartPhase would skip Phase 1, override
-    # it so the AADClient gets rebuilt before Phase 2 runs.
-    $forcePhase1ForAAD = $false
-    $global:ForcePhase1VmNames = @()
-    $needCacheFlush = $false
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.role -ne "AADClient" -or $vm.hidden) { continue }
-        $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
-        if (-not $existingVm) {
-            # VM doesn't exist — force Phase 1 so it gets created even with -StartPhase 2+
+        # AADClient idempotency: if an AADClient VM exists from a prior interrupted
+        # run but never reached oobeComplete, it is in an unrecoverable state
+        # (partial DSC, half-sysprepped, etc.). Delete it now so Phase 1 can
+        # re-create from a fresh VHDX. If -StartPhase would skip Phase 1, override
+        # it so the AADClient gets rebuilt before Phase 2 runs.
+        $forcePhase1ForAAD = $false
+        $global:ForcePhase1VmNames = @()
+        $needCacheFlush = $false
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.role -ne "AADClient" -or $vm.hidden) { continue }
+            $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
+            if (-not $existingVm) {
+                # VM doesn't exist — force Phase 1 so it gets created even with -StartPhase 2+
+                $global:ForcePhase1VmNames += $vm.vmName
+                $forcePhase1ForAAD = $true
+                # Only warn if Phase 1 would have been skipped (otherwise it runs naturally)
+                if ($StartPhase -and $StartPhase -gt 1) {
+                    Write-Log "[Phase 0] $($vm.vmName): AADClient does not exist. Forcing Phase 1 to create it." -Warning
+                }
+                continue
+            }
+            $note = Get-VMNote -VMName $vm.vmName
+            if ($note -and $note.oobeComplete) { continue }
+            Write-Log "[Phase 0] $($vm.vmName): AADClient exists but oobeComplete is not set (interrupted prior run). Deleting so Phase 1 can re-create." -Warning
+            Remove-VirtualMachine -VmName $vm.vmName -Force -SkipProxyCleanup
             $global:ForcePhase1VmNames += $vm.vmName
             $forcePhase1ForAAD = $true
-            # Only warn if Phase 1 would have been skipped (otherwise it runs naturally)
-            if ($StartPhase -and $StartPhase -gt 1) {
-                Write-Log "[Phase 0] $($vm.vmName): AADClient does not exist. Forcing Phase 1 to create it." -Warning
-            }
-            continue
+            $needCacheFlush = $true
         }
-        $note = Get-VMNote -VMName $vm.vmName
-        if ($note -and $note.oobeComplete) { continue }
-        Write-Log "[Phase 0] $($vm.vmName): AADClient exists but oobeComplete is not set (interrupted prior run). Deleting so Phase 1 can re-create." -Warning
-        Remove-VirtualMachine -VmName $vm.vmName -Force -SkipProxyCleanup
-        $global:ForcePhase1VmNames += $vm.vmName
-        $forcePhase1ForAAD = $true
-        $needCacheFlush = $true
-    }
-    if ($forcePhase1ForAAD) {
-        $runPhase1 = $true
-        if ($needCacheFlush) {
-            # Flush the VM list cache so Phase 1 sees the deleted VM as missing
+        if ($forcePhase1ForAAD) {
+            $runPhase1 = $true
+            if ($needCacheFlush) {
+                # Flush the VM list cache so Phase 1 sees the deleted VM as missing
+                Get-List -FlushCache
+            }
+        }
+
+        # Same repair for every other role. Phase 1 is skipped entirely when all config VMs
+        # merely EXIST, so a half-built leftover is never re-created -- it is skipped forever
+        # and every later phase fails against a shell. Test-VmPhase1Incomplete only says yes
+        # when the note proves it, so unreadable/legacy/unversioned notes are left alone.
+        $forcePhase1Incomplete = $false
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
+            if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
+            if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
+            $verdict = Test-VmPhase1Incomplete -VmName $vm.vmName
+            if (-not $verdict.Incomplete) { continue }
+            Write-Log "[Phase 0] $($vm.vmName): exists but never completed Phase 1 ($($verdict.Reason)). Deleting so Phase 1 can re-create it." -Warning
+            Remove-VirtualMachine -VmName $vm.vmName -Force
+            if (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue) {
+                Write-Log "[Phase 0] $($vm.vmName): removal reported done but the VM is still present; leaving it for manual cleanup." -Failure
+                continue
+            }
+            $global:ForcePhase1VmNames += $vm.vmName
+            $forcePhase1Incomplete = $true
+        }
+        if ($forcePhase1Incomplete) {
+            $runPhase1 = $true
             Get-List -FlushCache
         }
-    }
 
-    # Same repair for every other role. Phase 1 is skipped entirely when all config VMs
-    # merely EXIST, so a half-built leftover is never re-created -- it is skipped forever
-    # and every later phase fails against a shell. Test-VmPhase1Incomplete only says yes
-    # when the note proves it, so unreadable/legacy/unversioned notes are left alone.
-    $forcePhase1Incomplete = $false
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
-        if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
-        if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
-        $verdict = Test-VmPhase1Incomplete -VmName $vm.vmName
-        if (-not $verdict.Incomplete) { continue }
-        Write-Log "[Phase 0] $($vm.vmName): exists but never completed Phase 1 ($($verdict.Reason)). Deleting so Phase 1 can re-create it." -Warning
-        Remove-VirtualMachine -VmName $vm.vmName -Force
-        if (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue) {
-            Write-Log "[Phase 0] $($vm.vmName): removal reported done but the VM is still present; leaving it for manual cleanup." -Failure
-            continue
+        # Phase 1 is the only thing that creates additionalDisks, and it is skipped for a VM
+        # that already exists -- so a disk added to an existing VM's config never appears, and
+        # Phase 2 InitializeDisks cannot ever succeed. Fail here instead of at the end of the
+        # phase budget. VMs about to be rebuilt are excluded; they get their disks from Phase 1.
+        $diskMismatch = @()
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
+            if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
+            if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
+            $diskState = Get-VmMissingDataDisk -VmName $vm.vmName -AdditionalDisks $vm.additionalDisks
+            if ($diskState.Error) {
+                Write-Log "[Phase 0] $($vm.vmName): $($diskState.Error). Its disks were NOT verified." -Warning
+                continue
+            }
+            if ($diskState.Missing.Count -gt 0) {
+                $detail = (($diskState.Missing | ForEach-Object { "$($_.Letter)=$($_.Size)" }) -join ', ')
+                $found = if ($diskState.Attached.Count -gt 0) { $diskState.Attached -join ', ' } else { 'none' }
+                $diskMismatch += "$($vm.vmName) is missing $($diskState.Missing.Count) configured disk(s): $detail. Data disks actually attached: $found"
+            }
         }
-        $global:ForcePhase1VmNames += $vm.vmName
-        $forcePhase1Incomplete = $true
-    }
-    if ($forcePhase1Incomplete) {
-        $runPhase1 = $true
-        Get-List -FlushCache
-    }
+        if ($diskMismatch.Count -gt 0) {
+            foreach ($m in $diskMismatch) { Write-Log "[Phase 0] $m" -Failure }
+            Write-Log "[Phase 0] These VMs already exist, so Phase 1 will not run for them and the disk(s) above will never be created. Delete the VM(s) so Phase 1 rebuilds them, or remove the added disk(s) from the config." -Failure
+            exit 1
+        }
 
-    # Phase 1 is the only thing that creates additionalDisks, and it is skipped for a VM
-    # that already exists -- so a disk added to an existing VM's config never appears, and
-    # Phase 2 InitializeDisks cannot ever succeed. Fail here instead of at the end of the
-    # phase budget. VMs about to be rebuilt are excluded; they get their disks from Phase 1.
-    $diskMismatch = @()
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.hidden -or $vm.role -eq 'AADClient') { continue }
-        if ($vm.vmName -in $global:ForcePhase1VmNames) { continue }
-        if (-not (Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue)) { continue }
-        $diskState = Get-VmMissingDataDisk -VmName $vm.vmName -AdditionalDisks $vm.additionalDisks
-        if ($diskState.Error) {
-            Write-Log "[Phase 0] $($vm.vmName): $($diskState.Error). Its disks were NOT verified." -Warning
-            continue
-        }
-        if ($diskState.Missing.Count -gt 0) {
-            $detail = (($diskState.Missing | ForEach-Object { "$($_.Letter)=$($_.Size)" }) -join ', ')
-            $found = if ($diskState.Attached.Count -gt 0) { $diskState.Attached -join ', ' } else { 'none' }
-            $diskMismatch += "$($vm.vmName) is missing $($diskState.Missing.Count) configured disk(s): $detail. Data disks actually attached: $found"
-        }
-    }
-    if ($diskMismatch.Count -gt 0) {
-        foreach ($m in $diskMismatch) { Write-Log "[Phase 0] $m" -Failure }
-        Write-Log "[Phase 0] These VMs already exist, so Phase 1 will not run for them and the disk(s) above will never be created. Delete the VM(s) so Phase 1 rebuilds them, or remove the added disk(s) from the config." -Failure
-        exit 1
-    }
+        # Define phases
+        $start = 1
+        $maxPhase = 11
+        # A script launched with pwsh -File can place its validated parameter in global
+        # scope. Mirroring an omitted [int] value (0) back to the same name then reruns
+        # ValidateRange(2, 11) and fails before Phase 1.
+        $global:MemLabsStartPhase = [int]$StartPhase
 
-    # Define phases
-    $start = 1
-    $maxPhase = 11
-    # A script launched with pwsh -File can place its validated parameter in global
-    # scope. Mirroring an omitted [int] value (0) back to the same name then reruns
-    # ValidateRange(2, 11) and fails before Phase 1.
-    $global:MemLabsStartPhase = [int]$StartPhase
-
-    # Pre-build the host download-cache ISO ONCE, before any phase fans out to
-    # per-VM jobs. Building it here (single host process) instead of lazily inside
-    # each VM's DSC step avoids N separate processes racing to build the same
-    # content-addressed ISO (and leaking per-PID cache-build-* staging dirs on
-    # contention). The per-VM step then just finds the already-built ISO and mounts
-    # it. Pure optimization: any failure is logged and ignored (guests fall back to
-    # direct download). Skipped under -WhatIf and when the cache is disabled.
-    if (-not $WhatIf -and (Test-MemlabsDownloadCacheEnabled)) {
-        try {
-            Write-Log "Pre-building host download-cache ISO before phases..." -LogOnly
-            $null = Get-MemlabsCacheIsoForDeploy -DeployConfig $deployConfig -StartPhase ([int]$StartPhase)
+        # Pre-build the host download-cache ISO ONCE, before any phase fans out to
+        # per-VM jobs. Building it here (single host process) instead of lazily inside
+        # each VM's DSC step avoids N separate processes racing to build the same
+        # content-addressed ISO (and leaking per-PID cache-build-* staging dirs on
+        # contention). The per-VM step then just finds the already-built ISO and mounts
+        # it. Pure optimization: any failure is logged and ignored (guests fall back to
+        # direct download). Skipped under -WhatIf and when the cache is disabled.
+        if (-not $WhatIf -and (Test-MemlabsDownloadCacheEnabled)) {
+            try {
+                Write-Log "Pre-building host download-cache ISO before phases..." -LogOnly
+                $null = Get-MemlabsCacheIsoForDeploy -DeployConfig $deployConfig -StartPhase ([int]$StartPhase)
+            }
+            catch {
+                Write-Log "Download-cache pre-build failed (non-fatal): $($_.Exception.Message)" -LogOnly
+            }
         }
-        catch {
-            Write-Log "Download-cache pre-build failed (non-fatal): $($_.Exception.Message)" -LogOnly
-        }
-    }
-
-    if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
             Write-Phase -Phase $i
@@ -1422,9 +1444,9 @@ try {
                     # post-dcpromo window. Letting Phase 3 (media download/prep) run first gives
                     # the DC extra settle time so the common case installs on the first attempt;
                     # the in-guest write-probe gate + retry/remediation loop still wait the window
-                    # out if it hasn't closed yet. Phase 3 consumes no PKI certs (the first cert
-                    # consumer is the Phase 8 HTTPS flip), so deferring one phase costs no
-                    # autoenrollment lead time in practice.
+                    # out if it hasn't closed yet. Phase 3 applies computer policy before these
+                    # templates exist; Install-PKI verifies member autoenrollment after publishing
+                    # them, without waiting for a later background cycle or client-push request.
                     # Only trigger for NEW VMs (non-hidden). If only existing/hidden VMs have
                     # InstallCA, PKI is already deployed and should not be re-orchestrated.
                     $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA -and -not $_.hidden }).Count -gt 0
@@ -1498,7 +1520,10 @@ try {
         if ($currentPhase -ge 2) {
             $offerRestore = $false
             if ($currentPhase -eq 8 -and $deployConfig) {
-                try { $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig }
+                try {
+                    $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig `
+                        -SnapshotNamePattern "*MemLabs Phase 8 AutoSnapshot $Global:ConfigurationShort*"
+                }
                 catch { $offerRestore = $false }
             }
             if ($offerRestore) {
@@ -1509,7 +1534,7 @@ try {
             }
             else {
                 Write-Host
-                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -NoIndent
+                Write-Log "To retry from the current phase, run the command below. Phase 0 will prepare the retained VMs and reboot only those that need it: " -NoIndent
                 Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase
 
             }
@@ -1629,7 +1654,15 @@ try {
 
 }
 catch {
-    Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json -Depth 12)
+    $deploymentError = $_
+    $diagnosticConfigJson = $null
+    try {
+        $diagnosticConfigJson = ConvertTo-ConfigDiagnosticJson -Config $deployConfig -Depth 12
+    }
+    catch {
+        Write-Log 'Deploy config diagnostic redaction failed; configuration omitted from error context.' -Warning
+    }
+    Write-Exception -ExceptionInfo $deploymentError -AdditionalInfo $diagnosticConfigJson
     $NewLabsuccess = $false
 }
 finally {
@@ -1701,7 +1734,10 @@ finally {
         if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
             $offerRestore = $false
             if ($currentPhase -eq 8 -and $deployConfig) {
-                try { $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig }
+                try {
+                    $offerRestore = Test-Phase8AutoSnapshotExists -DeployConfig $deployConfig `
+                        -SnapshotNamePattern "*MemLabs Phase 8 AutoSnapshot $Global:ConfigurationShort*"
+                }
                 catch { $offerRestore = $false }
             }
             if ($offerRestore) {
@@ -1711,7 +1747,7 @@ finally {
             }
             else {
                 write-host
-                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -NoIndent
+                Write-Log "To retry from the current phase, run the command below. Phase 0 will prepare the retained VMs and reboot only those that need it: " -NoIndent
                 Write-NewLabResumeCommand -Configuration $Configuration -Phase $currentPhase
             }
         }
@@ -1815,9 +1851,9 @@ finally {
     }
     $global:ps_cache = @{}
 
-    # Reclaim runspaces parked by an abandon path (connect timeout, or a session
-    # evicted with -LeakSession). -Force because every job is gone by now, so the
-    # late-transport-callback hazard that made immediate disposal unsafe is over.
+    # Reclaim terminal runspaces parked by an abandon path. -Force bypasses age,
+    # not active-work guards: a timed-out connect can still be blocked inside
+    # VMBus even after every PowerShell job has been removed.
     try { $null = Clear-OrphanRunspaces -Force } catch { }
 
     # Runspaces are the launcher's dominant memory cost (~8MB each, and the reason a

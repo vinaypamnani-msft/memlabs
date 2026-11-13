@@ -193,6 +193,232 @@ function Get-VM2 {
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
 
+function Initialize-OsdClientHost {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][long]$MemoryBytes,
+        [Parameter(Mandatory)][int]$ProcessorCount,
+        [long]$DynamicMinRam = 0,
+        [int]$Phase = 0
+    )
+
+    $prefix = "[Phase $Phase]: ${VmName}: OSD host preparation"
+    $observed = @{ Vm = $null; Id = $null }
+    $originalState = $null
+    $updateError = $null
+    $updateStage = $null
+    $restoreError = $null
+    $restorePower = $false
+    $memoryUpdated = $false
+    $stage = 'validate request'
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+
+    function Format-OsdHostVm {
+        param($Vm)
+        if ($null -eq $Vm) { return '<not observed>' }
+        return (@('Id', 'State', 'Status', 'Generation', 'Heartbeat', 'MemoryStartup',
+                'DynamicMemoryEnabled', 'MemoryMinimum', 'MemoryMaximum', 'ProcessorCount') |
+            ForEach-Object {
+                $property = $Vm.PSObject.Properties[$_]
+                "$_=$(if ($property) { $property.Value } else { '<missing>' })"
+            }) -join '; '
+    }
+
+    function Format-OsdHostError {
+        param([Management.Automation.ErrorRecord]$ErrorRecord)
+        $codes = [Collections.Generic.List[string]]::new()
+        $exception = $ErrorRecord.Exception
+        while ($exception) {
+            $codes.Add(('0x{0:X8}' -f $exception.HResult))
+            $exception = $exception.InnerException
+        }
+        return "type=$($ErrorRecord.Exception.GetType().Name); errorId=$($ErrorRecord.FullyQualifiedErrorId); hresults=$($codes -join ','); $($ErrorRecord.Exception.Message -replace '\s+', ' ')"
+    }
+
+    function Invoke-OsdHostCommand {
+        param([string]$Operation, [scriptblock]$Action)
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try { return (& $Action) }
+            catch {
+                $errorText = Format-OsdHostError $_
+                $transient = $errorText -match '0x80010001|0x80010002|0x8001010A|0x800706BA|0x800706BB|message filter|server is (too )?busy|RPC server is unavailable|call was rejected|empty VM record'
+                if (-not $transient -or $attempt -eq 3) { throw }
+                Write-Log "$prefix`: $Operation transient failure, attempt $attempt/3; retrying in 5s. $errorText" -LogOnly
+                Start-Sleep -Seconds 5
+            }
+        }
+    }
+
+    function Get-OsdHostVm {
+        param([string]$ExpectedState)
+        for ($poll = 1; $poll -le 6; $poll++) {
+            $liveVm = Invoke-OsdHostCommand -Operation 'read live VM' -Action {
+                $records = @(Get-VM -Name $VmName -ErrorAction Stop)
+                if ($records.Count -eq 0 -or ($records.Count -eq 1 -and $null -eq $records[0])) {
+                    throw "Hyper-V returned an empty VM record for '$VmName'."
+                }
+                if ($records.Count -ne 1 -or $records[0].Name -ine $VmName) {
+                    throw "Hyper-V did not return exactly the requested VM '$VmName'."
+                }
+                return $records[0]
+            }
+            $observed.Vm = $liveVm
+            if (-not $liveVm.Id -or $liveVm.Id -eq [guid]::Empty -or
+                $liveVm.MemoryStartup -le 0 -or $liveVm.ProcessorCount -le 0) {
+                throw "Hyper-V returned an invalid host configuration for '$VmName'."
+            }
+            if ($observed.Id -and $liveVm.Id -ne $observed.Id) {
+                throw "VM identity changed from '$($observed.Id)' to '$($liveVm.Id)'; refusing to modify or start a replacement VM."
+            }
+            if (-not $observed.Id) { $observed.Id = $liveVm.Id }
+            $state = "$($liveVm.State)"
+            if (($ExpectedState -and $state -eq $ExpectedState) -or
+                (-not $ExpectedState -and $state -in @('Off', 'Running', 'Saved', 'Paused'))) {
+                return $liveVm
+            }
+            if (-not $ExpectedState -and $state -notin @('Starting', 'Stopping', 'Saving',
+                    'Restoring', 'Pausing', 'Resuming', 'Reset', 'Resetting', 'FastSaving')) {
+                throw "Unsupported Hyper-V state '$state'; no automatic reset or saved-state removal will be attempted."
+            }
+            $wanted = if ($ExpectedState) { $ExpectedState } else { 'a stable power state' }
+            if ($poll -eq 6) {
+                throw "VM did not reach $wanted after 6 observations; last state='$state'."
+            }
+            Write-Log "$prefix`: state observation $poll/6, expected=$wanted, actual=$state; checking again in 5s." -LogOnly
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    try {
+        if ($MemoryBytes -le 0 -or $ProcessorCount -le 0 -or
+            $DynamicMinRam -lt 0 -or $DynamicMinRam -gt $MemoryBytes) {
+            throw "Invalid requested host configuration: startupBytes=$MemoryBytes; processors=$ProcessorCount; dynamicMinBytes=$DynamicMinRam."
+        }
+        $stage = 'inspect live VM'
+        $vm = Get-OsdHostVm
+        $originalState = "$($vm.State)"
+        Write-Log "$prefix`: preflight: $(Format-OsdHostVm $vm); requestedStartupBytes=$MemoryBytes; requestedProcessors=$ProcessorCount; requestedDynamicMinBytes=$DynamicMinRam; WindowsGuestChecks=Skipped (PXE target)." -LogOnly
+
+        $pinnedMin = [long][math]::Floor($MemoryBytes * 0.99)
+        $pinnedMin -= $pinnedMin % 2MB
+        if ($pinnedMin -lt 40MB) { $pinnedMin = $MemoryBytes }
+        $memoryChanged = $vm.MemoryStartup -ne $MemoryBytes
+        $processorsChanged = $vm.ProcessorCount -ne $ProcessorCount
+        $pinChanged = $DynamicMinRam -gt 0 -and
+            (-not $vm.DynamicMemoryEnabled -or $vm.MemoryMinimum -ne $pinnedMin)
+        if ($originalState -in @('Saved', 'Paused') -and
+            ($memoryChanged -or $processorsChanged -or $pinChanged)) {
+            throw "Cannot change hardware while the PXE target is '$originalState'. Resume or shut down the VM before retrying; its saved/paused state will not be discarded."
+        }
+
+        try {
+            if ($originalState -eq 'Running' -and
+                ($memoryChanged -or $processorsChanged -or ($pinChanged -and -not $vm.DynamicMemoryEnabled))) {
+                $stage = 'stop for hardware update'
+                $restorePower = $true
+                $stopped = Stop-VM2 -Name $VmName -Passthru -RetryCount 1 -RetrySeconds 5 -GracefulTimeoutSeconds 30
+                if ($stopped -isnot [bool] -or -not $stopped) {
+                    throw 'Stop-VM2 did not return Boolean true; hardware was not changed.'
+                }
+                $vm = Get-OsdHostVm -ExpectedState Off
+            }
+
+            $memoryChanged = $vm.MemoryStartup -ne $MemoryBytes
+            $pinChanged = $DynamicMinRam -gt 0 -and
+                (-not $vm.DynamicMemoryEnabled -or $vm.MemoryMinimum -ne $pinnedMin)
+            if ($pinChanged -and -not $memoryChanged -and $vm.State -eq 'Running' -and
+                $vm.DynamicMemoryEnabled) {
+                Write-Log "$prefix`: retaining live dynamic-memory floor $($vm.MemoryMinimum) instead of $pinnedMin; deployment pin adjustments alone will not interrupt a running PXE target or issue a potentially blocking live Set-VMMemory call." -LogOnly
+                $pinChanged = $false
+            }
+            if ($memoryChanged -or $pinChanged) {
+                $stage = 'update memory'
+                $memoryParams = @{
+                    DynamicMemoryEnabled = $true
+                    MinimumBytes = $pinnedMin
+                    MaximumBytes = $MemoryBytes
+                    StartupBytes = $MemoryBytes
+                }
+                Invoke-OsdHostCommand -Operation $stage -Action {
+                    $vm | Set-VMMemory @memoryParams -ErrorAction Stop | Out-Null
+                }
+                $memoryUpdated = $true
+            }
+            if ($processorsChanged) {
+                $stage = 'update processors'
+                Invoke-OsdHostCommand -Operation $stage -Action {
+                    $vm | Set-VM -ProcessorCount $ProcessorCount -ErrorAction Stop | Out-Null
+                }
+            }
+        }
+        catch {
+            $updateError = $_
+            $updateStage = $stage
+        }
+        finally {
+            if ($restorePower) {
+                try {
+                    $stage = 'restore original Running state'
+                    $vm = Get-OsdHostVm
+                    if ($vm.State -eq 'Off') {
+                        $started = Start-VM2 -Name $VmName -Passthru -RetryCount 1 -RetrySeconds 5
+                        if ($started -isnot [bool] -or -not $started) {
+                            throw 'Start-VM2 did not return Boolean true.'
+                        }
+                    }
+                    elseif ($vm.State -ne 'Running') {
+                        throw "VM is '$($vm.State)'; refusing to discard saved/paused state during power recovery."
+                    }
+                    $vm = Get-OsdHostVm -ExpectedState Running
+                    Write-Log "$prefix`: restored original power state Running; Windows guest checks were not required." -LogOnly
+                }
+                catch {
+                    $restoreError = $_
+                    $primaryError = if ($updateError) { $updateError.Exception.Message -replace '\s+', ' ' } else { '<none>' }
+                    Write-Log "$prefix`: power recovery failed: $(Format-OsdHostError $_); updateError=$primaryError; lastHostState=$(Format-OsdHostVm $observed.Vm)." -Failure -LogOnly
+                }
+            }
+        }
+        if ($updateError) {
+            $stage = $updateStage
+            throw $updateError
+        }
+        if ($restoreError) { throw $restoreError }
+
+        $stage = 'verify host configuration'
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $vm = Get-OsdHostVm -ExpectedState $originalState
+            $mismatches = [Collections.Generic.List[string]]::new()
+            if ($vm.MemoryStartup -ne $MemoryBytes) {
+                $mismatches.Add("startupBytes=$($vm.MemoryStartup), expected=$MemoryBytes")
+            }
+            if ($vm.ProcessorCount -ne $ProcessorCount) {
+                $mismatches.Add("processors=$($vm.ProcessorCount), expected=$ProcessorCount")
+            }
+            if ($memoryUpdated -and (-not $vm.DynamicMemoryEnabled -or
+                    $vm.MemoryMinimum -ne $pinnedMin -or $vm.MemoryMaximum -ne $MemoryBytes)) {
+                $mismatches.Add("dynamicMemory=$($vm.DynamicMemoryEnabled), minimum=$($vm.MemoryMinimum), maximum=$($vm.MemoryMaximum); expected=True/$pinnedMin/$MemoryBytes")
+            }
+            if ($mismatches.Count -eq 0) { break }
+            if ($attempt -eq 3) {
+                throw "Host verification failed after 3 observations: $($mismatches -join '; ')."
+            }
+            Write-Log "$prefix`: verification mismatch, attempt $attempt/3: $($mismatches -join '; '); reading again in 5s." -LogOnly
+            Start-Sleep -Seconds 5
+        }
+        Write-Log "$prefix`: verified: $(Format-OsdHostVm $vm); originalState=$originalState; elapsedSeconds=$([math]::Round($timer.Elapsed.TotalSeconds, 1)); WindowsGuestChecks=Skipped." -LogOnly
+        return $true
+    }
+    catch {
+        Write-Log "$prefix failed at '$stage': $(Format-OsdHostError $_); requestedStartupBytes=$MemoryBytes; requestedProcessors=$ProcessorCount; originalState=$originalState; lastHostState=$(Format-OsdHostVm $observed.Vm); elapsedSeconds=$([math]::Round($timer.Elapsed.TotalSeconds, 1))." -Failure -LogOnly
+        return $false
+    }
+    finally {
+        $timer.Stop()
+    }
+}
+
 function Get-VMSwitch2 {
     param (
         [Parameter(Mandatory = $true)]
@@ -511,7 +737,12 @@ public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.I
             $errorHistoryNote = if ($ClearErrorHistory) { ", errorsCleared=$clearedErrorRecords" } else { "" }
             Write-Log "Invoke-HostMemoryReclaim: launcher pid $PID after cleanup - managed ${managedBeforeMB}MB -> ${managedAfterMB}MB, private ${beforePrivateMB}MB -> ${afterPrivateMB}MB, WS ${beforeWorkingSetMB}MB -> ${afterWorkingSetMB}MB, heap ${heapBeforeMB}MB -> ${heapAfterMB}MB, committed ${committedBeforeMB}MB -> ${committedAfterMB}MB, fragmented ${fragmentedBeforeMB}MB -> ${fragmentedAfterMB}MB$errorHistoryNote" -LogOnly
             if ($managedAfterMB -ge 1024 -or $afterPrivateMB -ge 2048) {
-                Write-Log "[MemoryGuard] Launcher remains above the safe post-cleanup threshold (managed=${managedAfterMB}MB private=${afterPrivateMB}MB heap=${heapAfterMB}MB fragmented=${fragmentedAfterMB}MB). Restart Start-Test before the next large configuration; capture a managed heap dump if growth repeats." -Warning
+                if ($env:MEMLABS_PINNED_CHILD_PROCESS -eq '1') {
+                    Write-Log "[MemoryGuard] Deployment child remains above the safe post-cleanup threshold (managed=${managedAfterMB}MB private=${afterPrivateMB}MB heap=${heapAfterMB}MB fragmented=${fragmentedAfterMB}MB), but this isolated process is exiting now and will release the entire heap." -LogOnly
+                }
+                else {
+                    Write-Log "[MemoryGuard] Launcher remains above the safe post-cleanup threshold (managed=${managedAfterMB}MB private=${afterPrivateMB}MB heap=${heapAfterMB}MB fragmented=${fragmentedAfterMB}MB). Restart Start-Test before the next large configuration; capture a managed heap dump if growth repeats." -Warning
+                }
             }
         }
         elseif ($null -ne $freedMB) {
@@ -1851,11 +2082,13 @@ function Restart-VM2Smart {
     # recovery screen, so this helper ALWAYS tries a graceful guest-OS shutdown
     # first (bounded by -GracefulTimeoutSeconds so a hung guest can't block the
     # caller forever). It only escalates to a hard power-off when -AllowTurnOff
-    # is set AND the graceful shutdown did not bring the VM down.
+    # is set, the graceful shutdown did not bring the VM down, AND Windows did
+    # not report that it already owns a shutdown. Guest-owned shutdown is
+    # observed with a no-progress watchdog and always fails closed.
     #
-    # Returns $true if the VM was restarted (graceful succeeded, or TurnOff was
-    # used), $false if the graceful shutdown did not complete and TurnOff was
-    # not permitted (the VM is left running for the caller to keep waiting on).
+    # Returns $true if the VM was restarted. A still-running shutdown job is
+    # observed with the same watchdog as ERROR_SHUTDOWN_IN_PROGRESS. A stalled
+    # shutdown returns $false without hard power-off, even with -AllowTurnOff.
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
@@ -1864,6 +2097,12 @@ function Restart-VM2Smart {
         [switch]$AllowTurnOff,
         [Parameter(Mandatory = $false)]
         [int]$GracefulTimeoutSeconds = 180,
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 7200)]
+        [int]$ShutdownNoProgressSeconds = 1800,
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 60)]
+        [int]$ShutdownPollSeconds = 10,
         [Parameter(Mandatory = $false)]
         [string]$Reason = "restart",
         [Parameter(Mandatory = $false)]
@@ -1882,6 +2121,8 @@ function Restart-VM2Smart {
     $gracefulNote = ''
     $shutdownInProgress = $false
     $uptimeBefore = $null
+    $gracefulJob = $null
+    $jobError = ''
     if ($vm.State -eq 'Running') {
         try { $uptimeBefore = $vm.Uptime } catch { }
         # Let just-reaped PSDirect jobs finish tearing down server-side before power is
@@ -1891,6 +2132,25 @@ function Restart-VM2Smart {
         # disposed job on a threadpool thread -> unhandled PSObjectDisposedException that
         # kills the whole phase child process.
         Start-Sleep -Seconds 5
+        # Completed probes leave an idle PSDirect connection cached. Close only
+        # idle connections before shutdown; never dispose a live pipeline.
+        $cachedSessions = @($global:ps_cache.Keys | Where-Object { $_ -like "$Name-*" } |
+            ForEach-Object { $global:ps_cache[$_] })
+        $busySessions = @($cachedSessions | Where-Object { "$($_.Availability)" -ne 'Available' })
+        if ($busySessions.Count -gt 0) {
+            Write-Log "${Name}: Restart ($Reason): cached PSDirect session is not idle; refusing shutdown over an active or unverifiable pipeline." -Warning
+            return $false
+        }
+        if ($cachedSessions.Count -gt 0) {
+            try {
+                Remove-VmSessionFromCache -VmName $Name
+                Write-Log "${Name}: Restart ($Reason): closed $($cachedSessions.Count) idle cached PSDirect session(s) before shutdown." -LogOnly
+            }
+            catch {
+                Write-Log "${Name}: Restart ($Reason): could not close cached PSDirect sessions: $($_.Exception.Message)" -Warning
+                return $false
+            }
+        }
         Write-Log "${Name}: Restart ($Reason): attempting graceful shutdown (up to ${GracefulTimeoutSeconds}s)..." -LogOnly
         try {
             if (Get-Command Write-VmJobLedgerCensus -ErrorAction SilentlyContinue) {
@@ -1929,12 +2189,17 @@ function Restart-VM2Smart {
             # the stop because the guest is ALREADY going down -- on the DSC reboot-pending
             # path, that is the very reboot this call exists to force.
             $shutdownInProgress = [bool]($jobError -match '0x8007045B(?![0-9A-Fa-f])|0x800704A6(?![0-9A-Fa-f])|shutdown is in progress|shutdown has already been scheduled')
+            if ($jobState -eq 'Running') {
+                $shutdownInProgress = $true
+            }
             $gracefulSeconds = [int][Math]::Floor(([DateTime]::UtcNow - $gracefulStart).TotalSeconds)
             $gracefulNote = " (job=$jobState after ${gracefulSeconds}s"
             if ($jobError) { $gracefulNote += "; error: $jobError" }
             $gracefulNote += ')'
-            if ($gracefulJob.State -eq 'Running') { Stop-Job $gracefulJob -ErrorAction SilentlyContinue }
+            # A live shutdown job may be Windows servicing, not a failed request.
+            # Leave it alive while observing VM progress; never power-cycle it.
             Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: Restart ($Reason) graceful shutdown"
+            if ($jobState -in @('Completed', 'Failed')) { $gracefulJob = $null }
         }
         catch {
             $gracefulNote = " (Stop-VM threw: $($_.Exception.Message))"
@@ -1948,18 +2213,26 @@ function Restart-VM2Smart {
     # The guest is already restarting itself. Forcing power off now is exactly the
     # fragile-window corruption this function's header warns about, it breaks the VMBus
     # under in-flight PSDirect jobs (which kills the phase child process with a disposed-job
-    # exception), and it buys nothing -- the reboot we wanted is already happening. Wait.
+    # exception), and it buys nothing -- the reboot we wanted is already happening.
+    # Monitor observable state/heartbeat changes instead of imposing a total-duration cap.
+    # If that progress stops, leave the VM untouched and let the caller fail closed.
     if ($shutdownInProgress -and -not ($vm -and $vm.State -eq 'Off')) {
-        Write-Log "${Name}: Restart ($Reason): the guest is already shutting down$gracefulNote. Waiting for its own restart instead of forcing a power-off." -Warning
-        $rebootDeadline = (Get-Date).AddSeconds($GracefulTimeoutSeconds)
-        while ((Get-Date) -lt $rebootDeadline) {
-            Start-Sleep -Seconds 10
+        Write-Log "${Name}: Restart ($Reason): shutdown is still in progress$gracefulNote. Monitoring state/heartbeat/uptime with a ${ShutdownNoProgressSeconds}s no-progress budget; hard TurnOff is prohibited while Windows owns shutdown." -Warning
+        $shutdownLastProgress = [DateTime]::UtcNow
+        $shutdownFingerprint = "$($vm.State)|$($vm.Heartbeat)|$($vm.Status)"
+        while ($true) {
+            Start-Sleep -Seconds $ShutdownPollSeconds
             $vm = Get-VM2 -Name $Name -Fallback
-            if (-not $vm -or $vm.State -eq 'Off') { break }
+            if (-not $vm) {
+                Write-Log "${Name}: Restart ($Reason): VM disappeared while Windows owned shutdown; refusing hard TurnOff." -Warning
+                return $false
+            }
+            if ($vm.State -eq 'Off') { break }
             # A guest-initiated RESTART never reports 'Off' in Hyper-V, so the uptime
             # resetting is the only proof it actually came back around.
             if ($uptimeBefore -and $vm.Uptime -lt $uptimeBefore) {
                 Write-Log "${Name}: Restart ($Reason): guest completed its own restart (uptime reset)." -LogOnly
+                Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: observed guest restart"
                 if ($Stopwatch -and $Timespan) {
                     Wait-ForHeartbeat -VmName $Name -Stopwatch $Stopwatch -Timespan $Timespan | Out-Null
                 }
@@ -1967,6 +2240,33 @@ function Restart-VM2Smart {
                     Wait-ForHeartbeat -VmName $Name | Out-Null
                 }
                 return $true
+            }
+            if ($gracefulJob -and "$($gracefulJob.State)" -eq 'Failed' -and
+                -not ($jobError -match '0x8007045B|shutdown is in progress')) {
+                $lateErrors = @($gracefulJob.JobStateInfo.Reason.Message)
+                foreach ($child in @($gracefulJob.ChildJobs)) {
+                    $lateErrors += @($child.JobStateInfo.Reason.Message)
+                    $lateErrors += @($child.Error | ForEach-Object { "$_" })
+                }
+                $lateError = ($lateErrors | Where-Object { $_ } | Select-Object -Unique) -join ' | '
+                if ($lateError -notmatch '0x8007045B|shutdown is in progress') {
+                    Write-Log "${Name}: Restart ($Reason): shutdown job failed while being observed: $lateError; state=$($vm.State), heartbeat=$($vm.Heartbeat), status=$($vm.Status), uptime=$($vm.Uptime). Refusing hard TurnOff." -Warning
+                    Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: observed shutdown failure"
+                    return $false
+                }
+            }
+
+            $currentFingerprint = "$($vm.State)|$($vm.Heartbeat)|$($vm.Status)"
+            if ($currentFingerprint -ne $shutdownFingerprint) {
+                Write-Log "${Name}: Restart ($Reason): guest-owned shutdown progressed: '$shutdownFingerprint' -> '$currentFingerprint'." -LogOnly
+                $shutdownFingerprint = $currentFingerprint
+                $shutdownLastProgress = [DateTime]::UtcNow
+            }
+            $shutdownNoProgress = [int][Math]::Floor(
+                ([DateTime]::UtcNow - $shutdownLastProgress).TotalSeconds)
+            if ($shutdownNoProgress -ge $ShutdownNoProgressSeconds) {
+                Write-Log "${Name}: Restart ($Reason): guest-owned shutdown made no observable state/heartbeat progress for ${shutdownNoProgress}s; state=$($vm.State), heartbeat=$($vm.Heartbeat), status=$($vm.Status), uptime=$($vm.Uptime), shutdownJob=$($gracefulJob.State)$gracefulNote. Refusing hard TurnOff while Windows owns shutdown; leaving the VM unchanged for fail-closed diagnostics." -Warning
+                return $false
             }
         }
     }
@@ -1983,6 +2283,7 @@ function Restart-VM2Smart {
     }
 
     # 3) Start it back up and wait for it to respond.
+    Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: observed guest shutdown"
     Start-Sleep -Seconds 10
     Start-VM2 -Name $Name
     if ($Stopwatch -and $Timespan) {

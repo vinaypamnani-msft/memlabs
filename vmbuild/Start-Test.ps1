@@ -32,14 +32,19 @@
     .\Start-Test.ps1 -Test NOCM -MainToDevelopExpansion
 
     Deploys NOCM-A once with pinned main, then runs develop's NOCM B+ fixtures
-    twice before validating and removing the family.
+    twice before validating and removing the family. Existing-site maintenance,
+    idempotence and independent readiness are required. CM fault recovery is
+    explicitly not applicable to NOCM; include a CM family for that coverage.
 
 .EXAMPLE
     .\Start-Test.ps1 -All -MainToDevelopExpansion
 
     Runs every family that has an A fixture in pinned main and B+ fixtures in
     pinned develop. Completed stages are checkpointed under
-    ProgramData\MemLabs\CrossRevision. If exact-main A is interrupted, remove
+    ProgramData\MemLabs\CrossRevision. Pinned regression/artifact preflight,
+    existing-site maintenance, per-pass readiness and once-per-candidate CM
+    recovery receipts gate completion and cleanup. The recovery matrix alters
+    only scoped disposable test VMs. If exact-main A is interrupted, remove
     that family lab and reset its state; the runner will not replay or adopt an
     uncheckpointed baseline.
 #>
@@ -86,6 +91,12 @@ param (
 
     [Parameter(Mandatory = $true, HelpMessage = "Continuously run the highest-value test that fits the host", ParameterSetName = 'Continuous')]
     [switch]$Continuous,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Skip one or more test families (for example CSTest5)", ParameterSetName = 'ALL')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip one or more test families (for example CSTest5)", ParameterSetName = 'TestName')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip one or more test families (for example CSTest5)", ParameterSetName = 'Suite')]
+    [Parameter(Mandatory = $false, HelpMessage = "Skip one or more test families (for example CSTest5)", ParameterSetName = 'Continuous')]
+    [string[]]$SkipTest,
 
     [Parameter(Mandatory = $false, ParameterSetName = 'Continuous')]
     [switch]$ContinuousPlanOnly,
@@ -198,6 +209,12 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip the main-to-develop VM-note compatibility preflight", ParameterSetName = 'Suite')]
     [switch]$SkipVMNoteCompatibility,
 
+    [Parameter(HelpMessage = "Emergency deployment-only mode: skip auxiliary tests, validation, maintenance qualification/recovery, and Phase 11", ParameterSetName = 'ALL')]
+    [Parameter(HelpMessage = "Emergency deployment-only mode: skip auxiliary tests, validation, maintenance qualification/recovery, and Phase 11", ParameterSetName = 'TestName')]
+    [Parameter(HelpMessage = "Emergency deployment-only mode: skip auxiliary tests, validation, maintenance qualification/recovery, and Phase 11", ParameterSetName = 'Suite')]
+    [Parameter(HelpMessage = "Emergency deployment-only mode: skip auxiliary tests, validation, maintenance qualification/recovery, and Phase 11", ParameterSetName = 'Continuous')]
+    [switch]$SkipTests,
+
     [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'ALL')]
     [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'TestName')]
     [Parameter(Mandatory = $false, HelpMessage = "Deploy each A fixture with pinned main, then its B+ fixtures twice with pinned develop", ParameterSetName = 'Suite')]
@@ -248,6 +265,20 @@ if ($Suite) {
 elseif ($All.IsPresent) {
     $resolvedTestSuite = Resolve-MemLabsTestSuite -VmbuildRoot $PSScriptRoot -Name 'Core'
 }
+$skipTestNames = @($SkipTest | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+if ($skipTestNames.Count -gt 0) {
+    $knownTestFamilies = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'config\tests') -Filter *.json |
+        ForEach-Object { ($_.BaseName -split '-')[0] } |
+        Where-Object { $_ -and $_ -notmatch 'storageconfig' } |
+        Select-Object -Unique)
+    $unknownSkipTests = @($skipTestNames | Where-Object { $_ -notin $knownTestFamilies })
+    if ($unknownSkipTests.Count -gt 0) {
+        throw "Unknown test family in -SkipTest: $($unknownSkipTests -join ', '). Valid family names include: $($knownTestFamilies -join ', ')."
+    }
+    Write-Host "Skipping test families: $($skipTestNames -join ', ')" -ForegroundColor Yellow
+}
+$skipTestSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($skipTestName in $skipTestNames) { [void]$skipTestSet.Add($skipTestName) }
 $runCrossRevision = $MainToDevelopExpansion.IsPresent -or
     ($resolvedTestSuite -and $resolvedTestSuite.Mode -eq 'CrossRevision')
 
@@ -262,6 +293,8 @@ if ($Continuous.IsPresent) {
         '-RetentionDays', $RetentionDays
     )
     if ($ContinuousPlanOnly.IsPresent) { $continuousArguments += '-PlanOnly' }
+    if ($SkipTests.IsPresent) { $continuousArguments += '-SkipTests' }
+    foreach ($skipTestName in $skipTestNames) { $continuousArguments += @('-SkipTest', $skipTestName) }
     if ($TestHistoryPath) { $continuousArguments += @('-HistoryPath', $TestHistoryPath) }
     if ($TestRetentionPath) { $continuousArguments += @('-RetentionPath', $TestRetentionPath) }
     do {
@@ -271,6 +304,11 @@ if ($Continuous.IsPresent) {
         }
     } while ($continuousExit -eq 57)
     exit $continuousExit
+}
+
+if ($Test -and $skipTestSet.Contains($Test)) {
+    Write-Host "Skipping requested test family '$Test'." -ForegroundColor Yellow
+    exit 0
 }
 
 
@@ -698,7 +736,8 @@ function Invoke-MainToDevelopExpansionCycle {
         [switch] $RunAll,
         [switch] $PlanOnly,
         [switch] $ResetState,
-        [switch] $RequireCleanSource
+        [switch] $RequireCleanSource,
+        [switch] $SkipTests
     )
 
     $runnerPath = Join-Path $PSScriptRoot 'tools\Invoke-MainToDevelopExpansionTest.ps1'
@@ -732,6 +771,7 @@ function Invoke-MainToDevelopExpansionCycle {
         if ($PlanOnly.IsPresent) { $arguments += '-PlanOnly' }
         if ($forwardResetState) { $arguments += '-ResetState' }
         if ($RequireCleanSource.IsPresent) { $arguments += '-RequireCleanSource' }
+        if ($SkipTests.IsPresent) { $arguments += '-SkipTests' }
         if ($StateRoot) { $arguments += @('-StateRoot', $StateRoot) }
 
         $global:LASTEXITCODE = 0
@@ -752,55 +792,97 @@ function Invoke-MainToDevelopExpansionCycle {
 }
 
 function Invoke-NewLab {
-    # Run one deployment and hand back ONLY its exit code. Two things here are load-bearing:
-    #  1. '| Out-Host' -- New-Lab.ps1 leaks objects onto the success stream. Un-piped they
-    #     join Run-Test's own output, so the caller's "$result = Run-Test" gets an ARRAY and
-    #     "-not $result" evaluates FALSE on failure: a failed build silently rolled on.
-    #  2. Zeroing $LASTEXITCODE first -- New-Lab.ps1 only calls exit when it FAILS, so on
-    #     success $LASTEXITCODE is whatever the last native command left (e.g. a preceding
-    #     git pull whose non-zero exit we deliberately tolerate).
-    #  3. -KeepFailedVMs -- without it New-Lab deletes every Phase 1 VM on failure, which
-    #     flatly contradicts the "left intact for investigation" message the harness prints
-    #     next and makes the offered Retry-after-repair impossible.
+    # Run every deployment in a fresh attached process. New-Lab loads thousands of
+    # commands, formats, modules, remoting objects, and job payloads; a long Start-Test
+    # sequence cannot reliably reclaim all of those graphs from one process. Process exit
+    # is the ownership boundary. Invoke-PinnedChildScript supplies kill-on-close cleanup
+    # and a token-verified result sidecar for structured resume metadata.
     param(
-        [string]$ConfigFile
+        [string]$ConfigFile,
+        [int]$StartPhase = 0,
+        [switch]$Restore
     )
 
     $script:LastNewLabResumeCommand = $null
-    $global:NewLabResumeCommand = $null
-    $global:LASTEXITCODE = 0
-    & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit -RequireCleanSource:$RequireCleanSource | Out-Host
-    $code = [int]$LASTEXITCODE
-    $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
+    $script:LastNewLabResumeInfo = $null
+    if ($SkipTests -and $StartPhase -eq 11) {
+        Write-Host "SKIP TESTS: Phase 11-only resume for '$ConfigFile' omitted; deployment phases are already complete. This is not a validated pass." -ForegroundColor Yellow
+        return 0
+    }
+    $newLabParameters = [ordered]@{
+        Configuration = $ConfigFile
+        AutoSnapshot = $true
+        KeepFailedVMs = $true
+        ClearErrorHistoryOnExit = $true
+        RequireCleanSource = $RequireCleanSource
+    }
+    if ($SkipTests) {
+        $newLabParameters.SkipValidation = $true
+        $newLabParameters.SkipPhase = @(11)
+    }
+    if ($StartPhase -gt 0) { $newLabParameters.StartPhase = $StartPhase }
+    if ($Restore.IsPresent) { $newLabParameters.Restore = $true }
+
+    $childLauncherPath = if ($script:NewLabChildLauncherPath) {
+        $script:NewLabChildLauncherPath
+    }
+    else {
+        Join-Path $PSScriptRoot 'tools\Invoke-PinnedChildScript.ps1'
+    }
+    if (-not (Test-Path -LiteralPath $childLauncherPath -PathType Leaf)) {
+        throw "New-Lab child launcher not found: $childLauncherPath"
+    }
+    $newLabScriptPath = (Resolve-Path -LiteralPath '.\New-Lab.ps1' -ErrorAction Stop).Path
+    $childEngine = (Get-Command pwsh.exe -ErrorAction Stop).Source
+    $childStateRoot = Join-Path ([IO.Path]::GetTempPath()) 'MemLabs\StartTest'
+    $null = New-Item -ItemType Directory -Path $childStateRoot -Force -ErrorAction Stop
+
+    $invokeChild = {
+        $token = [guid]::NewGuid().ToString('N')
+        $parameterPath = Join-Path $childStateRoot ".newlab-parameters-$PID-$token.clixml"
+        $resultPath = Join-Path $childStateRoot ".newlab-result-$PID-$token.json"
+        try {
+            $newLabParameters | Export-Clixml -LiteralPath $parameterPath -Depth 5 -ErrorAction Stop
+            $global:LASTEXITCODE = 0
+            & $childEngine -NoLogo -NoProfile -NonInteractive -File $childLauncherPath `
+                -ScriptPath $newLabScriptPath -ParameterPath $parameterPath `
+                -InvocationToken $token -ResultPath $resultPath 2>&1 | Out-Host
+            $processExitCode = [int]$LASTEXITCODE
+            if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                throw "New-Lab child exited $processExitCode without publishing its structured result."
+            }
+            $childResult = Get-Content -LiteralPath $resultPath -Raw -ErrorAction Stop |
+                ConvertFrom-Json -ErrorAction Stop
+            if ("$($childResult.InvocationToken)" -ne $token) {
+                throw "New-Lab child result token does not match invocation '$token'."
+            }
+            if ([int]$childResult.ExitCode -ne $processExitCode) {
+                throw "New-Lab child result exit code $($childResult.ExitCode) does not match process exit code $processExitCode."
+            }
+            return [pscustomobject]@{
+                ExitCode      = $processExitCode
+                ResumeCommand = $childResult.ResumeCommand
+                ResumeInfo    = $childResult.ResumeInfo
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $parameterPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $result = & $invokeChild
+    $code = [int]$result.ExitCode
+    $script:LastNewLabResumeCommand = $result.ResumeCommand
+    $script:LastNewLabResumeInfo = $result.ResumeInfo
 
     # 55 = New-Lab rebuilt DSC.zip and needs a restart to pick it up.
     if ($code -eq 55) {
-        $global:NewLabResumeCommand = $null
-        $global:LASTEXITCODE = 0
-        & ./New-Lab.ps1 -Configuration $ConfigFile -NoSnapshot -KeepFailedVMs -ClearErrorHistoryOnExit -RequireCleanSource:$RequireCleanSource | Out-Host
-        $code = [int]$LASTEXITCODE
-        $script:LastNewLabResumeCommand = $global:NewLabResumeCommand
+        $result = & $invokeChild
+        $code = [int]$result.ExitCode
+        $script:LastNewLabResumeCommand = $result.ResumeCommand
+        $script:LastNewLabResumeInfo = $result.ResumeInfo
     }
-
-    # New-Lab runs INSIDE this process, so its job workers are children of the
-    # harness and survive into the next test. Each is a pwsh.exe holding ~300MB
-    # once it has dot-sourced Common.ps1, so an -All run accumulates them until
-    # Phase 1 of some later test fails its memory pre-flight. Sweep between tests
-    # and report anything that would not die, so the leaking job gets named.
-    try {
-        foreach ($job in @(Get-Job -ErrorAction SilentlyContinue)) {
-            if ($job.State -eq 'Running') { try { $job.StopJobAsync() } catch { } }
-        }
-        $stragglers = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -match '-s\s+-NoLogo' })
-        foreach ($proc in $stragglers) { Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue }
-        foreach ($job in @(Get-Job -ErrorAction SilentlyContinue)) { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue }
-        if ($stragglers.Count -gt 0) {
-            Write-Host "  Swept $($stragglers.Count) leftover job worker process(es) after $(Split-Path $ConfigFile -Leaf)." -ForegroundColor DarkYellow
-        }
-        $null = Write-PowerShellJobLeakDiag -Context "Start-Test after $(Split-Path $ConfigFile -Leaf)"
-    }
-    catch { }
 
     return $code
 }
@@ -821,7 +903,7 @@ function Get-TestFailureAction {
     Write-Host "  Domain : $DomainName" -ForegroundColor DarkGray
     if ($ResumeCommand) {
         Write-Host "  Resume : $ResumeCommand" -ForegroundColor DarkGray
-        Write-Host "  Repair or resume it from another window, then choose Retry." -ForegroundColor DarkGray
+        Write-Host "  Phase 0 prepares retained VMs and reboots only those that prove they need it." -ForegroundColor DarkGray
     }
     else {
         Write-Host "  No -StartPhase command was produced; the failure occurred before a resumable phase was identified." -ForegroundColor DarkGray
@@ -854,13 +936,63 @@ function Get-TestFailureAction {
     }
 }
 
+function Write-TestConfigSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigName
+    )
+
+    $destinationDirectory = Split-Path -Path $DestinationPath -Parent
+    if ($destinationDirectory -and -not (Test-Path -LiteralPath $destinationDirectory -PathType Container)) {
+        $null = New-Item -ItemType Directory -Path $destinationDirectory -Force -ErrorAction Stop
+    }
+
+    $config = Get-Content -LiteralPath $SourcePath -Raw -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ($cmVersion -and $config.cmOptions.version) {
+        if ($config.cmOptions.version -ne $cmVersion) {
+            $config.cmOptions.version = $cmVersion
+            Write-Host "updating cmVersion to $cmVersion"
+        }
+
+        if ($DoNotInstallCM -and $config.cmOptions.Install) {
+            $config.cmOptions.Install = $false
+        }
+    }
+
+    if ($dynamicMemory) {
+        foreach ($vm in $config.virtualMachines) {
+            $dynamicMinRam = if ($vm.sqlVersion) { "4GB" } else { "1GB" }
+            Write-Host "updating dynamicMinRam to $dynamicMinRam on $($vm.VmName)"
+            $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value $dynamicMinRam -Force
+        }
+    }
+    if ($serverVersion) {
+        foreach ($vm in $config.virtualMachines) {
+            if ($vm.operatingSystem -like "*server*") {
+                $vm.operatingSystem = $serverVersion
+            }
+        }
+    }
+
+    $null = Set-FeatureOverrides -Config $config -ConfigName $ConfigName
+    $null = Resolve-TestConfigNetworks -Config $config -ConfigName $ConfigName
+    $config | ConvertTo-Json -Depth 5 | Out-File -LiteralPath $DestinationPath -Force
+    return $config
+}
+
 function Run-Test {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '',
         Justification = 'Local test-runner helper; not an exported cmdlet.')]
     param(
         [string]$Test
     )
-    Write-Host "Starting all tests for $Test"
+    if ($SkipTests) { Write-Host "Starting deployment scenarios for $Test with all validation tests skipped." -ForegroundColor Yellow }
+    else { Write-Host "Starting all tests for $Test" }
     $Test = $Test.ToLowerInvariant()
     $Tests = Get-ChildItem -Path "$PSScriptRoot\config\tests" -Filter *.json | Sort-Object -Property { $_.Name } | Where-Object { $_.Name.ToLowerInvariant().StartsWith($Test) }
     $script:TestNetworkMap = @{}
@@ -883,60 +1015,60 @@ function Run-Test {
             # merge commit; a pull failure is non-fatal (continue with the current tree).
             Invoke-TestGitPull -Context "before $(Split-Path $testjson -Leaf)"
             $outputFile = Split-Path $testjson -leaf
-            $ModifiedtestFile = (Join-Path "c:\temp" $outputFile)
-            $config = Get-Content $testjson -Force | ConvertFrom-Json
-            if ($cmVersion -and $config.cmOptions.version) {
-                if ($config.cmOptions.version -ne $cmVersion) {
-                    $config.cmOptions.version = $cmVersion
-                    write-host "updating cmVersion to $cmVersion"
-                } 
-
-                if ($DoNotInstallCM -and $config.cmOptions.Install)  {
-                    $config.cmOptions.Install = $false
-                }
-            }
-        
-            if ($dynamicMemory) {
-                foreach ($vm in $config.virtualMachines) {
-                    $dynamicMinRam = if ($vm.sqlVersion) { "4GB" } else { "1GB" }
-                    write-host "updating dynamicMinRam to $dynamicMinRam on $($vm.VmName)"
-                    $vm | Add-Member -MemberType NoteProperty -Name "dynamicMinRam" -Value $dynamicMinRam -Force
-                }       
-            }
-            if ($serverVersion) {
-                foreach ($vm in $config.virtualMachines) {
-                    if ($vm.operatingSystem -like "*server*") {
-                        $vm.operatingSystem = $serverVersion
-                    }
-                }    
-            }
-            Set-FeatureOverrides -Config $config -ConfigName $outputFile
-            Resolve-TestConfigNetworks -Config $config -ConfigName $outputFile
+            $ModifiedtestFile = Join-Path $script:TestWorkingDirectory $outputFile
+            $config = Write-TestConfigSnapshot -SourcePath $testjson.FullName `
+                -DestinationPath $ModifiedtestFile -ConfigName $outputFile
             $domainName = $config.vmOptions.domainName
             $global:removedomains += $domainName
             $global:removedomains = @($global:removedomains | Select-Object -Unique)
 
-            $config | ConvertTo-Json -Depth 5 | Out-File $ModifiedtestFile -Force
             Write-Host "Starting test ($passLabel) for $testjson.  Added $domainName to the cleanup list: $($global:removedomains -join ', ')"
 
             $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
             Write-Host "$exitCode was returned from $testjson ($passLabel)"
 
             $action = 'Continue'
+            $automatedResumeAttempts = 0
             while ($exitCode -ne 0) {
                 Write-Host "$testjson Failed ($passLabel)"
                 Write-Host "Failed to create lab for $testjson copied to $ModifiedtestFile"
-                $action = Get-TestFailureAction -ConfigFile $ModifiedtestFile -DomainName $domainName -ExitCode $exitCode -ResumeCommand $script:LastNewLabResumeCommand
+                $resumeInfo = $script:LastNewLabResumeInfo
+                $canAutoResume = $resumeInfo -and
+                    [int]$resumeInfo.Phase -gt 0 -and
+                    $automatedResumeAttempts -lt 1
+                if ($canAutoResume) {
+                    $action = 'Retry'
+                    $automatedResumeAttempts++
+                    Write-Host "Automatically resuming at Phase $($resumeInfo.Phase); Phase 0 will prepare retained VMs and reboot only when required (attempt 1 of 1)." -ForegroundColor Cyan
+                }
+                else {
+                    $action = Get-TestFailureAction -ConfigFile $ModifiedtestFile -DomainName $domainName -ExitCode $exitCode -ResumeCommand $script:LastNewLabResumeCommand
+                }
                 if ($action -ne 'Retry') { break }
                 Write-Host "Retrying $testjson ($passLabel)..." -ForegroundColor Cyan
                 Invoke-TestGitPull -Context "before retrying $(Split-Path $testjson -Leaf)"
-                $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
+                $config = Write-TestConfigSnapshot -SourcePath $testjson.FullName `
+                    -DestinationPath $ModifiedtestFile -ConfigName $outputFile
+                $domainName = $config.vmOptions.domainName
+                $global:removedomains += $domainName
+                $global:removedomains = @($global:removedomains | Select-Object -Unique)
+                if ($resumeInfo -and [int]$resumeInfo.Phase -gt 0) {
+                    $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile `
+                        -StartPhase ([int]$resumeInfo.Phase) -Restore:([bool]$resumeInfo.Restore)
+                }
+                else {
+                    $exitCode = Invoke-NewLab -ConfigFile $ModifiedtestFile
+                }
                 Write-Host "$exitCode was returned from $testjson (retry, $passLabel)"
             }
 
             if ($exitCode -eq 0) {
-                Write-Host "$testjson Completed Successfully ($passLabel)"
-                $global:history += "$testjson Completed Successfully ($passLabel)"
+                $completionText = if ($SkipTests) {
+                    "$testjson Deployment Completed ($passLabel; tests skipped, unqualified)"
+                }
+                else { "$testjson Completed Successfully ($passLabel)" }
+                Write-Host $completionText
+                $global:history += $completionText
                 continue
             }
 
@@ -975,6 +1107,7 @@ function Invoke-RecordedTestFamily {
             StartedUtc = $startedUtc.ToString('o'); Commit = $startCommit
             Domains = @($metadata.Domains); CoverageTags = @($metadata.CoverageTags)
             RequiredMemoryGB = $metadata.EstimatedRequiredGB
+            TestsSkipped = [bool]$SkipTests
         })
     $success = $false
     $failureText = ''
@@ -997,7 +1130,8 @@ function Invoke-RecordedTestFamily {
                 Commit = Get-MemLabsCurrentCommit -RepositoryRoot $repositoryRoot
                 StartCommit = $startCommit; Success = $success; ExitCode = $(if ($success) { 0 } else { 1 })
                 Error = $failureText; Domains = @($metadata.Domains)
-                CoverageTags = @($metadata.CoverageTags); NeedsRerun = -not $success
+                CoverageTags = @($metadata.CoverageTags); NeedsRerun = -not $success -or [bool]$SkipTests
+                TestsSkipped = [bool]$SkipTests; Qualified = $success -and -not [bool]$SkipTests
             })
     }
 }
@@ -1063,7 +1197,10 @@ else {
         Write-Host 'Mixed-revision plan-only mode uses the current committed HEAD without pulling.' -ForegroundColor DarkGray
     }
 }
-if ($SkipVMNoteCompatibility.IsPresent) {
+if ($SkipTests.IsPresent) {
+    Write-Host 'SKIP TESTS: emergency deployment-only mode; VM-note preflight, auxiliary qualification/recovery, validation, and Phase 11 are skipped. Results are unqualified.' -ForegroundColor Yellow
+}
+elseif ($SkipVMNoteCompatibility.IsPresent) {
     Write-Host 'WARNING: main-to-develop VM-note compatibility preflight skipped by request.' -ForegroundColor Yellow
 }
 elseif (-not (Invoke-VMNoteCompatibilityPreflight -PinnedMainRevision $MainRevision)) {
@@ -1090,13 +1227,14 @@ if ($runCrossRevision) {
         }
     }
     $crossRevisionFamilies = if ($resolvedTestSuite -and -not $resolvedTestSuite.IncludeAll) {
-        @($resolvedTestSuite.Families)
+        @($resolvedTestSuite.Families | Where-Object { -not $skipTestSet.Contains($_) })
     }
     else {
         @()
     }
-    $crossRevisionRunAll = ($resolvedTestSuite -and $resolvedTestSuite.IncludeAll) -or
+    $crossRevisionRunAll = (($resolvedTestSuite -and $resolvedTestSuite.IncludeAll) -or
         (-not $resolvedTestSuite -and $All.IsPresent)
+    ) -and $skipTestNames.Count -eq 0
     $crossRevisionExit = Invoke-MainToDevelopExpansionCycle `
         -PinnedMainRevision $MainRevision `
         -PinnedDevelopRevision $developRevision `
@@ -1106,7 +1244,8 @@ if ($runCrossRevision) {
         -StateRoot $CrossRevisionStateRoot `
         -PlanOnly:$CrossRevisionPlanOnly `
         -ResetState:$ResetCrossRevisionState `
-        -RequireCleanSource:$RequireCleanSource
+        -RequireCleanSource:$RequireCleanSource `
+        -SkipTests:$SkipTests
     exit $crossRevisionExit
 }
 
@@ -1120,6 +1259,12 @@ if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq
 }
 
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
+
+$script:TestWorkingDirectory = 'C:\temp'
+if (-not (Test-Path -LiteralPath $script:TestWorkingDirectory -PathType Container)) {
+    $null = New-Item -ItemType Directory -Path $script:TestWorkingDirectory -Force -ErrorAction Stop
+}
+$script:CompletedTestsPath = Join-Path $script:TestWorkingDirectory 'CompletedTests.txt'
 
 try {
     $global:history = @()
@@ -1153,11 +1298,15 @@ try {
     }
 
     if ($all -or $Suite) {
-        $Tests = @($resolvedTestSuite.Families)
+        $Tests = @($resolvedTestSuite.Families | Where-Object { -not $skipTestSet.Contains($_) })
+        $skippedSuiteTests = @($resolvedTestSuite.Families | Where-Object { $skipTestSet.Contains($_) })
+        if ($skippedSuiteTests.Count -gt 0) {
+            Write-Host "Skipped from '$($resolvedTestSuite.Name)' suite: $($skippedSuiteTests -join ', ')" -ForegroundColor Yellow
+        }
         Write-Host "Running '$($resolvedTestSuite.Name)' suite: $($Tests -join ', ')" -ForegroundColor Cyan
 
         foreach ($Test in $Tests) {
-            if (Get-Content "c:\temp\CompletedTests.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -eq $Test }) {
+            if (Get-Content -LiteralPath $script:CompletedTestsPath -ErrorAction SilentlyContinue | Where-Object { $_ -eq $Test }) {
                 write-host "$Test already ran skipping"
                 continue
             }
@@ -1179,7 +1328,7 @@ try {
             }else {
                 write-host "global:removedomains was empty"
             }
-            $Test | Out-File "c:\temp\CompletedTests.txt" -Force -Append
+            $Test | Out-File -LiteralPath $script:CompletedTestsPath -Force -Append
         }
     }
 }
@@ -1195,7 +1344,7 @@ finally {
             Write-GreenCheck $historyitem
         }
     }
-    Write-host "Delete C:\temp\CompletedTests.txt to re-run all tests"
+    Write-host "Delete $script:CompletedTestsPath to re-run all tests"
     if ($script:TestMutationMutexHeld) {
         try { $script:TestMutationMutex.ReleaseMutex() } catch { }
     }

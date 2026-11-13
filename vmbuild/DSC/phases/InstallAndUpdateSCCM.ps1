@@ -72,6 +72,446 @@ function Get-CmSetupCompletionFailureReason {
     return ''
 }
 
+function Invoke-SqlSetupCanary {
+    param(
+        [Parameter(Mandatory)][string]$ConnectionString,
+        [Parameter(Mandatory)][string]$SiteCode
+    )
+
+    $safeSiteCode = $SiteCode -replace '[^A-Za-z0-9_]', '_'
+    $databaseName = "MemLabs_Phase8Canary_${safeSiteCode}_$([guid]::NewGuid().ToString('N'))"
+    $connection = $null
+    $failure = $null
+    $cleanupFailure = $null
+
+    try {
+        $connection = New-Object System.Data.Odbc.OdbcConnection $ConnectionString
+        $connection.Open()
+
+        $identityCommand = $connection.CreateCommand()
+        $identityCommand.CommandTimeout = 30
+        $identityCommand.CommandText = @"
+SELECT CAST(SERVERPROPERTY('ServerName') AS nvarchar(128)),
+       CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)),
+       CAST(SERVERPROPERTY('Edition') AS nvarchar(128))
+"@
+        $identityReader = $identityCommand.ExecuteReader()
+        try {
+            if ($identityReader.Read()) {
+                Write-DscStatus "SQL storage-engine canary: server=$($identityReader.GetString(0)); version=$($identityReader.GetString(1)); edition=$($identityReader.GetString(2))"
+            }
+        }
+        finally {
+            $identityReader.Close()
+        }
+
+        foreach ($systemDatabase in @('master', 'model', 'msdb')) {
+            $checkCommand = $connection.CreateCommand()
+            $checkCommand.CommandTimeout = 120
+            $checkCommand.CommandText = "DBCC CHECKDB ([$systemDatabase]) WITH NO_INFOMSGS, ALL_ERRORMSGS"
+            $null = $checkCommand.ExecuteNonQuery()
+            Write-DscStatus "SQL storage-engine canary: DBCC CHECKDB [$systemDatabase] passed."
+        }
+
+        $createCommand = $connection.CreateCommand()
+        $createCommand.CommandTimeout = 120
+        $createCommand.CommandText = "CREATE DATABASE [$databaseName]"
+        $null = $createCommand.ExecuteNonQuery()
+
+        $ddlCommand = $connection.CreateCommand()
+        $ddlCommand.CommandTimeout = 180
+        $ddlCommand.CommandText = @"
+USE [$databaseName];
+CREATE TABLE dbo.MemLabsStorageEngineCanary
+(
+    CanaryId int NOT NULL,
+    Payload char(200) NOT NULL
+);
+WITH E1(N) AS
+(
+    SELECT 1
+    FROM (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS A(N)
+    CROSS JOIN (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS B(N)
+),
+E2(N) AS
+(
+    SELECT 1 FROM E1 AS A CROSS JOIN E1 AS B
+)
+INSERT dbo.MemLabsStorageEngineCanary (CanaryId, Payload)
+SELECT TOP (8192) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), REPLICATE('X', 200)
+FROM E2;
+ALTER TABLE dbo.MemLabsStorageEngineCanary
+    ADD CONSTRAINT PK_MemLabsStorageEngineCanary
+    PRIMARY KEY CLUSTERED (CanaryId);
+DBCC CHECKTABLE (N'dbo.MemLabsStorageEngineCanary') WITH NO_INFOMSGS, ALL_ERRORMSGS;
+DBCC CHECKDB (N'$databaseName') WITH NO_INFOMSGS, ALL_ERRORMSGS;
+"@
+        $null = $ddlCommand.ExecuteNonQuery()
+        Write-DscStatus "SQL storage-engine canary: clustered primary-key creation and integrity checks passed in [$databaseName]."
+    }
+    catch {
+        $failure = $_
+    }
+    finally {
+        if ($connection) {
+            try { $connection.Close() } catch {}
+            $connection.Dispose()
+        }
+
+        $cleanupConnection = $null
+        try {
+            $cleanupConnection = New-Object System.Data.Odbc.OdbcConnection $ConnectionString
+            $cleanupConnection.Open()
+            $cleanupCommand = $cleanupConnection.CreateCommand()
+            $cleanupCommand.CommandTimeout = 120
+            $cleanupCommand.CommandText = @"
+IF DB_ID(N'$databaseName') IS NOT NULL
+BEGIN
+    ALTER DATABASE [$databaseName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE [$databaseName];
+END
+"@
+            $null = $cleanupCommand.ExecuteNonQuery()
+        }
+        catch {
+            $cleanupFailure = $_
+        }
+        finally {
+            if ($cleanupConnection) {
+                try { $cleanupConnection.Close() } catch {}
+                $cleanupConnection.Dispose()
+            }
+        }
+    }
+
+    if ($failure) {
+        Write-DscStatus "SQL storage-engine canary failed before ConfigMgr setup: $($failure.Exception.Message). Refusing to create CM_$SiteCode; inspect the SQL ERRORLOG and dump files." -Failure
+        if ($cleanupFailure) {
+            Write-DscStatus "SQL storage-engine canary cleanup also failed for [$databaseName]: $($cleanupFailure.Exception.Message)"
+        }
+        return $false
+    }
+    if ($cleanupFailure) {
+        Write-DscStatus "SQL storage-engine canary passed but cleanup failed for [$databaseName]: $($cleanupFailure.Exception.Message). Refusing to continue with an unclean SQL instance." -Failure
+        return $false
+    }
+
+    Write-DscStatus "SQL storage-engine canary completed and removed [$databaseName]."
+    return $true
+}
+
+function Invoke-SqlAoSetupCanary {
+    param(
+        [Parameter(Mandatory)][string]$ListenerConnectionString,
+        [Parameter(Mandatory)][string]$ListenerName,
+        [Parameter(Mandatory)][string]$Node1,
+        [Parameter(Mandatory)][string]$Node2,
+        [Parameter(Mandatory)][string]$Node1Port,
+        [Parameter(Mandatory)][string]$Node2Port,
+        [Parameter(Mandatory)][string]$AvailabilityGroupName,
+        [hashtable]$TestHooks
+    )
+
+    $databaseName = 'TESTDB'
+    $suffix = [guid]::NewGuid().ToString('N')
+    $beforeTable = "MemLabsAgCanaryBefore_$suffix"
+    $afterTable = "MemLabsAgCanaryAfter_$suffix"
+    $agIdentifier = '[' + ($AvailabilityGroupName -replace ']', ']]') + ']'
+    $tables = @($beforeTable, $afterTable)
+    $failed = $null
+    $listener = $null
+    $primaryNode = $null
+    $secondaryNode = $null
+    $primaryConnectionString = $null
+    $secondaryConnectionString = $null
+    $roleTransitionStarted = $false
+    $returnedToOriginalPrimary = $false
+    $pollAttempts = if ($TestHooks -and $TestHooks.ContainsKey('PollAttempts')) { [int]$TestHooks.PollAttempts } else { 45 }
+    $pollSeconds = if ($TestHooks -and $TestHooks.ContainsKey('PollSeconds')) { [int]$TestHooks.PollSeconds } else { 20 }
+    $stabilizationSeconds = if ($TestHooks -and $TestHooks.ContainsKey('StabilizationSeconds')) {
+        [int]$TestHooks.StabilizationSeconds
+    }
+    else {
+        15 * 60
+    }
+
+    function New-CanaryStageDeadline {
+        return [DateTime]::UtcNow.AddSeconds($stabilizationSeconds)
+    }
+
+    function Invoke-CanaryCommand {
+        param(
+            [Parameter(Mandatory)][string]$ConnectionString,
+            [Parameter(Mandatory)][string]$CommandText,
+            [int]$TimeoutSeconds = 120,
+            [switch]$Scalar
+        )
+        Invoke-SqlAoCommand @PSBoundParameters -TestHooks $TestHooks
+    }
+
+    function Wait-CanaryReplicaReady {
+        param(
+            [string]$NodeName,
+            [string]$ConnectionString,
+            [string]$ExpectedRole,
+            [DateTime]$DeadlineUtc
+        )
+        $lastState = ''
+        for ($attempt = 1; $attempt -le $pollAttempts; $attempt++) {
+            try {
+                $state = Invoke-CanaryCommand -ConnectionString $ConnectionString -TimeoutSeconds 30 -Scalar -CommandText @"
+SELECT TOP (1)
+       rs.role_desc + '|' + rs.connected_state_desc + '|' + rs.synchronization_health_desc + '|' +
+       drs.synchronization_state_desc + '|' + drs.synchronization_health_desc
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+JOIN sys.dm_hadr_database_replica_states drs ON drs.group_database_id =
+    (SELECT group_database_id FROM sys.availability_databases_cluster WHERE database_name = N'$databaseName')
+WHERE ag.name = N'$($AvailabilityGroupName.Replace("'", "''"))'
+  AND rs.is_local = 1
+  AND drs.is_local = 1
+  AND drs.database_id = DB_ID(N'$databaseName')
+"@
+                $lastState = "$state"
+                $parts = $lastState -split '\|'
+                if ($parts.Count -ge 5 -and $parts[0] -eq $ExpectedRole -and
+                    $parts[1] -eq 'CONNECTED' -and $parts[2] -eq 'HEALTHY' -and
+                    $parts[3] -eq 'SYNCHRONIZED' -and $parts[4] -eq 'HEALTHY') {
+                    return $true
+                }
+            }
+            catch {
+                $lastState = $_.Exception.Message
+            }
+            if ($attempt -eq 1 -or $attempt % 5 -eq 0) {
+                Write-DscStatus "SQLAO canary: replica [$NodeName] readiness attempt $attempt/$pollAttempts expected=$ExpectedRole; observed=$lastState"
+            }
+            $remainingSeconds = [int][Math]::Ceiling(($DeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+            if ($remainingSeconds -le 0) { break }
+            if ($attempt -lt $pollAttempts -and $pollSeconds -gt 0) {
+                Start-Sleep -Seconds ([Math]::Min($pollSeconds, $remainingSeconds))
+            }
+        }
+        Write-DscStatus "SQLAO canary: replica [$NodeName] did not reach $ExpectedRole/CONNECTED/HEALTHY/SYNCHRONIZED within the shared stabilization window. Last state: $lastState"
+        return $false
+    }
+
+    function Wait-CanaryListenerOwner {
+        param([string]$ExpectedNode, [DateTime]$DeadlineUtc)
+        $lastOwner = ''
+        for ($attempt = 1; $attempt -le $pollAttempts; $attempt++) {
+            try {
+                $lastOwner = "$(Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 30 -Scalar -CommandText "SELECT CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS nvarchar(128))")"
+                if ($lastOwner.Split('.')[0] -ieq $ExpectedNode.Split('.')[0]) { return $true }
+            }
+            catch {}
+            if ($attempt -eq 1 -or $attempt % 5 -eq 0) {
+                Write-DscStatus "SQLAO canary: listener [$ListenerName] owner attempt $attempt/$pollAttempts expected=$ExpectedNode; observed=$lastOwner"
+            }
+            $remainingSeconds = [int][Math]::Ceiling(($DeadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+            if ($remainingSeconds -le 0) { break }
+            if ($attempt -lt $pollAttempts -and $pollSeconds -gt 0) {
+                Start-Sleep -Seconds ([Math]::Min($pollSeconds, $remainingSeconds))
+            }
+        }
+        Write-DscStatus "SQLAO canary: listener '$ListenerName' did not move to expected owner '$ExpectedNode' within the shared stabilization window. Last owner: $lastOwner"
+        return $false
+    }
+
+    function Restore-CanaryOriginalPrimary {
+        if (-not $roleTransitionStarted -or -not $primaryNode -or -not $primaryConnectionString) {
+            return $true
+        }
+
+        try {
+            $owner = "$(Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 30 -Scalar -CommandText "SELECT CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS nvarchar(128))")"
+            if ($owner.Split('.')[0] -ieq $primaryNode.Split('.')[0]) {
+                Write-DscStatus "SQLAO canary recovery: original primary [$primaryNode] is already restored."
+                return $true
+            }
+        }
+        catch {
+            Write-DscStatus "SQLAO canary recovery: could not confirm the listener owner before failback: $($_.Exception.Message)"
+        }
+
+        try {
+            $recoveryDeadline = New-CanaryStageDeadline
+            if (-not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                        -ExpectedRole 'SECONDARY' -DeadlineUtc $recoveryDeadline)) {
+                throw "Original primary [$primaryNode] is not a synchronized secondary."
+            }
+            Write-DscStatus "SQLAO canary recovery: attempting failback to original primary [$primaryNode]."
+            Invoke-CanaryCommand -ConnectionString $primaryConnectionString -TimeoutSeconds 180 `
+                -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
+            if (-not (Wait-CanaryListenerOwner -ExpectedNode $primaryNode -DeadlineUtc $recoveryDeadline) -or
+                -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                        -ExpectedRole 'PRIMARY' -DeadlineUtc $recoveryDeadline) -or
+                -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString `
+                        -ExpectedRole 'SECONDARY' -DeadlineUtc $recoveryDeadline)) {
+                throw "Failback to original primary [$primaryNode] did not stabilize."
+            }
+            Write-DscStatus "SQLAO canary recovery: restored original primary [$primaryNode]."
+            return $true
+        }
+        catch {
+            Write-DscStatus "SQLAO canary recovery failed to restore original primary [$primaryNode]: $($_.Exception.Message)"
+            return $false
+        }
+    }
+
+    try {
+        $node1ConnectionString = New-SqlAoNodeConnectionString -Server $Node1 -Port $Node1Port
+        $node2ConnectionString = New-SqlAoNodeConnectionString -Server $Node2 -Port $Node2Port
+        Write-DscStatus "SQLAO canary: listener checks use [$ListenerName]; physical replica checks and failover commands use [$Node1,$Node1Port] and [$Node2,$Node2Port]."
+
+        Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 120 -CommandText @"
+DECLARE @sql nvarchar(max) = N'';
+SELECT @sql = @sql +
+    N'ALTER AVAILABILITY GROUP $agIdentifier MODIFY REPLICA ON N''' +
+    REPLACE(replica_server_name, N'''', N'''''') +
+    N''' WITH (SESSION_TIMEOUT = 30);'
+FROM sys.availability_replicas
+WHERE group_id = (SELECT group_id FROM sys.availability_groups WHERE name = N'$($AvailabilityGroupName.Replace("'", "''"))')
+  AND session_timeout < 30;
+IF @sql <> N'' EXEC sys.sp_executesql @sql;
+ALTER AVAILABILITY GROUP $agIdentifier SET (HEALTH_CHECK_TIMEOUT = 60000);
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.availability_replicas
+    WHERE group_id = (SELECT group_id FROM sys.availability_groups WHERE name = N'$($AvailabilityGroupName.Replace("'", "''"))')
+      AND session_timeout < 30
+)
+    THROW 51000, 'SQLAO replica SESSION_TIMEOUT did not reach 30 seconds.', 1;
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.availability_groups
+    WHERE name = N'$($AvailabilityGroupName.Replace("'", "''"))'
+      AND health_check_timeout < 60000
+)
+    THROW 51001, 'SQLAO HEALTH_CHECK_TIMEOUT did not reach 60000 milliseconds.', 1;
+"@
+        Write-DscStatus "SQLAO canary: slow-host tolerance verified (replica session timeout >=30s; health check timeout >=60s)."
+
+        $currentOwner = "$(Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 30 -Scalar -CommandText "SELECT CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS nvarchar(128))")"
+        $primaryNode = if ($currentOwner.Split('.')[0] -ieq $Node1.Split('.')[0]) { $Node1 } elseif ($currentOwner.Split('.')[0] -ieq $Node2.Split('.')[0]) { $Node2 } else { throw "Listener owner '$currentOwner' is not either configured SQLAO node." }
+        $secondaryNode = if ($primaryNode -ieq $Node1) { $Node2 } else { $Node1 }
+        $secondaryConnectionString = if ($secondaryNode -ieq $Node1) { $node1ConnectionString } else { $node2ConnectionString }
+        $primaryConnectionString = if ($primaryNode -ieq $Node1) { $node1ConnectionString } else { $node2ConnectionString }
+
+        $initialDeadline = New-CanaryStageDeadline
+        if (-not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                    -ExpectedRole 'PRIMARY' -DeadlineUtc $initialDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString `
+                    -ExpectedRole 'SECONDARY' -DeadlineUtc $initialDeadline)) {
+            throw 'The existing TESTDB AG was not stable before the rehearsal.'
+        }
+
+        Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 180 -CommandText @"
+USE [$databaseName];
+CREATE TABLE dbo.[$beforeTable] (CanaryId int NOT NULL, Payload char(200) NOT NULL);
+WITH E1(N) AS
+(
+    SELECT 1 FROM (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS A(N)
+    CROSS JOIN (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS B(N)
+),
+E2(N) AS (SELECT 1 FROM E1 AS A CROSS JOIN E1 AS B)
+INSERT dbo.[$beforeTable] (CanaryId, Payload)
+SELECT TOP (8192) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), REPLICATE('X', 200) FROM E2;
+ALTER TABLE dbo.[$beforeTable] ADD CONSTRAINT [PK_$beforeTable] PRIMARY KEY CLUSTERED (CanaryId);
+"@
+        Write-DscStatus "SQLAO canary: clustered-key DDL passed on TESTDB before failover."
+
+        $roleTransitionStarted = $true
+        Invoke-CanaryCommand -ConnectionString $secondaryConnectionString -TimeoutSeconds 180 `
+            -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
+        $failoverDeadline = New-CanaryStageDeadline
+        if (-not (Wait-CanaryListenerOwner -ExpectedNode $secondaryNode -DeadlineUtc $failoverDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString `
+                    -ExpectedRole 'PRIMARY' -DeadlineUtc $failoverDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                    -ExpectedRole 'SECONDARY' -DeadlineUtc $failoverDeadline)) {
+            throw 'The first SQLAO canary failover did not stabilize.'
+        }
+        Write-DscStatus "SQLAO canary: controlled failover to [$secondaryNode] completed."
+
+        Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 180 `
+            -CommandText @"
+USE [$databaseName];
+CREATE TABLE dbo.[$afterTable] (CanaryId int NOT NULL, Payload char(200) NOT NULL);
+WITH E1(N) AS
+(
+    SELECT 1 FROM (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS A(N)
+    CROSS JOIN (VALUES (0),(0),(0),(0),(0),(0),(0),(0),(0),(0)) AS B(N)
+),
+E2(N) AS (SELECT 1 FROM E1 AS A CROSS JOIN E1 AS B)
+INSERT dbo.[$afterTable] (CanaryId, Payload)
+SELECT TOP (8192) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) + 4096, REPLICATE('Y', 200) FROM E2;
+ALTER TABLE dbo.[$afterTable] ADD CONSTRAINT [PK_$afterTable] PRIMARY KEY CLUSTERED (CanaryId);
+MERGE dbo.[$beforeTable] AS Target
+USING dbo.[$afterTable] AS Source
+    ON Source.CanaryId = Target.CanaryId
+WHEN MATCHED THEN
+    UPDATE SET Payload = Source.Payload
+WHEN NOT MATCHED BY TARGET THEN
+    INSERT (CanaryId, Payload) VALUES (Source.CanaryId, Source.Payload);
+DBCC CHECKTABLE (N'dbo.$beforeTable') WITH NO_INFOMSGS;
+"@
+        Write-DscStatus "SQLAO canary: clustered-key DDL and synchronized MERGE passed on TESTDB after failover."
+
+        Invoke-CanaryCommand -ConnectionString $primaryConnectionString -TimeoutSeconds 180 `
+            -CommandText "ALTER AVAILABILITY GROUP $agIdentifier FAILOVER"
+        $failbackDeadline = New-CanaryStageDeadline
+        if (-not (Wait-CanaryListenerOwner -ExpectedNode $primaryNode -DeadlineUtc $failbackDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $primaryNode -ConnectionString $primaryConnectionString `
+                    -ExpectedRole 'PRIMARY' -DeadlineUtc $failbackDeadline) -or
+            -not (Wait-CanaryReplicaReady -NodeName $secondaryNode -ConnectionString $secondaryConnectionString `
+                    -ExpectedRole 'SECONDARY' -DeadlineUtc $failbackDeadline)) {
+            throw 'The SQLAO canary failback did not stabilize.'
+        }
+        $returnedToOriginalPrimary = $true
+        Write-DscStatus "SQLAO canary: controlled failback to [$primaryNode] completed."
+    }
+    catch {
+        $failed = $_
+    }
+    finally {
+        if ($listener) {
+            try { $listener.Close() } catch {}
+            $listener.Dispose()
+        }
+        if (-not $returnedToOriginalPrimary) {
+            $returnedToOriginalPrimary = Restore-CanaryOriginalPrimary
+            if (-not $returnedToOriginalPrimary -and -not $failed) {
+                $failed = [System.Management.Automation.ErrorRecord]::new(
+                    [InvalidOperationException]::new("SQLAO canary could not restore original primary [$primaryNode]."),
+                    'SqlAoCanaryFailbackFailed',
+                    [System.Management.Automation.ErrorCategory]::InvalidOperation,
+                    $primaryNode)
+            }
+        }
+        foreach ($table in $tables) {
+            try {
+                Invoke-CanaryCommand -ConnectionString $ListenerConnectionString -TimeoutSeconds 180 `
+                    -CommandText "USE [$databaseName]; IF OBJECT_ID(N'dbo.$table', N'U') IS NOT NULL DROP TABLE dbo.[$table];"
+            }
+            catch {
+                if (-not $failed) { $failed = $_ }
+                Write-DscStatus "SQLAO canary cleanup failed for [$table]: $($_.Exception.Message)"
+            }
+        }
+    }
+
+    if ($failed) {
+        Write-DscStatus "SQLAO failover/DDL canary failed before ConfigMgr setup: $($failed.Exception.Message). Refusing to launch setup.exe." -Failure
+        return $false
+    }
+    Write-DscStatus "SQLAO failover/DDL canary completed and removed its TESTDB tables."
+    return $true
+}
+
 function Format-CmUpdateErrorRecord {
     param([Parameter(Mandatory)]$ErrorRecord)
 
@@ -406,6 +846,7 @@ if ($ThisVM.cmInstallDir) {
 }
 
 # SQL FQDN
+$installToAO = $false
 
 $installToAO = $false
 if ($ThisVM.remoteSQLVM) {
@@ -418,12 +859,14 @@ if ($ThisVM.remoteSQLVM) {
     else {
         $sqlPort = 1433
     }
-    $sqlNodePort = $sqlPort
+    $sqlNode1Port = $sqlPort
     if ($SQLVM.AlwaysOnListenerName) {
         $installToAO = $true
         $sqlServerName = $SQLVM.AlwaysOnListenerName
         $sqlNode1 = $SQLVM.VMName
         $sqlNode2 = $SQLVM.OtherNode
+        $SQLNode2VM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlNode2 }
+        $sqlNode2Port = if ($SQLNode2VM.sqlPort) { $SQLNode2VM.sqlPort } else { $sqlNode1Port }
         $sqlAOGroupName = $SQLVM.AlwaysOnGroupName
         $agBackupShare = $SQLVM.thisParams.SQLAO.BackupShareFQ
         $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
@@ -455,6 +898,15 @@ if (!(Test-Path C:\$CM\Redist)) {
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
+$sqlAoMaxDopParameters = $null
+if ($installToAO) {
+    $sqlAoMaxDopParameters = @{
+        Node1 = $sqlNode1; Node2 = $sqlNode2
+        Node1Port = "$sqlNode1Port"; Node2Port = "$sqlNode2Port"
+    }
+    if (-not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+}
+
 # Reset upgrade action (in case called again in add to existing scenario), but not if already completed
 if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
     $Configuration.UpgradeSCCM.Status = 'NotStart'
@@ -462,9 +914,10 @@ if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }
 
-# On re-entry, Status='Running' means the prior runner was killed mid-install
-# (the script never reached the 'Completed' write). What's safe to do next
-# depends on *which* sub-step was running when it got killed:
+# On re-entry, Status='Running' means the prior attempt did not reach the
+# 'Completed' write. The runner may have been interrupted, or setup.exe may
+# have returned a fatal error. What's safe to do next depends on which sub-step
+# was active:
 #
 #   * setupdl.exe (the pre-req downloader) is idempotent -- it has its own
 #     two-successes-in-a-row verification loop and will quickly re-verify
@@ -512,7 +965,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
 
         # For SQLAO, if the listener fails try the actual SQL node which has
         # a real computer account and works with Integrated Auth.
-        $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNodePort)
+        $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNode1Port)
 
         Write-DscStatus "InstallSCCM.Status='Running' on re-entry with setup.exe breadcrumb present. Probing for database [$cmDbName] (targets: $($sqlProbeTargets -join ', ')) to decide whether retry is safe..."
 
@@ -530,7 +983,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
             $failReason = "setup.exe breadcrumb present but SQL probe failed (tried: $($sqlProbeTargets -join ', ')): $probeError. Cannot confirm whether [$cmDbName] exists; refusing to retry blind. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
         }
         elseif ($probeDbExists) {
-            $failReason = "setup.exe breadcrumb present and [$cmDbName] already exists on [$sqlDataSource] -- prior setup.exe attempt created the site database before being killed. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
+            $failReason = "setup.exe breadcrumb present and [$cmDbName] already exists on [$sqlDataSource] -- the prior setup.exe attempt left a partial site database. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
         }
         else {
             $resetReason = "setup.exe breadcrumb present but [$cmDbName] does not exist on [$sqlDataSource] -- prior setup.exe attempt failed before creating the site database, so no install state was committed. Safe to retry."
@@ -629,7 +1082,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
 
         # For SQLAO, if the listener fails try the actual SQL node name which
         # has a real computer account and works with Integrated Auth.
-        $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNodePort)
+        $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNode1Port)
 
         foreach ($probeTarget in $sqlProbeTargets) {
             try {
@@ -700,7 +1153,7 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
     if ($sqlInstanceName -and $sqlInstanceName -ine 'MSSQLSERVER') { $sqlDataSource = "$sqlServerName\$sqlInstanceName" }
     else { $sqlDataSource = $sqlServerName }
     if ($sqlPort -and $sqlPort -ne 1433) { $sqlDataSource = "$sqlServerName,$sqlPort" }
-    $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNodePort)
+    $sqlProbeTargets = @(Get-CmDatabaseProbeTargets -ListenerTarget $sqlDataSource -InstallToAO $installToAO -NodeName $sqlNode1 -NodePort $sqlNode1Port)
     $multiSubnetTarget = if ($installToAO -and $SQLVM.thisParams.SQLAO.MultiSubnetFailover) { $sqlDataSource } else { '' }
     $preLaunchDatabaseState = Get-CmDatabaseStateForRetry -DatabaseName $cmDbName -Targets $sqlProbeTargets -MultiSubnetTarget $multiSubnetTarget
     try {
@@ -1287,9 +1740,9 @@ CurrentBranch=1
         # clean polls (not just one momentary HEALTHY blip) before allowing
         # setup.exe to launch, and resume any suspended AG dbs as we go.
         if ($installToAO -and $sqlPreCheckCs -and $sqlAOGroupName) {
-            $agStableMin     = 3        # consecutive clean polls required (~60s stability)
+            $agStableMin     = 6        # consecutive clean polls required (~2m stability)
             $agPollInterval  = 20       # seconds between polls
-            $agMaxAttempts   = 30       # 30 * 20s = 10 min max wall-clock
+            $agMaxAttempts   = 45       # 45 * 20s = 15 min max wall-clock on slower hosts
             $agCleanStreak   = 0
             $agLastSnapshot  = $null
             $agStable        = $false
@@ -1432,8 +1885,34 @@ WHERE drs.is_suspended = 1
             }
 
             if (-not $agStable) {
-                Write-DscStatus "AG pre-flight: WARNING — AG '$sqlAOGroupName' did not stay HEALTHY for $($agStableMin * $agPollInterval)s within $($agMaxAttempts * $agPollInterval)s. ConfigMgr Init_Database may fail at AGWaitForSynchronizationHealth (the failover/failback CM does to set db_owner needs both replicas HEALTHY+SYNCHRONIZED within ~15 min). Last state: $agLastSnapshot. Proceeding anyway."
+                Write-DscStatus "AG pre-flight: AG '$sqlAOGroupName' did not stay HEALTHY for $($agStableMin * $agPollInterval)s within $($agMaxAttempts * $agPollInterval)s. Refusing to launch ConfigMgr setup because Init_Database performs its own failover/failback and would likely fail. Last state: $agLastSnapshot." -Failure
+                return
             }
+        }
+    }
+
+    $sqlCanaryConnectionString = $sqlPreCheckCs
+    if (-not $sqlCanaryConnectionString) {
+        $localSqlTarget = if ($sqlInstanceName -and $sqlInstanceName -ine 'MSSQLSERVER') {
+            "$env:COMPUTERNAME\$sqlInstanceName"
+        }
+        else {
+            $env:COMPUTERNAME
+        }
+        if ($sqlPort -and $sqlPort -ne 1433) {
+            $localSqlTarget = "$env:COMPUTERNAME,$sqlPort"
+        }
+        $sqlCanaryConnectionString = "Driver={SQL Server};AutoTranslate=no;Server=$localSqlTarget;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
+    }
+    if (-not (Invoke-SqlSetupCanary -ConnectionString $sqlCanaryConnectionString -SiteCode $SiteCode)) {
+        return
+    }
+    if ($installToAO) {
+        if (-not (Invoke-SqlAoSetupCanary -ListenerConnectionString $sqlCanaryConnectionString `
+                    -ListenerName $sqlServerName -Node1 $sqlNode1 -Node2 $sqlNode2 `
+                    -Node1Port "$sqlNode1Port" -Node2Port "$sqlNode2Port" `
+                    -AvailabilityGroupName $sqlAOGroupName)) {
+            return
         }
     }
 
@@ -1493,6 +1972,7 @@ WHERE drs.is_suspended = 1
         return
     }
     $setupExitCode = $setupProcess.ExitCode
+    if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
     # Check if setup.exe failed the prerequisite check. If so, rename the
     # log, re-run the SQL pre-flight (Kerberos may have settled since our
@@ -1563,6 +2043,7 @@ WHERE drs.is_suspended = 1
             Write-DscStatus "Re-launching setup.exe (attempt 2)"
             $setupProcess = Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -Wait -PassThru
             $setupExitCode = $setupProcess.ExitCode
+            if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
             # Check if the retry also failed prereq
             if (Test-Path 'C:\ConfigMgrSetup.log') {
@@ -2020,6 +2501,7 @@ if ($UpdateRequired) {
     }
 
     $updateCompleted = $false
+    $upgradeFailureReason = $null
     # Work on update
     while ($updatepack -ne "") {
 
@@ -2030,6 +2512,7 @@ if ($UpdateRequired) {
         # Set failure if retry exhausted
         if ($retrytimes -eq 3) {
             $upgradingfailed = $true
+            $upgradeFailureReason = "Upgrade retry budget was exhausted after 3 attempts."
             break
         }
 
@@ -2153,6 +2636,8 @@ if ($UpdateRequired) {
 
         if ($downloadretrycount -ge 2) {
             Write-DscStatus "Timed out waiting for '$($updatepack.Name)' download to complete."
+            $upgradingfailed = $true
+            $upgradeFailureReason = "Timed out waiting for '$($updatepack.Name)' download after $downloadretrycount bounded retry windows."
             break
         }
 
@@ -2376,6 +2861,7 @@ if ($UpdateRequired) {
                 }
                 Write-DscStatus "Update '$($updatepack.Name)' did not complete within $monitorDeadlineMin min (last state: $($state[$updatepack.State]) [$($updatepack.State)]). cmupdate.log went idle without reaching INSTALL_SUCCESS. See cmupdate.log/hman.log.$diag"
                 $upgradingfailed = $true
+                $upgradeFailureReason = "Update '$($updatepack.Name)' exceeded the ${monitorDeadlineMin}-minute monitor deadline in state $($state[$updatepack.State]) [$($updatepack.State)]."
                 $updateCompleted = $true
                 break
             }
@@ -2435,30 +2921,53 @@ if ($UpdateRequired) {
         }
 
         if ($updatepack.State -eq 196607 -or $updatepack.State -eq 262143 ) {
-            if ($retrytimes -le 3) {
-                $retrytimes++
-                Start-Sleep 300
-                continue
+            $retrytimes++
+            $terminalStateName = "$($state[$updatepack.State])"
+            $terminalStateCode = [int]$updatepack.State
+            if ($retrytimes -ge 3) {
+                $upgradingfailed = $true
+                $upgradeFailureReason = "Update '$($updatepack.Name)' reached terminal state $terminalStateName [$terminalStateCode] on attempt $retrytimes of 3."
+                Write-DscStatus "$upgradeFailureReason No retries remain." -Warning
+                break
             }
+
+            Write-DscStatus "Update '$($updatepack.Name)' reached terminal state $terminalStateName [$terminalStateCode] on attempt $retrytimes of 3. Capturing retry evidence, then retrying in 300 seconds." -Warning
+            try {
+                $cmSetup = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
+                $retryLogDir = Join-Path "$($cmSetup.'Installation Directory')" 'Logs'
+                foreach ($retryLogName in @('cmupdate.log', 'hman.log', 'dmpdownloader.log')) {
+                    $retryLogPath = Join-Path $retryLogDir $retryLogName
+                    if (-not (Test-Path -LiteralPath $retryLogPath -PathType Leaf)) { continue }
+                    foreach ($retryLogLine in @(Get-Content -LiteralPath $retryLogPath -Tail 20 -ErrorAction Stop)) {
+                        if ([string]::IsNullOrWhiteSpace("$retryLogLine")) { continue }
+                        Write-DscStatus "[CMUpdateRetry][$retryLogName][$terminalStateName/$terminalStateCode] $("$retryLogLine".Trim())" -NoStatus -Warning
+                    }
+                }
+            }
+            catch {
+                Write-DscStatus "[CMUpdateRetry] Could not capture product-log tails before retry: $($_.Exception.Message)" -NoStatus -Warning
+            }
+            Start-Sleep 300
+            continue
         }
     }
 
-    # Update Action file
-    if ($downloadretrycount -ge 2) {
-        Write-DscStatus "Failed to download '$($updatepack.Name)'"
-        $Configuration.UpgradeSCCM.Status = 'Error'
-    }
+    if ($upgradingfailed -eq $true -or $downloadretrycount -ge 2) {
+        $failedUpdateName = if ($updatePackageName) { $updatePackageName } elseif ($updatepack.Name) { "$($updatepack.Name)" } else { "Configuration Manager $($cmo.version)" }
+        if (-not $upgradeFailureReason) {
+            $upgradeFailureReason = "Upgrade to '$failedUpdateName' failed after exhausting the bounded retry policy."
+        }
 
-    # Update Action file
-    if ($upgradingfailed -eq $true) {
-        Write-DscStatus "Upgrade to '$($updatepack.Name)' failed."
-
-        if ($updatepack.Name.IndexOf("hotfix", [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Write-DscStatus "'$($updatepack.Name)' is a hotfix, skip it and continue...."
+        if ($failedUpdateName.ToLowerInvariant().Contains("hotfix")) {
+            Write-DscStatus "$upgradeFailureReason The failed package is a hotfix; recording the failure as a warning and continuing." -Warning
             $Configuration.UpgradeSCCM.Status = 'Completed'
         }
         else {
             $Configuration.UpgradeSCCM.Status = 'Error'
+            $Configuration.UpgradeSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+            Write-DscStatus "$upgradeFailureReason Stopping before primary-site and dependent-role configuration. Host failure collection will pull cmupdate.log, hman.log, dmpdownloader.log, provider state, and the workflow transcript." -Failure
+            throw $upgradeFailureReason
         }
     }
     else {
@@ -2553,22 +3062,21 @@ else {
                 $Configuration | Add-Member -MemberType NoteProperty -Name  $propName  -Value  $PSReadytoUse -Force
 
             }
-            # Only mark Running if not already Completed
-            if ($Configuration.$propName.Status -ne 'Completed') {
-                $Configuration.$propName.Status = 'Running'
-                $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            if ($Configuration.$propName -is [System.Collections.IDictionary]) {
+                $Configuration.$propName['ReplicationVerified'] = $false
             }
+            else {
+                $Configuration.$propName | Add-Member -NotePropertyName ReplicationVerified -NotePropertyValue $false -Force
+            }
+            $Configuration.$propName.Status = 'Running'
+            $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            $Configuration.$propName.EndTime = ''
             Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
         }
 
-        # Build wait list excluding already-completed primaries
+        # A previous timeout could have written Completed without an active link.
         $waitList = @()
         foreach ($PSVM in $PSVMs) {
-            $propName = "PSReadyToUse" + $PSVM.VmName
-            if ($Configuration.$propName.Status -eq 'Completed') {
-                Write-DscStatus "Replication link for $($PSVM.VmName) already verified. Skipping."
-                continue
-            }
             $waitList += $PSVM.vmName
         }
 
@@ -2739,9 +3247,114 @@ else {
             return $h
         }
 
+        function ConvertTo-MemLabsDrsInitializationPercent {
+            param([AllowNull()][object]$Value)
+
+            $text = [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture)
+            if ($text -notmatch '^\s*(\d+(?:\.\d+)?)\s*%?\s*$') {
+                throw "Unrecognized DRS initialization percentage '$text'."
+            }
+            $percent = 0.0
+            if (-not [double]::TryParse($Matches[1], [Globalization.NumberStyles]::Float,
+                    [Globalization.CultureInfo]::InvariantCulture, [ref]$percent) -or
+                $percent -lt 0 -or $percent -gt 100) {
+                throw "DRS initialization percentage '$text' is outside 0-100."
+            }
+            return $percent
+        }
+
+        function Get-MemLabsFailedDrsLinkGroups {
+            param(
+                [Parameter(Mandatory)][string]$CasSqlDataSource,
+                [Parameter(Mandatory)][string]$CasDbName,
+                [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{3}$')][string]$CasSiteCode,
+                [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{3}$')][string]$PriSiteCode
+            )
+
+            $groups = [Collections.Generic.List[object]]::new()
+            $seen = [Collections.Generic.HashSet[int]]::new()
+            $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$CasSqlDataSource;Initial Catalog=$CasDbName;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+            $command = $null
+            $reader = $null
+            try {
+                $connection.Open()
+                $command = $connection.CreateCommand()
+                $command.CommandTimeout = 30
+                $command.CommandText = @'
+SELECT DISTINCT rd.ID, rd.ReplicationGroup, links.SiteSending, links.SiteReceiving, links.Status AS LinkStatus
+FROM dbo.RCM_ReplicationLinkStatus AS links
+INNER JOIN dbo.ReplicationData AS rd ON rd.ID = links.ReplicationID
+WHERE ((links.SiteSending = @cas AND links.SiteReceiving = @pri)
+    OR (links.SiteSending = @pri AND links.SiteReceiving = @cas))
+  AND links.Status IN (6, 8, 9)
+ORDER BY rd.ID
+'@
+                [void]$command.Parameters.AddWithValue('@cas', $CasSiteCode)
+                [void]$command.Parameters.AddWithValue('@pri', $PriSiteCode)
+                $reader = $command.ExecuteReader()
+                while ($reader.Read()) {
+                    $group = [pscustomobject]@{
+                        ID = [int]$reader['ID']
+                        ReplicationGroup = "$($reader['ReplicationGroup'])"
+                        SiteSending = "$($reader['SiteSending'])"
+                        SiteReceiving = "$($reader['SiteReceiving'])"
+                        LinkStatus = [int]$reader['LinkStatus']
+                    }
+                    $samePair = ($group.SiteSending -eq $CasSiteCode -and $group.SiteReceiving -eq $PriSiteCode) -or
+                        ($group.SiteSending -eq $PriSiteCode -and $group.SiteReceiving -eq $CasSiteCode)
+                    if (-not $samePair -or $group.LinkStatus -notin 6, 8, 9 -or
+                        $group.ID -le 0 -or -not $group.ReplicationGroup) {
+                        throw 'Failed-link SQL query returned unverified or out-of-scope replication data; no reinitialization is safe.'
+                    }
+                    if ($seen.Add($group.ID)) { $groups.Add($group) }
+                }
+            }
+            finally {
+                if ($reader) { $reader.Dispose() }
+                if ($command) { $command.Dispose() }
+                $connection.Dispose()
+            }
+            return $groups.ToArray()
+        }
+
+        function Invoke-MemLabsDrsGroupReinitialization {
+            param(
+                [Parameter(Mandatory)][object]$Group,
+                [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{3}$')][string]$CasSiteCode,
+                [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{3}$')][string]$PriSiteCode,
+                [ValidateRange(1, 60)][int]$OperationTimeoutSeconds = 60
+            )
+
+            $samePair = ($Group.SiteSending -eq $CasSiteCode -and $Group.SiteReceiving -eq $PriSiteCode) -or
+                ($Group.SiteSending -eq $PriSiteCode -and $Group.SiteReceiving -eq $CasSiteCode)
+            [uint32]$groupId = 0
+            if (-not $samePair -or $Group.LinkStatus -notin 6, 8, 9 -or
+                -not [uint32]::TryParse("$($Group.ID)", [ref]$groupId) -or $groupId -eq 0) {
+                throw 'InitializeData requires a verified failed group from the requested site pair.'
+            }
+            $result = Invoke-CimMethod -Namespace "root\SMS\site_$CasSiteCode" -ClassName SMS_ReplicationGroup `
+                -MethodName InitializeData -Arguments @{
+                    ReplicationGroupID = $groupId
+                    SiteCode1 = $CasSiteCode
+                    SiteCode2 = $PriSiteCode
+                } -OperationTimeoutSec $OperationTimeoutSeconds -ErrorAction Stop
+            if (-not $result -or $null -eq $result.ReturnValue -or
+                ($result.ReturnValue -isnot [int] -and $result.ReturnValue -isnot [uint32])) {
+                throw "InitializeData for group $groupId returned no valid result."
+            }
+            if ($result.ReturnValue -ne 0) {
+                throw "InitializeData for '$($Group.ReplicationGroup)' ($groupId), $CasSiteCode -> $PriSiteCode failed with ReturnValue=$($result.ReturnValue)."
+            }
+            [pscustomobject]@{
+                ID = $groupId; ReplicationGroup = "$($Group.ReplicationGroup)"
+                SiteCode1 = $CasSiteCode; SiteCode2 = $PriSiteCode; ReturnValue = $result.ReturnValue
+            }
+        }
+
         # Replication wait with timeout, failure detection, and reinit
         $drsStartTime = Get-Date
         $drsTimeoutSec = 120 * 60  # 2 hours
+        $drsLastObservation = @{}
         # Get-CMDatabaseReplicationStatus LinkStatus / GlobalState / SiteState enum. Authoritative source:
         # AdminConsole SMS_ReplicationLinkSummary-LinkStatus.resx (the SAME table backs all four columns):
         #   0=Deleted, 1=Tombstoned, 2=Active, 3=Interim, 4=Initializing, 5=NotStarted(being configured),
@@ -2752,6 +3365,7 @@ else {
         $failedStates = @(6, 8, 9)  # Error, Degraded, Failed -> reinit territory
         $failedSinceTime = @{}     # per-primary tracking
         $reinitAttempted = @{}
+        $drsReinitHistory = @{}
         $reinitCooldownMin = 10
         $sleepSeconds = 30
 
@@ -2786,17 +3400,55 @@ else {
                 $drsElapsedMin = [int]($drsElapsed / 60)
 
                 if ($drsElapsed -ge $drsTimeoutSec) {
-                    Write-DscStatus "DRS replication wait timed out after ${drsElapsedMin}m. Proceeding anyway." -MachineName $PSVM.VmName
-                    $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
-                    $Configuration.$propName.Status = 'Completed'
+                    $drsFailureReason = "DRS replication readiness for $SiteCode -> $PSSiteCode timed out after ${drsElapsedMin}m. The Primary is NOT ready; inspect DRSReadinessFailure.json and both sites' rcmctrl.log."
+                    $Configuration.$propName.Status = 'Error'
+                    $Configuration.$propName.ReplicationVerified = $false
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+                    $Configuration.InstallSCCM.Status = 'Error'
+                    $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-                    continue
+                    try {
+                        [ordered]@{
+                            CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+                            SourceSite = $SiteCode
+                            TargetSite = $PSSiteCode
+                            Primary = $PSVM.VmName
+                            ElapsedSeconds = $drsElapsed
+                            Error = $drsFailureReason
+                            LastObservations = $drsLastObservation
+                        } | ConvertTo-Json -Depth 6 -ErrorAction Stop |
+                            Set-Content -LiteralPath (Join-Path $LogPath 'DRSReadinessFailure.json') -Encoding UTF8 -ErrorAction Stop
+                    }
+                    catch { Write-DscStatus "DRS readiness failure snapshot could not be written: $($_.Exception.Message)" -Warning }
+                    Write-DscStatus $drsFailureReason -Failure -MachineName $PSVM.VmName
+                    throw $drsFailureReason
                 }
 
                 # Wait for replication ready
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+                $initializationPercent = $null
+                $percentageError = ''
+                try {
+                    $initializationPercent = ConvertTo-MemLabsDrsInitializationPercent -Value $replicationStatus.GlobalInitPercentage
+                }
+                catch {
+                    $percentageError = $_.Exception.Message
+                    Write-DscStatus "DRS initialization percentage was NOT measured: $percentageError. The 100-percent recovery gate is suppressed." -Warning -MachineName $PSVM.VmName
+                }
+                $drsLastObservation[$PSVM.VmName] = [ordered]@{
+                    CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+                    StatusReturned = $null -ne $replicationStatus
+                    LinkStatus = $replicationStatus.LinkStatus
+                    CasToPrimaryGlobal = $replicationStatus.Site1ToSite2GlobalState
+                    PrimaryToCasGlobal = $replicationStatus.Site2ToSite1GlobalState
+                    PrimaryToCasSite = $replicationStatus.Site2ToSite1SiteState
+                    GlobalInitPercentage = $replicationStatus.GlobalInitPercentage
+                    InitializationPercent = $initializationPercent
+                    PercentageError = $percentageError
+                    SqlHealth = $null
+                    Reinitialization = $drsReinitHistory[$PSVM.VmName]
+                }
 
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
                     $linkName = $stateMap[[int]$replicationStatus.LinkStatus]; if (-not $linkName) { $linkName = "$($replicationStatus.LinkStatus)" }
@@ -2810,12 +3462,14 @@ else {
                     # ReplicationActive (125 child / 225 CAS) and there are no failed sends for the primary, the
                     # link is functionally Active and we complete now, regardless of the stale summary.
                     $sqlHealth = Test-DrsLinkHealthyViaSql -CasSqlDataSource $casSqlDataSource -CasDbName $casDbName -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode -ActiveStatuses $drsActiveStatuses
+                    $drsLastObservation[$PSVM.VmName].SqlHealth = $sqlHealth
                     if ($sqlHealth.Healthy) {
                         Write-DscStatus "Replication link is Active per SQL ground truth (ServerData: $SiteCode=$($sqlHealth.CasStatus), $PSSiteCode=$($sqlHealth.PriStatus); 0 failed sends) - the monitoring summary still lags (Link=$linkName, CAS->PRI=$g12Name, PRI->CAS=$g21Name, Site=$s21Name) (${drsElapsedMin}m elapsed)" -MachineName $PSVM.VmName
                         Write-DscStatus "$SiteCode -> $PSSiteCode replication link Active (SQL ground truth)"
                         $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                         $propName = "PSReadyToUse" + $PSVM.VmName
                         $Configuration.$propName.Status = 'Completed'
+                        $Configuration.$propName.ReplicationVerified = $true
                         $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                         Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                         continue
@@ -2843,22 +3497,34 @@ else {
                         if ($failedMin -ge $reinitCooldownMin -and -not $reinitAttempted[$PSVM.VmName]) {
                             $reinitAttempted[$PSVM.VmName] = $true
                             Write-DscStatus "DRS link has been failed for $failedMin minutes. Attempting reinitialization via SMS_ReplicationGroup.InitializeData..." -MachineName $PSVM.VmName
+                            $recovery = [ordered]@{
+                                AttemptedAtUtc = [datetime]::UtcNow.ToString('o')
+                                Groups = @(); Requests = @(); Error = ''
+                            }
+                            $drsReinitHistory[$PSVM.VmName] = $recovery
+                            $drsLastObservation[$PSVM.VmName].Reinitialization = $recovery
                             try {
-                                $failedGroups = Get-WmiObject -Namespace "root\sms\site_$SiteCode" -Class SMS_ReplicationGroup `
-                                    -Filter "SiteCode1 = '$SiteCode' AND SiteCode2 = '$PSSiteCode' AND Status != 2"
-                                if ($failedGroups) {
+                                # Group.Status is global catalog data, not the per-link failure state.
+                                $failedGroups = @(Get-MemLabsFailedDrsLinkGroups -CasSqlDataSource $casSqlDataSource `
+                                    -CasDbName $casDbName -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode)
+                                $recovery.Groups = $failedGroups
+                                if ($failedGroups.Count) {
                                     foreach ($group in $failedGroups) {
-                                        Write-DscStatus "Reinitializing replication group '$($group.ReplicationGroup)' (ID=$($group.ID))..." -MachineName $PSVM.VmName
-                                        $result = ([wmiclass]"\\.\root\sms\site_$($SiteCode):SMS_ReplicationGroup").InitializeData($group.ID, $SiteCode, $PSSiteCode)
-                                        Write-DscStatus "InitializeData result for group '$($group.ReplicationGroup)': ReturnValue=$($result.ReturnValue)" -MachineName $PSVM.VmName
+                                        $remainingRecoverySeconds = [math]::Floor($drsTimeoutSec - ((Get-Date) - $drsStartTime).TotalSeconds)
+                                        if ($remainingRecoverySeconds -le 0) { throw 'DRS deadline reached before submitting another recovery request.' }
+                                        $request = Invoke-MemLabsDrsGroupReinitialization -Group $group -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode `
+                                            -OperationTimeoutSeconds ([int][math]::Min(60, $remainingRecoverySeconds))
+                                        $recovery.Requests += $request
+                                        Write-DscStatus "InitializeData accepted '$($group.ReplicationGroup)' (ID=$($group.ID)) for $SiteCode -> $PSSiteCode. This is a recovery request, not verified readiness; waiting for the link to become Active." -MachineName $PSVM.VmName
                                     }
                                 }
                                 else {
-                                    Write-DscStatus "No failed replication groups found via WMI. Link may recover on its own." -MachineName $PSVM.VmName
+                                    Write-DscStatus "No current failed replication groups were measured for $SiteCode -> $PSSiteCode in SQL; no InitializeData request was submitted. The readiness gate remains in place." -Warning -MachineName $PSVM.VmName
                                 }
                             }
                             catch {
-                                Write-DscStatus "Failed to reinitialize DRS link: $_. Will continue waiting." -MachineName $PSVM.VmName
+                                $recovery.Error = $_.Exception.Message
+                                Write-DscStatus "DRS recovery failed: $($recovery.Error). Readiness is NOT inferred from this failure; evidence is retained for the deadline capture." -Warning -MachineName $PSVM.VmName
                             }
                         }
                     }
@@ -2873,12 +3539,12 @@ else {
                     # The idle-stuck window must be continuous. Reset it on any
                     # progress/failure or percentage regression, not only while the
                     # summary happens to report 100%.
-                    if ($linkInFailedState -or $linkIsProgressing -or $replicationStatus.GlobalInitPercentage -lt 100) {
+                    if ($linkInFailedState -or $linkIsProgressing -or $null -eq $initializationPercent -or $initializationPercent -lt 100) {
                         $forceSendStuckSince[$PSVM.VmName] = $null
                         $forceSendLastProbe[$PSVM.VmName] = $null
                     }
 
-                    if ($replicationStatus.GlobalInitPercentage -ge 100) {
+                    if ($null -ne $initializationPercent -and $initializationPercent -ge 100) {
                         # Init complete but link not yet active - show which states are pending
                         $pending = @()
                         if ($replicationStatus.LinkStatus -ne 2) { $pending += "Link=$linkName" }
@@ -2986,9 +3652,9 @@ ORDER BY p.rows DESC
                         Write-DscStatus "$SiteCode -> $PSSiteCode replication init done, finalizing link ($pendingStr)" -NoLog -RetrySeconds $sleepSeconds
                     }
                     else {
-                        $pct = $replicationStatus.GlobalInitPercentage
-                        Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pct% (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
-                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pct%" -NoLog -RetrySeconds $sleepSeconds
+                        $pctText = if ($null -eq $initializationPercent) { "unmeasured (raw='$($replicationStatus.GlobalInitPercentage)')" } else { "$initializationPercent%" }
+                        Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pctText (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pctText" -NoLog -RetrySeconds $sleepSeconds
                     }
                 }
                 else {
@@ -2997,6 +3663,7 @@ ORDER BY p.rows DESC
                     $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
                     $Configuration.$propName.Status = 'Completed'
+                    $Configuration.$propName.ReplicationVerified = $true
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                 }

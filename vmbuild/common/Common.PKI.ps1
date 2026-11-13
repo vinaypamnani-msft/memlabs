@@ -4,7 +4,7 @@
 #
 # Host-driven PKI orchestrator. Handles both single-tier (Enterprise Root CA)
 # and two-tier (Standalone Offline Root CA + Enterprise Subordinate CA)
-# deployments on any domain-joined VM. Called after Phase2 completes when
+# deployments on any domain-joined VM. Called after Phase3 completes when
 # pkiOptions.EnablePKI is set and a VM has InstallCA = $true.
 #
 # Entry point: Install-PKI (dispatches to Install-SingleTierPKI or
@@ -207,6 +207,10 @@ function Install-PKICertificateTemplates {
             # ldifde -k skips entries that already exist, so re-running is safe.
             $configCtxA = ([ADSI]"LDAP://RootDSE").configurationNamingContext
             $oidContainerDN = "CN=OID,CN=Public Key Services,CN=Services,$configCtxA"
+            $ldfDirectory = 'C:\temp'
+            if (-not (Test-Path -LiteralPath $ldfDirectory -PathType Container)) {
+                $null = New-Item -ItemType Directory -Path $ldfDirectory -Force -ErrorAction Stop
+            }
 
             foreach ($tplName in $TemplateList) {
                 $found = Find-TemplateInAD $tplName
@@ -235,7 +239,7 @@ function Install-PKICertificateTemplates {
                     return @{ Success = $false; Log = $report.ToArray(); Error = "LDF not found: $ldfSource" }
                 }
 
-                $ldfTarget = "C:\temp\$tplName.ldf"
+                $ldfTarget = Join-Path $ldfDirectory "$tplName.ldf"
                 (Get-Content $ldfSource) -replace 'DC=TEMPLATE,DC=com', $dnPath |
                     Set-Content $ldfTarget -Force
 
@@ -441,7 +445,7 @@ function Install-SingleTierPKI {
         Installs a single-tier PKI (Enterprise Root CA) on a domain-joined VM.
 
     .DESCRIPTION
-        This function runs after Phase2 completes. It:
+        This function runs after Phase3 completes. It:
           Step 1: Installs ADCS as Enterprise Root CA
           Step 2: Configures CDP/AIA, IIS CRL virtual directory
           Step 3: Creates pki.<domain> DNS CNAME on DC
@@ -1278,11 +1282,47 @@ LoadDefaultTemplates=0
     return $true
 }
 
+function Initialize-PKIMemberCertificates {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$DeployConfig)
+
+    $memberRoles = @('DomainMember', 'CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem', 'SQLAO')
+    $members = @($DeployConfig.virtualMachines | Where-Object {
+            $_.role -in $memberRoles -and -not $_.hidden
+        })
+    if ($members.Count -eq 0) {
+        Write-Log '[PKI] No new Windows domain members require certificate autoenrollment.' -LogOnly
+        return $true
+    }
+
+    Write-Log "[PKI] Verifying certificate autoenrollment on $($members.Count) new Windows domain member(s), independent of client-push selection."
+    $allReady = $true
+    foreach ($member in $members) {
+        $domain = if ($member.domain) { $member.domain } else { $DeployConfig.vmOptions.domainName }
+        try {
+            $certificate = Invoke-MemLabsClientCertificateReadiness -VMName $member.vmName -DomainName $domain `
+                -DisplayName 'PKI: Verify member autoenrollment'
+            if (-not $certificate.Ready) {
+                Write-Log "[PKI] $($member.vmName): certificate autoenrollment did not converge: $($certificate.Detail)" -Failure
+                $allReady = $false
+            }
+            else {
+                Write-Log "[PKI] $($member.vmName): certificate autoenrollment verified: $($certificate.Detail)" -LogOnly
+            }
+        }
+        catch {
+            Write-Log "[PKI] $($member.vmName): certificate autoenrollment verification failed: $($_.Exception.Message)" -Failure
+            $allReady = $false
+        }
+    }
+    return $allReady
+}
+
 function Install-PKI {
     <#
     .SYNOPSIS
         Unified PKI deployment entry point. Dispatches to single-tier or
-        two-tier based on UseOfflineRoot.
+        two-tier based on UseOfflineRoot, then verifies member autoenrollment.
 
     .PARAMETER DeployConfig
         The deployment configuration object.
@@ -1300,11 +1340,13 @@ function Install-PKI {
     }
 
     if ($caVM.UseOfflineRoot) {
-        return Install-TwoTierPKI -DeployConfig $DeployConfig
+        $pkiReady = Install-TwoTierPKI -DeployConfig $DeployConfig
     }
     else {
-        return Install-SingleTierPKI -DeployConfig $DeployConfig
+        $pkiReady = Install-SingleTierPKI -DeployConfig $DeployConfig
     }
+    if (-not $pkiReady) { return $false }
+    return Initialize-PKIMemberCertificates -DeployConfig $DeployConfig
 }
 
 function Install-TwoTierPKI {
@@ -1314,7 +1356,7 @@ function Install-TwoTierPKI {
         enterprise subordinate CA on a domain-joined VM.
 
     .DESCRIPTION
-        This function runs after Phase2 completes. It:
+        This function runs after Phase3 completes. It:
           Step 1: Configures the Standalone Root CA (installs ADCS, CDP/AIA, exports cert+CRL)
           Step 2: Prepares the Issuing CA VM (IIS, CRL vdir, publishes root to AD, installs Sub CA with -OutputCertRequestFile)
           DNS:    Creates pki.<domain> CNAME on DC pointing to the Issuing CA VM

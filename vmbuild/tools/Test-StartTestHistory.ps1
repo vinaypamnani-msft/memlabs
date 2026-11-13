@@ -11,6 +11,7 @@ $startTestPath = Join-Path $RootPath 'Start-Test.ps1'
 $runnerPath = Join-Path $RootPath 'tools\Invoke-MainToDevelopExpansionTest.ps1'
 $continuousPath = Join-Path $RootPath 'tools\Invoke-MemLabsContinuousTests.ps1'
 $attachedPath = Join-Path $RootPath 'tools\Common.AttachedProcess.ps1'
+$processFunctionsPath = Join-Path $RootPath 'DSC\phases\ProcessFunctions.ps1'
 . (Join-Path $RootPath 'tools\Common.TestHistory.ps1')
 
 function Import-TestFunction {
@@ -36,7 +37,7 @@ function Assert-Equal {
 }
 
 . (Import-TestFunction -Path $startTestPath -Name 'Invoke-RecordedTestFamily')
-. (Import-TestFunction -Path $attachedPath -Name 'Initialize-MemLabsJobObjectType')
+. (Import-TestFunction -Path $processFunctionsPath -Name 'Initialize-MemLabsJobObjectType')
 . (Import-TestFunction -Path $attachedPath -Name 'Invoke-MemLabsAttachedPowerShell')
 $script:StartTestVmbuildRoot = $RootPath
 $script:MockRunResult = $true
@@ -74,7 +75,8 @@ try {
     $attachedSource = Get-Content -LiteralPath $attachedPath -Raw
     Assert-True (-not ($continuousSource -match 'Start-Process|nohup|disown|detach\s*=')) `
         'Continuous scheduler contains detached-process behavior.'
-    Assert-True ($attachedSource.Contains('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE')) `
+    Assert-True ((Get-Content -LiteralPath $processFunctionsPath -Raw).Contains('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE') -and
+        $attachedSource.Contains('ProcessFunctions.ps1')) `
         'Continuous scheduler does not bind children to a kill-on-close Job Object.'
     Assert-True ($continuousSource.Contains('Invoke-MemLabsAttachedPowerShell -Arguments $arguments')) `
         'Continuous scheduler does not use its attached child launcher.'
