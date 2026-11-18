@@ -78,8 +78,9 @@ $global:Phase10Job = {
         if ($FreshDeployOnly) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Running fresh-deploy fixes only: $FreshDeployOnly"
         }
-        if ($currentItem.Role -in @("AADClient")) {
+        if ($currentItem.Role -in @("OSDClient", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
+            return
         }
         # Linux VMs have no Windows-side maintenance; Start-VMMaintenance also
         # short-circuits, but log a clearer message here.
@@ -87,6 +88,7 @@ $global:Phase10Job = {
         if ($currentItem.role -eq 'Proxy') { $jobIsLinuxVm = $true }
         elseif ($currentItem.PSObject.Properties.Name -contains 'osFamily' -and $currentItem.osFamily -eq 'Linux') { $jobIsLinuxVm = $true }
         elseif ($currentItem.operatingSystem -and ($currentItem.operatingSystem -like 'Ubuntu*' -or $currentItem.operatingSystem -like 'Debian*' -or $currentItem.operatingSystem -like 'Linux*')) { $jobIsLinuxVm = $true }
+        elseif ($currentItem.deployedOS -and ($currentItem.deployedOS -like 'Ubuntu*' -or $currentItem.deployedOS -like 'Debian*' -or $currentItem.deployedOS -like 'Linux*')) { $jobIsLinuxVm = $true }
         if ($jobIsLinuxVm) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM (role '$($currentItem.role)'); Windows maintenance not applicable. Skipping." -OutputStream -Success
             return

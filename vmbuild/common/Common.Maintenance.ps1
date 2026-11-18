@@ -317,7 +317,15 @@ function Start-RequiredExistingVMMaintenance {
     $liveVmNameSet = @{}
     foreach ($liveVm in $liveVMs) { if ($liveVm.Name) { $liveVmNameSet[$liveVm.Name] = $true } }
 
-    $targets = @($DeployConfig.virtualMachines | Where-Object { $_.vmName -and $liveVmNameSet.ContainsKey($_.vmName) } | Sort-Object vmName)
+    $targets = @($DeployConfig.virtualMachines | Where-Object {
+            $_.vmName -and
+            $liveVmNameSet.ContainsKey($_.vmName) -and
+            $_.role -notin @('OSDClient', 'AADClient') -and
+            -not ($_.role -eq 'Proxy') -and
+            $_.osFamily -ne 'Linux' -and
+            -not ($_.operatingSystem -like 'Ubuntu*' -or $_.operatingSystem -like 'Debian*' -or $_.operatingSystem -like 'Linux*') -and
+            -not ($_.deployedOS -like 'Ubuntu*' -or $_.deployedOS -like 'Debian*' -or $_.deployedOS -like 'Linux*')
+        } | Sort-Object vmName)
     if ($targets.Count -eq 0) {
         Write-Log -Verbose "[Phase 0] Maintenance gate: no DeployConfig VM already exists in live Hyper-V inventory; nothing required. (Not-yet-created VMs get fixes through DSC/Phase 10 once Phase 1 creates them.)"
         return $true
@@ -829,6 +837,10 @@ function Start-VMMaintenance {
 
     if ($isLinuxVm) {
         Write-Log "$VMName`: Linux VM (role '$($vmNoteObject.role)'); Windows maintenance pipeline not applicable. Skipping." -Success
+        return $true
+    }
+    if ($vmNoteObject.role -in @('OSDClient', 'AADClient')) {
+        Write-Log "$VMName`: $($vmNoteObject.role) is externally managed and has no Windows maintenance guest surface. Skipping." -Success
         return $true
     }
 

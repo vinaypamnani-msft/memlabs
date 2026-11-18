@@ -216,6 +216,31 @@ $resultD = Start-RequiredExistingVMMaintenance -DeployConfig (New-TestDeployConf
 Assert-Equal $true $resultD 'fully dispatched and fully accounted-for success returns $true'
 Assert-Equal $true $script:LastArgument3 'the mandatory gate passes the in-progress override to its dispatcher'
 
+# --- Scenario D3: blank OSD/AAD placeholders and Linux infrastructure exist
+#     in Hyper-V but have no Windows guest maintenance surface. The mandatory
+#     gate must exclude them before dispatch rather than trying PSDirect. ----
+Reset-TestState
+$script:DispatchJobsToReturn = @([pscustomobject]@{ Id = 1 }, [pscustomobject]@{ Id = 2 })
+$script:WaitPhaseResult = [pscustomobject]@{ Success = 2; Failed = 0 }
+$noGuestConfig = [pscustomobject]@{
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'DISPATCH-A'; role = 'DomainMember' }
+        [pscustomobject]@{ vmName = 'DISPATCH-B'; role = 'DomainMember' }
+        [pscustomobject]@{ vmName = 'OSD-BLANK'; role = 'OSDClient' }
+        [pscustomobject]@{ vmName = 'AAD-BLANK'; role = 'AADClient' }
+        [pscustomobject]@{ vmName = 'LINUX-RELAY'; role = 'DHCPRelay'; osFamily = 'Linux'; operatingSystem = 'Ubuntu Server 24.04 LTS' }
+    )
+}
+$script:LiveVms += @(
+    [pscustomobject]@{ Name = 'OSD-BLANK'; Notes = '' }
+    [pscustomobject]@{ Name = 'AAD-BLANK'; Notes = '' }
+    [pscustomobject]@{ Name = 'LINUX-RELAY'; Notes = '' }
+)
+$noGuestResult = Start-RequiredExistingVMMaintenance -DeployConfig $noGuestConfig `
+    -OwnedMutexVmNames @('DISPATCH-A', 'DISPATCH-B', 'OSD-BLANK', 'AAD-BLANK', 'LINUX-RELAY')
+Assert-Equal $true $noGuestResult 'mandatory maintenance excludes externally managed and Linux roles'
+Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Message -match 'Dispatched: 2 of 2' })) 'excluded no-guest roles never enter dispatch cardinality'
+
 # --- Scenario D2: the real Wait-Phase drains the mutable collection while
 #     accounting completed jobs. The gate must use the pre-wait dispatch count,
 #     not the now-empty collection. ------------------------------------------
@@ -254,11 +279,37 @@ Assert-Equal 0 $script:StartVmFixesCalls 'ordinary maintenance does not run fixe
 $allowedResult = Start-VMMaintenance -VMName 'DISPATCH-A' -AllowInProgress
 Assert-Equal $true $allowedResult 'the mutex-owned Phase 0 override maintains an interrupted VM'
 Assert-Equal 1 $script:StartVmFixesCalls 'the Phase 0 override runs required fixes exactly once'
+$script:StartVmFixesCalls = 0
+function Get-VMMaintenanceNote {
+    param($VMName)
+    return [pscustomobject]@{
+        vmName     = $VMName
+        role       = 'OSDClient'
+        domain     = 'example.test'
+        inProgress = $false
+    }
+}
+$osdResult = Start-VMMaintenance -VMName 'OSD-BLANK'
+Assert-Equal $true $osdResult 'defensive maintenance skip accepts an OSDClient without a guest'
+Assert-Equal 0 $script:StartVmFixesCalls 'defensive OSDClient skip never starts PSDirect fixes'
+function Get-VMMaintenanceNote {
+    param($VMName)
+    return [pscustomobject]@{
+        vmName     = $VMName
+        role       = 'AADClient'
+        domain     = 'example.test'
+        inProgress = $false
+    }
+}
+$aadResult = Start-VMMaintenance -VMName 'AAD-BLANK'
+Assert-Equal $true $aadResult 'defensive maintenance skip accepts an AADClient without a guest'
+Assert-Equal 0 $script:StartVmFixesCalls 'defensive AADClient skip never starts PSDirect fixes'
 
 $phase0FunctionText = $definition[0].Extent.Text
 Assert-Equal $true ($phase0FunctionText -match '(?i)-argument3\s+\$true') 'the mandatory Phase 0 dispatcher enables the in-progress override'
 $scriptBlocksText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1') -Raw
 Assert-Equal $true ($scriptBlocksText -match '(?s)\$global:Phase10Job\s*=\s*\{.*?\[boolean\]\s*\$AllowInProgress.*?Start-VMMaintenance.+?-AllowInProgress:\$AllowInProgress') 'Phase10Job forwards the override explicitly'
+Assert-Equal $true ($scriptBlocksText -match '(?s)if\s*\(\$currentItem\.Role\s+-in\s+@\("OSDClient",\s*"AADClient"\)\)\s*\{.*?\breturn\b') 'Phase10Job returns before PSDirect for OSDClient and AADClient'
 $phasesText = Get-Content -LiteralPath (Join-Path $RootPath 'common\Common.Phases.ps1') -Raw
 Assert-Equal $true ($phasesText -match '(?s)\$hasArgumentList\s*=.+?\$argument3.+?if\s*\(\$hasArgumentList\).+?-ArgumentList\s+\$currentItem') 'Start-NormalJobs forwards a true third argument even when the first argument is empty'
 
