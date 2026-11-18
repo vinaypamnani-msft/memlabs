@@ -17,7 +17,7 @@ function Assert-True {
 }
 
 foreach ($entry in @(
-        @{ Path = 'common\Common.Config.ps1'; Names = @('Get-List') },
+        @{ Path = 'common\Common.Config.ps1'; Names = @('Test-VMResourceCacheMetrics', 'Get-List') },
         @{ Path = 'common\Common.RdcMan.ps1'; Names = @('Remove-MissingServersFromGroup', 'Remove-MissingDomainsFromFile') },
         @{ Path = 'common\Common.mRemoteNG.ps1'; Names = @('Remove-MissingConnectionsFromMRemoteNG', 'Remove-MissingDomainsFromMRemoteNG', 'New-MRemoteNGFileFromHyperV', 'New-MRemoteNGXmlDocument', 'Set-MRemoteNGNodeOrder') }
     )) {
@@ -53,6 +53,7 @@ function Invoke-InventoryFixture {
         Seed = [pscustomobject]@{
             vmName = 'KEEP-DC'; vmID = [guid]'e4c4d7aa-383a-4e9c-91d3-7a449e2d5cd3'
             Domain = 'keep.test'; Role = 'DC'; source = 'hyperv'
+            memoryStartupGB = 2; diskUsedGB = 0
         }
     }
     $global:Common = [pscustomobject]@{

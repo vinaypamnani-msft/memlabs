@@ -178,6 +178,24 @@ are staged as existing-VM updates; no new VM is required. Unchanged inventory
 and reverted edits do not count as queued work. The same action also handles
 new VMs and existing-VM updates together.
 
+Updating a deployed VM does not download its OS base VHDX again, even when its
+configuration uses a moving image alias such as Windows 11 latest. New VMs still
+acquire their base images; SQL/ConfigMgr media checks remain enabled for reruns.
+`-DownloadFilesOnly`, `-DownloadAll` on `Get-FilesForConfiguration`, and
+`-ForceDownloadFiles` still explicitly acquire the requested images.
+
+When every staged existing-VM change is limited to RAM or dynamic-memory
+settings, **Deploy / Apply Changes** applies the Hyper-V host changes directly
+and returns to the domain edit menu without running deployment phases. The VM
+restarts only when its memory settings actually change; its VM notes and pending
+edit markers update only after Hyper-V succeeds. Mixed changes still use the full
+deployment path. Post-deployment memory restoration now also honors static
+memory (`DynamicMinRam = Memory`) instead of re-enabling dynamic memory.
+
+VM inventory and disk-size caches are published atomically, so Ctrl+C during a
+cache write leaves the previous complete cache intact. Unreadable or incomplete
+inventory is discarded and rebuilt rather than reused as zero resource totals.
+
 Cleared, single-entry, and array message collections support multiple validation
 failures without runtime exceptions. This does not change which configurations
 pass validation or the existing warning/error override switches.
@@ -267,6 +285,11 @@ not the newer Sysinternals binary. If the pin is unavailable, startup warns and
 leaves the client and connection files unchanged. `New-Lab.ps1 -WhatIf` skips this
 preparation, initialization errors leave files untouched, and internal GenConfig
 calls do not repeat it.
+
+Automatic RDCMan refreshes leave the file and running sessions alone when
+connection data is unchanged. RAM/dynamic-memory changes and other inventory-only
+comment updates do not trigger a restart. Connection, credential, grouping, and
+display-name changes still refresh the file; explicit overwrite still rebuilds it.
 
 Connection-file regeneration and domain/server pruning capture one verified live
 VM inventory before stopping clients or modifying connection files. Startup shares

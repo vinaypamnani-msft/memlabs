@@ -48,6 +48,7 @@ function New-StartupVM {
         State = 'Off'; remoteSQLVM = $null; OtherNode = $null
         remoteContentLibVM = $null; fileServerVM = $null; patchMyPCFileServer = $null
         sqlVersion = $SqlVersion
+        memoryStartupGB = 2; diskUsedGB = 0
     }
 }
 
@@ -426,7 +427,7 @@ Assert-Startup (($script:StartupFixture.Changes | Where-Object Name -eq 'FS01').
 Assert-Startup (($script:StartupFixture.Changes | Where-Object Name -eq 'PRI01').Delay -eq 240) 'An updated primary must boot after its newly selected file server.'
 
 & {
-    foreach ($name in @('Get-List', 'Get-VMFromHyperV', 'Update-VMFromHyperV')) {
+    foreach ($name in @('Test-VMResourceCacheMetrics', 'Get-List', 'Get-VMFromHyperV', 'Update-VMFromHyperV')) {
         . (Import-StartupFunction -Path (Join-Path $RootPath 'common\Common.Config.ps1') -Name $name)
     }
     foreach ($name in @('Get-VMNote', 'Set-VMNote', 'Update-VMNoteProperty')) {

@@ -805,6 +805,93 @@ function Test-AnyExistingVMModified {
     return $false
 }
 
+function Get-ExistingVmQuickUpdatePlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Config,
+        [Parameter(Mandatory = $true)][object[]]$ExistingMachines,
+        [Parameter(Mandatory = $false)][AllowNull()][string]$ConfigBaselineJson
+    )
+
+    $configChanged = [string]::IsNullOrWhiteSpace($ConfigBaselineJson) -or
+        (($Config | ConvertTo-Json -Depth 10 -Compress) -cne $ConfigBaselineJson)
+    $newVms = @($Config.virtualMachines | Where-Object { -not $_.Hidden -and -not $_.ExistingVM })
+    $modified = @($ExistingMachines | Where-Object { get-IsExistingVMModified -virtualMachine $_ })
+    $unsupported = [System.Collections.Generic.List[string]]::new()
+    foreach ($vm in $modified) {
+        foreach ($prop in $vm.PSObject.Properties | Where-Object { $_.Name.EndsWith('-Original') }) {
+            $name = $prop.Name.Replace('-Original', '')
+            if ($prop.Value -ne $vm."$name" -and $name -notin @('memory', 'dynamicMinRam')) {
+                $unsupported.Add("$($vm.vmName):$name")
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        CanApplyQuickly = $modified.Count -gt 0 -and $newVms.Count -eq 0 -and
+            $unsupported.Count -eq 0 -and -not $configChanged
+        VMs = @($modified)
+        NewVmCount = $newVms.Count
+        UnsupportedChanges = @($unsupported)
+        ConfigurationChanged = $configChanged
+    }
+}
+
+function Invoke-ExistingVmQuickUpdates {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Config,
+        [Parameter(Mandatory = $true)][object[]]$ExistingMachines
+    )
+
+    $plan = Get-ExistingVmQuickUpdatePlan -Config $Config -ExistingMachines $ExistingMachines `
+        -ConfigBaselineJson $global:GenConfigQuickApplyBaselineJson
+    if (-not $plan.CanApplyQuickly) {
+        return [pscustomobject]@{ Handled = $false; Applied = 0; Failed = 0; Plan = $plan }
+    }
+
+    $applied = 0
+    $failed = 0
+    Write-Host
+    Write-Log "Applying existing-VM memory changes directly to Hyper-V; deployment phases are not required." -Activity
+    foreach ($vm in $plan.VMs) {
+        try {
+            $result = Set-MemLabsVmMemoryConfiguration -VmName $vm.vmName -Memory $vm.memory `
+                -DynamicMinRam $vm.dynamicMinRam -Role $vm.role -SqlVersion $vm.sqlVersion
+            $memoryNote = [pscustomobject]@{
+                memory = $vm.memory
+                dynamicMinRam = $vm.dynamicMinRam
+            }
+            Set-VMNote -vmName $vm.vmName -vmNote $memoryNote
+            foreach ($propertyName in @('memory', 'dynamicMinRam')) {
+                $originalName = "$propertyName-Original"
+                if ($vm.PSObject.Properties.Name -contains $originalName) {
+                    $vm."$originalName" = $vm."$propertyName"
+                }
+            }
+            $message = if ($result.Changed) { "Applied memory $($vm.dynamicMinRam)-$($vm.memory) to $($vm.vmName)" }
+            else { "$($vm.vmName) already has memory $($vm.dynamicMinRam)-$($vm.memory)" }
+            if ($result.Restarted) { $message += ' (VM restarted)' }
+            Write-GreenCheck $message
+            $applied++
+        }
+        catch {
+            $failed++
+            Write-RedX "Could not update $($vm.vmName) memory: $($_.Exception.Message)"
+            Write-Log "Quick existing-VM memory update failed for $($vm.vmName): $($_.Exception.Message)" -Failure -LogOnly
+        }
+    }
+    $global:vm_List_Dirty = $true
+    $global:vm_List_LastUpdate = $null
+    if ($failed -eq 0) {
+        Write-GreenCheck "Applied $applied existing-VM memory update(s). Returning to the domain menu."
+    }
+    else {
+        Write-OrangePoint "$applied update(s) applied; $failed update(s) remain queued for retry."
+    }
+    return [pscustomobject]@{ Handled = $true; Applied = $applied; Failed = $failed; Plan = $plan }
+}
+
 function Save-CurrentConfigState {
     $Global:SavedConfig = $Global:Config
     $Global:SavedConfigFile = $Global:configfile
@@ -940,6 +1027,9 @@ function Select-MainMenu {
 
             $global:Config.virtualMachines = @()
         }
+        if ([string]::IsNullOrWhiteSpace($global:GenConfigQuickApplyBaselineJson)) {
+            $global:GenConfigQuickApplyBaselineJson = $Global:Config | ConvertTo-Json -Depth 10 -Compress
+        }
 
         $built = Build-MainMenuOptions
         $preOptions = $built.PreOptions
@@ -983,6 +1073,10 @@ function Select-MainMenu {
                     Select-PKIOptions
                 }
                 "d" {
+                    $quickResult = Invoke-ExistingVmQuickUpdates -Config $Global:Config -ExistingMachines $global:existingMachines
+                    if ($quickResult.Handled) {
+                        continue
+                    }
                     Add-ModifiedExistingVMsToConfig
                     $global:DisableSmartUpdate = $false
                     return $true
@@ -1321,6 +1415,7 @@ do {
     $global:StartOver = $false
     $global:GoBack = $false
     $Global:Config = Select-ConfigMenu
+    $global:GenConfigQuickApplyBaselineJson = $null
 
 
     # $DeployConfig = (Test-Configuration -InputObject $Global:Config).DeployConfig

@@ -2721,14 +2721,137 @@ function Checkpoint-VM2 {
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
 
+function Set-MemLabsVmMemoryRestartPending {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][bool]$Pending
+    )
+
+    $note = Get-VMNote -VMName $VmName
+    if (-not $note) { throw "VM '$VmName' has no MemLabs note; refusing a memory change without restart recovery state." }
+    if ($Pending) {
+        $note | Add-Member -MemberType NoteProperty -Name 'memoryRestartPending' -Value $true -Force
+    }
+    else {
+        $note | Add-Member -MemberType NoteProperty -Name 'memoryRestartPending' -Value $false -Force
+    }
+    Set-VMNote -vmName $VmName -vmNote $note
+}
+
+function Set-MemLabsVmMemoryConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $true)][string]$Memory,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$DynamicMinRam,
+        [Parameter(Mandatory = $false)][AllowEmptyString()][string]$Role = '',
+        [Parameter(Mandatory = $false)][AllowEmptyString()][string]$SqlVersion = ''
+    )
+
+    $vm = Get-VM2 -Name $VmName -Fallback
+    if (-not $vm) { throw "VM '$VmName' was not found." }
+
+    $maxBytes = [long]($Memory / 1)
+    $minBytes = if ([string]::IsNullOrWhiteSpace($DynamicMinRam)) { $maxBytes } else { [long]($DynamicMinRam / 1) }
+    if ($maxBytes -le 0 -or $minBytes -le 0 -or $minBytes -gt $maxBytes) {
+        throw "Invalid memory configuration for '$VmName': $DynamicMinRam / $Memory."
+    }
+
+    $dynamicRequested = $minBytes -lt $maxBytes
+    $vmNote = Get-VMNote -VMName $VmName
+    $restartPending = [bool]($vmNote -and $vmNote.memoryRestartPending)
+    $alreadyConfigured = if ($dynamicRequested) {
+        $vm.DynamicMemoryEnabled -and $vm.MemoryMinimum -eq $minBytes -and
+        $vm.MemoryMaximum -eq $maxBytes -and $vm.MemoryStartup -eq $maxBytes
+    }
+    else {
+        -not $vm.DynamicMemoryEnabled -and $vm.MemoryStartup -eq $maxBytes
+    }
+    if ($alreadyConfigured) {
+        $recoveredRestart = $false
+        if ($restartPending) {
+            if ($vm.State -ne 'Running') {
+                $started = Start-VM2 -Name $VmName -Passthru
+                if (-not $started) { throw "Memory is configured for '$VmName', but its interrupted restart could not be completed." }
+                $recoveredRestart = $true
+            }
+            Set-MemLabsVmMemoryRestartPending -VmName $VmName -Pending $false
+        }
+        return [pscustomobject]@{ Changed = $false; Restarted = $recoveredRestart }
+    }
+
+    $wasRunning = $vm.State -eq 'Running' -or $restartPending
+    if ($wasRunning) {
+        if (-not $restartPending) {
+            Set-MemLabsVmMemoryRestartPending -VmName $VmName -Pending $true
+        }
+        if ($vm.State -eq 'Running') {
+            $stopped = Stop-VM2 -Name $VmName -Passthru
+            if (-not $stopped) {
+                $current = Get-VM2 -Name $VmName -Fallback
+                if ($current -and $current.State -eq 'Running') {
+                    Set-MemLabsVmMemoryRestartPending -VmName $VmName -Pending $false
+                }
+                throw "Could not stop '$VmName' to apply its memory configuration."
+            }
+        }
+    }
+
+    $priority = 25
+    $buffer = 10
+    $effectiveRole = $Role
+    if ($SqlVersion -and $effectiveRole -eq 'DomainMember') { $effectiveRole = 'SqlServer' }
+    if ($effectiveRole -in @('DC', 'SqlServer', 'Primary', 'SQLAO', 'CAS')) {
+        $priority = 50
+        $buffer = 20
+    }
+
+    try {
+        if ($dynamicRequested) {
+            $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $minBytes `
+                -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority `
+                -Buffer $buffer -ErrorAction Stop
+        }
+        else {
+            $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $maxBytes -ErrorAction Stop
+        }
+
+        if ($wasRunning) {
+            $started = Start-VM2 -Name $VmName -Passthru
+            if (-not $started) { throw "Memory was updated but '$VmName' could not be restarted." }
+            Set-MemLabsVmMemoryRestartPending -VmName $VmName -Pending $false
+        }
+    }
+    catch {
+        $updateError = $_
+        if ($wasRunning) {
+            $current = Get-VM2 -Name $VmName -Fallback
+            if ($current -and $current.State -ne 'Running') {
+                try {
+                    $recovered = Start-VM2 -Name $VmName -Passthru
+                    if ($recovered) {
+                        Set-MemLabsVmMemoryRestartPending -VmName $VmName -Pending $false
+                    }
+                }
+                catch {
+                    Write-Log "Could not recover '$VmName' after a memory update failure: $($_.Exception.Message)" -Failure
+                }
+            }
+        }
+        throw $updateError
+    }
+    return [pscustomobject]@{ Changed = $true; Restarted = $wasRunning }
+}
+
 function Restore-DynamicMemory {
     <#
     .SYNOPSIS
-        Restores dynamic memory settings on all VMs after deployment completes.
+        Restores configured static or dynamic memory after deployment completes.
     .DESCRIPTION
-        During deployment, VMs run with dynamic memory but min pinned at 99% of max.
-        This function lowers the min back to the configured dynamicMinRam value.
-        Since dynamic memory is already enabled, this works on running VMs.
+        During deployment, Windows VMs can run with dynamic memory pinned near
+        maximum. This restores the requested dynamic minimum or turns dynamic
+        memory off when DynamicMinRam equals Memory.
     #>
     [CmdletBinding()]
     param(
@@ -2740,11 +2863,11 @@ function Restore-DynamicMemory {
 
     # Linux VMs are pinned static (no balloon driver dependency); skip them.
     $vmsToRestore = @($DeployConfig.virtualMachines | Where-Object {
-        $_.dynamicMinRam -and ($_.dynamicMinRam / 1) -ne 0 -and (($_.dynamicMinRam / 1) -lt ($_.memory / 1)) -and -not (Test-VmIsLinux -Vm $_)
+        $_.memory -and $_.dynamicMinRam -and -not (Test-VmIsLinux -Vm $_)
     })
 
     if ($vmsToRestore.Count -eq 0) {
-        Write-Log "[Phase 11] No VMs have dynamic memory configured for domain '$domain'; skipping restore" -LogOnly
+        Write-Log "[Phase 11] No VMs have memory configuration to restore for domain '$domain'; skipping restore" -LogOnly
         return
     }
 
@@ -2770,13 +2893,13 @@ function Restore-DynamicMemory {
     }
 
     if ($vmsToRestore.Count -eq 0) {
-        Write-Log "[Phase 11] No live VMs need dynamic memory restored for domain '$domain'; skipping" -LogOnly
+        Write-Log "[Phase 11] No live VMs need memory restored for domain '$domain'; skipping" -LogOnly
         return
     }
 
     # Only now (after we know there's work) emit the visible Activity header.
-    Write-Log "[Phase 11] Restoring dynamic memory settings for domain '$domain'..." -Activity
-    Write-Log "[Phase 11] Restoring dynamic memory on $($vmsToRestore.Count) VM(s)..." -SubActivity
+    Write-Log "[Phase 11] Restoring memory settings for domain '$domain'..." -Activity
+    Write-Log "[Phase 11] Restoring configured memory on $($vmsToRestore.Count) VM(s)..." -SubActivity
 
     # Per-VM work is a couple of Hyper-V cmdlet calls (Get-VM, Set-VMMemory).
     # No Common.ps1 dot-source needed. Just fan out via ThreadJob so 20 VMs
@@ -2788,15 +2911,17 @@ function Restore-DynamicMemory {
         param($vmConfig)
         $vmName = $vmConfig.vmName
         $messages = New-Object System.Collections.Generic.List[object]
+        $wasRunning = $false
         try {
             $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
             if (-not $vm) {
                 $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: VM not found, skipping (likely rolled back by failed Phase 1)" })
-                return @{ VmName = $vmName; Messages = $messages }
+                return [pscustomobject]@{ VmName = $vmName; Messages = $messages; Success = $false; Error = 'VM not found.' }
             }
 
             $minBytes = ($vmConfig.dynamicMinRam / 1)
             $maxBytes = ($vmConfig.memory / 1)
+            $dynamicRequested = $minBytes -lt $maxBytes
 
             $priority = 25
             $buffer = 10
@@ -2807,7 +2932,22 @@ function Restore-DynamicMemory {
                 $buffer = 20
             }
 
-            if ($vm.DynamicMemoryEnabled) {
+            if (-not $dynamicRequested) {
+                $staticComplete = -not $vm.DynamicMemoryEnabled -and $vm.MemoryStartup -eq $maxBytes
+                if (-not $staticComplete) {
+                    $wasRunning = $vm.State -eq 'Running'
+                    if ($wasRunning) {
+                        $messages.Add(@{ Level = 'Warning'; Text = "[Phase 11]   $vmName`: Stopping VM to restore static memory" })
+                        $vm | Stop-VM -Force -ErrorAction Stop
+                    }
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $maxBytes -ErrorAction Stop
+                    if ($wasRunning) {
+                        $vm | Start-VM -ErrorAction Stop
+                        $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Restarted with static memory" })
+                    }
+                }
+            }
+            elseif ($vm.DynamicMemoryEnabled) {
                 # On a running VM, Hyper-V only allows max memory to be
                 # increased, never decreased. Clamp to at least the current
                 # value to avoid "Invalid maximum memory amount" errors on
@@ -2835,15 +2975,32 @@ function Restore-DynamicMemory {
         }
         catch {
             $messages.Add(@{ Level = 'Warning'; Text = "[Phase 11]   $vmName`: Failed to restore dynamic memory: $_" })
+            if ($wasRunning) {
+                try {
+                    $currentVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+                    if ($currentVm -and $currentVm.State -ne 'Running') {
+                        $currentVm | Start-VM -ErrorAction Stop
+                        $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Recovered original running state after restore failure" })
+                    }
+                }
+                catch {
+                    $messages.Add(@{ Level = 'Warning'; Text = "[Phase 11]   $vmName`: Could not recover original running state: $_" })
+                }
+            }
+            return [pscustomobject]@{ VmName = $vmName; Messages = $messages; Success = $false; Error = "$_" }
         }
-        return @{ VmName = $vmName; Messages = $messages }
+        return [pscustomobject]@{ VmName = $vmName; Messages = $messages; Success = $true; Error = $null }
     }
 
+    $results = New-Object System.Collections.Generic.List[object]
     if ($useThreadJob) {
         $jobs = foreach ($vmConfig in $vmsToRestore) {
             Start-ThreadJob -ScriptBlock $restoreWorker -ArgumentList $vmConfig -ThrottleLimit 8
         }
-        $results = $jobs | Wait-Job | Receive-Job
+        $rawResults = @($jobs | Wait-Job | Receive-Job)
+        foreach ($rawResult in $rawResults) {
+            if ($rawResult.PSObject.Properties.Name -contains 'Success') { $results.Add($rawResult) }
+        }
         $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
         foreach ($r in $results) {
             foreach ($m in $r.Messages) {
@@ -2857,7 +3014,10 @@ function Restore-DynamicMemory {
     }
     else {
         foreach ($vmConfig in $vmsToRestore) {
-            $r = & $restoreWorker $vmConfig
+            $rawResult = @(& $restoreWorker $vmConfig)
+            $r = $rawResult | Where-Object { $_.PSObject.Properties.Name -contains 'Success' } | Select-Object -Last 1
+            if (-not $r) { throw "Restore worker for $($vmConfig.vmName) did not return a result." }
+            $results.Add($r)
             foreach ($m in $r.Messages) {
                 switch ($m.Level) {
                     'Warning' { Write-Log $m.Text -Warning }
@@ -2868,7 +3028,14 @@ function Restore-DynamicMemory {
         }
     }
 
-    Write-Log "[Phase 11] Dynamic memory restore complete" -Success
+    if ($results.Count -ne $vmsToRestore.Count) {
+        throw "[Phase 11] Memory restore did not return results for every VM."
+    }
+    $failedRestores = @($results | Where-Object { -not $_.Success })
+    if ($failedRestores.Count -gt 0) {
+        throw "[Phase 11] Memory restore failed for $($failedRestores.Count) VM(s): $(($failedRestores | ForEach-Object { "$($_.VmName)=$($_.Error)" }) -join '; ')"
+    }
+    Write-Log "[Phase 11] Memory restore complete" -Success
 }
 
 

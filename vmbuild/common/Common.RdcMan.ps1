@@ -890,6 +890,63 @@ function Get-RDCManOSShortName {
     }
 }
 
+function Test-RDCManConnectionDataChanged {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][xml]$Before,
+        [Parameter(Mandatory = $true)][xml]$After
+    )
+
+    $comparable = @()
+    foreach ($document in @($Before, $After)) {
+        $copy = $document.CloneNode($true)
+        # Inventory comments and UI expansion/order do not change a connection.
+        foreach ($node in @($copy.SelectNodes('//server/properties/comment | //properties/expanded'))) {
+            [void]$node.ParentNode.RemoveChild($node)
+        }
+        # RDCMan omits default display names and connection types when saving.
+        foreach ($properties in @($copy.SelectNodes('//server/properties'))) {
+            if ($null -eq $properties.SelectSingleNode('displayName')) {
+                $displayName = $copy.CreateElement('displayName')
+                $displayName.InnerText = $properties.name
+                [void]$properties.AppendChild($displayName)
+            }
+            if ($null -eq $properties.SelectSingleNode('connectionType')) {
+                $connectionType = $copy.CreateElement('connectionType')
+                $connectionType.InnerText = 'Normal'
+                [void]$properties.AppendChild($connectionType)
+            }
+        }
+        foreach ($passwordNode in @($copy.SelectNodes('//logonCredentials/password'))) {
+            if (-not [string]::IsNullOrEmpty($passwordNode.InnerText)) {
+                try {
+                    $encryptionSettings = New-Object -TypeName RdcMan.EncryptionSettings -ErrorAction Stop
+                    $passwordNode.InnerText = [RdcMan.Encryption]::DecryptString($passwordNode.InnerText, $encryptionSettings)
+                }
+                catch {
+                    Write-Log "Could not compare an RDCMan credential; the connection file will be refreshed. $($_.Exception.Message)" -LogOnly
+                    return $true
+                }
+            }
+        }
+        foreach ($parent in @($copy.SelectNodes('//file | //group | //server | //properties | //logonCredentials | //trustedCertificates'))) {
+            $children = @($parent.SelectNodes('*') | Sort-Object -Property {
+                    "$($_.LocalName)|$($_.properties.name)|$($_.properties.displayName)|$($_.properties.vmId)|$($_.GetAttribute('endpoint'))"
+                })
+            foreach ($child in $children) { [void]$parent.AppendChild($child) }
+        }
+        foreach ($node in @($copy.SelectNodes('//*'))) {
+            foreach ($attribute in @($node.Attributes | Sort-Object Name)) {
+                [void]$node.Attributes.Remove($attribute)
+                [void]$node.Attributes.Append($attribute)
+            }
+        }
+        foreach ($node in @($copy.SelectNodes('//*[not(*) and string-length(.) = 0]'))) { $node.IsEmpty = $true }
+        $comparable += $copy.OuterXml
+    }
+    return $comparable[0] -cne $comparable[1]
+}
+
 <#
 .SYNOPSIS
     Update the lab's RDCMan connection file.
@@ -987,6 +1044,7 @@ function New-RDCManFileFromHyperV {
             Write-Verbose "Loading config from $rdcmanfile"
         }
         [xml]$existing = Get-Content -Path $rdcmanfile
+        $original = $existing.CloneNode($true)
         # This is the bulk of the data.
         $file = $existing.RDCMan.file
         if ($null -eq $file) {
@@ -1609,6 +1667,9 @@ function New-RDCManFileFromHyperV {
         [void]$file.AppendChild($findgroup)
     }
 
+    if ($shouldSave -and -not $OverWrite) {
+        $shouldSave = Test-RDCManConnectionDataChanged -Before $original -After $existing
+    }
     $killed = Save-RdcManSettingsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {

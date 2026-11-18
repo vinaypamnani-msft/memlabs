@@ -665,6 +665,10 @@ try {
         param($Name)
         throw "The isolated menu test must not start VM '$Name'."
     }
+    function Invoke-ExistingVmQuickUpdates {
+        param($Config, $ExistingMachines)
+        [pscustomobject]@{ Handled = $false; Applied = 0; Failed = 0 }
+    }
     $InternalUseOnly = [switch] $true
     foreach ($includeNewVM in $false, $true) {
         Reset-Fixture

@@ -1420,6 +1420,8 @@ function Get-FilesForConfiguration {
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the image, if it exists.")]
         [switch]$ForceDownloadFiles,
         [Parameter(Mandatory = $false)]
+        [string[]]$ExistingVMNames = @(),
+        [Parameter(Mandatory = $false)]
         [switch]$UseCDN,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
@@ -1442,7 +1444,10 @@ function Get-FilesForConfiguration {
     # Get unique items from config
     if ($config) {
         $cfgCmOptions = Get-ConfigCmOptions -Config $config
-        $operatingSystemsToGet = @($config.virtualMachines.operatingSystem | Select-Object -Unique)
+        $imageVMs = @($config.virtualMachines | Where-Object {
+                $ForceDownloadFiles -or $_.vmName -notin $ExistingVMNames
+            })
+        $operatingSystemsToGet = @($imageVMs.operatingSystem | Select-Object -Unique)
         if (Test-MemLabsUsesDhcpAppliance) {
             $operatingSystemsToGet = @($operatingSystemsToGet + 'Ubuntu Server 24.04 LTS' | Select-Object -Unique)
         }
@@ -5307,6 +5312,27 @@ function Get-DomainList {
     }
 }
 
+function Test-VMResourceCacheMetrics {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object]$MemoryStartup,
+        [AllowNull()][object]$DiskSize
+    )
+
+    foreach ($value in @($MemoryStartup, $DiskSize)) {
+        if ($null -eq $value -or $value -is [enum] -or
+            $value.PSObject.TypeNames -contains 'Deserialized.System.Enum') { return $false }
+        $typeCode = [Type]::GetTypeCode($value.GetType())
+        if ($typeCode -notin @(
+                [TypeCode]::SByte, [TypeCode]::Byte, [TypeCode]::Int16, [TypeCode]::UInt16,
+                [TypeCode]::Int32, [TypeCode]::UInt32, [TypeCode]::Int64, [TypeCode]::UInt64,
+                [TypeCode]::Single, [TypeCode]::Double, [TypeCode]::Decimal
+            )) { return $false }
+        if ([double]::IsNaN([double]$value) -or [double]::IsInfinity([double]$value)) { return $false }
+    }
+    return [double]$MemoryStartup -gt 0 -and [double]$DiskSize -ge 0
+}
+
 function Get-VMSizeCached {
     [CmdletBinding()]
     param (
@@ -5322,20 +5348,21 @@ function Get-VMSizeCached {
     $vmCacheEntry = $null
     if (Test-Path $cacheFile) {
         try {
-            $vmCacheEntry = Get-Content $cacheFile | ConvertFrom-Json
-            if ($common.InJob) {
+            $vmCacheEntry = Get-Content -LiteralPath $cacheFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($vmCacheEntry.vmId -ne $vm.vmID -or
+                -not (Test-VMResourceCacheMetrics -MemoryStartup $vmCacheEntry.MemoryStartup -DiskSize $vmCacheEntry.diskSize)) {
+                Write-Log "Get-VMSizeCached: Ignoring incomplete size cache for $($vm.Name)." -LogOnly
+                $vmCacheEntry = $null
+            }
+            elseif ($vmCacheEntry.diskSize -gt 0 -and
+                ($Common.InJob -or (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24))) {
+                if ($vm.MemoryStartup -gt 0) { $vmCacheEntry.MemoryStartup = $vm.MemoryStartup }
                 return $vmCacheEntry
             }
         }
-        catch {}
-    }
-
-
-    if ($vmCacheEntry) {
-        if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
-            if ($vmCacheEntry.diskSize -and $vmCacheEntry.diskSize -gt 0) {
-                return $vmCacheEntry
-            }
+        catch {
+            Write-Log "Get-VMSizeCached: Could not read size cache for $($vm.Name). $($_.Exception.Message)" -LogOnly
+            $vmCacheEntry = $null
         }
     }
 
@@ -5372,7 +5399,28 @@ function Get-VMSizeCached {
         EntryAdded    = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
     if (-not $Common.InJob) {
-        ConvertTo-Json  $vmCacheEntry | Out-File $cacheFile -Force
+        $tempPath = "$cacheFile.$([guid]::NewGuid().ToString('N')).tmp"
+        $backupPath = "$tempPath.bak"
+        try {
+            $vmCacheEntry | ConvertTo-Json -ErrorAction Stop | Out-File -LiteralPath $tempPath -Force -ErrorAction Stop
+            if ([IO.File]::Exists($cacheFile)) {
+                [IO.File]::Replace($tempPath, $cacheFile, $backupPath)
+            }
+            else {
+                [IO.File]::Move($tempPath, $cacheFile)
+            }
+        }
+        catch {
+            Write-Log "Get-VMSizeCached: Could not save size cache for $($vm.Name). $($_.Exception.Message)" -LogOnly
+        }
+        finally {
+            foreach ($path in @($tempPath, $backupPath)) {
+                if ([IO.File]::Exists($path)) {
+                    try { [IO.File]::Delete($path) }
+                    catch { Write-Log "Get-VMSizeCached: Could not remove temporary cache '$path'. $($_.Exception.Message)" -LogOnly }
+                }
+            }
+        }
     }
     return $vmCacheEntry
 }
@@ -5964,6 +6012,8 @@ function Update-VMFromHyperV {
 
 function Save-VMListDiskCache {
     if ($Common.InJob) { return }
+    $tempPath = $null
+    $backupPath = $null
     try {
         $cachePath = Join-Path $Common.CachePath "vm-list-cache.clixml"
         if (-not $global:vm_List -or $global:vm_List.Count -eq 0) {
@@ -5976,11 +6026,27 @@ function Save-VMListDiskCache {
             }
             return
         }
-        @($global:vm_List) | Export-Clixml -Path $cachePath -Force -Depth 10
+        $tempPath = "$cachePath.$([guid]::NewGuid().ToString('N')).tmp"
+        $backupPath = "$tempPath.bak"
+        @($global:vm_List) | Export-Clixml -LiteralPath $tempPath -Force -Depth 10 -ErrorAction Stop
+        if ([IO.File]::Exists($cachePath)) {
+            [IO.File]::Replace($tempPath, $cachePath, $backupPath)
+        }
+        else {
+            [IO.File]::Move($tempPath, $cachePath)
+        }
         Write-Log "Save-VMListDiskCache: Wrote $($global:vm_List.Count) VMs to disk cache." -LogOnly
     }
     catch {
         Write-Log "Save-VMListDiskCache: Failed to write disk cache. $_" -LogOnly
+    }
+    finally {
+        foreach ($path in @($tempPath, $backupPath)) {
+            if ($path -and [IO.File]::Exists($path)) {
+                try { [IO.File]::Delete($path) }
+                catch { Write-Log "Save-VMListDiskCache: Could not remove temporary cache '$path'. $($_.Exception.Message)" -LogOnly }
+            }
+        }
     }
 }
 
@@ -5996,8 +6062,15 @@ function Read-VMListDiskCache {
             return $null
         }
 
-        $cached = @(Import-Clixml -Path $cachePath)
+        $cached = @(Import-Clixml -LiteralPath $cachePath -ErrorAction Stop)
         if ($cached.Count -eq 0) { return $null }
+        foreach ($cachedVm in $cached) {
+            if ([string]::IsNullOrWhiteSpace($cachedVm.vmName) -or -not $cachedVm.vmId -or
+                -not (Test-VMResourceCacheMetrics -MemoryStartup $cachedVm.memoryStartupGB -DiskSize $cachedVm.diskUsedGB)) {
+                Write-Log "Read-VMListDiskCache: Ignoring incomplete VM inventory; rebuilding resource totals from Hyper-V." -LogOnly
+                return $null
+            }
+        }
 
         # Caches written before the blank-string parser fix may contain the
         # prefix as integer 0. Prefix is a string-valued field, so numeric zero
@@ -6047,11 +6120,21 @@ function Get-List {
         [switch] $FailOnError
     )
 
+    # A failed full rebuild leaves no resident list; retain that obligation on retry.
+    $rebuildVMList = -not $Common.InJob -and $global:vm_List_Dirty -and -not $global:vm_List
+    if (-not $FlushCache.IsPresent -and -not $Common.InJob -and $global:vm_List) {
+        foreach ($cachedVm in $global:vm_List) {
+            if (-not (Test-VMResourceCacheMetrics -MemoryStartup $cachedVm.memoryStartupGB -DiskSize $cachedVm.diskUsedGB)) {
+                $rebuildVMList = $true
+                break
+            }
+        }
+    }
     $doSmartUpdate = $SmartUpdate.IsPresent -or $FailOnError.IsPresent
     $inMutex = $false
     $return = $null
     #Get-PSCallStack | out-host
-    if ($global:DisableSmartUpdate -eq $true -and -not $FailOnError.IsPresent) {
+    if ($global:DisableSmartUpdate -eq $true -and -not $FailOnError.IsPresent -and -not $rebuildVMList) {
         $doSmartUpdate = $false        
     }
     else {        
@@ -6094,13 +6177,19 @@ function Get-List {
             $global:vm_List = $null
             $global:vm_List_LastUpdate = $null
         }
+        if ($rebuildVMList) {
+            Write-Log "Get-List: Ignoring incomplete resident VM inventory; rebuilding resource totals from Hyper-V." -LogOnly
+            $global:vm_List = $null
+            $global:vm_List_LastUpdate = $null
+            $global:vm_List_Dirty = $true
+        }
 
         # Seed from disk cache if in-memory list is empty. This lets job
         # workers (Start-Job) skip the expensive Get-VM + Get-VMFromHyperV
         # full-build loop. The subsequent SmartUpdate block will do a
         # lightweight Get-VM + Update-VMFromHyperV refresh to pick up
         # current State values.
-        if (-not $global:vm_List) {
+        if (-not $global:vm_List -and -not $rebuildVMList) {
             $diskCached = Read-VMListDiskCache
             if ($diskCached) {
                 # The disk cache persists across PowerShell restarts and is
@@ -6247,6 +6336,7 @@ function Get-List {
 
                     $global:vm_List = $return
                     $global:vm_List_LastUpdate = Get-Date
+                    $global:vm_List_Dirty = $false
                     Save-VMListDiskCache
                 }
             }

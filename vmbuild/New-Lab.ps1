@@ -1027,14 +1027,17 @@ try {
         break
     }
 
-    if ($runPhase1 -or $needFiles) {
+    $existingVMNamesForImages = @($existingVMs.vmName)
+    if ($DownloadFilesOnly) { $existingVMNamesForImages = @() }
+
+    if ($DownloadFilesOnly -or $runPhase1 -or $needFiles) {
         # Download required files
-        $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
+        $success = Get-FilesForConfiguration -InputObject $deployConfig -ExistingVMNames $existingVMNamesForImages -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
         if (-not $success) {
             Write-Host
             Write-Log "Failed to download all required files. Retrying download of missing files in 2 minutes... " -Warning
             Start-Sleep -Seconds 120
-            $success = Get-FilesForConfiguration -InputObject $deployConfig -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
+            $success = Get-FilesForConfiguration -InputObject $deployConfig -ExistingVMNames $existingVMNamesForImages -WhatIf:$WhatIf -UseCDN:$UseCDN -ForceDownloadFiles:$ForceDownloadFiles
             if (-not $success) {
                 $timer.Stop()
                 Write-Log "Failed to download all required files. Exiting." -Failure
@@ -1766,7 +1769,9 @@ finally {
     # an early cancel is just confusing).
     if ($deployConfig -and $currentPhase -gt 1) {
         try { Restore-DynamicMemory -DeployConfig $deployConfig } catch {
-            Write-Log "Restore-DynamicMemory failed: $_" -Warning
+            Write-Log "Restore-DynamicMemory failed: $_" -Failure
+            $NewLabsuccess = $false
+            $exitcode = 1
         }
     }
 
