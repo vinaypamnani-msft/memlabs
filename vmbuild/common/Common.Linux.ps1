@@ -5850,6 +5850,26 @@ function Test-LinuxDhcpRelayAddressAvailable {
     }
 
     if (-not (Test-MemLabsUsesDhcpAppliance)) {
+        $nativeScopes = @()
+        try {
+            $nativeScopes = @(Get-DhcpServerv4Scope -ErrorAction Stop)
+        }
+        catch {
+            return [pscustomobject]@{
+                Available = $false
+                Reason = "DHCP scope ownership could not be measured for $Network`: $($_.Exception.Message)"
+            }
+        }
+        $scopeExists = [bool]($nativeScopes | Where-Object {
+                $scopeText = if ($_.PSObject.Properties['IPAddressToString']) {
+                    "$($_.IPAddressToString)"
+                }
+                else {
+                    "$($_.ScopeId)"
+                }
+                $scopeText -eq $Network
+            } | Select-Object -First 1)
+
         $readNativeDhcpOwnership = {
             $reservation = Get-DhcpServerv4Reservation -ScopeId $Network -ErrorAction Stop |
                 Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
@@ -5876,20 +5896,22 @@ function Test-LinuxDhcpRelayAddressAvailable {
             return $null
         }
 
-        try {
-            $ownership = & $readNativeDhcpOwnership
-            if ($ownership) { return $ownership }
-        }
-        catch {
-            $firstError = $_
+        if ($scopeExists) {
             try {
                 $ownership = & $readNativeDhcpOwnership
                 if ($ownership) { return $ownership }
             }
             catch {
-                return [pscustomobject]@{
-                    Available = $false
-                    Reason = "DHCP ownership could not be measured for $Network after retry (initial: $($firstError.Exception.Message); retry: $($_.Exception.Message))"
+                $firstError = $_
+                try {
+                    $ownership = & $readNativeDhcpOwnership
+                    if ($ownership) { return $ownership }
+                }
+                catch {
+                    return [pscustomobject]@{
+                        Available = $false
+                        Reason = "DHCP ownership could not be measured for $Network after retry (initial: $($firstError.Exception.Message); retry: $($_.Exception.Message))"
+                    }
                 }
             }
         }

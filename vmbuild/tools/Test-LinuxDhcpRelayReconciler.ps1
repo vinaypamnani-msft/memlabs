@@ -20,7 +20,7 @@ function Import-TestFunction {
     param ([string] $Path, [string] $Name)
     $errors = $null; $tokens = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
-    if (@($errors).Count) { throw "$Path has parse errors" }
+    if ($null -ne $errors -and $errors.Count -gt 0) { throw "$Path has parse errors" }
     $definition = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name }, $true))
     if ($definition.Count -ne 1) { throw "Expected one $Name definition" }
     [scriptblock]::Create($definition[0].Extent.Text)
@@ -31,6 +31,9 @@ $linuxPath = Join-Path $RootPath 'common\Common.Linux.ps1'
 . (Import-TestFunction $linuxPath 'Sync-LinuxDhcpRelay')
 $validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
 . (Import-TestFunction $validationPath 'Test-LinuxDhcpRelay')
+$summaryPath = Join-Path $RootPath 'common\Common.GenConfig.Summary.ps1'
+. (Import-TestFunction $summaryPath 'Get-AdditionalInformation')
+. (Import-TestFunction $summaryPath 'Get-DhcpRelayMappingsSummary')
 
 $script:Adapters = @()
 $script:AddCalls = 0
@@ -46,6 +49,8 @@ $script:ResolvedPaths = @()
 $script:UseDhcpAppliance = $false
 $script:NativeDhcpReads = 0
 $script:NativeDhcpFailuresBeforeSuccess = 0
+$script:NativeDhcpScopeExists = $true
+$script:NativeDhcpScopeError = $false
 
 function Reset-Fixture {
     param ([switch] $WithClient, [switch] $DuplicateClient)
@@ -60,6 +65,8 @@ function Reset-Fixture {
     $script:ResolverCalls = 0
     $script:NativeDhcpReads = 0
     $script:NativeDhcpFailuresBeforeSuccess = 0
+    $script:NativeDhcpScopeExists = $true
+    $script:NativeDhcpScopeError = $false
     $script:Adapters = @([pscustomobject]@{
             Name = 'Network Adapter'; SwitchName = '192.168.1.0'; MacAddress = '00155D010001'; IPAddresses = @('192.168.1.4')
         })
@@ -132,7 +139,17 @@ function Get-DhcpServerv4Lease { [CmdletBinding()] param($ScopeId); $script:Nati
 function Get-NetNeighbor { [CmdletBinding()] param($IPAddress); return @($script:Neighbor) }
 function Test-Connection { [CmdletBinding()] param($ComputerName, $Count, [switch] $Quiet); return $script:Neighbor.Count -gt 0 }
 function Get-VMSwitch { [CmdletBinding()] param($Name); return [pscustomobject]@{ Name = $Name } }
-function Get-DhcpServerv4Scope { [CmdletBinding()] param($ScopeId); return [pscustomobject]@{ ScopeId = $ScopeId } }
+function Get-DhcpServerv4Scope {
+    [CmdletBinding()]
+    param($ScopeId)
+    if ($script:NativeDhcpScopeError) { throw 'simulated DHCP scope backend failure' }
+    if (-not $script:NativeDhcpScopeExists) { return @() }
+    if ($ScopeId) { return @([pscustomobject]@{ ScopeId = $ScopeId }) }
+    return @(
+        [pscustomobject]@{ ScopeId = '192.168.1.0' }
+        [pscustomobject]@{ ScopeId = '192.168.3.0' }
+    )
+}
 function Add-Phase11Output { param($Text, $Level) }
 function Add-VMNetworkAdapter {
     [CmdletBinding()]
@@ -184,6 +201,16 @@ function Write-Log { param($Message, [switch]$Activity, [switch]$Success, [switc
 
 Write-Host "engine : $($PSVersionTable.PSVersion)"
 
+$global:config = [pscustomobject]@{
+    vmOptions = [pscustomobject]@{ Prefix = 'ADA-' }
+}
+$global:GenConfigErrorMessages = @()
+$nullableDisplay = Get-AdditionalInformation -item vmName -data $null
+Assert-Equal $true ($nullableDisplay -is [string]) 'nullable scalar VM display data preserves string formatter semantics'
+Assert-Equal '10.0.2.0 -> DP1' (Get-DhcpRelayMappingsSummary -Mappings @(
+        [pscustomobject]@{ clientNetwork = '10.0.2.0'; distributionPointVM = 'DP1' }
+    )) 'relay mapping formatter renders structured configuration'
+
 Reset-Fixture
 $script:Reservation = @([pscustomobject]@{
     IPAddress = [pscustomobject]@{ IPAddressToString = '192.168.1.4' }
@@ -213,6 +240,26 @@ $persistentFailure = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4
 Assert-Equal $false $persistentFailure.Available 'persistent native DHCP read remains fail-closed'
 Assert-Equal 2 $script:NativeDhcpReads 'persistent native DHCP read is attempted only twice'
 Assert-Equal $true ($persistentFailure.Reason -like '*after retry*') 'persistent native DHCP read reports both attempts'
+
+Reset-Fixture
+$script:NativeDhcpScopeExists = $false
+$script:Reservation = @([pscustomobject]@{
+    IPAddress = [pscustomobject]@{ IPAddressToString = '192.168.1.4' }
+    Name = 'foreign pending-scope sentinel'
+    ClientId = '00-15-5D-01-00-99'
+})
+$pendingScope = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $true $pendingScope.Available 'new subnet with no DHCP scope defers reservation inspection'
+Assert-Equal 0 $script:NativeDhcpReads 'new subnet with no DHCP scope never queries reservations or leases'
+
+Reset-Fixture
+$script:NativeDhcpScopeError = $true
+$scopeFailure = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $false $scopeFailure.Available 'DHCP scope enumeration failure remains fail-closed'
+Assert-Equal 0 $script:NativeDhcpReads 'DHCP scope enumeration failure does not query reservations or leases'
+Assert-Equal $true ($scopeFailure.Reason -like '*scope backend failure*') 'DHCP scope enumeration failure reports the backend error'
 
 Reset-Fixture
 $script:Reservation = @([pscustomobject]@{
