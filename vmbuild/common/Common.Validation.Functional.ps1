@@ -10575,8 +10575,12 @@ function Save-Phase11OsdContentFailureLogs {
         }
         foreach ($site in $sites) {
             Add-Phase11Output "[Phase 11] $VMName [OSD]: collecting distribution/provider/workflow evidence from '$($site.vmName)' (site $code)"
+            $siteCollector = [scriptblock]::Create(@"
+function Invoke-Phase11LocalSystemProbe { $(${function:Invoke-Phase11LocalSystemProbe}) }
+Invoke-Phase11LocalSystemProbe -ScriptBlock { $Phase11SmsSiteLogCollector } -TimeoutSeconds 150
+"@)
             $null = Save-Phase11GuestLogs -VMName $site.vmName -DomainName $domain `
-                -RoleLabel 'OSD-Site' -Collector $Phase11SmsSiteLogCollector -TimeoutSeconds 180
+                -RoleLabel 'OSD-Site' -Collector $siteCollector -TimeoutSeconds 180
         }
     }
     foreach ($dpName in @($DistributionPointNames | Where-Object { $_ } |
@@ -10907,10 +10911,9 @@ $Phase11SmsSiteLogCollector = {
         try { $smsDir = (Get-ItemProperty -Path $k -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' } catch { }
         if ($smsDir) { $diag += "SMS install dir from '$k' = '$smsDir'"; break }
     }
-    if (-not $smsDir -or -not (Test-Path $smsDir)) {
-        $diag += "no SMS installation directory found (probed SMS\Identification and SMS\Setup). This VM is a remote DP/site system with no SMS_EXECUTIVE logs, not a site server."
-        $out['_collector-diag.txt'] = ($diag -join "`r`n")
-        return $out
+    $smsDirReady = [bool]($smsDir -and (Test-Path $smsDir))
+    if (-not $smsDirReady) {
+        $diag += "no usable SMS installation directory found (probed SMS\Identification and SMS\Setup). Continuing bounded host/SMB diagnostics and staging-log capture instead of returning early."
     }
     # sitecomp.log is the only one that says WHY a component was reconfigured. distmgr
     # logs "SMS_EXECUTIVE signalled SMS_DISTRIBUTION_MANAGER to stop" but never the
@@ -10918,26 +10921,139 @@ $Phase11SmsSiteLogCollector = {
     # set and every later content bundle aborting on 0x800704d3 (burnin 2026-08-24:
     # stop at 13:23:36, threads back at 13:24:59, HUB00004 -> SEC dead at 13:29:30, and
     # the cause of the stop was unrecoverable from the artifacts collected).
-    foreach ($baseName in @('distmgr', 'PkgXferMgr', 'sender', 'despool', 'rcmctrl', 'sitecomp', 'SMSProv', 'smsexec')) {
-        foreach ($extension in @('.log', '.lo_')) {
-            $n = "$baseName$extension"
-            $p = Join-Path $smsDir "Logs\$n"
-            try {
-                $file = Get-Item -LiteralPath $p -ErrorAction Stop
-                $diag += "'$p': bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o')) tailLines=4000"
-                $c = @(Get-Content -LiteralPath $p -Tail 4000 -ErrorAction Stop)
-                if ($c.Count) { $out[$n] = $c -join "`r`n" }
-                else { $diag += "'$n' is empty" }
+    if ($smsDirReady) {
+        foreach ($baseName in @('distmgr', 'PkgXferMgr', 'sender', 'despool', 'rcmctrl', 'sitecomp', 'SMSProv', 'smsexec')) {
+            foreach ($extension in @('.log', '.lo_')) {
+                $n = "$baseName$extension"
+                $p = Join-Path $smsDir "Logs\$n"
+                try {
+                    $file = Get-Item -LiteralPath $p -ErrorAction Stop
+                    $diag += "'$p': bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o')) tailLines=4000"
+                    $c = @(Get-Content -LiteralPath $p -Tail 4000 -ErrorAction Stop)
+                    if ($c.Count) { $out[$n] = $c -join "`r`n" }
+                    else { $diag += "'$n' is empty" }
+                }
+                catch { $diag += "'$p' capture failed: $($_.Exception.Message)" }
             }
-            catch { $diag += "'$p' capture failed: $($_.Exception.Message)" }
         }
     }
     # A remote DP still carries SMS\Identification with an Installation Directory, so
     # the guard above passes and the loop then reports five separate "not present"
     # lines that never say the one thing that matters. Say it once, plainly.
-    if ($out.Count -eq 0) {
+    if ($smsDirReady -and $out.Count -eq 0) {
         $diag += "NONE of the site-server logs exist under '$smsDir\Logs'. This VM is a remote DP/site system, not a site server -- the logs that explain ITS content state are under ?:\SMS_DP`$\sms\logs (see the DpContent capture)."
     }
+
+    $transferDiagnostics = @()
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        try {
+            $transferDiagnostics += "Probe identity='$($identity.Name)' SID=$($identity.User.Value) AuthenticationType=$($identity.AuthenticationType)"
+            $transferDiagnostics += "Probe groups=$((@($identity.Groups | ForEach-Object {
+                            try { $_.Translate([Security.Principal.NTAccount]).Value } catch { $_.Value }
+                        })) -join ', ')"
+        }
+        finally { $identity.Dispose() }
+    }
+    catch { $transferDiagnostics += "Probe token lookup failed: $($_.Exception.Message)" }
+    try {
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='SMS_EXECUTIVE'" `
+            -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 1
+        if ($service) {
+            $transferDiagnostics += "SMS_EXECUTIVE StartName='$($service.StartName)' PID=$($service.ProcessId) State=$($service.State) StartMode=$($service.StartMode)"
+            if ($service.ProcessId) {
+                $process = Get-Process -Id $service.ProcessId -ErrorAction SilentlyContinue
+                if ($process) { $transferDiagnostics += "SMS_EXECUTIVE StartTime=$($process.StartTime.ToUniversalTime().ToString('o'))" }
+            }
+        }
+        else { $transferDiagnostics += 'SMS_EXECUTIVE service was not found' }
+    }
+    catch { $transferDiagnostics += "SMS_EXECUTIVE service probe failed: $($_.Exception.Message)" }
+
+    $pkgXferText = if ($out.ContainsKey('PkgXferMgr.log')) { "$($out['PkgXferMgr.log'])" } else { '' }
+    $targetServers = @(
+        [regex]::Matches($pkgXferText, '\\\\(?<server>[A-Za-z0-9_.-]+)\\SMS_DP\$') |
+            ForEach-Object { $_.Groups['server'].Value } |
+            Sort-Object -Unique |
+            Select-Object -First 4
+    )
+    $transferDiagnostics += "PkgXferMgr SMS_DP target(s)=$($targetServers -join ', ')"
+    $targetProbeJobs = @(
+        foreach ($server in $targetServers) {
+            Start-Job -Name "MemLabs-Phase11-Smb-$server" -ArgumentList $server -ScriptBlock {
+                param([string]$TargetServer)
+                $serverLines = [System.Collections.Generic.List[string]]::new()
+                $sharePath = "\\$TargetServer\SMS_DP`$"
+                try {
+                    $addresses = @(Resolve-DnsName -Name $TargetServer -Type A -QuickTimeout -ErrorAction Stop |
+                            ForEach-Object { "$($_.IPAddress)" } | Select-Object -Unique)
+                    $serverLines.Add("Target $TargetServer DNS=$($addresses -join ',')")
+                }
+                catch { $serverLines.Add("Target $TargetServer DNS probe failed: $($_.Exception.Message)") }
+                try {
+                    $connections = @(Get-SmbConnection -ServerName $TargetServer -ErrorAction SilentlyContinue)
+                    if ($connections.Count -eq 0) {
+                        $serverLines.Add("Target $TargetServer SMB connections: none visible to this SYSTEM token")
+                    }
+                    else {
+                        foreach ($connection in $connections) {
+                            $serverLines.Add("Target $TargetServer SMB connection: share=$($connection.ShareName) user=$($connection.UserName) dialect=$($connection.Dialect) signed=$($connection.Signed) encrypted=$($connection.Encrypted)")
+                        }
+                    }
+                }
+                catch { $serverLines.Add("Target $TargetServer SMB connection query failed: $($_.Exception.Message)") }
+                try {
+                    $null = Get-Item -LiteralPath $sharePath -Force -ErrorAction Stop
+                    $serverLines.Add("Target $sharePath root enumeration=SUCCESS")
+                }
+                catch {
+                    $serverLines.Add("Target $sharePath root enumeration=FAIL category=$($_.CategoryInfo.Category) hresult=0x$('{0:X8}' -f ($_.Exception.HResult)) message=$($_.Exception.Message)")
+                }
+                $probePath = Join-Path $sharePath ".MemLabsPhase11Probe-$([guid]::NewGuid().ToString('N')).tmp"
+                try {
+                    Set-Content -LiteralPath $probePath -Value 'MemLabs Phase 11 SMB producer probe' -NoNewline -Encoding ASCII -ErrorAction Stop
+                    $serverLines.Add("Target $sharePath create-file probe=SUCCESS path=$probePath")
+                }
+                catch {
+                    $serverLines.Add("Target $sharePath create-file probe=FAIL category=$($_.CategoryInfo.Category) hresult=0x$('{0:X8}' -f ($_.Exception.HResult)) message=$($_.Exception.Message)")
+                }
+                try {
+                    if (Test-Path -LiteralPath $probePath -ErrorAction SilentlyContinue) {
+                        Remove-Item -LiteralPath $probePath -Force -ErrorAction Stop
+                        $serverLines.Add("Target $sharePath cleanup probe=SUCCESS path=$probePath")
+                    }
+                }
+                catch { $serverLines.Add("Target $sharePath cleanup probe=FAIL path=$probePath message=$($_.Exception.Message)") }
+                return $serverLines.ToArray()
+            }
+        }
+    )
+    if ($targetProbeJobs.Count -gt 0) {
+        $null = Wait-Job -Job $targetProbeJobs -Timeout 25 -ErrorAction SilentlyContinue
+        foreach ($job in @($targetProbeJobs)) {
+            $timedOut = $job.State -in 'Running', 'NotStarted', 'Suspended', 'Disconnected'
+            if ($timedOut) {
+                $transferDiagnostics += "Target SMB probe timed out after 25s: $($job.Name)"
+                Stop-Job -Job $job -ErrorAction SilentlyContinue
+                $null = Wait-Job -Job $job -Timeout 3 -ErrorAction SilentlyContinue
+            }
+            try {
+                $transferDiagnostics += @((Receive-Job -Job $job -ErrorAction SilentlyContinue))
+            }
+            catch {
+                $transferDiagnostics += "Target SMB probe output could not be received for $($job.Name): $($_.Exception.Message)"
+            }
+            if ($job.State -notin 'Completed', 'Stopped') {
+                $transferDiagnostics += "Target SMB probe ended in $($job.State): $($job.Name)"
+            }
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $transportSignals = @($pkgXferText -split "`r?`n" | Where-Object {
+            $_ -match 'Error during connection|Win32 error = 5|Error is considered fatal|Cannot connect to server|will not try send requests|Restart time =|Sending failed|user .* will be used to connect'
+        } | Select-Object -Last 40)
+    foreach ($signal in $transportSignals) { $transferDiagnostics += "PkgXferMgr: $signal" }
+    $out['ContentTransferSmbDiagnostics.txt'] = ($transferDiagnostics -join "`r`n")
 
     foreach ($name in @('InstallCMLog.log', 'DSC_Log.log', 'DSC_Status.txt')) {
         $path = "C:\staging\DSC\$name"
@@ -11273,6 +11389,60 @@ $Phase11DpContentLogCollector = {
         }
     }
     catch { $payload += "Local Administrators lookup failed: $($_.Exception.Message)" }
+    $relevantSessionIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    try {
+        $openFiles = @(Get-SmbOpenFile -IncludeHidden -ErrorAction Stop | Where-Object {
+                "$($_.Path)" -match 'SMS_DP\$|SMSSIG\$|SMS_DP_SMSPKG\$|SMS_DP_SMSSIG\$|SCCMContentLib'
+            } | Select-Object -First 100)
+        foreach ($openFile in $openFiles) {
+            if ($openFile.SessionId) { [void]$relevantSessionIds.Add("$($openFile.SessionId)") }
+            $payload += "SMB ConfigMgr open file: client=$($openFile.ClientComputerName) user=$($openFile.ClientUserName) path=$($openFile.Path)"
+        }
+        if ($openFiles.Count -eq 0) { $payload += 'SMB ConfigMgr open files: none' }
+    }
+    catch { $payload += "SMB ConfigMgr open-file query failed: $($_.Exception.Message)" }
+    try {
+        $sessions = @(Get-SmbSession -IncludeHidden -ErrorAction Stop | Where-Object {
+                $relevantSessionIds.Contains("$($_.SessionId)") -or
+                "$($_.ClientUserName)" -match '\\\\[^\\]+\\$$|SYSTEM|NETWORK SERVICE|LOCAL SERVICE' -or
+                "$($_.ClientComputerName)" -match 'ADA-|MEMLABS|SITE'
+            })
+        if ($sessions.Count -eq 0) {
+            $payload += 'SMB relevant ConfigMgr sessions: none active'
+        }
+        else {
+            foreach ($session in $sessions) {
+                $payload += "SMB ConfigMgr session: id=$($session.SessionId) client=$($session.ClientComputerName) user=$($session.ClientUserName) auth=$($session.AuthenticationType) dialect=$($session.Dialect) signed=$($session.IsSigningEnabled) encrypted=$($session.IsEncrypted) opens=$($session.NumOpens)"
+            }
+        }
+    }
+    catch { $payload += "SMB relevant ConfigMgr session query failed: $($_.Exception.Message)" }
+    try {
+        $since = (Get-Date).AddHours(-2)
+        $securityIds = @(4624, 4732, 4733, 5140, 5145)
+        $events = @(Get-WinEvent -FilterHashtable @{
+                LogName = 'Security'; StartTime = $since; Id = $securityIds
+            } -MaxEvents 2000 -ErrorAction Stop)
+        $securityRows = [System.Collections.Generic.List[string]]::new()
+        foreach ($securityEvent in $events) {
+            $xml = [xml]$securityEvent.ToXml()
+            $data = @{}
+            foreach ($field in @($xml.Event.EventData.Data)) { $data["$($field.Name)"] = "$($field.'#text')" }
+            $summary = @(
+                $data['TargetUserName'], $data['SubjectUserName'], $data['IpAddress'], $data['Workstation'],
+                $data['ShareName'], $data['RelativeTargetName'], $data['ObjectName'], $data['MemberName']
+            ) | Where-Object { $_ } | ForEach-Object { "$_" }
+            $text = "$($securityEvent.Id) $($securityEvent.TimeCreated.ToUniversalTime().ToString('o')) $($summary -join ' ')"
+            if ($text -match 'ADA-|SMS_DP|SMSPKG|SMSSIG|Administrators') { $securityRows.Add($text) }
+        }
+        if ($securityRows.Count -eq 0) {
+            $payload += "SMB/group Security evidence: none matching SMS_DP or lab accounts since $($since.ToUniversalTime().ToString('o')); audit policy may not be enabled"
+        }
+        else {
+            foreach ($row in $securityRows | Select-Object -Last 200) { $payload += "Security event: $row" }
+        }
+    }
+    catch { $payload += "Security event probe failed: $($_.Exception.Message)" }
     if ($dpSharePath) {
         foreach ($path in @($dpSharePath, (Join-Path $dpSharePath 'sms'), (Join-Path $dpSharePath 'sms\bin'), (Join-Path $dpSharePath 'sms\bin\SMSBoot'))) {
             try { $payload += "Independent ACL '$path': $((Get-Acl -LiteralPath $path -ErrorAction Stop).Sddl)" }
@@ -14546,7 +14716,12 @@ function Test-CMClientPackageDistribution {
     if ($result -and ($result.ScriptBlockFailed -or
             (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($failing.Count -gt 0))))) {
         Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: distribution or provider validation failed, or a DP needs diagnostics -- collecting site logs into the logs folder"
-        $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' -Collector $Phase11SmsSiteLogCollector
+        $siteCollector = [scriptblock]::Create(@"
+function Invoke-Phase11LocalSystemProbe { $(${function:Invoke-Phase11LocalSystemProbe}) }
+Invoke-Phase11LocalSystemProbe -ScriptBlock { $Phase11SmsSiteLogCollector } -TimeoutSeconds 150
+"@)
+        $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' `
+            -Collector $siteCollector -TimeoutSeconds 180
 
         # The summarizer is HIERARCHY-wide, so the failing DP routinely belongs to a
         # site this run never touched (re-running a subset config still reports it).
@@ -14573,7 +14748,12 @@ function Test-CMClientPackageDistribution {
                 # The two collectors above cover a PULL DP (CCM logs) and a SITE SERVER
                 # (SMS logs). A plain remote DP is neither, so on cstest2 both returned
                 # nothing for the one machine the whole failure was about.
-                $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DP' -Collector $Phase11DpContentLogCollector
+                $dpCollector = [scriptblock]::Create(@"
+function Invoke-Phase11LocalSystemProbe { $(${function:Invoke-Phase11LocalSystemProbe}) }
+Invoke-Phase11LocalSystemProbe -ScriptBlock { $Phase11DpContentLogCollector } -TimeoutSeconds 120
+"@)
+                $null = Save-Phase11GuestLogs -VMName $dpVm.vmName -DomainName $domain `
+                    -RoleLabel 'ClientPkg-DP' -Collector $dpCollector -TimeoutSeconds 150
                 # A Secondary DP that never gets the client package is often wedged in
                 # distmgr on "site exchange certificate is not found / Failed to decrypt
                 # cert PFX data" -- its site DB lost the SiteExchangeCertificate, so it
@@ -14655,7 +14835,8 @@ function Test-CMClientPackageDistribution {
                 }
                 elseif ($collectedFrom.Add($ownerVm.vmName)) {
                     Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: $($feed.Why) -- collecting the sending side from '$($ownerVm.vmName)'"
-                    $null = Save-Phase11GuestLogs -VMName $ownerVm.vmName -DomainName $domain -RoleLabel $feed.Label -Collector $Phase11SmsSiteLogCollector
+                    $null = Save-Phase11GuestLogs -VMName $ownerVm.vmName -DomainName $domain `
+                        -RoleLabel $feed.Label -Collector $siteCollector -TimeoutSeconds 180
                 }
             }
         }
@@ -14678,7 +14859,12 @@ function Test-CMClientPackageDistribution {
             }
             else {
                 Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: collecting a control content probe from HEALTHY DP '$($baselineVm.vmName)' to compare against the failing DP(s)"
-                $null = Save-Phase11GuestLogs -VMName $baselineVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-DPBaseline' -Collector $Phase11DpContentLogCollector
+                $baselineCollector = [scriptblock]::Create(@"
+function Invoke-Phase11LocalSystemProbe { $(${function:Invoke-Phase11LocalSystemProbe}) }
+Invoke-Phase11LocalSystemProbe -ScriptBlock { $Phase11DpContentLogCollector } -TimeoutSeconds 120
+"@)
+                $null = Save-Phase11GuestLogs -VMName $baselineVm.vmName -DomainName $domain `
+                    -RoleLabel 'ClientPkg-DPBaseline' -Collector $baselineCollector -TimeoutSeconds 150
             }
         }
 
@@ -14703,7 +14889,8 @@ function Test-CMClientPackageDistribution {
                 }
                 elseif ($collectedFrom.Add($parentVm.vmName)) {
                     Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: site $siteCode holds no copy of the client package -- collecting the sending side from parent site $parentCode ('$($parentVm.vmName)')"
-                    $null = Save-Phase11GuestLogs -VMName $parentVm.vmName -DomainName $domain -RoleLabel 'ClientPkg-ContentSource' -Collector $Phase11SmsSiteLogCollector
+                    $null = Save-Phase11GuestLogs -VMName $parentVm.vmName -DomainName $domain `
+                        -RoleLabel 'ClientPkg-ContentSource' -Collector $siteCollector -TimeoutSeconds 180
                 }
             }
         }
@@ -15908,6 +16095,127 @@ function Test-CMSiteWideFunctionality {
             OsdContentWaitTargets = @()
         }
 
+        $getContentTransferFailureEvidence = {
+            param([string]$PackageId, [string[]]$RequiredDps = @())
+
+            $result = [pscustomobject]@{
+                Measured     = $false
+                Fatal        = $false
+                AccessDenied = $false
+                Target       = ''
+                ServiceUser  = ''
+                Lines        = @()
+                Error        = ''
+            }
+            try {
+                $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='SMS_EXECUTIVE'" `
+                    -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 1
+                if ($service) { $result.ServiceUser = "$($service.StartName)" }
+
+                $smsDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' `
+                    -ErrorAction Stop).'Installation Directory'
+                $pkgXferPath = Join-Path $smsDir 'Logs\PkgXferMgr.log'
+                if (-not (Test-Path -LiteralPath $pkgXferPath -ErrorAction Stop)) {
+                    $result.Measured = $true
+                    $result.Error = "PkgXferMgr.log is absent at '$pkgXferPath'"
+                    return $result
+                }
+
+                $lines = @(Get-Content -LiteralPath $pkgXferPath -Tail 5000 -ErrorAction Stop)
+                $packageMatches = @(
+                    for ($i = 0; $i -lt $lines.Count; $i++) {
+                        if ($lines[$i] -match "Package[: ]+=$([regex]::Escape($PackageId))\b|package[: ]+$([regex]::Escape($PackageId))\b") {
+                            $i
+                        }
+                    }
+                )
+                if ($packageMatches.Count -eq 0) {
+                    $result.Measured = $true
+                    $result.Error = "PkgXferMgr.log has no record for $PackageId in its 5000-line tail"
+                    return $result
+                }
+
+                $start = [math]::Max(0, [int]$packageMatches[-1] - 2)
+                $end = [math]::Min($lines.Count - 1, $start + 120)
+                $window = @($lines[$start..$end])
+                $signals = @($window | Where-Object {
+                        $_ -match 'Error during connection to \\\\[^ ]+\\SMS_DP\$ \(\d+\)' -or
+                        $_ -match 'There is no existing connection, Win32 error' -or
+                        $_ -match 'Error is considered fatal' -or
+                        $_ -match 'Cannot connect to server' -or
+                        $_ -match 'will not try send requests going to site' -or
+                        $_ -match 'Sending failed\.' -or
+                        $_ -match 'Restart time =' -or
+                        $_ -match 'user .* will be used to connect'
+                    })
+                $result.Measured = $true
+                $result.Lines = @($signals | Select-Object -Last 16)
+                $result.Fatal = [bool]($result.Lines | Where-Object {
+                        $_ -match 'Error is considered fatal|Cannot connect to server|Sending failed\.'
+                    } | Select-Object -First 1)
+                $result.AccessDenied = [bool]($result.Lines | Where-Object {
+                        $_ -match 'Error during connection to .+ \((5)\)' -or $_ -match 'Win32 error = 5'
+                    } | Select-Object -First 1)
+                $targetLine = @($result.Lines | Where-Object {
+                        $_ -match 'Error during connection to (?<unc>\\\\[^ ]+\\SMS_DP\$)'
+                    } | Select-Object -Last 1)
+                if ($targetLine.Count -eq 1 -and $targetLine[0] -match 'Error during connection to (?<unc>\\\\[^ ]+\\SMS_DP\$)') {
+                    $result.Target = "$($Matches.unc)"
+                }
+                $targetMatchesRequired = $false
+                if ($result.Target -and $RequiredDps.Count -gt 0) {
+                    $targetHost = (($result.Target -replace '^\\\\', '') -split '\\')[0]
+                    $targetMatchesRequired = [bool](@($RequiredDps | Where-Object {
+                                $expected = ("$_" -split '\.')[0]
+                                $expected -ieq $targetHost -or $expected -ieq (($targetHost -split '\.')[0])
+                            } | Select-Object -First 1))
+                }
+                if ($RequiredDps.Count -gt 0 -and -not $targetMatchesRequired) { $result.Fatal = $false }
+                if ($result.Fatal) {
+                    $timingEstablished = $false
+                    $failureIsActive = $false
+                    $now = Get-Date
+                    foreach ($line in @($result.Lines | Select-Object -Last 20)) {
+                        $retryTime = $null
+                        if ($line -match 'Restart time = (?<time>\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)') {
+                            try {
+                                $retryTime = [datetime]::ParseExact(
+                                    $Matches.time, 'M/d/yyyy h:mm:ss tt',
+                                    [Globalization.CultureInfo]::InvariantCulture,
+                                    [Globalization.DateTimeStyles]::AssumeLocal)
+                                $timingEstablished = $true
+                                if ($retryTime -ge $now.AddMinutes(-1)) { $failureIsActive = $true }
+                            }
+                            catch {}
+                            continue
+                        }
+                        $occurrenceTime = $null
+                        if ($line -match '><(?<time>\d{2}-\d{2}-\d{4}\s+\d{1,2}:\d{2}:\d{2}(?:\.\d+)?)(?:[+-]\d+)?') {
+                            $stamp = $Matches.time
+                            try {
+                                $format = if ($stamp.Contains('.')) { 'MM-dd-yyyy HH:mm:ss.FFF' } else { 'MM-dd-yyyy HH:mm:ss' }
+                                $occurrenceTime = [datetime]::ParseExact(
+                                    $stamp, $format,
+                                    [Globalization.CultureInfo]::InvariantCulture,
+                                    [Globalization.DateTimeStyles]::AssumeLocal)
+                            }
+                            catch {}
+                        }
+                        if ($occurrenceTime) {
+                            $timingEstablished = $true
+                            if ($occurrenceTime -ge $now.AddHours(-1)) { $failureIsActive = $true }
+                        }
+                    }
+                    if (-not $timingEstablished -or -not $failureIsActive) { $result.Fatal = $false }
+                }
+                return $result
+            }
+            catch {
+                $result.Error = $_.Exception.Message
+                return $result
+            }
+        }
+
         $ns = "root\SMS\site_$sc"
 
         if (-not $providerQueryDefinition) { throw 'The provider-query helper was not supplied by the host.' }
@@ -16553,9 +16861,24 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             }
                             $requiredPendingBootRows = @()
                             $bootPendingWaitAttempts = 0
+                            $bootTransferEvidence = $null
                             if ($expectOsd -and $biName -notmatch 'arm64' -and $expectedOsdDpNames.Count -gt 0) {
                                 $requiredPendingBootRows = @(& $getRequiredPendingBootRows $allDp)
-                                for ($pendingTry = 1; $pendingTry -le 10 -and $requiredPendingBootRows.Count -gt 0; $pendingTry++) {
+                                $pendingBootDpNames = @($requiredPendingBootRows | ForEach-Object {
+                                        "$(& $dpNameOf $_.ServerNALPath)"
+                                    } | Where-Object { $_ } | Select-Object -Unique)
+                                $bootTransferEvidence = & $getContentTransferFailureEvidence "$($bi.PackageID)" $pendingBootDpNames
+                                if ($bootTransferEvidence.Measured -and $bootTransferEvidence.AccessDenied) {
+                                    $evidenceText = @($bootTransferEvidence.Lines) -join ' | '
+                                    $results.Details.Add("DIAG: boot image '$biName' ($($bi.PackageID)) producer-side PkgXferMgr logged access-denied transport failure$(if ($bootTransferEvidence.Target) { " for $($bootTransferEvidence.Target)" })$(if ($bootTransferEvidence.ServiceUser) { "; SMS_EXECUTIVE service account=$($bootTransferEvidence.ServiceUser)" }): $evidenceText")
+                                }
+                                elseif ($bootTransferEvidence.Error) {
+                                    $results.Details.Add("DIAG: boot-image transfer evidence was NOT measured for '$biName' ($($bi.PackageID)): $($bootTransferEvidence.Error)")
+                                }
+                                $fatalEvidenceBlocksOnlyRequiredDp = $bootTransferEvidence.Fatal -and
+                                    $requiredPendingBootRows.Count -eq 1
+                                for ($pendingTry = 1; $pendingTry -le 10 -and $requiredPendingBootRows.Count -gt 0 -and
+                                    -not $fatalEvidenceBlocksOnlyRequiredDp; $pendingTry++) {
                                     Write-Progress -Activity $osdProgressActivity -Status "Waiting for required boot-image content '$biName' (attempt $pendingTry/10)"
                                     Start-Sleep -Seconds 30
                                     $bootPendingWaitAttempts++
@@ -16568,6 +16891,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                 }
                                 if ($bootPendingWaitAttempts -gt 0 -and $requiredPendingBootRows.Count -eq 0) {
                                     $results.Details.Add("INFO: required boot-image DP state converged after $($bootPendingWaitAttempts * 30) second(s)")
+                                }
+                                elseif ($fatalEvidenceBlocksOnlyRequiredDp -and $requiredPendingBootRows.Count -gt 0) {
+                                    $results.Details.Add("INFO: skipped the 300-second boot-image convergence wait because PkgXferMgr already classified the producer connection as fatal; it will not retry this destination for the logged backoff interval")
                                 }
                             }
                             $bootPendingWaitTimedOut = $requiredPendingBootRows.Count -gt 0
@@ -17177,6 +17503,14 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     }
                 }
                 catch { $parts.Add("site-log diagnostic failed: $($_.Exception.Message)") }
+                $transferEvidence = & $getContentTransferFailureEvidence "$($Package.PackageID)" @($RequiredDp)
+                if ($transferEvidence.Measured -and $transferEvidence.Fatal) {
+                    $parts.Add("PkgXferMgr fatal transport: target=$($transferEvidence.Target) serviceUser=$($transferEvidence.ServiceUser) accessDenied=$($transferEvidence.AccessDenied)")
+                    if ($transferEvidence.Lines) { $parts.Add("PkgXferMgr failure tail: $(@($transferEvidence.Lines) -join ' | ')") }
+                }
+                elseif ($transferEvidence.Error) {
+                    $parts.Add("PkgXferMgr failure classification unavailable: $($transferEvidence.Error)")
+                }
                 try {
                     $dpHost = ($RequiredDp -split '\.')[0]
                     $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 60000

@@ -49,6 +49,10 @@ function Get-TestDefinition {
     function Save-Phase11GuestLogs {
         param($VMName, $DomainName, $RoleLabel, $Collector, $TimeoutSeconds)
         $kind = $Collector.ToString().Trim()
+        if ($RoleLabel -eq 'OSD-Site') {
+            Assert-True ($kind.Contains('Invoke-Phase11LocalSystemProbe -ScriptBlock')) 'Site-side transfer evidence is not collected as SYSTEM.'
+            $kind = "'site'"
+        }
         if ($RoleLabel -eq 'OSD-DP') {
             Assert-True ($kind.Contains('Invoke-Phase11LocalSystemProbe -ScriptBlock')) 'Protected DP failure evidence is not collected as SYSTEM.'
             $kind = "'dp'"
@@ -123,6 +127,9 @@ Assert-True ('Test-SiteSystemFunctionality' -in $callOwners -and
     'Test-CMSiteWideFunctionality' -in $callOwners) 'OSD failure capture is wired to the wrong validation functions.'
 Assert-True ($ast.Extent.Text.Contains('-SourceSiteCodes $osdSourceSiteCodes') -and
     $ast.Extent.Text.Contains('$result.ScriptBlockOutput.OsdContentSourceSiteCodes')) 'Measured content source sites are not passed from the validator to failure capture.'
+Assert-True ($ast.Extent.Text -match 'RoleLabel ''ClientPkg''\s*`?\r?\n?\s*-Collector \$siteCollector -TimeoutSeconds 180' -and
+    $ast.Extent.Text -match 'RoleLabel \$feed\.Label -Collector \$siteCollector -TimeoutSeconds 180' -and
+    $ast.Extent.Text -match 'RoleLabel ''ClientPkg-ContentSource'' -Collector \$siteCollector -TimeoutSeconds 180') 'ClientPkg site-side collectors lost the SYSTEM wrapper or its 30-second outer timeout margin.'
 $guards = @($ast.FindAll({
             param($node)
             $node -is [Management.Automation.Language.IfStatementAst] -and
@@ -152,7 +159,12 @@ $siteCollector = Get-TestDefinition 'Phase11SmsSiteLogCollector' -Collector
     $contents = @{
         'C:\Site\Logs\distmgr.log' = 'current distribution retry'
         'C:\Site\Logs\distmgr.lo_' = 'original distribution failure'
-        'C:\Site\Logs\PkgXferMgr.log' = 'current transfer failure'
+        'C:\Site\Logs\PkgXferMgr.log' = @(
+            'Found send request with ID: 24, Package: PRI00008, Version:4, Destination: NEWDP'
+            'Error during connection to \\NEWDP.memlabs.test\SMS_DP$ (5).'
+            'Error is considered fatal.'
+            '~ Sending failed. Failure count = 1, Restart time = 10/30/2026 12:35:00 PM'
+        ) -join "`r`n"
         'C:\Site\Logs\PkgXferMgr.lo_' = 'original transfer failure'
         'C:\Site\Logs\SMSProv.log' = 'provider rebuild evidence'
         'C:\staging\DSC\InstallCMLog.log' = 'Phase 8 publication and coverage evidence'
@@ -175,6 +187,24 @@ $siteCollector = Get-TestDefinition 'Phase11SmsSiteLogCollector' -Collector
         Assert-True ($Tail -eq 4000) 'A diagnostic log read lost its 4000-line bound.'
         return $contents[$LiteralPath]
     }
+    function Resolve-DnsName { param($Name, $Type, $ErrorAction) [pscustomobject]@{ IPAddress = '192.0.2.10' } }
+    function Get-SmbConnection { param($ServerName, $ErrorAction) @() }
+    function Set-Content {
+        param($LiteralPath, $Value, [switch]$NoNewline, $Encoding, $ErrorAction)
+        throw 'synthetic SYSTEM share create denied'
+    }
+    function Remove-Item { param($LiteralPath, [switch]$Force, $ErrorAction) }
+    function Start-Job {
+        param($Name, $ArgumentList, $ScriptBlock)
+        [pscustomobject]@{
+            Name = $Name; State = 'Completed'
+            Output = @(& $ScriptBlock @ArgumentList)
+        }
+    }
+    function Wait-Job { param($Job, $Timeout, $ErrorAction) @($Job) }
+    function Receive-Job { param($Job, $ErrorAction) @($Job.Output) }
+    function Stop-Job { param($Job, [switch]$Force, $ErrorAction) }
+    function Remove-Job { param($Job, [switch]$Force, $ErrorAction) }
     function Get-CimInstance {
         param($Namespace, $ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
         if ($ClassName -eq 'Win32_Service') { return }
@@ -225,6 +255,9 @@ $siteCollector = Get-TestDefinition 'Phase11SmsSiteLogCollector' -Collector
         $snapshot.OSUpgradePackages[0].StoredPkgVersion -eq 0 -and
         $snapshot.SourceSiteCodes -contains 'SRC' -and
         $snapshot.Classes.SMS_PackageStatusDistPointsSummarizer.Count -eq 3) 'The snapshot lost OS content versions, their source Primary, or their per-DP status.'
+    Assert-True ($out.ContainsKey('ContentTransferSmbDiagnostics.txt') -and
+        $out['ContentTransferSmbDiagnostics.txt'] -match 'SMS_DP\$ root enumeration|create-file probe' -and
+        $out['ContentTransferSmbDiagnostics.txt'] -match 'Win32 error|Error during connection to') 'Site capture lost SYSTEM-context SMB and PkgXferMgr access-denied evidence.'
     $state.ProviderFails = $true
     $out = & $siteCollector
     $snapshot = $out['OsdDistributionState.json'] | ConvertFrom-Json
@@ -259,6 +292,10 @@ $failureDiagnostic = Get-TestDefinition 'getOsdContentFailureDiagnostic' -Collec
     $ns = 'root\SMS\site_PRI'
     $dpNameOf = { param($Path) "$Path".Trim('\') }
     $getOsdContentTargetRows = { param($PackageId, $RequiredDp) @() }
+    $getContentTransferFailureEvidence = {
+        param($PackageId)
+        [pscustomobject]@{ Measured = $true; Fatal = $false; Error = ''; Target = ''; ServiceUser = ''; AccessDenied = $false; Lines = @() }
+    }
     $logs = @{
         'C:\Site\Logs\PkgXferMgr.log' = 'Sending legacy content SRC00007.1 -- current transfer timestamp'
         'C:\Site\Logs\despool.lo_' = 'Stored Package SRC00007 -- original arrival timestamp'
@@ -294,6 +331,58 @@ $failureDiagnostic = Get-TestDefinition 'getOsdContentFailureDiagnostic' -Collec
         $detail -match 'unrelated startup errors are not evidence') 'Old uncorrelated DP startup errors masqueraded as this package''s failure.'
 }
 
+$transferEvidence = Get-TestDefinition 'getContentTransferFailureEvidence' -Collector
+& {
+    $script:TransferFixtureLines = @()
+    function Get-CimInstance {
+        param($ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
+        [pscustomobject]@{ StartName = 'LocalSystem' }
+    }
+    function Get-ItemProperty {
+        param($Path, $Name, $ErrorAction)
+        [pscustomobject]@{ 'Installation Directory' = 'C:\Site' }
+    }
+    function Test-Path { param($LiteralPath, $ErrorAction) $true }
+    function Get-Content {
+        param($LiteralPath, $Tail, $ErrorAction)
+        @($script:TransferFixtureLines)
+    }
+    $recent = (Get-Date).AddMinutes(-2)
+    $futureRetry = (Get-Date).AddMinutes(28)
+    $script:TransferFixtureLines = @(
+        "Found send request with ID: 24, Package: PS100008, Version:5, Destination: ADA-PS1DPMP1.ADATUM.COM  `$`$<SMS_PACKAGE_TRANSFER_MANAGER><$($recent.ToString('MM-dd-yyyy HH:mm:ss'))>"
+        'Something else unrelated'
+        "~There is no existing connection, Win32 error = 5  `$`$<SMS_PACKAGE_TRANSFER_MANAGER><$($recent.AddSeconds(1).ToString('MM-dd-yyyy HH:mm:ss'))>"
+        "Error during connection to \\ADA-PS1DPMP1.adatum.com\SMS_DP`$ (5).  `$`$<SMS_PACKAGE_TRANSFER_MANAGER><$($recent.AddSeconds(1).ToString('MM-dd-yyyy HH:mm:ss'))>"
+        "Error is considered fatal.  `$`$<SMS_PACKAGE_TRANSFER_MANAGER><$($recent.AddSeconds(1).ToString('MM-dd-yyyy HH:mm:ss'))>"
+        "~Cannot connect to server ADA-PS1DPMP1.adatum.com at remote site ADA-PS1DPMP1.ADATUM.COM, won't try send requests for an hour.  `$`$<SMS_PACKAGE_TRANSFER_MANAGER><$($recent.AddSeconds(1).ToString('MM-dd-yyyy HH:mm:ss'))>"
+        "~Restart time = $($futureRetry.ToString('M/d/yyyy h:mm:ss tt')) -0600"
+        "~ Sending failed. Failure count = 1, Restart time = $($futureRetry.ToString('M/d/yyyy h:mm:ss tt')) -0600"
+    )
+    $evidence = & $transferEvidence 'PS100008' @('ADA-PS1DPMP1')
+    Assert-True ($evidence.Measured -and $evidence.Fatal -and $evidence.AccessDenied) 'PkgXferMgr access denial was not classified as a fatal transfer failure.'
+    Assert-True ($evidence.Target -eq '\\ADA-PS1DPMP1.adatum.com\SMS_DP$' -and
+        $evidence.ServiceUser -eq 'LocalSystem' -and $evidence.Lines.Count -ge 4) "PkgXferMgr diagnostic lost its target, producer identity, or actionable backoff lines: $($evidence | ConvertTo-Json -Compress)"
+    $unrelated = & $transferEvidence 'PS100008' @('OTHERDP')
+    Assert-True (-not $unrelated.Fatal) 'A fatal transfer for one DP suppressed waiting for a different required DP.'
+    $stale = (Get-Date).AddHours(-2)
+    $script:TransferFixtureLines = @(
+        "Found send request with ID: 24, Package: PS100008, Version:5, Destination: ADA-PS1DPMP1.ADATUM.COM  `$`$<SMS_PACKAGE_TRANSFER_MANAGER><$($stale.ToString('MM-dd-yyyy HH:mm:ss'))>"
+        "Error during connection to \\ADA-PS1DPMP1.adatum.com\SMS_DP`$ (5).  `$`$<SMS_PACKAGE_TRANSFER_MANAGER><$($stale.AddSeconds(1).ToString('MM-dd-yyyy HH:mm:ss'))>"
+        "Error is considered fatal.  `$`$<SMS_PACKAGE_TRANSFER_MANAGER><$($stale.AddSeconds(1).ToString('MM-dd-yyyy HH:mm:ss'))>"
+    )
+    $staleEvidence = & $transferEvidence 'PS100008' @('ADA-PS1DPMP1')
+    Assert-True (-not $staleEvidence.Fatal) "An old PkgXferMgr fatal record suppressed the convergence wait: $($staleEvidence | ConvertTo-Json -Compress)"
+    $script:TransferFixtureLines = @(
+        'Found send request with ID: 24, Package: PS100008, Version:5'
+        'Error during connection to \\ADA-PS1DPMP1.adatum.com\SMS_DP$ (5).'
+        'Error is considered fatal.'
+    )
+    Assert-True (-not (& $transferEvidence 'PS100008' @('ADA-PS1DPMP1')).Fatal) 'PkgXferMgr fatal evidence without a timestamp suppressed the convergence wait.'
+}
+
+Assert-True ($ast.Extent.Text -match '\$requiredPendingBootRows\.Count -eq 1') 'Multi-DP boot validation still lets one DP fatal transfer suppress another DP wait.'
+
 $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector
 & {
     $state = [pscustomobject]@{ ReadFails = $false }
@@ -315,6 +404,32 @@ $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector
     function Get-SmbShareAccess {
         param($Name, $ErrorAction)
         [pscustomobject]@{ AccountName = 'BUILTIN\Administrators'; AccessControlType = 'Allow'; AccessRight = 'Full' }
+    }
+    function Get-SmbOpenFile {
+        param([switch]$IncludeHidden, $ErrorAction)
+        @(
+            [pscustomobject]@{
+                SessionId = 10; ClientComputerName = 'UNRELATED'; ClientUserName = 'OTHER\user'
+                Path = '\UnrelatedShare\private\invoice.txt'
+            }
+            [pscustomobject]@{
+                SessionId = 20; ClientComputerName = 'PRIMARY1'; ClientUserName = 'MEMLABS\PRIMARY1$'
+                Path = '\SMS_DP$\PS100008\boot.wim'
+            }
+        )
+    }
+    function Get-SmbSession {
+        param([switch]$IncludeHidden, $ErrorAction)
+        @(
+            [pscustomobject]@{
+                SessionId = 10; ClientComputerName = 'UNRELATED'; ClientUserName = 'OTHER\user'
+                AuthenticationType = 'NTLM'; Dialect = '3.1.1'; IsSigningEnabled = $true; IsEncrypted = $false; NumOpens = 1
+            }
+            [pscustomobject]@{
+                SessionId = 20; ClientComputerName = 'PRIMARY1'; ClientUserName = 'MEMLABS\PRIMARY1$'
+                AuthenticationType = 'Kerberos'; Dialect = '3.1.1'; IsSigningEnabled = $true; IsEncrypted = $true; NumOpens = 1
+            }
+        )
     }
     function Get-LocalGroup {
         param($SID, $ErrorAction)
@@ -378,6 +493,17 @@ $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector
     function Get-Acl { param($LiteralPath, $ErrorAction) [pscustomobject]@{ Sddl = 'fixture-sddl' } }
     function Import-Module { param($Name, $ErrorAction) }
     function Get-Website { param($Name, $ErrorAction) [pscustomobject]@{ State = 'Started' } }
+    function Get-WinEvent {
+        param($FilterHashtable, $MaxEvents, $ErrorAction)
+        $eventRecord = [pscustomobject]@{
+            Id = 5140
+            TimeCreated = [datetime]'2026-10-30T12:06:00Z'
+        }
+        $eventRecord | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+            '<Event><EventData><Data Name="SubjectUserName">PRIMARY1$</Data><Data Name="IpAddress">192.0.2.10</Data><Data Name="ShareName">\\*\SMS_DP$</Data></EventData></Event>'
+        }
+        @($eventRecord)
+    }
     $out = & $dpCollector
     Assert-True ($out['smsdpprov.log'] -eq 'current DP failure' -and
         $out['smsdpprov.lo_'] -eq 'original DP failure' -and
@@ -388,6 +514,10 @@ $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector
         $out['DpPxePayload.txt'] -match 'fixture-sddl' -and
         $out['DpPxePayload.txt'] -match "DataLib 'PRI00008.4': files=1 folders=0" -and
         $out['DpPxePayload.txt'] -match 'missing fixture') 'PXE capture does not explain service roots, actual boot files, ACLs, package shape, and absent paths.'
+    Assert-True ($out['DpPxePayload.txt'] -match 'SMB ConfigMgr open file:.*SMS_DP\$' -and
+        $out['DpPxePayload.txt'] -match 'SMB ConfigMgr session: id=20' -and
+        $out['DpPxePayload.txt'] -notmatch 'invoice.txt' -and
+        $out['DpPxePayload.txt'] -match 'Security event: 5140') 'DP SMB evidence did not retain relevant ConfigMgr sessions/events or excluded unrelated share paths.'
     $state.ReadFails = $true
     $out = & $dpCollector
     Assert-True ($out['_dp-collector-diag.txt'] -match 'synthetic DP log access denied' -and
