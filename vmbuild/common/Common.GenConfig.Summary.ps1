@@ -430,6 +430,27 @@ function Get-AdditionalInformation {
     return $data
 }
 
+function Get-DhcpRelayMappingsSummary {
+    [CmdletBinding()]
+    param ([AllowNull()] [object[]] $Mappings)
+
+    $summaries = @($Mappings | Where-Object { $null -ne $_ } | ForEach-Object {
+            $clientNetwork = "$($_.clientNetwork)".Trim()
+            $distributionPoint = "$($_.distributionPointVM)".Trim()
+            if ($clientNetwork -and $distributionPoint) {
+                "$clientNetwork -> $distributionPoint"
+            }
+            elseif ($clientNetwork -or $distributionPoint) {
+                "$clientNetwork -> <$distributionPoint>"
+            }
+            else {
+                '<invalid mapping>'
+            }
+        })
+    if ($summaries.Count -eq 0) { return '(none)' }
+    return $summaries -join '; '
+}
+
 
 function get-VMString {
     [CmdletBinding()]

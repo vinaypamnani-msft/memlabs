@@ -45,6 +45,7 @@ $script:ResolverCalls = 0
 $script:ResolvedPaths = @()
 $script:UseDhcpAppliance = $false
 $script:NativeDhcpReads = 0
+$script:NativeDhcpFailuresBeforeSuccess = 0
 
 function Reset-Fixture {
     param ([switch] $WithClient, [switch] $DuplicateClient)
@@ -58,6 +59,7 @@ function Reset-Fixture {
     $script:ValidationPayload = $null
     $script:ResolverCalls = 0
     $script:NativeDhcpReads = 0
+    $script:NativeDhcpFailuresBeforeSuccess = 0
     $script:Adapters = @([pscustomobject]@{
             Name = 'Network Adapter'; SwitchName = '192.168.1.0'; MacAddress = '00155D010001'; IPAddresses = @('192.168.1.4')
         })
@@ -116,7 +118,16 @@ function Get-VMNetworkAdapter {
 }
 function Test-MemLabsUsesDhcpAppliance { return $script:UseDhcpAppliance }
 function Test-MemLabsDhcpApplianceScopeReady { param($ScopeId); return $true }
-function Get-DhcpServerv4Reservation { [CmdletBinding()] param($ScopeId); $script:NativeDhcpReads++; return @($script:Reservation) }
+function Get-DhcpServerv4Reservation {
+    [CmdletBinding()]
+    param($ScopeId)
+    $script:NativeDhcpReads++
+    if ($script:NativeDhcpFailuresBeforeSuccess -gt 0) {
+        $script:NativeDhcpFailuresBeforeSuccess--
+        throw 'simulated transient native DHCP read failure'
+    }
+    return @($script:Reservation)
+}
 function Get-DhcpServerv4Lease { [CmdletBinding()] param($ScopeId); $script:NativeDhcpReads++; return @($script:Lease) }
 function Get-NetNeighbor { [CmdletBinding()] param($IPAddress); return @($script:Neighbor) }
 function Test-Connection { [CmdletBinding()] param($ComputerName, $Count, [switch] $Quiet); return $script:Neighbor.Count -gt 0 }
@@ -182,6 +193,26 @@ $script:Reservation = @([pscustomobject]@{
 $ownReservation = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
     -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
 Assert-Equal $true $ownReservation.Available 'blank-name reservation for the exact relay adapter MAC is not a conflict'
+
+Reset-Fixture
+$script:NativeDhcpFailuresBeforeSuccess = 1
+$script:Reservation = @([pscustomobject]@{
+    IPAddress = [pscustomobject]@{ IPAddressToString = '192.168.1.4' }
+    Name = ''
+    ClientId = '00-15-5D-01-00-01'
+})
+$recoveredReservation = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $true $recoveredReservation.Available 'transient native DHCP read accepts the relay after retry'
+Assert-Equal 3 $script:NativeDhcpReads 'transient native DHCP read retries reservation and then checks leases'
+
+Reset-Fixture
+$script:NativeDhcpFailuresBeforeSuccess = 2
+$persistentFailure = Test-LinuxDhcpRelayAddressAvailable -IPAddress '192.168.1.4' -Network '192.168.1.0' `
+    -RelayVmName 'RELAY1' -DeployConfig (New-FixtureConfig)
+Assert-Equal $false $persistentFailure.Available 'persistent native DHCP read remains fail-closed'
+Assert-Equal 2 $script:NativeDhcpReads 'persistent native DHCP read is attempted only twice'
+Assert-Equal $true ($persistentFailure.Reason -like '*after retry*') 'persistent native DHCP read reports both attempts'
 
 Reset-Fixture
 $script:Reservation = @([pscustomobject]@{

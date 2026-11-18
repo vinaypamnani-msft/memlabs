@@ -142,6 +142,9 @@ function Select-Options {
                         # 11 Latest") and deployedOS is the resolved build. Informational.
                         $displayValue = "$value  (deployed: $($property.deployedOS))"
                     }
+                    elseif ($item -eq "relayMappings") {
+                        $displayValue = Get-DhcpRelayMappingsSummary -Mappings $value
+                    }
                     $null = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "     $($($item).PadRight($padding," "")) = $displayValue" -Color1 "LightSlateGray" -selectable $false -HelpFunction $HelpFunction
                 }
             }
@@ -155,6 +158,10 @@ function Select-Options {
                     $value = $property."$($item)"
                     if ($item -eq "cmOptions") {
                         $TextToDisplay = get-CMOptionsSummary -CmOptions $value
+                        $color = $Global:Common.Colors.GenConfigNonDefault
+                    }
+                    elseif ($item -eq "relayMappings") {
+                        $TextToDisplay = Get-DhcpRelayMappingsSummary -Mappings $value
                         $color = $Global:Common.Colors.GenConfigNonDefault
                     }
                     else {
@@ -209,6 +216,10 @@ function Select-Options {
                 # colored summary the main menu shows, and route the handler
                 # into the dedicated sub-menu (see switch below).
                 $TextToDisplay = get-CMOptionsSummary -CmOptions $value
+                $color = $Global:Common.Colors.GenConfigNonDefault
+            }
+            elseif ($item -eq "relayMappings") {
+                $TextToDisplay = Get-DhcpRelayMappingsSummary -Mappings $value
                 $color = $Global:Common.Colors.GenConfigNonDefault
             }
             else {

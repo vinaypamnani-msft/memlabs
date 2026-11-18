@@ -5850,7 +5850,7 @@ function Test-LinuxDhcpRelayAddressAvailable {
     }
 
     if (-not (Test-MemLabsUsesDhcpAppliance)) {
-        try {
+        $readNativeDhcpOwnership = {
             $reservation = Get-DhcpServerv4Reservation -ScopeId $Network -ErrorAction Stop |
                 Where-Object { "$($_.IPAddress.IPAddressToString)" -eq $IPAddress } | Select-Object -First 1
             if ($reservation) {
@@ -5873,9 +5873,25 @@ function Test-LinuxDhcpRelayAddressAvailable {
                     return [pscustomobject]@{ Available = $false; Reason = "DHCP lease for $leaseOwner owns $IPAddress" }
                 }
             }
+            return $null
+        }
+
+        try {
+            $ownership = & $readNativeDhcpOwnership
+            if ($ownership) { return $ownership }
         }
         catch {
-            return [pscustomobject]@{ Available = $false; Reason = "DHCP ownership could not be measured for $Network`: $($_.Exception.Message)" }
+            $firstError = $_
+            try {
+                $ownership = & $readNativeDhcpOwnership
+                if ($ownership) { return $ownership }
+            }
+            catch {
+                return [pscustomobject]@{
+                    Available = $false
+                    Reason = "DHCP ownership could not be measured for $Network after retry (initial: $($firstError.Exception.Message); retry: $($_.Exception.Message))"
+                }
+            }
         }
     }
 
