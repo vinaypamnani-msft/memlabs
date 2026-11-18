@@ -11419,7 +11419,7 @@ $Phase11DpContentLogCollector = {
     catch { $payload += "SMB relevant ConfigMgr session query failed: $($_.Exception.Message)" }
     try {
         $since = (Get-Date).AddHours(-2)
-        $securityIds = @(4624, 4732, 4733, 5140, 5145)
+        $securityIds = @(4624, 4670, 4732, 4733, 4907, 5140, 5145)
         $events = @(Get-WinEvent -FilterHashtable @{
                 LogName = 'Security'; StartTime = $since; Id = $securityIds
             } -MaxEvents 2000 -ErrorAction Stop)
@@ -11430,7 +11430,8 @@ $Phase11DpContentLogCollector = {
             foreach ($field in @($xml.Event.EventData.Data)) { $data["$($field.Name)"] = "$($field.'#text')" }
             $summary = @(
                 $data['TargetUserName'], $data['SubjectUserName'], $data['IpAddress'], $data['Workstation'],
-                $data['ShareName'], $data['RelativeTargetName'], $data['ObjectName'], $data['MemberName']
+                $data['ShareName'], $data['RelativeTargetName'], $data['ObjectName'], $data['MemberName'],
+                $data['ProcessName'], $data['OldSd'], $data['NewSd']
             ) | Where-Object { $_ } | ForEach-Object { "$_" }
             $text = "$($securityEvent.Id) $($securityEvent.TimeCreated.ToUniversalTime().ToString('o')) $($summary -join ' ')"
             if ($text -match 'ADA-|SMS_DP|SMSPKG|SMSSIG|Administrators') { $securityRows.Add($text) }

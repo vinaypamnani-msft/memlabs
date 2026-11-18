@@ -50,7 +50,10 @@ $workerNodes = @($shareFunction.FindAll({
 Assert-True ($workerNodes.Count -eq 1) 'Expected one bounded DP share-probe worker.'
 $worker = & ([scriptblock]::Create($workerNodes[0].Extent.Text))
 & {
-    $state = [pscustomobject]@{ Mode = 'Ready'; Paths = [System.Collections.Generic.List[string]]::new() }
+    $state = [pscustomobject]@{
+        Mode = 'Ready'; Paths = [System.Collections.Generic.List[string]]::new()
+        Writes = 0; Deletes = 0
+    }
     function Get-Item {
         param($LiteralPath, [switch]$Force, $ErrorAction)
         $state.Paths.Add($LiteralPath)
@@ -70,12 +73,31 @@ $worker = & ([scriptblock]::Create($workerNodes[0].Extent.Text))
         if ($state.Mode -eq 'Empty') { return }
         [pscustomobject]@{ Name = 'sms' }
     }
-    foreach ($mode in @('RootDenied', 'ListDenied', 'Unavailable', 'Ready', 'Empty')) {
+    function Join-Path { param($Path, $ChildPath) "$Path\$ChildPath" }
+    function Set-Content {
+        param($LiteralPath, $Value, [switch]$NoNewline, $Encoding, $ErrorAction)
+        $state.Writes++
+        if ($state.Mode -eq 'WriteDenied') { throw [UnauthorizedAccessException]::new('Access is denied') }
+    }
+    function Remove-Item {
+        param($LiteralPath, [switch]$Force, $ErrorAction)
+        $state.Deletes++
+        if ($state.Mode -eq 'DeleteDenied') { throw [UnauthorizedAccessException]::new('Access is denied') }
+    }
+    foreach ($mode in @('RootDenied', 'ListDenied', 'WriteDenied', 'DeleteDenied', 'Unavailable', 'Ready', 'Empty')) {
         $state.Mode = $mode
         $result = & $worker 'NEWDP.memlabs.test'
         if ($mode -in 'Ready', 'Empty') { Assert-True $result.Ready 'A readable DP share was rejected because of its contents/layout.' }
         elseif ($mode -eq 'Unavailable') {
             Assert-True (-not $result.Ready -and $result.Category -eq 'Unreadable') 'An unknown SMB failure was misclassified as permission-repair evidence.'
+        }
+        elseif ($mode -eq 'WriteDenied') {
+            Assert-True (-not $result.Ready -and $result.Category -eq 'AccessDenied' -and
+                $result.Error -match 'Access is denied') 'A readable-but-non-writable DP share passed producer readiness.'
+        }
+        elseif ($mode -eq 'DeleteDenied') {
+            Assert-True (-not $result.Ready -and $result.Category -eq 'AccessDenied' -and
+                $result.Error -match 'Access is denied') 'A create-capable but non-deletable share passed producer readiness.'
         }
         else {
             Assert-True (-not $result.Ready -and $result.Category -eq 'AccessDenied' -and
@@ -86,6 +108,7 @@ $worker = & ([scriptblock]::Create($workerNodes[0].Extent.Text))
     $state.Mode = 'Ready'
     $result = & $worker "$env:COMPUTERNAME.memlabs.test"
     Assert-True ($result.Ready -and $state.Paths[$state.Paths.Count - 1] -eq 'C:\SMS_DP$') 'A site-server-local DP still requires the remote-DP bin tree.'
+    Assert-True ($state.Writes -gt 0 -and $state.Deletes -gt 0) 'The producer share probe does not exercise and clean up a real write.'
 }
 
 . ([scriptblock]::Create($shareFunction.Extent.Text))
@@ -115,6 +138,13 @@ $worker = & ([scriptblock]::Create($workerNodes[0].Extent.Text))
     Assert-True (-not $result.Ready -and $result.Error -match 'structured') 'A success-shaped invalid worker result passed readiness.'
 }
 
+$readinessFunction = Get-TestFunction $functions 'Get-CMDistributionPointReadiness'
+Assert-True ($readinessFunction.Extent.Text -match 'Get-CMDistributionPointShareAccess') 'DP readiness stopped using the producer write probe.'
+$perfloading = Join-Path $root 'DSC\phases\perfloading.ps1'
+$perfloadingText = Get-Content -LiteralPath $perfloading -Raw
+Assert-True ($perfloadingText -match 'Confirm-CMDistributionPointAccess -ServerFQDN \$d\.Fqdn' -and
+    $perfloadingText -match 'Verified producer write access to SMS_DP\$') 'OSD distribution does not preflight and repair producer DP write access.'
+
 $repairFunction = Get-TestFunction $functions 'Repair-CMDistributionPointAccess'
 $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
 & {
@@ -129,6 +159,7 @@ $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
         Root = 'C:\SMS_DP$'; Members = @(); ShareAccess = @(); Acls = @{}
         Added = 0; Granted = 0; Written = [System.Collections.Generic.List[string]]::new()
         IgnoreAclWrite = $false; DenyAclRead = $false; SiteServer = $false
+        SecurityEvents = @()
     }
     function Reset-Fixture {
         $state.Root = 'C:\SMS_DP$'
@@ -141,9 +172,11 @@ $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
         $state.IgnoreAclWrite = $false
         $state.DenyAclRead = $false
         $state.SiteServer = $false
+        $state.SecurityEvents = @()
         foreach ($path in @('C:\SMS_DP$', 'C:\SMS_DP$\sms', 'C:\SMS_DP$\sms\bin')) {
             $acl = [Security.AccessControl.DirectorySecurity]::new()
             $acl.SetAccessRuleProtection($true, $false)
+            $acl.SetOwner([Security.Principal.SecurityIdentifier]'S-1-5-18')
             foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', $readerSid)) {
                 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
                         ([Security.Principal.SecurityIdentifier]$sid),
@@ -181,6 +214,19 @@ $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
         $copy.SetSecurityDescriptorSddlForm($state.Acls[$LiteralPath].GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All))
         return $copy
     }
+    function Get-Item {
+        param($LiteralPath, [switch]$Force, $ErrorAction)
+        [pscustomobject]@{
+            FullName = $LiteralPath
+            CreationTimeUtc = [datetime]'2026-10-01T00:00:00Z'
+            LastWriteTimeUtc = [datetime]'2026-10-30T12:00:00Z'
+        }
+    }
+    function Get-WinEvent {
+        param($FilterHashtable, $MaxEvents, $ErrorAction)
+        Assert-True ($FilterHashtable.Id -contains 4670 -and $FilterHashtable.Id -contains 4907) 'ACL-origin events are not requested.'
+        @($state.SecurityEvents)
+    }
     function Set-Acl {
         param($LiteralPath, $AclObject, $ErrorAction)
         $state.Written.Add($LiteralPath)
@@ -190,6 +236,29 @@ $repair = Get-TestAssignedBlock $repairFunction 'repairScript'
     $result = & $repair 'MEMLABS\SITESERVER$' $siteSid
     Assert-True ($result.Succeeded -and $state.Added -eq 1 -and $state.Granted -eq 1 -and
         $state.Written.Count -eq 3) "Missing required DP grants were not restored: $($result.Error)"
+    Assert-True ($result.AclEvidence.Count -eq 6 -and
+        @($result.AclEvidence | Where-Object { $_.Stage -eq 'Before' }).Count -eq 3 -and
+        @($result.AclEvidence | Where-Object { $_.Stage -eq 'After' }).Count -eq 3) 'Repair did not preserve before/after ACL provenance for every changed path.'
+    $sampleAcl = @($result.AclEvidence)[0]
+    Assert-True (-not [string]::IsNullOrWhiteSpace("$($sampleAcl.Owner)") -and $sampleAcl.CreatedUtc -and
+        $sampleAcl.ModifiedUtc -and $sampleAcl.Sddl -and $null -ne $sampleAcl.AccessRulesProtected -and
+        $sampleAcl.Rules.Count -ge 3 -and @($sampleAcl.Rules | Where-Object {
+                $_.IdentityReference -and $_.Rights -and $_.Access -and
+                $null -ne $_.Inherited -and $_.InheritanceFlags -and $_.PropagationFlags
+            }).Count -eq $sampleAcl.Rules.Count) "ACL evidence lost owner, timestamps, protection, SDDL, or complete decoded ACE fields: $($sampleAcl | ConvertTo-Json -Compress -Depth 5)"
+    Assert-True ($result.SecurityEvidence.Count -eq 0) 'A no-event audit fixture unexpectedly reported security provenance.'
+    Reset-Fixture
+    $auditEvent = [pscustomobject]@{ Id = 4670; TimeCreated = [datetime]'2026-10-30T12:05:00Z' }
+    $auditEvent | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+        '<Event><EventData><Data Name="SubjectUserName">SECOPS</Data><Data Name="ObjectName">C:\SMS_DP$</Data><Data Name="OldSd">old-sddl</Data><Data Name="NewSd">new-readonly-sddl</Data><Data Name="ProcessName">acl-tool.exe</Data></EventData></Event>'
+    }
+    $state.SecurityEvents = @($auditEvent)
+    $auditResult = & $repair 'MEMLABS\SITESERVER$' $siteSid
+    Assert-True ($auditResult.SecurityEvidence.Count -eq 1 -and
+        $auditResult.SecurityEvidence[0] -match '4670' -and
+        $auditResult.SecurityEvidence[0] -match 'old-sddl' -and
+        $auditResult.SecurityEvidence[0] -match 'new-readonly-sddl' -and
+        $auditResult.SecurityEvidence[0] -match 'acl-tool\.exe') 'ACL-origin Security evidence lost the old/new descriptor and process context.'
     foreach ($acl in $state.Acls.Values) {
         Assert-True $acl.AreAccessRulesProtected 'The repair disabled an existing protected ACL.'
         $reader = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |

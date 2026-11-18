@@ -2726,6 +2726,17 @@ if ($licensed) { Write-Output 'Activated' }
                 Write-DscStatus "$Tag Could not read existing '$OsdDpGroupName' membership; falling back to idempotent adds: $($_.Exception.Message)"
             }
             foreach ($d in $osdDps) {
+                $dpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $d.Fqdn -SiteCode $SiteCode
+                if (-not (Confirm-CMDistributionPointAccess -ServerFQDN $d.Fqdn -SiteCode $SiteCode -Readiness $dpReadiness)) {
+                    throw "Required OSD DP '$($d.Fqdn)' producer access could not be verified or repaired: $($dpReadiness.Detail)"
+                }
+                if (-not $dpReadiness.Ready) {
+                    $dpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $d.Fqdn -SiteCode $SiteCode
+                }
+                if (-not $dpReadiness.Ready) {
+                    throw "Required OSD DP '$($d.Fqdn)' is not ready for producer content access: $($dpReadiness.Detail)"
+                }
+                Write-DscStatus "$Tag Verified producer write access to SMS_DP$ on OSD DP '$($d.Short)'"
                 # Add the DP to the group by its FQDN, NOT its short name. Add-CMDistributionPointToGroup
                 # resolves -DistributionPointName against the DP's ServerName (FQDN); passing the short
                 # name ('PL-PANCETTA') fails to match, the error is swallowed, and the group is left EMPTY

@@ -2912,7 +2912,16 @@ function Get-CMDistributionPointShareAccess {
                 }
                 $null = Get-Item -LiteralPath $path -Force -ErrorAction Stop
                 $null = Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Select-Object -First 1
-                [pscustomobject]@{ Ready = $true; Category = ''; Error = '' }
+                $probePath = Join-Path $path ".MemLabsDpAccess-$([guid]::NewGuid().ToString('N')).tmp"
+                try {
+                    Set-Content -LiteralPath $probePath -Value 'MemLabs DP producer access probe' -NoNewline -Encoding ASCII -ErrorAction Stop
+                    Remove-Item -LiteralPath $probePath -Force -ErrorAction Stop
+                    [pscustomobject]@{ Ready = $true; Category = ''; Error = '' }
+                }
+                catch {
+                    try { Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue } catch {}
+                    throw
+                }
             }
             catch {
                 $denied = $_.CategoryInfo.Category -eq 'PermissionDenied'
@@ -2948,6 +2957,57 @@ function Repair-CMDistributionPointAccess {
         param([string]$SiteAccount, [string]$SiteAccountSid)
 
         $changes = [System.Collections.Generic.List[string]]::new()
+        $aclEvidence = [System.Collections.Generic.List[object]]::new()
+        $getAclEvidence = {
+            param([string]$Path, [string]$Stage)
+            $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+            $owner = "$($acl.Owner)"
+            if (-not $owner) {
+                try { $owner = "$($acl.GetOwner([Security.Principal.SecurityIdentifier]))" } catch {}
+            }
+            $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                    ForEach-Object {
+                        [pscustomobject]@{
+                            IdentityReference = "$($_.IdentityReference)"
+                            Rights            = "$($_.FileSystemRights)"
+                            Access            = "$($_.AccessControlType)"
+                            Inherited         = [bool]$_.IsInherited
+                            InheritanceFlags  = "$($_.InheritanceFlags)"
+                            PropagationFlags  = "$($_.PropagationFlags)"
+                        }
+                    })
+            [pscustomobject]@{
+                Stage = $Stage; Path = $Path; CreatedUtc = $item.CreationTimeUtc.ToString('o')
+                ModifiedUtc = $item.LastWriteTimeUtc.ToString('o')
+                Owner = $owner; AccessRulesProtected = [bool]$acl.AreAccessRulesProtected
+                Sddl = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+                Rules = $rules
+            }
+        }
+        $securityEvidence = @()
+        try {
+            $since = (Get-Date).AddDays(-7)
+            $securityEvents = @(Get-WinEvent -FilterHashtable @{
+                    LogName = 'Security'; StartTime = $since; Id = 4670, 4907, 4732, 4733
+                } -MaxEvents 2000 -ErrorAction Stop)
+            foreach ($securityEvent in $securityEvents) {
+                $xml = [xml]$securityEvent.ToXml()
+                $data = @{}
+                foreach ($field in @($xml.Event.EventData.Data)) { $data["$($field.Name)"] = "$($field.'#text')" }
+                $summary = @(
+                    $data['SubjectUserName'], $data['ObjectName'], $data['TargetUserName'],
+                    $data['MemberName'], $data['ProcessName'], $data['OldSd'], $data['NewSd']
+                ) | Where-Object { $_ } | ForEach-Object { "$_" }
+                $line = "$($securityEvent.Id) $($securityEvent.TimeCreated.ToUniversalTime().ToString('o')) $($summary -join ' ')"
+                if ($line -match 'SMS_DP|Administrators|S-1-5-32-544|ADA-PS1SITE') {
+                    $securityEvidence += $line
+                }
+            }
+        }
+        catch {
+            $securityEvidence += "Security ACL/group audit query unavailable: $($_.Exception.Message)"
+        }
         try {
             if ($SiteAccount -notmatch '\\[^\\]+\$$' -or $SiteAccountSid -notmatch '^S-1-5-21-(\d+-){3}\d+$') {
                 throw 'The owning site computer account was not resolved to a domain SID.'
@@ -2968,6 +3028,7 @@ function Repair-CMDistributionPointAccess {
             $acls = @{}
             foreach ($path in $paths) {
                 $acls[$path] = Get-Acl -LiteralPath $path -ErrorAction Stop
+                $aclEvidence.Add((& $getAclEvidence -Path $path -Stage 'Before'))
                 if (@($acls[$path].GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
                             Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny }).Count) {
                     throw "'$path' has a deny ACE. Review the policy instead of resetting permissions."
@@ -3018,6 +3079,7 @@ function Repair-CMDistributionPointAccess {
                 }
                 if (-not $changed) { continue }
                 Set-Acl -LiteralPath $path -AclObject $acls[$path] -ErrorAction Stop
+                $aclEvidence.Add((& $getAclEvidence -Path $path -Stage 'After'))
                 $verifiedAcl = Get-Acl -LiteralPath $path -ErrorAction Stop
                 foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
                     $verifiedRules = @($verifiedAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
@@ -3031,10 +3093,16 @@ function Repair-CMDistributionPointAccess {
                 }
                 $changes.Add("restored SYSTEM/Administrators Full on '$path' without an ACL reset")
             }
-            [pscustomobject]@{ Succeeded = $true; Changes = $changes.ToArray(); Error = '' }
+            [pscustomobject]@{
+                Succeeded = $true; Changes = $changes.ToArray(); Error = ''
+                AclEvidence = $aclEvidence.ToArray(); SecurityEvidence = @($securityEvidence)
+            }
         }
         catch {
-            [pscustomobject]@{ Succeeded = $false; Changes = $changes.ToArray(); Error = $_.Exception.Message }
+            [pscustomobject]@{
+                Succeeded = $false; Changes = $changes.ToArray(); Error = $_.Exception.Message
+                AclEvidence = $aclEvidence.ToArray(); SecurityEvidence = @($securityEvidence)
+            }
         }
     }
     try {
@@ -3065,6 +3133,12 @@ function Confirm-CMDistributionPointAccess {
     Write-DscStatus "DP '$ServerFQDN' is registered but required SMS_DP$ access is denied. Checking the owning site computer and standard DP permissions." -Warning
     $repair = Repair-CMDistributionPointAccess -ServerFQDN $ServerFQDN
     foreach ($change in @($repair.Changes)) { Write-DscStatus "DP access repair on $ServerFQDN`: $change" }
+    foreach ($acl in @($repair.AclEvidence)) {
+        Write-DscStatus "DP ACL evidence on $ServerFQDN`: stage=$($acl.Stage) path=$($acl.Path) owner=$($acl.Owner) protected=$($acl.AccessRulesProtected) createdUtc=$($acl.CreatedUtc) modifiedUtc=$($acl.ModifiedUtc) sddl=$($acl.Sddl) rules=$(@($acl.Rules | ForEach-Object { "$($_.IdentityReference):$($_.Rights):$($_.Access):inherited=$($_.Inherited)" }) -join ';')"
+    }
+    foreach ($security in @($repair.SecurityEvidence | Select-Object -Last 50)) {
+        Write-DscStatus "DP ACL-origin security evidence on $ServerFQDN`: $security"
+    }
     if (-not $repair.Succeeded) {
         Write-DscStatus "DP access repair on $ServerFQDN failed: $($repair.Error). No content-library ACL reset or deny-policy override is attempted." -Failure
         return $false

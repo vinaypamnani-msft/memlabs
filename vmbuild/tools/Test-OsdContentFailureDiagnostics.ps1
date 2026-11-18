@@ -495,14 +495,22 @@ $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector
     function Get-Website { param($Name, $ErrorAction) [pscustomobject]@{ State = 'Started' } }
     function Get-WinEvent {
         param($FilterHashtable, $MaxEvents, $ErrorAction)
-        $eventRecord = [pscustomobject]@{
+        Assert-True ($FilterHashtable.Id -contains 4670 -and $FilterHashtable.Id -contains 4907) 'DP ACL-origin event IDs were not requested.'
+        $shareEvent = [pscustomobject]@{
             Id = 5140
             TimeCreated = [datetime]'2026-10-30T12:06:00Z'
         }
-        $eventRecord | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+        $shareEvent | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
             '<Event><EventData><Data Name="SubjectUserName">PRIMARY1$</Data><Data Name="IpAddress">192.0.2.10</Data><Data Name="ShareName">\\*\SMS_DP$</Data></EventData></Event>'
         }
-        @($eventRecord)
+        $aclEvent = [pscustomobject]@{
+            Id = 4670
+            TimeCreated = [datetime]'2026-10-30T12:05:00Z'
+        }
+        $aclEvent | Add-Member -MemberType ScriptMethod -Name ToXml -Value {
+            '<Event><EventData><Data Name="SubjectUserName">SECOPS</Data><Data Name="ObjectName">C:\SMS_DP$</Data><Data Name="OldSd">old-sddl</Data><Data Name="NewSd">new-readonly-sddl</Data><Data Name="ProcessName">acl-tool.exe</Data></EventData></Event>'
+        }
+        @($shareEvent, $aclEvent)
     }
     $out = & $dpCollector
     Assert-True ($out['smsdpprov.log'] -eq 'current DP failure' -and
@@ -517,7 +525,11 @@ $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector
     Assert-True ($out['DpPxePayload.txt'] -match 'SMB ConfigMgr open file:.*SMS_DP\$' -and
         $out['DpPxePayload.txt'] -match 'SMB ConfigMgr session: id=20' -and
         $out['DpPxePayload.txt'] -notmatch 'invoice.txt' -and
-        $out['DpPxePayload.txt'] -match 'Security event: 5140') 'DP SMB evidence did not retain relevant ConfigMgr sessions/events or excluded unrelated share paths.'
+        $out['DpPxePayload.txt'] -match 'Security event: 5140' -and
+        $out['DpPxePayload.txt'] -match 'Security event: 4670' -and
+        $out['DpPxePayload.txt'] -match 'old-sddl' -and
+        $out['DpPxePayload.txt'] -match 'new-readonly-sddl' -and
+        $out['DpPxePayload.txt'] -match 'acl-tool\.exe') 'DP SMB evidence did not retain relevant ConfigMgr sessions, share access, or ACL-origin old/new SDDL and process context.'
     $state.ReadFails = $true
     $out = & $dpCollector
     Assert-True ($out['_dp-collector-diag.txt'] -match 'synthetic DP log access denied' -and
