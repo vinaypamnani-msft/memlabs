@@ -8,6 +8,18 @@ function Start-Maintenance {
         [object]$DeployConfig
     )
 
+    $startupDomain = $null
+    if ($DeployConfig) {
+        $startupDomain = $DeployConfig.vmOptions.domainName
+        if ([string]::IsNullOrWhiteSpace($startupDomain)) {
+            Write-Log "Automatic startup maintenance requires a domain in DeployConfig; maintenance was not started." -Failure
+            return
+        }
+    }
+    if (-not (Set-VMAutomaticStartup -DomainName $startupDomain -Prompt:([bool](-not $DeployConfig)))) {
+        return
+    }
+
     $freshDeployOnly = $false
     if ($DeployConfig) {
         Write-log "Start-Maintenance called with DeployConfig"
@@ -163,7 +175,7 @@ function Start-Maintenance {
             }
         }
         else {
-            Write-Log "No maintenance required." -Success
+            Write-Log "No guest maintenance required." -Success
             return
         }
     }

@@ -43,7 +43,9 @@ function Get-CriticalVMs {
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
         [string] $domain,
         [Parameter(Mandatory = $false, HelpMessage = "VMs to bucketize, names only")]
-        [object] $vmNames = $null
+        [object] $vmNames = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Use an existing domain inventory instead of refreshing Hyper-V")]
+        [object[]] $InputVMs
     )
 
     $return = [pscustomObject]@{
@@ -57,7 +59,10 @@ function Get-CriticalVMs {
     }
 
     $allvms = @()
-    if ($vmNames) {
+    if ($PSBoundParameters.ContainsKey('InputVMs')) {
+        $allvms += $InputVMs | Where-Object { $_.domain -eq $domain }
+    }
+    elseif ($vmNames) {
         write-log -LogOnly "[Get-CriticalVMs] Requested $vmNames"
         $allvms += get-list -type vm -SmartUpdate
     }
@@ -80,6 +85,12 @@ function Get-CriticalVMs {
     $return.ALLCRIT += $vms | Where-Object { $_.Role -in "DC", "BDC" }
     $vms = $vms | Where-Object { $_.Role -notin "DC", "BDC" }
 
+    $fileServerNames = @()
+    $fileServerNames += ($vms | Where-Object { $_.remoteContentLibVM }).remoteContentLibVM
+    $fileServerNames += ($vms | Where-Object { $_.fileServerVM }).fileServerVM
+    $fileServerNames += ($vms | Where-Object { $_.patchMyPCFileServer }).patchMyPCFileServer
+    $fileServerNames = $fileServerNames | Select-Object -Unique
+
     $sqlServerNames = ($vms | Where-Object { $_.remoteSQLVM }).remoteSQLVM | Select-Object -Unique
 
     foreach ($sqlName in $sqlServerNames) {
@@ -93,12 +104,6 @@ function Get-CriticalVMs {
             $vms = $vms | Where-Object { $_.vmName -ne $thisSql.OtherNode }
         }
     }
-
-    $fileServerNames = @()
-    $fileServerNames += ($vms | Where-Object { $_.remoteContentLibVM }).remoteContentLibVM
-    $fileServerNames += ($vms | Where-Object { $_.fileServerVM }).fileServerVM
-    $fileServerNames += ($vms | Where-Object { $_.patchMyPCFileServer }).patchMyPCFileServer
-    $fileServerNames = $fileServerNames | Select-Object -Unique
 
     foreach ($fsName in $fileServerNames) {
         $thisfs = $vms | Where-Object { $_.vmName -eq $fsName }

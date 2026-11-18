@@ -182,7 +182,7 @@ rows. Header, health, quick-stat, and background-operation rows are display-only
 | `L` | Load saved config from file | Opens the JSON selector for `vmbuild/config`. | Edit, redeploy, or save a variant of an existing file. |
 | `X` | Load TEST config; develop branch only | Opens `vmbuild/config/tests`. | Run repository test scenarios, not normal authoring. |
 | `T` | Update Tools or Copy Optional Tools to VMs | Opens the running-VM tool deployment menu. | Refresh standard tools or inject optional tools without rebuilding. |
-| `A` | Apply Pending VM Maintenance | Reconciles DHCP/networking through `Confirm-MemLabsDhcpReadiness`, then calls the same interactive `Start-Maintenance` used everywhere else, with no `-DeployConfig` so it targets every currently deployed, MemLabs-managed Windows VM (not just this session's config). | Push pending fixes to the whole lab outside of a deployment run, e.g. after a hotfix bump, without needing to load or deploy any configuration. |
+| `A` | Apply Pending VM Maintenance | Reconciles DHCP/networking, offers host-side automatic startup settings for eligible managed VMs, then runs interactive pending Windows VM fixes. No loaded configuration is required. | Configure staggered host-boot startup or push pending fixes without a deployment run. |
 | `V` | Show Virtual Machines | Displays current Hyper-V VM state and deployment metadata. | Inspect what is already deployed. |
 | `N` | Show Networks | Displays subnets, domains, site codes, and VMs. | Check subnet use before designing a topology. |
 | `P` | Show Passwords | Displays the current shared lab credential and domain account names. | Local troubleshooting only; do not capture or share the output. |
@@ -597,7 +597,35 @@ configuration:
 
 Within `Start-Maintenance`:
 
-- VMs are excluded up front when they have no Windows-side maintenance
+- Host-side automatic startup maintenance runs first, even when all guest fixes
+  are already current. Pending changes are displayed and require a separate
+  confirmation (45-second default-`No` timeout). Declining leaves startup
+  settings unchanged and still permits normal guest maintenance.
+- Eligible managed VMs receive `AutomaticStartAction = Start` and 120-second
+  gaps between nonempty dependency groups, independently for each domain:
+  DCs/BDCs and proxies, referenced file servers, SQL servers (including both
+  SQLAO nodes and dedicated `DomainMember` VMs with `sqlVersion`), CAS, primary
+  sites, and remaining VMs. For a domain containing
+  only DC01, SQL01, and WEB01, the delays are 0, 120, and 240 seconds.
+  VMs in one group share a delay; empty groups add no delay.
+- This changes future host-boot behavior, not current power states, and includes
+  eligible Linux VMs. Even a previously stopped VM will auto-start on host boot.
+  Unmanaged, hidden, in-progress, failed, offline-root-CA (`StandaloneRootCA`),
+  `OSDClient`, `AADClient`, and DHCP-appliance VMs are left untouched. DHCP
+  appliance startup remains owned by its existing appliance configuration.
+  Stop actions are not changed. Every changed setting is read back from Hyper-V;
+  failures are reported rather than treated as success. Already-correct settings
+  are not rewritten. Planning forces a live inventory refresh, including newly
+  saved dependencies; an inventory failure is not treated as an empty lab.
+- Delays provide a head start, not a guarantee that AD, SQL, or other guest
+  services are ready. Manual domain starts retain their existing smart-start
+  behavior.
+- New builds apply the same host-side settings automatically for the completed
+  domain after Phase 11 passes and existing-VM dependency changes have been
+  saved. A failure prevents a successful build result; `-WhatIf` does not apply
+  the settings. Partial runs that do not pass Phase 11 leave startup settings
+  alone.
+- Guest fixes exclude VMs when they have no Windows-side maintenance
   pipeline: `OSDClient`/`AADClient` roles, a powered-off `StandaloneRootCA`,
   `Proxy` role VMs, and Linux VMs (by `osFamily`/`operatingSystem`/`deployedOS`).
 - A VM already recorded (in its Hyper-V VM Notes `appliedFixes`) as current on

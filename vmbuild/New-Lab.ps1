@@ -1228,6 +1228,7 @@ try {
     # at "if (-not $prepared -or -not $configured)" would report a run where nothing
     # ran, and nothing failed, as FINISHED WITH FAILURES.
     $configured = $true
+    $phase11Passed = $false
     $containsHidden = $deployConfig.virtualMachines | Where-Object { $_.hidden -eq $true }
     if ($containsHidden -or $resumePreparation -or $requireExistingVMs) {
         Write-Phase -Phase 0
@@ -1474,6 +1475,8 @@ try {
                     }
                 }
                 if ($i -eq 11) {
+                    $phase11Passed = $true
+
                     # Phase 11 passed: merge the Phase 8 auto-snapshot if it exists
                     if (-not $global:MemLabsNoSnapshot) {
                         Merge-Phase8AutoSnapshot -DeployConfig $deployConfig
@@ -1634,6 +1637,10 @@ try {
                     Clear-VmProxyEnforcement -VmName $vm.vmName
                 }
             }
+        }
+
+        if ($phase11Passed -and -not (Set-VMAutomaticStartup -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf)) {
+            throw "Automatic startup maintenance failed after Phase 11; the build cannot be reported as successful."
         }
 
         # Retrieve guest-side component timing from ScriptWorkflow.json

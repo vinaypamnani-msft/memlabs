@@ -94,6 +94,8 @@ Function Select-PasswordMenu {
 # user still decides whether to run it and whether to start stopped VMs). Unlike
 # the mandatory deployment-time gate, this path is entirely optional and can be
 # skipped or declined at any prompt.
+# Host-side automatic startup maintenance has its own confirmation and also
+# covers eligible Linux VMs without starting them.
 Function Select-PendingVMMaintenance {
     Write-Log "Apply Pending VM Maintenance: reconciling DHCP/networking before maintenance." -Activity
     $dhcpReady = Confirm-MemLabsDhcpReadiness
@@ -423,7 +425,7 @@ function Build-ConfigMenuOptions {
     $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
     $customOptions += [ordered]@{ "HT" = "Use this to refresh tools on a VM, or add new ones, like Azure Data Studio!" }
     $customOptions += [ordered]@{"A" = "Apply Pending VM Maintenance%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-    $customOptions += [ordered]@{ "HA" = "Reconciles DHCP/networking first, then applies any pending fixes to all currently deployed Windows VMs. Optional -- you decide whether to run it and whether to start stopped VMs." }
+    $customOptions += [ordered]@{ "HA" = "Reconciles DHCP/networking, offers dependency-ordered automatic startup settings, then applies pending Windows VM fixes. Optional -- you decide whether to apply settings and whether to start stopped VMs." }
 
     $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "List Resources%$($Global:Common.Colors.GenConfigHeader)" }
     $customOptions += [ordered]@{"V" = "Show Virtual Machines%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }

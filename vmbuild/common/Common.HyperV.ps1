@@ -193,6 +193,123 @@ function Get-VM2 {
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
 
+function Get-VMAutomaticStartupPlan {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]] $VMs
+    )
+
+    $eligible = @($VMs | Where-Object {
+            $_.vmBuild -eq $true -and $_.inProgress -ne $true -and $_.success -ne $false -and
+            -not $_.hidden -and
+            $_.role -notin @('StandaloneRootCA', 'OSDClient', 'AADClient', 'DhcpAppliance')
+        })
+    foreach ($vm in $eligible) {
+        if (-not $vm.vmName -or -not $vm.vmId -or
+            [string]::IsNullOrWhiteSpace($vm.domain) -or [string]::IsNullOrWhiteSpace($vm.role)) {
+            throw "Automatic startup requires a VM name, ID, domain, and role for every managed target."
+        }
+    }
+
+    foreach ($domainGroup in ($eligible | Group-Object domain | Sort-Object Name)) {
+        $critical = Get-CriticalVMs -domain $domainGroup.Name -InputVMs $domainGroup.Group
+        # GenConfig persists dedicated SQL servers as DomainMember + sqlVersion.
+        $sqlServers = @($critical.NONCRIT | Where-Object {
+                $_.role -in @('SqlServer', 'SQLAO') -or ($_.role -eq 'DomainMember' -and $_.sqlVersion)
+            })
+        $critical.SQL = @($critical.SQL) + $sqlServers
+        $critical.DC = @($critical.DC) + @($critical.NONCRIT | Where-Object { $_.role -eq 'Proxy' })
+        $critical.NONCRIT = @($critical.NONCRIT | Where-Object { $_.vmName -notin $sqlServers.vmName -and $_.role -ne 'Proxy' })
+
+        $delay = 0
+        foreach ($bucket in @('DC', 'FS', 'SQL', 'CAS', 'PRI', 'NONCRIT')) {
+            $members = @($critical.$bucket | Where-Object { $_ } | Sort-Object vmName -Unique)
+            if ($members.Count -eq 0) { continue }
+            foreach ($vm in $members) {
+                [pscustomobject]@{
+                    VMName = $vm.vmName
+                    VMId = $vm.vmId
+                    Domain = $vm.domain
+                    Role = $vm.role
+                    AutomaticStartAction = 'Start'
+                    AutomaticStartDelay = $delay
+                }
+            }
+            $delay += 120
+        }
+    }
+}
+
+function Set-VMAutomaticStartup {
+    <#
+    .SYNOPSIS
+        Reconciles host-boot startup settings without changing current VM power states.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param (
+        [string] $DomainName,
+        [switch] $Prompt
+    )
+
+    try {
+        $vms = @(Get-List -Type VM -FailOnError -ErrorAction Stop)
+        if ($DomainName) {
+            $vms = @($vms | Where-Object { $_.domain -eq $DomainName })
+        }
+        $plan = @(Get-VMAutomaticStartupPlan -VMs $vms)
+        if ($plan.Count -eq 0) {
+            Write-Log "Automatic startup maintenance: no eligible managed VMs."
+            return $true
+        }
+
+        $liveVMs = @{}
+        foreach ($vm in (Get-VM -Id @($plan.VMId) -ErrorAction Stop)) {
+            $liveVMs["$($vm.Id)"] = $vm
+        }
+        $pending = @($plan | Where-Object {
+                $live = $liveVMs["$($_.VMId)"]
+                if (-not $live) { throw "VM '$($_.VMName)' was not found in live Hyper-V inventory." }
+                $live.AutomaticStartAction -ne $_.AutomaticStartAction -or
+                $live.AutomaticStartDelay -ne $_.AutomaticStartDelay
+            })
+        if ($pending.Count -eq 0) {
+            Write-Log "Automatic startup maintenance: all $($plan.Count) eligible VM(s) are already up to date."
+            return $true
+        }
+
+        Write-Log "Automatic startup maintenance: set $($pending.Count) VM(s) to Start on host boot, even if previously stopped. No VMs are started or stopped now. Delays are not service-readiness checks." -Activity
+        if ($Prompt -and -not $WhatIfPreference) {
+            $pending | Format-Table VMName, Domain, Role, AutomaticStartAction, AutomaticStartDelay | Out-Host
+            $answer = Read-YesOrNoWithTimeout -Prompt "Apply these automatic startup settings? (y/N)" -HideHelp -Default 'n' -timeout 45
+            if ($answer -notin @('y', 'yes')) {
+                Write-Log "Automatic startup maintenance declined; startup settings were not changed."
+                return $true
+            }
+        }
+
+        foreach ($item in $pending) {
+            if (-not $PSCmdlet.ShouldProcess($item.VMName, "Set AutomaticStartAction=Start, AutomaticStartDelay=$($item.AutomaticStartDelay) seconds")) {
+                continue
+            }
+            $vm = $liveVMs["$($item.VMId)"]
+            Set-VM -VM $vm -AutomaticStartAction Start -AutomaticStartDelay $item.AutomaticStartDelay -ErrorAction Stop
+            $verified = Get-VM -Id $item.VMId -ErrorAction Stop
+            if (-not $verified -or $verified.AutomaticStartAction -ne 'Start' -or
+                $verified.AutomaticStartDelay -ne $item.AutomaticStartDelay) {
+                throw "VM '$($item.VMName)' did not retain the requested automatic startup settings."
+            }
+            Write-Log "$($item.VMName): AutomaticStartAction=Start; AutomaticStartDelay=$($item.AutomaticStartDelay) seconds." -Success
+        }
+        return $true
+    }
+    catch {
+        Write-Log "Automatic startup maintenance failed: $($_.Exception.Message) Some settings may already have been applied; resolve the error and rerun maintenance." -Failure
+        return $false
+    }
+}
+
 function Initialize-OsdClientHost {
     [CmdletBinding()]
     param(
