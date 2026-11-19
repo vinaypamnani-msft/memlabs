@@ -5014,17 +5014,6 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): VM responded after last-resort reboot." -Success -OutputStream
         }
 
-        $currentCmOptions = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
-        if ($Phase -eq 8 -and $currentItem.role -eq 'Primary' -and $currentCmOptions.PrePopulateObjects) {
-            $payloadReady = Repair-PrimaryPrepopulationPayload -VirtualMachine $currentItem `
-                -VmDomainName $domainName -AzureFileList $Common.AzureFileList `
-                -AzureFilesPath $Common.AzureFilesPath -Phase $Phase -RequireDomainIdentity
-            if (-not $payloadReady) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary prepopulation payload repair failed. See preceding diagnostics." -Failure -OutputStream
-                return
-            }
-        }
-
         Write-Progress2 $Activity -Status "Establishing a session with the VM" -percentcomplete 2 -force
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
@@ -8938,6 +8927,15 @@ $global:VM_Config = {
                             }
                         }
 
+                        if ($Phase -eq 8) {
+                            $phase8Nodes = @($using:ConfigurationData.AllNodes | Where-Object { $_.NodeName -eq $nodeName })
+                            if ($phase8Nodes.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$phase8Nodes[0].Role)) {
+                                "Cannot resolve one authoritative Phase 8 DSC role for $nodeName." | Out-File $log -Append
+                                return "NODE_ROLE_UNRESOLVED"
+                            }
+                            $nodeRole = $phase8Nodes[0].Role
+                        }
+
                         $cd = @{
                             AllNodes = @(
                                 @{ NodeName = '*'; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
@@ -8970,6 +8968,10 @@ $global:VM_Config = {
                     }
                     $recoveryResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_RecoverLocal -ArgumentList $DscFolder -DisplayName "DSC: Local Recovery" -AsJob -TimeoutSeconds 300
                     $recoveryOutput = if ($recoveryResult.ScriptBlockOutput) { $recoveryResult.ScriptBlockOutput } else { "no output" }
+                    if (@($recoveryOutput) -contains 'NODE_ROLE_UNRESOLVED') {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Local recovery cannot resolve its authoritative DSC role. Aborting instead of compiling the wrong node." -Failure -OutputStream
+                        return
+                    }
                     if ($recoveryResult.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC local recovery failed: $recoveryOutput" -Warning
                     }

@@ -2394,6 +2394,40 @@ function Start-PhaseJobs {
     # waiting on Primary) would block on the same wall-clock, turning a
     # 30-second misconfig into a 9-hour stuck deploy.
     if ($Phase -eq 8) {
+        # Finish media copies before DC readiness recovery can reboot a preparing Primary.
+        try {
+            $phase8PrimaryNames = @($ConfigurationData.AllNodes | Where-Object {
+                    $_.Role -eq 'Primary' -and $_.NodeName -and $_.NodeName -ne '*'
+                } | Select-Object -ExpandProperty NodeName)
+            $prepopulationPrimaries = @($deployConfig.virtualMachines | Where-Object {
+                    $_.role -eq 'Primary' -and $_.vmName -in $phase8PrimaryNames -and
+                    (-not $OnlyVMs -or $_.vmName -in $OnlyVMs)
+                })
+            foreach ($primary in $prepopulationPrimaries) {
+                $primaryCmOptions = if ($primary.cmOptions) { $primary.cmOptions } else { $deployConfig.cmOptions }
+                if (-not $primaryCmOptions.PrePopulateObjects) { continue }
+                $prepopulationDomain = if ($primary.domain) { $primary.domain } else { $deployConfig.parameters.DomainName }
+                Write-Log "[Phase 8] Preparing $($primary.vmName) prepopulation payload before dispatching DSC workers."
+                $connected = Wait-ForVM -VmName $primary.vmName -PathToVerify 'C:\Users' -VmDomainName $prepopulationDomain
+                if (-not $connected) { throw "$($primary.vmName) is not connectable for prepopulation preparation." }
+                $payloadReady = Repair-PrimaryPrepopulationPayload -VirtualMachine $primary `
+                    -VmDomainName $prepopulationDomain -AzureFileList $Common.AzureFileList `
+                    -AzureFilesPath $Common.AzureFilesPath -Phase $Phase -RequireDomainIdentity
+                if (-not $payloadReady) { throw "$($primary.vmName) prepopulation payload repair failed. See preceding diagnostics." }
+            }
+        }
+        catch {
+            Write-Log "[Phase 8] Primary prepopulation preflight failed: $($_.Exception.Message). Aborting before any per-VM jobs are dispatched." -Failure
+            return [PSCustomObject]@{
+                Failed          = 1
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
+            }
+        }
+
         try {
             $null = Set-OsdClientMacAddresses -DeployConfig $deployConfig
         }

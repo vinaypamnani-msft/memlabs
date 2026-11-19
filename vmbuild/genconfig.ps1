@@ -1027,11 +1027,12 @@ function Select-MainMenu {
 
             $global:Config.virtualMachines = @()
         }
+        $built = Build-MainMenuOptions
+        # Rendering fills legacy defaults before user edits begin.
         if ([string]::IsNullOrWhiteSpace($global:GenConfigQuickApplyBaselineJson)) {
             $global:GenConfigQuickApplyBaselineJson = $Global:Config | ConvertTo-Json -Depth 10 -Compress
         }
 
-        $built = Build-MainMenuOptions
         $preOptions = $built.PreOptions
         $customOptions = $built.Options
         $vmNameToNumberMap = $built.VMNameToNumberMap

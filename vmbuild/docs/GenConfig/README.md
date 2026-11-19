@@ -440,6 +440,13 @@ replica, WSUS, Patch My PC, and client push can be added/changed when their
 deployment paths support it. A deployed SUP or Patch My PC installation is
 locked because there is no removal workflow.
 
+When only `Memory`/`DynamicMinRam` is edited, with no new VMs or other
+configuration changes, **Deploy / Apply Changes And Save Config** applies RAM
+directly through Hyper-V without running deployment phases or guest DSC. Running
+targets may restart. Initial legacy editor defaults are not treated as user
+changes, and RAM-only updates do not backfill unrelated locale/proxy fields into
+VM notes. Explicit locale, proxy, or global-option edits still require deployment.
+
 ## ConfigMgr options
 
 Current configs store `cmOptions` on each top-level CAS or standalone Primary.
@@ -461,6 +468,12 @@ opens the only top-level directly or asks which hierarchy to edit.
 | `EnableBLM` | `false` | Enables ConfigMgr BitLocker Management and per-client `BitLocker`. | Test escrow/recovery/policy; requires CM 2002+ and domain clients. |
 | `ReproPolicyBulkCount` | Absent; shown only if already present | Creates contentless policy-volume packages/deployments. | Specialized policy-churn repro only. |
 | `ReproTattooCICount` | Absent; shown only if already present | Creates paired script/registry CIs for policy-revert repro. | Specialized policy-churn repro only. |
+
+Phase 8 verifies and repairs enabled Primary prepopulation payloads before any
+DSC workers start. This keeps DC readiness recovery from rebooting a Primary
+during an OS-media copy; preparation failures stop the phase before dispatch.
+Local DSC recovery uses the phase's resolved node role, including `SqlServer`
+for a referenced remote SQL VM configured as a `DomainMember`.
 
 ### ConfigMgr picker and action submenus
 

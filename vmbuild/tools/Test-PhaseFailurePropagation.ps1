@@ -2,6 +2,7 @@
 .SYNOPSIS
     Verifies missing-VM preflight and phase-result failures stop deployment.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'AST-extracted production gates consume fixture variables dynamically.')]
 [CmdletBinding()]
 param()
 
@@ -131,6 +132,7 @@ $cmStatement = $start.Body.EndBlock.Statements | Where-Object {
 $cmPreflight = [scriptblock]::Create($cmStatement.Extent.Text + "`nreturn `$true")
 function Get-Phase8ConfigurationData { param($deployConfig) $script:cmConfig }
 function Get-Phase9ConfigurationData { param($deployConfig) $script:cmConfig }
+function Sync-CmSetupProxyClients { param($deployConfig) $true }
 function Get-MissingHyperVNodes {
     param($ConfigurationData)
     if ($script:cmProbeThrows) { throw 'CM inventory unavailable' }
@@ -213,6 +215,84 @@ $script:dispatchResult.Failed = 1
 Assert-True ((& $dispatchGate) -eq $false) 'Partial dispatch failure was lost after successful jobs.'
 $script:dispatchResult = [pscustomobject]@{ Failed = 0; Jobs = 0; Applicable = $false }
 Assert-True ((& $dispatchGate) -eq $true) 'Valid no-op phase failed.'
+
+& {
+    $roleTokens = $null
+    $roleErrors = $null
+    $scriptBlocksAst = [Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $root 'common\Common.ScriptBlocks.ps1'), [ref]$roleTokens, [ref]$roleErrors)
+    if ($roleErrors.Count) { throw "Recovery source parse errors: $($roleErrors -join '; ')" }
+    $localRecovery = @($scriptBlocksAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$DSC_RecoverLocal'
+            }, $true))
+    if ($localRecovery.Count -ne 1) { throw 'Expected one local DSC recovery block.' }
+    $recoveryText = $localRecovery[0].Right.Extent.Text
+    $roleStart = $recoveryText.IndexOf('$nodeRole =')
+    $roleEnd = $recoveryText.IndexOf('$cd =', $roleStart)
+    if ($roleStart -lt 0 -or $roleEnd -le $roleStart) { throw 'Could not isolate the shipped recovery role mapping.' }
+    $resolveRole = [scriptblock]::Create(
+        $recoveryText.Substring($roleStart, $roleEnd - $roleStart).Replace('$using:ConfigurationData', '$ConfigurationData') +
+        "`nreturn `$nodeRole")
+    $script:RoleDiagnostics = [Collections.Generic.List[string]]::new()
+    function Out-File {
+        param([Parameter(Position = 0)]$FilePath, [Parameter(ValueFromPipeline = $true)]$InputObject, [switch]$Append)
+        process { $script:RoleDiagnostics.Add([string]$InputObject) }
+    }
+
+    foreach ($case in @(
+            @{ Phase = 8; Role = 'DomainMember'; Expected = 'SqlServer' },
+            @{ Phase = 8; Role = 'Primary'; AuthoritativeRoles = @('Primary'); Expected = 'Primary' },
+            @{ Phase = 8; Role = 'DomainMember'; AuthoritativeRoles = @(); Expected = 'NODE_ROLE_UNRESOLVED' },
+            @{ Phase = 8; Role = 'DomainMember'; AuthoritativeRoles = @('SqlServer', 'Primary'); Expected = 'NODE_ROLE_UNRESOLVED' },
+            @{ Phase = 8; Role = 'DomainMember'; AuthoritativeRoles = @(''); Expected = 'NODE_ROLE_UNRESOLVED' },
+            @{ Phase = 5; Role = 'SQLAO'; OtherNode = 'SQL2'; Expected = 'ClusterNode1' },
+            @{ Phase = 5; Role = 'SQLAO'; Expected = 'ClusterNode2' },
+            @{ Phase = 6; Role = 'Primary'; InstallSUP = $true; Expected = 'WSUS' },
+            @{ Phase = 7; Role = 'DomainMember'; InstallRP = $true; Expected = 'PBIRS' },
+            @{ Phase = 7; Role = 'DomainMember'; InstallSUP = $true; Expected = 'WSUS' },
+            @{ Phase = 9; Role = 'SQLAO'; Expected = 'SqlServer' }
+        )) {
+        $Phase = $case.Phase
+        $nodeName = 'SQL1'
+        $thisVm = [pscustomobject]@{
+            Role = $case.Role; OtherNode = $case.OtherNode
+            installSUP = [bool]$case.InstallSUP; installRP = [bool]$case.InstallRP
+        }
+        $roles = @('SqlServer')
+        if ($case.ContainsKey('AuthoritativeRoles')) { $roles = @($case.AuthoritativeRoles) }
+        $ConfigurationData = [pscustomobject]@{
+            AllNodes = @([pscustomobject]@{ NodeName = '*'; Role = 'DomainMember' }) +
+                @($roles | ForEach-Object { [pscustomobject]@{ NodeName = $nodeName; Role = $_ } })
+        }
+        $log = 'fixture.log'
+        $script:RoleDiagnostics.Clear()
+        $actualRole = & $resolveRole
+        Assert-True ($actualRole -eq $case.Expected) "Phase $Phase local recovery mapped $($case.Role) to [$actualRole], expected [$($case.Expected)]."
+        if ($case.Expected -eq 'NODE_ROLE_UNRESOLVED') {
+            Assert-True ($script:RoleDiagnostics.Count -gt 0) 'Unresolved authoritative recovery role was not diagnosed.'
+        }
+    }
+    $failureGates = @($scriptBlocksAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.IfStatementAst] -and
+                $node.Clauses[0].Item1.Extent.Text -match 'NODE_ROLE_UNRESOLVED'
+            }, $true))
+    Assert-True ($failureGates.Count -eq 1) 'Expected one host-side unresolved-role failure gate.'
+    $failRole = [scriptblock]::Create($failureGates[0].Extent.Text + "`nreturn 'continued'")
+    $script:RoleFailures = 0
+    function Write-Log {
+        param($Message, [switch]$Failure, [switch]$OutputStream)
+        if ($Failure -and $OutputStream) { $script:RoleFailures++ }
+    }
+    $Phase = 8
+    $currentItem = [pscustomobject]@{ vmName = 'SQL1' }
+    $recoveryOutput = 'NODE_ROLE_UNRESOLVED'
+    Assert-True ($null -eq (& $failRole) -and $script:RoleFailures -eq 1) 'Unresolved authoritative roles did not stop the VM worker with a visible failure.'
+    $recoveryOutput = 'STARTED'
+    Assert-True ((& $failRole) -eq 'continued' -and $script:RoleFailures -eq 1) 'Successful local recovery was incorrectly aborted.'
+}
 
 $jobsText = (Get-TestFunction 'Start-PhaseJobs').Extent.Text
 foreach ($marker in @('$missingDispatchNodes.Count -gt 0', '$missingHyperVNodes.Count -gt 0')) {

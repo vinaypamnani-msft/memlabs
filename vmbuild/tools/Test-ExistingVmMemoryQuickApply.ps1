@@ -318,4 +318,131 @@ foreach ($case in @(
         -not (get-IsExistingVMModified -virtualMachine $edited)) 'The automatic minimum-memory edit was not applied and persisted after restoring the maximum.'
 }
 
+& {
+    foreach ($entry in @(
+            @{ Path = 'genconfig.ps1'; Name = 'Get-ExistingVMs' },
+            @{ Path = 'genconfig.ps1'; Name = 'Select-MainMenu' },
+            @{ Path = 'genconfig.ps1'; Name = 'Build-MainMenuOptions' },
+            @{ Path = 'common\Common.GenConfig.Summary.ps1'; Name = 'get-VMOptionsSummary' },
+            @{ Path = 'common\Common.GenConfig.NewDomain.ps1'; Name = 'Initialize-PerVmLocales' },
+            @{ Path = 'common\Common.GenConfig.NewDomain.ps1'; Name = 'Set-DefaultLocaleForVM' }
+        )) {
+        . (Import-TestFunction -Path $entry.Path -Name $entry.Name)
+    }
+
+    $script:LegacyCatalogPath = Join-Path $RootPath 'common\LocaleCatalog.json'
+    $script:LegacyLocaleInitializer = ${function:Initialize-PerVmLocales}
+    function Initialize-PerVmLocales {
+        param($ConfigToCheck)
+        & $script:LegacyLocaleInitializer -ConfigToCheck $ConfigToCheck -CatalogPath $script:LegacyCatalogPath
+    }
+
+    function Add-OfflineRootCAVMIfMissing { param($ConfigToModify) }
+    function Remove-OfflineRootCAVMIfAutoAdded { param($ConfigToModify) }
+    function Add-ProxyVMIfMissing { param($ConfigToModify) }
+    function Remove-ProxyVMIfAutoAdded { param($ConfigToModify) }
+    function Test-Configuration { param($InputObject, [switch]$Fast) [pscustomobject]@{ Valid = $true } }
+    function Convert-ValidationMessages { param($TestObject) }
+    function Get-PKIOptionsSummary { '' }
+    function Get-VMString { param($Config, $VirtualMachine, [switch]$Colors) $VirtualMachine.vmName }
+    function Get-TimeZone { [pscustomobject]@{ Id = 'UTC' } }
+    function Format-OptionToken { param($Color, $Text) $Text }
+    function Limit-AnsiString { param($Text, $MaxVisible) $Text }
+    function Get-LocaleProfiles { param($Path) @{ 'en-US' = [pscustomobject]@{ LanguageTag = 'en-US' } } }
+    function Get-LocaleDefinitionForOperatingSystem { param($LocaleDefinition, $OperatingSystem) $LocaleDefinition }
+    function Get-LocaleAcquisitionMethod { param([Alias('Profile')]$LocaleDefinition, $OperatingSystem, $ConfigPath) 'Included' }
+    function Get-List {
+        param($Type, $Domain)
+        $script:LegacyNotes.Values | ForEach-Object { $_ | ConvertTo-Json -Depth 5 | ConvertFrom-Json }
+    }
+    function Get-Menu2 {
+        param($MenuName, $Prompt, $OptionArray, $AdditionalOptions, $PreOptions, $Test, [switch]$AcceptsDelete)
+        if ($script:LegacyResponses.Count -eq 0) { throw 'Legacy RAM fixture exhausted its menu responses.' }
+        $script:LegacyResponses.Dequeue()
+    }
+    function Select-VirtualMachines {
+        param($VmName)
+        $target = $global:existingMachines | Where-Object { $_.vmName -eq $VmName }
+        Set-DefaultLocaleForVM -ConfigToCheck $global:Config -VirtualMachine $target -CatalogPath $script:LegacyCatalogPath
+        $target | Add-Member -NotePropertyName 'memory-Original' -NotePropertyValue $target.memory
+        $target.memory = '4GB'
+    }
+    function Select-Options {
+        param($MenuName, $Rootproperty, $PropertyName, $Prompt, $HelpFunction)
+        $Rootproperty.vmOptions.network = '192.168.3.0'
+    }
+    function Set-MemLabsVmMemoryConfiguration {
+        param($VmName, $Memory, $DynamicMinRam, $Role, $SqlVersion)
+        $script:LegacyMemoryRequests.Add($VmName)
+        [pscustomobject]@{ Changed = $true; Restarted = $true }
+    }
+    function Set-VMNote {
+        param($VmName, $VmNote)
+        foreach ($property in $VmNote.PSObject.Properties) {
+            $script:LegacyNotes[$VmName] | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force
+        }
+    }
+    function Add-ModifiedExistingVMsToConfig { $script:LegacyDeploymentRequests++ }
+
+    $InternalUseOnly = [switch]$true
+    $enableDebug = $false
+    $global:Common = [pscustomobject]@{
+        ConfigPath = Join-Path $RootPath 'config'
+        Colors = [pscustomobject]@{}
+    }
+    foreach ($editGlobalOptions in $false, $true) {
+        $global:Config = [pscustomobject]@{
+            vmOptions = [pscustomobject]@{ domainName = 'legacy.test'; network = '192.168.2.0'; prefix = 'LAB-' }
+            virtualMachines = @()
+        }
+        $global:existingMachines = $null
+        $global:GenConfigQuickApplyBaselineJson = $null
+        $global:PendingValidationErrors = $null
+        $script:LegacyNotes = @{}
+        foreach ($vmName in 'LAB-OLD1', 'LAB-OLD2') {
+            $script:LegacyNotes[$vmName] = [pscustomobject]@{
+                vmName = $vmName; role = 'DomainMember'; ExistingVM = $true
+                operatingSystem = 'Windows 10 Latest'; memory = '2GB'; dynamicMinRam = '2GB'
+            }
+        }
+        $script:LegacyMemoryRequests = [Collections.Generic.List[string]]::new()
+        $script:LegacyDeploymentRequests = 0
+        $script:LegacyResponses = [Collections.Generic.Queue[string]]::new()
+        foreach ($response in '1', '2') { $script:LegacyResponses.Enqueue($response) }
+        if ($editGlobalOptions) { $script:LegacyResponses.Enqueue('V') }
+        foreach ($response in 'D', 'S') { $script:LegacyResponses.Enqueue($response) }
+
+        $deploy = Select-MainMenu
+        if ($editGlobalOptions) {
+            Assert-True ($deploy -eq $true -and $script:LegacyDeploymentRequests -eq 1 -and
+                $script:LegacyMemoryRequests.Count -eq 0) 'An intentional global edit after normalization incorrectly bypassed deployment.'
+            continue
+        }
+        Assert-True ($deploy -eq $false -and $script:LegacyDeploymentRequests -eq 0 -and
+            $script:LegacyMemoryRequests.Count -eq 2) 'Legacy RAM-only edits entered deployment after the menu added missing defaults.'
+        Assert-True ($global:Config.domainDefaults.DefaultLocale -eq 'en-US' -and
+            $global:Config.vmOptions.timeZone -eq 'UTC') 'The legacy menu fixture did not exercise initial locale/time-zone normalization.'
+        foreach ($vmName in 'LAB-OLD1', 'LAB-OLD2') {
+            $note = $script:LegacyNotes[$vmName]
+            Assert-True ($note.memory -eq '4GB' -and $note.dynamicMinRam -eq '2GB' -and
+                -not $note.PSObject.Properties['locale'] -and
+                -not $note.PSObject.Properties['useProxy']) 'A quick RAM update backfilled unrelated locale/proxy properties into a legacy VM note.'
+        }
+        Assert-True (-not @($global:existingMachines | Where-Object {
+                    get-IsExistingVMModified -virtualMachine $_
+                }).Count) 'Successfully applied legacy RAM edits remained queued for deployment.'
+        foreach ($propertyName in 'locale', 'useProxy') {
+            $explicitEdit = $global:existingMachines[0].PSObject.Copy()
+            $explicitEdit.memory = '6GB'
+            $explicitEdit | Add-Member -NotePropertyName "$propertyName-Original" -NotePropertyValue $explicitEdit.$propertyName -Force
+            if ($propertyName -eq 'locale') { $explicitEdit.locale = 'fr-FR' }
+            else { $explicitEdit.useProxy = $true }
+            $explicitPlan = Get-ExistingVmQuickUpdatePlan -Config $global:Config -ExistingMachines @($explicitEdit) `
+                -ConfigBaselineJson $global:GenConfigQuickApplyBaselineJson
+            Assert-True (-not $explicitPlan.CanApplyQuickly -and
+                $explicitPlan.UnsupportedChanges -contains "$($explicitEdit.vmName):$propertyName") 'An intentional locale/proxy edit was mistaken for a legacy editor default.'
+        }
+    }
+}
+
 Write-Host "PASS -- $script:Assertions existing-VM RAM quick-apply assertions."
