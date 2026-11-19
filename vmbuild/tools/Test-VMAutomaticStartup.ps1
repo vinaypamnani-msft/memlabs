@@ -28,7 +28,7 @@ function Import-StartupFunction {
 }
 
 . (Import-StartupFunction -Path (Join-Path $RootPath 'common\Common.Phases.ps1') -Name 'Get-CriticalVMs')
-foreach ($name in @('Get-VMAutomaticStartupPlan', 'Set-VMAutomaticStartup')) {
+foreach ($name in @('Get-VM2', 'Get-VMAutomaticStartupPlan', 'Set-VMAutomaticStartup')) {
     . (Import-StartupFunction -Path (Join-Path $RootPath 'common\Common.HyperV.ps1') -Name $name)
 }
 . (Import-StartupFunction -Path (Join-Path $RootPath 'common\Common.Maintenance.ps1') -Name 'Start-Maintenance')
@@ -60,7 +60,7 @@ function Reset-StartupFixture {
         Changes = [Collections.Generic.List[object]]::new()
         Logs = [Collections.Generic.List[object]]::new()
         Answer = 'n'; Prompts = 0; InventoryReads = 0
-        Failure = ''; FailureVM = ''; MissingId = ''; HyperVReads = 0
+        Failure = ''; FailureVM = ''; MissingId = ''; HyperVReads = 0; SmartInventory = $null
         Answers = [Collections.Generic.Queue[string]]::new()
         GuestPending = $false; AllowGuestJobs = $false; GuestJobs = 0
     }
@@ -80,7 +80,12 @@ function Get-List {
     param($Type, $DomainName, [switch] $SmartUpdate, [switch] $FailOnError)
     $script:StartupFixture.InventoryReads++
     if ($script:StartupFixture.Failure -eq 'Inventory') { throw 'Synthetic inventory failure' }
-    $vms = $script:StartupFixture.Inventory
+    $vms = if ($SmartUpdate -and $script:StartupFixture.SmartInventory) {
+        $script:StartupFixture.SmartInventory
+    }
+    else {
+        $script:StartupFixture.Inventory
+    }
     if ($DomainName) { $vms = @($vms | Where-Object { $_.domain -eq $DomainName }) }
     $vms
 }
@@ -170,6 +175,40 @@ $basic = @(
     New-StartupVM -Name 'SQL01' -Role 'DomainMember' -SqlVersion 'SQL Server 2022'
     New-StartupVM -Name 'DC01' -Role 'DC'
 )
+Reset-StartupFixture -VMs $basic
+
+$duplicateNameId = [guid]::NewGuid()
+$staleDuplicateId = [guid]::NewGuid()
+$duplicateInventory = @(
+    [pscustomobject]@{ vmName = 'DUPLICATE'; vmId = $staleDuplicateId }
+    [pscustomobject]@{ vmName = 'DUPLICATE'; vmId = $duplicateNameId.ToString('N') }
+    [pscustomobject]@{ vmName = 'DUPLICATE'; vmId = $duplicateNameId.ToString('B') }
+    [pscustomobject]@{ vmName = 'DUPLICATE'; vmId = $staleDuplicateId }
+)
+Reset-StartupFixture -VMs $duplicateInventory
+$script:StartupFixture.Live.Remove("$staleDuplicateId")
+foreach ($formattedId in @($duplicateNameId.ToString('N'), $duplicateNameId.ToString('B'))) {
+    $script:StartupFixture.Live.Remove($formattedId)
+}
+$script:StartupFixture.Live["$duplicateNameId"] = [pscustomobject]@{
+    Id = $duplicateNameId; VMId = $duplicateNameId; Name = 'DUPLICATE'
+}
+Assert-Startup ((Get-VM2 -Name 'DUPLICATE').Id -eq $duplicateNameId) 'Duplicate cache rows were bound as an array instead of scalar VM IDs.'
+Assert-Startup ($script:StartupFixture.HyperVReads -eq 2) 'Duplicate cache rows were not deduplicated and stale IDs were not skipped.'
+
+$refreshId = [guid]::NewGuid()
+$wrongNameId = [guid]::NewGuid()
+Reset-StartupFixture -VMs @(
+    [pscustomobject]@{ vmName = 'REFRESHED'; vmId = 'invalid-guid' }
+    [pscustomobject]@{ vmName = 'REFRESHED'; vmId = $wrongNameId }
+)
+$script:StartupFixture.SmartInventory = @([pscustomobject]@{ vmName = 'REFRESHED'; vmId = $refreshId })
+$script:StartupFixture.Live.Clear()
+$script:StartupFixture.Live["$wrongNameId"] = [pscustomobject]@{ Id = $wrongNameId; Name = 'OTHER' }
+$script:StartupFixture.Live["$refreshId"] = [pscustomobject]@{ Id = $refreshId; Name = 'REFRESHED' }
+Assert-Startup ((Get-VM2 -Name 'REFRESHED').Id -eq $refreshId) 'Invalid or wrong-name cache rows did not advance to the smart refresh.'
+Assert-Startup ($script:StartupFixture.HyperVReads -eq 2 -and $script:StartupFixture.InventoryReads -eq 2) 'Smart refresh did not use one scalar initial ID and one scalar refreshed ID.'
+
 Reset-StartupFixture -VMs $basic
 $plan = @(Get-VMAutomaticStartupPlan -VMs $basic)
 Assert-Startup (($plan.VMName -join ',') -eq 'DC01,SQL01,WEB01') 'Basic startup ordering is incorrect.'

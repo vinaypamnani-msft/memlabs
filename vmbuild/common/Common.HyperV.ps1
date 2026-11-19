@@ -171,18 +171,28 @@ function Get-VM2 {
     # find a virtual machine with id ..." on such an entry, which aborted callers
     # like Remove-Lab. Returning $null on a stale id and falling through to a
     # cache refresh lets the caller treat the VM as gone (which it is).
-    $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $Name }
-
-    if ($vmFromList) {
-        $vm = Get-VM -Id $vmFromList.vmId -ErrorAction SilentlyContinue
-        if ($vm) { return $vm }
-        # Stale cache entry: id no longer in Hyper-V. Fall through to refresh.
+    $vmFromList = @(Get-List -Type VM | Where-Object { $_.vmName -eq $Name })
+    $seenIds = @{}
+    foreach ($vmId in @($vmFromList | ForEach-Object { $_.vmId } | Where-Object { $null -ne $_ })) {
+        $parsedId = [guid]::Empty
+        if (-not [guid]::TryParse("$vmId", [ref]$parsedId)) { continue }
+        $idKey = $parsedId.ToString('D')
+        if ($seenIds.ContainsKey($idKey)) { continue }
+        $seenIds[$idKey] = $true
+        $vm = Get-VM -Id $parsedId -ErrorAction SilentlyContinue
+        if ($null -ne $vm -and $vm.Name -eq $Name) { return $vm }
     }
 
-    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name }
-    if ($vmFromList) {
-        $vm = Get-VM -Id $vmFromList.vmId -ErrorAction SilentlyContinue
-        if ($vm) { return $vm }
+    $vmFromList = @(Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $Name })
+    $seenIds = @{}
+    foreach ($vmId in @($vmFromList | ForEach-Object { $_.vmId } | Where-Object { $null -ne $_ })) {
+        $parsedId = [guid]::Empty
+        if (-not [guid]::TryParse("$vmId", [ref]$parsedId)) { continue }
+        $idKey = $parsedId.ToString('D')
+        if ($seenIds.ContainsKey($idKey)) { continue }
+        $seenIds[$idKey] = $true
+        $vm = Get-VM -Id $parsedId -ErrorAction SilentlyContinue
+        if ($null -ne $vm -and $vm.Name -eq $Name) { return $vm }
     }
 
     # VM may exist, without vmNotes object, try fallback if caller explicitly wants it.
@@ -422,6 +432,7 @@ function Initialize-OsdClientHost {
             $DynamicMinRam -lt 0 -or $DynamicMinRam -gt $MemoryBytes) {
             throw "Invalid requested host configuration: startupBytes=$MemoryBytes; processors=$ProcessorCount; dynamicMinBytes=$DynamicMinRam."
         }
+        $useDynamicMemory = $DynamicMinRam -gt 0 -and $DynamicMinRam -lt $MemoryBytes
         $stage = 'inspect live VM'
         $vm = Get-OsdHostVm
         $originalState = "$($vm.State)"
@@ -432,16 +443,17 @@ function Initialize-OsdClientHost {
         if ($pinnedMin -lt 40MB) { $pinnedMin = $MemoryBytes }
         $memoryChanged = $vm.MemoryStartup -ne $MemoryBytes
         $processorsChanged = $vm.ProcessorCount -ne $ProcessorCount
-        $pinChanged = $DynamicMinRam -gt 0 -and
+        $memoryModeChanged = $vm.DynamicMemoryEnabled -ne $useDynamicMemory
+        $pinChanged = $useDynamicMemory -and
             (-not $vm.DynamicMemoryEnabled -or $vm.MemoryMinimum -ne $pinnedMin)
         if ($originalState -in @('Saved', 'Paused') -and
-            ($memoryChanged -or $processorsChanged -or $pinChanged)) {
+            ($memoryChanged -or $processorsChanged -or $memoryModeChanged -or $pinChanged)) {
             throw "Cannot change hardware while the PXE target is '$originalState'. Resume or shut down the VM before retrying; its saved/paused state will not be discarded."
         }
 
         try {
             if ($originalState -eq 'Running' -and
-                ($memoryChanged -or $processorsChanged -or ($pinChanged -and -not $vm.DynamicMemoryEnabled))) {
+                ($memoryChanged -or $processorsChanged -or $memoryModeChanged)) {
                 $stage = 'stop for hardware update'
                 $restorePower = $true
                 $stopped = Stop-VM2 -Name $VmName -Passthru -RetryCount 1 -RetrySeconds 5 -GracefulTimeoutSeconds 30
@@ -452,20 +464,23 @@ function Initialize-OsdClientHost {
             }
 
             $memoryChanged = $vm.MemoryStartup -ne $MemoryBytes
-            $pinChanged = $DynamicMinRam -gt 0 -and
+            $memoryModeChanged = $vm.DynamicMemoryEnabled -ne $useDynamicMemory
+            $pinChanged = $useDynamicMemory -and
                 (-not $vm.DynamicMemoryEnabled -or $vm.MemoryMinimum -ne $pinnedMin)
             if ($pinChanged -and -not $memoryChanged -and $vm.State -eq 'Running' -and
                 $vm.DynamicMemoryEnabled) {
                 Write-Log "$prefix`: retaining live dynamic-memory floor $($vm.MemoryMinimum) instead of $pinnedMin; deployment pin adjustments alone will not interrupt a running PXE target or issue a potentially blocking live Set-VMMemory call." -LogOnly
                 $pinChanged = $false
             }
-            if ($memoryChanged -or $pinChanged) {
+            if ($memoryChanged -or $memoryModeChanged -or $pinChanged) {
                 $stage = 'update memory'
                 $memoryParams = @{
-                    DynamicMemoryEnabled = $true
-                    MinimumBytes = $pinnedMin
-                    MaximumBytes = $MemoryBytes
+                    DynamicMemoryEnabled = $useDynamicMemory
                     StartupBytes = $MemoryBytes
+                }
+                if ($useDynamicMemory) {
+                    $memoryParams.MinimumBytes = $pinnedMin
+                    $memoryParams.MaximumBytes = $MemoryBytes
                 }
                 Invoke-OsdHostCommand -Operation $stage -Action {
                     $vm | Set-VMMemory @memoryParams -ErrorAction Stop | Out-Null
@@ -523,8 +538,11 @@ function Initialize-OsdClientHost {
             if ($vm.ProcessorCount -ne $ProcessorCount) {
                 $mismatches.Add("processors=$($vm.ProcessorCount), expected=$ProcessorCount")
             }
-            if ($memoryUpdated -and (-not $vm.DynamicMemoryEnabled -or
-                    $vm.MemoryMinimum -ne $pinnedMin -or $vm.MemoryMaximum -ne $MemoryBytes)) {
+            if ($vm.DynamicMemoryEnabled -ne $useDynamicMemory) {
+                $mismatches.Add("dynamicMemory=$($vm.DynamicMemoryEnabled), expected=$useDynamicMemory")
+            }
+            if ($memoryUpdated -and $useDynamicMemory -and
+                ($vm.MemoryMinimum -ne $pinnedMin -or $vm.MemoryMaximum -ne $MemoryBytes)) {
                 $mismatches.Add("dynamicMemory=$($vm.DynamicMemoryEnabled), minimum=$($vm.MemoryMinimum), maximum=$($vm.MemoryMaximum); expected=True/$pinnedMin/$MemoryBytes")
             }
             if ($mismatches.Count -eq 0) { break }
@@ -1256,7 +1274,7 @@ function Start-VM2 {
                 }
                 $StopError = $null
                 Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-                if (($StopError -ne $null) -and ($StopError.Exception.Message.contains("authentication tag"))) {
+                if (($null -ne $StopError) -and ($StopError.Exception.Message.contains("authentication tag"))) {
                     write-progress2 "Start VM" -Status "Removing saved state for $Name"  -force
                     try {
                         Remove-VMSavedState -vm $vm -ErrorAction Stop
@@ -1286,7 +1304,7 @@ function Start-VM2 {
                 # retry. The previous narrow message-match missed
                 # localized error strings on non-English hosts and
                 # wrapped exceptions.
-                if (($StopError -ne $null) -and ($vm.State -ne 'Running')) {
+                if (($null -ne $StopError) -and ($vm.State -ne 'Running')) {
                     # Collapse the (often multi-line) Hyper-V error message to a
                     # single line BEFORE it touches any progress/log surface.
                     # Start-VM out-of-memory errors in particular come back as
