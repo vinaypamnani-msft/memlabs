@@ -1371,6 +1371,19 @@ Validate with `vmbuild\tools\Test-WindowsOobeRecovery.ps1`. It uses mocked
 Hyper-V/guest operations and disposable files; live recovery viability must
 still be confirmed on the affected host.
 
+### Phase 2 tool replacement
+
+When a tools bundle contains `tools\LogMachine\LogMachine.exe`, injection
+force-stops running LogMachine instances from that exact guest destination and
+waits up to 10 seconds for each to exit before extraction. Both ISO delivery
+and direct-copy fallback use this behavior. Copies in other folders are not
+stopped. Skipped tool sets and dry runs do not stop any LogMachine instances.
+Reopen LogMachine after the update if needed.
+
+Stop and extraction errors still fail injection; file permissions are not
+weakened and failed replacements are not marked current. Validate with
+[`Test-ToolInjectionRecovery.ps1`](vmbuild/tools/Test-ToolInjectionRecovery.ps1).
+
 ### Phase 2 DSC staging recovery
 
 A healthy Hyper-V heartbeat does not guarantee that PowerShell Direct can open

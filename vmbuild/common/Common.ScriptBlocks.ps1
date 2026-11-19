@@ -5944,7 +5944,7 @@ $global:VM_Config = {
                 if (-not $injectedOk) {
                     # Surface it to the phase tally. Tools are a hard dependency for later
                     # phases, so a phase that ends with them missing must not report clean.
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection FAILED -- later phases depend on the injected tools. See the Copy-ItemSafe stall-diag lines above for why the copy died." -Failure -OutputStream
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection FAILED -- later phases depend on the injected tools. See the preceding tools delivery or expansion errors for details." -Failure -OutputStream
                 }
             }
 

@@ -12420,6 +12420,75 @@ function Copy-ToolToVM {
     Write-Log "$vmName`: Copying tools bundle (${totalSizeMB} MB, $totalItems items) to VM..."
     Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${totalSizeMB} MB) to $VMName" -Log -force
 
+    $expandToolsBundles = {
+        param([string]$BundlePath, [string]$ExpectedHash, [string]$VolumeLabel)
+
+        $destinationRoot = 'C:\'
+        $bundlePaths = @($BundlePath)
+        if ($VolumeLabel) {
+            $volume = Get-Volume -FileSystemLabel $VolumeLabel -ErrorAction SilentlyContinue |
+                Where-Object { $_.DriveLetter } | Select-Object -First 1
+            if (-not $volume) {
+                return [PSCustomObject]@{ Ok = $false; Reason = "$VolumeLabel volume not found" }
+            }
+
+            $root = "$($volume.DriveLetter):\"
+            $actualHash = Get-Content -Path (Join-Path $root 'Tools.Bundle.md5') -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($actualHash -ne $ExpectedHash) {
+                return [PSCustomObject]@{ Ok = $false; Reason = "bundle hash mismatch (expected $ExpectedHash, found $actualHash)" }
+            }
+
+            $bundleNames = @(Get-Content -Path (Join-Path $root 'Tools.Bundles.txt') -ErrorAction SilentlyContinue | Where-Object { $_ })
+            if ($bundleNames.Count -eq 0) {
+                return [PSCustomObject]@{ Ok = $false; Reason = 'bundle manifest is empty' }
+            }
+            $bundlePaths = @($bundleNames | ForEach-Object { Join-Path $root $_ })
+        }
+
+        Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem -ErrorAction Stop
+        $stoppedProcessIds = @()
+        foreach ($path in $bundlePaths) {
+            $archivePath = (Get-Item -LiteralPath $path -ErrorAction Stop).FullName
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
+            try {
+                $replacesLogMachine = @($archive.Entries | Where-Object {
+                        $_.FullName.Replace('\', '/') -ieq 'tools/LogMachine/LogMachine.exe'
+                    }).Count -gt 0
+            }
+            finally {
+                $archive.Dispose()
+            }
+
+            if ($replacesLogMachine) {
+                $logMachinePath = Join-Path $destinationRoot 'tools\LogMachine\LogMachine.exe'
+                foreach ($process in [System.Diagnostics.Process]::GetProcessesByName('LogMachine')) {
+                    try {
+                        # Hold the process handle so its PID cannot be reused before Stop-Process.
+                        $null = $process.Handle
+                        if ($process.HasExited -or $process.MainModule.FileName -ine $logMachinePath) { continue }
+                        Stop-Process -Id $process.Id -Force -ErrorAction Stop
+                        if (-not $process.WaitForExit(10000)) {
+                            throw "LogMachine PID $($process.Id) did not exit within 10 seconds before tools replacement."
+                        }
+                        $stoppedProcessIds += $process.Id
+                    }
+                    catch {
+                        if (-not $process.HasExited) { throw }
+                    }
+                    finally {
+                        $process.Dispose()
+                    }
+                }
+            }
+
+            Expand-Archive -LiteralPath $archivePath -DestinationPath $destinationRoot -Force -ErrorAction Stop
+            if (-not $VolumeLabel) {
+                Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        return [PSCustomObject]@{ Ok = $true; Reason = ''; StoppedLogMachineProcessIds = $stoppedProcessIds }
+    }
+
     # --- Prefer a content-addressed ISO, then fall back to PSDirect copy ---
     $success = $false
     $isoDelivered = $false
@@ -12437,42 +12506,17 @@ function Copy-ToolToVM {
                         try {
                             $visible = Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $vm.domain -MarkerRelativePath 'Tools.Bundle.md5' -Context 'tools' -TimeoutSeconds 90 -Phase 2
                             if ($visible) {
-                                $isoResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($bundleHash, $global:MemlabsToolsVolumeLabel) -DisplayName 'Tools: Expand bundles from mounted ISO' -ScriptBlock {
-                                    param($expectedHash, $volumeLabel)
-
-                                    $volume = Get-Volume -FileSystemLabel $volumeLabel -ErrorAction SilentlyContinue |
-                                        Where-Object { $_.DriveLetter } | Select-Object -First 1
-                                    if (-not $volume) {
-                                        return [PSCustomObject]@{ Ok = $false; Reason = "$volumeLabel volume not found" }
-                                    }
-
-                                    $root = "$($volume.DriveLetter):\"
-                                    $actualHash = Get-Content -Path (Join-Path $root 'Tools.Bundle.md5') -ErrorAction SilentlyContinue | Select-Object -First 1
-                                    if ($actualHash -ne $expectedHash) {
-                                        return [PSCustomObject]@{ Ok = $false; Reason = "bundle hash mismatch (expected $expectedHash, found $actualHash)" }
-                                    }
-
-                                    $bundleNames = @(Get-Content -Path (Join-Path $root 'Tools.Bundles.txt') -ErrorAction SilentlyContinue | Where-Object { $_ })
-                                    if ($bundleNames.Count -eq 0) {
-                                        return [PSCustomObject]@{ Ok = $false; Reason = 'bundle manifest is empty' }
-                                    }
-
-                                    foreach ($bundleName in $bundleNames) {
-                                        $bundlePath = Join-Path $root $bundleName
-                                        if (-not (Test-Path $bundlePath)) {
-                                            return [PSCustomObject]@{ Ok = $false; Reason = "bundle '$bundleName' is missing" }
-                                        }
-                                        Expand-Archive -Path $bundlePath -DestinationPath 'C:\' -Force -ErrorAction Stop
-                                    }
-                                    return [PSCustomObject]@{ Ok = $true; Reason = '' }
-                                }
+                                $isoResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($null, $bundleHash, $global:MemlabsToolsVolumeLabel) -DisplayName 'Tools: Expand bundles from mounted ISO' -ScriptBlock $expandToolsBundles
                                 if (-not $isoResult.ScriptBlockFailed -and $isoResult.ScriptBlockOutput -and $isoResult.ScriptBlockOutput.Ok) {
                                     $isoDelivered = $true
                                     $success = $true
+                                    if ($isoResult.ScriptBlockOutput.StoppedLogMachineProcessIds) {
+                                        Write-Log "$vmName`: Stopped LogMachine PID(s) $($isoResult.ScriptBlockOutput.StoppedLogMachineProcessIds -join ', ') before tools replacement." -LogOnly
+                                    }
                                     Write-Log "$vmName`: Expanded tools bundle from $([System.IO.Path]::GetFileName($toolsIso))." -Success
                                 }
                                 else {
-                                    $reason = if ($isoResult.ScriptBlockOutput) { $isoResult.ScriptBlockOutput.Reason } else { 'in-guest ISO extraction failed' }
+                                    $reason = if ($isoResult.ScriptBlockFailed) { "$($isoResult.ScriptBlockOutput)" } elseif ($isoResult.ScriptBlockOutput) { $isoResult.ScriptBlockOutput.Reason } else { 'in-guest ISO extraction failed' }
                                     Write-Log "$vmName`: Tools ISO delivery did not complete ($reason). Falling back to direct copy." -Warning
                                 }
                             }
@@ -12517,14 +12561,14 @@ function Copy-ToolToVM {
                 }
 
                 if (-not $WhatIf) {
-                    $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
-                        Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
-                        Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
-                    }
-                    if ($expandResult.ScriptBlockFailed) {
+                    $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($vmZipPath) -DisplayName 'Tools: Expand directly transferred bundle' -ScriptBlock $expandToolsBundles
+                    if ($expandResult.ScriptBlockFailed -or -not $expandResult.ScriptBlockOutput.Ok) {
                         Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
                         $success = $false
                         break
+                    }
+                    if ($expandResult.ScriptBlockOutput.StoppedLogMachineProcessIds) {
+                        Write-Log "$vmName`: Stopped LogMachine PID(s) $($expandResult.ScriptBlockOutput.StoppedLogMachineProcessIds -join ', ') before tools replacement." -LogOnly
                     }
                 }
             }
