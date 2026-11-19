@@ -7007,12 +7007,12 @@ Function Show-Summary {
         Write-Host " [Default Network $($deployConfig.vmOptions.network)]"
         #Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
 
-        $totalMemory = ($fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum / 1GB
-        $runningVMNames = (Get-VM | Where-Object { $_.State -eq "Running" }).Name
-        $runningConfigVMs = @($fixedConfig | Where-Object { $_.vmName -in $runningVMNames })
-        $alreadyRunningMemory = if ($runningConfigVMs.Count -gt 0) { ($runningConfigVMs.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum / 1GB } else { 0 }
-        $availableMemory = Get-AvailableMemoryGB -ExcludeVMs $fixedConfig.vmName
-        $runningInfo = if ($alreadyRunningMemory -gt 0) { " ($($alreadyRunningMemory)GB already running)" } else { "" }
+        $totalMemory = ($deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum / 1GB
+        $runningConfigVMs = @(Get-VM | Where-Object { $_.State -eq "Running" -and $_.Name -in $deployConfig.virtualMachines.vmName })
+        $alreadyRunningMemory = if ($runningConfigVMs.Count -gt 0) { [Math]::Round(($runningConfigVMs | Measure-Object -Property MemoryAssigned -Sum).Sum / 1GB, 2) } else { 0 }
+        $additionalMemory = [Math]::Round([Math]::Max(0, $totalMemory - $alreadyRunningMemory), 2)
+        $availableMemory = Get-AvailableMemoryGB -ExcludeVMs $deployConfig.virtualMachines.vmName
+        $runningInfo = if ($alreadyRunningMemory -gt 0) { " ($($alreadyRunningMemory)GB already running; $($additionalMemory)GB additional)" } else { "" }
         $memorySummary = "This configuration will use $($totalMemory)GB$runningInfo out of $($availableMemory)GB deployable RAM on host machine [after 15% host reserve, capped at 8GB]"
         if ($totalMemory -le $availableMemory) {
             Write-GreenCheck $memorySummary

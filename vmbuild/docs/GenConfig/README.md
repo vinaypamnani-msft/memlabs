@@ -234,6 +234,13 @@ menu; action implementations are in
 | `Z` | Generate DSC.Zip; Debug only | Saves, validates, picks a VM, and runs `createGuestDscZip.ps1`. | Developer DSC diagnosis. |
 | Escape/Left/Back | Context-dependent return | Returns to the outer menu; existing-VM edits trigger a confirmation path. | Leave the deployment menu without selecting an action. |
 
+The RAM summary includes both proposed and existing VMs in the deployment
+configuration. It shows the requested total, actual RAM already assigned to
+running VMs, and additional RAM needed. Those same running allocations are
+credited when calculating deployable host RAM after the 15% reserve (capped at
+8 GB). For example, increasing two running VMs from 2 GB to 4 GB each shows
+8 GB total, 4 GB already running, and 4 GB additional.
+
 ## Domain and network options
 
 ### New-domain default settings
