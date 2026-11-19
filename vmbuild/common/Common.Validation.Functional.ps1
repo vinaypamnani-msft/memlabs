@@ -11313,13 +11313,17 @@ function Invoke-TftpReadProbe {
 
         Only the first data block is read. Failures retain socket provenance and
         effective firewall/network state before the temporary reply rule is removed.
-        A later paired diagnostic capture never changes this validation result.
+        A missing response gets one bounded fresh retry after the firewall rule has
+        had time to enter the effective store. A later paired diagnostic capture
+        does not replace this validation retry.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Server,
         [Parameter(Mandatory = $true)][string]$FileName,
         [int]$Port = 69,
         [int]$TimeoutMs = 5000,
+        [ValidateRange(0, 5000)][int]$RuleActivationTimeoutMs = 1500,
+        [ValidateRange(0, 5000)][int]$RuleSettleMs = 250,
         [switch]$DeferFailureNetworkState
     )
 
@@ -11356,16 +11360,36 @@ function Invoke-TftpReadProbe {
             -Profile Any -PolicyStore PersistentStore -ErrorAction Stop
         $firewallRuleCreated = $true
         if (-not $rule -or $rule.Name -ne $firewallRuleName) { throw 'TFTP probe firewall rule creation returned no matching rule.' }
-        $ruleBeforeSend = [ordered]@{ CapturedAtUtc = [datetime]::UtcNow.ToString('o'); CompletedAtUtc = ''; ReadSucceeded = $false; Rules = @(); Error = ''; ErrorId = '' }
-        try {
-            $ruleBeforeSend.Rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -TracePolicyStore -Name $firewallRuleName -ErrorAction Stop |
-                    Select-Object Name, Enabled, Direction, Action, Profile, EnforcementStatus, PrimaryStatus, Status,
-                    PolicyStoreSource, PolicyStoreSourceType)
-            $ruleBeforeSend.ReadSucceeded = $true
-        }
-        catch { $ruleBeforeSend.Error = $_.Exception.Message; $ruleBeforeSend.ErrorId = $_.FullyQualifiedErrorId }
+        $ruleBeforeSend = [ordered]@{ CapturedAtUtc = [datetime]::UtcNow.ToString('o'); CompletedAtUtc = ''; ReadSucceeded = $false; Rules = @(); Error = ''; ErrorId = ''; Ready = $false; Reads = 0 }
+        $activationTimer = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            try {
+                $ruleBeforeSend.Reads++
+                $ruleBeforeSend.Rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -TracePolicyStore -Name $firewallRuleName -ErrorAction Stop |
+                        Select-Object Name, Enabled, Direction, Action, Profile, EnforcementStatus, PrimaryStatus, Status,
+                        PolicyStoreSource, PolicyStoreSourceType)
+                $ruleBeforeSend.ReadSucceeded = $true
+                $effectiveRule = @($ruleBeforeSend.Rules | Where-Object {
+                        $_.Name -eq $firewallRuleName -and "$($_.Enabled)" -eq 'True' -and
+                        "$($_.EnforcementStatus)" -notmatch 'Disallowed|Disabled|Inactive'
+                    })
+                $ruleBeforeSend.Ready = $effectiveRule.Count -eq 1
+            }
+            catch {
+                $ruleBeforeSend.Error = $_.Exception.Message
+                $ruleBeforeSend.ErrorId = $_.FullyQualifiedErrorId
+            }
+            if (-not $ruleBeforeSend.Ready -and $activationTimer.ElapsedMilliseconds -lt $RuleActivationTimeoutMs) {
+                Start-Sleep -Milliseconds ([Math]::Min(100, $RuleActivationTimeoutMs - $activationTimer.ElapsedMilliseconds))
+            }
+        } while (-not $ruleBeforeSend.Ready -and $activationTimer.ElapsedMilliseconds -lt $RuleActivationTimeoutMs)
         $ruleBeforeSend.CompletedAtUtc = [datetime]::UtcNow.ToString('o')
         $out.RuleBeforeSendJson = $ruleBeforeSend | ConvertTo-Json -Depth 5
+        if (-not $ruleBeforeSend.Ready) {
+            $reason = if ($ruleBeforeSend.Error) { $ruleBeforeSend.Error } else { "ActiveStore rule never became effectively enforced" }
+            throw "TFTP reply firewall rule setup failed before sending: $reason."
+        }
+        if ($RuleSettleMs -gt 0) { Start-Sleep -Milliseconds $RuleSettleMs }
         $req = New-Object System.Collections.Generic.List[byte]
         $req.Add(0); $req.Add(1)
         $req.AddRange([System.Text.Encoding]::ASCII.GetBytes($FileName)); $req.Add(0)
@@ -11386,6 +11410,7 @@ function Invoke-TftpReadProbe {
             $out.Detail = 'reply was empty or truncated'
             return $out
         }
+
         if (-not $ep.Address.Equals($serverAddress)) {
             $out.Detail = "reply came from unexpected server $($ep.Address), expected $serverAddress"
             return $out
@@ -11474,6 +11499,31 @@ function Invoke-TftpReadProbe {
         }
     }
     return $out
+}
+
+function Invoke-TftpReadProbeWithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Server,
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [int]$Port = 69,
+        [int]$TimeoutMs = 6000,
+        [ValidateRange(0, 5000)][int]$RetryDelayMs = 500
+    )
+
+    $first = Invoke-TftpReadProbe -Server $Server -FileName $FileName -Port $Port -TimeoutMs $TimeoutMs
+    if ($first.Result -ne 'NoResponse') {
+        $first | Add-Member -MemberType NoteProperty -Name Attempts -Value 1 -Force
+        return $first
+    }
+    if ($RetryDelayMs -gt 0) { Start-Sleep -Milliseconds $RetryDelayMs }
+    $second = Invoke-TftpReadProbe -Server $Server -FileName $FileName -Port $Port -TimeoutMs $TimeoutMs
+    $second | Add-Member -MemberType NoteProperty -Name Attempts -Value 2 -Force
+    $second | Add-Member -MemberType NoteProperty -Name OriginalProbe -Value $first -Force
+    if ($second.Result -eq 'Served') {
+        $second.Detail += '; recovered on attempt 2 after the initial firewall-rule activation race'
+    }
+    return $second
 }
 
 $Phase11CcmClientLogCollector = {
@@ -18333,7 +18383,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             $probe = $null
                             foreach ($sep in @('\', '/')) {
                                 $tftpFile = "smsboot$sep$tftpPkg${sep}x64${sep}wdsmgfw.efi"
-                                $probe = Invoke-TftpReadProbe -Server $tftpDp -FileName $tftpFile -TimeoutMs 6000
+                                $probe = Invoke-TftpReadProbeWithRetry -Server $tftpDp -FileName $tftpFile -TimeoutMs 6000
                                 if ($probe.Result -ne 'FileNotFound') { break }
                             }
                             if ($probe.Result -ne 'Served') { [void]$results.TftpFailures.Add($probe) }
@@ -19159,6 +19209,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     $tftpProbeText = @"
 function Get-Phase11TftpNetworkState { $(${function:Get-Phase11TftpNetworkState}) }
 function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }
+function Invoke-TftpReadProbeWithRetry { $(${function:Invoke-TftpReadProbeWithRetry}) }
 "@
     $providerQueryDefinition = (Get-Command -Name Invoke-CmWmiQueryWithRetry -CommandType Function -ErrorAction Stop).Definition
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `

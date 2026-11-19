@@ -30,7 +30,8 @@ function Get-TestFunction {
 $systemDefinition = Get-TestFunction 'Invoke-Phase11LocalSystemProbe'
 . ([scriptblock]::Create($systemDefinition.Extent.Text))
 foreach ($name in @('Get-Phase11TftpNetworkState', 'Invoke-Phase11TftpTraceCommand',
-        'Invoke-Phase11TftpCapture', 'Save-Phase11TftpFailureDiagnostics', 'Invoke-TftpReadProbe')) {
+        'Invoke-Phase11TftpCapture', 'Save-Phase11TftpFailureDiagnostics', 'Invoke-TftpReadProbe',
+        'Invoke-TftpReadProbeWithRetry')) {
     . ([scriptblock]::Create((Get-TestFunction $name).Extent.Text))
 }
 
@@ -232,6 +233,7 @@ finally {
     $state = [pscustomobject]@{
         Mode = 'Served'; RuleName = ''; Created = 0; Removed = 0; Closed = 0; NetworkCalls = 0
         Requests = [System.Collections.Generic.List[object]]::new()
+        RuleReads = 0; Sleeps = [System.Collections.Generic.List[int]]::new()
     }
     $socket = [pscustomobject]@{
         Client = [pscustomobject]@{ ReceiveTimeout = 0; LocalEndPoint = [Net.IPEndPoint]::new([Net.IPAddress]::Any, 53000) }
@@ -294,8 +296,14 @@ finally {
             $PolicyStore -eq 'ActiveStore' -and $TracePolicyStore) 'Reply-rule enforcement was not observed before the first RRQ.'
         if ($state.Mode -eq 'RuleLookupFailure') { throw 'synthetic ActiveStore lookup failure' }
         $enforcement = 'Full'
+        $state.RuleReads++
         if ($state.Mode -eq 'InactiveReplyRule') { $enforcement = 'LocalFirewallRulesDisallowed' }
+        if ($state.Mode -eq 'DelayedReplyRule' -and $state.RuleReads -eq 1) { $enforcement = 'PolicyDisabled' }
         [pscustomobject]@{ Name = $Name; Enabled = 'True'; EnforcementStatus = $enforcement }
+    }
+    function Start-Sleep {
+        param($Milliseconds)
+        $state.Sleeps.Add([int]$Milliseconds)
     }
     function Get-Phase11TftpNetworkState {
         param($PeerAddress, $LocalPort, $ProbeRuleName, $Context, $SinceUtc)
@@ -307,20 +315,26 @@ finally {
         @{ Route = @([pscustomobject]@{ IPAddress = '127.0.0.1' }); ActiveProbeRule = $ProbeRuleName }
     }
     foreach ($mode in @('Served', 'Missing', 'Denied', 'Truncated', 'WrongBlock', 'EmptyData', 'WrongSender',
-            'Timeout', 'NetworkFailure', 'RuleLookupFailure', 'InactiveReplyRule', 'RuleFailure', 'SendFailure', 'AbortFailure', 'CloseFailure', 'RemoveFailure')) {
+            'Timeout', 'NetworkFailure', 'RuleLookupFailure', 'InactiveReplyRule', 'DelayedReplyRule', 'RuleFailure',
+            'SendFailure', 'AbortFailure', 'CloseFailure', 'RemoveFailure')) {
         $state.Mode = $mode
         $state.Created = 0
         $state.Removed = 0
         $state.Closed = 0
+        $state.RuleReads = 0
+        $state.Sleeps.Clear()
         $state.Requests.Clear()
-        $probe = Invoke-TftpReadProbe -Server '127.0.0.1' -FileName 'smsboot\PRI00008\x64\wdsmgfw.efi'
+        $probe = Invoke-TftpReadProbe -Server '127.0.0.1' -FileName 'smsboot\PRI00008\x64\wdsmgfw.efi' `
+            -RuleActivationTimeoutMs $(if ($mode -eq 'DelayedReplyRule') { 500 } else { 0 }) `
+            -RuleSettleMs $(if ($mode -eq 'DelayedReplyRule') { 10 } else { 0 })
         $expected = switch ($mode) {
             'Served' { 'Served' }
+            'DelayedReplyRule' { 'Served' }
             'Missing' { 'FileNotFound' }
             'Timeout' { 'NoResponse' }
             'NetworkFailure' { 'NoResponse' }
-            'RuleLookupFailure' { 'NoResponse' }
-            'InactiveReplyRule' { 'NoResponse' }
+            'RuleLookupFailure' { 'Error' }
+            'InactiveReplyRule' { 'Error' }
             default { 'Error' }
         }
         Assert-True ($probe.Result -eq $expected -and $probe.Detail) "$mode produced an incorrect or unexplained TFTP result: $($probe.Result) $($probe.Detail)"
@@ -343,20 +357,53 @@ finally {
         if ($mode -eq 'RuleLookupFailure') {
             $before = $probe.RuleBeforeSendJson | ConvertFrom-Json
             Assert-True (-not $before.ReadSucceeded -and $before.Error -match 'ActiveStore lookup failure' -and
-                $probe.RequestSent) 'An unmeasured pre-send rule read hid its error or replaced the actual TFTP measurement.'
+                -not $probe.RequestSent -and $probe.Detail -match 'before sending') 'An unavailable pre-send rule was treated as a responder timeout.'
         }
         if ($mode -eq 'InactiveReplyRule') {
             $before = $probe.RuleBeforeSendJson | ConvertFrom-Json
             Assert-True ($before.Rules[0].EnforcementStatus -eq 'LocalFirewallRulesDisallowed' -and
-                ([datetime]$before.CompletedAtUtc).ToUniversalTime() -le ([datetime]$probe.RequestAcceptedAtUtc).ToUniversalTime()) "The pre-send inactive rule or its ordering relative to RRQ acceptance was lost: rule=$($probe.RuleBeforeSendJson); accepted=$($probe.RequestAcceptedAtUtc)"
+                -not $before.Ready -and -not $probe.RequestSent) "The inactive rule was sent through or mislabeled as a network timeout: rule=$($probe.RuleBeforeSendJson)"
+        }
+        if ($mode -eq 'DelayedReplyRule') {
+            Assert-True ($probe.Result -eq 'Served' -and $state.RuleReads -eq 2 -and
+                $state.Sleeps.Count -eq 2 -and $state.Sleeps[0] -eq 100 -and $state.Sleeps[1] -eq 10 -and
+                $state.Requests.Count -eq 2) 'Delayed ActiveStore enforcement was not polled, settled, then sent in that order.'
         }
         if ($mode -eq 'Denied') { Assert-True ($probe.TftpErrorCode -eq 2) 'The service file-access error was flattened into a generic failure.' }
     }
     $state.Mode = 'Timeout'; $state.Created = 0; $state.Removed = 0; $state.Closed = 0; $state.NetworkCalls = 0
     $state.Requests.Clear()
-    $probe = Invoke-TftpReadProbe -Server '127.0.0.1' -FileName 'smsboot\PRI00008\x64\wdsmgfw.efi' -DeferFailureNetworkState
+    $probe = Invoke-TftpReadProbe -Server '127.0.0.1' -FileName 'smsboot\PRI00008\x64\wdsmgfw.efi' `
+        -RuleActivationTimeoutMs 0 -RuleSettleMs 0 -DeferFailureNetworkState
     Assert-True ($probe.Result -eq 'NoResponse' -and $probe.NetworkStateDeferred -and
         $state.NetworkCalls -eq 0 -and $state.Removed -eq 1 -and $state.Closed -eq 1) 'The diagnostic replay performed slow inventory before its completion boundary or skipped socket/rule cleanup.'
+}
+
+& {
+    $state = [pscustomobject]@{ Attempt = 0 }
+    function Invoke-TftpReadProbe {
+        param($Server, $FileName, $Port, $TimeoutMs)
+        $state.Attempt++
+        if ($state.Attempt -eq 1) {
+            return [pscustomobject]@{ Result = 'NoResponse'; FileName = $FileName; Detail = 'initial timeout' }
+        }
+        return [pscustomobject]@{ Result = 'Served'; FileName = $FileName; Detail = 'DATA block 1' }
+    }
+    $probe = Invoke-TftpReadProbeWithRetry -Server 'DP1.test' -FileName 'smsboot\PRI00008\x64\wdsmgfw.efi' `
+        -RetryDelayMs 0
+    Assert-True ($probe.Result -eq 'Served' -and $probe.Attempts -eq 2 -and $state.Attempt -eq 2 -and
+        $probe.OriginalProbe.Result -eq 'NoResponse') 'A transient NoResponse was not retried once with original evidence.'
+
+    $state.Attempt = 0
+    function Invoke-TftpReadProbe {
+        param($Server, $FileName, $Port, $TimeoutMs)
+        $state.Attempt++
+        return [pscustomobject]@{ Result = 'NoResponse'; FileName = $FileName; Detail = 'settled timeout' }
+    }
+    $probe = Invoke-TftpReadProbeWithRetry -Server 'DP1.test' -FileName 'smsboot\PRI00008\x64\wdsmgfw.efi' `
+        -RetryDelayMs 0
+    Assert-True ($probe.Result -eq 'NoResponse' -and $probe.Attempts -eq 2 -and $state.Attempt -eq 2 -and
+        $probe.OriginalProbe.Detail -eq 'settled timeout') 'A settled timeout was not bounded to exactly two failing attempts.'
 }
 
 & {
