@@ -11360,7 +11360,7 @@ function Invoke-TftpReadProbe {
             -Profile Any -PolicyStore PersistentStore -ErrorAction Stop
         $firewallRuleCreated = $true
         if (-not $rule -or $rule.Name -ne $firewallRuleName) { throw 'TFTP probe firewall rule creation returned no matching rule.' }
-        $ruleBeforeSend = [ordered]@{ CapturedAtUtc = [datetime]::UtcNow.ToString('o'); CompletedAtUtc = ''; ReadSucceeded = $false; Rules = @(); Error = ''; ErrorId = ''; Ready = $false; Reads = 0 }
+        $ruleBeforeSend = [ordered]@{ CapturedAtUtc = [datetime]::UtcNow.ToString('o'); CompletedAtUtc = ''; ReadSucceeded = $false; Rules = @(); Error = ''; ErrorId = ''; Ready = $false; ReadinessReason = ''; Reads = 0 }
         $activationTimer = [Diagnostics.Stopwatch]::StartNew()
         do {
             try {
@@ -11369,11 +11369,31 @@ function Invoke-TftpReadProbe {
                         Select-Object Name, Enabled, Direction, Action, Profile, EnforcementStatus, PrimaryStatus, Status,
                         PolicyStoreSource, PolicyStoreSourceType)
                 $ruleBeforeSend.ReadSucceeded = $true
-                $effectiveRule = @($ruleBeforeSend.Rules | Where-Object {
-                        $_.Name -eq $firewallRuleName -and "$($_.Enabled)" -eq 'True' -and
-                        "$($_.EnforcementStatus)" -notmatch 'Disallowed|Disabled|Inactive'
+                $matchingRules = @($ruleBeforeSend.Rules | Where-Object {
+                        $_.Name -eq $firewallRuleName -and "$($_.Enabled)" -match '^(True|1)$'
                     })
-                $ruleBeforeSend.Ready = $effectiveRule.Count -eq 1
+                if ($matchingRules.Count -ne 1) {
+                    $ruleBeforeSend.ReadinessReason = "expected one enabled matching ActiveStore rule; found $($matchingRules.Count)"
+                }
+                else {
+                    $enforcement = "$($matchingRules[0].EnforcementStatus)"
+                    $statusTokens = @($enforcement -split '[\s,;]+' | Where-Object { $_ })
+                    $fullyEnforced = $statusTokens.Count -eq 1 -and $statusTokens[0] -eq 'Full'
+                    $profileDoesNotFilter = $statusTokens.Count -eq 2 -and
+                        $statusTokens -contains 'DisabledInProfile' -and $statusTokens -contains 'ProfileInactive'
+                    if ($fullyEnforced -or $profileDoesNotFilter) {
+                        $ruleBeforeSend.Ready = $true
+                        $ruleBeforeSend.ReadinessReason = if ($fullyEnforced) {
+                            'the exact reply rule is fully enforced'
+                        }
+                        else {
+                            'the active firewall profile is disabled or inactive, so no reply filtering is applied'
+                        }
+                    }
+                    else {
+                        $ruleBeforeSend.ReadinessReason = "ActiveStore has blocking or inconclusive enforcement status '$enforcement'"
+                    }
+                }
             }
             catch {
                 $ruleBeforeSend.Error = $_.Exception.Message
@@ -11386,7 +11406,7 @@ function Invoke-TftpReadProbe {
         $ruleBeforeSend.CompletedAtUtc = [datetime]::UtcNow.ToString('o')
         $out.RuleBeforeSendJson = $ruleBeforeSend | ConvertTo-Json -Depth 5
         if (-not $ruleBeforeSend.Ready) {
-            $reason = if ($ruleBeforeSend.Error) { $ruleBeforeSend.Error } else { "ActiveStore rule never became effectively enforced" }
+            $reason = if ($ruleBeforeSend.Error) { $ruleBeforeSend.Error } elseif ($ruleBeforeSend.ReadinessReason) { $ruleBeforeSend.ReadinessReason } else { 'ActiveStore rule readiness could not be established' }
             throw "TFTP reply firewall rule setup failed before sending: $reason."
         }
         if ($RuleSettleMs -gt 0) { Start-Sleep -Milliseconds $RuleSettleMs }

@@ -298,7 +298,12 @@ finally {
         $enforcement = 'Full'
         $state.RuleReads++
         if ($state.Mode -eq 'InactiveReplyRule') { $enforcement = 'LocalFirewallRulesDisallowed' }
+        if ($state.Mode -eq 'OnlyProfileDisabled') { $enforcement = @('DisabledInProfile') }
+        if ($state.Mode -eq 'OnlyProfileInactive') { $enforcement = @('ProfileInactive') }
+        if ($state.Mode -eq 'PartialFullStatus') { $enforcement = @('PartiallyFull') }
+        if ($state.Mode -eq 'ExtraInactiveStatus') { $enforcement = @('DisabledInProfile', 'ProfileInactive', 'Unknown') }
         if ($state.Mode -eq 'DelayedReplyRule' -and $state.RuleReads -eq 1) { $enforcement = 'PolicyDisabled' }
+        if ($state.Mode -eq 'FirewallProfileDisabled') { $enforcement = @('DisabledInProfile', 'ProfileInactive') }
         [pscustomobject]@{ Name = $Name; Enabled = 'True'; EnforcementStatus = $enforcement }
     }
     function Start-Sleep {
@@ -315,7 +320,9 @@ finally {
         @{ Route = @([pscustomobject]@{ IPAddress = '127.0.0.1' }); ActiveProbeRule = $ProbeRuleName }
     }
     foreach ($mode in @('Served', 'Missing', 'Denied', 'Truncated', 'WrongBlock', 'EmptyData', 'WrongSender',
-            'Timeout', 'NetworkFailure', 'RuleLookupFailure', 'InactiveReplyRule', 'DelayedReplyRule', 'RuleFailure',
+            'Timeout', 'NetworkFailure', 'RuleLookupFailure', 'InactiveReplyRule', 'DelayedReplyRule',
+            'FirewallProfileDisabled', 'OnlyProfileDisabled', 'OnlyProfileInactive', 'PartialFullStatus',
+            'ExtraInactiveStatus', 'RuleFailure',
             'SendFailure', 'AbortFailure', 'CloseFailure', 'RemoveFailure')) {
         $state.Mode = $mode
         $state.Created = 0
@@ -330,6 +337,7 @@ finally {
         $expected = switch ($mode) {
             'Served' { 'Served' }
             'DelayedReplyRule' { 'Served' }
+            'FirewallProfileDisabled' { 'Served' }
             'Missing' { 'FileNotFound' }
             'Timeout' { 'NoResponse' }
             'NetworkFailure' { 'NoResponse' }
@@ -368,6 +376,15 @@ finally {
             Assert-True ($probe.Result -eq 'Served' -and $state.RuleReads -eq 2 -and
                 $state.Sleeps.Count -eq 2 -and $state.Sleeps[0] -eq 100 -and $state.Sleeps[1] -eq 10 -and
                 $state.Requests.Count -eq 2) 'Delayed ActiveStore enforcement was not polled, settled, then sent in that order.'
+        }
+        if ($mode -eq 'FirewallProfileDisabled') {
+            $before = $probe.RuleBeforeSendJson | ConvertFrom-Json
+            Assert-True ($before.Ready -and $before.ReadinessReason -match 'disabled or inactive' -and
+                $probe.Result -eq 'Served' -and $probe.RequestSent) 'A disabled active firewall profile was mistaken for an unenforced reply rule.'
+        }
+        if ($mode -in @('OnlyProfileDisabled', 'OnlyProfileInactive', 'PartialFullStatus', 'ExtraInactiveStatus')) {
+            $before = $probe.RuleBeforeSendJson | ConvertFrom-Json
+            Assert-True (-not $before.Ready -and -not $probe.RequestSent -and $state.Requests.Count -eq 0) "$mode was accepted as an exact nonblocking status set."
         }
         if ($mode -eq 'Denied') { Assert-True ($probe.TftpErrorCode -eq 2) 'The service file-access error was flattened into a generic failure.' }
     }
@@ -911,7 +928,7 @@ finally {
         function Get-NetFirewallRule {
             param($Name, $PolicyStore, [switch]$TracePolicyStore, $ErrorAction)
             Wait-CancellationBoundary 'RulePeek'
-            [pscustomobject]@{ Name = $Name; Enabled = 'True' }
+            [pscustomobject]@{ Name = $Name; Enabled = 'True'; EnforcementStatus = 'Full' }
         }
         function Remove-NetFirewallRule {
             param($Name, $PolicyStore, $ErrorAction)
