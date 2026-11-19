@@ -42,15 +42,18 @@ $script:Mounted = [System.Collections.Generic.List[string]]::new()
 $script:Dismounted = [System.Collections.Generic.List[string]]::new()
 $script:CopiedOs = [System.Collections.Generic.List[string]]::new()
 $script:BaselineCopies = 0
+$script:BaselinePending = $false
+$script:BaselineCopyFailures = 0
 $script:BaselineStrict = $false
 $script:StrictCalls = 0
+$script:ProbeMode = 'normal'
 
 function Get-TestPayloadState {
     $missing = @()
     if (-not $script:GuestState.W11) { $missing += 'Windows 11 24h2' }
     if (-not $script:GuestState.W10) { $missing += 'Windows 10 22h2' }
     [pscustomobject]@{
-        BaselinesPresent = $script:GuestState.Baselines
+        BaselinesPresent = $script:GuestState.Baselines -and -not $script:BaselinePending
         MissingOs        = [string[]]$missing
     }
 }
@@ -67,6 +70,25 @@ function Invoke-VmCommand {
         $ArgumentList
     )
     if ($RequireDomainIdentity) { $script:StrictCalls++ }
+    if ($DisplayName -eq 'Inspect Primary prepopulation payload') {
+        if ($script:ProbeMode -eq 'transient') {
+            return [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @('Transport interrupted') }
+        }
+        if ($script:ProbeMode -eq 'malformed') {
+            return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @([pscustomobject]@{ BaselinesPresent = 'yes'; MissingOs = @() }); ErrorDetails = @() }
+        }
+        if ($script:ProbeMode -eq 'ambiguous') {
+            return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @((Get-TestPayloadState), (Get-TestPayloadState)); ErrorDetails = @() }
+        }
+    }
+    if ($DisplayName -eq 'Prepare Primary baseline copy') {
+        $script:BaselinePending = $true
+        return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @('BASELINE_COPY_PENDING'); ErrorDetails = @() }
+    }
+    if ($DisplayName -eq 'Verify Primary baseline copy') {
+        $script:BaselinePending = $false
+        return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @('BASELINE_COPY_VERIFIED'); ErrorDetails = @() }
+    }
     if ($DisplayName -like 'Repair Primary OSD media*') {
         if ($DisplayName -match 'Windows 11') { $script:GuestState.W11 = $true; $script:CopiedOs.Add('Windows 11 24h2') }
         elseif ($DisplayName -match 'Windows 10') { $script:GuestState.W10 = $true; $script:CopiedOs.Add('Windows 10 22h2') }
@@ -89,6 +111,10 @@ function Copy-ItemSafe {
     if ($RequireDomainIdentity) { $script:StrictCalls++; $script:BaselineStrict = $true }
     $script:GuestState.Baselines = $true
     $script:BaselineCopies++
+    if ($script:BaselineCopyFailures -gt 0) {
+        $script:BaselineCopyFailures--
+        return $false
+    }
     return $true
 }
 
@@ -170,11 +196,99 @@ try {
     Assert-True ($script:Mounted.Count -eq 1 -and $script:Dismounted -contains $script:Mounted[0]) 'Repair ISO should be mounted and ejected.'
     Assert-True ($script:StrictCalls -gt 0) 'Phase 8 repair should require the domain identity.'
 
+    $script:GuestState = @{ Baselines = $false; W11 = $true; W10 = $true }
+    $script:BaselineCopyFailures = 1
+    $script:BaselineCopies = 0
+    $repairDiagnostics = @{}
+    $interruptedBaseline = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+        -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
+    Assert-True (-not $interruptedBaseline -and $repairDiagnostics.Retryable -and $script:BaselinePending) 'An interrupted baseline copy lost its retryable incomplete state.'
+    $retriedBaseline = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+        -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
+    Assert-True ($retriedBaseline -and $script:BaselineCopies -eq 2 -and -not $script:BaselinePending) 'A partial baseline was accepted without copying and verifying it again.'
+
     $script:GuestState = @{ Baselines = $true; W11 = $true; W10 = $false }
     Remove-Item -LiteralPath (Join-Path $tempRoot 'w10.iso') -Force
+    $repairDiagnostics = @{}
     $missingHostMedia = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
-        -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -RequireDomainIdentity
-    Assert-True (-not $missingHostMedia) 'Missing host ISO should fail the repair.'
+        -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -RequireDomainIdentity -Diagnostics $repairDiagnostics
+    Assert-True (-not $missingHostMedia -and $repairDiagnostics.Retryable -eq $false) 'Missing host ISO should fail permanently.'
+    foreach ($probeMode in 'transient', 'malformed', 'ambiguous') {
+        $script:ProbeMode = $probeMode
+        $repairDiagnostics = @{}
+        $probeResult = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+            -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
+        Assert-True (-not $probeResult -and $repairDiagnostics.Retryable -is [bool] -and
+            $repairDiagnostics.Retryable -eq ($probeMode -eq 'transient')) 'Probe failure classification allowed malformed state or rejected transient transport recovery.'
+    }
+    $script:ProbeMode = 'normal'
+
+    & {
+        $copyAssignment = $repairDefinition.Ast.Find({
+                param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$copyResult'
+            }, $true)
+        $copyArgument = $copyAssignment.Right.Find({ param($node) $node -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true)
+        $copyMedia = $copyArgument.ScriptBlock.GetScriptBlock()
+        $probeAssignment = $repairDefinition.Ast.Find({
+                param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$probeScript'
+            }, $true)
+        $probeArgument = $probeAssignment.Right.Find({ param($node) $node -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true)
+        $probeMedia = $probeArgument.ScriptBlock.GetScriptBlock()
+        $mediaRoot = Join-Path $tempRoot 'media'
+        $guestRoot = Join-Path $tempRoot 'guest-osd'
+        $null = New-Item -ItemType Directory -Path (Join-Path $mediaRoot 'sources') -Force
+        $null = New-Item -ItemType Directory -Path (Join-Path $guestRoot 'Windows 10 22h2\sources') -Force
+        Set-Content -LiteralPath (Join-Path $mediaRoot 'sources\install.wim') -Value 'complete-media-content' -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path $guestRoot 'Windows 10 22h2\sources\install.wim') -Value 'complete' -Encoding ASCII
+        $script:MediaDrive = 'Phase8Media' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $null = New-PSDrive -Name $script:MediaDrive -PSProvider FileSystem -Root $mediaRoot
+        function Get-Volume {
+            [CmdletBinding()]
+            param()
+            [pscustomobject]@{ DriveType = 'CD-ROM'; DriveLetter = $script:MediaDrive }
+        }
+        function Test-Path {
+            [CmdletBinding()]
+            param($LiteralPath, $PathType = 'Any')
+            if ($LiteralPath -eq 'C:\tools\baselines.zip') { return $true }
+            if ($LiteralPath -eq 'C:\tools\.memlabs-baselines.pending') { return $false }
+            Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType $PathType
+        }
+        function Copy-Item {
+            param($Path, $Destination, [switch]$Recurse, [switch]$Force, [switch]$Confirm, $ErrorAction)
+            if ($script:MediaCopyMode -eq 'interrupt') {
+                $null = New-Item -Path (Join-Path $Destination 'sources') -ItemType Directory -Force
+                Set-Content -LiteralPath (Join-Path $Destination 'sources\install.wim') -Value 'partial' -Encoding ASCII
+                throw [IO.IOException]::new('Synthetic interrupted media copy.')
+            }
+            Microsoft.PowerShell.Management\Copy-Item -Path $Path -Destination $Destination -Recurse -Force -Confirm:$false -ErrorAction Stop
+            if ($script:MediaCopyMode -eq 'truncate') {
+                Set-Content -LiteralPath (Join-Path $Destination 'sources\install.wim') -Value 'short' -Encoding ASCII
+            }
+        }
+        try {
+            $destination = Join-Path $guestRoot 'Windows 11 24h2'
+            foreach ($mode in 'interrupt', 'truncate') {
+                $script:MediaCopyMode = $mode
+                $failed = $false
+                try { $null = & $copyMedia $destination } catch { $failed = $true }
+                $stateAfterFailure = & $probeMedia $guestRoot
+                Assert-True ($failed -and
+                    (Microsoft.PowerShell.Management\Test-Path -LiteralPath (Join-Path $destination 'sources\install.wim') -PathType Leaf) -and
+                    (Microsoft.PowerShell.Management\Test-Path -LiteralPath (Join-Path $destination '.memlabs-copy.pending') -PathType Leaf) -and
+                    $stateAfterFailure.MissingOs -contains 'Windows 11 24h2') 'A partial install.wim was accepted as completed media.'
+            }
+            $script:MediaCopyMode = 'success'
+            $null = & $copyMedia $destination
+            $stateAfterRetry = & $probeMedia $guestRoot
+            Assert-True ($stateAfterRetry.MissingOs.Count -eq 0) 'A verified retry did not clear the incomplete-copy marker.'
+        }
+        finally {
+            Remove-PSDrive -Name $script:MediaDrive -Force -ErrorAction Stop
+        }
+    }
 
     $source = Get-Content -LiteralPath $scriptBlocksPath -Raw
     Assert-True (($source | Select-String -Pattern 'Repair-PrimaryPrepopulationPayload' -AllMatches).Matches.Count -eq 1) `
@@ -199,7 +313,8 @@ try {
         $preparationGates = @($phaseDefinition.Ast.FindAll({
                     param($node)
                     $node -is [Management.Automation.Language.TryStatementAst] -and
-                    $node.Body.Extent.Text -match '\bRepair-PrimaryPrepopulationPayload\b'
+                    $node.Body.Extent.Text -match '\bRepair-PrimaryPrepopulationPayload\b' -and
+                    $node.CatchClauses.Extent.Text -match 'PreflightFailed'
                 }, $true))
         Assert-True ($preparationGates.Count -eq 1) 'Expected one Primary preparation preflight.'
         $dispatchCommands = @($phaseDefinition.Ast.FindAll({
@@ -213,20 +328,28 @@ try {
         $preparationGate = [scriptblock]::Create(
             $preparationGates[0].Extent.Text + "`n`$script:PreflightDispatches++; return `$null")
         function Wait-ForVM {
-            param($VmName, $PathToVerify, $VmDomainName)
+            param($VmName, $PathToVerify, $VmDomainName, $TimeoutMinutes)
             $script:PreflightConnections.Add([pscustomobject]@{ Name = $VmName; Domain = $VmDomainName })
+            Assert-True ($TimeoutMinutes -eq 5) 'Preparation connectivity recovery lost its bounded wait.'
             $script:PreflightConnectable
         }
         function Repair-PrimaryPrepopulationPayload {
-            param($VirtualMachine, $VmDomainName, $AzureFileList, $AzureFilesPath, $Phase, [switch]$RequireDomainIdentity)
+            param($VirtualMachine, $VmDomainName, $AzureFileList, $AzureFilesPath, $Phase, [switch]$RequireDomainIdentity, $Diagnostics)
             Assert-True ($script:PreflightDispatches -eq 0) 'DSC dispatch raced Primary preparation.'
             $script:PreparationSeconds += 11 * 60
             Assert-True ($script:PreflightDispatches -eq 0) 'A preparation exceeding ten minutes exposed a DC recovery worker.'
             Assert-True ($RequireDomainIdentity -and $Phase -eq 8) 'Phase 8 preparation lost its domain-identity requirement.'
             $script:PreflightCopies.Add([pscustomobject]@{ Name = $VirtualMachine.vmName; Domain = $VmDomainName })
+            $attemptsForVm = @($script:PreflightCopies | Where-Object { $_.Name -eq $VirtualMachine.vmName }).Count
+            if ($VirtualMachine.vmName -eq $script:RetryTarget -and $attemptsForVm -le $script:TransientFailures) {
+                $Diagnostics.Retryable = $true
+                if ($script:PreparationMode -eq 'transient-throw') { throw [IO.IOException]::new('Synthetic interrupted copy.') }
+                return $false
+            }
             if ($script:PreparationMode -eq 'throw') { throw 'Synthetic payload copy failure.' }
             $script:PreparationMode -ne 'false'
         }
+        function Start-Sleep { param($Seconds) }
         function Write-Log {
             param($Message, [switch]$Failure)
             if ($Failure) { $script:PreflightFailures.Add([string]$Message) }
@@ -260,11 +383,18 @@ try {
                 @{ Mode = 'success'; Connected = $false; Expected = ''; Failed = $true },
                 @{ Mode = 'success'; Connected = $true; Only = @('PRI3'); Expected = 'PRI3'; Failed = $false },
                 @{ Mode = 'success'; Connected = $true; Only = @('SQL1'); Expected = ''; Failed = $false },
-                @{ Mode = 'success'; Connected = $true; RootDisabled = $true; Expected = 'PRI1'; Failed = $false }
+                @{ Mode = 'success'; Connected = $true; RootDisabled = $true; Expected = 'PRI1'; Failed = $false },
+                @{ Mode = 'success'; Connected = $true; TransientFailures = 1; Expected = 'PRI1,PRI1,PRI3'; Failed = $false },
+                @{ Mode = 'success'; Connected = $true; TransientFailures = 2; Expected = 'PRI1,PRI1,PRI1,PRI3'; Failed = $false },
+                @{ Mode = 'success'; Connected = $true; TransientFailures = 3; Expected = 'PRI1,PRI1,PRI1'; Failed = $true },
+                @{ Mode = 'transient-throw'; Connected = $true; TransientFailures = 2; Expected = 'PRI1,PRI1,PRI1,PRI3'; Failed = $false },
+                @{ Mode = 'success'; Connected = $true; TransientFailures = 2; RetryTarget = 'PRI3'; Expected = 'PRI1,PRI3,PRI3,PRI3'; Failed = $false }
             )) {
             $script:PreflightDispatches = 0
             $script:PreparationSeconds = 0
             $script:PreparationMode = $case.Mode
+            $script:TransientFailures = [int]$case.TransientFailures
+            $script:RetryTarget = if ($case.RetryTarget) { $case.RetryTarget } else { 'PRI1' }
             $script:PreflightConnectable = $case.Connected
             $script:PreflightConnections = [Collections.Generic.List[object]]::new()
             $script:PreflightCopies = [Collections.Generic.List[object]]::new()

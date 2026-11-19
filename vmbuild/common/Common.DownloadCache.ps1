@@ -1056,9 +1056,12 @@ function Repair-PrimaryPrepopulationPayload {
         [Parameter(Mandatory)][object]$AzureFileList,
         [Parameter(Mandatory)][string]$AzureFilesPath,
         [int]$Phase = 8,
-        [switch]$RequireDomainIdentity
+        [switch]$RequireDomainIdentity,
+        [hashtable]$Diagnostics = @{}
     )
 
+    if ($null -eq $Diagnostics) { $Diagnostics = @{} }
+    $Diagnostics.Retryable = $false
     $vmName = "$($VirtualMachine.vmName)"
     if (-not $vmName -or "$($VirtualMachine.role)" -ne 'Primary') {
         Write-Log "[Phase $Phase]: Primary prepopulation repair requires a Primary VM with a name." -Failure
@@ -1080,18 +1083,26 @@ function Repair-PrimaryPrepopulationPayload {
         param($osdRoot)
         $required = @('Windows 11 24h2', 'Windows 10 22h2')
         $missing = @($required | Where-Object {
-                -not (Test-Path -LiteralPath (Join-Path $osdRoot "$_\sources\install.wim") -PathType Leaf)
+                -not (Test-Path -LiteralPath (Join-Path $osdRoot "$_\sources\install.wim") -PathType Leaf) -or
+                (Test-Path -LiteralPath (Join-Path $osdRoot "$_\.memlabs-copy.pending") -PathType Leaf)
             })
         [pscustomobject]@{
-            BaselinesPresent = Test-Path -LiteralPath 'C:\tools\baselines.zip' -PathType Leaf
+            BaselinesPresent = (Test-Path -LiteralPath 'C:\tools\baselines.zip' -PathType Leaf) -and
+                -not (Test-Path -LiteralPath 'C:\tools\.memlabs-baselines.pending' -PathType Leaf)
             MissingOs        = [string[]]$missing
         }
     }
     $readState = {
         param([string]$DisplayName)
+        $Diagnostics.Retryable = $true
         $result = Invoke-VmCommand -VmName $vmName -VmDomainName $VmDomainName `
             -RequireDomainIdentity:$RequireDomainIdentity -AsJob -TimeoutSeconds 120 `
             -DisplayName $DisplayName -ScriptBlock $probeScript -ArgumentList $osdRoot
+        if (-not $result -or $result.ScriptBlockFailed -isnot [bool]) {
+            $Diagnostics.Retryable = $false
+            Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation probe returned an invalid result envelope." -Failure
+            return $null
+        }
         if ($result.ScriptBlockFailed) {
             $detail = (@($result.ErrorDetails) + @($result.ScriptBlockOutput) | Where-Object { $_ }) -join '; '
             Write-Log "[Phase $Phase]: ${vmName}: Could not inspect Primary prepopulation payload: $detail" -Failure
@@ -1100,11 +1111,13 @@ function Repair-PrimaryPrepopulationPayload {
         $states = @($result.ScriptBlockOutput | Where-Object {
                 $_ -and $_.PSObject.Properties['BaselinesPresent'] -and $_.PSObject.Properties['MissingOs']
             })
-        if ($states.Count -eq 0) {
-            Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation probe returned no state." -Failure
+        if ($states.Count -ne 1 -or $states[0].BaselinesPresent -isnot [bool]) {
+            $Diagnostics.Retryable = $false
+            Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation probe returned invalid or ambiguous state." -Failure
             return $null
         }
-        return $states[-1]
+        $Diagnostics.Retryable = $false
+        return $states[0]
     }
 
     $state = & $readState 'Inspect Primary prepopulation payload'
@@ -1125,6 +1138,24 @@ function Repair-PrimaryPrepopulationPayload {
             Write-Log "[Phase $Phase]: ${vmName}: Cannot repair baselines.zip; host source is missing: $baselineSource" -Failure
             return $false
         }
+        $baselineLength = (Get-Item -LiteralPath $baselineSource -ErrorAction Stop).Length
+        $Diagnostics.Retryable = $true
+        $pendingBaseline = Invoke-VmCommand -VmName $vmName -VmDomainName $VmDomainName `
+            -RequireDomainIdentity:$RequireDomainIdentity -AsJob -TimeoutSeconds 120 `
+            -DisplayName 'Prepare Primary baseline copy' -ScriptBlock {
+            New-Item -Path 'C:\tools' -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            Set-Content -LiteralPath 'C:\tools\.memlabs-baselines.pending' -Value 'Copy pending' -Encoding ASCII -ErrorAction Stop
+            'BASELINE_COPY_PENDING'
+        }
+        if (-not $pendingBaseline -or $pendingBaseline.ScriptBlockFailed -isnot [bool]) {
+            $Diagnostics.Retryable = $false
+            Write-Log "[Phase $Phase]: ${vmName}: Baseline preparation returned an invalid result envelope." -Failure
+            return $false
+        }
+        if ($pendingBaseline.ScriptBlockFailed -or $pendingBaseline.ScriptBlockOutput -notcontains 'BASELINE_COPY_PENDING') {
+            Write-Log "[Phase $Phase]: ${vmName}: Could not mark baselines.zip as incomplete before copying." -Failure
+            return $false
+        }
         $baselineCopied = Copy-ItemSafe -VmName $vmName -VMDomainName $VmDomainName `
             -Path $baselineSource -Destination 'C:\tools' -Recurse -Container -Force `
             -RequireDomainIdentity:$RequireDomainIdentity
@@ -1132,8 +1163,27 @@ function Repair-PrimaryPrepopulationPayload {
             Write-Log "[Phase $Phase]: ${vmName}: Failed to copy baselines.zip to C:\tools." -Failure
             return $false
         }
+        $verifiedBaseline = Invoke-VmCommand -VmName $vmName -VmDomainName $VmDomainName `
+            -RequireDomainIdentity:$RequireDomainIdentity -AsJob -TimeoutSeconds 120 `
+            -DisplayName 'Verify Primary baseline copy' -ScriptBlock {
+            param([long]$expectedLength)
+            $baseline = Get-Item -LiteralPath 'C:\tools\baselines.zip' -ErrorAction Stop
+            if ($baseline.Length -ne $expectedLength) { throw 'Copied baselines.zip length does not match the host source.' }
+            Remove-Item -LiteralPath 'C:\tools\.memlabs-baselines.pending' -Force -ErrorAction Stop
+            'BASELINE_COPY_VERIFIED'
+        } -ArgumentList $baselineLength
+        if (-not $verifiedBaseline -or $verifiedBaseline.ScriptBlockFailed -isnot [bool]) {
+            $Diagnostics.Retryable = $false
+            Write-Log "[Phase $Phase]: ${vmName}: Baseline verification returned an invalid result envelope." -Failure
+            return $false
+        }
+        if ($verifiedBaseline.ScriptBlockFailed -or $verifiedBaseline.ScriptBlockOutput -notcontains 'BASELINE_COPY_VERIFIED') {
+            Write-Log "[Phase $Phase]: ${vmName}: Could not verify the completed baselines.zip copy." -Failure
+            return $false
+        }
     }
 
+    $Diagnostics.Retryable = $false
     $isoById = @{}
     foreach ($osId in $requiredOs) {
         $entries = @($AzureFileList.OSISO | Where-Object { $_.id -eq $osId })
@@ -1151,6 +1201,7 @@ function Repair-PrimaryPrepopulationPayload {
     }
 
     foreach ($osId in $missingOs) {
+        $Diagnostics.Retryable = $false
         $isoPath = $isoById[$osId]
         if (-not $isoPath -or -not (Test-Path -LiteralPath $isoPath -PathType Leaf)) {
             Write-Log "[Phase $Phase]: ${vmName}: Cannot repair '$osId'; host ISO is missing: $isoPath" -Failure
@@ -1160,6 +1211,7 @@ function Repair-PrimaryPrepopulationPayload {
         foreach ($knownIsoPath in @($isoById.Values | Where-Object { $_ })) {
             Dismount-IsoFromVm -VmName $vmName -IsoPath $knownIsoPath -Context 'OS prepopulation' -Phase $Phase
         }
+        $Diagnostics.Retryable = $true
         if (-not (Mount-IsoOnVm -VmName $vmName -IsoPath $isoPath -Context "OS prepopulation ($osId)" -Phase $Phase)) {
             Write-Log "[Phase $Phase]: ${vmName}: Failed to mount '$osId' ISO for prepopulation repair." -Failure
             return $false
@@ -1187,9 +1239,14 @@ function Repair-PrimaryPrepopulationPayload {
                     throw "Expected exactly one mounted OS ISO with sources\install.wim; found $($media.Count): $visible"
                 }
                 $sourceRoot = "$($media[0].DriveLetter):\"
-                New-Item -Path $destination -ItemType Directory -Force | Out-Null
+                $sourceWim = Get-Item -LiteralPath (Join-Path $sourceRoot 'sources\install.wim') -ErrorAction Stop
+                New-Item -Path $destination -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                $pendingPath = Join-Path $destination '.memlabs-copy.pending'
+                Set-Content -LiteralPath $pendingPath -Value 'Copy pending' -Encoding ASCII -ErrorAction Stop
                 Copy-Item -Path "$sourceRoot*" -Destination $destination -Recurse -Force -Confirm:$false -ErrorAction Stop
                 $wim = Get-Item -LiteralPath (Join-Path $destination 'sources\install.wim') -ErrorAction Stop
+                if ($wim.Length -ne $sourceWim.Length) { throw 'Copied install.wim length does not match the mounted media.' }
+                Remove-Item -LiteralPath $pendingPath -Force -ErrorAction Stop
                 [pscustomobject]@{ Path = $wim.FullName; Length = $wim.Length }
             } -ArgumentList $destination
             if ($copyResult.ScriptBlockFailed) {
@@ -1207,6 +1264,7 @@ function Repair-PrimaryPrepopulationPayload {
     if ($null -eq $verified) { return $false }
     $stillMissing = @($verified.MissingOs | ForEach-Object { "$_" })
     if (-not $verified.BaselinesPresent -or $stillMissing.Count -gt 0) {
+        $Diagnostics.Retryable = $true
         Write-Log "[Phase $Phase]: ${vmName}: Prepopulation repair verification failed (baselinesPresent=$($verified.BaselinesPresent), missingOS=$($stillMissing -join ', '))." -Failure
         return $false
     }

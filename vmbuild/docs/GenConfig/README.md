@@ -471,9 +471,26 @@ opens the only top-level directly or asks which hierarchy to edit.
 
 Phase 8 verifies and repairs enabled Primary prepopulation payloads before any
 DSC workers start. This keeps DC readiness recovery from rebooting a Primary
-during an OS-media copy; preparation failures stop the phase before dispatch.
-Local DSC recovery uses the phase's resolved node role, including `SqlServer`
-for a referenced remote SQL VM configured as a `DomainMember`.
+during an OS-media copy. Transient connection/copy failures get up to two
+automatic retries for the affected Primary; missing host media, invalid manifest
+entries, and malformed probe results stop preparation without retries. Interrupted
+copies stay marked incomplete until the copied files are verified.
+
+Missed DSC pushes and failed DSC resources share a separate budget of two local
+recovery attempts per node. Phase 8 reconnects, restores a missing guest phase
+script when its host source exists, and compiles locally or resumes the existing
+MOF. Completed peers are not redeployed, current-run completion receipts prevent
+replaying completed work, and busy LCMs/running workflows are left alone. Local
+recovery uses the phase's resolved node role, including `SqlServer` for a remote
+SQL VM configured as a `DomainMember`. Invalid configuration, another run's
+readiness token, or exhaustion of the recovery budget remains a clear failure.
+Stranded pending configurations can resume when no reboot or workflow is active.
+Even after the action budget is used, a read-only check confirms completion or
+active work before declaring exhaustion; it cannot start a third recovery.
+The same guards precede AD-related restart decisions. Completion checks use the
+authoritative phase role: CAS/Primary workflow receipts are distinct from
+current-run `Complete!` status on nodes that do not run their own workflow.
+These retries do not reset existing reboot limits or restart the whole phase.
 
 ### ConfigMgr picker and action submenus
 

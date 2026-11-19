@@ -1375,6 +1375,159 @@ function Resolve-WaitPhaseResult {
     return $result
 }
 
+function Invoke-Phase8DscRecovery {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$VmDomainName,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock,
+        [Parameter(Mandatory)][scriptblock]$ProbeScriptBlock,
+        [Parameter(Mandatory)][hashtable]$RecoveryState,
+        [object[]]$ArgumentList,
+        [object[]]$ProbeArgumentList,
+        [string]$FailureText,
+        [string]$DscSourcePath,
+        [switch]$ProbeOnly
+    )
+
+    if (($RecoveryState.Attempts -isnot [int] -and $RecoveryState.Attempts -isnot [long]) -or
+        $RecoveryState.Attempts -lt 0 -or $RecoveryState.Attempts -gt 2) {
+        throw 'Phase 8 DSC recovery requires an attempt count between zero and two.'
+    }
+    $outcome = [pscustomobject]@{
+        Succeeded = $false
+        Deferred = $false
+        Exhausted = $false
+        Permanent = $false
+        Ready = $false
+        Result = $null
+        Reason = ''
+    }
+    $permanentPattern = 'Could not find mandatory property|Compilation errors occurred|NODE_ROLE_UNRESOLVED|MOF_FOLDER_UNRESOLVED|RUN_GUID_MISMATCH|Cannot bind (argument|parameter)|Access is denied|Logon failure|user name or password is incorrect'
+    while ($true) {
+        $probe = $null
+        for ($probeTry = 0; $probeTry -lt 2; $probeTry++) {
+            try {
+                $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock $ProbeScriptBlock `
+                    -ArgumentList $ProbeArgumentList -DisplayName 'DSC: Phase 8 recovery safety probe' -AsJob -TimeoutSeconds 60 -SessionMaxRetries 1
+            }
+            catch {
+                if ($_.Exception -isnot [System.TimeoutException] -and
+                    $_.Exception -isnot [System.IO.IOException] -and
+                    $_.Exception -isnot [System.Management.Automation.Remoting.PSRemotingTransportException]) { throw }
+                $probe = [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @($_.Exception.Message) }
+            }
+            if (-not $probe -or $probe.ScriptBlockFailed -isnot [bool] -or -not $probe.ScriptBlockFailed) { break }
+        }
+        $outcome.Result = $probe
+        if (-not $probe -or $probe.ScriptBlockFailed -isnot [bool]) {
+            $outcome.Permanent = $true
+            $outcome.Reason = 'Recovery safety probe returned an invalid result envelope.'
+            return $outcome
+        }
+        if ($probe.ScriptBlockFailed) {
+            $outcome.Exhausted = $true
+            $outcome.Reason = 'Cannot verify recovery ownership/readiness after two read-only probes.'
+            return $outcome
+        }
+        $probeMessages = @($probe.ScriptBlockOutput)
+        if ($probeMessages.Count -ne 1 -or $probeMessages[0] -isnot [string]) {
+            $outcome.Permanent = $true
+            $outcome.Reason = 'Recovery safety probe returned invalid or ambiguous state.'
+            return $outcome
+        }
+        $probeStatus = $probeMessages[0]
+        if ($probeStatus -eq 'ALREADY_COMPLETE') {
+            $outcome.Succeeded = $true
+            return $outcome
+        }
+        if ($probeStatus -in @('LCM_Busy', 'LCM_PendingReboot', 'WORKFLOW_RUNNING', 'MOF_NOT_READY', 'REBOOT_STATE_UNKNOWN')) {
+            $outcome.Deferred = $true
+            $outcome.Reason = $probeStatus
+            return $outcome
+        }
+        if ($probeStatus -ne 'READY' -or $FailureText -match $permanentPattern) {
+            $outcome.Permanent = $true
+            $outcome.Reason = if ($probeStatus -ne 'READY') { $probeStatus } else { $FailureText }
+            return $outcome
+        }
+        if ($ProbeOnly) {
+            $outcome.Ready = $true
+            return $outcome
+        }
+        if ($RecoveryState.Attempts -ge 2) {
+            $outcome.Exhausted = $true
+            if (-not $outcome.Reason) { $outcome.Reason = 'The two automatic DSC recovery attempts were already used.' }
+            return $outcome
+        }
+        try {
+            $result = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -ScriptBlock $ScriptBlock `
+                -ArgumentList $ArgumentList -DisplayName 'DSC: Phase 8 automatic recovery' -AsJob -TimeoutSeconds 300 -SessionMaxRetries 1
+        }
+        catch {
+            if ($_.Exception -isnot [System.TimeoutException] -and
+                $_.Exception -isnot [System.IO.IOException] -and
+                $_.Exception -isnot [System.Management.Automation.Remoting.PSRemotingTransportException]) { throw }
+            $result = [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @($_.Exception.Message) }
+        }
+        $outcome.Result = $result
+        if ($result -and $result.ScriptBlockFailed -is [bool] -and -not $result.ScriptBlockFailed) {
+            $messages = @($result.ScriptBlockOutput)
+            if ($messages.Count -eq 1 -and $messages[0] -in @('LCM_Busy', 'LCM_PendingReboot', 'WORKFLOW_RUNNING', 'MOF_NOT_READY', 'REBOOT_STATE_UNKNOWN')) {
+                $outcome.Deferred = $true
+                $outcome.Reason = [string]$messages[0]
+                return $outcome
+            }
+            if ($messages.Count -eq 1 -and $messages[0] -eq 'ALREADY_COMPLETE') {
+                $outcome.Succeeded = $true
+                return $outcome
+            }
+        }
+
+        $RecoveryState.Attempts++
+        Write-Log "[Phase 8]: ${VmName}: automatic DSC recovery attempt $($RecoveryState.Attempts)/2." -Warning
+        if (-not $result -or $result.ScriptBlockFailed -isnot [bool]) {
+            $outcome.Permanent = $true
+            $outcome.Reason = 'Recovery returned an invalid result envelope.'
+            return $outcome
+        }
+        $detail = (@($result.ErrorDetails) + @($result.ScriptBlockOutput) | Where-Object { $_ }) -join '; '
+        $outcome.Reason = $detail
+        if ($detail -match $permanentPattern -or @($result.ScriptBlockOutput) -contains 'COMPILE_FAILED') {
+            $outcome.Permanent = $true
+            return $outcome
+        }
+        if (-not $result.ScriptBlockFailed -and @($result.ScriptBlockOutput).Count -eq 1 -and
+            $result.ScriptBlockOutput -contains 'STARTED') {
+            $outcome.Succeeded = $true
+            return $outcome
+        }
+        if (-not $result.ScriptBlockFailed -and
+            (@($result.ScriptBlockOutput) -contains 'SCRIPT_NOT_FOUND' -or
+                @($result.ScriptBlockOutput) -contains 'MOF_NOT_FOUND')) {
+            if ([string]::IsNullOrWhiteSpace($DscSourcePath) -or -not (Test-Path -LiteralPath $DscSourcePath -PathType Leaf)) {
+                $outcome.Permanent = $true
+                $outcome.Reason = "The host Phase 8 DSC source is missing: $DscSourcePath"
+                return $outcome
+            }
+            if ($RecoveryState.Attempts -lt 2) {
+                $copied = Copy-ItemSafe -VmName $VmName -VmDomainName $VmDomainName -Path $DscSourcePath `
+                    -Destination 'C:\staging\DSC\phases' -Force -RequireDomainIdentity
+                if (-not $copied) { $outcome.Reason = 'Could not restore the guest Phase 8 DSC source.' }
+            }
+        }
+        elseif (-not $result.ScriptBlockFailed) {
+            $outcome.Permanent = $true
+            $outcome.Reason = "Unexpected recovery status: $detail"
+            return $outcome
+        }
+        if ($RecoveryState.Attempts -lt 2) {
+            Write-Log "[Phase 8]: ${VmName}: transient DSC recovery failure; reconnecting for the remaining attempt. $($outcome.Reason)" -Warning
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+
 function Start-Phase {
 
     param(
@@ -2407,13 +2560,31 @@ function Start-PhaseJobs {
                 $primaryCmOptions = if ($primary.cmOptions) { $primary.cmOptions } else { $deployConfig.cmOptions }
                 if (-not $primaryCmOptions.PrePopulateObjects) { continue }
                 $prepopulationDomain = if ($primary.domain) { $primary.domain } else { $deployConfig.parameters.DomainName }
+                if ([string]::IsNullOrWhiteSpace($prepopulationDomain)) { throw "$($primary.vmName) has no domain for prepopulation preparation." }
                 Write-Log "[Phase 8] Preparing $($primary.vmName) prepopulation payload before dispatching DSC workers."
-                $connected = Wait-ForVM -VmName $primary.vmName -PathToVerify 'C:\Users' -VmDomainName $prepopulationDomain
-                if (-not $connected) { throw "$($primary.vmName) is not connectable for prepopulation preparation." }
-                $payloadReady = Repair-PrimaryPrepopulationPayload -VirtualMachine $primary `
-                    -VmDomainName $prepopulationDomain -AzureFileList $Common.AzureFileList `
-                    -AzureFilesPath $Common.AzureFilesPath -Phase $Phase -RequireDomainIdentity
-                if (-not $payloadReady) { throw "$($primary.vmName) prepopulation payload repair failed. See preceding diagnostics." }
+                for ($preparationRetry = 0; $preparationRetry -le 2; $preparationRetry++) {
+                    $payloadReady = $false
+                    $payloadDiagnostics = @{ Retryable = $true }
+                    try {
+                        $connected = Wait-ForVM -VmName $primary.vmName -PathToVerify 'C:\Users' -VmDomainName $prepopulationDomain -TimeoutMinutes 5
+                        if ($connected) {
+                            $payloadDiagnostics.Retryable = $false
+                            $payloadReady = Repair-PrimaryPrepopulationPayload -VirtualMachine $primary `
+                                -VmDomainName $prepopulationDomain -AzureFileList $Common.AzureFileList `
+                                -AzureFilesPath $Common.AzureFilesPath -Phase $Phase -RequireDomainIdentity -Diagnostics $payloadDiagnostics
+                        }
+                    }
+                    catch {
+                        if ($payloadDiagnostics.Retryable -isnot [bool] -or -not $payloadDiagnostics.Retryable) { throw }
+                        Write-Log "[Phase 8] $($primary.vmName) preparation connection/copy failed: $($_.Exception.Message)" -Warning
+                    }
+                    if ($payloadReady) { break }
+                    if ($payloadDiagnostics.Retryable -isnot [bool] -or -not $payloadDiagnostics.Retryable -or $preparationRetry -ge 2) {
+                        throw "$($primary.vmName) prepopulation preparation failed after $preparationRetry recovery attempt(s). See preceding diagnostics."
+                    }
+                    Write-Log "[Phase 8] $($primary.vmName) transient preparation failure; reconnecting and retrying incomplete payloads (recovery $($preparationRetry + 1)/2)." -Warning
+                    Start-Sleep -Seconds 5
+                }
             }
         }
         catch {

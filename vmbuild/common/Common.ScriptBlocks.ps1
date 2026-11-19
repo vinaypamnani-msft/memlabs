@@ -8682,6 +8682,88 @@ $global:VM_Config = {
         $dscStatusPolls = 0
         [int]$failCount = 0
         $dscRecoveryAttempted = $false
+        $phase8RecoveryState = @{ Attempts = 0 }
+        $phase8RequiresWorkflowReceipt = $true
+        if ($Phase -eq 8) {
+            $phase8CurrentNodes = @($ConfigurationData.AllNodes | Where-Object { $_.NodeName -eq $currentItem.vmName })
+            if ($phase8CurrentNodes.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$phase8CurrentNodes[0].Role)) {
+                Write-Log "[Phase 8]: $($currentItem.vmName): Cannot determine the authoritative completion contract." -Failure -OutputStream
+                return
+            }
+            $phase8RequiresWorkflowReceipt = $phase8CurrentNodes[0].Role -in @('CAS', 'Primary')
+        }
+        $phase8RecoveryProbe = {
+            param([string]$expectedRunId, [string]$phaseRunGuid, [bool]$RequireExistingMof, [bool]$RequireWorkflowReceipt = $true)
+            $workflowRoot = 'C:\staging\DSC'
+            $completedPath = Join-Path $workflowRoot 'ScriptWorkflow.completed.runid'
+            if ($expectedRunId -and (Test-Path -LiteralPath $completedPath) -and
+                (Get-Content -LiteralPath $completedPath -ErrorAction Stop | Select-Object -First 1) -eq $expectedRunId) {
+                return 'ALREADY_COMPLETE'
+            }
+            $readyGuid = Get-Content -LiteralPath (Join-Path $workflowRoot 'RunGuid.txt') -ErrorAction Stop |
+                Select-Object -First 1
+            if ($readyGuid -ne $phaseRunGuid) { return 'RUN_GUID_MISMATCH' }
+            if (-not $RequireWorkflowReceipt -and (Test-Path -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt'))) {
+                $statusText = Get-Content -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt') -Raw -ErrorAction Stop
+                if ($statusText -and $statusText.Trim() -in @('Complete!', 'Setting up ConfigMgr. Status: Complete!')) { return 'ALREADY_COMPLETE' }
+            }
+            $lcm = Get-DscLocalConfigurationManager -ErrorAction Stop
+            if ($lcm.LCMState -notin @('Idle', 'PendingConfiguration')) { return "LCM_$($lcm.LCMState)" }
+            $workflow = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' }
+            if (@($workflow | Where-Object { $_.State -eq 'Running' }).Count -gt 0) { return 'WORKFLOW_RUNNING' }
+            if ($lcm.LCMState -eq 'PendingConfiguration') {
+                $lastApply = Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1
+                if (-not $lastApply -or $lastApply.RebootRequested -isnot [bool]) { return 'REBOOT_STATE_UNKNOWN' }
+                if ($lastApply.RebootRequested) { return 'LCM_PendingReboot' }
+            }
+            $configurationRoot = Join-Path $env:SystemRoot 'System32\Configuration'
+            if ($RequireExistingMof -and
+                -not (Test-Path -LiteralPath (Join-Path $configurationRoot 'Current.mof')) -and
+                -not (Test-Path -LiteralPath (Join-Path $configurationRoot 'Pending.mof'))) { return 'MOF_NOT_READY' }
+            'READY'
+        }
+        $phase8ResumeExisting = {
+            param([string]$expectedRunId, [string]$phaseRunGuid, [bool]$RequireWorkflowReceipt = $true)
+            $workflowRoot = 'C:\staging\DSC'
+            $completedPath = Join-Path $workflowRoot 'ScriptWorkflow.completed.runid'
+            if ($expectedRunId -and (Test-Path -LiteralPath $completedPath) -and
+                (Get-Content -LiteralPath $completedPath -ErrorAction Stop | Select-Object -First 1) -eq $expectedRunId) {
+                return 'ALREADY_COMPLETE'
+            }
+            $readyGuid = Get-Content -LiteralPath (Join-Path $workflowRoot 'RunGuid.txt') -ErrorAction Stop |
+                Select-Object -First 1
+            if ($readyGuid -ne $phaseRunGuid) { throw 'RUN_GUID_MISMATCH: The guest is not prepared for this Phase 8 run.' }
+            if (-not $RequireWorkflowReceipt -and (Test-Path -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt'))) {
+                $statusText = Get-Content -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt') -Raw -ErrorAction Stop
+                if ($statusText -and $statusText.Trim() -in @('Complete!', 'Setting up ConfigMgr. Status: Complete!')) { return 'ALREADY_COMPLETE' }
+            }
+            $lcm = Get-DscLocalConfigurationManager -ErrorAction Stop
+            if ($lcm.LCMState -notin @('Idle', 'PendingConfiguration')) { return "LCM_$($lcm.LCMState)" }
+            $workflow = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' }
+            if (@($workflow | Where-Object { $_.State -eq 'Running' }).Count -gt 0) { return 'WORKFLOW_RUNNING' }
+            if ($lcm.LCMState -eq 'PendingConfiguration') {
+                $lastApply = Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1
+                if (-not $lastApply -or $lastApply.RebootRequested -isnot [bool]) { return 'REBOOT_STATE_UNKNOWN' }
+                if ($lastApply.RebootRequested) { return 'LCM_PendingReboot' }
+            }
+            $configurationRoot = Join-Path $env:SystemRoot 'System32\Configuration'
+            if (-not (Test-Path -LiteralPath (Join-Path $configurationRoot 'Current.mof')) -and
+                -not (Test-Path -LiteralPath (Join-Path $configurationRoot 'Pending.mof'))) { return 'MOF_NOT_READY' }
+            try {
+                $null = Start-DscConfiguration -UseExisting -ErrorAction Stop
+            }
+            catch {
+                $startFailure = $_
+                $lcmAfterStart = Get-DscLocalConfigurationManager -ErrorAction Stop
+                if ($lcmAfterStart.LCMState -in @('Busy', 'PendingReboot')) { return "LCM_$($lcmAfterStart.LCMState)" }
+                if ($lcmAfterStart.LCMState -eq 'PendingConfiguration') {
+                    $lastApply = Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1
+                    if ($lastApply.RebootRequested) { return 'LCM_PendingReboot' }
+                }
+                throw $startFailure
+            }
+            'STARTED'
+        }
         $dcReadySince = $null  # track when DC became reachable for non-DC nodes
         $sqlaoStuckRemediated = $false   # one-shot guard: bounce SQL on a stuck SQLAO replica at most once per deploy
         try {
@@ -8699,7 +8781,7 @@ $global:VM_Config = {
                 # (no heartbeat), defer the timer until it comes back.
                 $nodeCount = @($ConfigurationData.AllNodes | Where-Object { $_.NodeName -ne '*' }).Count
                 $recoveryMinutes = 3 + [Math]::Max(0, ($nodeCount - 10) * 20 / 60)
-                if ($skipStartDsc -and $noStatus -and -not $dscRecoveryAttempted) {
+                if ($skipStartDsc -and $noStatus -and (-not $dscRecoveryAttempted -or $Phase -eq 8)) {
                     # Find DC readiness: don't start the recovery clock until
                     # the DC VM has a heartbeat AND AD Web Services are responding.
                     # Heartbeat OK just means the OS is running; ADWS/DNS/Kerberos
@@ -8857,18 +8939,42 @@ $global:VM_Config = {
                         else {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min ($nodeCount nodes) since DC ready and the guest LCM is Idle -- DC failed to push config. Attempting local compile+start." -Warning -OutputStream
                     $DSC_RecoverLocal = {
-                        param($DscFolder)
+                        param($DscFolder, [string]$expectedRunId, [bool]$RequireWorkflowReceipt = $true, [string]$phaseRunGuid)
+                        $Phase = $using:Phase
                         $log = "C:\staging\DSC\DSC_Init.log"
                         $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                         "`r`n=====`r`nDSC_RecoverLocal: $time`r`n=====" | Out-File $log -Append -Force
 
-                        $lcm = Get-DscLocalConfigurationManager
-                        if ($lcm.LCMState -ne 'Idle') {
+                        $completedPath = 'C:\staging\DSC\ScriptWorkflow.completed.runid'
+                        if ($expectedRunId -and (Test-Path -LiteralPath $completedPath) -and
+                            (Get-Content -LiteralPath $completedPath -ErrorAction Stop | Select-Object -First 1) -eq $expectedRunId) {
+                            return 'ALREADY_COMPLETE'
+                        }
+                        if ($Phase -eq 8 -and -not $RequireWorkflowReceipt) {
+                            $readyGuid = Get-Content -LiteralPath 'C:\staging\DSC\RunGuid.txt' -ErrorAction Stop |
+                                Select-Object -First 1
+                            if ($readyGuid -ne $phaseRunGuid) { return 'RUN_GUID_MISMATCH' }
+                            $statusPath = 'C:\staging\DSC\DSC_Status.txt'
+                            if (Test-Path -LiteralPath $statusPath) {
+                                $statusText = Get-Content -LiteralPath $statusPath -Raw -ErrorAction Stop
+                                if ($statusText -and $statusText.Trim() -in @('Complete!', 'Setting up ConfigMgr. Status: Complete!')) { return 'ALREADY_COMPLETE' }
+                            }
+                        }
+                        $lcm = Get-DscLocalConfigurationManager -ErrorAction Stop
+                        if ($lcm.LCMState -ne 'Idle' -and -not ($Phase -eq 8 -and $lcm.LCMState -eq 'PendingConfiguration')) {
                             "LCM is $($lcm.LCMState), skipping" | Out-File $log -Append
                             return "LCM_$($lcm.LCMState)"
                         }
+                        if ($Phase -eq 8 -and $lcm.LCMState -eq 'PendingConfiguration') {
+                            $lastApply = Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1
+                            if (-not $lastApply -or $lastApply.RebootRequested -isnot [bool]) { return 'REBOOT_STATE_UNKNOWN' }
+                            if ($lastApply.RebootRequested) { return 'LCM_PendingReboot' }
+                        }
+                        if ($Phase -eq 8 -or $expectedRunId) {
+                            $workflow = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' }
+                            if (@($workflow | Where-Object { $_.State -eq 'Running' }).Count -gt 0) { return 'WORKFLOW_RUNNING' }
+                        }
 
-                        $Phase = $using:Phase
                         $deployConfig = Get-Content 'C:\staging\DSC\deployConfig.json' -Force | ConvertFrom-Json
                         $dscRole = "Phase$Phase"
                         $mofFolderName = $using:mofFolderName
@@ -8948,7 +9054,7 @@ $global:VM_Config = {
 
                         "Compiling $dscRole for $nodeName (Role: $($cd.AllNodes[1].Role))" | Out-File $log -Append
                         try {
-                            & "$dscRole" -DeployConfigPath $deployConfigPath -AdminCreds $creds -ConfigurationData $cd -OutputPath $dscConfigPath
+                            $null = & "$dscRole" -DeployConfigPath $deployConfigPath -AdminCreds $creds -ConfigurationData $cd -OutputPath $dscConfigPath
                         }
                         catch {
                             "Compilation failed: $_" | Out-File $log -Append
@@ -8961,18 +9067,50 @@ $global:VM_Config = {
                             return "MOF_NOT_FOUND"
                         }
 
-                        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
                         "Starting DSC locally from $dscConfigPath" | Out-File $log -Append
-                        $null = Start-DscConfiguration -Path $dscConfigPath -Force
+                        if ($Phase -eq 8) {
+                            $lcmBeforeStart = Get-DscLocalConfigurationManager -ErrorAction Stop
+                            if ($lcmBeforeStart.LCMState -notin @('Idle', 'PendingConfiguration')) { return "LCM_$($lcmBeforeStart.LCMState)" }
+                            if ($lcmBeforeStart.LCMState -eq 'PendingConfiguration') {
+                                $lastApply = Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1
+                                if (-not $lastApply -or $lastApply.RebootRequested -isnot [bool]) { return 'REBOOT_STATE_UNKNOWN' }
+                                if ($lastApply.RebootRequested) { return 'LCM_PendingReboot' }
+                            }
+                            $workflow = Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq 'ScriptWorkflow' }
+                            if (@($workflow | Where-Object { $_.State -eq 'Running' }).Count -gt 0) { return 'WORKFLOW_RUNNING' }
+                            $null = Start-DscConfiguration -Path $dscConfigPath -ErrorAction Stop
+                        }
+                        else {
+                            Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
+                            $null = Start-DscConfiguration -Path $dscConfigPath -Force
+                        }
                         return "STARTED"
                     }
-                    $recoveryResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_RecoverLocal -ArgumentList $DscFolder -DisplayName "DSC: Local Recovery" -AsJob -TimeoutSeconds 300
+                    $localRecovery = $null
+                    if ($Phase -eq 8) {
+                        $localRecovery = Invoke-Phase8DscRecovery -VmName $currentItem.vmName -VmDomainName $domainName `
+                            -ScriptBlock $DSC_RecoverLocal -ArgumentList @($DscFolder, $expectedRunId, $phase8RequiresWorkflowReceipt, $phaseRunGuid) `
+                            -ProbeScriptBlock $phase8RecoveryProbe -ProbeArgumentList @($expectedRunId, $phaseRunGuid, $false, $phase8RequiresWorkflowReceipt) `
+                            -RecoveryState $phase8RecoveryState -DscSourcePath (Join-Path $rootPath 'DSC\phases\Phase8.ps1')
+                        if ($localRecovery.Permanent) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Automatic DSC recovery cannot repair this configuration: $($localRecovery.Reason)" -Failure -OutputStream
+                            return
+                        }
+                        if ($localRecovery.Exhausted) { $firstStatusRecoveryExhausted = $true }
+                        $recoveryResult = $localRecovery.Result
+                    }
+                    else {
+                        $recoveryResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_RecoverLocal -ArgumentList $DscFolder -DisplayName "DSC: Local Recovery" -AsJob -TimeoutSeconds 300
+                    }
                     $recoveryOutput = if ($recoveryResult.ScriptBlockOutput) { $recoveryResult.ScriptBlockOutput } else { "no output" }
                     if (@($recoveryOutput) -contains 'NODE_ROLE_UNRESOLVED') {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Local recovery cannot resolve its authoritative DSC role. Aborting instead of compiling the wrong node." -Failure -OutputStream
                         return
                     }
-                    if ($recoveryResult.ScriptBlockFailed) {
+                    if ($localRecovery -and ($localRecovery.Deferred -or $localRecovery.Exhausted)) {
+                        $dcReadySince = [DateTime]::UtcNow
+                    }
+                    elseif ($recoveryResult.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC local recovery failed: $recoveryOutput" -Warning
                     }
                     else {
@@ -8996,16 +9134,26 @@ $global:VM_Config = {
                     $dscStatusPolls = 0 # Do this every 30 seconds or so
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Polling DSC Status via Get-DscConfigurationStatus" -Verbose
                     $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
+                        param([bool]$ReturnStatus)
                         $ProgressPreference = 'SilentlyContinue'
                         try { 
-                            Get-DscConfigurationStatus | out-null
+                            if ($ReturnStatus) {
+                                Get-DscConfigurationStatus -ErrorAction Stop | Select-Object -First 1
+                            }
+                            else {
+                                Get-DscConfigurationStatus | Out-Null
+                            }
                         }
-                        catch {}
+                        catch {
+                            if ($ReturnStatus) { throw }
+                        }
 
                         $ProgressPreference = 'Continue'
-                    } -SuppressLog:$suppressNoisyLogging
+                    } -ArgumentList ($Phase -eq 8) -SuppressLog:$suppressNoisyLogging
 
-                    if ($dscStatus.ScriptBlockFailed -or $dscStatus.ScriptBlockOutput.Error) {
+                    $phase8DscFailure = $Phase -eq 8 -and $dscStatus.ScriptBlockFailed -is [bool] -and
+                        -not $dscStatus.ScriptBlockFailed -and $dscStatus.ScriptBlockOutput.Status -eq 'Failure'
+                    if ($dscStatus.ScriptBlockFailed -or ($dscStatus.ScriptBlockOutput.Error -and -not $phase8DscFailure)) {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Get-DscConfigurationStatus did not complete"
                         Write-log "[Phase $Phase]: $($currentItem.vmName): $($dscStatus.ScriptBlockOutput) $($dscStatus.ScriptBlockOutput) $($dscStatus.ScriptBlockOutput.Error)"
                         $dscFails++
@@ -9040,7 +9188,45 @@ $global:VM_Config = {
                         # This cmd fails when DSC is running, so it's 'good'
                     }
                     else {
-                        if ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -ne "Success") {
+                        if ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -ne "Success" -and
+                            ($Phase -ne 8 -or -not $noStatus)) {
+                            if ($Phase -eq 8 -and -not $noStatus -and $dscStatus.ScriptBlockOutput.Status -eq 'Failure') {
+                                $phase8FailureText = (@($dscStatus.ScriptBlockOutput.Error) +
+                                    @($dscStatus.ScriptBlockOutput.ResourcesNotInDesiredState | ForEach-Object { $_.Error })) -join '; '
+                                if ($phase8FailureText -notmatch 'ADServerDownException') {
+                                    $resumeRecovery = Invoke-Phase8DscRecovery -VmName $currentItem.vmName -VmDomainName $domainName `
+                                        -ScriptBlock $phase8ResumeExisting -ArgumentList @($expectedRunId, $phaseRunGuid, $phase8RequiresWorkflowReceipt) `
+                                        -ProbeScriptBlock $phase8RecoveryProbe -ProbeArgumentList @($expectedRunId, $phaseRunGuid, $true, $phase8RequiresWorkflowReceipt) `
+                                        -RecoveryState $phase8RecoveryState -FailureText $phase8FailureText
+                                    if ($resumeRecovery.Succeeded -or $resumeRecovery.Deferred) {
+                                        if ($resumeRecovery.Succeeded) {
+                                            if (@($resumeRecovery.Result.ScriptBlockOutput) -contains 'ALREADY_COMPLETE') {
+                                                Write-Log "[Phase $Phase]: $($currentItem.vmName): The current run already completed; leaving its configuration unchanged." -LogOnly
+                                            }
+                                            else {
+                                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Resumed failed DSC locally (automatic recovery $($phase8RecoveryState.Attempts)/2); retaining completed nodes and this run's configuration." -Warning -OutputStream
+                                            }
+                                            if ($FailStopWatch) { $FailStopWatch.Stop(); $FailStopWatch = $null }
+                                            $failCount = 0
+                                            $lasterror = $null
+                                        }
+                                        continue
+                                    }
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Automatic DSC recovery stopped after $($phase8RecoveryState.Attempts) attempt(s): $($resumeRecovery.Reason)" -Failure -OutputStream
+                                    return
+                                }
+                                else {
+                                    $adRecoveryGuard = Invoke-Phase8DscRecovery -VmName $currentItem.vmName -VmDomainName $domainName `
+                                        -ScriptBlock $phase8ResumeExisting -ProbeScriptBlock $phase8RecoveryProbe `
+                                        -ProbeArgumentList @($expectedRunId, $phaseRunGuid, $true, $phase8RequiresWorkflowReceipt) `
+                                        -RecoveryState $phase8RecoveryState -ProbeOnly
+                                    if ($adRecoveryGuard.Succeeded -or $adRecoveryGuard.Deferred) { continue }
+                                    if (-not $adRecoveryGuard.Ready) {
+                                        Write-Log "[Phase 8]: $($currentItem.vmName): Cannot safely recover the AD failure: $($adRecoveryGuard.Reason)" -Failure -OutputStream
+                                        return
+                                    }
+                                }
+                            }
                             $badResources = $dscStatus.ScriptBlockOutput.ResourcesNotInDesiredState
                             $adServerRestarted = $false
                             foreach ($badResource in $badResources) {
@@ -9258,7 +9444,7 @@ $global:VM_Config = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): First DSC status arrived while recovery exhaustion was being confirmed; processing the fresh result instead of failing." -LogOnly
                     }
                     else {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC recovery exhausted after $staleRestartCount restart/resume attempt(s); a fresh read still found no status or completion sentinel." -Failure -OutputStream
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC recovery exhausted after $staleRestartCount restart/resume attempt(s) and $($phase8RecoveryState.Attempts) automatic local recovery attempt(s); a fresh read still found no status or completion sentinel." -Failure -OutputStream
                         break
                     }
                 }
