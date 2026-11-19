@@ -135,7 +135,7 @@ The site-side TFTP probe binds its UDP socket before sending the request and
 temporarily allows inbound replies only from the resolved DP address to that
 socket's local port and process. TFTP's first DATA block normally comes from a
 server-selected transfer port, not UDP/69; an outbound UDP/69 request alone does
-not permit that reply through a stateful client firewall. The uniquely named
+not guarantee that reply can pass a stateful client firewall. The uniquely named
 local firewall rule is removed in `finally` on success and failure. Probe setup,
 malformed replies, and cleanup errors fail required delivery coverage.
 
@@ -144,6 +144,96 @@ client's path. If `SMSPXE.log` records the matching request and `sending`, inspe
 the return path and receiving host's firewall rather than claiming the responder
 is down or rebuilding the boot WIM. Local policy can still prevent a probe reply;
 the rule does not override explicit blocks or domain policy.
+
+Failed TFTP probes now preserve their own probe ID, UTC start/end times, resolved
+server, local/reply ports, process/executable, accepted request byte count, and
+native socket error. A `Network.json` snapshot is taken **before** closing the
+socket or removing its temporary rule. It includes the rule's actual
+`ActiveStore` enforcement state, effective profile/local-rule-merge settings,
+UDP socket ownership and process paths, PXE/firewall services, selected route,
+interfaces, enabled UDP/Any-protocol rule candidates and their address,
+application, service and policy-source filters. Rules are not selected by a
+PXE-looking display name. Peer/UTC-correlated WFP packet/connection drops retain
+their runtime filter IDs. Missing auditing, unreadable tables and truncation are
+explicit; an empty event table is not proof that no packet was dropped.
+The retained-rule limit is applied after enabled UDP/Any selection, so disabled
+rules cannot crowd out an enabled blocker. GPO source names are explicitly queried.
+
+On failure, the host also makes **one labelled diagnostic replay per failing
+DP**, not one per boot package. Uniquely named `netsh trace` sessions run on the
+site server and responder around that replay. They capture IPv4 UDP involving
+the original responder, multilayer packet evidence and WFP events. Each ETL is
+circular, limited to 8 MB, with packets truncated to 128 bytes; native commands
+have a 20-second limit and remoting/copies have separate bounded deadlines.
+The replay uses the original resolved IP so its traffic cannot silently escape
+the capture filter after a DNS change. It never makes the original validation
+pass, even if the replay serves DATA.
+
+The replay defers slow network inventory. Both owned sessions are stopped in a
+separate lightweight pass in `finally` **before** either endpoint's inventory,
+hashing or copying, preventing slow client-side processing from evicting the
+responder's replay from its circular buffer. A per-session stop-intent marker
+also rejects queued starts and makes an already-running start stop its own
+session if its acknowledgement races cancellation. Stop markers are retained
+when verified collection/cleanup cannot finish.
+Failure to create/protect/write stop metadata cannot suppress the exact owned
+session's native stop. A validated native-stop acknowledgement also permits
+independent ETL collection when confirmation-file persistence failed; the
+metadata/cancellation limitation remains explicit in the evidence.
+Authoritative stop and unreleased-start reconciliation execute in `finally`,
+including actual asynchronous pipeline cancellation during directory/ACL/marker
+work or the final start-intent inspection. Offline regressions exercise real
+runspace `BeginStop` cancellation, not only thrown exceptions.
+Existing named traces and global Packet Monitor
+filters are not stopped or modified. ETLs are copied beside the VMBuild log and
+SHA256-verified before their exact guest files/directories are removed. A failed
+copy leaves the guest path in the evidence; a failed stop identifies the exact
+owned session that needs attention. No firewall/audit policy, DP configuration,
+content, or service is repaired/reset by this capture.
+
+Include **all `*-Tftp-*` JSON and ETL files** with the usual site/DP logs.
+`*-Evidence.json` links the original probe, before-cleanup network snapshots,
+replay, endpoint snapshots, native trace command results, verified host ETLs and
+any incomplete collection. Read packet/drop events to locate the failed leg;
+nonempty ETLs do not by themselves prove an RRQ or DATA packet was captured.
+The subsequent DP log capture preserves any replay activity, while the separate
+original/replay timestamps prevent historical `SMSPXE` transfers being treated
+as evidence for this failure.
+An original, replay or post-stop JSON write failure is reported independently;
+it cannot suppress the other snapshots, paired stops or verified ETL copies.
+
+The built-in offline converter can render an endpoint ETL without starting a
+capture or changing policy:
+
+```powershell
+netsh trace convert input="<endpoint.etl>" output="<endpoint.txt>" dump=TXT report=no
+```
+
+Compare the replay's actual RRQ and DATA tuple on both endpoints and inspect WFP
+packet-drop/filter IDs. A running service is not proof of a UDP/69 binding, and
+missing Security events can mean auditing was disabled.
+
+### Testable theories for a stale PXE log and a TFTP timeout
+
+The November 18 failure followed a PXE responder restart, with no contemporaneous
+request in the collected log. That makes listener/binding and request-admission
+faults plausible, but does not prove either. The diagnostic manifest now includes
+`TheoryChecks`, with these hypotheses and their confirming measurements:
+
+| Theory | Evidence that distinguishes it |
+|---|---|
+| Responder did not bind correctly after restart, or another process owns UDP/69 | `Responder-Before-Network.json` is collected before replay. Compare exact `RequestedPortEndpoints`/count, bound IP, service PID and process creation time with the post-replay responder snapshot. Requested-port rows are retained separately from the capped service-socket inventory. A failed endpoint query is not a measured zero. |
+| Wrong/stale DNS or ARP, wrong route/NIC, or host virtual-network filtering | Compare the resolved DP IP with responder addresses, guest NIC/MAC and address state, peer/gateway neighbor state, and host VM adapter/switch/standard/extended ACL snapshots. Then locate the same RRQ in both endpoint ETLs. A MAC mismatch is meaningful only on the correct on-link path; a gateway MAC is not the remote server's MAC. |
+| DP firewall/WFP rejects the RRQ | A DP-side request plus a matching drop/filter ID and effective rule/GPO data supports admission failure. A source RRQ absent at the DP instead directs attention to the intervening path. Missing or overwritten packet evidence remains unmeasured. |
+| Client reply allowance is not active when the RRQ is sent, or DATA is blocked | `RuleBeforeSendJson` reads the exact rule from `ActiveStore` before sending, preserving lookup errors, enforcement and UTC interval. Compare it with request-accepted UTC, after-failure policy, server-selected transfer port and client ephemeral-port drop evidence. The read does not wait for policy or turn an unmeasured rule into a failed TFTP result. |
+| Responder/file-serving path is unhealthy despite installed content | After captures stop and remote evidence collection completes, one separately labelled DP-local TFTP control requests the **same DP address and filename**. Compare local/remote results and actual `TftpErrorCode` (for example file-not-found versus access violation). Local success proves service capability only at control time, not that the earlier remote path worked. An unconfirmed capture stop suppresses this extra traffic. |
+| Collected log is stale or no longer the active logging target | Snapshots record UTC/size of a clearly labelled service-relative `SMSPXE.log` candidate. Compare with the local protocol control and the subsequent SYSTEM DP log inventory. A successful control with unchanged candidate log demands logging/path investigation, not an assertion that no request reached the service. |
+
+Pre-replay inspection and host-policy read failures are explicit and cannot
+suppress independent captures. The DP-local control never makes original
+validation pass, changes content, or restarts a service. Protocol and rule
+diagnostic cancellation still closes the original socket and removes only its
+owned reply rule; real runspace cancellation covers both new read boundaries.
 
 For these **validation-only** corrections, update the host source and rerun
 **Phase 11**. Rerun Phase 8 only when producer access or content distribution

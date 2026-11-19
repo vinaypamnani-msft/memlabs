@@ -10712,9 +10712,589 @@ function Invoke-Phase11LocalSystemProbe {
     return $output
 }
 
-# Collector scriptblocks used by the DP / pull-DP diagnostics below. Each is
-# self-contained (runs IN the guest), resolves its log directory from the
-# authoritative registry key, and tails the named logs into a hashtable.
+function Get-Phase11TftpNetworkState {
+    param(
+        [string]$PeerAddress,
+        [int]$LocalPort = 69,
+        [string]$ProbeRuleName = '',
+        [string]$Context = 'Observation',
+        [datetime]$SinceUtc = [datetime]::UtcNow.AddMinutes(-2)
+    )
+
+    $state = [ordered]@{
+        CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+        Context = $Context
+        ComputerName = $env:COMPUTERNAME
+        PeerAddress = $PeerAddress
+        LocalPort = $LocalPort
+        ProbeRuleName = $ProbeRuleName
+        EventWindowStartUtc = $SinceUtc.ToUniversalTime().ToString('o')
+        Errors = [Collections.Generic.List[string]]::new()
+        AddressQuerySucceeded = $false
+        ServiceQuerySucceeded = $false
+        UdpQuerySucceeded = $false
+        UdpEndpoints = @()
+        RequestedPortEndpointCount = $null
+        RequestedPortEndpoints = @()
+        PxeLogCandidates = [Collections.Generic.List[object]]::new()
+        FirewallRules = [Collections.Generic.List[object]]::new()
+        FirewallRulesTruncated = $false
+        WfpStatus = 'Unmeasured'
+        WfpEvents = [Collections.Generic.List[object]]::new()
+    }
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        try { $state.Identity = $identity.Name }
+        finally { $identity.Dispose() }
+    }
+    catch { $state.Errors.Add("Probe identity: $($_.Exception.Message)") }
+    try {
+        $state.Addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                Select-Object IPAddress, InterfaceIndex, InterfaceAlias, PrefixLength, SkipAsSource, AddressState)
+        $state.AddressQuerySucceeded = $true
+        $state.ConnectionProfiles = @(Get-NetConnectionProfile -ErrorAction Stop |
+                Select-Object InterfaceIndex, InterfaceAlias, NetworkCategory, IPv4Connectivity)
+    }
+    catch { $state.Errors.Add("IP addresses/connection profiles: $($_.Exception.Message)") }
+    try {
+        $state.Adapters = @(Get-NetAdapter -ErrorAction Stop |
+                Select-Object -First 20 Name, InterfaceIndex, InterfaceDescription, MacAddress, Status, LinkSpeed)
+    }
+    catch { $state.Errors.Add("Adapter/MAC inventory: $($_.Exception.Message)") }
+    if ($PeerAddress) {
+        try {
+            $state.Route = @(Find-NetRoute -RemoteIPAddress $PeerAddress -ErrorAction Stop |
+                    Select-Object IPAddress, InterfaceIndex, InterfaceAlias, DestinationPrefix, NextHop, RouteMetric)
+        }
+        catch { $state.Errors.Add("Route to $PeerAddress`: $($_.Exception.Message)") }
+    }
+    else { $state.Errors.Add('Peer IPv4 address unavailable; return route and peer-correlated WFP events are unmeasured.') }
+    try {
+        $neighborAddresses = @(@($PeerAddress) + @($state.Route | Where-Object NextHop |
+                    ForEach-Object { "$($_.NextHop)" }) | Where-Object { $_ -and $_ -ne '0.0.0.0' } | Select-Object -Unique)
+        $state.Neighbors = @(Get-NetNeighbor -AddressFamily IPv4 -ErrorAction Stop |
+                Where-Object { "$($_.IPAddress)" -in $neighborAddresses } |
+                Select-Object -First 40 IPAddress, LinkLayerAddress, State, InterfaceIndex, InterfaceAlias)
+    }
+    catch { $state.Errors.Add("Peer/gateway ARP neighbor state: $($_.Exception.Message)") }
+    $services = @()
+    try {
+        $services = @(Get-CimInstance -ClassName Win32_Service -Filter "Name='SccmPxe' OR Name='WDSServer' OR Name='MpsSvc' OR Name='BFE'" `
+                -OperationTimeoutSec 10 -ErrorAction Stop |
+                Select-Object Name, State, StartMode, StartName, ProcessId, PathName)
+        $state.Services = $services
+        $state.ServiceQuerySucceeded = $true
+    }
+    catch { $state.Errors.Add("PXE/firewall services: $($_.Exception.Message)") }
+    foreach ($pxeService in @($services | Where-Object Name -eq 'SccmPxe')) {
+        if ("$($pxeService.PathName)" -notmatch '^\s*"?(.+?\.exe)"?(?:\s|$)') {
+            $state.Errors.Add('SccmPxe executable path could not be parsed for candidate log freshness.')
+            continue
+        }
+        $log = [ordered]@{ Path = ''; Source = 'Service-relative candidate, not an authoritative configured log path'; Measured = $false; Error = '' }
+        try {
+            $candidate = [IO.Path]::Combine([IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($Matches[1])), 'logs\SMSPXE.log')
+            $log.Path = $candidate
+            $file = Get-Item -LiteralPath $candidate -ErrorAction Stop
+            $log.Measured = $true; $log.Bytes = $file.Length; $log.LastWriteTimeUtc = $file.LastWriteTimeUtc.ToString('o')
+        }
+        catch { $log.Error = $_.Exception.Message }
+        $state.PxeLogCandidates.Add([pscustomobject]$log)
+    }
+    try {
+        $serviceIds = @($services | Where-Object { $_.ProcessId -gt 0 } | ForEach-Object { $_.ProcessId })
+        $endpoints = @(Get-NetUDPEndpoint -ErrorAction Stop | Where-Object {
+                $_.LocalPort -eq $LocalPort -or $_.OwningProcess -eq $PID -or $_.OwningProcess -in $serviceIds
+            })
+        $state.UdpQuerySucceeded = $true
+        $requestedEndpoints = @($endpoints | Where-Object LocalPort -eq $LocalPort)
+        $state.RequestedPortEndpointCount = $requestedEndpoints.Count
+        $state.RequestedPortEndpoints = @($requestedEndpoints | Select-Object -First 20 LocalAddress, LocalPort, OwningProcess, CreationTime)
+        if ($requestedEndpoints.Count -gt 20) { $state.Errors.Add('Requested-port endpoint rows truncated to 20; exact count retained.') }
+        $state.UdpEndpoints = @($endpoints | Select-Object -First 100 LocalAddress, LocalPort, OwningProcess, CreationTime)
+        if ($endpoints.Count -gt 100) { $state.Errors.Add('UDP endpoint inventory truncated to 100 rows.') }
+        $ownerIds = @(@($endpoints.OwningProcess) + @($serviceIds) + @($PID) | Select-Object -Unique)
+        $ownerFilter = ($ownerIds | ForEach-Object { "ProcessId=$([int]$_)" }) -join ' OR '
+        $state.Processes = @(Get-CimInstance -ClassName Win32_Process -Filter $ownerFilter -OperationTimeoutSec 10 -ErrorAction Stop |
+                Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CreationDate)
+    }
+    catch { $state.Errors.Add("UDP endpoint/process ownership: $($_.Exception.Message)") }
+    try {
+        $state.FirewallProfiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop |
+                Select-Object Name, Enabled, DefaultInboundAction, DefaultOutboundAction, AllowInboundRules,
+                AllowLocalFirewallRules, AllowLocalIPsecRules, LogAllowed, LogBlocked, LogFileName)
+    }
+    catch { $state.Errors.Add("Effective firewall profiles: $($_.Exception.Message)") }
+    if ($ProbeRuleName) {
+        try {
+            $state.ActiveProbeRule = @(Get-NetFirewallRule -PolicyStore ActiveStore -TracePolicyStore -Name $ProbeRuleName -ErrorAction Stop |
+                    Select-Object Name, Enabled, Direction, Action, Profile, EnforcementStatus, PrimaryStatus,
+                    Status, PolicyStoreSource, PolicyStoreSourceType)
+        }
+        catch { $state.Errors.Add("Probe rule in ActiveStore before cleanup: $($_.Exception.Message)") }
+    }
+    try {
+        $enabledRules = @(Get-NetFirewallRule -PolicyStore ActiveStore -TracePolicyStore -Enabled True -ErrorAction Stop |
+                Where-Object { "$($_.Enabled)" -eq 'True' })
+        foreach ($rule in $enabledRules) {
+            try {
+                $portFilters = @(Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop |
+                        Where-Object { "$($_.Protocol)" -in @('UDP', '17', 'Any', '256') })
+                if ($portFilters.Count -eq 0) { continue }
+                if ($state.FirewallRules.Count -ge 100) {
+                    $state.FirewallRulesTruncated = $true
+                    $state.Errors.Add('Enabled UDP/Any firewall rule inventory truncated to 100 rules; absence of a matching rule is not conclusive.')
+                    break
+                }
+                foreach ($portFilter in $portFilters) {
+                    $state.FirewallRules.Add([pscustomobject]@{
+                        Name = $rule.Name; DisplayName = $rule.DisplayName; Direction = "$($rule.Direction)"
+                        Action = "$($rule.Action)"; Profile = "$($rule.Profile)"
+                        EnforcementStatus = "$($rule.EnforcementStatus)"; Status = "$($rule.Status)"
+                        PolicyStoreSource = $rule.PolicyStoreSource; PolicyStoreSourceType = "$($rule.PolicyStoreSourceType)"
+                        Protocol = "$($portFilter.Protocol)"; LocalPort = $portFilter.LocalPort; RemotePort = $portFilter.RemotePort
+                        Addresses = @(Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop |
+                                Select-Object LocalAddress, RemoteAddress)
+                        Applications = @(Get-NetFirewallApplicationFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop |
+                                Select-Object Program, Package)
+                        Services = @(Get-NetFirewallServiceFilter -AssociatedNetFirewallRule $rule -ErrorAction Stop |
+                                Select-Object Service)
+                    })
+                }
+            }
+            catch { $state.Errors.Add("Effective firewall rule '$($rule.Name)': $($_.Exception.Message)") }
+        }
+    }
+    catch { $state.Errors.Add("Effective UDP/Any firewall rules: $($_.Exception.Message)") }
+    if ($PeerAddress) {
+        try {
+            $peer = [Net.IPAddress]::Parse($PeerAddress)
+            if ($peer.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { throw 'Expected an IPv4 peer.' }
+            $since = $SinceUtc.ToUniversalTime().ToString('o')
+            $xpath = "*[System[(EventID=5152 or EventID=5157) and TimeCreated[@SystemTime >= '$since']]] and *[EventData[Data[@Name='Protocol']='17' and (Data[@Name='SourceAddress']='$peer' or Data[@Name='DestAddress']='$peer')]]"
+            $events = @(Get-WinEvent -LogName Security -FilterXPath $xpath -MaxEvents 101 -ErrorAction Stop)
+            $state.WfpStatus = 'Measured; no absence-of-drop inference without enabled auditing'
+            if ($events.Count -gt 100) { $state.Errors.Add('Peer-correlated WFP event inventory truncated to 100 events.') }
+            foreach ($wfpEvent in @($events | Select-Object -First 100)) {
+                $data = @{}
+                foreach ($field in @(([xml]$wfpEvent.ToXml()).Event.EventData.Data)) { $data["$($field.Name)"] = "$($field.'#text')" }
+                $state.WfpEvents.Add([pscustomobject]@{
+                    Id = $wfpEvent.Id; RecordId = $wfpEvent.RecordId
+                    TimeCreatedUtc = $wfpEvent.TimeCreated.ToUniversalTime().ToString('o'); Data = $data
+                })
+            }
+        }
+        catch {
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') {
+                $state.WfpStatus = 'No matching events returned; auditing may be disabled, so this does not prove no packets were dropped'
+            }
+            else { $state.Errors.Add("Peer-correlated WFP events: $($_.Exception.Message)") }
+        }
+    }
+    return $state
+}
+
+function Invoke-Phase11TftpTraceCommand {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = Join-Path $env:windir 'System32\netsh.exe'
+    $startInfo.Arguments = ($ArgumentList | ForEach-Object { '"{0}"' -f $_.Replace('"', '\"') }) -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $started = $false
+    try {
+        $process.StartInfo = $startInfo
+        $started = $process.Start()
+        if (-not $started) { throw 'netsh trace process did not start.' }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(20000)) { throw "netsh $($ArgumentList -join ' ') exceeded 20 seconds." }
+        return @{
+            ExitCode = $process.ExitCode
+            StdOut = $stdout.GetAwaiter().GetResult()
+            StdErr = $stderr.GetAwaiter().GetResult()
+        }
+    }
+    finally {
+        if ($started -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction Stop }
+        $process.Dispose()
+    }
+}
+
+function Invoke-Phase11TftpCapture {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Inspect', 'Start', 'Stop', 'Collect', 'Cleanup')][string]$Action,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{32}$')][string]$TraceId,
+        [Parameter(Mandatory = $true)][ValidateSet('Client', 'Responder')][string]$Role,
+        [string]$ServerAddress,
+        [string]$PeerAddress,
+        [int]$LocalPort = 69,
+        [ValidateSet('True', 'False')][string]$StopAcknowledged = 'False',
+        [datetime]$SinceUtc = [datetime]::UtcNow.AddMinutes(-2)
+    )
+
+    $sessionName = "MemLabsTftp-$TraceId-$Role"
+    $directory = Join-Path $env:windir "Temp\$sessionName"
+    $path = Join-Path $directory 'Tftp.etl'
+    $stopRequested = Join-Path $directory 'Stop.requested'
+    $stopConfirmed = Join-Path $directory 'Stop.confirmed'
+    $answer = @{
+        TraceId = $TraceId; Role = $Role; Action = $Action; SessionName = $sessionName
+        ComputerName = $env:COMPUTERNAME; CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+        Succeeded = $false; TraceStopped = $false; Path = $path; Bytes = 0; SHA256 = ''
+        CommandLog = ''; Error = ''; NetworkStateJson = ''; NetworkStateError = ''
+    }
+    $startReleased = $false
+    try {
+        if ($Action -eq 'Cleanup') {
+            Remove-Item -LiteralPath $path -ErrorAction Stop
+            foreach ($marker in @($stopRequested, $stopConfirmed)) {
+                if (Test-Path -LiteralPath $marker -PathType Leaf -ErrorAction Stop) { Remove-Item -LiteralPath $marker -ErrorAction Stop }
+            }
+            Remove-Item -LiteralPath $directory -ErrorAction Stop
+        }
+        elseif ($Action -eq 'Collect') {
+            if ($StopAcknowledged -ne 'True' -and -not (Test-Path -LiteralPath $stopConfirmed -PathType Leaf -ErrorAction Stop)) {
+                throw 'No confirmed stop for this owned capture; a possibly live ETL will not be copied.'
+            }
+            $answer.TraceStopped = $true
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            if ($file.Length -le 0 -or $file.Length -gt 16MB) { throw "Unexpected trace size $($file.Length); capture is not claimed complete." }
+            $answer.Bytes = $file.Length
+            $answer.SHA256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+        elseif ($Action -ne 'Inspect') {
+            if ($Action -eq 'Start') {
+                $address = [Net.IPAddress]::Parse($ServerAddress)
+                if ($address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { throw 'The trace requires the original responder IPv4 address.' }
+                $null = New-Item -ItemType Directory -Path $directory -ErrorAction Stop
+                $arguments = @('trace', 'start', "sessionname=$sessionName", 'capture=yes', 'capturetype=physical',
+                    'report=disabled', 'persistent=no', 'maxSize=8', 'fileMode=circular', 'overwrite=no',
+                    'correlation=disabled', 'perfMerge=no', "traceFile=$path", 'Ethernet.Type=IPv4',
+                    'Protocol=UDP', "IPv4.Address=$address", 'PacketTruncateBytes=128', 'CaptureMultiLayer=yes',
+                    'provider=Microsoft-Windows-WFP', 'level=5')
+            }
+            try {
+                if ($Action -eq 'Stop') { $null = New-Item -ItemType Directory -Path $directory -Force -ErrorAction Stop }
+                $acl = [Security.AccessControl.DirectorySecurity]::new()
+                $acl.SetAccessRuleProtection($true, $false)
+                foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+                    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                            [Security.Principal.SecurityIdentifier]$sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+                }
+                Set-Acl -LiteralPath $directory -AclObject $acl -ErrorAction Stop
+                if ($Action -eq 'Stop') {
+                    Set-Content -LiteralPath $stopRequested -Value ([datetime]::UtcNow.ToString('o')) -Encoding UTF8 -ErrorAction Stop
+                }
+            }
+            catch {
+                if ($Action -ne 'Stop') { throw }
+                $answer.Error = "Stop-intent preparation failed; queued-start cancellation is unmeasured: $($_.Exception.Message)"
+            }
+            if ($Action -eq 'Start' -and (Test-Path -LiteralPath $stopRequested -PathType Leaf -ErrorAction Stop)) {
+                throw 'Capture start was cancelled by an earlier stop request.'
+            }
+            if ($Action -eq 'Start') {
+                $native = Invoke-Phase11TftpTraceCommand -ArgumentList $arguments
+                $answer.CommandLog = "$($arguments -join ' ')`r`nExitCode=$($native.ExitCode)`r`n$($native.StdOut)`r`n$($native.StdErr)"
+                if ($native.ExitCode -ne 0) { throw "Named trace Start failed with exit code $($native.ExitCode). See CommandLog." }
+                if (Test-Path -LiteralPath $stopRequested -PathType Leaf -ErrorAction Stop) {
+                    throw 'Capture start completed after a stop request.'
+                }
+                $startReleased = $true
+            }
+        }
+        $answer.Succeeded = -not [bool]$answer.Error
+    }
+    catch { $answer.Error = (@($answer.Error, $_.Exception.Message) | Where-Object { $_ }) -join '; ' }
+    finally {
+        # Pipeline cancellation can skip catch/follow-on code, but not authoritative cleanup here.
+        if ($Action -eq 'Stop' -or ($Action -eq 'Start' -and -not $startReleased)) {
+            try {
+                $stopped = Invoke-Phase11TftpTraceCommand -ArgumentList @('trace', 'stop', "sessionname=$sessionName")
+                $answer.CommandLog += "`r`nOwned-session stop ExitCode=$($stopped.ExitCode)`r`n$($stopped.StdOut)`r`n$($stopped.StdErr)"
+                if ($stopped.ExitCode -ne 0) { throw "Owned-session stop failed with exit code $($stopped.ExitCode); inspect only '$sessionName'." }
+                $answer.TraceStopped = $true
+                Set-Content -LiteralPath $stopConfirmed -Value ([datetime]::UtcNow.ToString('o')) -Encoding UTF8 -ErrorAction Stop
+            }
+            catch { $answer.Error += "; $($_.Exception.Message)" }
+            if ($Action -eq 'Start') { $answer.Succeeded = $false }
+            else { $answer.Succeeded = $answer.TraceStopped -and -not [bool]$answer.Error }
+        }
+    }
+    if ($Action -in @('Inspect', 'Collect')) {
+        try {
+            $context = 'AfterDiagnosticCaptureStop'
+            if ($Action -eq 'Inspect') { $context = 'BeforeDiagnosticReplay' }
+            $answer.NetworkStateJson = Get-Phase11TftpNetworkState -PeerAddress $PeerAddress -LocalPort $LocalPort `
+                -Context $context -SinceUtc $SinceUtc |
+                ConvertTo-Json -Depth 12
+        }
+        catch { $answer.NetworkStateError = $_.Exception.Message }
+    }
+    return $answer
+}
+
+function Save-Phase11TftpFailureDiagnostics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$DomainName,
+        [Parameter(Mandatory = $true)][object[]]$Probes,
+        [Parameter(Mandatory = $true)][string]$ProbeDefinition
+    )
+
+    $logDirectory = Split-Path $Common.LogPath -Parent
+    if (-not $logDirectory -or -not (Test-Path -LiteralPath $logDirectory -PathType Container)) {
+        Write-Log "[Phase 11] $VMName [TFTP]: diagnostics NOT collected: host log directory is unavailable." -Warning -LogOnly
+        return
+    }
+    $captureDefinition = @"
+function Get-Phase11TftpNetworkState { $(${function:Get-Phase11TftpNetworkState}) }
+function Invoke-Phase11TftpTraceCommand { $(${function:Invoke-Phase11TftpTraceCommand}) }
+function Invoke-Phase11TftpCapture { $(${function:Invoke-Phase11TftpCapture}) }
+"@
+    $captureBlock = {
+        param($definition, $action, $traceId, $role, $serverAddress, $peerAddress, $sinceUtc, $localPort, $stopAcknowledged = 'False')
+        . ([scriptblock]::Create($definition))
+        Invoke-Phase11TftpCapture -Action $action -TraceId $traceId -Role $role -ServerAddress $serverAddress `
+            -PeerAddress $peerAddress -LocalPort ([int]$localPort) -StopAcknowledged $stopAcknowledged `
+            -SinceUtc ([datetime]::Parse($sinceUtc).ToUniversalTime())
+    }
+    $replayBlock = {
+        param($definition, $serverAddress, $fileName)
+        . ([scriptblock]::Create($definition))
+        @{ Probe = Invoke-TftpReadProbe -Server $serverAddress -FileName $fileName -TimeoutMs 6000 -DeferFailureNetworkState }
+    }
+    foreach ($group in @($Probes | Group-Object Server)) {
+        $original = $group.Group[0]
+        $traceId = [guid]::NewGuid().ToString('N')
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $prefix = "$VMName-Phase11-$stamp-Tftp-$traceId"
+        $manifestPath = Join-Path $logDirectory "$prefix-Evidence.json"
+        $participants = @(
+            [pscustomobject]@{ VMName = $VMName; Role = 'Client'; PeerAddress = "$($original.ServerAddress)"; Attempted = $false; Start = $null; Stop = $null; Collection = $null; HostTrace = ''; NetworkStateFile = ''; Cleanup = $null },
+            [pscustomobject]@{ VMName = ("$($original.Server)" -split '\.')[0]; Role = 'Responder'; PeerAddress = "$($original.RouteSourceAddress)"; Attempted = $false; Start = $null; Stop = $null; Collection = $null; HostTrace = ''; NetworkStateFile = ''; Cleanup = $null }
+        )
+        $evidence = [ordered]@{
+            TraceId = $traceId; StartedAtUtc = [datetime]::UtcNow.ToString('o')
+            OriginalProbes = @($group.Group | Select-Object -Property * -ExcludeProperty NetworkStateJson)
+            OriginalNetworkStateFiles = [Collections.Generic.List[string]]::new()
+            Replay = $null; ReplayNetworkStateFile = ''
+            ResponderBeforeNetworkFile = ''; ResponderLocalControl = $null
+            HostNetwork = [Collections.Generic.List[object]]::new()
+            TheoryChecks = @(
+                @{ Theory = 'Missing/wrong UDP69 binding after restart'; ConfirmWith = 'Compare responder before/after RequestedPortEndpoints, service PID and process creation times; Running alone is not binding evidence.' },
+                @{ Theory = 'Wrong endpoint, ARP/route or virtual-switch path'; ConfirmWith = 'Compare resolved DP IP, guest addresses/adapter MACs, peer/gateway neighbors, host NIC/switch/ACLs and RRQ location in both ETLs.' },
+                @{ Theory = 'DP request filtering'; ConfirmWith = 'Match incoming RRQ and DP WFP drops/filter IDs to active policy; no audit events is not proof of no drop.' },
+                @{ Theory = 'Client reply filtering or rule activation race'; ConfirmWith = 'Compare RuleBeforeSendJson with after-failure enforcement, request UTC, DATA transfer port and client ephemeral-port WFP drops.' },
+                @{ Theory = 'Responder/file-serving context failure'; ConfirmWith = 'Compare remote replay with later DP-local control for the same address/file; retain protocol error code. Local success only establishes service health at control time.' },
+                @{ Theory = 'Stale or wrong collected log'; ConfirmWith = 'Compare candidate log UTC/size before/after remote replay with local control and the subsequent SYSTEM DP log inventory. Candidate paths are not asserted authoritative.' }
+            )
+            Participants = $participants; Errors = [Collections.Generic.List[string]]::new()
+            ValidationOutcome = 'Original failure is preserved; a diagnostic replay is not a validation retry'
+            CaptureScope = 'IPv4 UDP involving the original responder; 128-byte packets; 8MB circular ETL per endpoint, plus WFP events'
+        }
+        Add-Phase11Output "[Phase 11] $VMName [TFTP]: collecting paired packet/policy evidence for '$($original.Server)' (trace $traceId); original validation remains failed."
+        try {
+            foreach ($probe in $group.Group) {
+                if (-not $probe.NetworkStateJson) { continue }
+                try {
+                    $null = $probe.NetworkStateJson | ConvertFrom-Json -ErrorAction Stop
+                    $networkPath = Join-Path $logDirectory "$prefix-Original-$($probe.ProbeId)-Network.json"
+                    Set-Content -LiteralPath $networkPath -Value $probe.NetworkStateJson -Encoding UTF8 -ErrorAction Stop
+                    $evidence.OriginalNetworkStateFiles.Add($networkPath)
+                }
+                catch { $evidence.Errors.Add("Original probe '$($probe.ProbeId)' network snapshot persistence: $($_.Exception.Message)") }
+            }
+            $address = [Net.IPAddress]::Parse("$($original.ServerAddress)")
+            if ($address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { throw 'The failed probe did not resolve an IPv4 responder; paired packet capture is unmeasured.' }
+            foreach ($participant in $participants) {
+                $hostNetwork = [ordered]@{ VMName = $participant.VMName; AdapterQuerySucceeded = $false; Errors = [Collections.Generic.List[string]]::new() }
+                try {
+                    $adapters = @(Get-VMNetworkAdapter -VMName $participant.VMName -ErrorAction Stop)
+                    $hostNetwork.Adapters = @($adapters | Select-Object -First 8 Name, SwitchName, MacAddress, IPAddresses,
+                            Status, DhcpGuard, RouterGuard, MacAddressSpoofing, PortMirroringMode)
+                    $hostNetwork.AdapterQuerySucceeded = $true
+                    if ($adapters.Count -gt 8) { $hostNetwork.Errors.Add('Host VM NIC inventory truncated to 8 adapters.') }
+                }
+                catch { $hostNetwork.Errors.Add("Host VM NIC query: $($_.Exception.Message)") }
+                foreach ($commandName in @('Get-VMNetworkAdapterAcl', 'Get-VMNetworkAdapterExtendedAcl')) {
+                    try {
+                        $acls = @(& $commandName -VMName $participant.VMName -ErrorAction Stop)
+                        $hostNetwork[$commandName] = @($acls | Select-Object -First 100 `
+                                @{ Name = 'AdapterName'; Expression = { $_.ParentAdapter.Name } }, Action, Direction,
+                                LocalAddress, RemoteAddress, LocalAddressType, RemoteAddressType,
+                                LocalIPAddress, RemoteIPAddress, LocalPort, RemotePort, Protocol, Weight, Stateful, IsolationID)
+                        if ($acls.Count -gt 100) { $hostNetwork.Errors.Add("$commandName truncated to 100 rows.") }
+                    }
+                    catch { $hostNetwork.Errors.Add("$commandName`: $($_.Exception.Message)") }
+                }
+                $evidence.HostNetwork.Add([pscustomobject]$hostNetwork)
+                foreach ($hostError in $hostNetwork.Errors) { $evidence.Errors.Add("Host network '$($participant.VMName)': $hostError") }
+            }
+            try {
+                $inspectionSince = "$($original.StartedAtUtc)"
+                if (-not $inspectionSince) { throw 'Original UTC start missing; responder pre-replay window is unmeasured.' }
+                $inspection = Invoke-VmCommand -VmName $participants[1].VMName -VmDomainName $DomainName -ScriptBlock $captureBlock `
+                    -ArgumentList $captureDefinition, 'Inspect', $traceId, 'Responder', "$address", $participants[1].PeerAddress, $inspectionSince, '69' `
+                    -DisplayName 'Phase11-TFTP-ResponderBefore' -SuppressLog -AsJob -TimeoutSeconds 90
+                if (-not $inspection -or $inspection.ScriptBlockFailed -or $inspection.ScriptBlockOutput -isnot [hashtable] -or
+                    $inspection.ScriptBlockOutput.TraceId -ne $traceId -or $inspection.ScriptBlockOutput.Action -ne 'Inspect' -or
+                    $inspection.ScriptBlockOutput.Role -ne 'Responder' -or -not $inspection.ScriptBlockOutput.NetworkStateJson) {
+                    throw 'No responder pre-replay network snapshot returned.'
+                }
+                $null = $inspection.ScriptBlockOutput.NetworkStateJson | ConvertFrom-Json -ErrorAction Stop
+                $networkPath = Join-Path $logDirectory "$prefix-Responder-Before-Network.json"
+                Set-Content -LiteralPath $networkPath -Value $inspection.ScriptBlockOutput.NetworkStateJson -Encoding UTF8 -ErrorAction Stop
+                $evidence.ResponderBeforeNetworkFile = $networkPath
+            }
+            catch { $evidence.Errors.Add("Responder before-replay inspection: $($_.Exception.Message)") }
+            foreach ($participant in $participants) {
+                $participant.Attempted = $true
+                try {
+                    $start = Invoke-VmCommand -VmName $participant.VMName -VmDomainName $DomainName -ScriptBlock $captureBlock `
+                        -ArgumentList $captureDefinition, 'Start', $traceId, $participant.Role, "$address", $participant.PeerAddress, $evidence.StartedAtUtc, '69' `
+                        -DisplayName 'Phase11-TFTP-CaptureStart' -SuppressLog -AsJob -TimeoutSeconds 60
+                    if (-not $start -or $start.ScriptBlockFailed -or $start.ScriptBlockOutput -isnot [hashtable] -or
+                        $start.ScriptBlockOutput.TraceId -ne $traceId -or $start.ScriptBlockOutput.Role -ne $participant.Role -or
+                        $start.ScriptBlockOutput.Action -ne 'Start' -or $start.ScriptBlockOutput.Succeeded -isnot [bool]) {
+                        throw 'Trace start returned no valid acknowledgement; the owned session will still be stopped.'
+                    }
+                    $participant.Start = [pscustomobject]$start.ScriptBlockOutput
+                    if (-not $participant.Start.Succeeded) { $evidence.Errors.Add("$($participant.Role) capture start: $($participant.Start.Error)") }
+                }
+                catch { $evidence.Errors.Add("$($participant.Role) capture start transport: $($_.Exception.Message)") }
+            }
+            $replay = Invoke-VmCommand -VmName $VMName -VmDomainName $DomainName -ScriptBlock $replayBlock `
+                -ArgumentList $ProbeDefinition, "$address", "$($original.FileName)" `
+                -DisplayName 'Phase11-TFTP-DiagnosticReplay' -SuppressLog -AsJob -TimeoutSeconds 60
+            if (-not $replay -or $replay.ScriptBlockFailed -or $replay.ScriptBlockOutput -isnot [hashtable] -or
+                -not $replay.ScriptBlockOutput.Probe) { throw 'Diagnostic replay returned no probe evidence.' }
+            $evidence.Replay = $replay.ScriptBlockOutput.Probe | Select-Object -Property * -ExcludeProperty NetworkStateJson
+            if ($replay.ScriptBlockOutput.Probe.NetworkStateJson) {
+                try {
+                    $networkPath = Join-Path $logDirectory "$prefix-Replay-Network.json"
+                    Set-Content -LiteralPath $networkPath -Value $replay.ScriptBlockOutput.Probe.NetworkStateJson -Encoding UTF8 -ErrorAction Stop
+                    $evidence.ReplayNetworkStateFile = $networkPath
+                }
+                catch { $evidence.Errors.Add("Replay network snapshot persistence: $($_.Exception.Message)") }
+            }
+        }
+        catch { $evidence.Errors.Add($_.Exception.Message) }
+        finally {
+            foreach ($participant in @($participants | Where-Object Attempted)) {
+                try {
+                    $stop = Invoke-VmCommand -VmName $participant.VMName -VmDomainName $DomainName -ScriptBlock $captureBlock `
+                        -ArgumentList $captureDefinition, 'Stop', $traceId, $participant.Role, "$($original.ServerAddress)", $participant.PeerAddress, $evidence.StartedAtUtc, '69' `
+                        -DisplayName 'Phase11-TFTP-CaptureStop' -SuppressLog -AsJob -TimeoutSeconds 40
+                    if (-not $stop -or $stop.ScriptBlockFailed -or $stop.ScriptBlockOutput -isnot [hashtable] -or
+                        $stop.ScriptBlockOutput.TraceId -ne $traceId -or $stop.ScriptBlockOutput.Role -ne $participant.Role -or
+                        $stop.ScriptBlockOutput.Action -ne 'Stop' -or $stop.ScriptBlockOutput.Succeeded -isnot [bool] -or
+                        $stop.ScriptBlockOutput.TraceStopped -isnot [bool]) {
+                        throw "Trace stop returned no valid acknowledgement. Check only owned session MemLabsTftp-$traceId-$($participant.Role)."
+                    }
+                    $participant.Stop = [pscustomobject]$stop.ScriptBlockOutput
+                    if (-not $participant.Stop.Succeeded -or -not $participant.Stop.TraceStopped) {
+                        $evidence.Errors.Add("$($participant.Role) capture stop: $($participant.Stop.Error)")
+                    }
+                }
+                catch { $evidence.Errors.Add("$($participant.Role) capture stop transport: $($_.Exception.Message)") }
+            }
+            foreach ($participant in @($participants | Where-Object Attempted)) {
+                try {
+                    $localPort = 69
+                    if ($participant.Role -eq 'Client') {
+                        $localPort = $original.LocalPort
+                        if ($evidence.Replay -and $evidence.Replay.LocalPort) { $localPort = $evidence.Replay.LocalPort }
+                    }
+                    $stopAcknowledged = 'False'
+                    if ($participant.Stop -and $participant.Stop.TraceStopped -eq $true) { $stopAcknowledged = 'True' }
+                    $collected = Invoke-VmCommand -VmName $participant.VMName -VmDomainName $DomainName -ScriptBlock $captureBlock `
+                        -ArgumentList $captureDefinition, 'Collect', $traceId, $participant.Role, "$($original.ServerAddress)", $participant.PeerAddress, $evidence.StartedAtUtc, ([string]$localPort), $stopAcknowledged `
+                        -DisplayName 'Phase11-TFTP-CaptureCollect' -SuppressLog -AsJob -TimeoutSeconds 90
+                    if (-not $collected -or $collected.ScriptBlockFailed -or $collected.ScriptBlockOutput -isnot [hashtable] -or
+                        $collected.ScriptBlockOutput.TraceId -ne $traceId -or $collected.ScriptBlockOutput.Role -ne $participant.Role -or
+                        $collected.ScriptBlockOutput.Action -ne 'Collect' -or $collected.ScriptBlockOutput.Succeeded -isnot [bool] -or
+                        $collected.ScriptBlockOutput.TraceStopped -isnot [bool]) { throw 'Trace collection returned no valid acknowledgement.' }
+                    $capture = $collected.ScriptBlockOutput
+                    $participant.Collection = [pscustomobject]$capture | Select-Object -Property * -ExcludeProperty NetworkStateJson
+                    if ($capture.NetworkStateJson) {
+                        try {
+                            $networkPath = Join-Path $logDirectory "$prefix-$($participant.Role)-Network.json"
+                            Set-Content -LiteralPath $networkPath -Value $capture.NetworkStateJson -Encoding UTF8 -ErrorAction Stop
+                            $participant.NetworkStateFile = $networkPath
+                        }
+                        catch { $evidence.Errors.Add("$($participant.Role) network snapshot persistence: $($_.Exception.Message)") }
+                    }
+                    if ($capture.NetworkStateError) {
+                        $evidence.Errors.Add("$($participant.Role) network snapshot: $($capture.NetworkStateError)")
+                    }
+                    if (-not $capture.Succeeded -or -not $capture.TraceStopped -or $capture.Error) {
+                        throw "Named capture did not complete cleanly: $($capture.Error). See CommandLog and session $($capture.SessionName)."
+                    }
+                    $expectedSuffix = "\Temp\MemLabsTftp-$traceId-$($participant.Role)\Tftp.etl"
+                    if (-not ([string]$capture.Path).EndsWith($expectedSuffix, [StringComparison]::OrdinalIgnoreCase) -or
+                        $capture.Bytes -le 0 -or $capture.Bytes -gt 16MB -or $capture.SHA256 -notmatch '^[A-Fa-f0-9]{64}$') {
+                        throw 'Trace acknowledgement did not identify a bounded, owned ETL and SHA256.'
+                    }
+                    $destination = Join-Path $logDirectory "$prefix-$($participant.Role).etl"
+                    $copied = Copy-ItemFromVmBounded -VMName $participant.VMName -VMDomainName $DomainName `
+                        -Path $capture.Path -Destination $destination -TimeoutSeconds 45
+                    if (-not $copied -or -not (Test-Path -LiteralPath $destination -PathType Leaf) -or
+                        (Get-FileHash -LiteralPath $destination -Algorithm SHA256 -ErrorAction Stop).Hash -ne $capture.SHA256) {
+                        throw "Trace copy/verification failed; retain guest evidence at '$($capture.Path)'."
+                    }
+                    $participant.HostTrace = $destination
+                    $cleanup = Invoke-VmCommand -VmName $participant.VMName -VmDomainName $DomainName -ScriptBlock $captureBlock `
+                        -ArgumentList $captureDefinition, 'Cleanup', $traceId, $participant.Role, "$($original.ServerAddress)", $participant.PeerAddress, $evidence.StartedAtUtc, ([string]$localPort) `
+                        -DisplayName 'Phase11-TFTP-CaptureCleanup' -SuppressLog -AsJob -TimeoutSeconds 30
+                    if (-not $cleanup -or $cleanup.ScriptBlockFailed -or $cleanup.ScriptBlockOutput -isnot [hashtable] -or
+                        $cleanup.ScriptBlockOutput.TraceId -ne $traceId -or $cleanup.ScriptBlockOutput.Role -ne $participant.Role -or
+                        $cleanup.ScriptBlockOutput.Action -ne 'Cleanup' -or $cleanup.ScriptBlockOutput.Succeeded -isnot [bool] -or
+                        -not $cleanup.ScriptBlockOutput.Succeeded) {
+                        throw "Guest trace cleanup failed; inspect '$($capture.Path)' after the verified host copy."
+                    }
+                    $participant.Cleanup = [pscustomobject]$cleanup.ScriptBlockOutput
+                }
+                catch { $evidence.Errors.Add("$($participant.Role) capture inventory/copy/cleanup: $($_.Exception.Message)") }
+            }
+            try {
+                if (-not $original.ServerAddress -or @($participants | Where-Object {
+                            -not $_.Attempted -or -not $_.Stop -or -not $_.Stop.TraceStopped
+                        }).Count -gt 0) {
+                    throw 'Local control not run: responder address or owned-trace quiescence is unconfirmed.'
+                }
+                $localControl = Invoke-VmCommand -VmName $participants[1].VMName -VmDomainName $DomainName -ScriptBlock $replayBlock `
+                    -ArgumentList $ProbeDefinition, "$($original.ServerAddress)", "$($original.FileName)" `
+                    -DisplayName 'Phase11-TFTP-ResponderLocalControl' -SuppressLog -AsJob -TimeoutSeconds 60
+                if (-not $localControl -or $localControl.ScriptBlockFailed -or $localControl.ScriptBlockOutput -isnot [hashtable] -or
+                    -not $localControl.ScriptBlockOutput.Probe) { throw 'No DP-local TFTP control result returned.' }
+                $evidence.ResponderLocalControl = $localControl.ScriptBlockOutput.Probe | Select-Object -Property * -ExcludeProperty NetworkStateJson
+                Add-Phase11Output "[Phase 11] $VMName [TFTP]: theory control remote=$($evidence.Replay.Result), DP-local=$($evidence.ResponderLocalControl.Result) for '$($original.FileName)'. Control runs after capture/collection; this comparison does not locate a dropped leg without packet evidence."
+            }
+            catch {
+                $evidence.ResponderLocalControl = [pscustomobject]@{ Result = 'Unmeasured'; Detail = $_.Exception.Message }
+                $evidence.Errors.Add("Responder local TFTP control: $($_.Exception.Message)")
+            }
+            $evidence.CompletedAtUtc = [datetime]::UtcNow.ToString('o')
+            try {
+                $evidence | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding UTF8 -ErrorAction Stop
+                $traceCount = @($participants | Where-Object HostTrace).Count
+                Add-Phase11Output "[Phase 11] $VMName [TFTP]: saved $manifestPath; verified endpoint ETLs=$traceCount/2. Include the JSON and ETL files in the diagnostic bundle; packet presence/drop location must be read from the captures, not inferred from file size."
+                foreach ($errorText in $evidence.Errors) {
+                    Add-Phase11Output "[Phase 11] $VMName [TFTP]: diagnostics incomplete: $errorText" -Level Warning
+                }
+            }
+            catch { Write-Log "[Phase 11] $VMName [TFTP]: failed to persist failure evidence: $($_.Exception.Message)" -Warning -LogOnly }
+        }
+    }
+}
+
 function Invoke-TftpReadProbe {
     <#
     .SYNOPSIS
@@ -10731,17 +11311,27 @@ function Invoke-TftpReadProbe {
           FileNotFound  responder IS answering, but that file is not there (error 1)
           Served        the file is actually served
 
-        Only the first data block is read -- enough to prove the transfer starts,
-        without pulling a whole boot file across the lab network.
+        Only the first data block is read. Failures retain socket provenance and
+        effective firewall/network state before the temporary reply rule is removed.
+        A later paired diagnostic capture never changes this validation result.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Server,
         [Parameter(Mandatory = $true)][string]$FileName,
         [int]$Port = 69,
-        [int]$TimeoutMs = 5000
+        [int]$TimeoutMs = 5000,
+        [switch]$DeferFailureNetworkState
     )
 
-    $out = [pscustomobject]@{ Server = $Server; FileName = $FileName; Result = 'Error'; Bytes = 0; Detail = '' }
+    $out = [pscustomobject]@{
+        ProbeId = [guid]::NewGuid().ToString('N'); Server = $Server; FileName = $FileName
+        Result = 'Error'; Bytes = 0; Detail = ''; StartedAtUtc = [datetime]::UtcNow.ToString('o')
+        CompletedAtUtc = ''; ServerAddress = ''; ServerPort = $Port; LocalPort = 0
+        RouteSourceAddress = ''; ProcessId = $PID; Program = ''; RequestSent = $false; RequestBytes = 0
+        ReplyAddress = ''; ReplyPort = 0; SocketErrorCode = ''; NativeErrorCode = $null; NetworkStateJson = ''
+        NetworkStateDeferred = [bool]$DeferFailureNetworkState
+        RuleBeforeSendJson = ''; RequestAcceptedAtUtc = ''; ReplyReceivedAtUtc = ''; TftpErrorCode = $null
+    }
     $udp = $null
     $firewallRuleName = "MemLabs-Phase11Tftp-$([guid]::NewGuid().ToString('N'))"
     $firewallRuleCreated = $false
@@ -10752,26 +11342,45 @@ function Invoke-TftpReadProbe {
         $serverAddress = @([System.Net.Dns]::GetHostAddresses($Server) |
                 Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork }) | Select-Object -First 1
         if (-not $serverAddress) { throw "No IPv4 address was resolved for '$Server'." }
+        $out.ServerAddress = $serverAddress.IPAddressToString
         $serverEndpoint = [System.Net.IPEndPoint]::new($serverAddress, $Port)
         $udp = New-Object System.Net.Sockets.UdpClient -ArgumentList 0
         $udp.Client.ReceiveTimeout = $TimeoutMs
         $localPort = $udp.Client.LocalEndPoint.Port
+        $out.LocalPort = $localPort
+        $out.Program = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
         # TFTP DATA comes from a server-selected transfer port, not necessarily UDP/69.
         $rule = New-NetFirewallRule -Name $firewallRuleName -DisplayName 'MemLabs Phase 11 TFTP probe' `
             -Direction Inbound -Action Allow -Protocol UDP -LocalPort $localPort `
-            -RemoteAddress $serverAddress.IPAddressToString -Program ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) `
+            -RemoteAddress $serverAddress.IPAddressToString -Program $out.Program `
             -Profile Any -PolicyStore PersistentStore -ErrorAction Stop
         $firewallRuleCreated = $true
         if (-not $rule -or $rule.Name -ne $firewallRuleName) { throw 'TFTP probe firewall rule creation returned no matching rule.' }
+        $ruleBeforeSend = [ordered]@{ CapturedAtUtc = [datetime]::UtcNow.ToString('o'); CompletedAtUtc = ''; ReadSucceeded = $false; Rules = @(); Error = ''; ErrorId = '' }
+        try {
+            $ruleBeforeSend.Rules = @(Get-NetFirewallRule -PolicyStore ActiveStore -TracePolicyStore -Name $firewallRuleName -ErrorAction Stop |
+                    Select-Object Name, Enabled, Direction, Action, Profile, EnforcementStatus, PrimaryStatus, Status,
+                    PolicyStoreSource, PolicyStoreSourceType)
+            $ruleBeforeSend.ReadSucceeded = $true
+        }
+        catch { $ruleBeforeSend.Error = $_.Exception.Message; $ruleBeforeSend.ErrorId = $_.FullyQualifiedErrorId }
+        $ruleBeforeSend.CompletedAtUtc = [datetime]::UtcNow.ToString('o')
+        $out.RuleBeforeSendJson = $ruleBeforeSend | ConvertTo-Json -Depth 5
         $req = New-Object System.Collections.Generic.List[byte]
         $req.Add(0); $req.Add(1)
         $req.AddRange([System.Text.Encoding]::ASCII.GetBytes($FileName)); $req.Add(0)
         $req.AddRange([System.Text.Encoding]::ASCII.GetBytes('octet')); $req.Add(0)
         $payload = $req.ToArray()
-        [void]$udp.Send($payload, $payload.Length, $serverEndpoint)
+        $out.RequestBytes = $udp.Send($payload, $payload.Length, $serverEndpoint)
+        if ($out.RequestBytes -ne $payload.Length) { throw "TFTP request send accepted $($out.RequestBytes) of $($payload.Length) bytes." }
         $requestSent = $true
+        $out.RequestSent = $true
+        $out.RequestAcceptedAtUtc = [datetime]::UtcNow.ToString('o')
         $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
         $resp = $udp.Receive([ref]$ep)
+        $out.ReplyReceivedAtUtc = [datetime]::UtcNow.ToString('o')
+        $out.ReplyAddress = $ep.Address.IPAddressToString
+        $out.ReplyPort = $ep.Port
         if ($null -eq $resp -or $resp.Length -lt 4) {
             $out.Result = 'Error'
             $out.Detail = 'reply was empty or truncated'
@@ -10803,6 +11412,7 @@ function Invoke-TftpReadProbe {
         }
         elseif ($opcode -eq 5) {
             $code = ([int]$resp[2] * 256) + [int]$resp[3]
+            $out.TftpErrorCode = $code
             $msg = ''
             if ($resp.Length -gt 4) { $msg = ([System.Text.Encoding]::ASCII.GetString($resp, 4, $resp.Length - 4)).Trim([char]0) }
             $out.Result = if ($code -eq 1) { 'FileNotFound' } else { 'Error' }
@@ -10817,26 +11427,49 @@ function Invoke-TftpReadProbe {
         $out.Result = 'Error'
         $out.Detail = $_.Exception.Message
         for ($exception = $_.Exception; $exception; $exception = $exception.InnerException) {
-            if ($exception -is [System.Net.Sockets.SocketException] -and $requestSent) {
-                $out.Result = 'NoResponse'
-                $out.Detail = "server $serverAddress -> client UDP/$localPort (TFTP replies use a server-selected transfer port): $($exception.Message)"
+            if ($exception -is [System.Net.Sockets.SocketException]) {
+                $out.SocketErrorCode = "$($exception.SocketErrorCode)"
+                $out.NativeErrorCode = $exception.NativeErrorCode
+                if ($requestSent) {
+                    $out.Result = 'NoResponse'
+                    $out.Detail = "server $serverAddress -> client UDP/$localPort (TFTP replies use a server-selected transfer port): $($exception.Message)"
+                }
                 break
             }
         }
     }
     finally {
-        if ($udp) {
-            try { $udp.Close() }
-            catch {
-                $out.Result = 'Error'
-                $out.Detail += "; closing the TFTP probe socket failed: $($_.Exception.Message)"
+        $out.CompletedAtUtc = [datetime]::UtcNow.ToString('o')
+        try {
+            if ($out.Result -ne 'Served' -and -not $DeferFailureNetworkState) {
+                try {
+                    $network = Get-Phase11TftpNetworkState -PeerAddress $out.ServerAddress -LocalPort $localPort `
+                        -ProbeRuleName $firewallRuleName -Context 'FailureBeforeProbeCleanup' `
+                        -SinceUtc ([datetime]::Parse($out.StartedAtUtc).ToUniversalTime())
+                    $out.RouteSourceAddress = "$(@($network.Route | Where-Object IPAddress | Select-Object -First 1).IPAddress)"
+                    $out.NetworkStateJson = $network | ConvertTo-Json -Depth 12
+                }
+                catch { $out.Detail += "; failure network evidence unavailable before cleanup: $($_.Exception.Message)" }
             }
         }
-        if ($firewallRuleCreated) {
-            try { Remove-NetFirewallRule -Name $firewallRuleName -PolicyStore PersistentStore -ErrorAction Stop }
-            catch {
-                $out.Result = 'Error'
-                $out.Detail += "; removing probe firewall rule '$firewallRuleName' failed: $($_.Exception.Message)"
+        finally {
+            try {
+                if ($udp) {
+                    try { $udp.Close() }
+                    catch {
+                        $out.Result = 'Error'
+                        $out.Detail += "; closing the TFTP probe socket failed: $($_.Exception.Message)"
+                    }
+                }
+            }
+            finally {
+                if ($firewallRuleCreated) {
+                    try { Remove-NetFirewallRule -Name $firewallRuleName -PolicyStore PersistentStore -ErrorAction Stop }
+                    catch {
+                        $out.Result = 'Error'
+                        $out.Detail += "; removing probe firewall rule '$firewallRuleName' failed: $($_.Exception.Message)"
+                    }
+                }
             }
         }
     }
@@ -17683,6 +18316,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
         # TFTP read a PXE client does, from a DIFFERENT machine, so DNS, the route, the
         # firewall, the listener and the file are all exercised at once.
         if ($isPrimary -and $expectOsd -and $tftpProbeText) {
+            $results.TftpFailures = [Collections.ArrayList]::new()
             try {
                 . ([scriptblock]::Create($tftpProbeText))
                 $tftpTargets = @($expectedOsdDpNames | Where-Object { $_ })
@@ -17702,6 +18336,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                 $probe = Invoke-TftpReadProbe -Server $tftpDp -FileName $tftpFile -TimeoutMs 6000
                                 if ($probe.Result -ne 'FileNotFound') { break }
                             }
+                            if ($probe.Result -ne 'Served') { [void]$results.TftpFailures.Add($probe) }
                             if ($probe.Result -eq 'Served') {
                                 $results.Details.Add("OK: TFTP read of '$($probe.FileName)' from $tftpDp succeeded ($($probe.Detail)) -- a PXE client can pull its boot file")
                             }
@@ -18521,7 +19156,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     $appsCsv = ($expectedAppNames -join '|')
     # The probe has to exist inside the guest session, and a hyphenated name needs the
     # braced form -- $function:Invoke-TftpReadProbe is a parse error.
-    $tftpProbeText = "function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }"
+    $tftpProbeText = @"
+function Get-Phase11TftpNetworkState { $(${function:Get-Phase11TftpNetworkState}) }
+function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }
+"@
     $providerQueryDefinition = (Get-Command -Name Invoke-CmWmiQueryWithRetry -CommandType Function -ErrorAction Stop).Definition
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource, $providerQueryDefinition `
@@ -18539,6 +19177,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     if ($prePopulate -and $hasOsdClient -and
         (-not $result -or $result.ScriptBlockFailed -or $osdFailureLines.Count -gt 0)) {
         Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: OSD validation failed -- collecting sending-site and DP evidence, including pending/retrying boot-image failures"
+        if ($result -and $result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.TftpFailures) {
+            Save-Phase11TftpFailureDiagnostics -VMName $VMName -DomainName $domain `
+                -Probes @($result.ScriptBlockOutput.TftpFailures) -ProbeDefinition $tftpProbeText
+        }
         Save-Phase11OsdContentFailureLogs -VMName $VMName -CurrentItem $CurrentItem `
             -DeployConfig $DeployConfig -DistributionPointNames @($expectedOsdDpCsv -split '\|' | Where-Object { $_ }) `
             -SourceSiteCodes $osdSourceSiteCodes
