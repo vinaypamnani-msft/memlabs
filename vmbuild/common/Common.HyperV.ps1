@@ -1274,7 +1274,8 @@ function Start-VM2 {
                 }
                 $StopError = $null
                 Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-                if (($null -ne $StopError) -and ($StopError.Exception.Message.contains("authentication tag"))) {
+                # ErrorVariable is an empty collection, not null, on success.
+                if (($StopError.Count -gt 0) -and ($StopError.Exception.Message -match 'authentication tag')) {
                     write-progress2 "Start VM" -Status "Removing saved state for $Name"  -force
                     try {
                         Remove-VMSavedState -vm $vm -ErrorAction Stop
@@ -1304,7 +1305,7 @@ function Start-VM2 {
                 # retry. The previous narrow message-match missed
                 # localized error strings on non-English hosts and
                 # wrapped exceptions.
-                if (($null -ne $StopError) -and ($vm.State -ne 'Running')) {
+                if (($StopError.Count -gt 0) -and ($vm.State -ne 'Running')) {
                     # Collapse the (often multi-line) Hyper-V error message to a
                     # single line BEFORE it touches any progress/log surface.
                     # Start-VM out-of-memory errors in particular come back as
@@ -1313,7 +1314,7 @@ function Start-VM2 {
                     # CR/LFs to the cursor-positioned Write-Progress2 renderer
                     # shoves every managed bar around and makes the host spew
                     # "...) contains new-line" hundreds of times (corrupted UI).
-                    $errMsg = ($StopError.Exception.Message -replace '\s*\r?\n\s*', ' ').Trim()
+                    $errMsg = (($StopError.Exception.Message -join '; ') -replace '\s*\r?\n\s*', ' ').Trim()
 
                     $isOutOfMemory = ($errMsg -match '0x8007000E') -or ($errMsg -match 'not enough memory')
                     if ($isOutOfMemory) {
@@ -1387,8 +1388,9 @@ function Start-VM2 {
                             # If the failure mode changed to something other than
                             # OOM, stop the memory-wait loop and let the normal
                             # stray-mount / outer-retry handling take over.
-                            if ($StopError -and ($StopError.Exception.Message -notmatch '0x8007000E') -and ($StopError.Exception.Message -notmatch 'not enough memory')) {
-                                try { Write-Log "${Name}: Start-VM error changed from OOM to: $(($StopError.Exception.Message -replace '\s*\r?\n\s*', ' ').Trim())" -Warning } catch {}
+                            $retryErrMsg = (($StopError.Exception.Message -join '; ') -replace '\s*\r?\n\s*', ' ').Trim()
+                            if (($StopError.Count -gt 0) -and ($retryErrMsg -notmatch '0x8007000E|not enough memory')) {
+                                try { Write-Log "${Name}: Start-VM error changed from OOM to: $retryErrMsg" -Warning } catch {}
                                 break
                             }
                         }

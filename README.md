@@ -2038,6 +2038,11 @@ nor request a reboot. A persistent outage still fails coverage without treating
 unknown provider state as missing content; coverage errors retain the CIM error
 ID instead of claiming that a memory retry occurred.
 
+Host VM startup does not enter recovery for an empty captured error collection;
+the refreshed Hyper-V state determines success. Saved-state, file-lock, and
+memory recovery inspect all captured startup errors. Validate offline with
+[`Test-StartVM2ErrorHandling.ps1`](vmbuild/tools/Test-StartVM2ErrorHandling.ps1).
+
 Graceful resume/DSC restarts close only idle cached PowerShell Direct sessions
 for the target VM before requesting shutdown. Busy or unverifiable cached
 pipelines fail closed without disposal or shutdown. A Hyper-V shutdown job still
