@@ -262,7 +262,7 @@ stable identifiers.
 | `DefaultServerOS` | Server 2022 | OS seeded onto new server roles. | Standardize servers while retaining per-VM overrides. |
 | `DefaultClientOS` | Windows 11 Latest | OS seeded onto new Windows client roles. | Standardize clients. |
 | `DefaultSqlVersion` | SQL Server 2022 | SQL version seeded when SQL is added. | Select a common SQL generation. |
-| `UseDynamicMemory` | `true` | Adds `dynamicMinRam` to new Windows VMs. SQL defaults to 4 GB minimum; others to 1 GB. | Reduce host memory pressure. Linux uses static memory. |
+| `UseDynamicMemory` | `true` | Adds `dynamicMinRam` to new Windows VMs. SQL defaults to 4 GB minimum; others to 1 GB, except OSDClient always defaults to static 4 GB. | Reduce host memory pressure. Linux uses static memory. |
 | `IncludeClients` | `true` | Adds two client-OS DomainMembers after the initial infrastructure. | Disable for a minimal infrastructure-only lab. |
 | `IncludeSSMSOnNONSQL` | `true` | Seeds `installSSMS` on non-SQL server VMs. | Disable to reduce deployment size/time. SQL hosts keep SSMS. |
 | `EnableSUPOnSiteServers` | `false` | Seeds SUP/WSUS fields on new CAS/Primary VMs. | Enable only when site servers should host SUP. |
@@ -340,7 +340,7 @@ by label. `H` is the stable **Enable High Availability** action.
 | WorkgroupMember | Windows VM with Internet access but no domain join. | Test non-domain Windows behavior. |
 | InternetClient | Isolated workgroup client on the Internet network. | Test CM internet-client scenarios. |
 | AADClient | Client that boots to OOBE for Entra/AAD join. | Test cloud join and enrollment. |
-| OSDClient | Bare VM with no `operatingSystem` or locale, 4 GB RAM, generation 2, optional exact `osdTaskSequence`, and no proxy setting. Selecting a DP-less subnet opens PXE remediation. | PXE boot interactively or prestage one of the generated Windows install task sequences. |
+| OSDClient | Bare VM with no `operatingSystem` or locale, static 4 GB RAM by default regardless of `UseDynamicMemory`, generation 2, optional exact `osdTaskSequence`, and no proxy setting. Selecting a DP-less subnet opens PXE remediation. | PXE boot interactively or prestage one of the generated Windows install task sequences. |
 | CAS and Primary | Creates a CAS; CAS creation recursively adds a child Primary and default DP/MP. | Start a ConfigMgr hierarchy. |
 | Primary | Standalone or child Primary; parent picker offers `X` for no parent. | Start a standalone site or add a Primary to a CAS. |
 | Secondary | Secondary site with required Primary parent and normally a distinct subnet. | Test hierarchy distribution/administration below a Primary. |
@@ -375,7 +375,7 @@ These labels are stable; numbers are not an API.
 | `Role` | One of the supported stored roles. | Recreates the proposed VM object with role defaults; changing it is intentionally disruptive. |
 | `Network` | Default subnet or valid per-VM `/24`. | Place the VM on another subnet and recalculate client-push ownership. |
 | `OperatingSystem` | Role-filtered current manifest value; absent for OSDClient. | Choose the guest base image. |
-| `Memory` | Whole-number MB/GB, 512 MB through 64 GB; Windows 11 is raised to 4 GB. | Set startup/maximum memory. Preserves `DynamicMinRam` unless it exceeds the resulting maximum, then lowers it to match with a warning. |
+| `Memory` | Whole-number MB/GB, 512 MB through 64 GB; Windows 11/OSD is raised to 4 GB. | Set startup/maximum memory. Preserves `DynamicMinRam` unless it exceeds the resulting maximum, then lowers it to match with a warning. |
 | `DynamicMinRam` | MB/GB; editor clamps to 50 MB through 64 GB. At or above `Memory` disables dynamic behavior. | Set the dynamic-memory floor. |
 | `VirtualProcs` | Integer 1 through 16. | Size guest CPU. |
 | `tpmEnabled` | Boolean; required for Windows 11. | Enable vTPM and permit unattended BitLocker. |
@@ -933,7 +933,7 @@ notices and are not necessarily the same as validation warnings.
 |---|---|
 | VM options | Unique prefix; existing base drive (`C:` only on Windows Client; never `D:`/`Z:`); valid FQDN and NetBIOS name; admin name; valid unique RFC1918 `/24`. |
 | Names/users | Windows and domain-joined Linux full names at most 15 characters; standalone Linux hostnames at most 64; invalid/reserved characters and names rejected; VM names unique host-wide. |
-| Capacity | Memory 512 MB-64 GB; Windows 11 repaired to 4 GB; SQL at least 4 GB; local site SQL role-aware minimums; 1-16 vCPU. |
+| Capacity | Memory 512 MB-64 GB; Windows 11/OSD memory and a configured OSD dynamic-memory floor below 4 GB are raised to 4 GB with non-blocking informational advisories; SQL at least 4 GB; local site SQL role-aware minimums; 1-16 vCPU. |
 | Disks/paths | E:-Y: except S:, 10-1000 GB; every non-C role path must have a matching disk; A/B/D/Z path drives rejected. |
 | Roles/media | Role must be supported; Windows OS/SQL/CM version must be in the active manifest; Windows 11 requires TPM; SQL roles require Server OS. |
 | Sites | Site codes are unique, three-character alphanumeric, and non-reserved; parents and remote VM references must resolve. |
@@ -1222,7 +1222,7 @@ hosting PXE/OSD content. The OSD VM needs at least 4 GB for WIMGAPI image apply.
 5. Select `osdTaskSequence`. Keep **Prompt at PXE**, or select the exact Windows
   11/Windows 10 install sequence for unattended required deployment.
 6. Keep `vmGeneration=2` unless deliberately testing legacy Gen 1 PXE, and keep
-  memory at 4 GB or higher.
+  the default static 4 GB memory (`dynamicMinRam` equals `memory`).
 7. Choose `D` to validate, save, and deploy; standalone GenConfig users choose
   `S` and run the printed `New-Lab.ps1 -Configuration` command.
 

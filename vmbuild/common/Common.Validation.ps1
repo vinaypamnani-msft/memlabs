@@ -971,7 +971,7 @@ function Test-ValidVmMemory {
             try { $memBytes = [int64]($vmMemory / 1) } catch { $memBytes = 0 }
             if ($memBytes -gt 0 -and $memBytes -lt 4GB) {
                 $VM.memory = "4GB"
-                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory [$vmMemory] raised to 4GB. A 2GB Windows 11/OSD client can exhaust memory during deployment; 4GB is the safe floor." -ReturnObject $ReturnObject -Warning
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] memory [$vmMemory] raised to 4GB. A 2GB Windows 11/OSD client can exhaust memory during deployment; 4GB is the safe floor." -ReturnObject $ReturnObject -Information
             }
             if ($VM.role -eq 'OSDClient' -and $VM.dynamicMinRam) {
                 $minimumBytes = 0
@@ -979,7 +979,7 @@ function Test-ValidVmMemory {
                 if ($minimumBytes -gt 0 -and $minimumBytes -lt 4GB) {
                     $oldMinimum = $VM.dynamicMinRam
                     $VM.dynamicMinRam = '4GB'
-                    Add-ValidationMessage -Message "$vmRole Validation: [$vmName] dynamic memory floor [$oldMinimum] raised to 4GB so WinPE cannot balloon below the OSD image-application requirement." -ReturnObject $ReturnObject -Warning
+                    Add-ValidationMessage -Message "$vmRole Validation: [$vmName] dynamic memory floor [$oldMinimum] raised to 4GB so WinPE cannot balloon below the OSD image-application requirement." -ReturnObject $ReturnObject -Information
                 }
             }
         }

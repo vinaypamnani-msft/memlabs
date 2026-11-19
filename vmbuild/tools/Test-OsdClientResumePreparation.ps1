@@ -188,8 +188,10 @@ function Set-VMMemory {
         }
         if ($script:failureMode -eq 'MemoryPermanent') { throw 'Synthetic memory access denied.' }
         if ($script:failureMode -eq 'MemoryNoOp') { return }
-        if ($script:fixtureVm.State -ne 'Off' -and $StartupBytes -ne $script:fixtureVm.MemoryStartup) {
-            throw 'Startup RAM was changed before confirming Off state.'
+        if ($script:fixtureVm.State -ne 'Off' -and
+            ($StartupBytes -ne $script:fixtureVm.MemoryStartup -or
+                $DynamicMemoryEnabled -ne $script:fixtureVm.DynamicMemoryEnabled)) {
+            throw 'Startup RAM or memory mode was changed before confirming Off state.'
         }
         Assert-True ($InputObject.Id -eq $script:fixtureVm.Id) 'Memory update targeted a replacement VM.'
         $script:fixtureVm.MemoryStartup = $StartupBytes
@@ -197,6 +199,7 @@ function Set-VMMemory {
         if ($PSBoundParameters.ContainsKey('MinimumBytes')) { $script:fixtureVm.MemoryMinimum = $MinimumBytes }
         if ($PSBoundParameters.ContainsKey('MaximumBytes')) { $script:fixtureVm.MemoryMaximum = $MaximumBytes }
         if ($script:failureMode -eq 'DynamicMemoryNoOp') { $script:fixtureVm.DynamicMemoryEnabled = $false }
+        if ($script:failureMode -eq 'StaticMemoryNoOp') { $script:fixtureVm.DynamicMemoryEnabled = $true }
     }
 }
 
@@ -376,6 +379,9 @@ foreach ($generation in @(1, 2)) {
                 if ($change -eq 'DynamicMemory') {
                     Assert-True $script:fixtureVm.DynamicMemoryEnabled "$label did not apply requested dynamic memory."
                 }
+                else {
+                    Assert-True (-not $script:fixtureVm.DynamicMemoryEnabled) "$label enabled dynamic memory for a static request."
+                }
                 if ($expectedRestart) {
                     Assert-True ($script:stopArguments.Passthru -and $script:stopArguments.RetryCount -eq 1 -and
                         $script:stopArguments.RetrySeconds -eq 5 -and $script:stopArguments.GracefulTimeoutSeconds -eq 30) `
@@ -452,7 +458,7 @@ Assert-True (@($script:messages | Where-Object {
         }).Count -eq 1) 'Combined failure lost the original operation.'
 
 foreach ($failure in @('ProcessorNonTerminating', 'DynamicMemoryNoOp')) {
-    $change = if ($failure -eq 'DynamicMemoryNoOp') { 'Memory' } else { 'Processor' }
+    $change = if ($failure -eq 'DynamicMemoryNoOp') { 'DynamicMemory' } else { 'Processor' }
     Invoke-PreparationFixture -State Running -Change $change -FailureMode $failure
     Assert-PreparationFailed $failure
     Assert-True ($script:fixtureVm.State -eq 'Running') "$failure did not restore original power."
@@ -514,7 +520,42 @@ foreach ($state in @('Saved', 'Paused')) {
         Assert-True ($script:calls.Stop -eq 0 -and $script:calls.Start -eq 0 -and
             $script:calls.Memory -eq 0 -and $script:calls.Processor -eq 0) "$state/$change discarded state or altered hardware."
     }
+    Invoke-PreparationFixture -State $state -DynamicMemory -DynamicMinRam 2GB
+    Assert-PreparationFailed "$state/static memory"
+    Assert-True ($script:calls.Stop -eq 0 -and $script:calls.Start -eq 0 -and
+        $script:calls.Memory -eq 0) "$state/static memory discarded state or altered hardware."
 }
+
+foreach ($state in @('Off', 'Running')) {
+    foreach ($staticMinimum in @(0, 4GB)) {
+        Invoke-PreparationFixture -State $state -Change Memory -DynamicMemory -DynamicMinRam $staticMinimum
+        $label = "$state/static minimum $staticMinimum"
+        Assert-PreparationPassed $label
+        Assert-True ($script:fixtureVm.MemoryStartup -eq 4GB -and
+            -not $script:fixtureVm.DynamicMemoryEnabled) "$label did not apply static 4GB memory."
+        $expectedRestart = [int]($state -eq 'Running')
+        Assert-True ($script:calls.Memory -eq 1 -and $script:calls.Stop -eq $expectedRestart -and
+            $script:calls.Start -eq $expectedRestart -and $script:fixtureVm.State -eq $state) `
+            "$label did not preserve the original power state with one bounded update."
+
+        $script:fixtureCount++
+        $result = @(Initialize-OsdClientHost -VmName TEST-OSD1 -MemoryBytes 4GB `
+                -ProcessorCount 2 -DynamicMinRam $staticMinimum)
+        Assert-True ($result.Count -eq 1 -and $result[0] -is [bool] -and $result[0]) "$label failed an idempotent retry."
+        Assert-True ($script:calls.Memory -eq 1 -and $script:calls.Stop -eq $expectedRestart -and
+            $script:calls.Start -eq $expectedRestart) "$label repeated a memory update or power cycle."
+    }
+}
+
+Invoke-PreparationFixture -State Running -DynamicMemory -DynamicMinRam 2GB
+Assert-PreparationPassed 'Static mode-only repair'
+Assert-True (-not $script:fixtureVm.DynamicMemoryEnabled -and
+    $script:calls.Memory -eq 1 -and $script:calls.Stop -eq 1 -and
+    $script:calls.Start -eq 1) 'Static mode-only repair did not disable dynamic memory with one power cycle.'
+
+Invoke-PreparationFixture -State Running -DynamicMemory -DynamicMinRam 2GB -FailureMode StaticMemoryNoOp
+Assert-PreparationFailed 'Static memory readback failure'
+Assert-True ($script:fixtureVm.State -eq 'Running') 'Static memory readback failure lost the original power state.'
 
 Invoke-PreparationFixture -State Running -Change DynamicMemory -DynamicMemory
 Assert-PreparationPassed 'Live deployment pin'
