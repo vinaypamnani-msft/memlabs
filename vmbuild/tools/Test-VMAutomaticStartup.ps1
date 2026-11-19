@@ -60,7 +60,7 @@ function Reset-StartupFixture {
         Changes = [Collections.Generic.List[object]]::new()
         Logs = [Collections.Generic.List[object]]::new()
         Answer = 'n'; Prompts = 0; InventoryReads = 0
-        Failure = ''; FailureVM = ''; MissingId = ''
+        Failure = ''; FailureVM = ''; MissingId = ''; HyperVReads = 0
         Answers = [Collections.Generic.Queue[string]]::new()
         GuestPending = $false; AllowGuestJobs = $false; GuestJobs = 0
     }
@@ -87,7 +87,8 @@ function Get-List {
 
 function Get-VM {
     [CmdletBinding()]
-    param([guid[]] $Id)
+    param([Nullable[guid]] $Id)
+    $script:StartupFixture.HyperVReads++
     if (-not $Id -and $script:StartupFixture.Failure -eq 'Enumeration') {
         throw 'Synthetic Hyper-V enumeration failure'
     }
@@ -100,10 +101,8 @@ function Get-VM {
         throw 'Synthetic Hyper-V read failure'
     }
     if (-not $Id) { return @($script:StartupFixture.Live.Values) }
-    foreach ($key in $Id) {
-        if ("$key" -eq $script:StartupFixture.MissingId) { continue }
-        $script:StartupFixture.Live["$key"]
-    }
+    if ("$Id" -eq $script:StartupFixture.MissingId) { return }
+    $script:StartupFixture.Live["$Id"]
 }
 
 function Set-VM {
@@ -314,6 +313,35 @@ $invalid = New-StartupVM -Name 'INVALID' -Role 'DC'
 $invalid.vmId = $null
 Reset-StartupFixture -VMs @($invalid)
 Assert-Startup (-not (Set-VMAutomaticStartup)) 'Invalid managed metadata must fail, not disappear from the plan.'
+$malformed = New-StartupVM -Name 'MALFORMED' -Role 'DC'
+$malformed.vmId = 'not-a-guid'
+Reset-StartupFixture -VMs @($malformed)
+$result = @(Set-VMAutomaticStartup)
+Assert-Startup ($result.Count -eq 1 -and $result[0] -eq $false -and
+    $script:StartupFixture.HyperVReads -eq 0 -and
+    ($script:StartupFixture.Logs | Where-Object Failure | Select-Object -ExpandProperty Message) -match 'invalid Hyper-V VM ID') 'A malformed VM ID was queried or did not fail explicitly.'
+$validFirst = New-StartupVM -Name 'VALID-FIRST' -Role 'DC'
+$malformedSecond = New-StartupVM -Name 'MALFORMED-SECOND' -Role 'DomainMember'
+$malformedSecond.vmId = 'still-not-a-guid'
+Reset-StartupFixture -VMs @($validFirst, $malformedSecond)
+$result = @(Set-VMAutomaticStartup)
+Assert-Startup ($result.Count -eq 1 -and $result[0] -eq $false -and
+    $script:StartupFixture.HyperVReads -eq 0 -and $script:StartupFixture.Changes.Count -eq 0) 'A later malformed VM ID allowed an earlier Hyper-V query or startup write.'
+foreach ($format in @('N', 'B')) {
+    $alternate = New-StartupVM -Name "ALTERNATE-$format" -Role 'DC'
+    $canonicalId = [guid]$alternate.vmId
+    $formattedId = $canonicalId.ToString($format)
+    if ($format -eq 'B') { $formattedId = " $formattedId " }
+    $alternate.vmId = $formattedId
+    Reset-StartupFixture -VMs @($alternate)
+    $formattedLive = $script:StartupFixture.Live["$formattedId"]
+    $script:StartupFixture.Live.Remove($formattedId)
+    $formattedLive.Id = $canonicalId
+    $formattedLive.VMId = $canonicalId
+    $script:StartupFixture.Live["$canonicalId"] = $formattedLive
+    Assert-Startup (Set-VMAutomaticStartup) "Valid '$format'-format Hyper-V VM ID failed startup maintenance."
+    Assert-Startup ($script:StartupFixture.Changes.Count -eq 1 -and $script:StartupFixture.HyperVReads -eq 2) "Valid '$format'-format VM ID was not canonicalized for lookup and readback."
+}
 
 Reset-StartupFixture -VMs $basic
 $script:StartupFixture.Answer = 'y'

@@ -264,8 +264,18 @@ function Set-VMAutomaticStartup {
             return $true
         }
 
+        foreach ($item in $plan) {
+            $parsedId = [guid]::Empty
+            if (-not [guid]::TryParse("$($item.VMId)", [ref]$parsedId)) {
+                throw "VM '$($item.VMName)' has invalid Hyper-V VM ID '$($item.VMId)'."
+            }
+            $item.VMId = $parsedId
+        }
+
         $liveVMs = @{}
-        foreach ($vm in (Get-VM -Id @($plan.VMId) -ErrorAction Stop)) {
+        foreach ($item in $plan) {
+            $vm = Get-VM -Id $item.VMId -ErrorAction Stop
+            if (-not $vm) { throw "VM '$($item.VMName)' was not found in live Hyper-V inventory." }
             $liveVMs["$($vm.Id)"] = $vm
         }
         $pending = @($plan | Where-Object {
