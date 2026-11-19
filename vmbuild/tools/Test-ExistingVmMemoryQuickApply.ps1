@@ -31,6 +31,7 @@ function Import-TestFunction {
 
 foreach ($entry in @(
         @{ Path = 'common\Common.GenConfig.Validation.ps1'; Name = 'get-IsExistingVMModified' },
+        @{ Path = 'common\Common.GenConfig.Validation.ps1'; Name = 'Get-AdditionalValidations' },
         @{ Path = 'genconfig.ps1'; Name = 'Get-ExistingVmQuickUpdatePlan' },
         @{ Path = 'genconfig.ps1'; Name = 'Invoke-ExistingVmQuickUpdates' },
         @{ Path = 'common\Common.HyperV.ps1'; Name = 'Set-MemLabsVmMemoryRestartPending' },
@@ -47,6 +48,11 @@ function Write-Log {
 function Write-GreenCheck { param([string]$Message) }
 function Write-OrangePoint { param([string]$Message) }
 function Write-RedX { param([string]$Message) $script:VisibleErrors += $Message }
+function Add-ErrorMessage {
+    param([string]$Message, [string]$Property, [switch]$Warning)
+    if (-not $Warning) { throw "Unexpected GenConfig error for $Property`: $Message" }
+    $script:MemoryEditWarnings += $Message
+}
 
 $script:HyperV = @{
     Dynamic = $false; Minimum = 4GB; Maximum = 4GB; Startup = 4GB; State = 'Running'
@@ -273,5 +279,43 @@ $restoreThrew = $false
 try { Restore-DynamicMemory -DeployConfig $restoreConfig } catch { $restoreThrew = $true }
 $script:FailMemorySet = $false
 Assert-True ($restoreThrew -and $restoreVm.State -eq 'Running') 'A post-deployment restore failure was reported as success or left the VM stopped.'
+
+foreach ($case in @(
+        @{ Memory = '4GB'; Minimum = '4GB'; OriginalMinimum = $null; ExpectedMinimum = '2GB'; Warnings = 1 },
+        @{ Memory = '4GB'; Minimum = '4GB'; OriginalMinimum = '3GB'; ExpectedMinimum = '2GB'; Warnings = 1 },
+        @{ Memory = '8GB'; Minimum = '6GB'; OriginalMinimum = $null; ExpectedMinimum = '4GB'; Warnings = 2; OperatingSystem = 'Windows 11 Latest' }
+    )) {
+    $script:MemoryEditWarnings = @()
+    $edited = New-ExistingMemoryVm -Memory '2GB' -DynamicMinRam $case.Minimum -OriginalMemory $case.Memory
+    $edited | Add-Member -NotePropertyName 'operatingSystem' -NotePropertyValue $case.OperatingSystem
+    $expectedOriginal = $case.OriginalMinimum
+    if ($null -eq $expectedOriginal) {
+        $edited.PSObject.Properties.Remove('dynamicMinRam-Original')
+        $expectedOriginal = $case.Minimum
+    }
+    else {
+        $edited.'dynamicMinRam-Original' = $expectedOriginal
+    }
+    Get-AdditionalValidations -property $edited -name 'memory' -CurrentValue $case.Memory
+    Assert-True ($edited.dynamicMinRam -eq $case.ExpectedMinimum -and
+        $edited.'dynamicMinRam-Original' -eq $expectedOriginal) 'Automatic minimum clamping lost or replaced the first existing-VM minimum comparison value.'
+    $currentMemory = $edited.memory
+    $edited.memory = $case.Memory
+    Get-AdditionalValidations -property $edited -name 'memory' -CurrentValue $currentMemory
+    Assert-True ($edited.dynamicMinRam -eq $case.ExpectedMinimum -and
+        $edited.'dynamicMinRam-Original' -eq $expectedOriginal -and
+        (get-IsExistingVMModified -virtualMachine $edited)) 'Restoring the original maximum hid the remaining minimum-memory edit.'
+    Assert-True ($script:MemoryEditWarnings.Count -eq $case.Warnings) 'Restoring the maximum emitted an unexpected warning.'
+    $editPlan = Get-ExistingVmQuickUpdatePlan -Config $config -ExistingMachines @($edited) -ConfigBaselineJson $configBaseline
+    Assert-True ($editPlan.CanApplyQuickly -and $editPlan.VMs.Count -eq 1) 'The remaining automatic minimum-memory edit was omitted from quick application.'
+
+    $memoryBytes = $case.Memory / 1
+    $script:HyperV = @{ Dynamic = $false; Minimum = $memoryBytes; Maximum = $memoryBytes; Startup = $memoryBytes; State = 'Running' }
+    $script:VmNote = [pscustomobject]@{ memory = $case.Memory; dynamicMinRam = $expectedOriginal; memoryRestartPending = $false }
+    $editResult = Invoke-ExistingVmQuickUpdates -Config $config -ExistingMachines @($edited)
+    Assert-True ($editResult.Handled -and $editResult.Applied -eq 1 -and $editResult.Failed -eq 0 -and
+        $script:VmNote.memory -eq $case.Memory -and $script:VmNote.dynamicMinRam -eq $case.ExpectedMinimum -and
+        -not (get-IsExistingVMModified -virtualMachine $edited)) 'The automatic minimum-memory edit was not applied and persisted after restoring the maximum.'
+}
 
 Write-Host "PASS -- $script:Assertions existing-VM RAM quick-apply assertions."

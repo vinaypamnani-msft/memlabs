@@ -375,7 +375,7 @@ These labels are stable; numbers are not an API.
 | `Role` | One of the supported stored roles. | Recreates the proposed VM object with role defaults; changing it is intentionally disruptive. |
 | `Network` | Default subnet or valid per-VM `/24`. | Place the VM on another subnet and recalculate client-push ownership. |
 | `OperatingSystem` | Role-filtered current manifest value; absent for OSDClient. | Choose the guest base image. |
-| `Memory` | Whole-number MB/GB, 512 MB through 64 GB; Windows 11 is raised to 4 GB. | Set startup/maximum memory. |
+| `Memory` | Whole-number MB/GB, 512 MB through 64 GB; Windows 11 is raised to 4 GB. | Set startup/maximum memory. Preserves `DynamicMinRam` unless it exceeds the resulting maximum, then lowers it to match with a warning. |
 | `DynamicMinRam` | MB/GB; editor clamps to 50 MB through 64 GB. At or above `Memory` disables dynamic behavior. | Set the dynamic-memory floor. |
 | `VirtualProcs` | Integer 1 through 16. | Size guest CPU. |
 | `tpmEnabled` | Boolean; required for Windows 11. | Enable vTPM and permit unattended BitLocker. |

@@ -272,10 +272,13 @@ function Get-AdditionalValidations {
                 }
             }
 
-            if (-not $Global:Config.domainDefaults.UseDynamicMemory) {
-                if ($property.dynamicMinRam) {
-                    $property.dynamicMinRam = $value.ToUpperInvariant()
+            if ($property.dynamicMinRam -and (($property.dynamicMinRam / 1) -gt ($property.$name / 1))) {
+                $previousMinimum = $property.dynamicMinRam
+                if ($property.ExistingVM -and -not $property.PSObject.Properties['dynamicMinRam-Original']) {
+                    $property | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam-Original' -Value $previousMinimum
                 }
+                $property.dynamicMinRam = $property.$name
+                Add-ErrorMessage -property 'dynamicMinRam' -Warning "Lowered dynamicMinRam from [$previousMinimum] to [$($property.$name)] so it does not exceed Memory."
             }
             
         }

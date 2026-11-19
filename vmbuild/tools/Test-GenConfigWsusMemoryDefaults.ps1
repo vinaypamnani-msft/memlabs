@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Verifies GenConfig memory floors for WSUS and Software Update Point databases.
+    Verifies GenConfig VM memory edits and memory floors for WSUS and Software Update Point databases.
 #>
 [CmdletBinding()]
 param([string] $RootPath)
@@ -77,7 +77,8 @@ function Get-SiteCodeMenu {
 
 function Add-ErrorMessage {
     param($message, $property, [switch] $Warning)
-    throw "Unexpected GenConfig error: $message"
+    if (-not $Warning) { throw "Unexpected GenConfig error: $message" }
+    $script:Warnings += [pscustomobject]@{ property = $property; Message = $message }
 }
 
 function Get-Menu2 {
@@ -94,9 +95,10 @@ function Get-Menu2 {
 }
 
 $global:Config = [pscustomobject]@{
-    domainDefaults  = [pscustomobject]@{ IncludeSSMSOnNONSQL = $false }
+    domainDefaults  = [pscustomobject]@{ IncludeSSMSOnNONSQL = $false; UseDynamicMemory = $false }
     virtualMachines = @()
 }
+$script:Warnings = @()
 
 $script:ActiveSiteServer = [pscustomobject]@{ InstallSUP = $true }
 $script:SiteSqlServer = [pscustomobject]@{ InstallSUP = $false; vmName = 'PS1SQL' }
@@ -153,4 +155,51 @@ $alreadySized = [pscustomobject]@{ Memory = '12GB' }
 Set-WsusMemoryFloor -property $alreadySized -UsesWID $true
 Assert-Equal '12GB' $alreadySized.Memory 'The WID floor reduced an explicitly larger memory value.'
 
-Write-Host 'PASS: GenConfig applies safe WSUS/SUP memory floors for WID and remote SQL.' -ForegroundColor Green
+Assert-Equal 0 $script:Warnings.Count 'WSUS/SUP memory floors emitted an unexpected warning.'
+
+foreach ($useDynamicMemory in $false, $true) {
+    $global:Config.domainDefaults.UseDynamicMemory = $useDynamicMemory
+    foreach ($case in @(
+            @{ Before = '2GB'; Entered = '4GB'; Minimum = '1GB'; ExpectedMemory = '4GB'; ExpectedMinimum = '1GB'; Warnings = 0 },
+            @{ Before = '4GB'; Entered = '2GB'; Minimum = '1GB'; ExpectedMemory = '2GB'; ExpectedMinimum = '1GB'; Warnings = 0 },
+            @{ Before = '4GB'; Entered = '1GB'; Minimum = '1GB'; ExpectedMemory = '1GB'; ExpectedMinimum = '1GB'; Warnings = 0 },
+            @{ Before = '4GB'; Entered = '1024mb'; Minimum = '2GB'; ExpectedMemory = '1024MB'; ExpectedMinimum = '1024MB'; Warnings = 1 },
+            @{ Before = '2GB'; Entered = '4'; Minimum = '512MB'; ExpectedMemory = '4GB'; ExpectedMinimum = '512MB'; Warnings = 0 },
+            @{ Before = '4GB'; Entered = '8GB'; Minimum = '4GB'; ExpectedMemory = '8GB'; ExpectedMinimum = '4GB'; Warnings = 0 },
+            @{ Before = '4GB'; Entered = '8GB'; Minimum = $null; ExpectedMemory = '8GB'; ExpectedMinimum = $null; Warnings = 0 },
+            @{ Before = '8GB'; Entered = '2GB'; Minimum = '3GB'; ExpectedMemory = '4GB'; ExpectedMinimum = '3GB'; Warnings = 1; OperatingSystem = 'Windows 11 Latest' },
+            @{ Before = '8GB'; Entered = '2GB'; Minimum = '6GB'; ExpectedMemory = '4GB'; ExpectedMinimum = '4GB'; Warnings = 2; OperatingSystem = 'Windows 11 Latest' },
+            @{ Before = '4GB'; Entered = '128GB'; Minimum = '1GB'; ExpectedMemory = '4GB'; ExpectedMinimum = '1GB'; Warnings = 1 }
+        )) {
+        $script:Warnings = @()
+        $vm = [pscustomobject]@{
+            vmName          = 'MEM1'
+            Role            = 'DomainMember'
+            OperatingSystem = $case.OperatingSystem
+            Memory          = $case.Entered
+        }
+        if ($null -ne $case.Minimum) {
+            $vm | Add-Member -NotePropertyName 'dynamicMinRam' -NotePropertyValue $case.Minimum
+        }
+        $context = "Memory $($case.Before) -> $($case.Entered), minimum $($case.Minimum), UseDynamicMemory=$useDynamicMemory."
+        Get-AdditionalValidations -property $vm -name 'memory' -CurrentValue $case.Before
+        Assert-Equal $case.ExpectedMemory $vm.Memory "$context Startup/maximum memory changed unexpectedly."
+        Assert-Equal $case.ExpectedMinimum $vm.dynamicMinRam "$context The per-VM minimum was not preserved or clamped correctly."
+        Assert-Equal $case.Warnings $script:Warnings.Count "$context An expected warning was missing or an unexpected warning was emitted."
+        Assert-Equal $null $vm.PSObject.Properties['dynamicMinRam-Original'] "$context A new VM received existing-VM change tracking."
+        if ($null -eq $case.Minimum) {
+            Assert-Equal $false ($null -ne $vm.PSObject.Properties['dynamicMinRam']) "$context Editing maximum memory added a minimum property."
+        }
+        elseif ($case.ExpectedMinimum -ne $case.Minimum) {
+            $minimumWarnings = @($script:Warnings | Where-Object property -eq 'dynamicMinRam')
+            Assert-Equal 1 $minimumWarnings.Count "$context The minimum adjustment warning identified the wrong property."
+            Assert-Equal $true ($minimumWarnings[0].Message -like "*$($case.Minimum)*$($case.ExpectedMinimum)*") "$context The warning omitted the previous or adjusted minimum."
+            $script:Warnings = @()
+            Get-AdditionalValidations -property $vm -name 'memory' -CurrentValue $vm.Memory
+            Assert-Equal $case.ExpectedMinimum $vm.dynamicMinRam "$context Repeating the normalized edit changed the minimum."
+            Assert-Equal 0 $script:Warnings.Count "$context Repeating the normalized edit emitted another warning."
+        }
+    }
+}
+
+Write-Host 'PASS: GenConfig preserves valid per-VM minimum memory, clamps excessive minimums, and applies safe WSUS/SUP memory floors.' -ForegroundColor Green
