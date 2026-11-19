@@ -80,6 +80,8 @@ function Reset-Scenario {
     $script:Scenario = $Name
     $script:Mutations = New-Object System.Collections.Generic.List[string]
     $script:Statuses = New-Object System.Collections.Generic.List[object]
+    $script:FilesystemWrites = 0
+    $script:ImportedMsi = ''
     $script:AppExists = $Name -notin @('Fresh', 'CreateUnreadable', 'OfficeDistributionFailure')
     $script:DeploymentTypeExists = $Name -notin @('Fresh', 'Partial')
     $script:AppDeploymentExists = $Name -in @('DuplicatePackage', 'PackageDeploymentQueryFailure')
@@ -93,7 +95,24 @@ function Write-DscStatus {
 
     [void]$script:Statuses.Add([pscustomobject]@{ Message = $Message; Failure = [bool]$Failure })
 }
-function Test-Path { param($LiteralPath); return $true }
+function Test-Path {
+    [CmdletBinding()]
+    param($LiteralPath, $PathType)
+
+    if ($script:Scenario -eq 'MissingSource' -and $LiteralPath -eq 'C:\tools\7z.msi') { return $false }
+    if ($script:Scenario -eq 'LinkCreationFailure' -and $LiteralPath -eq 'C:\Apps\7-Zip 64-bit\7z.msi') { return $false }
+    if ($LiteralPath -like '\\*') { return $false }
+    if ($script:Scenario -eq 'UncNotVisible' -and $LiteralPath -like 'FileSystem::\\*') { return $false }
+    return $true
+}
+function New-Item {
+    [CmdletBinding()]
+    param($ItemType, $Value, $Path, [switch]$Force)
+
+    $script:FilesystemWrites++
+    if ($script:Scenario -eq 'LinkCreationFailure') { Write-Error 'Synthetic hardlink creation failure.' }
+    return [pscustomobject]@{ FullName = $Path }
+}
 function Get-Item { param($LiteralPath); return [pscustomobject]@{ LinkType = 'HardLink' } }
 function Get-MockedFileHash { param($LiteralPath, $Algorithm); return [pscustomobject]@{ Hash = 'SAME' } }
 Set-Alias -Name Get-FileHash -Value Get-MockedFileHash -Scope Script
@@ -119,6 +138,7 @@ function Add-CMMSiDeploymentType {
     param($ApplicationName, $DeploymentTypeName, $ContentLocation, $Comment, [switch]$Force, $ErrorAction)
 
     [void]$script:Mutations.Add('AddDeploymentType')
+    $script:ImportedMsi = $ContentLocation
     $script:DeploymentTypeExists = $true
 }
 function Add-CMScriptDeploymentType {
@@ -187,6 +207,23 @@ Write-Host "engine : $($PSVersionTable.PSVersion)"
 Reset-Scenario -Name Fresh
 & $appLoop
 Assert-Equal 'NewApplication,AddDeploymentType,SyncApplication,NewApplicationDeployment,NewPackage,NewProgram,SyncPackage,NewPackageDeployment' ($script:Mutations -join ',') 'fresh state creates content, targets it, then creates deployments'
+Assert-Equal 0 $script:FilesystemWrites 'a current source remains a no-op while the CMSite provider rejects bare UNC paths'
+Assert-Equal '\\PS1SITE\c$\Apps\7-Zip 64-bit\7z.msi' $script:ImportedMsi 'MSI import uses the verified UNC file, not its containing directory'
+
+foreach ($scenario in 'MissingSource', 'LinkCreationFailure', 'UncNotVisible') {
+    Reset-Scenario -Name $scenario
+    $caught = $null
+    try { & $appLoop } catch { $caught = $_ }
+    Assert-Equal $true ($null -ne $caught) "$scenario stops preloading with an explicit error"
+    Assert-Equal '' ($script:Mutations -join ',') "$scenario stops before ConfigMgr object mutation"
+    if ($scenario -eq 'MissingSource') {
+        Assert-Equal $true ("$caught" -match [regex]::Escape('C:\tools\7z.msi')) 'missing-source error identifies the required local installer'
+        Assert-Equal 0 $script:FilesystemWrites 'missing installer stops before creating a source link'
+    }
+    elseif ($scenario -eq 'UncNotVisible') {
+        Assert-Equal $true ("$caught" -match [regex]::Escape('\\PS1SITE\c$\Apps\7-Zip 64-bit\7z.msi')) 'UNC visibility error identifies the exact importer path'
+    }
+}
 
 Reset-Scenario -Name Partial
 & $appLoop

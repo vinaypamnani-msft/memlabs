@@ -2228,17 +2228,21 @@ if ($licensed) { Write-Output 'Activated' }
         $appSourceDirectory = "C:\Apps\$($_.Name)"
         $appSourceFile = "C:\tools\$($_.AppMsi)"
         $appLinkPath = Join-Path $appSourceDirectory $_.AppMsi
-        if (-not (Test-Path -LiteralPath $appSourceDirectory)) {
-            New-Item -ItemType Directory -Path $appSourceDirectory -Force | Out-Null
+        $appContentLocation = "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)"
+        if (-not (Test-Path -LiteralPath $appSourceFile -PathType Leaf -ErrorAction Stop)) {
+            throw "Required application installer '$appSourceFile' is missing. Rerun Phase 8 so the host preflight can restore the configured MSI."
+        }
+        if (-not (Test-Path -LiteralPath $appSourceDirectory -PathType Container -ErrorAction Stop)) {
+            New-Item -ItemType Directory -Path $appSourceDirectory -Force -ErrorAction Stop | Out-Null
             Write-DscStatus "$Tag Created application source directory: $appSourceDirectory"
         }
 
         $appLinkIsCurrent = $false
-        if (Test-Path -LiteralPath $appLinkPath) {
+        if (Test-Path -LiteralPath $appLinkPath -ErrorAction Stop) {
             try {
-                $appLinkItem = Get-Item -LiteralPath $appLinkPath
+                $appLinkItem = Get-Item -LiteralPath $appLinkPath -ErrorAction Stop
                 $appLinkIsCurrent = $appLinkItem.LinkType -eq "HardLink" -and
-                    (Get-FileHash -LiteralPath $appSourceFile -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $appLinkPath -Algorithm SHA256).Hash
+                    (Get-FileHash -LiteralPath $appSourceFile -Algorithm SHA256 -ErrorAction Stop).Hash -eq (Get-FileHash -LiteralPath $appLinkPath -Algorithm SHA256 -ErrorAction Stop).Hash
             }
             catch {
                 Write-DscStatus "$Tag Could not verify the application source hardlink for $($_.Name); recreating it: $($_.Exception.Message)"
@@ -2248,9 +2252,12 @@ if ($licensed) { Write-Output 'Activated' }
             Write-DscStatus "$Tag Application source link is already current for $($_.Name) -- skipping filesystem write"
         }
         else {
-            if (Test-Path -LiteralPath $appLinkPath) { Remove-Item -LiteralPath $appLinkPath -Force }
-            New-Item -ItemType HardLink -Value $appSourceFile -Path $appLinkPath -Force | Out-Null
+            if (Test-Path -LiteralPath $appLinkPath -ErrorAction Stop) { Remove-Item -LiteralPath $appLinkPath -Force -ErrorAction Stop }
+            New-Item -ItemType HardLink -Value $appSourceFile -Path $appLinkPath -Force -ErrorAction Stop | Out-Null
             Write-DscStatus "$Tag Created application source hardlink for $($_.Name)"
+        }
+        if (-not (Test-Path -LiteralPath "FileSystem::$appContentLocation" -PathType Leaf -ErrorAction Stop)) {
+            throw "Application MSI '$appLinkPath' is not visible at the importer path '$appContentLocation'. Check the local administrative share and workflow identity."
         }
 
         #creating an application
@@ -2279,7 +2286,7 @@ if ($licensed) { Write-Output 'Activated' }
         $deploymentTypes = @(Get-CMDeploymentType -ApplicationName $appname -ErrorAction Stop)
         if ($deploymentTypes.Count -eq 0) {
             Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as App model"
-            Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction Stop | Out-Null
+            Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation $appContentLocation -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction Stop | Out-Null
             Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
         }
         elseif ($deploymentTypes.Count -ne 1 -or $deploymentTypes[0].LocalizedDisplayName -ne $_.AppMsi) {

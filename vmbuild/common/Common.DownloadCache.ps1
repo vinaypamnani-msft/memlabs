@@ -1079,17 +1079,40 @@ function Repair-PrimaryPrepopulationPayload {
     }
     $osdRoot = "$($driveLetter.TrimEnd('\'))\OSD"
     $requiredOs = @('Windows 11 24h2', 'Windows 10 22h2')
+    $applicationPayloads = @()
+    foreach ($tool in @($AzureFileList.Tools | Where-Object { $_.Appinstall -eq $true })) {
+        $fileName = "$($tool.AppMsi)"
+        if (-not $fileName -or [IO.Path]::GetFileName($fileName) -ne $fileName -or [IO.Path]::GetExtension($fileName) -ne '.msi') {
+            Write-Log "[Phase $Phase]: ${vmName}: Application '$($tool.Name)' must declare an MSI filename in AppMsi." -Failure
+            return $false
+        }
+        $applicationSource = Join-Path $AzureFilesPath "tools\$fileName"
+        if (-not (Test-Path -LiteralPath $applicationSource -PathType Leaf)) {
+            Write-Log "[Phase $Phase]: ${vmName}: Cannot verify application prepopulation; host installer is missing: $applicationSource" -Failure
+            return $false
+        }
+        $applicationPayloads += [pscustomobject]@{
+            FileName = $fileName
+            Sha256   = (Get-FileHash -LiteralPath $applicationSource -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+    }
     $probeScript = {
-        param($osdRoot)
+        param($osdRoot, $applicationPayloads)
         $required = @('Windows 11 24h2', 'Windows 10 22h2')
         $missing = @($required | Where-Object {
                 -not (Test-Path -LiteralPath (Join-Path $osdRoot "$_\sources\install.wim") -PathType Leaf) -or
                 (Test-Path -LiteralPath (Join-Path $osdRoot "$_\.memlabs-copy.pending") -PathType Leaf)
             })
+        $missingApplications = @($applicationPayloads | Where-Object {
+                $path = Join-Path 'C:\tools' $_.FileName
+                -not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop) -or
+                (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash -ne $_.Sha256
+            } | ForEach-Object { $_.FileName })
         [pscustomobject]@{
             BaselinesPresent = (Test-Path -LiteralPath 'C:\tools\baselines.zip' -PathType Leaf) -and
                 -not (Test-Path -LiteralPath 'C:\tools\.memlabs-baselines.pending' -PathType Leaf)
             MissingOs        = [string[]]$missing
+            MissingApplications = [string[]]$missingApplications
         }
     }
     $readState = {
@@ -1097,7 +1120,7 @@ function Repair-PrimaryPrepopulationPayload {
         $Diagnostics.Retryable = $true
         $result = Invoke-VmCommand -VmName $vmName -VmDomainName $VmDomainName `
             -RequireDomainIdentity:$RequireDomainIdentity -AsJob -TimeoutSeconds 120 `
-            -DisplayName $DisplayName -ScriptBlock $probeScript -ArgumentList $osdRoot
+            -DisplayName $DisplayName -ScriptBlock $probeScript -ArgumentList $osdRoot, $applicationPayloads
         if (-not $result -or $result.ScriptBlockFailed -isnot [bool]) {
             $Diagnostics.Retryable = $false
             Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation probe returned an invalid result envelope." -Failure
@@ -1109,7 +1132,8 @@ function Repair-PrimaryPrepopulationPayload {
             return $null
         }
         $states = @($result.ScriptBlockOutput | Where-Object {
-                $_ -and $_.PSObject.Properties['BaselinesPresent'] -and $_.PSObject.Properties['MissingOs']
+                $_ -and $_.PSObject.Properties['BaselinesPresent'] -and $_.PSObject.Properties['MissingOs'] -and
+                $_.PSObject.Properties['MissingApplications']
             })
         if ($states.Count -ne 1 -or $states[0].BaselinesPresent -isnot [bool]) {
             $Diagnostics.Retryable = $false
@@ -1123,12 +1147,13 @@ function Repair-PrimaryPrepopulationPayload {
     $state = & $readState 'Inspect Primary prepopulation payload'
     if ($null -eq $state) { return $false }
     $missingOs = @($state.MissingOs | ForEach-Object { "$_" })
-    if ($state.BaselinesPresent -and $missingOs.Count -eq 0) {
+    $missingApplications = @($state.MissingApplications | ForEach-Object { "$_" })
+    if ($state.BaselinesPresent -and $missingOs.Count -eq 0 -and $missingApplications.Count -eq 0) {
         Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation payload is complete." -LogOnly
         return $true
     }
 
-    Write-Log "[Phase $Phase]: ${vmName}: Repairing Primary prepopulation payload (baselinesPresent=$($state.BaselinesPresent), missingOS=$($missingOs -join ', '))."
+    Write-Log "[Phase $Phase]: ${vmName}: Repairing Primary prepopulation payload (baselinesPresent=$($state.BaselinesPresent), missingOS=$($missingOs -join ', '), missingMSI=$($missingApplications -join ', '))."
     Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status 'Repairing missing payload' -Force
 
     if (-not $state.BaselinesPresent) {
@@ -1179,6 +1204,18 @@ function Repair-PrimaryPrepopulationPayload {
         }
         if ($verifiedBaseline.ScriptBlockFailed -or $verifiedBaseline.ScriptBlockOutput -notcontains 'BASELINE_COPY_VERIFIED') {
             Write-Log "[Phase $Phase]: ${vmName}: Could not verify the completed baselines.zip copy." -Failure
+            return $false
+        }
+    }
+
+    foreach ($fileName in $missingApplications) {
+        Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status "Copying $fileName" -Force
+        $Diagnostics.Retryable = $true
+        $applicationCopied = Copy-ItemSafe -VmName $vmName -VMDomainName $VmDomainName `
+            -Path (Join-Path $AzureFilesPath "tools\$fileName") -Destination 'C:\tools' -Force `
+            -RequireDomainIdentity:$RequireDomainIdentity
+        if (-not $applicationCopied) {
+            Write-Log "[Phase $Phase]: ${vmName}: Failed to copy application installer '$fileName' to C:\tools." -Failure
             return $false
         }
     }
@@ -1263,9 +1300,10 @@ function Repair-PrimaryPrepopulationPayload {
     $verified = & $readState 'Verify Primary prepopulation payload'
     if ($null -eq $verified) { return $false }
     $stillMissing = @($verified.MissingOs | ForEach-Object { "$_" })
-    if (-not $verified.BaselinesPresent -or $stillMissing.Count -gt 0) {
+    $stillMissingApplications = @($verified.MissingApplications | ForEach-Object { "$_" })
+    if (-not $verified.BaselinesPresent -or $stillMissing.Count -gt 0 -or $stillMissingApplications.Count -gt 0) {
         $Diagnostics.Retryable = $true
-        Write-Log "[Phase $Phase]: ${vmName}: Prepopulation repair verification failed (baselinesPresent=$($verified.BaselinesPresent), missingOS=$($stillMissing -join ', '))." -Failure
+        Write-Log "[Phase $Phase]: ${vmName}: Prepopulation repair verification failed (baselinesPresent=$($verified.BaselinesPresent), missingOS=$($stillMissing -join ', '), missingMSI=$($stillMissingApplications -join ', '))." -Failure
         return $false
     }
 

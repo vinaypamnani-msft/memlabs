@@ -37,7 +37,7 @@ $validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
 $repairDefinition = Import-TestFunction -Path $downloadCachePath -Name 'Repair-PrimaryPrepopulationPayload'
 . $repairDefinition
 
-$script:GuestState = @{ Baselines = $true; W11 = $true; W10 = $true }
+$script:GuestState = @{ Baselines = $true; W11 = $true; W10 = $true; Application = $true }
 $script:Mounted = [System.Collections.Generic.List[string]]::new()
 $script:Dismounted = [System.Collections.Generic.List[string]]::new()
 $script:CopiedOs = [System.Collections.Generic.List[string]]::new()
@@ -45,6 +45,9 @@ $script:BaselineCopies = 0
 $script:BaselinePending = $false
 $script:BaselineCopyFailures = 0
 $script:BaselineStrict = $false
+$script:ApplicationCopies = 0
+$script:ApplicationStrict = $false
+$script:ApplicationCopyMode = 'normal'
 $script:StrictCalls = 0
 $script:ProbeMode = 'normal'
 
@@ -55,6 +58,7 @@ function Get-TestPayloadState {
     [pscustomobject]@{
         BaselinesPresent = $script:GuestState.Baselines -and -not $script:BaselinePending
         MissingOs        = [string[]]$missing
+        MissingApplications = [string[]]@('7z.msi' | Where-Object { -not $script:GuestState.Application })
     }
 }
 
@@ -75,7 +79,7 @@ function Invoke-VmCommand {
             return [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @('Transport interrupted') }
         }
         if ($script:ProbeMode -eq 'malformed') {
-            return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @([pscustomobject]@{ BaselinesPresent = 'yes'; MissingOs = @() }); ErrorDetails = @() }
+            return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @([pscustomobject]@{ BaselinesPresent = 'yes'; MissingOs = @(); MissingApplications = @() }); ErrorDetails = @() }
         }
         if ($script:ProbeMode -eq 'ambiguous') {
             return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @((Get-TestPayloadState), (Get-TestPayloadState)); ErrorDetails = @() }
@@ -108,7 +112,15 @@ function Copy-ItemSafe {
         [switch]$Force,
         [switch]$RequireDomainIdentity
     )
-    if ($RequireDomainIdentity) { $script:StrictCalls++; $script:BaselineStrict = $true }
+    if ($RequireDomainIdentity) { $script:StrictCalls++ }
+    if ((Split-Path $Path -Leaf) -eq '7z.msi') {
+        $script:ApplicationCopies++
+        if ($RequireDomainIdentity) { $script:ApplicationStrict = $true }
+        if ($script:ApplicationCopyMode -eq 'interrupted') { return $false }
+        if ($script:ApplicationCopyMode -ne 'partial') { $script:GuestState.Application = $true }
+        return $true
+    }
+    if ($RequireDomainIdentity) { $script:BaselineStrict = $true }
     $script:GuestState.Baselines = $true
     $script:BaselineCopies++
     if ($script:BaselineCopyFailures -gt 0) {
@@ -163,6 +175,8 @@ function Write-Progress2 {
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-prepopulation-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path (Join-Path $tempRoot 'support') -Force
+$null = New-Item -ItemType Directory -Path (Join-Path $tempRoot 'tools') -Force
+Set-Content -LiteralPath (Join-Path $tempRoot 'tools\7z.msi') -Value 'expected-msi' -Encoding ASCII
 $null = New-Item -ItemType File -Path (Join-Path $tempRoot 'support\baselines.zip') -Force
 $null = New-Item -ItemType File -Path (Join-Path $tempRoot 'w11.iso') -Force
 $null = New-Item -ItemType File -Path (Join-Path $tempRoot 'w10.iso') -Force
@@ -170,6 +184,10 @@ $null = New-Item -ItemType File -Path (Join-Path $tempRoot 'w10.iso') -Force
 try {
     $vm = [pscustomobject]@{ vmName = 'LAB-PRI'; role = 'Primary'; cmInstallDir = 'E:\ConfigMgr' }
     $fileList = [pscustomobject]@{
+        Tools = @(
+            [pscustomobject]@{ Appinstall = $true; AppMsi = '7z.msi' },
+            [pscustomobject]@{ Appinstall = $false; AppMsi = 'disabled.msi' }
+        )
         OSISO = @(
             [pscustomobject]@{ id = 'Windows 11 24h2'; filename = 'w11.iso' },
             [pscustomobject]@{ id = 'Windows 10 22h2'; filename = 'w10.iso' }
@@ -180,8 +198,38 @@ try {
         -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -RequireDomainIdentity
     Assert-True $healthy 'Complete payload should pass.'
     Assert-True ($script:Mounted.Count -eq 0 -and $script:BaselineCopies -eq 0) 'Complete payload should be a no-op.'
+    Assert-True ($script:ApplicationCopies -eq 0) 'Current application installers should not be copied.'
 
-    $script:GuestState = @{ Baselines = $false; W11 = $false; W10 = $true }
+    $script:GuestState.Application = $false
+    $repairedApplication = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+        -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -RequireDomainIdentity
+    Assert-True ($repairedApplication -and $script:ApplicationCopies -eq 1 -and $script:GuestState.Application) `
+        'A retained Primary with complete OS media and baselines must still repair its missing application installer.'
+    Assert-True $script:ApplicationStrict 'Application installer repair should require the selected domain identity.'
+    foreach ($copyMode in 'interrupted', 'partial') {
+        $script:GuestState.Application = $false
+        $script:ApplicationCopies = 0
+        $script:ApplicationCopyMode = $copyMode
+        $repairDiagnostics = @{}
+        $incompleteApplication = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+            -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
+        Assert-True (-not $incompleteApplication -and $repairDiagnostics.Retryable) `
+            "An $copyMode application copy must fail with retryable state."
+        $script:ApplicationCopyMode = 'normal'
+        $retriedApplication = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+            -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
+        Assert-True ($retriedApplication -and $script:ApplicationCopies -eq 2) `
+            'An incomplete installer must be copied and verified again on retry.'
+    }
+    Remove-Item -LiteralPath (Join-Path $tempRoot 'tools\7z.msi') -Force
+    $repairDiagnostics = @{}
+    $missingHostApplication = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+        -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
+    Assert-True (-not $missingHostApplication -and -not $repairDiagnostics.Retryable) `
+        'A missing host installer must fail permanently instead of claiming preflight success.'
+    Set-Content -LiteralPath (Join-Path $tempRoot 'tools\7z.msi') -Value 'expected-msi' -Encoding ASCII
+
+    $script:GuestState = @{ Baselines = $false; W11 = $false; W10 = $true; Application = $true }
     $script:Mounted.Clear()
     $script:Dismounted.Clear()
     $script:CopiedOs.Clear()
@@ -196,7 +244,7 @@ try {
     Assert-True ($script:Mounted.Count -eq 1 -and $script:Dismounted -contains $script:Mounted[0]) 'Repair ISO should be mounted and ejected.'
     Assert-True ($script:StrictCalls -gt 0) 'Phase 8 repair should require the domain identity.'
 
-    $script:GuestState = @{ Baselines = $false; W11 = $true; W10 = $true }
+    $script:GuestState = @{ Baselines = $false; W11 = $true; W10 = $true; Application = $true }
     $script:BaselineCopyFailures = 1
     $script:BaselineCopies = 0
     $repairDiagnostics = @{}
@@ -207,7 +255,7 @@ try {
         -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
     Assert-True ($retriedBaseline -and $script:BaselineCopies -eq 2 -and -not $script:BaselinePending) 'A partial baseline was accepted without copying and verifying it again.'
 
-    $script:GuestState = @{ Baselines = $true; W11 = $true; W10 = $false }
+    $script:GuestState = @{ Baselines = $true; W11 = $true; W10 = $false; Application = $true }
     Remove-Item -LiteralPath (Join-Path $tempRoot 'w10.iso') -Force
     $repairDiagnostics = @{}
     $missingHostMedia = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
@@ -238,6 +286,12 @@ try {
         $probeMedia = $probeArgument.ScriptBlock.GetScriptBlock()
         $mediaRoot = Join-Path $tempRoot 'media'
         $guestRoot = Join-Path $tempRoot 'guest-osd'
+        $guestApplicationPath = Join-Path $tempRoot 'guest-7z.msi'
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath (Join-Path $tempRoot 'tools\7z.msi') -Destination $guestApplicationPath
+        $applicationPayloads = @([pscustomobject]@{
+                FileName = '7z.msi'
+                Sha256 = (Get-FileHash -LiteralPath $guestApplicationPath -Algorithm SHA256).Hash
+            })
         $null = New-Item -ItemType Directory -Path (Join-Path $mediaRoot 'sources') -Force
         $null = New-Item -ItemType Directory -Path (Join-Path $guestRoot 'Windows 10 22h2\sources') -Force
         Set-Content -LiteralPath (Join-Path $mediaRoot 'sources\install.wim') -Value 'complete-media-content' -Encoding ASCII
@@ -254,7 +308,14 @@ try {
             param($LiteralPath, $PathType = 'Any')
             if ($LiteralPath -eq 'C:\tools\baselines.zip') { return $true }
             if ($LiteralPath -eq 'C:\tools\.memlabs-baselines.pending') { return $false }
+            if ($LiteralPath -eq 'C:\tools\7z.msi') { $LiteralPath = $guestApplicationPath }
             Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType $PathType
+        }
+        function Get-FileHash {
+            [CmdletBinding()]
+            param($LiteralPath, $Algorithm)
+            if ($LiteralPath -eq 'C:\tools\7z.msi') { $LiteralPath = $guestApplicationPath }
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm -ErrorAction Stop
         }
         function Copy-Item {
             param($Path, $Destination, [switch]$Recurse, [switch]$Force, [switch]$Confirm, $ErrorAction)
@@ -274,7 +335,7 @@ try {
                 $script:MediaCopyMode = $mode
                 $failed = $false
                 try { $null = & $copyMedia $destination } catch { $failed = $true }
-                $stateAfterFailure = & $probeMedia $guestRoot
+                $stateAfterFailure = & $probeMedia $guestRoot $applicationPayloads
                 Assert-True ($failed -and
                     (Microsoft.PowerShell.Management\Test-Path -LiteralPath (Join-Path $destination 'sources\install.wim') -PathType Leaf) -and
                     (Microsoft.PowerShell.Management\Test-Path -LiteralPath (Join-Path $destination '.memlabs-copy.pending') -PathType Leaf) -and
@@ -282,8 +343,23 @@ try {
             }
             $script:MediaCopyMode = 'success'
             $null = & $copyMedia $destination
-            $stateAfterRetry = & $probeMedia $guestRoot
+            $stateAfterRetry = & $probeMedia $guestRoot $applicationPayloads
             Assert-True ($stateAfterRetry.MissingOs.Count -eq 0) 'A verified retry did not clear the incomplete-copy marker.'
+            Set-Content -LiteralPath $guestApplicationPath -Value 'modified-msi' -Encoding ASCII
+            $corruptApplication = & $probeMedia $guestRoot $applicationPayloads
+            Assert-True ((Get-Item -LiteralPath $guestApplicationPath).Length -eq
+                (Get-Item -LiteralPath (Join-Path $tempRoot 'tools\7z.msi')).Length -and
+                $corruptApplication.MissingApplications -contains '7z.msi') `
+                'The guest probe must reject a same-length installer whose SHA-256 differs.'
+            Remove-Item -LiteralPath $guestApplicationPath -Force
+            $missingApplication = & $probeMedia $guestRoot $applicationPayloads
+            Assert-True ($missingApplication.MissingApplications.Count -eq 1 -and
+                $missingApplication.MissingApplications -contains '7z.msi') 'The guest probe must report an absent configured installer.'
+            $noApplications = & $probeMedia $guestRoot @()
+            Assert-True ($noApplications.MissingApplications.Count -eq 0) 'An empty application list must not require installers.'
+            Microsoft.PowerShell.Management\Copy-Item -LiteralPath (Join-Path $tempRoot 'tools\7z.msi') -Destination $guestApplicationPath -Force
+            $currentApplication = & $probeMedia $guestRoot $applicationPayloads
+            Assert-True ($currentApplication.MissingApplications.Count -eq 0) 'The guest probe rejected a verified current installer.'
         }
         finally {
             Remove-PSDrive -Name $script:MediaDrive -Force -ErrorAction Stop

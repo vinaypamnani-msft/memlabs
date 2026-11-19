@@ -2,6 +2,13 @@
 
 ARM Template and DSC configurations for deploying an Azure VM with Hyper-V, and for deploying ConfigMgr lab virtual machines on this Hyper-V host.
 
+## Develop release notes
+
+See the [consolidated develop release notes and email draft](docs/MemLabs-Develop-Release-Notes.md)
+for new features, usage guidance, performance changes, security/maintenance
+behavior, and the remaining release checks. The announcement is a working draft,
+not confirmation that develop has been released to main.
+
 ## Diagnostic configuration exports
 
 [`New-Lab.ps1`](vmbuild/New-Lab.ps1) writes a redacted
@@ -1445,6 +1452,21 @@ process without waiting for abandoned runspaces. The original exit code is
 preserved. This does not terminate the parent test harness or any lab VM.
 
 Validate with `vmbuild\tools\Test-OrphanRunspaceCleanup.ps1`.
+
+### Phase 8 Primary prepopulation sources
+
+Before dispatching Phase 8 workers, the host repairs missing Primary OS media,
+baselines, and application installers enabled by `Tools[].Appinstall`. Installer
+bytes in `C:\tools` must match the host download cache by SHA-256; interrupted or
+corrupt copies cannot pass verification. Current installers are not recopied.
+Missing host installers fail preparation explicitly.
+
+Application preloading requires the local MSI and its exact administrative-share
+UNC file path to be visible through FileSystem, even from the CMSite drive,
+before creating ConfigMgr objects. Directory or hardlink creation errors stop
+preloading instead of logging false success.
+Validate with `vmbuild\tools\Test-PrimaryPrepopulationPayload.ps1` and
+`vmbuild\tools\Test-PerfloadingApplicationPackageReconciliation.ps1`.
 
 ### Phase 8 ConfigMgr proxy scope
 
