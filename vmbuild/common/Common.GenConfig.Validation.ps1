@@ -987,12 +987,7 @@ Function Get-TestResult {
         if ($valid -eq $false) {
             $messages = $($c.Message) -split "\r\n"
             foreach ($msg in $messages.Trim()) {
-                #Write-RedX $msg
-                $global:GenConfigErrorMessages += [PSCustomObject]@{
-                    property = $null
-                    Level    = "ERROR"
-                    Message  = $msg
-                }
+                Add-ErrorMessage -message $msg
                 Write-Verbose "GenConfig Get-TestResult $msg"
             }
             #Write-ValidationMessages -TestObject $c

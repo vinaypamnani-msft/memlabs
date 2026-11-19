@@ -21,7 +21,7 @@ function Assert-True {
 }
 $hostPath = Join-Path $root 'common\Common.ScriptBlocks.ps1'
 $guestPath = Join-Path $root 'DSC\phases\ScriptFunctions.ps1'
-foreach ($name in @('Get-MemLabsClientCertificateReadinessBlock', 'Invoke-MemLabsClientCertificatePrestage')) {
+foreach ($name in @('Get-MemLabsClientCertificateReadinessBlock', 'Invoke-MemLabsClientCertificateReadiness', 'Invoke-MemLabsClientCertificatePrestage')) {
     . (Import-TestFunction $hostPath $name)
 }
 foreach ($name in @(
@@ -310,12 +310,27 @@ namespace MemLabs {
     }
     $script:NativeThrows = $false
     $script:EventsFail = $false
+    $script:NativeStderr = $false
+    $script:NativeProbeExit = 5
+    $script:PolicyReadFails = $false
+    function Get-ItemPropertyValue {
+        [CmdletBinding()]
+        param($Path, $Name)
+        if ($script:PolicyReadFails) { throw 'Synthetic autoenrollment policy read failure' }
+        7
+    }
     function gpupdate.exe {
         if ($script:NativeThrows) { throw 'Synthetic gpupdate invocation error' }
         $global:LASTEXITCODE = 0; $script:NativeCalls++; 'GP refreshed'
     }
     function certutil.exe {
         if ($script:NativeThrows) { throw 'Synthetic certutil invocation error' }
+        if ($script:NativeStderr) {
+            & powershell.exe -NoProfile -Command ("[Console]::Error.WriteLine('Synthetic native enrollment stderr'); exit {0}" -f $script:NativeProbeExit)
+            $nativeExitCode = $LASTEXITCODE
+            Set-Variable -Name LASTEXITCODE -Value $nativeExitCode -Scope 1
+            return
+        }
         $global:LASTEXITCODE = 5; $script:NativeCalls++; 'enrollment not ready'
     }
     function Get-WinEvent {
@@ -335,6 +350,8 @@ namespace MemLabs {
     $state = & $readiness
     Assert-True (@($state).Count -eq 1 -and $state.Ready -and $state.Thumbprint -eq 'usable' -and $script:CertificateReads -eq 3) 'Delayed autoenrollment did not converge to one readiness result within bounded retries.'
     Assert-True (($state.Diagnostics -join ' ') -match 'exit=5') 'Native enrollment failure exit codes were lost.'
+    Assert-True (($state.Diagnostics -join ' ') -match 'AEPolicy at probe start=7' -and
+        ($state.Diagnostics -join ' ') -match 'issuer=CA') 'GPO policy and certificate issuer evidence were lost.'
     $script:Candidates[0].HasPrivateKey = $false
     $script:CertificateReads = 0
     $state = & $readiness
@@ -360,15 +377,150 @@ namespace MemLabs {
         'A broken first certificate prevented selection of another usable client-auth certificate.'
     [MemLabs.ClientChainTest]::ThrowForUntrusted = $false
     $script:Candidates = @()
+    $script:NativeStderr = $true
+    foreach ($nativeCode in @(5, 0)) {
+        $script:NativeProbeExit = $nativeCode
+        $state = & $readiness
+        Assert-True (-not $state.Ready -and ($state.Diagnostics -join ' ') -match "certutil -pulse attempt=1 exit=$nativeCode" -and
+            ($state.Diagnostics -join ' ') -match 'Synthetic native enrollment stderr' -and
+            ($state.Diagnostics -join ' ') -notmatch 'certutil.*invocation failed') `
+            'Native stderr bypassed exit-code capture or command success was mistaken for certificate readiness.'
+        Assert-True ($ErrorActionPreference -eq 'Stop') 'Native enrollment probe did not restore the caller error preference.'
+    }
+    $script:NativeStderr = $false
     $script:NativeThrows = $true
     $script:EventsFail = $true
+    $script:PolicyReadFails = $true
     $state = & $readiness
     Assert-True (-not $state.Ready -and ($state.Diagnostics -join ' ') -match 'gpupdate invocation failed' -and
         ($state.Diagnostics -join ' ') -match 'certutil.*invocation failed' -and
-        ($state.Diagnostics -join ' ') -match 'event query failed') `
+        ($state.Diagnostics -join ' ') -match 'event query failed' -and
+        ($state.Diagnostics -join ' ') -match 'Synthetic autoenrollment policy read failure') `
         'Enrollment or event-log execution failures lost their diagnostic context.'
     Assert-True ($readinessText -match 'UrlRetrievalTimeout = \[TimeSpan\]::FromSeconds\(10\)') `
         'Certificate-chain URL retrieval has no bounded timeout.'
+
+    $validationPath = Join-Path $root 'common\Common.Validation.Functional.ps1'
+    $tokens = $null; $errors = $null
+    $validationAst = [Management.Automation.Language.Parser]::ParseFile($validationPath, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw "$validationPath has parse errors: $($errors -join '; ')" }
+    $member = $validationAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-DomainMemberFunctionality'
+    }, $true)
+    $guestAssignment = $member.Body.Find({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$scriptBlock'
+    }, $true)
+    $guestBlock = $guestAssignment.Right.Find({
+        param($node) $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
+    }, $true).ScriptBlock
+    $pkiCheck = @($guestBlock.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses[0].Item1.Extent.Text -match '^\$checkPki\b' -and
+                    $node.Extent.Text -match 'FAIL: PKI client readiness did not converge'
+            }, $true))
+    Assert-True ($pkiCheck.Count -eq 1) 'Expected one guest PKI readiness check.'
+    $guestInitializers = @($guestBlock.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $_.Left.Extent.Text -in @('$checkPki', '$pushRequested')
+        })
+    $scriptBlock = [scriptblock]::Create($guestBlock.ParamBlock.Extent.Text + "`n" +
+        ($guestInitializers.Extent.Text -join "`n") + "`n" + $pkiCheck[0].Extent.Text)
+    $hostDispatch = @($member.Body.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $_.Left.Extent.Text -in @('$checkPkiCert', '$clientCertificateProbeText', '$result') -and
+                ($_.Left.Extent.Text -ne '$result' -or $_.Right.Extent.Text -match 'Invoke-VmCommand')
+        })
+    Assert-True ($hostDispatch.Count -eq 3) 'Expected the real host PKI flag, probe and guest dispatch.'
+    $dispatch = [scriptblock]::Create($hostDispatch.Extent.Text -join "`n")
+    $script:ExistingAgent = $false; $script:ActiveSetup = $false
+    $script:ReadinessCalls = 0; $script:ReadinessReady = $true
+    function Get-Service {
+        param($Name, $ErrorAction)
+        if ($Name -eq 'CcmExec' -and $script:ExistingAgent) { [pscustomobject]@{ Status = 'Running' } }
+    }
+    function Get-Process {
+        param($Name, $ErrorAction)
+        if ($Name -eq 'ccmsetup' -and $script:ActiveSetup) { [pscustomobject]@{ Id = 1234 } }
+    }
+    function Get-MemLabsClientCertificateReadinessBlock {
+        {
+            $script:ReadinessCalls++
+            [pscustomobject]@{
+                Ready = $script:ReadinessReady; Diagnostics = @('fixture enrollment evidence')
+                CertFound = $script:ReadinessReady; ChainStatus = 'fixture'; Thumbprint = 'fixture'
+            }
+        }
+    }
+    function Invoke-VmCommand {
+        param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, $DisplayName,
+            [switch]$SuppressLog, [switch]$AsJob, $TimeoutSeconds, [switch]$PollProgress)
+        $script:ValidationResult = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $results = $script:ValidationResult
+        & $ScriptBlock @ArgumentList
+        [pscustomobject]@{ ScriptBlockOutput = $results; ScriptBlockFailed = $false }
+    }
+    $VMName = 'CLIENT'; $script:domain = 'lab.test'; $script:cmManagesDomain = $true
+    foreach ($case in @(
+            @{ PKI = $true; Push = $false; Agent = $false; Setup = $false; Calls = 1 },
+            @{ PKI = $true; Push = $false; Agent = $false; Setup = $true; Calls = 1 },
+            @{ PKI = $true; Push = $false; Agent = $true; Setup = $false; Calls = 1 },
+            @{ PKI = $true; Push = $true; Agent = $false; Setup = $false; Calls = 1 },
+            @{ PKI = $false; Push = $true; Agent = $true; Setup = $true; Calls = 0 }
+        )) {
+        $usePKI = $case.PKI; $pushExpected = $case.Push
+        $script:ExistingAgent = $case.Agent; $script:ActiveSetup = $case.Setup
+        $script:ReadinessCalls = 0
+        & $dispatch
+        Assert-True ($script:ReadinessCalls -eq $case.Calls) `
+            "Incorrect PKI validation gate: PKI=$usePKI push=$pushExpected agent=$($case.Agent) setup=$($case.Setup)."
+    }
+    $script:cmManagesDomain = $false
+    $usePKI = $true; $pushExpected = $true
+    $script:ReadinessCalls = 0
+    & $dispatch
+    Assert-True ($script:ReadinessCalls -eq 1) 'Configured PKI was incorrectly gated on ConfigMgr management.'
+    $usePKI = $false
+    $script:DeployConfig = [pscustomobject]@{
+        virtualMachines = @([pscustomobject]@{ InstallCA = $true; role = 'DC'; domain = 'lab.test' })
+    }
+    $script:ReadinessCalls = 0
+    & $dispatch
+    Assert-True ($script:ReadinessCalls -eq 1) 'A local issuing CA without ConfigMgr management skipped client autoenrollment validation.'
+    $script:DeployConfig.virtualMachines[0].domain = 'other.test'
+    $script:ReadinessCalls = 0
+    & $dispatch
+    Assert-True ($script:ReadinessCalls -eq 0) 'An unrelated forest CA forced PKI validation in this domain.'
+    $script:cmManagesDomain = $true
+    $usePKI = $true; $pushExpected = $false
+    $script:ExistingAgent = $false; $script:ActiveSetup = $false; $script:ReadinessReady = $false
+    & $dispatch
+    Assert-True (-not $script:ValidationResult.Passed -and
+        ($script:ValidationResult.Details -join ' ') -match 'fixture enrollment evidence.*PKI client readiness') `
+        'An opted-out client without an agent lost its required enrollment failure evidence.'
+
+    $capture = @($member.Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses[0].Item1.Extent.Text -match 'ScriptBlockOutput.*Details' -and
+                    $node.Extent.Text -match 'Save-CcmSetupLog'
+            }, $true))
+    Assert-True ($capture.Count -eq 1) 'Expected one host ccmsetup failure-log capture.'
+    $captureBlock = [scriptblock]::Create($capture[0].Extent.Text)
+    function Save-CcmSetupLog { param($VMName, $DomainName) $script:CapturedSetupLogs++ }
+    foreach ($case in @(
+            @{ Details = @('FAIL: ccmsetup wedged 7m after reporting no usable PKI client-auth certificate'); Captures = 1 },
+            @{ Details = @('WARN: CcmExec not installed; ccmsetup failed: fixture'); Captures = 1 },
+            @{ Details = @('ccmsetup failed: historical', 'OK: CcmExec is Running'); Captures = 0 },
+            @{ Details = @('WARN: Windows Time unavailable'); Captures = 0 }
+        )) {
+        $script:CapturedSetupLogs = 0
+        $script:result = [pscustomobject]@{ ScriptBlockOutput = @{ Details = $case.Details } }
+        & $captureBlock
+        Assert-True ($script:CapturedSetupLogs -eq $case.Captures) 'Wedged/current or historical ccmsetup log capture was misclassified.'
+    }
 }
 finally {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $script:TestRoot -Recurse -Force

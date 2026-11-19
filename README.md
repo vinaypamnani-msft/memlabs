@@ -2,6 +2,189 @@
 
 ARM Template and DSC configurations for deploying an Azure VM with Hyper-V, and for deploying ConfigMgr lab virtual machines on this Hyper-V host.
 
+## Diagnostic configuration exports
+
+[`New-Lab.ps1`](vmbuild/New-Lab.ps1) writes a redacted
+`VMBuild.<domain>.config.json` beside the deployment log. Activation keys
+(`productID`, `SysCenterId`, and product/license key fields), passwords,
+credentials, secrets, and token fields are omitted recursively. Credential
+objects and credential-bearing diagnostic text/URLs are redacted. Inline
+sidecar-write fallbacks and configuration error context use the same protection;
+failed redaction omits the configuration and reports a warning, never raw JSON.
+
+Shared MemLabs logging also redacts the actual password loaded from
+`cache\vmbuildadmin.txt`, including escaped representations in native errors,
+console/notification output, CMTrace/JSONL buffers, progress diagnostics, crash
+reports, and configuration diagnostics. This is value-based protection, not
+just matching fields named `password`. The mRemoteNG 32-bit encryption fallback
+passes credentials through redirected input, never generated script text or
+process arguments. Restart the launcher after updating to load these changes.
+
+`Write-Exception` writes the complete redacted root message, exception type,
+HRESULT, error identity/category, and crash-report path directly to CMTrace and
+JSONL logs, including calls without additional diagnostic data. Native exception
+messages and custom `ErrorDetails` are logged separately. Offline investigation
+no longer depends on potentially truncated call-stack arguments.
+Console and crash-report output remain available.
+
+Modern self-contained x64 mRemoteNG builds require x64 PowerShell 7 with a
+.NET runtime matching or exceeding the package's target framework (currently
+`.NET 10`). The primary loader selects the modern BouncyCastle dependency and
+resolves the provider from the installed assembly. Primary failures report the
+original sanitized error and host/runtime context; only legacy .NET Framework
+builds may retry in 32-bit Windows PowerShell. An encryption failure leaves the
+existing connection file and credentials unchanged, including overwrite requests.
+
+Runtime settings, activation, and guest deployment configurations are unchanged.
+This only protects newly generated MemLabs diagnostics; existing logs,
+archives, and OneDrive copies are not cleaned. Review other collected files
+before sharing. Validate with
+[`Test-ConfigDiagnosticRedaction.ps1`](vmbuild/tools/Test-ConfigDiagnosticRedaction.ps1)
+and [`Test-LogSecretRedaction.ps1`](vmbuild/tools/Test-LogSecretRedaction.ps1).
+[`Test-MRemoteNGEncryption.ps1`](vmbuild/tools/Test-MRemoteNGEncryption.ps1)
+also verifies the primary path against an installed modern mRemoteNG package.
+
+## Reporting diagnostics
+
+For missing ConfigMgr reports or a blank report portal, run
+[`Get-ReportingDiagnostics.ps1`](vmbuild/tools/Get-ReportingDiagnostics.ps1)
+from elevated PowerShell on the MemLabs Hyper-V host:
+
+```powershell
+pwsh -NoProfile -File .\vmbuild\tools\Get-ReportingDiagnostics.ps1 -VMName PKIPS1SQL -SiteCode PS1
+```
+
+The fresh process avoids reusing functions loaded before a `git pull`. Host
+PowerShell 5.1/7 uses cached MemLabs credentials; no manual guest script copy is
+required. The collector is **file-first**, rather than one large guest pipeline:
+
+1. **Before guest PowerShell:** copy raw reporting/setup/site logs through SMB
+   admin shares, using current Hyper-V IPs plus name/address alternatives. The
+   reporting VM and its owning site server are captured independently. Known
+   C: and data-drive locations and log directories inferred from service paths include
+   PBIRS/SSRS, SRSRP, ConfigMgr, SQL ERRORLOGs, and selected live event-log files.
+   Relevant WER `Report.wer` crash descriptions are copied, never memory dumps.
+2. **Independent host reads:** authenticated native WMI/DCOM and event RPC,
+   host SOAP/HTTP/REST, and read-only SQL catalog queries run in bounded workers.
+   Portal script responses are retained as non-executable text (2 MiB per asset)
+   and HTTP error pages retain status/body excerpts for blank-page analysis.
+   SQL tries a known local-VM IP with the configured instance/port when host DNS
+   fails. HTTP credentials never follow a cross-origin redirect.
+3. **Isolated missing-data fallbacks:** individual guest probes use PowerShell
+   Direct, then existing WinRM. A broken Direct channel opens a per-VM circuit
+   breaker instead of being retried for every remaining probe. Host evidence is
+   retained even if both guest PowerShell methods fail. Fresh crash/resource/
+   Defender events are then requested through native event RPC.
+
+Raw files, manifests, and `*-Reporting-<id>.partial.json` checkpoints are saved
+flat beside the build log, so normal synchronization captures them **while the
+collection is still running**. Each stage atomically updates the host checkpoint.
+Completed and aborted-copy bytes survive worker timeouts; aborted snapshots are
+explicitly incomplete. Text logs up to 32 MiB are copied in full, larger logs
+retain their last 8 MiB, and each copy pass has a 256 MiB budget. Live EVTX files
+must fit 64 MiB and are never tailed or represented as filtered/verified events.
+Their native event-RPC counterpart is collected separately. `Security.evtx`,
+raw RS encrypted configuration/DSNs, and credential caches are not exported.
+
+The latest usable JSON defaults to `logs\<VM>-ReportingDiagnostics.json`.
+Critical unavailable facts create a separate `*.failure-<id>.json` without
+overwriting earlier successful output. `-OutputPath` overrides this location.
+`-AsJson` returns one document but still retains raw files and checkpoints.
+`CollectionStatus`, `CollectionFailed`, `Attempts`, `FileManifests`, and
+`CollectionErrors` distinguish measured zero reports from unreadable data and
+show which source supplied a recovered fact. Source SHA-256 fingerprints are
+retained for the entry point, host helpers, transport, and bounded-worker code.
+
+The collector does not install software, launch a browser, mount/modify a live
+VHDX, restart the VM/services, or change firewall, DNS, trust, credentials, or
+database configuration. Existing network access and administrative permissions
+are required: if every independent transport is blocked, the manifest records
+that limitation rather than inventing an empty healthy inventory. Local
+Windows PowerShell 5.1 collection remains available by omitting `-VMName`.
+
+Phase 11 automatically retains a snapshot for **every** reporting-point validation,
+including otherwise healthy checks so browser-only blank pages still have evidence.
+Files are saved beside the domain build log as
+`<VM>-Phase11-<timestamp>-ReportingDiagnostics.json`; their paths appear in the
+validation output. Collection precedes reporting health/role probes that can warm
+or restart the reporting service. The owning site's `srsrp.log`, `srsrpsetup.log`, and
+`sitecomp.log` are also collected. SQL-hosted reporting points resolve their owning
+site even when the SQL VM has no `siteCode`.
+
+Validation requires published ConfigMgr reports in the expected site folder,
+verified through SOAP or an explicitly successful, site-scoped SQL catalog read,
+and a responding portal with its required JavaScript assets and catalog API.
+Older integrated SSRS instances without the v2 API retain SOAP/portal validation.
+Collection or verification failures remain visible failures, not successful empty
+report inventories. Portal assets also record class static initialization blocks:
+an installed Edge older than Chromium 94 fails validation when that syntax is
+present, even if the portal and API return HTTP 200. An unavailable browser
+version is explicitly unverified, not assumed compatible. These checks do not
+claim to execute the browser UI or establish a universal supported-browser floor.
+
+### Browser maintenance and empty catalogs
+
+Early provisioning still suppresses Edge Update to avoid extra pending-file
+renames and reboots. Phase 10
+[`Fix-EdgeServicing.ps1`](vmbuild/Fixes/Fix-EdgeServicing.ps1) installs the current
+official Stable release, verifies its installed version, and restores Edge
+updater services/tasks. The internet-connected host resolves and caches the
+Microsoft-signed MSI, then injects it into guests that need an upgrade; guests
+verify the local package without contacting internet endpoints. Isolated guests
+are supported, but a fully disconnected host still needs access to the official
+metadata/download endpoints. It also runs through maintenance for existing Windows
+VMs; offline root CAs, proxy, Linux, OSD, and AAD-client roles are excluded.
+It does not downgrade a newer browser, override managed update policies, restart
+the VM, or forcibly close browser windows. Reopen existing Edge windows afterward.
+Download, policy, installation, or updater-restoration failures remain explicit
+maintenance failures. Microsoft requires a
+[current supported browser for Power BI Report Server](https://learn.microsoft.com/en-us/power-bi/report-server/browser-support).
+
+A blank browser and an empty catalog are separate checks. If the ConfigMgr
+Reporting Services Point was removed or its ReportServer database recreated,
+re-add/reconfigure that role against the intended database and confirm publication
+in `srsrp.log` and the `ConfigMgr_<site>` folder. Updating the browser cannot restore
+reports to a newly empty database; do not repeatedly recreate it to fix a blank UI.
+
+Validate without a lab using
+[`Test-ReportingDiagnostics.ps1`](vmbuild/tools/Test-ReportingDiagnostics.ps1)
+and [`Test-ReportingValidation.ps1`](vmbuild/tools/Test-ReportingValidation.ps1).
+[`Test-EdgeServicing.ps1`](vmbuild/tools/Test-EdgeServicing.ps1) uses mocked
+installers/services/tasks and does not change host software or update settings.
+[`Test-ReportingProbeBounds.ps1`](vmbuild/tools/Test-ReportingProbeBounds.ps1)
+also exercises real HTTP response stalls and the shared transport timeout in
+the Windows PowerShell 5.1 guest runtime.
+It also runs isolated guest probes through real local Windows PowerShell
+remoting, without nested PowerShell workers in the guest.
+[`Test-VmCommandFailureDetails.ps1`](vmbuild/tools/Test-VmCommandFailureDetails.ps1)
+covers the shared command wrapper's failure envelopes.
+[`Test-ReportingResilience.ps1`](vmbuild/tools/Test-ReportingResilience.ps1)
+fault-tests copy ordering, locked files, exact byte limits, DNS/SMB/RPC/Direct/
+WinRM failures, SQL recovery, and durable partial output.
+[`Test-ReportingNativeWorkers.ps1`](vmbuild/tools/Test-ReportingNativeWorkers.ps1)
+executes real host workers, valid SOAP catalogs at zero/one/multiple-report
+boundaries, raw file/configuration capture, and interrupted-copy retention.
+
+## GenConfig: deploying and updating VMs
+
+An empty VM list is allowed while browsing, editing, or saving a draft. Choosing
+**[D] Deploy / Apply Changes And Save Config** with nothing queued reports
+**Nothing to deploy or update**, rather than an unnamed-VM error. Actual unnamed
+VM entries still fail validation.
+
+To update only existing VMs, select them under **Existing Virtual Machines**,
+change the supported properties, and use the same **[D]** action. Modified VMs
+are staged as existing-VM updates; no new VM is required. Unchanged inventory
+and reverted edits do not count as queued work. The same action also handles
+new VMs and existing-VM updates together.
+
+Cleared, single-entry, and array message collections support multiple validation
+failures without runtime exceptions. This does not change which configurations
+pass validation or the existing warning/error override switches.
+
+Validate without deploying a lab:
+`.\vmbuild\tools\Test-GenConfigInvalidReferences.ps1`.
+
 ## GenConfig: network editing
 
 For an OSDClient on a custom subnet, add a SiteSystem with `installDP` enabled,
@@ -85,8 +268,17 @@ leaves the client and connection files unchanged. `New-Lab.ps1 -WhatIf` skips th
 preparation, initialization errors leave files untouched, and internal GenConfig
 calls do not repeat it.
 
+Connection-file regeneration and domain/server pruning capture one verified live
+VM inventory before stopping clients or modifying connection files. Startup shares
+that snapshot between both exporters, and recursive pruning does not re-read
+inventory after changes begin. Failed reads are logged and stop the operation
+without replacing existing data; a genuinely empty host remains valid and can
+remove retired connections. `Get-List -FailOnError` requests a fresh read and
+rethrows errors without changing legacy callers' logged null-result contract.
+
 Validate with `vmbuild\tools\Test-RdcManStartup.ps1` and
-`vmbuild\tools\Test-RdcManEmptyFileRecovery.ps1`.
+`vmbuild\tools\Test-RdcManEmptyFileRecovery.ps1`, plus
+`vmbuild\tools\Test-ConnectionInventorySafety.ps1`.
 
 ## Windows Terminal settings safety
 
@@ -153,6 +345,23 @@ runs two minutes after logon, at most once per 24 hours. Normal VMBuild launches
 dispatch due WinGet and daily package work to a visible background maintenance
 window instead of waiting before opening the app. Both background entry points
 run the final ASP.NET Core security check after their package work.
+The Chocolatey `pwsh` version lookup allows 60 seconds **without log movement**,
+with a 10-minute maximum total runtime. It streams stdout/stderr to disk and uses
+Chocolatey's `--log-file` option for an attributable `ChocoSearch_*.native.log`.
+Changes in size or last-write time of these three query logs reset the inactivity
+timer; shared host-log activity cannot keep an unrelated search alive. Longer
+active searches report their elapsed time and last observed log movement.
+On timeout, maintenance collects a `ChocoSearch_*.diagnostics` directory **before**
+stopping the query by process ID. It contains query logs, tails of
+`chocolatey.log`/`choco.summary.log` and their numbered rotations, and `summary.json`
+with the timeout reason, PID, command, user/session, elapsed/idle times and
+per-log progress observations. Shared logs are labeled as host context, not proof
+of query progress. Collection is bounded to 10 shared logs, 4 MiB per file and
+32 MiB per run; the newest three failure directories are retained. Missing,
+locked or truncated logs and collection errors are reported without replacing
+the original timeout. A timed-out lookup fails daily upgrades without starting
+installers or recording successful completion; final ASP.NET Core verification
+still runs. These limits apply to the version lookup, not package installers.
 Host and package maintenance mutexes explicitly allow SYSTEM, local Administrators,
 and their creator, including in separate WinGet/Chocolatey upgrade windows. Existing
 mutexes are opened with only the wait/release rights when full control is unavailable.
@@ -178,6 +387,8 @@ Validate without changing host packages using
 `vmbuild\tools\Test-AspNetCoreMaintenance.ps1`,
 `vmbuild\tools\Test-MaintenanceScheduledTask.ps1`, and
 `vmbuild\tools\Test-WinGetMaintenance.ps1` under PowerShell 7 and Windows PowerShell 5.1.
+`vmbuild\tools\Test-PwshUpgradeDetection.ps1` also exercises a real delayed query
+without installing or upgrading host packages.
 
 ## Skipping an unreliable test family
 
@@ -460,6 +671,23 @@ Missing/replaced VMs, failed writes, and failed power recovery never become
 success. Resuming Phase 0 cannot recreate a VM after a failed inventory lookup.
 Ordinary Windows VMs retain their guest-readiness checks. Initial OSD VM creation
 remains in Phase 1.
+
+Resume reboot checks query the ConfigMgr ClientSDK only when the `CcmExec`
+service is installed, but that shared service alone does not prove a full client
+is installed. A missing SDK namespace/class on a registered management point is
+classified as `ManagementPointOnly` only when neither Windows uninstall registry
+view registers the `Configuration Manager Client` product. Hidden MSI entries and
+custom installation directories are supported. Working SDK results always take
+precedence; Windows reboot markers remain actionable on MP-only hosts. Registry
+read failures and SDK access-denied errors are never treated as client absence.
+Installed clients receive a read-only, 60-second readiness window per probe:
+service startup and SDK access-denied/missing-namespace/class responses retry
+every five seconds. Each of the two remote probes has a
+90-second job timeout. Persistent unreadable client state still fails preparation;
+it never becomes "no reboot needed." Errors identify the service state and CIM
+failure, and successful checks log client availability, call count, and elapsed
+time. Nonzero SDK return codes and incomplete results fail explicitly. The probe
+does not start services or change permissions.
 
 Phases 8 and 9 also check their DSC targets before snapshots or CM media
 preparation. Missing-node preflight failures stop dispatch. Job-wait exceptions
@@ -1138,6 +1366,30 @@ Resume the retained deployment with `-StartPhase 2` after updating the runner.
 
 Validate with `vmbuild\tools\Test-DscPayloadReadiness.ps1`.
 
+Phase 2 rechecks the shared Windows-client setup gate immediately before DSC
+apply, including for retained VMs. If the in-guest guard observes setup regressing
+after that check, the host waits for readiness before retrying instead of
+reapplying DSC or rebooting an unfinished setup. AAD and migration exemptions
+remain; the rename/domain-join guards and setup-completion criteria are unchanged.
+
+Failed DSC metadata pushes stop before apply and return exception types, HRESULTs,
+inner exceptions, and bounded LCM-state evidence to the host log. Last DSC status
+includes its start date; unavailable status falls back to dated operational events,
+and failed evidence reads are explicit. Clear-status recovery also logs the original
+transport errors before its existing retry/reboot ladder.
+
+During DSC monitoring, only successful, well-formed probes can advance progress,
+reset stall/restart safeguards, or supply completion and memory-recovery evidence.
+Failed or malformed reads retain the existing heartbeat/recovery limits and emit
+bounded warning diagnostics at most once per minute; they do not count as a first
+workflow status. Successful legacy text and structured RunId receipts remain
+supported. Multiline status files stay one string, with trailing line endings
+ignored when recognizing completion.
+
+Validate with `vmbuild\tools\Test-WindowsClientSetupReadiness.ps1` and
+`vmbuild\tools\Test-DscStartFailureDiagnostics.ps1`; monitor progress and receipt
+handling are covered by `vmbuild\tools\Test-RemoteWorkflowDependency.ps1`.
+
 ### Shutdown cleanup after PowerShell Direct timeouts
 
 A timed-out connection can remain in `Stopping` while blocked inside a Hyper-V
@@ -1166,7 +1418,13 @@ own workflow, including in CAS hierarchies. Unrelated sites in the same deployme
 are not treated as missing systems. Missing systems or failed proxy changes
 inside the owned scope still fail the workflow for retry.
 
-Validate with `vmbuild\tools\Test-CmProxySiteScope.ps1` and
+Retained Phase 8 runs recheck site-system registration before applying proxy
+settings, even when the saved `InstallDP` step is complete. Newly configured
+role-less `SiteSystem` VMs are registered for manual role installation;
+already-ready roles and existing registrations are not reinstalled.
+
+Validate with `vmbuild\tools\Test-BareSiteSystemRegistration.ps1`,
+`vmbuild\tools\Test-CmProxySiteScope.ps1`, and
 `vmbuild\tools\Test-CmRoleQuerySiteScope.ps1`.
 
 ## Upgrade release health and recovery
@@ -1194,12 +1452,46 @@ guard with `vmbuild\tools\Test-PerfloadingContract.ps1`; log transport is covere
 by `vmbuild\tools\Test-CmFailureDiagnostics.ps1`.
 Phase 11 fails an idle failed/canceled sync or an unreachable WSUS health check;
 a populated catalog alone is not evidence that the latest sync recovered.
+Local WSUS connectivity and SUP health checks use the same configured local
+`AdminProxy.GetUpdateServer()` connection as Phase 8, rather than guessing
+`localhost` endpoints that fail hostname validation on a healthy PKI SUP.
 Native results/state are read directly from the subscription API, without the
 heavyweight `GetStatus()` client/compliance aggregation. A separate scoped update
 count is informational: an unavailable count warns, is never treated as zero,
 and cannot mask a failed or unreadable native sync. Failed/unreachable checks and
 unavailable counts trigger bounded WCM/wsyncmgr and SUP SoftwareDistribution/IIS
 evidence capture, including the configured upstream SUP for downstream faults.
+
+CM-to-WSUS subscription parity reads `SMS_UpdateCategoryInstance` through the
+site's retrying provider-query helper, without requiring a CMSite PowerShell
+drive. An unreadable or malformed CM inventory warns, requests diagnostics, and
+leaves parity explicitly unverified; WSUS-only subscription counts are not
+reported as a successful parity check. Offline SUPs retain their intentionally
+empty subscription. Validate with `vmbuild\tools\Test-SupSubscriptionParity.ps1`
+and `vmbuild\tools\Test-WsusSyncConvergence.ps1`.
+
+### ConfigMgr client script policy and execution
+
+Prepopulation reconciles the existing `MEMLABS-powershellbypass` setting and its
+All Systems deployment before deploying baselines, including on reruns. Both
+the Computer Agent policy and deployment are read back; an existing object alone
+does not prove that either is configured.
+
+Phase 11 checks running ConfigMgr clients on Windows VMs, including site servers.
+It reads effective client PowerShell policy, current baseline evaluation outcomes,
+and recent PowerShell events for rejected scripts in `CCM\SystemTemp`. When the
+lab Bypass policy is missing, one machine-policy retrieval/evaluation request and
+up to 60 seconds of polling are allowed. Group Policy is reported, never changed.
+Non-compliance alone is not treated as an execution exception.
+Cross-forest clients use their configured managing site's prepopulation policy,
+not an unrelated local site's options.
+
+These client-script checks are warning-only: missing/unreadable policy, pending
+evaluation, discovery/runtime errors, and recent script rejections are visible
+without failing Phase 11. A current policy value does not by itself establish
+recovery from an earlier execution failure. Use
+`vmbuild\tools\Get-CMBaselineDiagnostics.ps1` for full client logs and rule details;
+validate the automated checks with `vmbuild\tools\Test-ClientScriptPolicy.ps1`.
 The WSUS collector pulls the current `SoftwareDistribution.log` and up to two
 newest rolled copies (`SoftwareDistribution.log*`), retaining at most 3,000 lines
 per file. Capture diagnostics record source paths, sizes, timestamps, captured
@@ -1213,11 +1505,28 @@ A `Canceled`/`UserCanceled` outcome is not proof of a service restart: SQL or
 transport failures can precede cancellation. Idle failures still fail validation;
 only a running replacement or a newer successful cycle supersedes the old failure.
 
+Certificate autoenrollment is domain-wide and independent of client push.
+Phase 2 creates the computer autoenrollment GPO (`AEPolicy=7`). Phase 3 applies
+computer policy before the CA templates are published. After CA/template
+provisioning, `Install-PKI` verifies autoenrollment for every new Windows domain
+member, including clients with `pushClient=false`, using bounded computer-policy
+refresh and `certutil -pulse` retries. A current client-auth certificate with a
+private key and trusted chain is required before PKI setup reports success.
+Workgroup/offline-root machines, domain controllers, and hidden existing VMs are
+not part of this member-enrollment pass. Validate with
+`vmbuild\tools\Test-PkiAutoEnrollment.ps1`.
+
 For HTTPS client push, the guest requests host certificate pre-staging and waits
 for a receipt matching both the deployment RunId and request ID. The host checks
 each target in its own domain, retries computer policy/autoenrollment, and verifies
 a current client-auth certificate with a private key and trusted chain. Missing
-or failed receipts stop client push. Phase 11 uses the same readiness probe.
+or failed receipts stop client push. Phase 11 uses the same readiness probe for
+all PKI-enabled Windows domain-member clients, even when push is disabled and
+no agent/setup is present. A local issuing CA also requires this check without
+a managing ConfigMgr site. Diagnostics include the applied autoenrollment policy
+and certificate issuer details. Failed/wedged
+setup collects ccmsetup/client MSI log tails (up to six files, 4,000 lines each);
+historical errors on a currently running agent do not trigger redundant capture.
 Enrollment command exit codes and recent autoenrollment events are diagnostic
 evidence; a future policy cycle is no longer treated as successful readiness.
 The receipt contains exactly one structured result per target. Per-target console
@@ -1234,6 +1543,18 @@ and a cryptographic error on one candidate does not hide another usable certific
 The existing certificate validity/private-key/trust policy and lab revocation
 behavior are unchanged. Validate with `vmbuild\tools\Test-PkiClientPrestage.ps1`
 and `vmbuild\tools\Test-PkiPrestageState.ps1`.
+
+Client push is explicitly per-VM. Account configuration never enables site-wide
+automatic push, which would bypass `pushClient=false` and certificate pre-staging.
+Deployment disables automatic push on each owning primary before discovery and
+explicit pushes, including cross-forest workflows and reruns with existing
+accounts. Failure to apply that policy stops discovery/push and reports a
+deployment failure. CAS boundary setup does not modify client-push settings.
+Requested clients that cannot be reached, discovered within the existing
+shared budget, or explicitly pushed report failure instead of marking the stage
+complete and relying on disabled automatic push.
+This does not uninstall existing agents or cancel previously queued installs.
+Validate with `vmbuild\tools\Test-ClientPushSiteResolution.ps1`.
 
 Phase 11 domain-member Windows Time checks require a successful status query,
 synchronized leap/stratum values, a non-local-clock source, and a valid last-sync
@@ -1312,6 +1633,48 @@ Missing required Windows maintenance metadata fails the VM rather than treating
 it as successfully maintained. No VM or service is restarted by this retry path.
 
 Validate this path with `vmbuild\tools\Test-VMMaintenanceNoteDiagnostics.ps1`.
+
+### Maintenance startup readiness
+
+For pending fixes, maintenance starts required dependency VMs and the target
+before inspecting `C:\Staging` or copying DSC content. Already-applied fixes do
+not start or contact the guest. Newly started VMs have a ten-minute readiness
+wait, allowing the existing PowerShell Direct recovery gate to run: three
+consecutive broken-channel probes and at least three elapsed minutes with a
+healthy heartbeat. The previous two-minute wait expired before that gate.
+The existing recovery/reset limits are unchanged; authentication errors do not
+count as broken-channel evidence.
+
+Startup/readiness failures stop both batched and individual fixes before host
+preparation, injection, execution, or applied-version stamping. A failed staging
+inspection or DSC copy also stops maintenance rather than surfacing later as an
+Edge preparation failure. VMs started for maintenance retain the existing shutdown
+policy on success, failure, and exceptions: non-DC VMs are shut down unless
+`SkipVMShutdown` is set; already-running VMs are not shut down.
+
+Validate without changing lab VMs using
+`vmbuild\tools\Test-MaintenanceStartup.ps1` and
+`vmbuild\tools\Test-MaintenanceFixRobustness.ps1` under PowerShell 7 and
+Windows PowerShell 5.1. The startup regression executes the shipped readiness
+wait with a simulated clock and mocked Hyper-V operations.
+
+### Maintenance evidence read failures
+
+Result markers are trusted only when their remote read succeeds. A failed read
+returns no marker and logs the original error, even if partial output contains
+valid `Success: true` JSON. Unreadable marker files and malformed JSON are
+reported rather than silently accepted.
+
+Failed, missing, or empty transcript reads produce a warning instead of an
+INFO-level fake transcript or no log entry. Requested failure-evidence collection
+still runs when transcript retrieval fails, and collection errors are reported
+separately. Genuine transcript content remains diagnostic text: caught guest
+exceptions do not automatically change the fix verdict. Reads retain their
+30-second execution timeout, single session attempt, and requested account.
+
+Validate these failure and success paths without changing lab VMs using
+`vmbuild\tools\Test-MaintenanceFixRobustness.ps1` under PowerShell 7 and
+Windows PowerShell 5.1.
 
 ### ODBC Driver 18 maintenance
 
@@ -1419,6 +1782,80 @@ Validate with
 [`Test-CmRolePhysicalReadiness.ps1`](vmbuild/tools/Test-CmRolePhysicalReadiness.ps1)
 and
 [`Test-SecondarySiteInstallResilience.ps1`](vmbuild/tools/Test-SecondarySiteInstallResilience.ps1).
+
+## Verified Windows feature prerequisites
+
+Required Windows-feature installation now stops on cmdlet errors or an
+unsuccessful result. A no-reboot installation is independently queried before
+its completion receipt is written; reboot-pending features remain unverified.
+The receipt retains the sorted feature signature on its first line and records
+`MemLabsFeatureStateVerified=1` on its second line.
+
+Older one-line receipts are not proof of installation: earlier versions could
+write them after a failed `Install-WindowsFeature` call. Phase 2/3 rechecks those
+receipts against actual installed state, and Phase 8 rejects them until that
+verification succeeds. Already verified receipts retain the existing fast path.
+Required-install and receipt-write errors remain visible failures.
+
+When required server features are missing, installation temporarily permits
+Windows Update as a feature-payload source. It snapshots and verifies the four
+affected update policy values plus the Windows Update service's startup/running
+state, keeps `NoAutoUpdate=1`, and does not start Update Orchestrator or request
+normal Windows updates. WSUS URLs are not changed. The original policy values
+(including absence) and service state are restored on success or failure.
+Restoration failures are explicit errors and retain the automatic-update block.
+Deployment-wide update lockdown is otherwise unchanged.
+
+This avoids directing feature-payload requests at a SUP that is not ready yet,
+or blocking those requests with deployment policies. Required-install failures
+also publish the host's terminal failure status immediately: they no longer
+spend the recovery budget repeatedly resuming/rebooting the same failed install.
+The prerequisite snapshot records selected WSUS/repair-source policies and
+update-service state alongside the original error and CBS/DISM evidence.
+
+For an existing lab with a false completion receipt, update the DSC payload and
+rerun Phase 3, not just Phase 8. Servicing/source failures such as `0x80240438`
+must be resolved before role installation can proceed. Phase 3 failures now also
+retain the prerequisite snapshot and bounded CBS/DISM logs beside the build log.
+
+Validate with
+[`Test-WindowsFeatureReceipts.ps1`](vmbuild/tools/Test-WindowsFeatureReceipts.ps1)
+and
+[`Test-WindowsFeatureUpdateAccess.ps1`](vmbuild/tools/Test-WindowsFeatureUpdateAccess.ps1).
+
+## Automatic MP/RP failure evidence
+
+Phase 7/8 failures automatically collect configured reporting targets and, during
+Phase 8, MP targets associated with the failed site. This includes SQL-hosted RPs,
+implicit Secondary MPs, and owning-site logs. Failed Phase 11 MP checks also
+collect this evidence, including when the validation transport throws. Existing
+Phase 11 reporting-validation snapshots and site-side log collection are reused;
+an unexpected reporting transport exception has an independent capture path.
+No additional failure-capture probes run for healthy checks.
+
+Diagnostic and memory-recovery helpers use normal host/file logging rather than
+returning logging objects. Capture warnings cannot turn a failed Boolean
+validation result into a truthy array or pollute recovery results.
+
+[`Get-ManagementPointDiagnostics.ps1`](vmbuild/tools/Get-ManagementPointDiagnostics.ps1)
+compares the IIS provider result with selected `applicationHost.config` fields
+and appcmd output, and records bindings, public certificate metadata, verified
+feature receipts, and MP setup logs. Known log directories on all fixed drives
+are searched, including non-C: installs. Site-side evidence includes
+`sitecomp`, `mpcontrol`, and reporting-role logs. Logs up to 8 MiB are retained
+in full; larger logs retain their last 6000 lines with an explicit capture mode.
+
+JSON files are written beside the build log using the triggering VM's prefix,
+the target VM, and `MPDiagnostics`, `RPDiagnostics`, or `SiteServerDiagnostics`.
+`<VM>-Phase<N>-<timestamp>-RoleDiagnostics.json` records every target's capture
+status and errors. Collection and file transfer have separate host-enforced
+timeouts; large log bodies do not cross the PSDirect return stream. A failed
+target cannot suppress other targets, baseline setup logs, or the original
+validation failure. Only diagnostic staging files are created/removed in guests;
+no services, configuration, or replication state are changed by collection.
+
+Validate with
+[`Test-CmRoleFailureDiagnostics.ps1`](vmbuild/tools/Test-CmRoleFailureDiagnostics.ps1).
 
 ## Reporting Point and SUP resource readiness
 
@@ -1593,6 +2030,33 @@ indicators identify possible causes, not a definitive diagnosis.
 Validate this path with `vmbuild\tools\Test-GuestCimMemoryRecovery.ps1` and
 `vmbuild\tools\Test-GuestMemoryDiagnostics.ps1`.
 
+Phase 11 client-package provider reads share the site's bounded three-attempt
+WMI query helper. Recovered queries are identified explicitly; exhausted retries
+retain namespace, class, filter, exception-chain types/HRESULTs, error identity,
+and stack. Provider-job failures collect site-side logs as well as failing the
+validation; they are not reported as empty or healthy package inventories.
+
+Client-package DRS nudges share a three-attempt send helper. Deadlock, lock-wait,
+and snapshot-conflict errors (1205, 1222, 3960, 3961), including wrapped SQL errors,
+receive five-second backoff and a fresh connection. Every failed attempt is a
+visible warning; nontransient errors stop immediately. Exhaustion still leaves
+native DRS scheduling and the existing coverage gate authoritative, without
+reinitializing replication or restarting services. Validate with
+`vmbuild\tools\Test-DrsGroupSendRetry.ps1`.
+
+Secondary-only expansions now run client-package validation through their owning
+Primary, even when that unchanged Primary is absent from the partial configuration.
+They also independently probe the Secondary's configured content-library PkgLib
+for the production client-package metadata file, with a 30-second guest deadline.
+Unreadable registry/library/session state is unverified, not proof of missing
+content. A Secondary required by assigned push clients fails when physical presence
+cannot be established; an unassigned Secondary remains a visible warning with
+DP-side diagnostics. PkgLib presence does not itself prove version currency:
+the existing provider SourceVersion and ownership checks still apply.
+
+Validate with `vmbuild\tools\Test-Phase11ClientPackageCoverage.ps1` and
+`vmbuild\tools\Test-Phase11SiteWmiRetry.ps1`.
+
 Client-package diagnostic snapshots run in a disposable PowerShell process with
 a 60-second wall-clock limit, including local provider reads and remote node
 probes. A timeout terminates only that diagnostic process, records
@@ -1661,3 +2125,26 @@ read. Standalone and other non-SQLAO SQL instances retain their existing setting
 Serial execution is a lab policy, not a guaranteed fix for SQL engine error 5243.
 Validate with `vmbuild\tools\Test-SqlAoMaxDop.ps1` and
 `vmbuild\tools\Test-SqlAoSetupCanaryRecovery.ps1`.
+
+Phase 11 can rejoin a SQLAO replica only when cluster metadata explicitly reports
+`NOT_JOINED` for the configured AG and physical instance, and a direct query to
+the configured partner independently confirms it is the primary with matching
+group and replica IDs. The guarded `JOIN` is followed by membership readback and
+bounded health checks. Missing/ambiguous metadata or SQL errors fail visibly;
+they never justify a speculative join. No database is dropped, restored,
+reseeded, or force-failed over. Joining a replica does not prepare its secondary
+databases: unverified local TESTDB membership still fails and requires review of
+the existing database state before manual recovery.
+
+AG checks are scoped to the configured group and SQL instance. A primary must
+report both expected replicas joined, connected, and healthy; a secondary must
+report its own joined, connected, healthy replica. Empty or incomplete results
+never pass, including after a restart, and successful AG recovery does not erase
+unrelated failures.
+Any existing restart recovery targets the configured SQL service, including named
+instances; partner SQL connections retain their configured physical port.
+Endpoint cycling and service restarts skip unjoined replicas so parallel
+validation cannot interrupt the partner's guarded join.
+Validate without changing guests with `vmbuild\tools\Test-Phase11SqlAoRecovery.ps1`.
+For the SYSTEM-identity and TFTP-reply probe corrections, see
+[Phase 11 probe identity and TFTP replies](vmbuild/tools/OsdContentDiagnostics.md#phase-11-probe-identity-and-tftp-replies).

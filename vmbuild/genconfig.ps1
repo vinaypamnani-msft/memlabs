@@ -1107,8 +1107,8 @@ function Build-MainMenuOptions {
     if ($InternalUseOnly.IsPresent) {
         $customOptions += [ordered]@{ "Q" = "Quit Without Saving!%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
         $customOptions += [ordered]@{ "HQ" = "Exits the script. Warning: Does not save." }
-        $customOptions += [ordered]@{ "D" = "Deploy And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
-        $customOptions += [ordered]@{ "HD" = "Saves the current configuration to your config folder, and will start creation of the VMs" }
+        $customOptions += [ordered]@{ "D" = "Deploy / Apply Changes And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
+        $customOptions += [ordered]@{ "HD" = "Saves the configuration, creates new VMs, and applies staged changes to existing VMs. No new VM is required for updates." }
     }
     if ($enableDebug) {
         $customOptions += [ordered]@{ "R" = "Return deployConfig" }
@@ -1266,7 +1266,7 @@ do {
         if ($return.DeployNow -is [PSCustomObject]) {
             return $return.DeployNow
         }
-        $c = Test-Configuration -InputObject $Global:Config
+        $c = Test-Configuration -InputObject $Global:Config -RequireDeploymentTargets:([bool]$return.DeployNow)
         Convert-ValidationMessages -TestObject $c
         # Non-blocking informational advisories (auto-fix notices + "incomplete
         # domain" style warnings). These do NOT fail validation, so surface them

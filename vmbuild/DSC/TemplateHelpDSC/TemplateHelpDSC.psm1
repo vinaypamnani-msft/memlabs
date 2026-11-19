@@ -5837,6 +5837,144 @@ class OpenFirewallPortForSCCM {
 
 }
 
+function Install-MemLabsRequiredWindowsFeature {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string[]]$Name)
+
+    $wuPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    $policyTargets = @(
+        [pscustomobject]@{ Path = "$wuPath\AU"; Name = 'NoAutoUpdate'; During = 1 }
+        [pscustomobject]@{ Path = $wuPath; Name = 'DoNotConnectToWindowsUpdateInternetLocations'; During = 0 }
+        [pscustomobject]@{ Path = $wuPath; Name = 'DisableWindowsUpdateAccess'; During = 0 }
+        [pscustomobject]@{ Path = "$wuPath\AU"; Name = 'UseWUServer'; During = 0 }
+    )
+    $readPolicy = {
+        param($Target)
+        $present = $false
+        $kind = $null
+        $value = $null
+        if (Test-Path -LiteralPath $Target.Path -ErrorAction Stop) {
+            $key = Get-Item -LiteralPath $Target.Path -ErrorAction Stop
+            try {
+                $present = $Target.Name -in $key.GetValueNames()
+                if ($present) {
+                    $kind = "$($key.GetValueKind($Target.Name))"
+                    $value = $key.GetValue($Target.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                }
+            }
+            finally { $key.Dispose() }
+        }
+        [pscustomobject]@{ Path = $Target.Path; Name = $Target.Name; Present = $present; Kind = $kind; Value = $value; During = $Target.During }
+    }
+    $restorePolicy = {
+        param($Snapshot)
+        if ($Snapshot.Present) {
+            $null = New-ItemProperty -LiteralPath $Snapshot.Path -Name $Snapshot.Name `
+                -PropertyType $Snapshot.Kind -Value $Snapshot.Value -Force -ErrorAction Stop
+        }
+        else {
+            $live = & $readPolicy $Snapshot
+            if ($live.Present) {
+                Remove-ItemProperty -LiteralPath $Snapshot.Path -Name $Snapshot.Name -Force -ErrorAction Stop
+            }
+        }
+        $live = & $readPolicy $Snapshot
+        if ($live.Present -ne $Snapshot.Present -or $live.Kind -ne $Snapshot.Kind -or $live.Value -ne $Snapshot.Value) {
+            throw "Restoration of update policy '$($Snapshot.Name)' could not be verified."
+        }
+    }
+
+    # Snapshot everything before opening access; automatic updates remain disabled.
+    $policies = @(foreach ($target in $policyTargets) {
+            $record = & $readPolicy $target
+            if ($record.Present -and ($record.Kind -ne 'DWord' -or
+                    ($record.Value -isnot [int] -and $record.Value -isnot [uint32]) -or $record.Value -notin @(0, 1))) {
+                throw "Unexpected update policy type/value for '$($record.Name)'; no feature-source changes were started."
+            }
+            $record
+        })
+    $service = Get-Service -Name wuauserv -ErrorAction Stop
+    $originalStatus = "$($service.Status)"
+    $originalStartup = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\wuauserv' `
+            -Name Start -ErrorAction Stop).Start
+    if ($originalStartup -notin @(2, 3, 4) -or $originalStatus -notin @('Running', 'Stopped')) {
+        throw "Windows Update service is not in a stable state (Start=$originalStartup, Status=$originalStatus); no feature-source changes were started."
+    }
+    $result = $null
+    $failure = $null
+    $restoreErrors = [System.Collections.Generic.List[string]]::new()
+    try {
+        Write-Status "Temporarily allowing Windows Update payload access for required features: $($Name -join ', '). Automatic updates remain disabled."
+        foreach ($record in $policies) {
+            if (-not (Test-Path -LiteralPath $record.Path -ErrorAction Stop)) {
+                $null = New-Item -Path $record.Path -Force -ErrorAction Stop
+            }
+            $null = New-ItemProperty -LiteralPath $record.Path -Name $record.Name -PropertyType DWord `
+                -Value $record.During -Force -ErrorAction Stop
+        }
+        foreach ($record in $policies) {
+            $live = & $readPolicy $record
+            if (-not $live.Present -or $live.Kind -ne 'DWord' -or $live.Value -ne $record.During) {
+                throw "Temporary feature-source policy '$($record.Name)' was not applied or was reapplied externally."
+            }
+        }
+        # Restart only this service to reload policy; do not start Update Orchestrator.
+        if ($originalStartup -eq 4) { Set-Service -Name wuauserv -StartupType Manual -ErrorAction Stop }
+        if ("$($service.Status)" -ne 'Stopped') {
+            $service.Stop()
+            $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        }
+        $service.Start()
+        $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+        $result = Install-WindowsFeature -Name $Name -IncludeManagementTools -ErrorAction Stop
+    }
+    catch { $failure = $_ }
+    finally {
+        foreach ($record in @($policies | Where-Object { $_.Name -ne 'NoAutoUpdate' })) {
+            try { & $restorePolicy $record }
+            catch { $restoreErrors.Add("$($record.Name): $($_.Exception.Message)") }
+        }
+        try {
+            $service.Refresh()
+            if ("$($service.Status)" -ne 'Stopped') {
+                $service.Stop()
+                $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+            }
+        }
+        catch { $restoreErrors.Add("Stop wuauserv: $($_.Exception.Message)") }
+        try {
+            $service.Refresh()
+            if ($originalStatus -eq 'Running' -and "$($service.Status)" -ne 'Running') {
+                $service.Start()
+                $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(30))
+            }
+            if ($originalStartup -eq 4) { Set-Service -Name wuauserv -StartupType Disabled -ErrorAction Stop }
+            $service.Refresh()
+            $restoredStartup = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\wuauserv' `
+                    -Name Start -ErrorAction Stop).Start
+            if ($restoredStartup -ne $originalStartup -or "$($service.Status)" -ne $originalStatus) {
+                throw "Expected Start=$originalStartup, Status=$originalStatus; got Start=$restoredStartup, Status=$($service.Status)."
+            }
+        }
+        catch { $restoreErrors.Add("Restore wuauserv: $($_.Exception.Message)") }
+        if ($restoreErrors.Count -eq 0) {
+            try { & $restorePolicy $policies[0] }
+            catch { $restoreErrors.Add("NoAutoUpdate: $($_.Exception.Message)") }
+        }
+        else {
+            $restoreErrors.Add('NoAutoUpdate remains enabled as a safety block until the restoration failure is corrected.')
+        }
+    }
+    if ($failure -or $restoreErrors.Count) {
+        $details = @()
+        if ($failure) { $details += "$($failure.Exception.Message) [FQID=$($failure.FullyQualifiedErrorId)]" }
+        if ($restoreErrors.Count) { $details += "Windows Update settings restoration failed: $($restoreErrors -join ' | ')" }
+        throw ($details -join ' ')
+    }
+    Write-Status 'Required-feature payload access finished; original Windows Update policy and service state restored.'
+    return $result
+}
+
 [DscResource()]
 class InstallFeatureForSCCM {
     [DscProperty(Key)]
@@ -5864,6 +6002,10 @@ class InstallFeatureForSCCM {
         $_Role = $this.Role
 
         Write-Status "Installing Windows Features for Role $_Role"
+        $markerPath = $this.MarkerPath()
+        if (Test-Path -LiteralPath $markerPath -ErrorAction Stop) {
+            Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+        }
 
         # Install on all devices. This read "dism / online / Enable-Feature / FeatureName:..."
         # for years: PowerShell tokenizes each bare "/" as its own argument, so dism got
@@ -5903,12 +6045,40 @@ class InstallFeatureForSCCM {
             }
             else {
                 Write-Status "Installing $($missingFeatures.Count) missing Windows Features: $($missingFeatures -join ', ')"
-                $result = Install-WindowsFeature -Name $missingFeatures -IncludeManagementTools
+                try {
+                    $result = Install-MemLabsRequiredWindowsFeature -Name $missingFeatures -ErrorAction Stop
+                }
+                catch {
+                    $message = "Required Windows feature installation failed for role $_Role ($($missingFeatures -join ', ')): $($_.Exception.Message). No verified completion receipt was written. Review CBS.log and DISM\dism.log on this VM."
+                    Write-Status "JOBFAILURE: $message"
+                    throw $message
+                }
+                if (-not $result -or $result.Success -ne $true) {
+                    $message = "Required Windows feature installation did not succeed for role $_Role (Success=$($result.Success), ExitCode=$($result.ExitCode), RestartNeeded=$($result.RestartNeeded)). No verified completion receipt was written."
+                    Write-Status "JOBFAILURE: $message"
+                    throw $message
+                }
                 if ($result.RestartNeeded -eq "Yes") {
                     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                     $global:DSCMachineStatus = 1
                 }
                 else {
+                    $verifiedState = @($this.GetFeatureState($featureList))
+                    $pendingVerification = @($verifiedState | Where-Object { ([string]$_.InstallState) -like "*Pending" })
+                    if ($pendingVerification.Count -gt 0) {
+                        Write-Status "Windows Features remain pending restart after installation: $($pendingVerification.Name -join ', ')"
+                        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                        $global:DSCMachineStatus = 1
+                        $this.WriteMarker('Finished')
+                        return
+                    }
+                    $stillMissing = @($verifiedState | Where-Object { $_.InstallState -ne "Installed" } |
+                            ForEach-Object { "$($_.Name)=$($_.InstallState)" })
+                    if ($stillMissing.Count -gt 0) {
+                        $message = "Windows feature installation reported success, but required features are not Installed: $($stillMissing -join ', '). No verified completion receipt was written."
+                        Write-Status "JOBFAILURE: $message"
+                        throw $message
+                    }
                     $stamp = $this.FeatureSignature($featureList)
                 }
             }
@@ -5985,11 +6155,14 @@ class InstallFeatureForSCCM {
             Write-Status "IIS globalModule DLL(s) missing, w3wp cannot start: $($missingModules -join '; ')"
             return $false
         }
-        try {
-            $recorded = Get-Content -Path $this.MarkerPath() -TotalCount 1 -ErrorAction Stop
-            if ($recorded -and ([string]$recorded).Trim() -eq $signature) { return $true }
+        # Older one-line receipts could be written after a failed feature install.
+        if (Test-Path -LiteralPath $this.MarkerPath() -ErrorAction Stop) {
+            $recorded = @(Get-Content -LiteralPath $this.MarkerPath() -TotalCount 2 -ErrorAction Stop)
+            if ($recorded.Count -eq 2 -and ([string]$recorded[0]).Trim() -eq $signature -and
+                ([string]$recorded[1]).Trim() -eq $this.ReceiptVerificationStamp()) {
+                return $true
+            }
         }
-        catch {}
 
         $featureState = @($this.GetFeatureState($featureList))
         $missing = @($featureState | Where-Object { $_.InstallState -ne "Installed" })
@@ -6004,6 +6177,10 @@ class InstallFeatureForSCCM {
 
     [string] FeatureSignature([string[]] $featureList) {
         return (($featureList | Sort-Object -Unique) -join ',')
+    }
+
+    [string] ReceiptVerificationStamp() {
+        return 'MemLabsFeatureStateVerified=1'
     }
 
     # Every DLL applicationHost.config registers as a globalModule must exist or EVERY
@@ -6028,13 +6205,14 @@ class InstallFeatureForSCCM {
     }
 
     [void] WriteMarker([string] $content) {
-        try {
-            $markerPath = $this.MarkerPath()
-            $markerDir = Split-Path -Parent $markerPath
-            if (-not (Test-Path $markerDir)) { New-Item -ItemType Directory -Path $markerDir -Force | Out-Null }
-            $content | Out-File -FilePath $markerPath -Force -Encoding ascii
+        $markerPath = $this.MarkerPath()
+        $markerDir = Split-Path -Parent $markerPath
+        if (-not (Test-Path -LiteralPath $markerDir -ErrorAction Stop)) {
+            New-Item -ItemType Directory -Path $markerDir -Force -ErrorAction Stop | Out-Null
         }
-        catch {}
+        $lines = @($content)
+        if ($content -ne 'Finished') { $lines += $this.ReceiptVerificationStamp() }
+        $lines | Set-Content -LiteralPath $markerPath -Force -Encoding ascii -ErrorAction Stop
     }
 
     [object[]] GetFeatureState([string[]] $featureList) {

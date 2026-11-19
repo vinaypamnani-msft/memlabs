@@ -1125,30 +1125,121 @@ $global:VM_Create = {
                         $reasons.Add("PendingFileRenameOperations(replace/move)=$replacementCount")
                     }
 
+                    $ccmClientState = 'NotInstalled'
+                    $ccmProbeAttempts = 0
+                    $ccmWaitSeconds = 0
+                    $ccmService = $null
                     try {
-                        $ccmReboot = Invoke-CimMethod -Namespace 'root\ccm\ClientSDK' `
-                            -ClassName CCM_ClientUtilities -MethodName DetermineIfRebootPending `
-                            -OperationTimeoutSec 5 -ErrorAction Stop
-                        if ($ccmReboot.RebootPending -or $ccmReboot.IsHardRebootPending) {
-                            $reasons.Add('ConfigMgrClient\RebootPending')
-                        }
+                        $ccmService = Get-Service -Name 'CcmExec' -ErrorAction Stop
                     }
                     catch {
-                        $nativeCimError = "$($_.Exception.NativeErrorCode)"
-                        $ccmSurfaceAbsent = $nativeCimError -in @('InvalidNamespace', 'InvalidClass') -or
-                            $_.Exception.Message -match 'Invalid namespace|Invalid class|not found'
-                        if (-not $ccmSurfaceAbsent) {
-                            throw
+                        if ($_.FullyQualifiedErrorId -notlike 'NoServiceFoundForGivenName*') {
+                            throw "ConfigMgr client service lookup failed: $($_.Exception.Message)"
+                        }
+                    }
+                    if ($ccmService) {
+                        $ccmProbeStart = Get-Date
+                        $ccmProbeDeadline = $ccmProbeStart.AddSeconds(60)
+                        $ccmClientState = 'Starting'
+                        $ccmManagementPointOnly = $null
+                        $lastCcmFailure = "CcmExec service is '$($ccmService.Status)'"
+                        while ((Get-Date) -lt $ccmProbeDeadline) {
+                            if ($ccmService.Status -eq 'Running') {
+                                $ccmProbeAttempts++
+                                try {
+                                    $ccmReboot = Invoke-CimMethod -Namespace 'root\ccm\ClientSDK' `
+                                        -ClassName CCM_ClientUtilities -MethodName DetermineIfRebootPending `
+                                        -OperationTimeoutSec 5 -ErrorAction Stop
+                                    if ($null -eq $ccmReboot -or
+                                        -not $ccmReboot.PSObject.Properties['ReturnValue'] -or
+                                        $null -eq $ccmReboot.ReturnValue -or
+                                        $ccmReboot.RebootPending -isnot [bool] -or
+                                        $ccmReboot.IsHardRebootPending -isnot [bool]) {
+                                        throw 'ClientSDK DetermineIfRebootPending returned an incomplete reboot status.'
+                                    }
+                                    if ($ccmReboot.ReturnValue -ne 0) {
+                                        throw "ClientSDK DetermineIfRebootPending returned ReturnValue=$($ccmReboot.ReturnValue)."
+                                    }
+                                    if ($ccmReboot.RebootPending -or $ccmReboot.IsHardRebootPending) {
+                                        $reasons.Add('ConfigMgrClient\RebootPending')
+                                    }
+                                    $ccmClientState = 'Ready'
+                                    break
+                                }
+                                catch {
+                                    $nativeCimError = if ($_.Exception.PSObject.Properties['NativeErrorCode']) {
+                                        "$($_.Exception.NativeErrorCode)"
+                                    }
+                                    else { '' }
+                                    $cimHresult = '{0:X8}' -f $_.Exception.HResult
+                                    $lastCcmFailure = "native=$nativeCimError hresult=$cimHresult errorId=$($_.FullyQualifiedErrorId): $($_.Exception.Message)"
+                                    $ccmSdkAbsent = $nativeCimError -in @('InvalidNamespace', 'InvalidClass') -or
+                                        $cimHresult -in @('8004100E', '80041010') -or
+                                        $_.FullyQualifiedErrorId -match '8004100E|80041010'
+                                    if ($ccmSdkAbsent -and $null -eq $ccmManagementPointOnly) {
+                                        $ccmManagementPointOnly = $false
+                                        try {
+                                            # MP-only installs share CcmExec but do not install the client SDK.
+                                            if (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\MP' -ErrorAction Stop) {
+                                                $ccmUninstallRoots = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+                                                $ccmUninstall32Root = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+                                                if (Test-Path -LiteralPath $ccmUninstall32Root -ErrorAction Stop) {
+                                                    $ccmUninstallRoots += $ccmUninstall32Root
+                                                }
+                                                $ccmClientProducts = @(
+                                                    foreach ($ccmUninstallRoot in $ccmUninstallRoots) {
+                                                        Get-ItemProperty -Path "$ccmUninstallRoot\*" -ErrorAction Stop |
+                                                            Where-Object {
+                                                                $_.PSObject.Properties['DisplayName'] -and
+                                                                $_.DisplayName -eq 'Configuration Manager Client'
+                                                            }
+                                                    }
+                                                )
+                                                $ccmManagementPointOnly = $ccmClientProducts.Count -eq 0
+                                            }
+                                        }
+                                        catch {
+                                            throw "ConfigMgr client installation lookup failed: $($_.Exception.Message) (errorId=$($_.FullyQualifiedErrorId))"
+                                        }
+                                    }
+                                    if ($ccmSdkAbsent -and $ccmManagementPointOnly) {
+                                        $ccmClientState = 'ManagementPointOnly'
+                                        break
+                                    }
+                                    $ccmInitializing = $ccmSdkAbsent -or $nativeCimError -eq 'AccessDenied' -or
+                                        $cimHresult -in @('80070005', '80041003') -or
+                                        $_.FullyQualifiedErrorId -match '80070005|80041003'
+                                    if (-not $ccmInitializing) {
+                                        throw "ConfigMgr client reboot probe failed (CcmExec=$($ccmService.Status); $lastCcmFailure)"
+                                    }
+                                }
+                            }
+                            else {
+                                $lastCcmFailure = "CcmExec service is '$($ccmService.Status)'"
+                            }
+                            $remainingSeconds = [int][Math]::Ceiling(($ccmProbeDeadline - (Get-Date)).TotalSeconds)
+                            if ($remainingSeconds -le 0) { break }
+                            Start-Sleep -Seconds ([Math]::Min(5, $remainingSeconds))
+                            $ccmService = Get-Service -Name 'CcmExec' -ErrorAction Stop
+                        }
+                        $ccmWaitSeconds = [Math]::Round(((Get-Date) - $ccmProbeStart).TotalSeconds, 1)
+                        if ($ccmClientState -notin @('Ready', 'ManagementPointOnly')) {
+                            throw "ConfigMgr client reboot status did not become readable within 60 seconds (CcmExec=$($ccmService.Status); attempts=$ccmProbeAttempts; lastError=$lastCcmFailure)"
                         }
                     }
 
-                    [pscustomobject]@{ Reasons = $reasons.ToArray() }
+                    [pscustomobject]@{
+                        Reasons = $reasons.ToArray()
+                        CcmClientState = $ccmClientState
+                        CcmProbeAttempts = $ccmProbeAttempts
+                        CcmWaitSeconds = $ccmWaitSeconds
+                    }
                 }
 
                 $resumeRebootProbe = $null
                 foreach ($probeAttempt in 1..2) {
                     $resumeRebootProbe = Invoke-VmCommand -VmName $currentItem.vmName `
-                        -VmDomainName $domainName -AsJob -TimeoutSeconds 45 `
+                        -VmDomainName $domainName -AsJob -TimeoutSeconds 90 `
                         -FailOnRemoteError -SuppressLog `
                         -DisplayName "Phase 0 resume reboot check (attempt $probeAttempt/2)" `
                         -ScriptBlock $resumeRebootProbeBlock
@@ -1172,6 +1263,7 @@ $global:VM_Create = {
                     return
                 }
 
+                Write-Log "[Phase 0]: $($currentItem.vmName): ConfigMgr client reboot check state=$($resumeRebootProbe.ScriptBlockOutput.CcmClientState) attempts=$($resumeRebootProbe.ScriptBlockOutput.CcmProbeAttempts) elapsed=$($resumeRebootProbe.ScriptBlockOutput.CcmWaitSeconds)s." -LogOnly
                 $resumeRebootReasons = @($resumeRebootProbe.ScriptBlockOutput.Reasons |
                     Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
                 if ($resumeRebootReasons.Count -eq 0) {
@@ -2422,19 +2514,19 @@ function Save-MemLabsGuestMemoryDiagnostics {
         $logDir = Split-Path -Parent $Common.LogPath
         $path = Join-Path $logDir "$VmName-Phase8-$(Get-Date -Format 'yyyyMMdd-HHmmss-fff')-$Trigger-MemoryDiagnostics.json"
         $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
-        Write-Log "[Phase 8]: ${VmName}: memory diagnostic report ($Trigger) -> $path" -OutputStream
+        Write-Log "[Phase 8]: ${VmName}: memory diagnostic report ($Trigger) -> $path"
         if ($report.Guest) {
             $top = @($report.Guest.TopProcesses | Select-Object -First 5 | ForEach-Object { "$($_.Name)(pid=$($_.Id),private=$($_.PrivateMB)MB)" }) -join ', '
             $memorySummary = if ($report.Guest.Memory) { "available=$($report.Guest.Memory.AvailableMB)MB commit=$($report.Guest.Memory.CommittedMB)/$($report.Guest.Memory.CommitLimitMB)MB" } else { 'memory counters unavailable' }
             Write-Log "[Phase 8]: ${VmName}: OOM evidence: $memorySummary; largest private-memory consumers: $top. Collector errors: $($report.Guest.Errors | ConvertTo-Json -Compress -Depth 3)" -LogOnly
-            foreach ($indicator in $report.Guest.Indicators) { Write-Log "[Phase 8]: ${VmName}: OOM indicator: $indicator" -Warning -OutputStream }
+            foreach ($indicator in $report.Guest.Indicators) { Write-Log "[Phase 8]: ${VmName}: OOM indicator: $indicator" -Warning }
         }
         if ($report.Errors.Count) {
-            Write-Log "[Phase 8]: ${VmName}: memory diagnostic report is incomplete: $($report.Errors | ConvertTo-Json -Compress)" -Warning -OutputStream
+            Write-Log "[Phase 8]: ${VmName}: memory diagnostic report is incomplete: $($report.Errors | ConvertTo-Json -Compress)" -Warning
         }
     }
     catch {
-        Write-Log "[Phase 8]: ${VmName}: memory diagnostic capture failed; recovery/failure handling will continue: $($_.Exception.Message)" -Warning -OutputStream
+        Write-Log "[Phase 8]: ${VmName}: memory diagnostic capture failed; recovery/failure handling will continue: $($_.Exception.Message)" -Warning
     }
 }
 
@@ -2445,6 +2537,12 @@ function Get-MemLabsClientCertificateReadinessBlock {
             ChainStatus = 'no usable client-auth certificate'; Thumbprint = ''
             Diagnostics = @()
         }
+        try {
+            $aePolicy = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment' `
+                -Name 'AEPolicy' -ErrorAction Stop
+            $result.Diagnostics += "AutoEnrollment AEPolicy at probe start=$aePolicy (expected 7)"
+        }
+        catch { $result.Diagnostics += "AutoEnrollment policy read failed: $($_.Exception.Message)" }
         for ($attempt = 1; $attempt -le 4; $attempt++) {
             $now = Get-Date
             $candidates = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction Stop |
@@ -2455,6 +2553,7 @@ function Get-MemLabsClientCertificateReadinessBlock {
                 } | Sort-Object NotAfter -Descending)
             $result.CertFound = $candidates.Count -gt 0
             foreach ($cert in $candidates) {
+                $result.Diagnostics += "Client-auth certificate thumbprint=$($cert.Thumbprint), subject=$($cert.Subject), issuer=$($cert.Issuer)"
                 $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
                 try {
                     $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
@@ -2479,17 +2578,25 @@ function Get-MemLabsClientCertificateReadinessBlock {
             }
             if ($attempt -lt 4) {
                 if ($attempt -eq 1) {
+                    $previousPreference = $ErrorActionPreference
                     try {
+                        $ErrorActionPreference = 'Continue'
                         $gpOutput = @(& gpupdate.exe /target:computer /force /wait:30 2>&1)
-                        $result.Diagnostics += "gpupdate exit=$LASTEXITCODE; $($gpOutput -join ' ')"
+                        $gpExitCode = $LASTEXITCODE
+                        $result.Diagnostics += "gpupdate exit=$gpExitCode; $($gpOutput -join ' ')"
                     }
                     catch { $result.Diagnostics += "gpupdate invocation failed: $($_.Exception.Message)" }
+                    finally { $ErrorActionPreference = $previousPreference }
                 }
+                $previousPreference = $ErrorActionPreference
                 try {
+                    $ErrorActionPreference = 'Continue'
                     $pulseOutput = @(& certutil.exe -pulse 2>&1)
-                    $result.Diagnostics += "certutil -pulse attempt=$attempt exit=$LASTEXITCODE; $($pulseOutput -join ' ')"
+                    $pulseExitCode = $LASTEXITCODE
+                    $result.Diagnostics += "certutil -pulse attempt=$attempt exit=$pulseExitCode; $($pulseOutput -join ' ')"
                 }
                 catch { $result.Diagnostics += "certutil -pulse attempt=$attempt invocation failed: $($_.Exception.Message)" }
+                finally { $ErrorActionPreference = $previousPreference }
                 Start-Sleep -Seconds 10
             }
         }
@@ -2511,6 +2618,35 @@ function Get-MemLabsClientCertificateReadinessBlock {
         }
         return [pscustomobject]$result
     }
+}
+
+function Invoke-MemLabsClientCertificateReadiness {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$DomainName,
+        [string]$DisplayName = 'PKI certificate readiness'
+    )
+
+    $probe = Invoke-VmCommand -VmName $VMName -VmDomainName $DomainName -AsJob -TimeoutSeconds 120 `
+        -SuppressLog -DisplayName $DisplayName -ScriptBlock (Get-MemLabsClientCertificateReadinessBlock)
+    if (-not $probe -or $probe.ScriptBlockFailed) {
+        throw "Certificate readiness probe failed. $($probe.ErrorDetails)"
+    }
+    $states = @($probe.ScriptBlockOutput)
+    if ($states.Count -ne 1 -or $states[0].Ready -isnot [bool]) {
+        throw 'Certificate readiness probe must return exactly one result with a Boolean Ready value.'
+    }
+    $state = $states[0]
+    if ($state.Ready -and ($state.CertFound -isnot [bool] -or -not $state.CertFound -or
+            $state.ChainOk -isnot [bool] -or -not $state.ChainOk -or
+            $state.Thumbprint -isnot [string] -or [string]::IsNullOrWhiteSpace($state.Thumbprint))) {
+        throw 'Certificate readiness probe returned inconsistent success evidence.'
+    }
+    $detail = "certFound=$($state.CertFound), chain=$($state.ChainStatus)"
+    if ($state.Thumbprint) { $detail += ", thumbprint=$($state.Thumbprint)" }
+    if ($state.Diagnostics) { $detail += "; $($state.Diagnostics -join ' | ')" }
+    [pscustomobject]@{ Target = $VMName; Ready = [bool]$state.Ready; Detail = $detail }
 }
 
 function Invoke-MemLabsClientCertificatePrestage {
@@ -2555,25 +2691,8 @@ function Invoke-MemLabsClientCertificatePrestage {
         $targetVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $target } | Select-Object -First 1
         $targetDomain = if ($targetVm.domain) { $targetVm.domain } else { $DomainName }
         try {
-            $probe = Invoke-VmCommand -VmName $target -VmDomainName $targetDomain -AsJob -TimeoutSeconds 120 `
-                -SuppressLog -DisplayName 'PKI cert pre-stage' -ScriptBlock (Get-MemLabsClientCertificateReadinessBlock)
-            if (-not $probe -or $probe.ScriptBlockFailed) {
-                throw "Certificate readiness probe failed. $($probe.ErrorDetails)"
-            }
-            $states = @($probe.ScriptBlockOutput)
-            if ($states.Count -ne 1 -or $states[0].Ready -isnot [bool]) {
-                throw 'Certificate readiness probe must return exactly one result with a Boolean Ready value.'
-            }
-            $state = $states[0]
-            if ($state.Ready -and ($state.CertFound -isnot [bool] -or -not $state.CertFound -or
-                    $state.ChainOk -isnot [bool] -or -not $state.ChainOk -or
-                    $state.Thumbprint -isnot [string] -or [string]::IsNullOrWhiteSpace($state.Thumbprint))) {
-                throw 'Certificate readiness probe returned inconsistent success evidence.'
-            }
-            $detail = "certFound=$($state.CertFound), chain=$($state.ChainStatus)"
-            if ($state.Thumbprint) { $detail += ", thumbprint=$($state.Thumbprint)" }
-            if ($state.Diagnostics) { $detail += "; $($state.Diagnostics -join ' | ')" }
-            $targetResult = [pscustomobject]@{ Target = $target; Ready = [bool]$state.Ready; Detail = $detail }
+            $targetResult = Invoke-MemLabsClientCertificateReadiness -VMName $target -DomainName $targetDomain `
+                -DisplayName 'PKI cert pre-stage'
         }
         catch {
             $targetResult = [pscustomobject]@{ Target = $target; Ready = $false; Detail = $_.Exception.Message }
@@ -2617,7 +2736,7 @@ function Invoke-MemLabsGuestMemoryRecovery {
         [ValidateRange(1, 600)] [int] $ReadyTimeoutSeconds = 600
     )
 
-    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: requesting the single permitted graceful reboot (RunId=$RunId)." -Warning -OutputStream
+    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: requesting the single permitted graceful reboot (RunId=$RunId)." -Warning
     if (-not (Restart-VM2Smart -Name $VmName -Reason 'Phase 8 CIM out-of-memory recovery')) {
         throw "${VmName}: memory recovery could not restart the guest gracefully; hard power-off is not permitted."
     }
@@ -2662,7 +2781,228 @@ function Invoke-MemLabsGuestMemoryRecovery {
     if (-not $resume -or $resume.ScriptBlockFailed -or $resume.ScriptBlockOutput -notcontains 'Resumed') {
         throw "${VmName}: memory recovery reboot completed, but resuming the existing DSC workflow failed: $($resume.ErrorDetails -join '; ') $($resume.ScriptBlockOutput)"
     }
-    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: guest readiness verified; existing workflow resumed without snapshot rollback." -OutputStream
+    Write-Log "[Phase 8]: ${VmName}: CIM memory recovery: guest readiness verified; existing workflow resumed without snapshot rollback."
+}
+
+function Save-CMRoleFailureDiagnostics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [Parameter(Mandatory)][string]$DomainName,
+        [Parameter(Mandatory)][ValidateSet(7, 8, 11)][int]$Phase,
+        [object]$DeployConfig,
+        [ValidateSet('MP', 'RP')][string[]]$Roles = @('MP', 'RP')
+    )
+
+    $logDir = if ($Common -and $Common.LogPath) { Split-Path $Common.LogPath -Parent } else { $null }
+    if (-not $logDir -or -not (Test-Path -LiteralPath $logDir -PathType Container)) {
+        Write-Log "[Phase $Phase]: $VmName`: role diagnostics: host log directory is unavailable ($logDir)." -Warning
+        return
+    }
+    $base = "$VmName-Phase$Phase-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    $statusPath = Join-Path $logDir "$base-RoleDiagnostics.json"
+    $state = [ordered]@{
+        CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+        TriggerVm = $VmName
+        Phase = $Phase
+        CaptureStatus = 'Collecting'
+        CollectionErrors = @()
+        Targets = @()
+    }
+    $saveStatus = {
+        $state | ConvertTo-Json -Depth 10 -ErrorAction Stop |
+            Set-Content -LiteralPath $statusPath -Encoding UTF8 -ErrorAction Stop
+    }
+    try {
+        & $saveStatus
+        $vms = @($DeployConfig.virtualMachines | Where-Object { $null -ne $_ })
+        $trigger = @($vms | Where-Object { $_.vmName -ieq $VmName })
+        if ($trigger.Count -ne 1) {
+            if ($Roles.Count -ne 1) { throw "Cannot identify one deployment VM for '$VmName'; role targets cannot be inferred." }
+            $message = "Deployment metadata for '$VmName' is unavailable; collecting only the requested $($Roles[0]) target without site ownership."
+            $state.CollectionErrors += $message
+            Write-Log "[Phase $Phase]: $VmName`: role diagnostics: $message" -Warning
+            $trigger = @([pscustomobject]@{
+                    vmName = $VmName; role = 'SiteSystem'; siteCode = ''
+                    installMP = $Roles -contains 'MP'; installRP = $Roles -contains 'RP'
+                })
+        }
+        $trigger = $trigger[0]
+        $candidates = @($trigger)
+        if ($Phase -eq 8 -and $trigger.role -in @('CAS', 'Primary') -and $trigger.siteCode) {
+            $candidates += @($vms | Where-Object {
+                    ($_.siteCode -and $_.siteCode -ieq $trigger.siteCode) -or
+                    ($trigger.remoteSQLVM -and $_.vmName -ieq $trigger.remoteSQLVM) -or
+                    ($_.role -eq 'Secondary' -and $_.parentSiteCode -ieq $trigger.siteCode)
+                })
+        }
+        $targets = [System.Collections.Generic.List[object]]::new()
+        if ($Phase -eq 8 -and $trigger.role -in @('CAS', 'Primary')) {
+            $replicationSites = @($trigger)
+            if ($trigger.role -eq 'CAS') {
+                $replicationSites += @($vms | Where-Object {
+                        $_.role -eq 'Primary' -and $trigger.siteCode -and
+                        $_.parentSiteCode -ieq $trigger.siteCode -and
+                        (-not $_.domain -or $_.domain -ieq $DomainName)
+                    })
+            }
+            elseif ($trigger.parentSiteCode) {
+                $parents = @($vms | Where-Object {
+                        $_.role -eq 'CAS' -and $_.siteCode -ieq $trigger.parentSiteCode -and
+                        (-not $_.domain -or $_.domain -ieq $DomainName)
+                    })
+                if ($parents.Count -ne 1) {
+                    $message = "Could not resolve one CAS peer for '$VmName' (parent site '$($trigger.parentSiteCode)'); replication peer evidence is incomplete."
+                    $state.CollectionErrors += $message
+                    Write-Log "[Phase $Phase]: $VmName`: $message" -Warning
+                }
+                else { $replicationSites += $parents }
+            }
+            foreach ($site in $replicationSites) {
+                $targets.Add([pscustomobject]@{ VmName = $site.vmName; Role = 'SiteServer'; SiteCode = "$($site.siteCode)" })
+            }
+        }
+        foreach ($candidate in @($candidates | Sort-Object vmName -Unique)) {
+            $candidateRoles = @()
+            if ($Phase -ne 7 -and 'MP' -in $Roles -and ($candidate.installMP -eq $true -or $candidate.role -eq 'Secondary')) {
+                $candidateRoles += 'MP'
+            }
+            if ('RP' -in $Roles -and $candidate.installRP -eq $true) { $candidateRoles += 'RP' }
+            if (-not $candidateRoles.Count) { continue }
+
+            $siteCode = "$($candidate.siteCode)".Trim()
+            $owners = @($vms | Where-Object {
+                    $_.role -in @('CAS', 'Primary', 'Secondary') -and $siteCode -and $_.siteCode -ieq $siteCode
+                })
+            if (-not $siteCode) {
+                $owners = @($vms | Where-Object {
+                        $_.role -in @('CAS', 'Primary') -and $_.remoteSQLVM -and $_.remoteSQLVM -ieq $candidate.vmName
+                    })
+                if ($owners.Count -eq 1) { $siteCode = "$($owners[0].siteCode)".Trim() }
+            }
+            if (-not $siteCode -or $owners.Count -ne 1) {
+                $message = "Site ownership for '$($candidate.vmName)' could not be resolved uniquely; available target evidence will still be collected."
+                $state.CollectionErrors += $message
+                Write-Log "[Phase $Phase]: $VmName`: role diagnostics: $message" -Warning
+            }
+            foreach ($role in $candidateRoles) {
+                $targets.Add([pscustomobject]@{ VmName = $candidate.vmName; Role = $role; SiteCode = $siteCode })
+            }
+            if ($candidate.role -eq 'Secondary' -and $candidate.parentSiteCode) {
+                $owners += @($vms | Where-Object {
+                        $_.role -eq 'Primary' -and $_.siteCode -ieq $candidate.parentSiteCode
+                    })
+            }
+            foreach ($owner in $owners) {
+                $targets.Add([pscustomobject]@{ VmName = $owner.vmName; Role = 'SiteServer'; SiteCode = "$($owner.siteCode)" })
+            }
+        }
+        $state.Targets = @(foreach ($target in @($targets.ToArray() | Sort-Object VmName, Role -Unique)) {
+                $safeName = "$($target.VmName)" -replace '[^A-Za-z0-9._-]', '_'
+                [pscustomobject]@{
+                    VmName = $target.VmName; Role = $target.Role; SiteCode = $target.SiteCode
+                    CaptureStatus = 'NotStarted'; GuestPath = $null
+                    HostPath = Join-Path $logDir "$base-$safeName-$($target.Role)Diagnostics.json"
+                    CollectionErrors = @(); Error = $null; CleanupError = $null
+                }
+            })
+        if (-not $state.Targets.Count) {
+            $state.CaptureStatus = 'NoApplicableRoles'
+            Write-Log "[Phase $Phase]: $VmName`: no configured role/site-server targets apply to this failure." -LogOnly
+            return
+        }
+        $toolsPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools'
+        $collectGuest = {
+            param([string]$Source, [hashtable]$CollectorArguments, [string]$Destination)
+            $ErrorActionPreference = 'Stop'
+            $payload = @(& ([scriptblock]::Create($Source)) @CollectorArguments)
+            if ($payload.Count -ne 1 -or $payload[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($payload[0])) {
+                throw 'Role collector did not return one JSON document.'
+            }
+            $null = $payload[0] | ConvertFrom-Json -ErrorAction Stop
+            $payload[0] | Set-Content -LiteralPath $Destination -Encoding UTF8 -ErrorAction Stop
+            $file = Get-Item -LiteralPath $Destination -ErrorAction Stop
+            [pscustomobject]@{ Path = $file.FullName; Bytes = $file.Length }
+        }
+        foreach ($target in $state.Targets) {
+            $target.CaptureStatus = 'Collecting'
+            $target.GuestPath = "C:\Windows\Temp\MemLabs-RoleDiagnostics-$([guid]::NewGuid().ToString('N')).json"
+            & $saveStatus
+            try {
+                $toolName = if ($target.Role -eq 'RP') { 'Get-ReportingDiagnostics.ps1' } else { 'Get-ManagementPointDiagnostics.ps1' }
+                $timeout = if ($target.Role -eq 'RP') { 600 } else { 180 }
+                $source = Get-Content -LiteralPath (Join-Path $toolsPath $toolName) -Raw -ErrorAction Stop
+                $arguments = @{ AsJson = $true }
+                if ($target.SiteCode) { $arguments.SiteCode = $target.SiteCode }
+                if ($target.Role -eq 'SiteServer') { $arguments.SiteServerOnly = $true }
+                $result = Invoke-VmCommand -VmName $target.VmName -VmDomainName $DomainName `
+                    -ScriptBlock $collectGuest -ArgumentList @($source, $arguments, $target.GuestPath) `
+                    -AsJob -TimeoutSeconds $timeout -SessionMaxRetries 1 -SuppressLog `
+                    -RequireDomainIdentity -FailOnRemoteError -DisplayName "Capture $($target.Role) role diagnostics"
+                if (-not $result -or -not $result.CommandResult -or $result.ScriptBlockFailed) {
+                    throw "Guest collection failed (timedOut=$([bool]$result.TimedOut)): $(@($result.ErrorDetails) -join '; ')"
+                }
+                $manifest = @($result.ScriptBlockOutput | Where-Object { $null -ne $_ })
+                if ($manifest.Count -ne 1 -or $manifest[0].Path -ne $target.GuestPath -or [long]$manifest[0].Bytes -le 0) {
+                    throw 'Guest collection returned an invalid staging manifest.'
+                }
+                # Keep log bodies off the PSDirect return stream, as baseline capture does.
+                if (-not (Copy-ItemFromVmBounded -Path $target.GuestPath -Destination $target.HostPath `
+                            -VMName $target.VmName -VMDomainName $DomainName -TimeoutSeconds 180)) {
+                    throw "Bounded diagnostic transfer failed; guest evidence remains at $($target.GuestPath)."
+                }
+                $file = Get-Item -LiteralPath $target.HostPath -ErrorAction Stop
+                if ($file.Length -ne [long]$manifest[0].Bytes) { throw "Diagnostic size mismatch: guest=$($manifest[0].Bytes), host=$($file.Length)." }
+                $document = Get-Content -LiteralPath $target.HostPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $required = @('ComputerName', 'CollectedAt', 'CollectionErrors', 'Logs')
+                if ($target.Role -eq 'RP') { $required += 'Endpoints' } else { $required += 'Probes' }
+                foreach ($property in $required) {
+                    if ($property -notin $document.PSObject.Properties.Name) { throw "Diagnostic document has no '$property' field." }
+                }
+                if ($document.ComputerName -ine $target.VmName) { throw "Diagnostic identity mismatch: expected '$($target.VmName)', got '$($document.ComputerName)'." }
+                $target.CollectionErrors = @($document.CollectionErrors | Where-Object { $_ })
+                $target.CaptureStatus = if ($target.CollectionErrors.Count) { 'CompletedWithErrors' } else { 'Completed' }
+                Write-Log "[Phase $Phase]: $VmName`: Captured $($target.Role) evidence from $($target.VmName) -> $($target.HostPath)"
+                foreach ($errorText in $target.CollectionErrors) {
+                    Write-Log "[Phase $Phase]: $VmName`: $($target.VmName) $($target.Role) diagnostic evidence unavailable: $errorText" -Warning
+                }
+                try {
+                    $cleanup = Invoke-VmCommand -VmName $target.VmName -VmDomainName $DomainName -ArgumentList @($target.GuestPath) `
+                        -ScriptBlock { param([string]$Path) Remove-Item -LiteralPath $Path -Force -ErrorAction Stop } `
+                        -AsJob -TimeoutSeconds 30 -SessionMaxRetries 1 -SuppressLog -RequireDomainIdentity -FailOnRemoteError `
+                        -DisplayName 'Remove staged role diagnostic'
+                    if (-not $cleanup -or -not $cleanup.CommandResult -or $cleanup.ScriptBlockFailed) {
+                        throw "Staged diagnostic could not be removed: $(@($cleanup.ErrorDetails) -join '; ')"
+                    }
+                }
+                catch {
+                    $target.CleanupError = $_.Exception.Message
+                    $target.CaptureStatus = 'CompletedWithErrors'
+                    Write-Log "[Phase $Phase]: $VmName`: $($target.VmName): $($target.CleanupError)" -Warning
+                }
+            }
+            catch {
+                $target.CaptureStatus = 'Failed'
+                $target.Error = $_.Exception.Message
+                Write-Log "[Phase $Phase]: $VmName`: $($target.Role) diagnostic capture on $($target.VmName) failed: $($target.Error)" -Warning
+            }
+        }
+        $state.CaptureStatus = if ($state.CollectionErrors.Count -or @($state.Targets | Where-Object { $_.CaptureStatus -ne 'Completed' }).Count) { 'Partial' } else { 'Completed' }
+    }
+    catch {
+        $state.CaptureStatus = 'Failed'
+        $state.CollectionErrors += $_.Exception.Message
+        Write-Log "[Phase $Phase]: $VmName`: role diagnostic collection failed: $($_.Exception.Message)" -Warning
+    }
+    finally {
+        try {
+            & $saveStatus
+            Write-Log "[Phase $Phase]: $VmName`: Role diagnostic capture status -> $statusPath"
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $VmName`: could not persist role diagnostic capture status: $($_.Exception.Message)" -Warning
+        }
+    }
 }
 
 function Save-CMSetupLogsFromVm {
@@ -2712,13 +3052,17 @@ function Save-CMSetupLogsFromVm {
             <VmName>-Phase8-<timestamp>-SMSProv.log, dmpdownloader.log, etc. (failure only)
             <VmName>-Phase8-<timestamp>-ConfigMgrUpdateDiagnostics.json
             <VmName>-Phase8-<timestamp>-ConfigMgrProviderState.json
+        Phase 7/8 failures also collect configured MP/RP targets and owning-site
+        logs independently when deployment metadata is supplied. Large role
+        documents use a bounded staged-file transfer rather than PSDirect output.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$VmName,
         [Parameter(Mandatory)][string]$DomainName,
         [Parameter(Mandatory)][int]$Phase,
-        [Parameter(Mandatory)][ValidateSet('Success', 'Failure')][string]$Mode
+        [Parameter(Mandatory)][ValidateSet('Success', 'Failure')][string]$Mode,
+        [Parameter()][object]$DeployConfig
     )
 
     $probeAndRead = {
@@ -2832,7 +3176,7 @@ function Save-CMSetupLogsFromVm {
                 }
             }
         }
-        if ($Mode -eq 'Failure' -and $Phase -eq 8) {
+        if ($Mode -eq 'Failure' -and $Phase -in @(3, 8)) {
             $prereq = [ordered]@{
                 CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
                 ComputerName  = $env:COMPUTERNAME
@@ -2840,6 +3184,7 @@ function Save-CMSetupLogsFromVm {
                 ODBC          = [ordered]@{}
                 ReportBuilder = [ordered]@{}
                 IIS           = [ordered]@{}
+                WindowsUpdate = [ordered]@{ Policies = @(); Services = @() }
                 PendingReboot = @()
                 Certificates  = [ordered]@{}
                 Errors        = @()
@@ -2897,6 +3242,35 @@ function Save-CMSetupLogsFromVm {
                 }
             }
             catch { $prereq.Errors += "IIS: $($_.Exception.Message)" }
+            foreach ($policy in @(
+                    @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Names = @('WUServer', 'WUStatusServer', 'DoNotConnectToWindowsUpdateInternetLocations', 'DisableWindowsUpdateAccess') },
+                    @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Names = @('UseWUServer', 'NoAutoUpdate', 'AUOptions') },
+                    @{ Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Servicing'; Names = @('LocalSourcePath', 'UseWindowsUpdate', 'RepairContentServerSource') }
+                )) {
+                try {
+                    if (-not (Test-Path -LiteralPath $policy.Path -ErrorAction Stop)) { continue }
+                    $key = Get-Item -LiteralPath $policy.Path -ErrorAction Stop
+                    try {
+                        foreach ($name in $policy.Names) {
+                            if ($name -in $key.GetValueNames()) {
+                                $prereq.WindowsUpdate.Policies += [ordered]@{
+                                    Path = $policy.Path; Name = $name; Kind = "$($key.GetValueKind($name))"
+                                    Value = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                }
+                            }
+                        }
+                    }
+                    finally { $key.Dispose() }
+                }
+                catch { $prereq.Errors += "Windows Update policy '$($policy.Path)': $($_.Exception.Message)" }
+            }
+            foreach ($serviceName in @('wuauserv', 'UsoSvc')) {
+                try {
+                    $service = Get-Service -Name $serviceName -ErrorAction Stop
+                    $prereq.WindowsUpdate.Services += [ordered]@{ Name = $serviceName; Status = "$($service.Status)"; StartType = "$($service.StartType)" }
+                }
+                catch { $prereq.Errors += "Windows Update service '$serviceName': $($_.Exception.Message)" }
+            }
             foreach ($pendingPath in @(
                     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
                     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
@@ -3021,7 +3395,11 @@ function Save-CMSetupLogsFromVm {
                 'cmupdate.log', 'cmupdate.lo_',
                 'hman.log', 'hman.lo_',
                 'distmgr.log', 'distmgr.lo_',
-                'smsexec.log', 'smsexec.lo_'
+                'smsexec.log', 'smsexec.lo_',
+                'rcmctrl.log', 'rcmctrl.lo_',
+                'replmgr.log', 'replmgr.lo_',
+                'sender.log', 'sender.lo_',
+                'despool.log', 'despool.lo_'
             )
             if ($cmLogDir -and (Test-Path -LiteralPath $cmLogDir -PathType Container)) {
                 foreach ($cmLogName in $cmLogNames) {
@@ -3053,6 +3431,27 @@ function Save-CMSetupLogsFromVm {
                 $productLogInventory.Add([pscustomobject]@{ SourcePath = '<ConfigMgr installation directory>'; Exists = $false; Collected = $false; Bytes = 0; Error = 'Installation Directory registry value was unavailable' })
             }
 
+            $drsSnapshotPath = 'C:\staging\DSC\DRSReadinessFailure.json'
+            try {
+                $drsSnapshot = Get-Item -LiteralPath $drsSnapshotPath -ErrorAction Stop
+                if ($drsSnapshot.Length -gt 1MB) { throw 'DRS readiness snapshot exceeds the 1 MiB capture bound.' }
+                $cmArtifacts.Add([pscustomobject]@{
+                        Name = $drsSnapshot.Name
+                        SourcePath = $drsSnapshot.FullName
+                        Bytes = $drsSnapshot.Length
+                        LastWriteTimeUtc = $drsSnapshot.LastWriteTimeUtc
+                        TailLines = 0
+                        Content = Get-Content -LiteralPath $drsSnapshot.FullName -Raw -ErrorAction Stop
+                    })
+                $productLogInventory.Add([pscustomobject]@{ SourcePath = $drsSnapshotPath; Exists = $true; Collected = $true; Bytes = $drsSnapshot.Length; Error = '' })
+            }
+            catch {
+                $productLogInventory.Add([pscustomobject]@{
+                        SourcePath = $drsSnapshotPath
+                        Exists = Test-Path -LiteralPath $drsSnapshotPath -PathType Leaf
+                        Collected = $false; Bytes = 0; Error = $_.Exception.Message
+                    })
+            }
             foreach ($rootLogPath in @('C:\ConfigMgrPrereq.log')) {
                 try {
                     $rootLogFile = Get-Item -LiteralPath $rootLogPath -ErrorAction Stop
@@ -3571,6 +3970,10 @@ function Save-CMSetupLogsFromVm {
         }
     }
 
+    if ($Mode -eq 'Failure' -and $Phase -in @(7, 8) -and $DeployConfig) {
+        Save-CMRoleFailureDiagnostics -VmName $VmName -DomainName $DomainName -Phase $Phase -DeployConfig $DeployConfig
+    }
+
     if ($Mode -eq 'Failure' -and $Phase -eq 8) {
         $providerProbe = {
             function Get-ProbeError {
@@ -3633,7 +4036,9 @@ function Save-CMSetupLogsFromVm {
                         'SMS_DPGroupMembers',
                         'SMS_DPGroupPackages',
                         'SMS_DPGroupCollections',
-                        'SMS_DistributionPointInfo'
+                        'SMS_DistributionPointInfo',
+                        'SMS_ReplicationLinkSummary',
+                        'SMS_ReplicationGroup'
                     )) {
                     try {
                         $boundedRows = @(Get-CimInstance -Namespace $probe.Namespace -ClassName $className -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 251)
@@ -6644,11 +7049,11 @@ $global:VM_Config = {
             # kill+purge+drain cycle usually clears it. If it still fails after
             # a fresh Stop_RunningDSC, escalate to a VM reboot (the guaranteed
             # way to clear an in-memory LCM apply).
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Clear Old Status failed (likely LCM=Busy); re-running Stop_RunningDSC before retry. $($result.ScriptBlockOutput)" -Warning
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Clear Old Status failed; LCM busy and an unreachable session require different triage. Re-running Stop_RunningDSC before retry. Output=$($result.ScriptBlockOutput); TimedOut=$($result.TimedOut); Errors=$(@($result.ErrorDetails) -join '; ')" -Warning
             $stopRetry = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's (retry)"
             $stopRetryFailed = $stopRetry.ScriptBlockFailed -or ($stopRetry.ScriptBlockOutput -and ($stopRetry.ScriptBlockOutput.Stopped -eq $false))
             if ($stopRetryFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Stop_RunningDSC retry also failed; rebooting VM to clear the LCM." -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Stop_RunningDSC retry also failed; rebooting VM to clear the LCM. Output=$($stopRetry.ScriptBlockOutput); Stopped=$($stopRetry.ScriptBlockOutput.Stopped); TimedOut=$($stopRetry.TimedOut); Errors=$(@($stopRetry.ErrorDetails) -join '; ')" -Warning
                 $clearStatusRebooted = $true
                 Stop-Vm2 -Name $currentItem.vmName
                 Start-Sleep -Seconds 10
@@ -7099,38 +7504,55 @@ $global:VM_Config = {
                 # the failing resource + error travels back to the host build log
                 # instead of forcing a manual in-guest dig.
                 function Get-DscFailureDetail {
-                    param($ErrorRecord)
+                    param($ErrorRecord, [switch]$MetadataPushFailure)
                     $detail = New-Object System.Collections.Generic.List[string]
                     if ($ErrorRecord) {
-                        $msg = $null
-                        try { $msg = $ErrorRecord.Exception.Message } catch {}
-                        if (-not [string]::IsNullOrWhiteSpace($msg)) {
-                            $detail.Add("Error: " + ($msg -replace '\s+', ' ').Trim())
+                        $exception = $ErrorRecord.Exception
+                        for ($depth = 0; $exception -and $depth -lt 8; $depth++) {
+                            $detail.Add("Error[$depth]: Type=$($exception.GetType().FullName); HResult=0x$($exception.HResult.ToString('X8')); Message=" + ($exception.Message -replace '\s+', ' ').Trim())
+                            $exception = $exception.InnerException
                         }
+                        $detail.Add("FQID=$($ErrorRecord.FullyQualifiedErrorId); Stack=$($ErrorRecord.ScriptStackTrace)")
                     }
-                    # Authoritative: every resource the last apply left not-in-state, with its own error text.
                     try {
-                        $status = Get-DscConfigurationStatus -ErrorAction Stop
-                        if ($status -and $status.ResourcesNotInDesiredState) {
-                            foreach ($r in $status.ResourcesNotInDesiredState) {
-                                $rerr = $r.Error
-                                if ([string]::IsNullOrWhiteSpace($rerr)) { $rerr = '(no error text)' }
-                                $detail.Add("Failed resource " + $r.ResourceId + ": " + ($rerr -replace '\s+', ' ').Trim())
+                        $lcm = Get-CimInstance -Namespace 'root\Microsoft\Windows\DesiredStateConfiguration' `
+                            -ClassName MSFT_DSCLocalConfigurationManager -OperationTimeoutSec 5 -ErrorAction Stop
+                        if (-not $lcm) { throw 'LCM state query returned no instance.' }
+                        $detail.Add("LCMState=$($lcm.LCMState); LCMStateDetail=$($lcm.LCMStateDetail)")
+                    }
+                    catch { $detail.Add("LCM state unavailable: $($_.Exception.Message)") }
+                    $readEvents = [bool]$MetadataPushFailure
+                    if ($MetadataPushFailure) {
+                        $detail.Add('Metadata push failed before apply; previous configuration status was not queried.')
+                    }
+                    else {
+                        try {
+                            $status = Get-DscConfigurationStatus -ErrorAction Stop
+                            if ($status) { $detail.Add("Last DSC status=$($status.Status); StartDate=$($status.StartDate); Type=$($status.Type)") }
+                            if ($status -and $status.ResourcesNotInDesiredState) {
+                                foreach ($r in $status.ResourcesNotInDesiredState) {
+                                    $rerr = $r.Error
+                                    if ([string]::IsNullOrWhiteSpace($rerr)) { $rerr = '(no error text)' }
+                                    $detail.Add("Failed resource " + $r.ResourceId + ": " + ($rerr -replace '\s+', ' ').Trim())
+                                }
                             }
                         }
+                        catch {
+                            $detail.Add("Last DSC status unavailable: $($_.Exception.Message)")
+                            $readEvents = $true
+                        }
                     }
-                    catch {
-                        # Get-DscConfigurationStatus refuses while the LCM is mid-apply; fall back to the event log.
+                    if ($readEvents) {
                         try {
                             $evts = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 40 -ErrorAction Stop |
                                 Where-Object { $_.LevelDisplayName -eq 'Error' } | Select-Object -First 3
                             foreach ($e in $evts) {
                                 $em = ($e.Message -replace '\s+', ' ').Trim()
                                 if ($em.Length -gt 300) { $em = $em.Substring(0, 300) }
-                                $detail.Add("DSC error event: " + $em)
+                                $detail.Add("DSC error event $($e.Id) at $($e.TimeCreated): " + $em)
                             }
                         }
-                        catch {}
+                        catch { $detail.Add("DSC event evidence unavailable: $($_.Exception.Message)") }
                     }
                     if ($detail.Count -gt 0) { return ($detail -join ' || ') }
                     return $null
@@ -7211,12 +7633,17 @@ $global:VM_Config = {
                         # No -Verbose: nothing drains that stream on success and each record is a
                         # synchronous round trip back to the host job -- the same reason the
                         # multi-node Start-DscConfiguration below omits it.
-                        Set-DscLocalConfigurationManager -Path $dscConfigPath -force
+                        Set-DscLocalConfigurationManager -Path $dscConfigPath -force -ErrorAction Stop
                     }
                     catch {
                         $data = "Could not run Set-DscLocalConfigurationManager -Path $dscConfigPath -force"
                         $data | Out-File $log -Append      
-                        $_ | Out-File $log -Append              
+                        $_ | Out-File $log -Append
+                        $dscDetail = Get-DscFailureDetail -ErrorRecord $_ -MetadataPushFailure
+                        if ($dscDetail) {
+                            $dscDetail | Out-File $log -Append
+                            $data = "$data | $dscDetail"
+                        }
                         Write-Error $data
                         Write-Error $_
                         return $data
@@ -8002,6 +8429,12 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished waiting on all nodes"
 
 
+            if ($Phase -eq 2 -and -not $Migrate -and $currentItem.role -ne 'AADClient') {
+                if (-not (Wait-MemLabsWindowsClientSetup -VmName $currentItem.vmName -VmDomainName $domainName)) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows client setup is not ready before DSC apply; no rename, domain join, or DSC start was attempted." -Failure -OutputStream
+                    return
+                }
+            }
             Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting DSC configuration."
             $dscStartStopWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -8030,6 +8463,13 @@ $global:VM_Config = {
                 Start-Sleep -Seconds 15
                 $dscStartWhy = if ($result.TimedOut) { "timed out after ${dscStartTimeoutSeconds}s" } else { "$($result.ScriptBlockOutput)" }
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to start $($currentItem.role) configuration. Retrying. $dscStartWhy" -Warning
+                if ($Phase -eq 2 -and -not $Migrate -and $currentItem.role -ne 'AADClient' -and
+                    $dscStartWhy -like '*Windows client setup is not complete*') {
+                    if (-not (Wait-MemLabsWindowsClientSetup -VmName $currentItem.vmName -VmDomainName $domainName)) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Windows client setup regressed after the host check and is still not ready; refusing DSC retry or reboot for an unfinished setup." -Failure -OutputStream
+                        return
+                    }
+                }
                 # Retry once before exiting. On a timeout Invoke-VmCommand has already
                 # evicted the wedged session, so this attempt builds a fresh channel.
                 $result = Invoke-VmCommand -VmName $currentItem.vmName @dscStartArgs
@@ -8096,6 +8536,7 @@ $global:VM_Config = {
         $staleRestartMax = 2
         $memoryRecoveryCount = 0
         $lastStaleWarningTime = [DateTime]::MinValue
+        $lastStatusReadWarningTime = [DateTime]::MinValue
         $deadWorkflowConfirmations = 0     # consecutive stale checks that proved the ScriptWorkflow task is not running
         $deadWorkflowMax = 3               # after this many, the wait is provably unclearable -- fail instead of warning forever
         $staleNoticeCount = 0              # stale notices emitted for the CURRENT status (reset on every status change)
@@ -8500,7 +8941,7 @@ $global:VM_Config = {
                 # Single round-trip: fetch DSC_Status.txt AND the completion-runid sentinel
                 $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock {
                     param($workflowRunId, [string]$workflowRoot = 'C:\staging\DSC')
-                    $statusText = Get-Content -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt') -ErrorAction SilentlyContinue
+                    $statusText = Get-Content -LiteralPath (Join-Path $workflowRoot 'DSC_Status.txt') -Raw -ErrorAction SilentlyContinue
                     $failurePath = Join-Path $workflowRoot 'ScriptWorkflow.failed.json'
                     if ($workflowRunId -and [IO.File]::Exists($failurePath)) {
                         $failure = Get-Content -LiteralPath $failurePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -8550,17 +8991,36 @@ $global:VM_Config = {
                 # be found on this object" during Phase 2 startup.
                 $completedRunIdSnapshot = $null
                 $statusTextSnapshot = $null
-                if ($status -and $status.ScriptBlockOutput -is [pscustomobject]) {
-                    $completedRunIdSnapshot = $status.ScriptBlockOutput.CompletedRunId
-                    $statusTextSnapshot = $status.ScriptBlockOutput.StatusText
+                $statusReadFailed = -not $status -or $status.ScriptBlockFailed -isnot [bool] -or $status.ScriptBlockFailed
+                $statusReadDetail = $null
+                if ($status -and $status.ScriptBlockFailed -isnot [bool]) {
+                    $statusReadDetail = 'Missing or invalid Boolean ScriptBlockFailed field.'
                 }
-                elseif ($status) {
-                    # Fallback (e.g. when the scriptblock failed before returning a pscustomobject)
-                    $statusTextSnapshot = $status.ScriptBlockOutput
+                if (-not $statusReadFailed) {
+                    $statusOutput = $status.ScriptBlockOutput
+                    if ($statusOutput -is [pscustomobject] -and
+                        $statusOutput.PSObject.Properties['StatusText'] -and
+                        $statusOutput.PSObject.Properties['CompletedRunId'] -and
+                        ($null -eq $statusOutput.StatusText -or $statusOutput.StatusText -is [string]) -and
+                        ($null -eq $statusOutput.CompletedRunId -or $statusOutput.CompletedRunId -is [string])) {
+                        $completedRunIdSnapshot = $statusOutput.CompletedRunId
+                        $statusTextSnapshot = $statusOutput.StatusText
+                    }
+                    elseif ($statusOutput -is [string]) {
+                        # Successful legacy callers can still return plain status text.
+                        $statusTextSnapshot = $statusOutput
+                    }
+                    else {
+                        $statusReadFailed = $true
+                        $statusReadDetail = 'Invalid DSC status payload; expected status text or a structured status/completion snapshot.'
+                    }
+                }
+                if ($statusTextSnapshot -is [string]) {
+                    $statusTextSnapshot = $statusTextSnapshot.TrimEnd([char[]]"`r`n")
                 }
                 $stopwatch2.Stop()
 
-                $memoryRequest = if ($status -and -not $status.ScriptBlockFailed) { $status.ScriptBlockOutput.MemoryRecovery } else { $null }
+                $memoryRequest = if (-not $statusReadFailed) { $status.ScriptBlockOutput.MemoryRecovery } else { $null }
                 if ($Phase -eq 8 -and $expectedRunId -and $memoryRequest -and
                     $memoryRequest.RunId -eq $expectedRunId -and $memoryRequest.Reason -eq 'OutOfMemory') {
                     $memoryDiagnosticTrigger = if ($memoryRecoveryCount -ge 1) { 'RecoveryExhausted' } else { 'BeforeRecovery' }
@@ -8586,7 +9046,7 @@ $global:VM_Config = {
                     continue
                 }
 
-                if (-not $status -or ($status.ScriptBlockFailed)) {
+                if ($statusReadFailed) {
                     if ($stopwatch2.elapsed.TotalSeconds -gt 10) {
                         [int]$failedHeartbeats = [int]$failedHeartbeats + ([math]::Round($stopwatch2.elapsed.TotalSeconds / 5, 0))
                     }
@@ -8595,7 +9055,22 @@ $global:VM_Config = {
                         start-sleep -Seconds 10
                     }
 
-                    # Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to get job status update. Failed Heartbeat Count: $failedHeartbeats" -Verbose
+                    if (([DateTime]::UtcNow - $lastStatusReadWarningTime).TotalSeconds -ge 60) {
+                        $lastStatusReadWarningTime = [DateTime]::UtcNow
+                        if (-not $statusReadDetail) {
+                            $statusReadDetail = if ($status) {
+                                ((@($status.ErrorDetails) + @($status.ScriptBlockOutput)) -join ' ' -replace '\s+', ' ').Trim()
+                            }
+                            else { 'No result returned.' }
+                        }
+                        if ([string]::IsNullOrWhiteSpace($statusReadDetail)) {
+                            $statusReadDetail = 'No error details returned.'
+                        }
+                        if ($statusReadDetail.Length -gt 2000) {
+                            $statusReadDetail = $statusReadDetail.Substring(0, 2000) + '...'
+                        }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC status read failed (failed heartbeats=$failedHeartbeats); probe output is not workflow progress. $statusReadDetail" -Warning -LogOnly
+                    }
                     if ($failedHeartbeats -gt 10) {
                         try {
                             Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Trying to retrieve job status from VM" -failcount $failedHeartbeats -failcountMax $failedHeartbeatThreshold
@@ -9717,7 +10192,11 @@ $global:VM_Config = {
                         if ($failEntry -is [string] -and $failEntry.Contains("$")) {
                             $failEntry = $failEntry.Substring(0, $failEntry.IndexOf("$"))
                         }
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $failEntry. Check C:\ConfigMgrSetup.log for more." -Failure -OutputStream
+                        $setupFailureMessage = "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $failEntry. Check C:\ConfigMgrSetup.log for more."
+                        if ($using:Phase -eq 8) {
+                            Write-Log "$setupFailureMessage Collecting bounded failure evidence before notifying the phase controller." -Warning -OutputStream
+                        }
+                        else { Write-Log $setupFailureMessage -Failure -OutputStream }
                         # Recognize the SQLAO Init_Database AG wait-for-health timeout
                         # and surface explicit remediation. CM Setup creates the site
                         # database BEFORE the failover/failback, so a blind retry
@@ -9756,11 +10235,12 @@ $global:VM_Config = {
                         # Any role/phase: DSC_Log.log is the only host-visible record of what
                         # the guest's DSC resources reported before giving up.
                         try {
-                            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+                            Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure' -DeployConfig $deployConfig
                         }
                         catch {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture threw after failure was already determined: $($_.Exception.Message)" -Warning -OutputStream
                         }
+                        if ($using:Phase -eq 8) { Write-Log $setupFailureMessage -Failure -OutputStream }
                         return
                     }
                 }
@@ -9787,15 +10267,21 @@ $global:VM_Config = {
             Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] DscApplyWait completed in $([math]::Round($stopWatch.Elapsed.TotalSeconds, 1)) seconds (complete=$complete)" -LogOnly
         }
         catch {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+            $monitoringFailure = $_
+            $monitoringFailureMessage = "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $monitoringFailure"
+            if ($using:Phase -eq 8) {
+                Write-Log "$monitoringFailureMessage Collecting bounded failure evidence before notifying the phase controller." -Warning -OutputStream
+            }
+            else { Write-Log $monitoringFailureMessage -Failure -OutputStream }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($monitoringFailure.ScriptStackTrace)" -LogOnly
             Write-Progress2 "Exception" -Status "Failed end $_" -force
             try {
-                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure'
+                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode 'Failure' -DeployConfig $deployConfig
             }
             catch {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture also threw while preserving monitoring-failure evidence: $($_.Exception.Message)" -Warning -OutputStream
             }
+            if ($using:Phase -eq 8) { Write-Log $monitoringFailureMessage -Failure -OutputStream }
             return
         }
 
@@ -9813,7 +10299,7 @@ $global:VM_Config = {
         if ($pullGuestLogs) {
             $cmLogMode = if ($complete) { 'Success' } else { 'Failure' }
             try {
-                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode $cmLogMode
+                Save-CMSetupLogsFromVm -VmName $currentItem.vmName -DomainName $domainName -Phase $using:Phase -Mode $cmLogMode -DeployConfig $deployConfig
             }
             catch {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): CMLog capture threw after the phase result was already determined: $($_.Exception.Message)" -Warning -OutputStream

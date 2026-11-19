@@ -161,18 +161,97 @@ function Invoke-ResumeProbeFixture {
         [string] $PendingName = 'NODE1',
         [object[]] $PendingFileRenames = @(),
         [bool] $CcmPending = $false,
-        [bool] $CcmSurfaceAbsent = $false
+        [bool] $CcmSurfaceAbsent = $false,
+        [AllowEmptyCollection()][string[]] $CcmServiceStates = @('Running'),
+        [bool] $CcmManagementPoint = $false,
+        [bool] $CcmClientRegistered = $true,
+        [bool] $CcmClientRegistration32Bit = $false,
+        [bool] $CcmRegistrationDenied = $false,
+        [string] $CcmRegistrationDeniedPath = '',
+        [bool] $CcmUninstall32RootAbsent = $false,
+        [int] $CcmFailuresBeforeSuccess = 0,
+        [string] $CcmErrorCode = 'AccessDenied',
+        [int] $CcmReturnValue = 0,
+        [bool] $CcmMalformed = $false,
+        [hashtable] $Observations = @{}
     )
 
     & {
+        $fixtureState = @{
+            ServiceReads = 0
+            CimCalls = 0
+            RegistrationReads = 0
+            ElapsedSeconds = 0
+            LastServiceState = $null
+        }
+        $Observations.State = $fixtureState
+        function Get-Date {
+            ([datetime]'2026-11-05T00:00:00Z').AddSeconds($fixtureState.ElapsedSeconds)
+        }
+        function Start-Sleep {
+            param([int] $Seconds)
+            $fixtureState.ElapsedSeconds += $Seconds
+        }
+        function Get-Service {
+            [CmdletBinding()]
+            param([string] $Name)
+            if ($Name -ne 'CcmExec') { throw "Unexpected service lookup: $Name" }
+            $fixtureState.ServiceReads++
+            if ($CcmServiceStates.Count -eq 0) {
+                Write-Error -Message 'CcmExec is not installed.' -ErrorId NoServiceFoundForGivenName `
+                    -Category ObjectNotFound
+                return
+            }
+            $index = [Math]::Min($fixtureState.ServiceReads - 1, $CcmServiceStates.Count - 1)
+            $fixtureState.LastServiceState = $CcmServiceStates[$index]
+            if ($fixtureState.LastServiceState -eq 'LookupDenied') {
+                throw [UnauthorizedAccessException]::new('localized service lookup failure')
+            }
+            [pscustomobject]@{ Status = $fixtureState.LastServiceState }
+        }
         function Test-Path {
             [CmdletBinding()]
             param([string] $LiteralPath)
+            if ($LiteralPath -eq $CcmRegistrationDeniedPath) {
+                throw [UnauthorizedAccessException]::new('localized registration lookup failure')
+            }
+            if ($LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\SMS\MP') {
+                return $CcmManagementPoint
+            }
+            if ($LiteralPath -eq 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall') {
+                return -not $CcmUninstall32RootAbsent
+            }
+            if ($LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall') {
+                return $true
+            }
             return [bool]$ExistingPaths[$LiteralPath]
         }
         function Get-ItemProperty {
             [CmdletBinding()]
-            param([string] $LiteralPath, [string] $Name)
+            param([string] $LiteralPath, [string] $Name, [string] $Path)
+            if ($Path) {
+                if ($Path -notin @(
+                        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+                    )) {
+                    throw "Unexpected registry enumeration: $Path"
+                }
+                $fixtureState.RegistrationReads++
+                if ($CcmRegistrationDenied -or $Path -eq $CcmRegistrationDeniedPath) {
+                    throw [UnauthorizedAccessException]::new('localized registration lookup failure')
+                }
+                [pscustomobject]@{ DisplayName = 'ConfigMgr Management Point'; SystemComponent = 1 }
+                [pscustomobject]@{ SystemComponent = 1 }
+                if ($CcmClientRegistered -and
+                    $CcmClientRegistration32Bit -eq ($Path -like '*WOW6432Node*')) {
+                    [pscustomobject]@{
+                        DisplayName = 'Configuration Manager Client'
+                        SystemComponent = 1
+                        InstallLocation = 'E:\SMS_CCM'
+                    }
+                }
+                return
+            }
             switch ($LiteralPath) {
                 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' {
                     return [pscustomobject]@{ ComputerName = $ActiveName }
@@ -197,13 +276,33 @@ function Invoke-ResumeProbeFixture {
                 [string] $MethodName,
                 [int] $OperationTimeoutSec
             )
+            $fixtureState.CimCalls++
+            if ($fixtureState.LastServiceState -and $fixtureState.LastServiceState -ne 'Running') {
+                throw 'ClientSDK was queried before CcmExec was running.'
+            }
             if ($CcmSurfaceAbsent) {
                 $exception = New-Object System.Exception 'localized namespace absence'
                 $exception | Add-Member -MemberType NoteProperty `
                     -Name NativeErrorCode -Value InvalidNamespace
                 throw $exception
             }
+            if ($fixtureState.CimCalls -le $CcmFailuresBeforeSuccess) {
+                if ($CcmErrorCode -in @('ErrorIdInvalidNamespace', 'ErrorIdInvalidClass')) {
+                    $errorId = if ($CcmErrorCode -eq 'ErrorIdInvalidNamespace') {
+                        'HRESULT 0x8004100e'
+                    }
+                    else { 'HRESULT 0x80041010' }
+                    Write-Error -Message 'localized ClientSDK failure' -ErrorId $errorId -Category MetadataError
+                    return
+                }
+                $exception = New-Object System.Exception 'localized ClientSDK failure'
+                $exception | Add-Member -MemberType NoteProperty `
+                    -Name NativeErrorCode -Value $CcmErrorCode
+                throw $exception
+            }
+            if ($CcmMalformed) { return [pscustomobject]@{ ReturnValue = 0 } }
             return [pscustomobject]@{
+                ReturnValue = $CcmReturnValue
                 RebootPending = $CcmPending
                 IsHardRebootPending = $false
             }
@@ -246,11 +345,172 @@ $ccmResult = Invoke-ResumeProbeFixture -CcmPending $true
 if ('ConfigMgrClient\RebootPending' -notin @($ccmResult.Reasons)) {
     throw 'ConfigMgr client reboot marker was not classified as actionable.'
 }
-$noCcmResult = Invoke-ResumeProbeFixture -CcmSurfaceAbsent $true
+$noCcmObservations = @{}
+$noCcmResult = Invoke-ResumeProbeFixture -CcmSurfaceAbsent $true -CcmServiceStates @() `
+    -Observations $noCcmObservations
 $noCcmReasons = @($noCcmResult.Reasons |
     Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
 if ($noCcmReasons.Count -ne 0) {
     throw 'Absent ConfigMgr client namespace incorrectly requested a reboot.'
+}
+if ($noCcmObservations.State.CimCalls -ne 0 -or $noCcmResult.CcmClientState -ne 'NotInstalled') {
+    throw 'A VM without CcmExec still queried the optional ClientSDK.'
+}
+
+foreach ($missingSdkError in @('InvalidNamespace', 'InvalidClass', 'ErrorIdInvalidNamespace', 'ErrorIdInvalidClass')) {
+    $mpObservations = @{}
+    $mpResult = Invoke-ResumeProbeFixture -CcmManagementPoint $true -CcmClientRegistered $false `
+        -CcmFailuresBeforeSuccess ([int]::MaxValue) -CcmErrorCode $missingSdkError `
+        -Observations $mpObservations
+    if ($mpResult.CcmClientState -ne 'ManagementPointOnly' -or
+        $mpResult.CcmProbeAttempts -ne 1 -or $mpResult.CcmWaitSeconds -ne 0 -or
+        $mpObservations.State.CimCalls -ne 1 -or
+        $mpObservations.State.RegistrationReads -ne 2 -or
+        $mpObservations.State.ElapsedSeconds -ne 0 -or @($mpResult.Reasons).Count -ne 0) {
+        throw "An MP-only CcmExec with $missingSdkError was treated as an installed client."
+    }
+}
+$singleViewObservations = @{}
+$singleViewResult = Invoke-ResumeProbeFixture -CcmManagementPoint $true -CcmClientRegistered $false `
+    -CcmUninstall32RootAbsent $true -CcmSurfaceAbsent $true -Observations $singleViewObservations
+if ($singleViewResult.CcmClientState -ne 'ManagementPointOnly' -or
+    $singleViewResult.CcmProbeAttempts -ne 1 -or $singleViewResult.CcmWaitSeconds -ne 0 -or
+    $singleViewObservations.State.RegistrationReads -ne 1 -or
+    $singleViewObservations.State.CimCalls -ne 1 -or
+    $singleViewObservations.State.ElapsedSeconds -ne 0) {
+    throw 'An absent optional 32-bit uninstall view prevented MP-only classification.'
+}
+$mpPendingResult = Invoke-ResumeProbeFixture -CcmManagementPoint $true -CcmClientRegistered $false `
+    -CcmSurfaceAbsent $true -ExistingPaths @{ $cbsPath = $true }
+if ($mpPendingResult.CcmClientState -ne 'ManagementPointOnly' -or
+    'CBS\RebootPending' -notin @($mpPendingResult.Reasons)) {
+    throw 'An MP-only client classification discarded an actionable Windows reboot marker.'
+}
+$mpReadyObservations = @{}
+$mpReadyResult = Invoke-ResumeProbeFixture -CcmManagementPoint $true -CcmClientRegistered $false `
+    -CcmPending $true -Observations $mpReadyObservations
+if ($mpReadyResult.CcmClientState -ne 'Ready' -or
+    'ConfigMgrClient\RebootPending' -notin @($mpReadyResult.Reasons) -or
+    $mpReadyObservations.State.RegistrationReads -ne 0) {
+    throw 'A working client SDK was bypassed because MSI registration was absent.'
+}
+foreach ($clientRegistration32Bit in @($false, $true)) {
+    $mpClientObservations = @{}
+    $mpClientMessage = $null
+    try {
+        $null = Invoke-ResumeProbeFixture -CcmManagementPoint $true `
+            -CcmClientRegistration32Bit $clientRegistration32Bit `
+            -CcmSurfaceAbsent $true -Observations $mpClientObservations
+    }
+    catch { $mpClientMessage = $_.Exception.Message }
+    if ($mpClientMessage -notmatch 'ConfigMgr client.*60 seconds' -or
+        $mpClientObservations.State.CimCalls -ne 12 -or
+        $mpClientObservations.State.RegistrationReads -ne 2 -or
+        $mpClientObservations.State.ElapsedSeconds -ne 60) {
+        throw "An installed client on an MP escaped its readiness check (32-bit registration=$clientRegistration32Bit): $mpClientMessage"
+    }
+}
+foreach ($guardError in @('AccessDenied', 'InvalidNamespace')) {
+    $guardObservations = @{}
+    $guardMessage = $null
+    try {
+        $null = Invoke-ResumeProbeFixture -CcmClientRegistered $false `
+            -CcmManagementPoint ($guardError -eq 'AccessDenied') `
+            -CcmFailuresBeforeSuccess ([int]::MaxValue) -CcmErrorCode $guardError `
+            -Observations $guardObservations
+    }
+    catch { $guardMessage = $_.Exception.Message }
+    if ($guardMessage -notmatch 'ConfigMgr client.*60 seconds' -or
+        $guardObservations.State.ElapsedSeconds -ne 60 -or
+        $guardObservations.State.RegistrationReads -ne 0) {
+        throw "Unreadable ClientSDK state became MP-only without sufficient installation evidence: $guardError $guardMessage"
+    }
+}
+$registrationObservations = @{}
+$registrationMessage = $null
+try {
+    $null = Invoke-ResumeProbeFixture -CcmManagementPoint $true -CcmClientRegistered $false `
+        -CcmRegistrationDenied $true -CcmSurfaceAbsent $true -Observations $registrationObservations
+}
+catch { $registrationMessage = $_.Exception.Message }
+if ($registrationMessage -notmatch 'ConfigMgr client installation lookup failed:.*localized registration lookup failure' -or
+    $registrationObservations.State.ElapsedSeconds -ne 0) {
+    throw "Failed client registration reads were hidden as MP-only or startup: $registrationMessage"
+}
+foreach ($deniedRegistrationPath in @(
+        'HKLM:\SOFTWARE\Microsoft\SMS\MP',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )) {
+    $deniedObservations = @{}
+    $deniedMessage = $null
+    try {
+        $null = Invoke-ResumeProbeFixture -CcmManagementPoint $true -CcmClientRegistered $false `
+            -CcmRegistrationDeniedPath $deniedRegistrationPath -CcmSurfaceAbsent $true `
+            -Observations $deniedObservations
+    }
+    catch { $deniedMessage = $_.Exception.Message }
+    if ($deniedMessage -notmatch 'ConfigMgr client installation lookup failed:.*localized registration lookup failure' -or
+        $deniedObservations.State.CimCalls -ne 1 -or $deniedObservations.State.ElapsedSeconds -ne 0) {
+        throw "Unreadable installation evidence '$deniedRegistrationPath' was hidden as client absence: $deniedMessage"
+    }
+}
+
+$startupObservations = @{}
+$startupResult = Invoke-ResumeProbeFixture -CcmServiceStates @('Stopped', 'StartPending', 'Running') `
+    -Observations $startupObservations
+if ($startupObservations.State.CimCalls -ne 1 -or
+    $startupObservations.State.ElapsedSeconds -ne 10 -or
+    $startupResult.CcmClientState -ne 'Ready') {
+    throw 'The reboot probe did not wait read-only for CcmExec startup.'
+}
+foreach ($startupError in @('AccessDenied', 'InvalidNamespace', 'InvalidClass')) {
+    $retryObservations = @{}
+    $retryResult = Invoke-ResumeProbeFixture -CcmFailuresBeforeSuccess 2 -CcmErrorCode $startupError `
+        -CcmPending $true -Observations $retryObservations
+    if ($retryObservations.State.CimCalls -ne 3 -or
+        $retryObservations.State.ElapsedSeconds -ne 10 -or
+        'ConfigMgrClient\RebootPending' -notin @($retryResult.Reasons)) {
+        throw "The reboot probe did not recover from startup-time $startupError."
+    }
+}
+foreach ($failureScenario in @('AccessDenied', 'InvalidNamespace', 'InvalidClass', 'Stopped')) {
+    $failureObservations = @{}
+    $failureMessage = $null
+    $failureArguments = @{
+        CcmFailuresBeforeSuccess = [int]::MaxValue
+        CcmErrorCode = $failureScenario
+        Observations = $failureObservations
+    }
+    if ($failureScenario -eq 'Stopped') { $failureArguments.CcmServiceStates = @('Stopped') }
+    try { $null = Invoke-ResumeProbeFixture @failureArguments }
+    catch { $failureMessage = $_.Exception.Message }
+    if ($failureMessage -notmatch 'ConfigMgr client.*60 seconds' -or
+        $failureMessage -notmatch $failureScenario -or
+        $failureObservations.State.ElapsedSeconds -ne 60 -or
+        $failureObservations.State.CimCalls -gt 13) {
+        throw "Persistent $failureScenario did not fail explicitly within the client readiness budget: $failureMessage"
+    }
+}
+foreach ($invalidScenario in @('LookupDenied', 'InvalidParameter', 'ReturnValue', 'Malformed')) {
+    $invalidObservations = @{}
+    $invalidMessage = $null
+    $invalidArguments = @{ Observations = $invalidObservations }
+    switch ($invalidScenario) {
+        'LookupDenied' { $invalidArguments.CcmServiceStates = @('LookupDenied') }
+        'InvalidParameter' {
+            $invalidArguments.CcmFailuresBeforeSuccess = [int]::MaxValue
+            $invalidArguments.CcmErrorCode = 'InvalidParameter'
+        }
+        'ReturnValue' { $invalidArguments.CcmReturnValue = 5 }
+        'Malformed' { $invalidArguments.CcmMalformed = $true }
+    }
+    try { $null = Invoke-ResumeProbeFixture @invalidArguments }
+    catch { $invalidMessage = $_.Exception.Message }
+    if (-not $invalidMessage -or $invalidObservations.State.ElapsedSeconds -ne 0) {
+        throw "$invalidScenario was hidden as healthy client reboot state or retried as startup."
+    }
 }
 
 if ($mixedRunner -notmatch 'Invoke-NewLabFixture') {

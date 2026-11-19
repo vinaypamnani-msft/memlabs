@@ -58,7 +58,7 @@ function Start-Sleep {
     $script:SleepSeconds += $Seconds
 }
 
-$rows = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup')
+$rows = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup' -Details $results.Details)
 if ($rows.Count -ne 1 -or $rows[0].Name -ne 'TST' -or $script:WmiAttempts -ne 2) {
     throw "Transient provider query did not recover on retry: rows=$($rows.Count) attempts=$script:WmiAttempts."
 }
@@ -72,13 +72,15 @@ $script:ThrowFirst = $false
 $script:SleepCalls = 0
 $script:SleepSeconds = 0
 $failure = $null
-try { $null = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup') }
+try { $null = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup' -Details $results.Details) }
 catch { $failure = $_.Exception.Message }
 if ($script:WmiAttempts -ne 3 -or
     $failure -notmatch 'failed after 3 attempts' -or
     $failure -notmatch 'Type=' -or
     $failure -notmatch 'HResult=' -or
-    $failure -notmatch 'FQID=') {
+    $failure -notmatch 'FQID=' -or
+    $failure -notmatch 'Namespace=root\\SMS\\site_TST; Class=SMS_BoundaryGroup; Filter=' -or
+    $failure -notmatch 'Stack=') {
     throw "Exhausted provider retries did not retain actionable diagnostics: attempts=$script:WmiAttempts error='$failure'."
 }
 

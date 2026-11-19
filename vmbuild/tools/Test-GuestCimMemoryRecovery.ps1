@@ -47,6 +47,7 @@ function Write-DscStatus {
 function Write-Log {
     param($Message, [switch] $Failure, [switch] $Warning, [switch] $OutputStream)
     if ($Failure) { $script:HostFailed = $true }
+    if ($OutputStream) { [pscustomobject]@{ Text = "$Message"; LogLevel = 2 } }
 }
 function Start-Sleep { param([int] $Seconds) }
 
@@ -203,7 +204,8 @@ try {
         }
         return [pscustomobject]@{ ScriptBlockFailed = $script:ResumeFails; ScriptBlockOutput = 'Resumed'; ErrorDetails = 'resume fixture failure' }
     }
-    Invoke-MemLabsGuestMemoryRecovery -VmName fixture -DomainName fixture.test -RunId fixture-run
+    $recoveryOutput = @(Invoke-MemLabsGuestMemoryRecovery -VmName fixture -DomainName fixture.test -RunId fixture-run)
+    Assert-True ($recoveryOutput.Count -eq 0) 'Memory recovery leaked logging objects into the caller return stream.'
     Assert-True ($script:RestartCalls -eq 1 -and $script:ProbeCalls -eq 2) 'Host did not wait for readiness after exactly one graceful restart.'
     $resumeBlock = $script:GuestBlocks[$script:GuestBlocks.Count - 1]
     $resumeText = $resumeBlock.ToString()

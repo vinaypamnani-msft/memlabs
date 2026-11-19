@@ -19,10 +19,45 @@ Following extensions are also installed:
   - Installs the Hyper-V and DHCP roles
   - Optionally moves the guest RDP listener to a custom port
   - Registers a startup task that runs `configureHost.ps1` after the reboot, to:
+    - Complete DHCP post-install configuration and clear its Server Manager task
     - Initialize data disks and create a Storage Pool
     - Format the E: VM-storage volume as NTFS or ReFS
     - Install chocolatey, git, sysinternals and curl
     - Clone the memlabs repository to E:
+
+## DHCP post-install configuration
+
+Provisioning downloads the shared prerequisite helpers from the same branch as
+the host setup script. After the reboot, it creates the **DHCP Administrators**
+and **DHCP Users** security groups, restarts DHCP, verifies that the service is
+running, and records the completed task in Server Manager. Existing scopes,
+reservations, leases, and scope options are preserved. Already-completed hosts
+are not restarted.
+
+Normal MemLabs DHCP startup also performs this one-time step for existing or
+manually provisioned hosts. A domain-joined host must already be authorized in
+its own Active Directory domain; automation does not authorize it or dismiss
+the task while it is unauthorized. Setup failures are reported rather than
+hidden by setting the completion flag.
+
+`New-Lab.ps1` requires PowerShell 7.4 or later and checks that requirement before
+host initialization. Use `VMBuild.cmd` to install or launch the supported runtime.
+If installation fails, the launcher stops instead of falling back to PS 5.
+The provisioning helpers themselves also support Windows PowerShell 5.1; DHCP
+module imports only use `-SkipEditionCheck` in PowerShell Core, so a legacy-shell
+parameter error does not trigger a misleading WMI-restart recovery.
+
+To complete the step immediately on an existing host, run elevated Windows
+PowerShell from the repository root after updating:
+
+```powershell
+Import-Module DhcpServer
+. .\vmbuild\common\Common.Prereqs.ps1
+Initialize-MemLabsDhcpServer
+```
+
+Validate without changing the host's DHCP configuration using
+[`Test-DhcpPostInstall.ps1`](../vmbuild/tools/Test-DhcpPostInstall.ps1).
 
 ## Parameters worth noting
 

@@ -23,6 +23,7 @@ try {
     Assert-Maintenance (-not $text.Contains($secret)) 'Diagnostic redaction leaked a token, password, SAS signature, or URL credential.'
     Assert-Maintenance ((Protect-VMFixDiagnosticText ('x' * 200) 50).Length -lt 80) 'Diagnostic text truncation is not bounded.'
     Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-ODBC18') -eq 1800) 'ODBC execution timeout changed unexpectedly.'
+    Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-EdgeServicing') -eq 1200) 'Edge servicing lost its bounded execution timeout.'
     Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-Upgrade-Console') -eq 3600) 'Console execution timeout changed unexpectedly.'
     Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-CMFullAdmin') -eq 600) 'Administrator execution timeout changed unexpectedly.'
     Assert-Maintenance ((Get-VMFixExecutionTimeout 'Fix-Unrelated') -eq 0) 'Unrelated fixes acquired an unexpected execution policy.'
@@ -87,7 +88,7 @@ try {
             }
         }
     }
-    $global:Common = [pscustomobject]@{ LogPath = (Join-Path $testRoot 'VMBuild.log'); MemLabsVersion = 'test'; LatestHotfixVersion = 'test' }
+    $global:Common = [pscustomobject]@{ LogPath = (Join-Path $testRoot 'VMBuild.log'); MemLabsVersion = 'test'; LatestHotfixVersion = 'test'; StagingInjectPath = $testRoot }
     Save-VMFixFailureEvidence -VMName 'LAB-PRI' -VMDomain 'lab.test' -FixName 'Fix-ODBC18' -VMDomainAccount 'admin'
     Assert-Maintenance (@(Get-ChildItem -LiteralPath $testRoot -Filter '*.diagnostics.log').Count -eq 1) 'Evidence was not persisted in the host log directory.'
     $call = $script:EvidenceCalls[0]
@@ -100,32 +101,222 @@ try {
     Assert-Maintenance ($collectorText -notmatch 'Win32_Product|InstallProduct|Stop-Service|Stop-Process') 'The evidence collector can mutate guest installer/service state.'
     Remove-Item Function:\Invoke-VmCommand, Function:\Write-Log
 
+    function Invoke-MaintenanceReadFixture {
+        param([string]$Kind, [AllowNull()]$Response, [switch]$Throw,
+            [switch]$CollectDiagnostics, [switch]$EvidenceThrows)
+        & {
+            $ErrorActionPreference = 'Continue'
+            $script:ReadFixture = @{
+                Response = $Response; Throw = $Throw.IsPresent; EvidenceThrows = $EvidenceThrows.IsPresent
+                Calls = [Collections.Generic.List[object]]::new()
+                Logs = [Collections.Generic.List[object]]::new()
+                Evidence = [Collections.Generic.List[object]]::new()
+            }
+            function Invoke-VmCommand {
+                param($VmName, $VmDomainName, $VmDomainAccount, $ScriptBlock, $ArgumentList, $DisplayName,
+                    [switch]$AsJob, $TimeoutSeconds, $SessionMaxRetries, [switch]$SuppressLog, [switch]$FailOnRemoteError)
+                $script:ReadFixture.Calls.Add([pscustomobject]@{
+                    VMName = $VmName; Domain = $VmDomainName; Account = $VmDomainAccount
+                    AsJob = $AsJob.IsPresent; Timeout = $TimeoutSeconds; Retries = $SessionMaxRetries
+                    SuppressLog = $SuppressLog.IsPresent; FailOnRemoteError = $FailOnRemoteError.IsPresent
+                    Arguments = @($ArgumentList); ScriptBlock = $ScriptBlock
+                })
+                if ($script:ReadFixture.Throw) { throw "Fixture read exception -Token $secret" }
+                return $script:ReadFixture.Response
+            }
+            function Write-Log {
+                param([string]$Message, [switch]$Warning, [switch]$LogOnly)
+                $script:ReadFixture.Logs.Add([pscustomobject]@{
+                    Message = $Message; Warning = $Warning.IsPresent; LogOnly = $LogOnly.IsPresent
+                })
+            }
+            function Save-VMFixFailureEvidence {
+                param($VMName, $VMDomain, $FixName, $VMDomainAccount, $Stage)
+                $script:ReadFixture.Evidence.Add([pscustomobject]@{
+                    VMName = $VMName; Domain = $VMDomain; FixName = $FixName; Account = $VMDomainAccount; Stage = $Stage
+                })
+                if ($script:ReadFixture.EvidenceThrows) { throw "Fixture evidence exception -Token $secret" }
+            }
+            if ($Kind -eq 'Marker') {
+                $value = Get-VMFixResultMarker -VMName 'LAB-PRI' -VMDomain 'lab.test' -FixName 'Fix-ODBC18' -VMDomainAccount 'setupadmin'
+            }
+            else {
+                $value = Get-VMFixTranscript -VMName 'LAB-PRI' -VMDomain 'lab.test' -FixName 'Fix-ODBC18' `
+                    -VMDomainAccount 'setupadmin' -CollectDiagnostics:$CollectDiagnostics -Stage 'fixture-read'
+            }
+            [pscustomobject]@{ Value = $value; State = $script:ReadFixture }
+        }
+    }
+
+    $validReadJson = '{"FixName":"Fix-ODBC18","IsStructured":true,"Success":true}'
+    foreach ($kind in @('Marker', 'Transcript')) {
+        foreach ($case in @(
+            @{ Name = 'FailedWithOutput'; Response = [pscustomobject]@{
+                ScriptBlockFailed = $true; ScriptBlockOutput = $validReadJson
+                ErrorDetails = @("Fixture remote read failure -Token $secret", 'Second remote error')
+            }; Expected = 'Fixture remote read failure.+Second remote error' }
+            @{ Name = 'FailedWithoutOutput'; Response = [pscustomobject]@{
+                ScriptBlockFailed = $true; ScriptBlockOutput = $null; ErrorDetails = @('Fixture empty remote failure')
+            }; Expected = 'Fixture empty remote failure' }
+            @{ Name = 'MissingResult'; Response = $null; Expected = 'no result' }
+            @{ Name = 'MissingDetails'; Response = [pscustomobject]@{
+                ScriptBlockFailed = $true; ScriptBlockOutput = $validReadJson; ErrorDetails = @()
+            }; Expected = 'failure without error details' }
+            @{ Name = 'Throw'; Response = $null; Throw = $true; Expected = 'Fixture read exception' }
+        )) {
+            $probe = Invoke-MaintenanceReadFixture -Kind $kind -Response $case.Response -Throw:($case.Throw -eq $true) `
+                -CollectDiagnostics:($kind -eq 'Transcript')
+            Assert-Maintenance ($null -eq $probe.Value) "$kind accepted failed remote output or leaked diagnostic output ($($case.Name))."
+            Assert-Maintenance ($probe.State.Logs.Count -eq 1 -and $probe.State.Logs[0].Warning -and
+                $probe.State.Logs[0].LogOnly -and $probe.State.Logs[0].Message -match $case.Expected) `
+                "$kind did not warn once with the original remote failure ($($case.Name))."
+            Assert-Maintenance (-not ($probe.State.Logs.Message -join "`n").Contains($secret)) "$kind leaked a diagnostic secret."
+            $call = $probe.State.Calls[0]
+            Assert-Maintenance ($probe.State.Calls.Count -eq 1 -and $call.VMName -eq 'LAB-PRI' -and
+                $call.Domain -eq 'lab.test' -and $call.Account -eq 'setupadmin' -and $call.AsJob -and
+                $call.Timeout -eq 30 -and $call.Retries -eq 1 -and $call.SuppressLog -and
+                $call.FailOnRemoteError -and $call.Arguments.Count -eq 1 -and $call.Arguments[0] -eq 'Fix-ODBC18') `
+                "$kind changed its guest identity, bounded invocation, or error contract."
+            if ($kind -eq 'Transcript') {
+                $evidence = $probe.State.Evidence[0]
+                Assert-Maintenance ($probe.State.Evidence.Count -eq 1 -and $evidence.VMName -eq 'LAB-PRI' -and
+                    $evidence.Domain -eq 'lab.test' -and $evidence.FixName -eq 'Fix-ODBC18' -and
+                    $evidence.Account -eq 'setupadmin' -and $evidence.Stage -eq 'fixture-read') `
+                    'Transcript retrieval failure skipped or misrouted requested evidence collection.'
+            }
+        }
+    }
+    foreach ($success in @($true, $false)) {
+        $response = [pscustomobject]@{
+            ScriptBlockFailed = $false
+            ScriptBlockOutput = ([pscustomobject]@{ FixName = 'Fix-ODBC18'; IsStructured = $true; Success = $success } | ConvertTo-Json)
+            ErrorDetails = @()
+        }
+        $probe = Invoke-MaintenanceReadFixture -Kind 'Marker' -Response $response
+        Assert-Maintenance ($probe.Value.IsStructured -and $probe.Value.FixName -eq 'Fix-ODBC18' -and
+            $probe.Value.Success -is [bool] -and $probe.Value.Success -eq $success -and $probe.State.Logs.Count -eq 0) `
+            'A successful marker read changed the explicit fix verdict or emitted a failure warning.'
+    }
+    $markerReadScript = $probe.State.Calls[0].ScriptBlock
+    & {
+        $ErrorActionPreference = 'Continue'
+        function Test-Path { param($Path) return $true }
+        function Get-Content {
+            [CmdletBinding()]
+            param($Path, [switch]$Raw)
+            Write-Error 'Fixture unreadable marker'
+        }
+        $threw = $false
+        try { $null = & $markerReadScript 'Fix-ODBC18' } catch { $threw = $true }
+        Assert-Maintenance $threw 'The remote marker reader suppressed a content-read error instead of failing its invocation.'
+    }
+    $probe = Invoke-MaintenanceReadFixture -Kind 'Marker' -Response ([pscustomobject]@{
+        ScriptBlockFailed = $false; ScriptBlockOutput = 'not JSON'; ErrorDetails = @()
+    })
+    Assert-Maintenance ($null -eq $probe.Value -and $probe.State.Logs.Count -eq 1 -and
+        $probe.State.Logs[0].Warning -and $probe.State.Logs[0].Message -match 'Failed to read result marker') `
+        'Malformed marker JSON was not reported under Continue error handling.'
+    $probe = Invoke-MaintenanceReadFixture -Kind 'Marker' -Response ([pscustomobject]@{
+        ScriptBlockFailed = $false; ScriptBlockOutput = $null; ErrorDetails = @()
+    })
+    Assert-Maintenance ($null -eq $probe.Value) 'A missing marker became an explicit success.'
+
+    foreach ($output in @($null, @(), @('', ' ', $null))) {
+        $probe = Invoke-MaintenanceReadFixture -Kind 'Transcript' -CollectDiagnostics -Response ([pscustomobject]@{
+            ScriptBlockFailed = $false; ScriptBlockOutput = $output; ErrorDetails = @()
+        })
+        Assert-Maintenance ($null -eq $probe.Value -and $probe.State.Logs.Count -eq 1 -and
+            $probe.State.Logs[0].Warning -and $probe.State.Logs[0].Message -match 'empty' -and
+            $probe.State.Evidence.Count -eq 1) 'Empty transcript output was silent, printed a fake transcript, or skipped evidence.'
+    }
+    $probe = Invoke-MaintenanceReadFixture -Kind 'Transcript' -Response ([pscustomobject]@{
+        ScriptBlockFailed = $false
+        ScriptBlockOutput = @("first line -Token $secret", '', $null, 'PS>TerminatingError(Get-Variable): caught context probe', 'second line')
+        ErrorDetails = @()
+    })
+    Assert-Maintenance ($null -eq $probe.Value -and $probe.State.Logs.Count -eq 5 -and
+        @($probe.State.Logs | Where-Object Warning).Count -eq 0 -and $probe.State.Evidence.Count -eq 0 -and
+        ($probe.State.Logs.Message -join "`n") -match '(?s)first line.+TerminatingError.+second line' -and
+        -not ($probe.State.Logs.Message -join "`n").Contains($secret)) `
+        'A valid transcript lost its content, treated blank lines as failures, collected unrequested evidence, or leaked a secret.'
+    $probe = Invoke-MaintenanceReadFixture -Kind 'Transcript' -CollectDiagnostics -EvidenceThrows -Response ([pscustomobject]@{
+        ScriptBlockFailed = $true; ScriptBlockOutput = 'untrusted partial output'; ErrorDetails = @('Original transcript failure')
+    })
+    Assert-Maintenance ($null -eq $probe.Value -and $probe.State.Logs.Count -eq 2 -and
+        @($probe.State.Logs | Where-Object Warning).Count -eq 2 -and
+        ($probe.State.Logs.Message -join "`n") -match '(?s)Original transcript failure.+Fixture evidence exception' -and
+        -not ($probe.State.Logs.Message -join "`n").Contains($secret)) `
+        'Evidence collection replaced the original transcript failure or leaked diagnostic output.'
+
     function Invoke-MaintenanceEngineFixture {
-        param([switch]$Batch, [switch]$AlwaysFail, [switch]$MissingMarker)
+        param([switch]$Batch, [switch]$AlwaysFail, [switch]$MissingMarker, [switch]$Console,
+            [switch]$RecoveryFailure, [switch]$UnconfirmedShutdown, [switch]$LateRecovery,
+            [switch]$DelayedConsole, [switch]$SuccessfulSibling, [string]$PreparationMode = '',
+            [string]$StartupFailure = '')
         & {
             $script:Engine = @{
                 Count = 0; Stamps = 0; AlwaysFail = $AlwaysFail.IsPresent
                 MissingMarker = $MissingMarker.IsPresent
+                RecoveryCalls = 0; RecoveryFailure = $RecoveryFailure.IsPresent
+                UnconfirmedShutdown = $UnconfirmedShutdown.IsPresent
+                LateRecovery = $LateRecovery.IsPresent; PrefixCalls = 0
+                DelayedConsole = $DelayedConsole.IsPresent
+                PreparationMode = $PreparationMode; PreparationCalls = 0; CopyCalls = 0
+                StartupFailure = $StartupFailure
                 Directory = Join-Path $testRoot ([guid]::NewGuid().ToString('N'))
                 Calls = [System.Collections.Generic.List[object]]::new()
                 Events = [System.Collections.Generic.List[string]]::new()
                 Sleeps = [System.Collections.Generic.List[int]]::new()
             }
             $null = New-Item -ItemType Directory -Path $script:Engine.Directory
-            function Write-Log { param($Message, [switch]$Warning, [switch]$LogOnly, [switch]$Verbose) }
+            function Write-Log {
+                param($Message, [switch]$Warning, [switch]$LogOnly, [switch]$Verbose, [switch]$Failure)
+                $script:Engine.Events.Add("log:$Message")
+            }
             function Write-Progress2 { param([switch]$Log, $PercentComplete, $Activity, $Status, [switch]$Force) }
             function Get-VMNote {
                 param($VMName)
-                [pscustomobject]@{ domain = 'lab.test'; appliedFixes = [pscustomobject]@{} }
+                if ($VMName -eq 'LAB-DC' -and $script:Engine.StartupFailure -eq 'DependencyMetadata') { return $null }
+                $applied = @{}
+                if ($script:Engine.PreparationMode -eq 'Applied') { $applied['Fix-ODBC18']='18.6.2.1' }
+                [pscustomobject]@{ domain = 'lab.test'; appliedFixes = [pscustomobject]$applied }
             }
             function ConvertTo-MemLabsVersion { param($Version) [version]$Version }
             function Start-VMIfNotRunning {
                 param($VMName, $VMDomain, [switch]$WaitForConnect, [switch]$Quiet)
-                [pscustomobject]@{ StartedVM = $false; StartFailed = $false }
+                $script:Engine.Events.Add("start:$VMName")
+                $failed = ($VMName -eq 'LAB-PRI' -and $script:Engine.StartupFailure -like 'Target*') -or
+                    ($VMName -eq 'LAB-DC' -and $script:Engine.StartupFailure -like 'Dependency*')
+                [pscustomobject]@{
+                    StartedVM = $failed -and $script:Engine.StartupFailure -like '*Connect'
+                    StartFailed = $failed -and $script:Engine.StartupFailure -like '*Start'
+                    ConnectFailed = $failed
+                }
             }
             function Get-VmSession {
                 param($VmName, $VmDomainName, $VmDomainAccount, [switch]$ShowVMSessionError)
                 [pscustomobject]@{ Availability = 'Available' }
+            }
+            function Copy-Item {
+                param($ToSession, $Path, $Destination, [switch]$Force, $ErrorAction)
+                if (-not $ToSession) { Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters; return }
+                $script:Engine.CopyCalls++
+                $script:Engine.Events.Add('copy')
+                if ($Path -notlike '*\staging\UnitEdge.msi' -or $Destination -ne 'C:\staging\UnitEdge.msi') { throw 'Prepared media was routed incorrectly.' }
+                if ($script:Engine.PreparationMode -eq 'CopyFailure') { throw 'Fixture staged media copy failed' }
+            }
+            function Repair-VMConsoleProvider {
+                param($VMName, $VMDomain, $VMDomainAccount)
+                $script:Engine.RecoveryCalls++
+                $script:Engine.Events.Add('provider-recovery')
+                Assert-Maintenance ($VMName -eq 'LAB-PRI' -and $VMDomain -eq 'lab.test' -and
+                    $VMDomainAccount -eq 'setupadmin') 'Console recovery did not retain the maintenance identity.'
+                [pscustomobject]@{
+                    Attempted = -not $script:Engine.UnconfirmedShutdown -and
+                        (-not $script:Engine.LateRecovery -or $script:Engine.RecoveryCalls -gt 1)
+                    Recovered = -not $script:Engine.RecoveryFailure -and -not $script:Engine.UnconfirmedShutdown -and
+                        (-not $script:Engine.LateRecovery -or $script:Engine.RecoveryCalls -gt 1)
+                }
             }
             function Start-Transcript {
                 param($Path, [switch]$Force, $ErrorAction)
@@ -176,24 +367,68 @@ try {
                 $value = & ([scriptblock]::Create($text)) @arguments 3>$null 6>$null
                 [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $value; ErrorDetails = $null }
             }
+            $fixtureFixName = if ($Console) { 'Fix-Upgrade-Console' } else { 'Fix-ODBC18' }
             $definition = [pscustomobject]@{
-                FixName = 'Fix-ODBC18'; FixVersion = '18.6.2.1'; AppliesToThisVM = $true
+                FixName = $fixtureFixName; FixVersion = '18.6.2.1'; AppliesToThisVM = $PreparationMode -ne 'NotApplicable'
                 RunAsAccount = 'setupadmin'; DependentVMs = @(); InjectFiles = @(); InjectTools = @()
+                ArgumentList = @(); PrepareScriptBlock = $null
                 ScriptBlock = {
+                    param([string]$PreparedValue)
+                    if ($script:Engine.PreparationMode -and $PreparedValue -ne 'prepared-edge') { throw 'Host-prepared arguments were not forwarded to the guest.' }
+                    $script:Engine.Events.Add('execute')
                     $script:Engine.Count++
                     'pipeline noise must not mask a failed result'
-                    [pscustomobject]@{ Success = -not $script:Engine.AlwaysFail -and $script:Engine.Count -gt 1; Message = 'engine fixture' }
+                    $succeeded = if ($script:Engine.LateRecovery) { $script:Engine.RecoveryCalls -gt 1 }
+                    else { -not $script:Engine.AlwaysFail -and $script:Engine.Count -gt 1 }
+                    [pscustomobject]@{ Success = $succeeded; Message = 'engine fixture' }
                 }
             }
-            if ($Batch) { $result = Start-VMFixesBatched -VMName 'LAB-PRI' -VMDomain 'lab.test' -VMFixes @($definition) }
+            if ($StartupFailure -like 'Dependency*') { $definition.DependentVMs = @('LAB-DC') }
+            if ($PreparationMode) {
+                $definition.PrepareScriptBlock = {
+                    param($VMName, $VMDomain, $VMFix)
+                    Assert-Maintenance ($VMName -eq 'LAB-PRI' -and $VMDomain -eq 'lab.test') 'Host preparation targeted the wrong guest.'
+                    $script:Engine.PreparationCalls++
+                    $script:Engine.Events.Add('prepare')
+                    if ($script:Engine.PreparationMode -eq 'Failure') { throw 'Fixture Edge metadata offline' }
+                    $VMFix.InjectFiles=@('UnitEdge.msi')
+                    $VMFix.ArgumentList=@('prepared-edge')
+                }
+            }
+            $definitions = @($definition)
+            if ($DelayedConsole -or $SuccessfulSibling) {
+                $prefix = [pscustomobject]@{
+                    FixName = 'Fix-UnitBeforeConsole'; FixVersion = '18.0'; AppliesToThisVM = $true
+                    RunAsAccount = 'setupadmin'; DependentVMs = @(); InjectFiles = @(); InjectTools = @()
+                    ScriptBlock = {
+                        $script:Engine.PrefixCalls++
+                        [pscustomobject]@{
+                            Success = -not $script:Engine.DelayedConsole -or $script:Engine.PrefixCalls -gt 1
+                            Message = 'prefix fixture'
+                        }
+                    }
+                }
+                $definitions = @($prefix, $definition)
+            }
+            if ($Batch) { $result = Start-VMFixesBatched -VMName 'LAB-PRI' -VMDomain 'lab.test' -VMFixes $definitions }
             else { $result = Start-VMFix -VMName 'LAB-PRI' -VMFix $definition }
             [pscustomobject]@{ Result = $result; State = $script:Engine }
         }
     }
     foreach ($batch in @($false, $true)) {
+        foreach ($failure in @('TargetStart', 'TargetConnect')) {
+            $probe = Invoke-MaintenanceEngineFixture -Batch:$batch -PreparationMode 'Ready' -StartupFailure $failure
+            Assert-Maintenance (-not $probe.Result.Success -and $probe.State.PreparationCalls -eq 0 -and
+                $probe.State.CopyCalls -eq 0 -and $probe.State.Count -eq 0 -and $probe.State.Stamps -eq 0 -and
+                $probe.State.Calls.Count -eq 0) 'A target startup/readiness failure ran preparation, injection, execution, or stamping.'
+            if ($failure -eq 'TargetConnect') {
+                Assert-Maintenance ($probe.Result.VMsToStop -contains 'LAB-PRI') 'A readiness failure lost the started target cleanup.'
+            }
+        }
         foreach ($fail in @($false, $true)) {
             $probe = Invoke-MaintenanceEngineFixture -Batch:$batch -AlwaysFail:$fail
             Assert-Maintenance ($probe.State.Count -eq 2 -and $probe.Result.Success -eq (-not $fail)) 'The real maintenance engine exceeded its attempt budget or lost the explicit verdict.'
+            Assert-Maintenance ($probe.State.RecoveryCalls -eq 0) 'An unrelated fix triggered console provider recovery.'
             Assert-Maintenance ($probe.State.Stamps -eq $(if ($fail) { 0 } else { 1 })) 'A failed fix was stamped or a successful retry was stamped more than once.'
             Assert-Maintenance ($probe.State.Sleeps.Count -eq 1 -and $probe.State.Sleeps[0] -eq 60) 'The engine did not use exactly one 60-second retry delay.'
             Assert-Maintenance ($probe.State.Events.IndexOf('diagnostics') -lt $probe.State.Events.IndexOf('sleep:60')) 'Evidence was not collected before the retry delay.'
@@ -202,9 +437,80 @@ try {
                     }).Count -eq 0) 'A maintenance execution lost its deadline or requested account.'
         }
     }
+    foreach ($failure in @('DependencyStart', 'DependencyConnect', 'DependencyMetadata')) {
+        $probe = Invoke-MaintenanceEngineFixture -PreparationMode 'Ready' -StartupFailure $failure
+        Assert-Maintenance (-not $probe.Result.Success -and $probe.State.PreparationCalls -eq 0 -and
+            $probe.State.Count -eq 0 -and $probe.State.Stamps -eq 0 -and
+            -not $probe.State.Events.Contains('start:LAB-PRI')) 'A dependency readiness failure reached the target fix.'
+        if ($failure -eq 'DependencyConnect') {
+            Assert-Maintenance ($probe.Result.VMsToStop -contains 'LAB-DC') 'A readiness failure lost the started dependency cleanup.'
+        }
+    }
+    foreach ($batch in @($false, $true)) {
+        foreach ($mode in @('Ready','Failure','CopyFailure','Applied','NotApplicable')) {
+            $probe = Invoke-MaintenanceEngineFixture -Batch:$batch -PreparationMode $mode
+            if ($mode -eq 'Ready') {
+                Assert-Maintenance ($probe.Result.Success -and $probe.State.PreparationCalls -eq 1 -and
+                    $probe.State.CopyCalls -eq 1 -and $probe.State.Count -eq 2 -and $probe.State.Stamps -eq 1) `
+                    'Host preparation/copy was skipped, repeated on retry, or lost its serialized arguments.'
+                Assert-Maintenance ($probe.State.Events.IndexOf('prepare') -lt $probe.State.Events.IndexOf('copy') -and
+                    $probe.State.Events.IndexOf('copy') -lt $probe.State.Events.IndexOf('execute')) `
+                    'Host preparation did not precede injection and guest execution.'
+            }
+            elseif ($mode -in @('Applied','NotApplicable')) {
+                Assert-Maintenance ($probe.Result.Success -and $probe.State.PreparationCalls -eq 0 -and
+                    $probe.State.CopyCalls -eq 0 -and $probe.State.Count -eq 0) `
+                    'An already-applied or inapplicable fix performed host preparation.'
+            }
+            else {
+                Assert-Maintenance (-not $probe.Result.Success -and $probe.State.PreparationCalls -eq 1 -and
+                    $probe.State.Count -eq 0 -and $probe.State.Stamps -eq 0) `
+                    'Failed host preparation/copy ran or stamped the guest fix.'
+                $reason = if ($mode -eq 'Failure') { 'Fixture Edge metadata offline' } else { 'Fixture staged media copy failed' }
+                Assert-Maintenance (($probe.State.Events -join "`n") -match [regex]::Escape($reason)) `
+                    'Host preparation/copy failure did not retain its concrete error.'
+            }
+        }
+    }
     $missingMarker = Invoke-MaintenanceEngineFixture -MissingMarker
     Assert-Maintenance (-not $missingMarker.Result.Success -and $missingMarker.State.Stamps -eq 0 -and $missingMarker.State.Count -eq 2) `
         'A successful pipeline result bypassed a missing authoritative marker.'
+
+    foreach ($batch in @($false, $true)) {
+        $healed = Invoke-MaintenanceEngineFixture -Batch:$batch -Console
+        Assert-Maintenance ($healed.Result.Success -and $healed.State.Count -eq 2 -and $healed.State.Stamps -eq 1 -and
+            $healed.State.RecoveryCalls -eq 1 -and $healed.State.Sleeps.Count -eq 0) `
+            'Console maintenance did not resume exactly once after verified recovery.'
+        Assert-Maintenance ($healed.State.Events.IndexOf('diagnostics') -lt $healed.State.Events.IndexOf('provider-recovery')) `
+            'Console recovery ran before collecting failure diagnostics.'
+        $failedRecovery = Invoke-MaintenanceEngineFixture -Batch:$batch -Console -RecoveryFailure
+        Assert-Maintenance (-not $failedRecovery.Result.Success -and $failedRecovery.State.Count -eq 1 -and
+            $failedRecovery.State.Stamps -eq 0 -and $failedRecovery.State.RecoveryCalls -eq 1) `
+            'Failed provider recovery retried setup or stamped the console fix.'
+        $failedAfterRecovery = Invoke-MaintenanceEngineFixture -Batch:$batch -Console -AlwaysFail
+        Assert-Maintenance (-not $failedAfterRecovery.Result.Success -and $failedAfterRecovery.State.Count -eq 2 -and
+            $failedAfterRecovery.State.Stamps -eq 0 -and $failedAfterRecovery.State.RecoveryCalls -eq 1) `
+            'A failed post-recovery console retry was stamped or triggered another recovery.'
+        $unconfirmed = Invoke-MaintenanceEngineFixture -Batch:$batch -Console -UnconfirmedShutdown
+        Assert-Maintenance ($unconfirmed.Result.Success -and $unconfirmed.State.Count -eq 2 -and
+            $unconfirmed.State.Sleeps.Count -eq 1 -and $unconfirmed.State.Sleeps[0] -eq 60) `
+            'An unconfirmed shutdown changed the ordinary console retry policy.'
+        $lateRecovery = Invoke-MaintenanceEngineFixture -Batch:$batch -Console -LateRecovery
+        Assert-Maintenance ($lateRecovery.Result.Success -and $lateRecovery.State.Count -eq 3 -and
+            $lateRecovery.State.Stamps -eq 1 -and $lateRecovery.State.RecoveryCalls -eq 2 -and
+            $lateRecovery.State.Sleeps.Count -eq 1 -and $lateRecovery.State.Sleeps[0] -eq 60) `
+            'A shutdown first confirmed on the final ordinary attempt did not get exactly one post-recovery retry.'
+    }
+    $delayedConsole = Invoke-MaintenanceEngineFixture -Batch -Console -DelayedConsole
+    Assert-Maintenance ($delayedConsole.Result.Success -and $delayedConsole.State.Count -eq 2 -and
+        $delayedConsole.State.PrefixCalls -eq 3 -and $delayedConsole.State.Stamps -eq 2 -and
+        $delayedConsole.State.RecoveryCalls -eq 1 -and $delayedConsole.State.Sleeps.Count -eq 1 -and
+        $delayedConsole.State.Sleeps[0] -eq 5) `
+        'An earlier fail-fast fix prevented console recovery on the final ordinary batch attempt.'
+    $successfulSibling = Invoke-MaintenanceEngineFixture -Batch -Console -SuccessfulSibling -RecoveryFailure
+    Assert-Maintenance (-not $successfulSibling.Result.Success -and $successfulSibling.State.Count -eq 1 -and
+        $successfulSibling.State.Stamps -eq 1 -and $successfulSibling.State.RecoveryCalls -eq 1) `
+        'Failed console provider recovery discarded an explicitly successful sibling fix.'
 
     $vmNote = [pscustomobject]@{ adminName = 'setupadmin'; remoteSQLVM = 'LAB-SQL' }
     $dc = [pscustomobject]@{ vmName = 'LAB-DC' }

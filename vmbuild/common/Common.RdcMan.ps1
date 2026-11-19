@@ -538,6 +538,7 @@ function Initialize-RDCManAtStartup {
             return
         }
 
+        $vmInventory = @(Get-List -Type VM -FailOnError)
         Write-Log "Preparing RDCMan $global:RDCManPinnedVersion and regenerating remote connection files at startup."
         $restartRDCMan = Stop-RDCMan
         if (-not (Restore-RDCManPinnedVersion)) {
@@ -547,8 +548,8 @@ function Initialize-RDCManAtStartup {
 
     Install-RDCman
     if ($needsRefresh) {
-        New-RDCManFileFromHyperV -rdcmanfile $Common.RdcManFilePath -OverWrite:$true -NoActivity -RestartRDCMan:$restartRDCMan
-        New-MRemoteNGFileFromHyperV -MRemoteNGFile $Common.MRemoteNGFilePath -OverWrite:$true -NoActivity
+        New-RDCManFileFromHyperV -rdcmanfile $Common.RdcManFilePath -OverWrite:$true -NoActivity -RestartRDCMan:$restartRDCMan -VmInventory $vmInventory
+        New-MRemoteNGFileFromHyperV -MRemoteNGFile $Common.MRemoteNGFilePath -OverWrite:$true -NoActivity -VmInventory $vmInventory
     }
 }
 
@@ -907,7 +908,9 @@ function New-RDCManFileFromHyperV {
         [switch]$NoActivity,
         [switch]$UseIP,
         [switch]$WhatIf,
-        [switch]$RestartRDCMan
+        [switch]$RestartRDCMan,
+        [Parameter(DontShow = $true)]
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
     )
 
     if ($WhatIf.IsPresent) {
@@ -915,6 +918,9 @@ function New-RDCManFileFromHyperV {
         return
     }
 
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity:$Activity
 
@@ -966,7 +972,7 @@ function New-RDCManFileFromHyperV {
         if ($null -eq $template) {
             Write-Log "Could not locate $templatefile" -Failure
             if ($OverWrite -eq $false) {
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -RestartRDCMan:$RestartRDCMan
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -RestartRDCMan:$RestartRDCMan -VmInventory $VmInventory
             }
             else {
                 return
@@ -984,7 +990,7 @@ function New-RDCManFileFromHyperV {
         if ($null -eq $file) {
             Write-Log "Could not load File section from $rdcmanfile" -Failure
             if ($OverWrite -eq $false) {
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -RestartRDCMan:$RestartRDCMan
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -RestartRDCMan:$RestartRDCMan -VmInventory $VmInventory
             }
             else {
                 return
@@ -995,7 +1001,7 @@ function New-RDCManFileFromHyperV {
         if ($null -eq $group) {
             if ($OverWrite -eq $false) {
                 Write-Log "No groups remain in $rdcmanfile. Regenerating it from the template." -LogOnly -Verbose
-                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -RestartRDCMan:$RestartRDCMan
+                return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -RestartRDCMan:$RestartRDCMan -VmInventory $VmInventory
             }
             else {
                 Write-Log "Could not load group section from $rdcmanfile" -Failure
@@ -1033,14 +1039,15 @@ function New-RDCManFileFromHyperV {
     }
     catch {
         if ($OverWrite -eq $false) {
-            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -RestartRDCMan:$RestartRDCMan
+            return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true -RestartRDCMan:$RestartRDCMan -VmInventory $VmInventory
         }
     }
     Install-RDCman
     # Dormant while pinned to 3.12: the node is a 3.21+ concept and that client never reads
     # it. Capture into VM notes still runs, so the pin can be lifted without a re-collection.
     $emitCertTrust = Test-RDCManCertTrustSupported
-    $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
+    $domainList = @($VmInventory | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Domain) } |
+        Select-Object -ExpandProperty Domain -Unique)
     foreach ($domain in $domainList) {
         Write-Verbose "Adding all machines from Domain $domain"
         $findGroup = $null
@@ -1049,11 +1056,11 @@ function New-RDCManFileFromHyperV {
             Write-Log "Failed to find group to modify" -Failure
             return
         }
-        if (Remove-MissingServersFromGroup -findgroup $findGroup) {
+        if (Remove-MissingServersFromGroup -findgroup $findGroup -VmInventory $VmInventory) {
             $shouldSave = $true
         }
         # Set user/pass on the group
-        $username = (Get-List -Type VM -domain $domain | Where-Object { $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
+        $username = ($VmInventory | Where-Object { $_.Domain -eq $domain -and $_.Role -eq 'DC' } | Select-Object -first 1).AdminName
 
         if ($null -eq $username) {
             Write-Log "Could not determine username from DC config for domain $domain. Assuming username is 'admin'"
@@ -1083,8 +1090,7 @@ function New-RDCManFileFromHyperV {
                 $shouldSave = $true
             }
         }
-        # $vmList = (Get-List -Type VM -domain $domain).VmName
-        $vmListFull = (Get-List -Type VM -domain $domain)
+        $vmListFull = @($VmInventory | Where-Object { $_.Domain -eq $domain })
 
         $dcVM = $vmListFull | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1
         $cmDomainDefaults = if ($dcVM) { $dcVM.domainDefaults } else { $null }
@@ -1542,11 +1548,11 @@ function New-RDCManFileFromHyperV {
 
     }
 
-    if (Remove-MissingDomainsFromFile -file $file) {
+    if (Remove-MissingDomainsFromFile -file $file -VmInventory $VmInventory) {
         $shouldSave = $true
     }
     $unknownVMs = @()
-    $unknownVMs += get-list -type vm | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
+    $unknownVMs += $VmInventory | Where-Object { $null -eq $_.Domain -and $null -eq $_.InProgress }
     if ($unknownVMs.Count -gt 0) {
         Write-Verbose "New-RDCManFileFromHyperV: Adding Unknown VMs"
         $findGroup = $null
@@ -1669,12 +1675,16 @@ function New-RDCManFileFromHyperV {
 function Remove-MissingServersFromGroup {
     [CmdletBinding()]
     param(
-        [object]$findgroup
+        [object]$findgroup,
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
     )
 
     $return = $false
 
-    $completeServerList = Get-List -Type VM | Select-Object -ExpandProperty vmName
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
+    $completeServerList = @($VmInventory | Select-Object -ExpandProperty vmName)
     # Search all child groups (and direct children) for servers to remove
     foreach ($item in @($findgroup.SelectNodes('.//server'))) {
         if ($item.properties.displayName -in $completeServerList -or $item.properties.name -in $completeServerList) {
@@ -1690,10 +1700,15 @@ function Remove-MissingServersFromGroup {
 function Remove-MissingDomainsFromFile {
     [CmdletBinding()]
     param(
-        [object]$file
+        [object]$file,
+        [AllowEmptyCollection()][ValidateNotNull()][object[]]$VmInventory
     )
     $return = $false
-    $domainList = (Get-List -Type UniqueDomain -SmartUpdate)
+    if (-not $PSBoundParameters.ContainsKey('VmInventory')) {
+        $VmInventory = @(Get-List -Type VM -FailOnError)
+    }
+    $domainList = @($VmInventory | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Domain) } |
+        Select-Object -ExpandProperty Domain -Unique)
     Write-Verbose "[Remove-MissingDomainsFromFile] DomainList: $($domainList -join ",")"
     foreach ($group in $file.SelectNodes("group")) {
         if ($group.properties.name -in $domainList) {

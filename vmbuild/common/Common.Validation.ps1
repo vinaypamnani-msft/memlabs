@@ -1723,7 +1723,9 @@ function Test-Configuration {
         [Parameter(Mandatory = $false, HelpMessage = "Final Test")]
         [switch]$Final,
         [Parameter(Mandatory = $false, HelpMessage = "Start phase for the deployment; URLs only needed by earlier phases are skipped.")]
-        [int]$StartPhase = 0
+        [int]$StartPhase = 0,
+        [Parameter(Mandatory = $false, HelpMessage = "Require at least one new or staged existing VM before deploying.")]
+        [switch]$RequireDeploymentTargets
     )
     #Get-PSCallStack | out-host
 
@@ -1739,7 +1741,7 @@ function Test-Configuration {
     # skip the full revalidation pass (New-DeployConfig + ~25 Test-Valid* calls).
     $fastCacheJson = $null
     $fastCacheKey = $null
-    $fastCacheEligible = ($Fast.IsPresent -and -not $Final.IsPresent -and $InputObject -and $OrigSmartUpdateValue -eq $true)
+    $fastCacheEligible = ($Fast.IsPresent -and -not $Final.IsPresent -and -not $RequireDeploymentTargets.IsPresent -and $InputObject -and $OrigSmartUpdateValue -eq $true)
     if ($fastCacheEligible) {
         try {
             $fastCacheJson = $InputObject | ConvertTo-Json -Depth 5 -Compress
@@ -1833,10 +1835,17 @@ function Test-Configuration {
         # }
 
         $vmIndex = 0
-        foreach ($candidate in @($configObject.virtualMachines)) {
+        foreach ($candidate in $configObject.virtualMachines) {
             $vmIndex++
             if ($null -eq $candidate -or [string]::IsNullOrWhiteSpace($candidate.vmName)) {
                 Add-ValidationMessage -Message "VM Validation: virtualMachines entry $vmIndex must contain a non-empty vmName." -ReturnObject $return -Failure
+            }
+        }
+        if ($return.Failures -eq 0 -and ($RequireDeploymentTargets.IsPresent -or $Final.IsPresent)) {
+            # Check queued VMs before enhancement adds unmodified domain dependencies.
+            $deploymentTargets = @($configObject.virtualMachines | Where-Object { $_ })
+            if ($deploymentTargets.Count -eq 0) {
+                Add-ValidationMessage -Message "Deployment Validation: Nothing to deploy or update. Add a new VM or modify an existing VM before deploying." -ReturnObject $return -Failure
             }
         }
         if ($return.Failures -gt 0) {
@@ -1848,14 +1857,6 @@ function Test-Configuration {
         # Get deployConfig without existing VM's for validation
         Write-Progress2 -Activity "Validating Configuration" -Status "Creating DeployConfig" -PercentComplete 5
         $deployConfig = New-DeployConfig -configObject $configObject
-
-        #if ($deployConfig.virtualMachines.Count -eq 0) {
-        #    $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
-        #    $return.Problems += 1
-        #$return.Failures += 1
-        #    Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
-        #    return $return
-        #}
 
         $virtualMachinesNoExisting = $deployConfig.virtualMachines | Where-Object { -not $_.Hidden }
         # Contains roles

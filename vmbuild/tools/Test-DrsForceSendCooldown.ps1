@@ -74,8 +74,8 @@ Assert-Equal $false ($source.Contains('DRS force-send skipped:')) 'old every-loo
 Assert-Equal $false ($source -match '\$forceSendLastAttempt\[\$PSVM\.VmName\] = \$lastFs') 'skipped probes no longer roll back cooldown state'
 Assert-Equal $true ($source -match 'elseif \(\$fsResult\.Skipped\)[\s\S]+?else \{[\s\S]+?\$forceSendCount\[\$PSVM\.VmName\] = \$attemptsSoFar \+ 1') 'only a real send consumes an attempt'
 Assert-Equal $true ($source -match '\$r\.Groups -eq 0[\s\S]+?\$r\.SkipReason = ''NoGlobalGroups''') 'zero-group query consumes no real send attempt'
-$resetIndex = $source.IndexOf('if ($linkInFailedState -or $linkIsProgressing -or $replicationStatus.GlobalInitPercentage -lt 100)')
-$percentageGateIndex = $source.IndexOf('if ($replicationStatus.GlobalInitPercentage -ge 100)')
+$resetIndex = $source.IndexOf('if ($linkInFailedState -or $linkIsProgressing -or $null -eq $initializationPercent -or $initializationPercent -lt 100)')
+$percentageGateIndex = $source.IndexOf('if ($null -ne $initializationPercent -and $initializationPercent -ge 100)')
 Assert-Equal $true ($resetIndex -ge 0 -and $resetIndex -lt $percentageGateIndex) 'idle continuity resets before the 100-percent gate'
 
 if ($script:Failures -gt 0) {

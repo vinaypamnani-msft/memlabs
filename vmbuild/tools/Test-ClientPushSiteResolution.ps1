@@ -215,6 +215,276 @@ Assert-ClientPush ($genConfigText -match 'foreach \(\$vm in \$siteInventory \| W
 Assert-ClientPush ($genConfigText -match '\$_.role -in \$bgPushableRoles -and \(Test-PushClientRequested -VM \$_\)') `
     'boundary candidates require explicit pushClient opt-in'
 
+. (Import-ClientPushFunction -Name 'Disable-MemLabsAutomaticClientPush' -Path $guestFunctionsPath)
+$script:AutomaticPush = @{ PS1 = $true; PS2 = $true }
+$script:PolicyCalls = 0
+$script:PolicyFailure = $false
+$script:PolicyFailures = @()
+$script:PushAccounts = @('existing-account')
+function Set-CMClientPushInstallation {
+    [CmdletBinding()]
+    param([string]$SiteCode, [bool]$EnableAutomaticClientPushInstallation, [string[]]$AddAccount)
+
+    $script:PolicyCalls++
+    if (-not $PSBoundParameters.ContainsKey('EnableAutomaticClientPushInstallation') -or
+        $EnableAutomaticClientPushInstallation -or -not $PSBoundParameters.ContainsKey('ErrorAction') -or
+        "$($PSBoundParameters.ErrorAction)" -ne 'Stop' -or
+        $PSBoundParameters.ContainsKey('AddAccount')) {
+        throw 'Client-push policy must disable automatic push without changing accounts and must fail on cmdlet errors.'
+    }
+    if ($script:PolicyFailure) { throw 'fixture provider rejected policy change' }
+    $script:AutomaticPush[$SiteCode] = $false
+}
+function Write-StatusLogEntry {
+    param([Parameter(ValueFromPipeline)]$Message)
+    process {}
+}
+function Write-DscStatus {
+    param($Status, [switch]$Failure, [switch]$Warning, [switch]$NoStatus)
+    if ($Failure) { $script:PolicyFailures += "$Status" }
+    if (-not $NoStatus) {
+        $script:LastPushStatus = if ($Failure) { "JOBFAILURE: $Status" } else { "$Status" }
+    }
+}
+$policyResult = @(Disable-MemLabsAutomaticClientPush -SiteCode PS1)
+Assert-ClientPush ($policyResult.Count -eq 1 -and $policyResult[0] -is [bool] -and $policyResult[0]) `
+    'automatic-push policy returns one successful Boolean result'
+Assert-ClientPush (-not $script:AutomaticPush.PS1 -and $script:AutomaticPush.PS2 -and
+    ($script:PushAccounts -join ',') -eq 'existing-account') `
+    'policy disables only the selected site and preserves existing push credentials'
+Assert-ClientPush (Disable-MemLabsAutomaticClientPush -SiteCode PS1) 'policy is reapplied on redeploy with an existing account'
+$script:AutomaticPush.PS1 = $true
+$script:PolicyFailure = $true
+Assert-ClientPush (-not (Disable-MemLabsAutomaticClientPush -SiteCode PS1)) 'failed policy update fails closed'
+Assert-ClientPush ($script:AutomaticPush.PS1 -and $script:PolicyFailures.Count -eq 1 -and
+    $script:PolicyFailures[0] -match 'fixture provider rejected policy change') `
+    'policy failure retains provider diagnostics and is reported as a deployment failure'
+$script:PolicyFailure = $false
+
+foreach ($policyConsumer in @(
+        @{ Path = 'DSC\phases\ScriptWorkFlow.ps1'; Count = 2; Site = '$SiteCode' },
+        @{ Path = 'DSC\phases\InstallBoundaryGroups.ps1'; Count = 1; Site = '$SiteCode' },
+        @{ Path = 'DSC\phases\PushClients.ps1'; Count = 1; Site = '$SiteCode' },
+        @{ Path = 'DSC\phases\InstallMultiDomainPKI.ps1'; Count = 1; Site = '$Externaldomainsitecode' }
+    )) {
+    $tokens = $null; $errors = $null
+    $consumerAst = [Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $RootPath $policyConsumer.Path), [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw "$($policyConsumer.Path) has parse errors: $($errors -join '; ')" }
+    if ($policyConsumer.Path -eq 'DSC\phases\ScriptWorkFlow.ps1') { $workflowAst = $consumerAst }
+    $guards = @($consumerAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.IfStatementAst] -and
+                $node.Clauses[0].Item1.Extent.Text -match '^-not \(Disable-MemLabsAutomaticClientPush '
+            }, $true))
+    Assert-ClientPush ($guards.Count -eq $policyConsumer.Count) "$($policyConsumer.Path) guards automatic-push policy"
+    foreach ($guard in $guards) {
+        Assert-ClientPush ($guard.Clauses[0].Item1.Extent.Text -like "*-SiteCode $($policyConsumer.Site)*" -and
+            $guard.Clauses[0].Item2.Statements.Count -eq 1 -and
+            $guard.Clauses[0].Item2.Statements[0] -is [Management.Automation.Language.ReturnStatementAst]) `
+            "$($policyConsumer.Path) stops before discovery/push if its owned site's policy cannot be enforced"
+        $gate = [scriptblock]::Create($guard.Extent.Text + "`n`$script:GuardPassed++")
+        $SiteCode = 'PS1'; $script:Externaldomainsitecode = 'PS2'
+        $script:PolicyFailure = $true; $script:GuardPassed = 0
+        & $gate
+        Assert-ClientPush ($script:GuardPassed -eq 0) "$($policyConsumer.Path) does not execute dependent work after policy failure"
+        $script:PolicyFailure = $false
+        & $gate
+        Assert-ClientPush ($script:GuardPassed -eq 1) "$($policyConsumer.Path) advances after policy success"
+        $nextAction = $consumerAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -in @('Set-CMDiscoveryMethod', 'New-CMActiveDirectoryForest', 'Install-CMClient') -and
+                $node.Extent.StartOffset -gt $guard.Extent.EndOffset
+            }, $true) | Sort-Object { $_.Extent.StartOffset } | Select-Object -First 1
+        Assert-ClientPush ($null -ne $nextAction) "$($policyConsumer.Path) enforces policy before discovery or individual push"
+    }
+    foreach ($command in @($consumerAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and
+                    $node.GetCommandName() -eq 'Set-CMClientPushInstallation'
+            }, $true))) {
+        Assert-ClientPush ($command.Extent.Text -notmatch '-EnableAutomaticClientPushInstallation\s+\$true') `
+            "$($policyConsumer.Path) never re-enables automatic push while configuring accounts"
+    }
+    if ($policyConsumer.Path -eq 'DSC\phases\InstallBoundaryGroups.ps1') {
+        $casGuards = @($consumerAst.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.IfStatementAst] -and
+                        $node.Clauses[0].Item1.Extent.Text -eq "`$ThisVM.role -ne 'CAS'" -and
+                        $node.Extent.Text -match 'Disable-MemLabsAutomaticClientPush'
+                }, $true))
+        Assert-ClientPush ($casGuards.Count -eq 1) 'boundary setup does not configure automatic push on a CAS'
+        if ($casGuards.Count -eq 1) {
+            $script:ThisVM = [pscustomobject]@{ role = 'CAS' }; $SiteCode = 'CAS'
+            $before = $script:PolicyCalls
+            & ([scriptblock]::Create($casGuards[0].Extent.Text))
+            Assert-ClientPush ($script:PolicyCalls -eq $before) 'CAS boundary setup executes no client-push policy mutation'
+        }
+    }
+}
+
+$externalSelection = $consumerAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$externalClients'
+}, $true)
+$externalBlocks = @($consumerAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.IfStatementAst] -and
+                $node.Clauses[0].Item1.Extent.Text -eq '$externalClients.Count -gt 0'
+        }, $true))
+Assert-ClientPush ($externalBlocks.Count -eq 1 -and $null -ne $externalSelection) 'external push fixture executes the real per-VM selection and delivery block'
+$externalCompletion = @($consumerAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $_.Left.Extent.Text -eq '$Configuration.InstallClient.Status'
+    })
+Assert-ClientPush ($externalCompletion.Count -eq 1) 'external push fixture uses the actual completed-state assignment'
+$externalDelivery = [scriptblock]::Create($externalSelection.Extent.Text + "`n" +
+    $externalBlocks[0].Extent.Text + "`n" + $externalCompletion[0].Extent.Text)
+$tokens = $null; $errors = $null
+$primaryAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $RootPath 'DSC\phases\PushClients.ps1'), [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw "PushClients.ps1 has parse errors: $($errors -join '; ')" }
+$primaryLoops = @($primaryAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.ForEachStatementAst] -and
+                $node.Variable.Extent.Text -eq '$client' -and $node.Condition.Extent.Text -eq '$ClientNameList'
+        }, $true))
+Assert-ClientPush ($primaryLoops.Count -eq 1) 'primary push fixture executes the real individual target loop'
+$primaryTry = $primaryLoops[0].Parent.Parent
+Assert-ClientPush ($primaryTry -is [Management.Automation.Language.TryStatementAst]) 'primary push retains its bounded retry handler'
+$primaryBudget = @($primaryTry.Body.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $_.Left.Extent.Text -in @('$discoveryBudgetMinutes', '$discoveryDeadline', '$lastDiscoveryRun')
+    })
+$primaryCompletion = @($primaryAst.EndBlock.Statements | Where-Object {
+        $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $_.Left.Extent.Text -eq '$Configuration.InstallClient.Status'
+    })
+Assert-ClientPush ($primaryBudget.Count -eq 3 -and $primaryCompletion.Count -eq 1) `
+    'primary push fixture uses the actual discovery budget and completed-state assignment'
+$primaryDelivery = [scriptblock]::Create("try {`n" + ($primaryBudget.Extent.Text -join "`n") + "`n" +
+    $primaryLoops[0].Extent.Text + "`n}`n" + ($primaryTry.CatchClauses.Extent.Text -join "`n") +
+    "`n" + $primaryCompletion[0].Extent.Text)
+
+$script:deployConfig = [pscustomobject]@{
+    virtualMachines = @(
+        [pscustomobject]@{ vmName = 'OPT-IN'; Role = 'DomainMember'; pushClient = $true; ThisParams = @{ vmNetwork = '192.0.2.0' } },
+        [pscustomobject]@{ vmName = 'OPT-OUT'; Role = 'DomainMember'; pushClient = $false; ThisParams = @{ vmNetwork = '192.0.2.0' } },
+        [pscustomobject]@{ vmName = 'SITE-OPT-IN'; Role = 'DomainMember'; pushClient = 'PS1'; ThisParams = @{ vmNetwork = '192.0.2.0' } }
+    )
+}
+$script:networks = @('192.0.2.0'); $script:Externaldomainsitecode = 'PS1'
+function Reset-PushFixture {
+    $script:Clock = [datetime]'2026-11-05T12:00:00'
+    $script:Discovered = @('OPT-IN', 'OPT-OUT', 'SITE-OPT-IN')
+    $script:QueryFailure = $false; $script:InstallFailure = $false; $script:SmbAvailable = $true
+    $script:SetupRunning = $false
+    $script:DeliveryCalls = [System.Collections.Generic.List[string]]::new()
+    $script:PolicyFailures = @()
+    $script:Configuration = @{ InstallClient = @{ Status = 'Running' } }
+    $script:ClientNameList = @('OPT-IN', 'SITE-OPT-IN')
+    $script:installedmachinelist = @(); $script:machinelist = $script:Discovered
+    $script:clientIndex = 0; $script:CollectionName = 'All Systems'; $script:SiteCode = 'PS1'
+    $script:pushAttempt = 2; $script:pushMaxAttempts = 2
+}
+function Get-CMDevice {
+    [CmdletBinding()]
+    param($CollectionName, $Name)
+    if ($script:QueryFailure) { throw 'fixture device query failed' }
+    if ($Name) { [pscustomobject]@{ Name = $Name; IsClient = $false } }
+    else { $script:Discovered | ForEach-Object { [pscustomobject]@{ Name = $_; IsClient = $false } } }
+}
+function Install-CMClient {
+    [CmdletBinding()]
+    param($DeviceName, $SiteCode, [bool]$AlwaysInstallClient)
+    if (-not $PSBoundParameters.ContainsKey('ErrorAction') -or "$($PSBoundParameters.ErrorAction)" -ne 'Stop') {
+        throw 'Client-push requests must promote cmdlet failures into their retry/error handlers.'
+    }
+    $script:DeliveryCalls.Add("$DeviceName")
+    if ($script:InstallFailure) { throw 'fixture client push rejected' }
+}
+function Invoke-CMForestDiscovery { [CmdletBinding()]param($SiteCode) }
+function Invoke-CMSystemDiscovery { [CmdletBinding()]param() }
+function Invoke-CMDeviceCollectionUpdate { [CmdletBinding()]param($Name) }
+function Start-Sleep { param($Seconds) $script:Clock = $script:Clock.AddSeconds($Seconds) }
+function Get-Date { $script:Clock }
+function Test-TcpPortFast { param($ComputerName, $Port) $script:SmbAvailable }
+function Test-RemoteCMClientInstalled { param($ComputerName) $false }
+function Invoke-Command {
+    [CmdletBinding()]
+    param($ComputerName, $ScriptBlock)
+    if ($script:SetupRunning) { [pscustomobject]@{ Id = 1234 } }
+}
+foreach ($delivery in @($externalDelivery, $primaryDelivery)) {
+    Reset-PushFixture
+    & $delivery
+    Assert-ClientPush (($script:DeliveryCalls -join ',') -eq 'OPT-IN,SITE-OPT-IN' -and
+        $script:Configuration.InstallClient.Status -eq 'Completed' -and $script:PolicyFailures.Count -eq 0) `
+        'individual pushes reach only explicitly requested targets and preserve asynchronous installation'
+}
+Reset-PushFixture
+$script:QueryFailure = $true
+& $externalDelivery
+Assert-ClientPush ($script:DeliveryCalls.Count -eq 0 -and $script:PolicyFailures.Count -gt 0 -and
+    $script:Configuration.InstallClient.Status -ne 'Completed') 'unreadable external discovery cannot report completed push or rely on automatic push'
+Assert-ClientPush (($script:Clock - [datetime]'2026-11-05T12:00:00').TotalSeconds -eq 900) `
+    'external discovery retains one shared 900-second budget'
+foreach ($delivery in @($externalDelivery, $primaryDelivery)) {
+    Reset-PushFixture
+    $script:Discovered = @(); $script:machinelist = @()
+    & $delivery
+    Assert-ClientPush ($script:DeliveryCalls.Count -eq 0 -and $script:PolicyFailures.Count -gt 0 -and
+        $script:Configuration.InstallClient.Status -ne 'Completed') 'undiscovered requested clients fail without false completion'
+    $expectedSeconds = if ($delivery -eq $externalDelivery) { 900 } else { 1200 }
+    Assert-ClientPush (($script:Clock - [datetime]'2026-11-05T12:00:00').TotalSeconds -eq $expectedSeconds) `
+        'discovery failure occurs at the real shared budget rather than a per-target or unbounded wait'
+    Reset-PushFixture
+    $script:InstallFailure = $true
+    & $delivery
+    Assert-ClientPush ($script:PolicyFailures.Count -gt 0 -and
+        ($script:PolicyFailures -join ' ') -match 'fixture client push rejected' -and
+        $script:Configuration.InstallClient.Status -ne 'Completed') 'rejected individual push preserves error evidence and does not complete the stage'
+}
+Reset-PushFixture
+$script:SmbAvailable = $false
+& $primaryDelivery
+Assert-ClientPush ($script:DeliveryCalls.Count -eq 0 -and $script:PolicyFailures.Count -gt 0 -and
+    $script:Configuration.InstallClient.Status -ne 'Completed') 'unreachable SMB target cannot silently complete an individual push'
+Reset-PushFixture
+$script:SetupRunning = $true
+& $primaryDelivery
+Assert-ClientPush ($script:DeliveryCalls.Count -eq 0 -and
+    $script:Configuration.InstallClient.Status -eq 'Completed') 'in-flight ccmsetup is preserved without a competing push'
+
+$ownerTry = @($workflowAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.TryStatementAst] -and
+                $node.CatchClauses.Extent.Text -match 'PushClients.ps1 failed'
+        }, $true))
+Assert-ClientPush ($ownerTry.Count -eq 1) 'workflow has one owner for client-push failure'
+$owner = [scriptblock]::Create($ownerTry[0].Extent.Text + "`n`$script:OwnerCompleted = `$true")
+function Set-Location { param($Path) }
+function Invoke-DotSource {
+    param($Script, $Arguments)
+    if ($script:OwnerFailure) {
+        Write-DscStatus 'fixture critical push failure' -Failure
+        throw 'fixture critical push failure'
+    }
+}
+$script:LogPath = $RootPath
+foreach ($fatal in @($false, $true)) {
+    Reset-PushFixture
+    $script:OwnerFailure = $fatal; $script:OwnerCompleted = $false
+    $caught = $false
+    try { & $owner } catch { $caught = $true }
+    Assert-ClientPush ($caught -eq $fatal -and $script:OwnerCompleted -eq (-not $fatal)) `
+        'workflow preserves nonfatal completion but propagates critical push failure to its receipt-writing trap'
+    if ($fatal) {
+        Assert-ClientPush ($script:LastPushStatus -like 'JOBFAILURE:*') 'workflow does not overwrite the reachable push failure with a warning'
+    }
+}
+
 foreach ($consumerPath in @(
         'common\Common.Config.ps1',
         'common\Common.GenConfig.ps1',

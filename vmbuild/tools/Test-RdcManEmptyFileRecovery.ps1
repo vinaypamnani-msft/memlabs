@@ -32,7 +32,8 @@ function Invoke-RdcManRecoveryCase {
         [switch] $UseRealSettings,
         [switch] $WhatIf,
         [switch] $StartDuringWarmup,
-        [switch] $RestartRDCMan
+        [switch] $RestartRDCMan,
+        [switch] $InventoryFails
     )
 
     Set-StrictMode -Off
@@ -56,6 +57,8 @@ function Invoke-RdcManRecoveryCase {
         WroteBeforeExit = $false
         Restarted     = $false
         SuccessMessages = [System.Collections.Generic.List[string]]::new()
+        InventoryFails = $InventoryFails.IsPresent
+        InventoryReads = 0
     }
     $state.SettingsPath = Join-Path $state.SettingsRoot 'Microsoft\Remote Desktop Connection Manager\RDCMan.settings'
     if ($Shutdown -ne 'None') {
@@ -187,11 +190,19 @@ function Invoke-RdcManRecoveryCase {
     }
 
     function Get-List {
+        [CmdletBinding()]
         param(
             [string] $Type,
             [string] $Domain,
-            [switch] $SmartUpdate
+            [switch] $SmartUpdate,
+            [switch] $FailOnError
         )
+        $state.InventoryReads++
+        if (-not $FailOnError) { throw 'Connection generation did not request fail-closed inventory.' }
+        if ($state.InventoryFails) {
+            Write-Log 'Synthetic inventory read failure.' -Failure -LogOnly
+            throw 'Synthetic inventory read failure.'
+        }
     }
 
     function Invoke-VMNetworkBulkWarmup { $state.ProcessesVisible = $true }
@@ -243,6 +254,7 @@ function Invoke-RdcManRecoveryCase {
             Restarted     = $state.Restarted
             SuccessCount  = $state.SuccessMessages.Count
             SettingsExist = Test-Path -LiteralPath $state.SettingsPath
+            InventoryReads = $state.InventoryReads
         }
     }
     finally {
@@ -331,6 +343,16 @@ try {
         [pscustomobject]@{ Name = 'settings'; Content = $templateContent; OverWrite = $false; Settings = $true }
     )
     foreach ($case in $shutdownCases) {
+        $inventoryTarget = Join-Path $normalRoot "inventory-$($case.Name).rdg"
+        if ($null -ne $case.Content) { [IO.File]::WriteAllText($inventoryTarget, $case.Content) }
+        $inventoryFailure = Invoke-RdcManRecoveryCase -SourcePath (Join-Path $normalRoot 'Common.RdcMan.ps1') `
+            -TargetPath $inventoryTarget -OverWrite:$case.OverWrite -Shutdown Delayed `
+            -UseRealSettings:$case.Settings -InventoryFails
+        Assert-True ($inventoryFailure.CaughtError -eq 'Synthetic inventory read failure.') "$($case.Name) surfaces unreadable inventory"
+        Assert-True ($inventoryFailure.Content -ceq $case.Content -and -not $inventoryFailure.SettingsExist) "$($case.Name) leaves connection and settings files untouched on inventory failure"
+        Assert-True ($inventoryFailure.CloseIds.Count -eq 0 -and $inventoryFailure.StopIds.Count -eq 0 -and
+            -not $inventoryFailure.InstallCalled -and -not $inventoryFailure.Restarted -and
+            $inventoryFailure.SuccessCount -eq 0) "$($case.Name) does not stop clients or report success before verified inventory"
         foreach ($shutdown in @('Delayed', 'StopFailure', 'Timeout', 'Remaining', 'ScanFailure')) {
             $target = Join-Path $normalRoot "$($case.Name)-$shutdown.rdg"
             if ($null -ne $case.Content) { [IO.File]::WriteAllText($target, $case.Content) }
@@ -349,6 +371,7 @@ try {
                 if ($case.Name -eq 'incremental') {
                     Assert-True ($actual.GroupCount -eq 0) "$label persists new data after stale shutdown writes"
                 }
+                Assert-True ($normal.InventoryReads -eq 1) 'template recovery reuses one inventory snapshot instead of re-reading after file changes'
                 if ($case.Settings) {
                     Assert-True $actual.SettingsExist "$label writes RDCMan settings after shutdown"
                 }

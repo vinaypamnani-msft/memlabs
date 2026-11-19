@@ -19,6 +19,17 @@ $repoUrl = "https://github.com/vinaypamnani-msft/$repoName"
 
 Write-HostLog "START"
 
+Write-HostLog "Completing DHCP post-install configuration"
+try {
+    . (Join-Path $PSScriptRoot 'Common.Prereqs.ps1')
+    Initialize-MemLabsDhcpServer
+    Write-HostLog "DHCP post-install configuration completed."
+}
+catch {
+    Write-HostLog "FAILED to complete DHCP post-install configuration: $_"
+    throw
+}
+
 # Change CD-ROM Drive Letter
 $cd = Get-WmiObject -Class Win32_volume -Filter 'DriveType=5'
 if ($cd) {

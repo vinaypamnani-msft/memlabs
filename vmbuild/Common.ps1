@@ -110,7 +110,7 @@ Function Write-ProgressDiagLog {
             $diagPath = Join-Path $base "progressdiag.log"
             $global:ProgressDiagPath = $diagPath
         }
-        $line = "{0} [pid:{1}] {2}`r`n" -f (Get-Date -Format "HH:mm:ss.fff"), $PID, $Message
+        $line = Protect-MemLabsLogText ("{0} [pid:{1}] {2}`r`n" -f (Get-Date -Format "HH:mm:ss.fff"), $PID, $Message)
         [System.IO.File]::AppendAllText($diagPath, $line)
     }
     catch {}
@@ -395,6 +395,41 @@ if (-not $global:MemLabsRunId) {
     }
 }
 
+function Protect-MemLabsLogText {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $commonState = $ExecutionContext.SessionState.PSVariable.GetValue('Common')
+    if ($null -eq $commonState) { return $Text }
+    $credential = $null
+    if ($commonState -is [System.Collections.IDictionary]) {
+        $credential = $commonState['LocalAdmin']
+    }
+    else {
+        $property = $commonState.PSObject.Properties['LocalAdmin']
+        if ($property) { $credential = $property.Value }
+    }
+    if ($credential -isnot [System.Management.Automation.PSCredential]) { return $Text }
+
+    # The cache file's loaded value can appear anywhere in native errors, not just password fields.
+    $password = $credential.GetNetworkCredential().Password
+    if ([string]::IsNullOrEmpty($password)) { return $Text }
+    $variants = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    [void]$variants.Add($password)
+    [void]$variants.Add($password.Replace("'", "''"))
+    $jsonEscaped = Get-JsonLogEscaped -Value $password
+    [void]$variants.Add($jsonEscaped)
+    [void]$variants.Add($jsonEscaped.Replace("'", '\u0027').Replace('<', '\u003c').Replace('>', '\u003e').Replace('&', '\u0026'))
+    $serialized = ConvertTo-Json -InputObject $password -Compress
+    [void]$variants.Add($serialized.Substring(1, $serialized.Length - 2))
+    [void]$variants.Add([System.Security.SecurityElement]::Escape($password))
+    [void]$variants.Add([Uri]::EscapeDataString($password))
+    foreach ($variant in @($variants | Sort-Object -Property Length -Descending)) {
+        $Text = $Text.Replace($variant, '[REDACTED]')
+    }
+    return $Text
+}
+
 function Get-JsonLogEscaped {
     # Minimal RFC-8259 string escaping for a single JSON value. The text has
     # already been stripped of control/non-ASCII chars (except TAB) upstream in
@@ -436,6 +471,7 @@ function Add-LogBufferText {
     # MemLabs.LogFlusher timer callback. StringBuilder is not thread-safe, and an
     # Append landing between the flusher's ToString() and its clear used to vanish.
     param([object]$Entry, [string]$Text)
+    $Text = Protect-MemLabsLogText -Text $Text
     [System.Threading.Monitor]::Enter($Entry.Builder)
     try { [void]$Entry.Builder.Append($Text) }
     finally { [System.Threading.Monitor]::Exit($Entry.Builder) }
@@ -448,6 +484,7 @@ function Add-LogTextToFile {
     # measured 144 records silently clobbered across 8 writers. Let the OS reject the
     # second writer and retry: a sharing violation must cost latency, not a record.
     param([string]$Path, [string]$Text, [int]$Attempts = 12)
+    $Text = Protect-MemLabsLogText -Text $Text
     for ($i = 1; $i -le $Attempts; $i++) {
         try {
             [System.IO.File]::AppendAllText($Path, $Text, [System.Text.Encoding]::UTF8)
@@ -540,8 +577,8 @@ function Flush-LogBuffer {
             if ($entry.Builder.Length -gt $global:LogBufferHardCapBytes) {
                 $lost = $entry.Builder.Length
                 $entry.Builder.Length = 0
-                [void]$entry.Builder.AppendLine(
-                    "*** MemLabs logging DROPPED $lost buffered chars for $Path : $($_.Exception.Message) ***")
+                [void]$entry.Builder.AppendLine((Protect-MemLabsLogText (
+                    "*** MemLabs logging DROPPED $lost buffered chars for $Path : $($_.Exception.Message) ***")))
                 $entry.LastFlushUtc = [DateTime]::UtcNow
             }
         }
@@ -862,6 +899,8 @@ function Write-Log {
     }
 
     if ($Text -is [string]) { $Text = $Text.ToString().Trim() }
+    $protectedText = Protect-MemLabsLogText -Text "$Text"
+    if ($Text -is [string] -or $protectedText -cne "$Text") { $Text = $protectedText }
     # $Text = "[$caller] $Text"
 
     if ($ShowNotification.IsPresent) {
@@ -1105,7 +1144,7 @@ function Write-Log {
             try {
                 # Last-resort direct append; ignore failure.
                 if ($logText -and $Common -and $Common.LogPath) {
-                    $logText | Out-File -LiteralPath $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
+                    Protect-MemLabsLogText -Text $logText | Out-File -LiteralPath $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
                 }
             }
             catch {
@@ -1164,16 +1203,49 @@ function Write-Exception {
     $sb = [System.Text.StringBuilder]::new()
 
     $parentFunctionName = (Get-PSCallStack)[1].FunctionName
-    $msg = "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
+    $msg = Protect-MemLabsLogText "`n=== $parentFunctionName`: An error occurred: $ExceptionInfo"
     [void]$sb.AppendLine($msg)
     Write-Host2 $msg -ForegroundColor Red
+
+    $exception = $null
+    $errorId = '<not supplied>'
+    $category = '<not supplied>'
+    if ($ExceptionInfo -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $ExceptionInfo.Exception
+        $errorId = $ExceptionInfo.FullyQualifiedErrorId
+        $category = "$($ExceptionInfo.CategoryInfo)"
+    }
+    elseif ($ExceptionInfo -is [System.Exception]) {
+        $exception = $ExceptionInfo
+    }
+    $exceptionType = '<not supplied>'
+    $hresult = '<not supplied>'
+    if ($null -ne $exception) {
+        $exceptionType = $exception.GetType().FullName
+        $hresult = '0x{0:X8}' -f $exception.HResult
+    }
+    # ErrorRecord.ToString() may replace the native cause with ErrorDetails.
+    $rootMessage = if ($null -ne $exception) { $exception.Message } else { "$ExceptionInfo" }
+    $logMessage = Protect-MemLabsLogText "`n=== $parentFunctionName`: An error occurred: $rootMessage"
+    if ($logMessage -cne $msg) { [void]$sb.AppendLine($logMessage) }
+    Write-Log -LogOnly $logMessage -Failure
+    if ($ExceptionInfo -is [System.Management.Automation.ErrorRecord] -and
+        $null -ne $ExceptionInfo.ErrorDetails -and
+        -not [string]::IsNullOrWhiteSpace($ExceptionInfo.ErrorDetails.Message)) {
+        $detailMessage = Protect-MemLabsLogText "ErrorDetails=$($ExceptionInfo.ErrorDetails.Message)"
+        [void]$sb.AppendLine($detailMessage)
+        Write-Log -LogOnly $detailMessage -Failure
+    }
+    $msg = Protect-MemLabsLogText "ExceptionType=$exceptionType; HResult=$hresult; FullyQualifiedErrorId=$errorId; Category=$category; CrashReportPath=$crashFile"
+    [void]$sb.AppendLine($msg)
+    Write-Log -LogOnly $msg -Failure
 
     $msg = "`n=== Exception.ScriptStackTrace:`n"
     [void]$sb.AppendLine($msg)
     Write-Host2 $msg -ForegroundColor Red
     Write-Log -LogOnly $msg -Failure
 
-    $msg = $ExceptionInfo.ScriptStackTrace
+    $msg = Protect-MemLabsLogText $ExceptionInfo.ScriptStackTrace
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
     Write-Log -LogOnly $msg -Failure
@@ -1183,7 +1255,10 @@ function Write-Exception {
     Write-Host2 $msg -ForegroundColor Red
     Write-Log -LogOnly $msg -Failure
 
-    $msg = (Get-PSCallStack | Select-Object Command, Location, Arguments | Format-Table | Out-String).Trim()
+    $msg = (Get-PSCallStack | Select-Object Command, Location,
+        @{ Name = 'Arguments'; Expression = { Protect-MemLabsLogText "$($_.Arguments)" } } |
+        Format-Table | Out-String).Trim()
+    $msg = Protect-MemLabsLogText $msg
     [void]$sb.AppendLine($msg)
     $msg | Out-Host
     Write-Log -LogOnly $msg -Failure
@@ -1191,15 +1266,14 @@ function Write-Exception {
         $msg = "`n=== Additional Information:`n"
         [void]$sb.AppendLine($msg)
         Write-Host2 "$msg" -ForegroundColor Red
-        Write-Host "Dumped to $crashFile"
         Write-Log -LogOnly $msg -Failure
-        Write-Log -LogOnly  "Dumped to $crashFile" -Failure
-        $msg = ($AdditionalInfo | Out-String).Trim()
+        $msg = Protect-MemLabsLogText ($AdditionalInfo | Out-String).Trim()
         [void]$sb.AppendLine($msg)
         Write-Log -LogOnly $msg -Failure
     }
 
-    $sb.ToString() | Out-File -FilePath $crashFile -Force
+    Protect-MemLabsLogText $sb.ToString() | Out-File -FilePath $crashFile -Force -ErrorAction Stop
+    Write-Host "Dumped to $crashFile"
     Write-Host
 }
 
@@ -3435,13 +3509,22 @@ function Start-DHCP {
         Reset-CimProxyModuleState | Out-Null
     }
 
+    $dhcpImport = @{ Name = 'DhcpServer'; Force = $true; ErrorAction = 'Stop' }
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $dhcpImport.SkipEditionCheck = $true
+    }
+
     $moduleLoaded = $false
     try {
-        Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+        Import-Module @dhcpImport
         $moduleLoaded = $true
     }
     catch {
         $importError = $_
+        if ($importError.Exception -is [System.Management.Automation.ParameterBindingException]) {
+            Write-Log "Start-DHCP: Invalid DhcpServer module import parameters; restarting WMI cannot fix this: $importError" -Failure
+            return $false
+        }
         Write-Log "Start-DHCP: DhcpServer module failed to load: $importError" -Warning
 
         # First, classify the "missing temp path" failure explicitly. This is
@@ -3457,7 +3540,7 @@ function Start-DHCP {
             Repair-CimProxyTempPath | Out-Null
             Reset-CimProxyModuleState | Out-Null
             try {
-                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                Import-Module @dhcpImport
                 $moduleLoaded = $true
                 Write-GreenCheck "DhcpServer module loaded after repairing the CIM-proxy temp directory and resetting the cached compat proxy."
             }
@@ -3479,7 +3562,7 @@ function Start-DHCP {
             Start-Service DHCPServer -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
             try {
-                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
+                Import-Module @dhcpImport
                 $moduleLoaded = $true
                 Write-GreenCheck "DhcpServer module loaded after WMI service restart."
             }
@@ -3497,9 +3580,14 @@ function Start-DHCP {
                     $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
                 }
                 if ($installed -and $installed.Success) {
-                    Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction SilentlyContinue
-                    $moduleLoaded = $true
-                    Write-GreenCheck "DHCP management tools reinstalled."
+                    try {
+                        Import-Module @dhcpImport
+                        $moduleLoaded = $true
+                        Write-GreenCheck "DHCP management tools reinstalled."
+                    }
+                    catch {
+                        Write-Log "Start-DHCP: DhcpServer module still won't load after reinstalling management tools: $_" -Failure
+                    }
                 }
                 else {
                     Write-Log "Start-DHCP: Failed to reinstall DHCP management tools. Run 'Install-WindowsFeature RSAT-DHCP' manually." -Failure
@@ -3512,6 +3600,14 @@ function Start-DHCP {
     }
 
     if (-not $moduleLoaded) {
+        return $false
+    }
+
+    try {
+        Initialize-MemLabsDhcpServer
+    }
+    catch {
+        Write-Log "Start-DHCP: DHCP post-install configuration failed: $_" -Failure
         return $false
     }
 
@@ -7918,6 +8014,18 @@ function Invoke-VmCommand {
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
+    $return = [PSCustomObject]@{
+        CommandResult     = $false
+        ScriptBlockFailed = $false
+        ScriptBlockOutput = $null
+        ErrorDetails      = $null
+        ChannelBroken     = $false
+        TimedOut          = $false
+        Rebooted          = $false
+    }
+    $inflightToken = $null
+    $caughtException = $null
+    $jobFailureReason = $null
     try {
         # Set display name for logging
         if (-not $DisplayName) {
@@ -7933,24 +8041,16 @@ function Invoke-VmCommand {
 
         # Fatal failure
         if ($null -eq $Common.LocalAdmin) {
-            Write-Log "$VmName`: Skip running '$DisplayName' since Local Admin creds not available" -Failure
-            return $false
+            $return.ScriptBlockFailed = $true
+            $return.ErrorDetails = @("Local admin credentials are unavailable; cannot run '$DisplayName' on '$VmName'.")
+            $return.ScriptBlockOutput = $return.ErrorDetails[0]
+            Write-Log "$VmName`: $($return.ErrorDetails[0])" -Failure -LogOnly:$SuppressLog
+            return $return
         }
 
         # Log entry
         if (-not $SuppressLog) {
             Write-Log "$VmName`: Running '$DisplayName'" -Verbose
-        }
-
-        # Create return object
-        $return = [PSCustomObject]@{
-            CommandResult     = $false
-            ScriptBlockFailed = $false
-            ScriptBlockOutput	= $null
-            ErrorDetails      = $null
-            ChannelBroken     = $false
-            TimedOut          = $false
-            Rebooted          = $false
         }
 
         # Prepare args
@@ -8022,8 +8122,6 @@ function Invoke-VmCommand {
         }
 
         # Run script block inside VM
-        $inflightToken = $null
-        $jobFailureReason = $null
         if (-not $failed) {
             # Mark this scriptblock as in-flight on $ps so a concurrent pipeline on
             # the SAME cached session (the suspected cause of "An error occurred while
@@ -8254,6 +8352,7 @@ function Invoke-VmCommand {
                         catch {}
                         if ($jobTimedOut) {
                             $OutErr = "remote pipeline still running after ${TimeoutSeconds}s"
+                            $jobFailureReason = $OutErr
                         }
                         elseif ($Err2.Count -ne 0) {
                             $OutErr = "$($Err2[0].ToString().Trim())"
@@ -8638,10 +8737,18 @@ function Invoke-VmCommand {
         }
     }
     catch {
-        Write-Log "$VmName`: Invoke-VMCommand Exception $_"
+        $commandError = $_
+        $return.CommandResult = $false
+        $return.ScriptBlockFailed = $true
+        $return.ErrorDetails = @($return.ErrorDetails | Where-Object { $_ })
+        $return.ErrorDetails += "$($commandError.Exception.ToString()); HRESULT=$($commandError.Exception.HResult); FQID=$($commandError.FullyQualifiedErrorId); stack=$($commandError.ScriptStackTrace)"
+        if ($null -eq $return.ScriptBlockOutput) { $return.ScriptBlockOutput = $return.ErrorDetails[0] }
+        try { Write-Log "$VmName`: Invoke-VMCommand Exception $($commandError.Exception.Message)" -LogOnly:$SuppressLog }
+        catch { $return.ErrorDetails += "Could not log the command failure: $($_.Exception.Message)" }
         # Ensure the in-flight marker is released even on an unexpected throw, so a
         # leaked entry can't produce a false-positive concurrency reading later.
-        Exit-VmSessionInflight -Token $inflightToken
+        try { Exit-VmSessionInflight -Token $inflightToken }
+        catch { $return.ErrorDetails += "Could not release the command's inflight marker: $($_.Exception.Message)" }
     }
     return $return
 

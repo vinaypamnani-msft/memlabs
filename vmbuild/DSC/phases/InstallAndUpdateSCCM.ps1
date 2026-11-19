@@ -2782,22 +2782,21 @@ else {
                 $Configuration | Add-Member -MemberType NoteProperty -Name  $propName  -Value  $PSReadytoUse -Force
 
             }
-            # Only mark Running if not already Completed
-            if ($Configuration.$propName.Status -ne 'Completed') {
-                $Configuration.$propName.Status = 'Running'
-                $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            if ($Configuration.$propName -is [System.Collections.IDictionary]) {
+                $Configuration.$propName['ReplicationVerified'] = $false
             }
+            else {
+                $Configuration.$propName | Add-Member -NotePropertyName ReplicationVerified -NotePropertyValue $false -Force
+            }
+            $Configuration.$propName.Status = 'Running'
+            $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            $Configuration.$propName.EndTime = ''
             Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
         }
 
-        # Build wait list excluding already-completed primaries
+        # A previous timeout could have written Completed without an active link.
         $waitList = @()
         foreach ($PSVM in $PSVMs) {
-            $propName = "PSReadyToUse" + $PSVM.VmName
-            if ($Configuration.$propName.Status -eq 'Completed') {
-                Write-DscStatus "Replication link for $($PSVM.VmName) already verified. Skipping."
-                continue
-            }
             $waitList += $PSVM.vmName
         }
 
@@ -2968,9 +2967,114 @@ else {
             return $h
         }
 
+        function ConvertTo-MemLabsDrsInitializationPercent {
+            param([AllowNull()][object]$Value)
+
+            $text = [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture)
+            if ($text -notmatch '^\s*(\d+(?:\.\d+)?)\s*%?\s*$') {
+                throw "Unrecognized DRS initialization percentage '$text'."
+            }
+            $percent = 0.0
+            if (-not [double]::TryParse($Matches[1], [Globalization.NumberStyles]::Float,
+                    [Globalization.CultureInfo]::InvariantCulture, [ref]$percent) -or
+                $percent -lt 0 -or $percent -gt 100) {
+                throw "DRS initialization percentage '$text' is outside 0-100."
+            }
+            return $percent
+        }
+
+        function Get-MemLabsFailedDrsLinkGroups {
+            param(
+                [Parameter(Mandatory)][string]$CasSqlDataSource,
+                [Parameter(Mandatory)][string]$CasDbName,
+                [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{3}$')][string]$CasSiteCode,
+                [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{3}$')][string]$PriSiteCode
+            )
+
+            $groups = [Collections.Generic.List[object]]::new()
+            $seen = [Collections.Generic.HashSet[int]]::new()
+            $connection = New-Object System.Data.SqlClient.SqlConnection "Data Source=$CasSqlDataSource;Initial Catalog=$CasDbName;Integrated Security=True;Connect Timeout=15;Encrypt=False;TrustServerCertificate=True"
+            $command = $null
+            $reader = $null
+            try {
+                $connection.Open()
+                $command = $connection.CreateCommand()
+                $command.CommandTimeout = 30
+                $command.CommandText = @'
+SELECT DISTINCT rd.ID, rd.ReplicationGroup, links.SiteSending, links.SiteReceiving, links.Status AS LinkStatus
+FROM dbo.RCM_ReplicationLinkStatus AS links
+INNER JOIN dbo.ReplicationData AS rd ON rd.ID = links.ReplicationID
+WHERE ((links.SiteSending = @cas AND links.SiteReceiving = @pri)
+    OR (links.SiteSending = @pri AND links.SiteReceiving = @cas))
+  AND links.Status IN (6, 8, 9)
+ORDER BY rd.ID
+'@
+                [void]$command.Parameters.AddWithValue('@cas', $CasSiteCode)
+                [void]$command.Parameters.AddWithValue('@pri', $PriSiteCode)
+                $reader = $command.ExecuteReader()
+                while ($reader.Read()) {
+                    $group = [pscustomobject]@{
+                        ID = [int]$reader['ID']
+                        ReplicationGroup = "$($reader['ReplicationGroup'])"
+                        SiteSending = "$($reader['SiteSending'])"
+                        SiteReceiving = "$($reader['SiteReceiving'])"
+                        LinkStatus = [int]$reader['LinkStatus']
+                    }
+                    $samePair = ($group.SiteSending -eq $CasSiteCode -and $group.SiteReceiving -eq $PriSiteCode) -or
+                        ($group.SiteSending -eq $PriSiteCode -and $group.SiteReceiving -eq $CasSiteCode)
+                    if (-not $samePair -or $group.LinkStatus -notin 6, 8, 9 -or
+                        $group.ID -le 0 -or -not $group.ReplicationGroup) {
+                        throw 'Failed-link SQL query returned unverified or out-of-scope replication data; no reinitialization is safe.'
+                    }
+                    if ($seen.Add($group.ID)) { $groups.Add($group) }
+                }
+            }
+            finally {
+                if ($reader) { $reader.Dispose() }
+                if ($command) { $command.Dispose() }
+                $connection.Dispose()
+            }
+            return $groups.ToArray()
+        }
+
+        function Invoke-MemLabsDrsGroupReinitialization {
+            param(
+                [Parameter(Mandatory)][object]$Group,
+                [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{3}$')][string]$CasSiteCode,
+                [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{3}$')][string]$PriSiteCode,
+                [ValidateRange(1, 60)][int]$OperationTimeoutSeconds = 60
+            )
+
+            $samePair = ($Group.SiteSending -eq $CasSiteCode -and $Group.SiteReceiving -eq $PriSiteCode) -or
+                ($Group.SiteSending -eq $PriSiteCode -and $Group.SiteReceiving -eq $CasSiteCode)
+            [uint32]$groupId = 0
+            if (-not $samePair -or $Group.LinkStatus -notin 6, 8, 9 -or
+                -not [uint32]::TryParse("$($Group.ID)", [ref]$groupId) -or $groupId -eq 0) {
+                throw 'InitializeData requires a verified failed group from the requested site pair.'
+            }
+            $result = Invoke-CimMethod -Namespace "root\SMS\site_$CasSiteCode" -ClassName SMS_ReplicationGroup `
+                -MethodName InitializeData -Arguments @{
+                    ReplicationGroupID = $groupId
+                    SiteCode1 = $CasSiteCode
+                    SiteCode2 = $PriSiteCode
+                } -OperationTimeoutSec $OperationTimeoutSeconds -ErrorAction Stop
+            if (-not $result -or $null -eq $result.ReturnValue -or
+                ($result.ReturnValue -isnot [int] -and $result.ReturnValue -isnot [uint32])) {
+                throw "InitializeData for group $groupId returned no valid result."
+            }
+            if ($result.ReturnValue -ne 0) {
+                throw "InitializeData for '$($Group.ReplicationGroup)' ($groupId), $CasSiteCode -> $PriSiteCode failed with ReturnValue=$($result.ReturnValue)."
+            }
+            [pscustomobject]@{
+                ID = $groupId; ReplicationGroup = "$($Group.ReplicationGroup)"
+                SiteCode1 = $CasSiteCode; SiteCode2 = $PriSiteCode; ReturnValue = $result.ReturnValue
+            }
+        }
+
         # Replication wait with timeout, failure detection, and reinit
         $drsStartTime = Get-Date
         $drsTimeoutSec = 120 * 60  # 2 hours
+        $drsLastObservation = @{}
         # Get-CMDatabaseReplicationStatus LinkStatus / GlobalState / SiteState enum. Authoritative source:
         # AdminConsole SMS_ReplicationLinkSummary-LinkStatus.resx (the SAME table backs all four columns):
         #   0=Deleted, 1=Tombstoned, 2=Active, 3=Interim, 4=Initializing, 5=NotStarted(being configured),
@@ -2981,6 +3085,7 @@ else {
         $failedStates = @(6, 8, 9)  # Error, Degraded, Failed -> reinit territory
         $failedSinceTime = @{}     # per-primary tracking
         $reinitAttempted = @{}
+        $drsReinitHistory = @{}
         $reinitCooldownMin = 10
         $sleepSeconds = 30
 
@@ -3015,17 +3120,55 @@ else {
                 $drsElapsedMin = [int]($drsElapsed / 60)
 
                 if ($drsElapsed -ge $drsTimeoutSec) {
-                    Write-DscStatus "DRS replication wait timed out after ${drsElapsedMin}m. Proceeding anyway." -MachineName $PSVM.VmName
-                    $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
-                    $Configuration.$propName.Status = 'Completed'
+                    $drsFailureReason = "DRS replication readiness for $SiteCode -> $PSSiteCode timed out after ${drsElapsedMin}m. The Primary is NOT ready; inspect DRSReadinessFailure.json and both sites' rcmctrl.log."
+                    $Configuration.$propName.Status = 'Error'
+                    $Configuration.$propName.ReplicationVerified = $false
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+                    $Configuration.InstallSCCM.Status = 'Error'
+                    $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-                    continue
+                    try {
+                        [ordered]@{
+                            CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+                            SourceSite = $SiteCode
+                            TargetSite = $PSSiteCode
+                            Primary = $PSVM.VmName
+                            ElapsedSeconds = $drsElapsed
+                            Error = $drsFailureReason
+                            LastObservations = $drsLastObservation
+                        } | ConvertTo-Json -Depth 6 -ErrorAction Stop |
+                            Set-Content -LiteralPath (Join-Path $LogPath 'DRSReadinessFailure.json') -Encoding UTF8 -ErrorAction Stop
+                    }
+                    catch { Write-DscStatus "DRS readiness failure snapshot could not be written: $($_.Exception.Message)" -Warning }
+                    Write-DscStatus $drsFailureReason -Failure -MachineName $PSVM.VmName
+                    throw $drsFailureReason
                 }
 
                 # Wait for replication ready
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+                $initializationPercent = $null
+                $percentageError = ''
+                try {
+                    $initializationPercent = ConvertTo-MemLabsDrsInitializationPercent -Value $replicationStatus.GlobalInitPercentage
+                }
+                catch {
+                    $percentageError = $_.Exception.Message
+                    Write-DscStatus "DRS initialization percentage was NOT measured: $percentageError. The 100-percent recovery gate is suppressed." -Warning -MachineName $PSVM.VmName
+                }
+                $drsLastObservation[$PSVM.VmName] = [ordered]@{
+                    CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+                    StatusReturned = $null -ne $replicationStatus
+                    LinkStatus = $replicationStatus.LinkStatus
+                    CasToPrimaryGlobal = $replicationStatus.Site1ToSite2GlobalState
+                    PrimaryToCasGlobal = $replicationStatus.Site2ToSite1GlobalState
+                    PrimaryToCasSite = $replicationStatus.Site2ToSite1SiteState
+                    GlobalInitPercentage = $replicationStatus.GlobalInitPercentage
+                    InitializationPercent = $initializationPercent
+                    PercentageError = $percentageError
+                    SqlHealth = $null
+                    Reinitialization = $drsReinitHistory[$PSVM.VmName]
+                }
 
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
                     $linkName = $stateMap[[int]$replicationStatus.LinkStatus]; if (-not $linkName) { $linkName = "$($replicationStatus.LinkStatus)" }
@@ -3039,12 +3182,14 @@ else {
                     # ReplicationActive (125 child / 225 CAS) and there are no failed sends for the primary, the
                     # link is functionally Active and we complete now, regardless of the stale summary.
                     $sqlHealth = Test-DrsLinkHealthyViaSql -CasSqlDataSource $casSqlDataSource -CasDbName $casDbName -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode -ActiveStatuses $drsActiveStatuses
+                    $drsLastObservation[$PSVM.VmName].SqlHealth = $sqlHealth
                     if ($sqlHealth.Healthy) {
                         Write-DscStatus "Replication link is Active per SQL ground truth (ServerData: $SiteCode=$($sqlHealth.CasStatus), $PSSiteCode=$($sqlHealth.PriStatus); 0 failed sends) - the monitoring summary still lags (Link=$linkName, CAS->PRI=$g12Name, PRI->CAS=$g21Name, Site=$s21Name) (${drsElapsedMin}m elapsed)" -MachineName $PSVM.VmName
                         Write-DscStatus "$SiteCode -> $PSSiteCode replication link Active (SQL ground truth)"
                         $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                         $propName = "PSReadyToUse" + $PSVM.VmName
                         $Configuration.$propName.Status = 'Completed'
+                        $Configuration.$propName.ReplicationVerified = $true
                         $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                         Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                         continue
@@ -3072,22 +3217,34 @@ else {
                         if ($failedMin -ge $reinitCooldownMin -and -not $reinitAttempted[$PSVM.VmName]) {
                             $reinitAttempted[$PSVM.VmName] = $true
                             Write-DscStatus "DRS link has been failed for $failedMin minutes. Attempting reinitialization via SMS_ReplicationGroup.InitializeData..." -MachineName $PSVM.VmName
+                            $recovery = [ordered]@{
+                                AttemptedAtUtc = [datetime]::UtcNow.ToString('o')
+                                Groups = @(); Requests = @(); Error = ''
+                            }
+                            $drsReinitHistory[$PSVM.VmName] = $recovery
+                            $drsLastObservation[$PSVM.VmName].Reinitialization = $recovery
                             try {
-                                $failedGroups = Get-WmiObject -Namespace "root\sms\site_$SiteCode" -Class SMS_ReplicationGroup `
-                                    -Filter "SiteCode1 = '$SiteCode' AND SiteCode2 = '$PSSiteCode' AND Status != 2"
-                                if ($failedGroups) {
+                                # Group.Status is global catalog data, not the per-link failure state.
+                                $failedGroups = @(Get-MemLabsFailedDrsLinkGroups -CasSqlDataSource $casSqlDataSource `
+                                    -CasDbName $casDbName -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode)
+                                $recovery.Groups = $failedGroups
+                                if ($failedGroups.Count) {
                                     foreach ($group in $failedGroups) {
-                                        Write-DscStatus "Reinitializing replication group '$($group.ReplicationGroup)' (ID=$($group.ID))..." -MachineName $PSVM.VmName
-                                        $result = ([wmiclass]"\\.\root\sms\site_$($SiteCode):SMS_ReplicationGroup").InitializeData($group.ID, $SiteCode, $PSSiteCode)
-                                        Write-DscStatus "InitializeData result for group '$($group.ReplicationGroup)': ReturnValue=$($result.ReturnValue)" -MachineName $PSVM.VmName
+                                        $remainingRecoverySeconds = [math]::Floor($drsTimeoutSec - ((Get-Date) - $drsStartTime).TotalSeconds)
+                                        if ($remainingRecoverySeconds -le 0) { throw 'DRS deadline reached before submitting another recovery request.' }
+                                        $request = Invoke-MemLabsDrsGroupReinitialization -Group $group -CasSiteCode $SiteCode -PriSiteCode $PSSiteCode `
+                                            -OperationTimeoutSeconds ([int][math]::Min(60, $remainingRecoverySeconds))
+                                        $recovery.Requests += $request
+                                        Write-DscStatus "InitializeData accepted '$($group.ReplicationGroup)' (ID=$($group.ID)) for $SiteCode -> $PSSiteCode. This is a recovery request, not verified readiness; waiting for the link to become Active." -MachineName $PSVM.VmName
                                     }
                                 }
                                 else {
-                                    Write-DscStatus "No failed replication groups found via WMI. Link may recover on its own." -MachineName $PSVM.VmName
+                                    Write-DscStatus "No current failed replication groups were measured for $SiteCode -> $PSSiteCode in SQL; no InitializeData request was submitted. The readiness gate remains in place." -Warning -MachineName $PSVM.VmName
                                 }
                             }
                             catch {
-                                Write-DscStatus "Failed to reinitialize DRS link: $_. Will continue waiting." -MachineName $PSVM.VmName
+                                $recovery.Error = $_.Exception.Message
+                                Write-DscStatus "DRS recovery failed: $($recovery.Error). Readiness is NOT inferred from this failure; evidence is retained for the deadline capture." -Warning -MachineName $PSVM.VmName
                             }
                         }
                     }
@@ -3102,12 +3259,12 @@ else {
                     # The idle-stuck window must be continuous. Reset it on any
                     # progress/failure or percentage regression, not only while the
                     # summary happens to report 100%.
-                    if ($linkInFailedState -or $linkIsProgressing -or $replicationStatus.GlobalInitPercentage -lt 100) {
+                    if ($linkInFailedState -or $linkIsProgressing -or $null -eq $initializationPercent -or $initializationPercent -lt 100) {
                         $forceSendStuckSince[$PSVM.VmName] = $null
                         $forceSendLastProbe[$PSVM.VmName] = $null
                     }
 
-                    if ($replicationStatus.GlobalInitPercentage -ge 100) {
+                    if ($null -ne $initializationPercent -and $initializationPercent -ge 100) {
                         # Init complete but link not yet active - show which states are pending
                         $pending = @()
                         if ($replicationStatus.LinkStatus -ne 2) { $pending += "Link=$linkName" }
@@ -3215,9 +3372,9 @@ ORDER BY p.rows DESC
                         Write-DscStatus "$SiteCode -> $PSSiteCode replication init done, finalizing link ($pendingStr)" -NoLog -RetrySeconds $sleepSeconds
                     }
                     else {
-                        $pct = $replicationStatus.GlobalInitPercentage
-                        Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pct% (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
-                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pct%" -NoLog -RetrySeconds $sleepSeconds
+                        $pctText = if ($null -eq $initializationPercent) { "unmeasured (raw='$($replicationStatus.GlobalInitPercentage)')" } else { "$initializationPercent%" }
+                        Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pctText (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pctText" -NoLog -RetrySeconds $sleepSeconds
                     }
                 }
                 else {
@@ -3226,6 +3383,7 @@ ORDER BY p.rows DESC
                     $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
                     $Configuration.$propName.Status = 'Completed'
+                    $Configuration.$propName.ReplicationVerified = $true
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                 }

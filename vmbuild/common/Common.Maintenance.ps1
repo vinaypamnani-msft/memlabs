@@ -708,73 +708,105 @@ function Start-VMFixes {
         return $true
     }
 
-    $HashArguments = @{
-        VmName       = $vmName
-        VMDomainName = $vmDomain
-        DisplayName  = "Testing for Memlabs files"
-        ScriptBlock  = { Test-Path "C:\Staging" }
-    }
-
-    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
-    if ($result.ScriptBlockOutput -eq $false) {
-        Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success
-        return $true
-    }
-
-    # Copy DSC content into the VM so fix bodies and helper scripts are available.
-    # Output is intentionally discarded; failures surface inside Copy-ItemSafe.
-    $null = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
-
-    # Determine if we can use the batched fast-path (no fixes have DependentVMs)
     $sortedFixes = $VMFixes | Sort-Object { ConvertTo-MemLabsVersion $_.FixVersion }
-    $hasDependentVMs = $sortedFixes | Where-Object { $_.DependentVMs -and $_.DependentVMs.Count -gt 0 -and $_.AppliesToThisVM }
+    $pendingFixes = @($sortedFixes | Where-Object {
+        $_.AppliesToThisVM -and -not (Test-VMFixApplied -VMNote $vmNote -FixName $_.FixName -FixVersion $_.FixVersion)
+    })
 
-    if (-not $hasDependentVMs) {
-        # Fast path: batch all fixes into a single remote call per session type
-        $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -FreshDeployOnly:$FreshDeployOnly
-        $success = $batchResult.Success
-        $toStop = $batchResult.VMsToStop
-        $fixesAppliedCount = $batchResult.AppliedCount
-        $fixesApplicableCount = $batchResult.ApplicableCount
+    try {
+        if ($pendingFixes.Count -gt 0) {
+            # Dependencies must be ready before target startup can authenticate to the domain.
+            $dependentVMs = @($pendingFixes | ForEach-Object { $_.DependentVMs } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+            foreach ($vm in $dependentVMs) {
+                $note = Get-VMNote -VMName $vm
+                if (-not $note -or [string]::IsNullOrWhiteSpace($note.domain)) {
+                    Write-Log "$VMName`: Dependent VM '$vm' has no resolvable domain; no fixes will be applied." -Failure
+                    return $false
+                }
+                $status = Start-VMIfNotRunning -VMName $vm -VMDomain $note.domain -WaitForConnect -Quiet
+                if ($status.StartedVM) { $toStop += $vm }
+                if ($status.StartFailed -or $status.ConnectFailed) {
+                    Write-Log "$VMName`: Dependent VM '$vm' startup/readiness failed; no fixes will be applied." -Failure
+                    return $false
+                }
+            }
+
+            $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
+            if ($status.StartedVM) { $toStop += $VMName }
+            if ($status.StartFailed -or $status.ConnectFailed) {
+                Write-Log "$VMName`: VM startup/readiness failed; no maintenance preflight or fixes will run." -Failure
+                return $false
+            }
+
+            $HashArguments = @{
+                VmName       = $vmName
+                VMDomainName = $vmDomain
+                DisplayName  = "Testing for Memlabs files"
+                ScriptBlock  = { Test-Path "C:\Staging" }
+            }
+            $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
+            if (-not $result -or $result.ScriptBlockFailed) {
+                $reason = if ($result) { Protect-VMFixDiagnosticText (@($result.ErrorDetails) -join '; ') } else { 'No result was returned.' }
+                Write-Log "$VMName`: Maintenance staging inspection failed: $reason. No fixes will be applied." -Failure
+                return $false
+            }
+            if ($result.ScriptBlockOutput -eq $false) {
+                Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success
+                return $true
+            }
+
+            $copied = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+            if ($copied -isnot [bool] -or -not $copied) {
+                Write-Log "$VMName`: Maintenance DSC staging failed; no fixes will be applied." -Failure
+                return $false
+            }
+        }
+
+        # Determine if we can use the batched fast-path (no fixes have DependentVMs)
+        $hasDependentVMs = $sortedFixes | Where-Object { $_.DependentVMs -and $_.DependentVMs.Count -gt 0 -and $_.AppliesToThisVM }
+        if (-not $hasDependentVMs) {
+            $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -FreshDeployOnly:$FreshDeployOnly
+            $success = $batchResult.Success
+            $toStop += $batchResult.VMsToStop
+            $fixesAppliedCount = $batchResult.AppliedCount
+            $fixesApplicableCount = $batchResult.ApplicableCount
+        }
+        else {
+            $fixesAppliedCount = 0
+            $fixesApplicableCount = 0
+            foreach ($vmFix in $sortedFixes) {
+                if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
+                $status = Start-VMFix -vmName $VMName -vmFix $vmFix -FreshDeployOnly:$FreshDeployOnly
+                $toStop += $status.VMsToStop
+                $success = $status.Success
+                if ($status.Applied) { $fixesAppliedCount++ }
+                if (-not $success) { break }
+            }
+        }
+
+        # If deploying a new VM and fixes were applicable but none actually ran
+        # their script block, something is wrong — do not stamp the version.
+        # (If zero were applicable, e.g. OSDClient/AADClient, that's expected.)
+        if ($FreshDeployOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
+            Write-Log "$VMName`: WARNING - $fixesApplicableCount maintenance fixes were applicable but none were applied. Version will NOT be stamped." -Warning
+            $success = $false
+        }
+
+        return $success
     }
-    else {
-        # Slow path: sequential per-fix execution (needed when fixes have dependent VMs)
-        $fixesAppliedCount = 0
-        $fixesApplicableCount = 0
-        foreach ($vmFix in $sortedFixes) {
-            if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
-            $status = Start-VMFix -vmName $VMName -vmFix $vmFix -FreshDeployOnly:$FreshDeployOnly
-            $toStop += $status.VMsToStop
-            $success = $status.Success
-            if ($status.Applied) { $fixesAppliedCount++ }
-            if (-not $success) {
-                break
+    finally {
+        if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
+            foreach ($vm in $toStop | Select-Object -Unique) {
+                if ([string]::IsNullOrWhiteSpace($vm)) { continue }
+                $vmNote = Get-VMNote -VMName $vm
+                if ($vmNote.role -ne "DC") {
+                    Write-Progress2 -Activity $global:MaintenanceActivity -Status "Shutting down VM "
+                    $null = Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
+                }
             }
         }
     }
-
-    # If deploying a new VM and fixes were applicable but none actually ran
-    # their script block, something is wrong — do not stamp the version.
-    # (If zero were applicable, e.g. OSDClient/AADClient, that's expected.)
-    if ($FreshDeployOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
-        Write-Log "$VMName`: WARNING - $fixesApplicableCount maintenance fixes were applicable but none were applied. Version will NOT be stamped." -Warning
-        $success = $false
-    }
-
-    if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
-        foreach ($vm in $toStop) {
-            if ([string]::IsNullOrWhiteSpace($vm)) {
-                continue
-            }
-            $vmNote = Get-VMNote -VMName $vm
-            if ($vmNote.role -ne "DC") {
-                Write-Progress2 -Activity $global:MaintenanceActivity -Status  "Shutting down VM "
-                Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
-            }
-        }
-    }
-
-    return $success
 }
 
 function Start-VMFixesBatched {
@@ -843,7 +875,20 @@ function Start-VMFixesBatched {
     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting $VMName for batched maintenance." -force
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $VMDomain -WaitForConnect -Quiet
     if ($status.StartedVM) { $return.VMsToStop += $VMName }
-    if ($status.StartFailed) { return $return }
+    if ($status.StartFailed -or $status.ConnectFailed) {
+        Write-Log "$VMName`: VM startup/readiness failed; batched fixes will not run." -Failure
+        return $return
+    }
+
+    foreach ($fix in $applicableFixes) {
+        $preparation = $fix.PSObject.Properties['PrepareScriptBlock']
+        if (-not $preparation -or -not $preparation.Value) { continue }
+        try { $null = & $preparation.Value -VMName $VMName -VMDomain $VMDomain -VMFix $fix }
+        catch {
+            Write-Log "$VMName`: Host preparation for fix '$($fix.FixName)' failed: $($_.Exception.Message)" -Failure
+            return $return
+        }
+    }
 
     # Copy all InjectFiles upfront in one session
     $allInjectFiles = $applicableFixes | Where-Object { $_.InjectFiles } | ForEach-Object { $_.InjectFiles } | Select-Object -Unique
@@ -930,7 +975,7 @@ function Start-VMFixesBatched {
             }
         }
         catch {
-            Write-Log "$VMName`: Failed to copy InjectFiles/InjectTools for batched maintenance." -Warning
+            Write-Log "$VMName`: Failed to copy InjectFiles/InjectTools for batched maintenance: $($_.Exception.Message)" -Warning
             return $return
         }
     }
@@ -946,6 +991,7 @@ function Start-VMFixesBatched {
     # Build and execute a batched scriptblock for each session group
     # Process groups in version order of their first fix
     $sortedKeys = @($groups.Keys) | Sort-Object { ConvertTo-MemLabsVersion ($groups[$_] | Select-Object -First 1).FixVersion }
+    $providerRecoveryAttempted = $false
 
     foreach ($key in $sortedKeys) {
         $groupFixes = $groups[$key]
@@ -1061,6 +1107,7 @@ function Start-VMFixesBatched {
         # processed/stamped below, so there is no double-stamping.
         $maxGroupAttempts = 2
         $groupAttempt = 0
+        $groupRecoveryFailed = $false
         $results = @()
         while ($groupAttempt -lt $maxGroupAttempts) {
             $groupAttempt++
@@ -1116,7 +1163,8 @@ function Start-VMFixesBatched {
             }
 
             $allOk = ($results.Count -ge $groupFixes.Count) -and (@($results | Where-Object { -not $_.Success }).Count -eq 0)
-            if ($allOk -or ($groupAttempt -ge $maxGroupAttempts)) { break }
+            $consoleFailed = @($results | Where-Object { $_.FixName -eq 'Fix-Upgrade-Console' -and -not $_.Success }).Count -gt 0
+            if ($allOk -or (($groupAttempt -ge $maxGroupAttempts) -and (-not $consoleFailed -or $providerRecoveryAttempted))) { break }
 
             $failedNames = @($results | Where-Object { -not $_.Success } | ForEach-Object { $_.FixName }) -join ', '
             if (-not $failedNames) { $failedNames = '(no/partial results)' }
@@ -1138,6 +1186,24 @@ function Start-VMFixesBatched {
                     }
                 }
             }
+            if ($consoleFailed -and -not $providerRecoveryAttempted) {
+                $recovery = Repair-VMConsoleProvider -VMName $VMName -VMDomain $VMDomain `
+                    -VMDomainAccount $(if ($key -eq '__default__') { $null } else { $key })
+                if ($recovery.Attempted) {
+                    $providerRecoveryAttempted = $true
+                    if (-not $recovery.Recovered) { $groupRecoveryFailed = $true; break }
+                    $ps = Get-VmSession @sessionArgs
+                    if (-not $ps) {
+                        Write-Log "$VMName`: Could not reconnect the maintenance account after console provider recovery." -Warning
+                        $groupRecoveryFailed = $true
+                        break
+                    }
+                    # A fail-fast sibling can defer the console's first execution until the final ordinary attempt.
+                    $maxGroupAttempts = [Math]::Max($maxGroupAttempts, $groupAttempt + 1)
+                    $retryDelay = 0
+                }
+            }
+            if ($groupAttempt -ge $maxGroupAttempts) { break }
             Write-Log "$VMName`: Fix(es) did not report explicit success on attempt $groupAttempt [$failedNames]; retrying batch once in $retryDelay seconds." -Warning
             Start-Sleep -Seconds $retryDelay
         }
@@ -1177,8 +1243,10 @@ function Start-VMFixesBatched {
             }
 
             # Always pull transcript (LogOnly) so failures + slow fixes are diagnosable
-            Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript `
-                -CollectDiagnostics:(!$r.Success) -Stage "batch-result-$groupAttempt"
+            if (-not $groupRecoveryFailed) {
+                Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript `
+                    -CollectDiagnostics:(!$r.Success) -Stage "batch-result-$groupAttempt"
+            }
 
             if ($r.Success) {
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied." -force
@@ -1195,9 +1263,13 @@ function Start-VMFixesBatched {
         # runs every fix, so it is no longer just fail-fast stopping early.
         if ($results.Count -lt $groupFixes.Count) {
             $failedFix = $groupFixes[$results.Count]
-            Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
-            # Pull transcript for the fix that we suspect crashed mid-execution
-            Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
+            if ($groupRecoveryFailed) {
+                Write-Log "$VMName`: Console provider recovery failed; batch could not continue to fix '$($failedFix.FixName)'." -Warning
+            }
+            else {
+                Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
+                Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
+            }
             $groupFailedNames += $failedFix.FixName
         }
 
@@ -1272,15 +1344,16 @@ function Start-VMFix {
             if ([string]::IsNullOrWhiteSpace($vm)) { continue }
             $note = Get-VMNote -VMName $vm
             if (-not $note -or [string]::IsNullOrWhiteSpace($note.domain)) {
-                Write-Log "$VMName`: Dependent VM '$vm' has no resolvable domain (note=$($null -ne $note)); skipping start." -LogOnly -Warning
-                continue
+                Write-Log "$VMName`: Dependent VM '$vm' has no resolvable domain (note=$($null -ne $note)); fix '$fixName' will not run." -Failure
+                return $return
             }
             $status = Start-VMIfNotRunning -VMName $vm -VMDomain $note.domain -WaitForConnect -Quiet
             if ($status.StartedVM) {
                 $return.VMsToStop += $vm
             }
 
-            if ($status.StartFailed) {
+            if ($status.StartFailed -or $status.ConnectFailed) {
+                Write-Log "$VMName`: Dependent VM '$vm' startup/readiness failed; fix '$fixName' will not run." -Failure
                 return $return
             }
         }
@@ -1292,10 +1365,20 @@ function Start-VMFix {
         $return.VMsToStop += $VMName
     }
 
-    if ($status.StartFailed) {
+    if ($status.StartFailed -or $status.ConnectFailed) {
+        Write-Log "$VMName`: VM startup/readiness failed; fix '$fixName' will not run." -Failure
         return $return
     }
     
+    $preparation = $vmFix.PSObject.Properties['PrepareScriptBlock']
+    if ($preparation -and $preparation.Value) {
+        try { $null = & $preparation.Value -VMName $VMName -VMDomain $vmDomain -VMFix $vmFix }
+        catch {
+            Write-Log "$VMName`: Host preparation for fix '$fixName' failed: $($_.Exception.Message)" -Failure
+            return $return
+        }
+    }
+
     # Apply Fix
     $HashArguments = @{
         VmName       = $VMName
@@ -1396,7 +1479,7 @@ function Start-VMFix {
             }
         }
         catch {
-            Write-Log "$VMName`: Failed to copy files for fix '$fixName' ($fixVersion)." -Warning
+            Write-Log "$VMName`: Failed to copy files for fix '$fixName' ($fixVersion): $($_.Exception.Message)" -Warning
             $return.Success = $false
             return $return
         }
@@ -1423,6 +1506,7 @@ function Start-VMFix {
     $rawOut = $null
     $isStructured = $false
     $maxFixAttempts = 2
+    $providerRecoveryAttempted = $false
     for ($fixAttempt = 1; $fixAttempt -le $maxFixAttempts; $fixAttempt++) {
         $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
 
@@ -1467,8 +1551,18 @@ function Start-VMFix {
         Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount `
             -CollectDiagnostics:(!$fixSucceeded) -Stage "attempt-$fixAttempt"
 
-        if ($fixSucceeded -or ($fixAttempt -ge $maxFixAttempts)) { break }
+        if ($fixSucceeded) { break }
         $retryDelay = if ($executionTimeout -gt 0) { 60 } else { 5 }
+        if ($fixName -eq 'Fix-Upgrade-Console' -and -not $providerRecoveryAttempted) {
+            $recovery = Repair-VMConsoleProvider -VMName $VMName -VMDomain $vmDomain -VMDomainAccount $vmFix.RunAsAccount
+            if ($recovery.Attempted) {
+                $providerRecoveryAttempted = $true
+                if (-not $recovery.Recovered) { break }
+                $maxFixAttempts = [Math]::Max($maxFixAttempts, $fixAttempt + 1)
+                $retryDelay = 0
+            }
+        }
+        if ($fixAttempt -ge $maxFixAttempts) { break }
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) did not report success on attempt $fixAttempt; retrying once in $retryDelay seconds." -Warning
         Start-Sleep -Seconds $retryDelay
     }
@@ -1487,6 +1581,183 @@ function Start-VMFix {
     }
 
     return $return
+}
+
+function Get-VMConsoleProviderHealthScriptBlock {
+    $sourcePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'DSC\phases\Upgrade-Console.ps1'
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$null, [ref]$parseErrors)
+    if ($parseErrors.Count) { throw "Console provider probe source does not parse: $($parseErrors -join '; ')" }
+    $definitions = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ConsoleSetupInfo'
+            }, $true))
+    if ($definitions.Count -ne 1) { throw "Expected one Get-ConsoleSetupInfo definition in $sourcePath" }
+
+    $probe = {
+        $identification = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop
+        $siteCode = "$($identification.'Site Code')"
+        if (-not $siteCode) { throw 'Console provider probe found no installed Site Code.' }
+        $setup = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
+        $directory = "$($setup.'Installation Directory')"
+        if (-not $directory) { throw 'Console provider probe found no site installation directory.' }
+        $providerLog = Join-Path $directory 'Logs\SMSProv.log'
+        $state = [pscustomobject]@{
+            Ready = $false; ShutdownDetected = $false; Error = ''; Evidence = ''; Diagnostics = @()
+        }
+        $previousLines = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $canCompareLog = $true
+        try {
+            if (Test-Path -LiteralPath $providerLog -PathType Leaf -ErrorAction Stop) {
+                foreach ($line in @(Get-Content -LiteralPath $providerLog -Tail 120 -ErrorAction Stop)) {
+                    [void]$previousLines.Add("$line")
+                }
+            }
+        }
+        catch {
+            $canCompareLog = $false
+            $state.Diagnostics += "Could not snapshot ${providerLog}: $($_.Exception.Message)"
+        }
+        try {
+            $info = Get-ConsoleSetupInfo -SiteCode $siteCode
+            [version]$version = $null
+            if (-not [version]::TryParse("$($info.FileVersion)".Trim(), [ref]$version) -or $version.Build -le 0) {
+                throw 'SMS_ConsoleSetupInfo returned no valid console extension version.'
+            }
+            $state.Ready = $true
+        }
+        catch {
+            $failure = $_
+            $state.Error = $failure.Exception.Message
+            $pattern = '(?i)\b(0x80041033|WBEM_E_SHUTTING_DOWN)\b'
+            $state.ShutdownDetected = $failure.FullyQualifiedErrorId -match $pattern -or
+                "$($failure.ErrorDetails)" -match $pattern
+            $exception = $failure.Exception
+            while ($exception) {
+                if ($exception.HResult -eq -2147217357 -or $exception.Message -match $pattern) {
+                    $state.ShutdownDetected = $true
+                }
+                $exception = $exception.InnerException
+            }
+            if ($state.ShutdownDetected) {
+                $state.Evidence = 'SMS_ConsoleSetupInfo query returned WBEM_E_SHUTTING_DOWN (0x80041033).'
+            }
+            elseif ($canCompareLog) {
+                try {
+                    # CIM can expose only E_FAIL; require a new, class-specific provider-log error.
+                    $newErrors = @(Get-Content -LiteralPath $providerLog -Tail 120 -ErrorAction Stop |
+                        Where-Object {
+                            -not $previousLines.Contains("$_") -and
+                            $_ -match '(?i)\bSMS_ConsoleSetupInfo\b.*\b0x80041033\b'
+                        })
+                    if ($newErrors.Count) {
+                        $state.ShutdownDetected = $true
+                        $state.Evidence = "$($newErrors[-1])"
+                    }
+                }
+                catch {
+                    $state.Diagnostics += "Could not inspect fresh ${providerLog} evidence: $($_.Exception.Message)"
+                }
+            }
+        }
+        return $state
+    }
+    return [scriptblock]::Create("$($definitions[0].Extent.Text)`n$probe")
+}
+
+function Repair-VMConsoleProvider {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$VMDomain,
+        [string]$VMDomainAccount,
+        [ValidateRange(1, 600)][int]$ReadyTimeoutSeconds = 300
+    )
+
+    $recovery = [pscustomobject]@{ Attempted = $false; Recovered = $false }
+    try { $probeBlock = Get-VMConsoleProviderHealthScriptBlock }
+    catch {
+        Write-Log "$VMName`: Cannot prepare console provider recovery probe: $($_.Exception.Message)" -Warning
+        return $recovery
+    }
+    $probeArguments = @{
+        VmName = $VMName; VmDomainName = $VMDomain; ScriptBlock = $probeBlock
+        DisplayName = 'Probe console SMS Provider'; AsJob = $true; TimeoutSeconds = 45
+        SessionMaxRetries = 1; SuppressLog = $true; FailOnRemoteError = $true
+    }
+    if ($VMDomainAccount) { $probeArguments.VmDomainAccount = $VMDomainAccount }
+    $readyWatch = $null
+    $lastError = ''
+    while ($true) {
+        if ($readyWatch) {
+            $remaining = $ReadyTimeoutSeconds - $readyWatch.Elapsed.TotalSeconds
+            if ($remaining -le 0) { break }
+            $probeArguments.TimeoutSeconds = [int][Math]::Min(45, [Math]::Ceiling($remaining))
+        }
+        $probe = Invoke-VmCommand @probeArguments
+        $states = @($probe.ScriptBlockOutput)
+        $state = $null
+        if (-not $probe -or $probe.ScriptBlockFailed) {
+            $lastError = "Console provider probe failed: $($probe.ErrorDetails -join '; ')"
+        }
+        elseif ($states.Count -ne 1 -or $states[0].Ready -isnot [bool] -or
+            $states[0].ShutdownDetected -isnot [bool] -or ($states[0].Ready -and $states[0].ShutdownDetected) -or
+            (-not $states[0].Ready -and [string]::IsNullOrWhiteSpace("$($states[0].Error)")) -or
+            ($states[0].ShutdownDetected -and [string]::IsNullOrWhiteSpace("$($states[0].Evidence)"))) {
+            $lastError = 'Console provider probe returned an invalid health result.'
+            Write-Log "$VMName`: Console provider probe returned an invalid health result; refusing further recovery." -Warning
+            break
+        }
+        else {
+            $state = $states[0]
+            foreach ($diagnostic in @($state.Diagnostics)) {
+                Write-Log "$VMName`: $(Protect-VMFixDiagnosticText $diagnostic)" -Warning -LogOnly
+            }
+            if ($state.Ready) {
+                if ($recovery.Attempted) {
+                    $recovery.Recovered = $true
+                    Write-Log "$VMName`: Console provider recovered after one graceful reboot; SMS_ConsoleSetupInfo returned a valid extension version. Retrying the console fix." -Success
+                }
+                return $recovery
+            }
+            $lastError = "$($state.Error)"
+        }
+        if (-not $recovery.Attempted) {
+            if (-not $state -or -not $state.ShutdownDetected) {
+                Write-Log "$VMName`: Console provider shutdown was not confirmed; retaining the normal maintenance retry. $(Protect-VMFixDiagnosticText $lastError)" -Warning
+                return $recovery
+            }
+            $recovery.Attempted = $true
+            Write-Log "$VMName`: Confirmed console provider shutdown: $(Protect-VMFixDiagnosticText $state.Evidence). Requesting the single permitted graceful reboot; hard power-off is prohibited." -Warning
+            Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName 'Fix-Upgrade-Console' `
+                -VMDomainAccount $VMDomainAccount -Stage 'provider-recovery-before-reboot'
+            $restartWatch = [Diagnostics.Stopwatch]::StartNew()
+            $restartBudget = [TimeSpan]::FromSeconds(180 + $ReadyTimeoutSeconds)
+            try {
+                $restarted = Restart-VM2Smart -Name $VMName -Reason 'Console provider WBEM_E_SHUTTING_DOWN recovery' `
+                    -GracefulTimeoutSeconds 180 -ShutdownNoProgressSeconds 300 -Stopwatch $restartWatch -Timespan $restartBudget
+            }
+            catch {
+                Write-Log "$VMName`: Console provider graceful recovery restart failed: $(Protect-VMFixDiagnosticText $_.Exception.Message). No hard power-off or second reboot will be attempted." -Warning
+                return $recovery
+            }
+            if (-not $restarted) {
+                Write-Log "$VMName`: Console provider recovery could not gracefully restart the VM; no hard power-off or second reboot will be attempted." -Warning
+                return $recovery
+            }
+            $readyWatch = [Diagnostics.Stopwatch]::StartNew()
+            continue
+        }
+        Write-Log "$VMName`: Waiting for console provider readiness after reboot: $(Protect-VMFixDiagnosticText $lastError)" -LogOnly
+        $delay = [int][Math]::Min(5, [Math]::Ceiling($ReadyTimeoutSeconds - $readyWatch.Elapsed.TotalSeconds))
+        if ($delay -gt 0) { Start-Sleep -Seconds $delay }
+    }
+    if ($recovery.Attempted) {
+        Write-Log "$VMName`: Console provider recovery failed after one reboot (readiness budget ${ReadyTimeoutSeconds}s); no further reboot will be attempted. $(Protect-VMFixDiagnosticText $lastError)" -Warning
+        Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName 'Fix-Upgrade-Console' `
+            -VMDomainAccount $VMDomainAccount -Stage 'provider-recovery-failed'
+    }
+    return $recovery
 }
 
 function Start-VMIfNotRunning {
@@ -1527,9 +1798,11 @@ function Start-VMIfNotRunning {
             $return.StartedVM = $true
             if ($WaitForConnect.IsPresent) {
                 Write-Log -verbose "Waiting to connect to $vmName"
-                $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes 2 -Quiet
+                # The existing PSDirect recovery gate needs three failures and at least three minutes.
+                $connectTimeoutMinutes = 10
+                $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $VMDomain -TimeoutMinutes $connectTimeoutMinutes -Quiet
                 if (-not $connected) {
-                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Could not connect to the VM after waiting for 2 minutes."
+                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Could not connect to the VM within the $connectTimeoutMinutes-minute maintenance readiness wait."
                     $return.ConnectFailed = $true
                 }
             }
@@ -1552,7 +1825,8 @@ function Protect-VMFixDiagnosticText {
     $safe = "$Text" -replace '(?i)(-Token\s+)(?:"[^"]*"|\S+)', '$1[REDACTED]'
     $safe = $safe -replace '(?i)([?&](?:sig|token|password|secret|access_token)=)[^&\s"]+', '$1[REDACTED]'
     $safe = $safe -replace '(?i)(\b(?:password|pwd|access_token|client_secret)\s*[:=]\s*)(?:"[^"]*"|''[^'']*''|[^;\s,]+)', '$1[REDACTED]'
-    $safe = $safe -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@', '$1[REDACTED]@'
+    # Bound scheme starts so long MSI lines do not cause quadratic scans on .NET Framework.
+    $safe = $safe -replace '(?<![a-zA-Z0-9+.-])([0-9+.-]*[a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@', '$1[REDACTED]@'
     if ($safe.Length -gt $MaximumLength) { return $safe.Substring(0, $MaximumLength) + ' [truncated]' }
     return $safe
 }
@@ -1561,14 +1835,152 @@ function Get-VMFixExecutionTimeout {
     param([string]$FixName)
     switch ($FixName) {
         'Fix-ODBC18' { return 1800 }
+        'Fix-EdgeServicing' { return 1200 }
         'Fix-Upgrade-Console' { return 3600 }
         'Fix-CMFullAdmin' { return 600 }
         default { return 0 }
     }
 }
 
+function Get-VMEdgeFailureEvidence {
+    param([string[]]$TempPaths = @())
+
+    $evidence = [ordered]@{
+        BrowserFiles = @(); RegistryPaths = @(); Services = @(); Tasks = @()
+        Processes = @(); Logs = @(); LogInventory = @(); Errors = @()
+    }
+    foreach ($directory in @(${env:ProgramFiles(x86)}, $env:ProgramFiles) | Where-Object { $_ } | Select-Object -Unique) {
+        $application = Join-Path $directory 'Microsoft\Edge\Application'
+        $browserPaths = @(Join-Path $application 'msedge.exe'; Join-Path $application 'new_msedge.exe')
+        try {
+            if (Test-Path -LiteralPath $application -PathType Container -ErrorAction Stop) {
+                $versions = @(Get-ChildItem -LiteralPath $application -Directory -ErrorAction Stop |
+                    Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+                    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 4)
+                $browserPaths += @($versions | ForEach-Object { Join-Path $_.FullName 'msedge.dll' })
+            }
+        }
+        catch { $evidence.Errors += "Edge payload inventory ${application}: $($_.Exception.Message)" }
+        foreach ($path in $browserPaths) {
+            try {
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop)) {
+                    $evidence.BrowserFiles += [pscustomobject]@{ Path = $path; Exists = $false }
+                    continue
+                }
+                $file = Get-Item -LiteralPath $path -ErrorAction Stop
+                $evidence.BrowserFiles += [pscustomobject]@{
+                    Path = $path; Exists = $true; Bytes = $file.Length; LastWriteTimeUtc = "$($file.LastWriteTimeUtc)"
+                    ProductVersion = "$($file.VersionInfo.ProductVersion)"; FileVersion = "$($file.VersionInfo.FileVersion)"
+                }
+            }
+            catch { $evidence.Errors += "Edge binary ${path}: $($_.Exception.Message)" }
+        }
+    }
+    foreach ($root in @('HKLM:\SOFTWARE', 'HKLM:\SOFTWARE\WOW6432Node')) {
+        $evidence.RegistryPaths += [pscustomobject]@{ Path = "$root\Microsoft\Edge\BLBeacon"; Names = @('version') }
+        $evidence.RegistryPaths += [pscustomobject]@{
+            Path = "$root\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}"
+            Names = @('pv', 'name', 'location')
+        }
+        $evidence.RegistryPaths += [pscustomobject]@{
+            Path = "$root\Microsoft\EdgeUpdate\ClientState\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}"
+            Names = @('InstallerResult', 'InstallerError', 'InstallerExtraCode1')
+        }
+    }
+    try {
+        $services = @(Get-Service -ErrorAction Stop | Where-Object {
+                $_.Name -in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService') -or
+                $_.Name -like 'MicrosoftEdgeUpdate*'
+            } | Select-Object -First 8)
+        $evidence.Services = @($services | Select-Object Name,
+            @{ Name = 'Status'; Expression = { "$($_.Status)" } },
+            @{ Name = 'StartType'; Expression = { "$($_.StartType)" } })
+        foreach ($service in $services) {
+            $evidence.RegistryPaths += [pscustomobject]@{
+                Path = "HKLM:\SYSTEM\CurrentControlSet\Services\$($service.Name)"
+                Names = @('ImagePath', 'Start', 'DelayedAutoStart')
+            }
+        }
+    }
+    catch { $evidence.Errors += "Edge updater services: $($_.Exception.Message)" }
+    try {
+        $evidence.Tasks = @(Get-ScheduledTask -ErrorAction Stop |
+            Where-Object TaskName -Like 'MicrosoftEdgeUpdate*' |
+            Select-Object -First 8 TaskName, TaskPath, @{ Name = 'State'; Expression = { "$($_.State)" } })
+    }
+    catch { $evidence.Errors += "Edge updater tasks: $($_.Exception.Message)" }
+    try {
+        $evidence.Processes = @(Get-Process -ErrorAction Stop |
+            Where-Object { $_.ProcessName -in @('msedge', 'MicrosoftEdgeUpdate', 'MicrosoftEdgeUpdateSetup', 'setup') } |
+            Sort-Object ProcessName | Select-Object -First 20 Id, ProcessName,
+                @{ Name = 'Path'; Expression = { Protect-VMFixDiagnosticText "$($_.Path)" 500 } })
+    }
+    catch { $evidence.Errors += "Edge processes: $($_.Exception.Message)" }
+
+    $logPaths = @('C:\staging\Fix\EdgeServicing-MSI.log')
+    if ($env:ProgramData) {
+        $updaterRoot = Join-Path $env:ProgramData 'Microsoft\EdgeUpdate\Log'
+        $logPaths += @(Join-Path $updaterRoot 'MicrosoftEdgeUpdate.log'; Join-Path $updaterRoot 'MicrosoftEdgeUpdate.log.bak')
+    }
+    else { $evidence.Errors += 'ProgramData is unavailable; Edge updater logs could not be located.' }
+    $setupRoots = @($TempPaths)
+    if ($env:SystemRoot) {
+        $setupRoots += @(Join-Path $env:SystemRoot 'SystemTemp'
+            Join-Path $env:SystemRoot 'System32\config\systemprofile\AppData\Local\Temp')
+    }
+    $setupLogs = @(foreach ($directory in @($setupRoots | Select-Object -Unique)) {
+            try {
+                if (Test-Path -LiteralPath $directory -PathType Container -ErrorAction Stop) {
+                    Get-ChildItem -LiteralPath $directory -File -Filter 'msedge_installer*.log' -ErrorAction Stop
+                }
+            }
+            catch { $evidence.Errors += "Edge setup log inventory ${directory}: $($_.Exception.Message)" }
+        })
+    $logPaths += @($setupLogs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 3 -ExpandProperty FullName)
+    foreach ($path in @($logPaths | Select-Object -Unique | Select-Object -First 6)) {
+        $inventory = [ordered]@{ Path = $path; Exists = $null; Collected = $false; Bytes = 0; Truncated = $false; Error = '' }
+        try {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop)) {
+                $inventory.Exists = $false
+                $inventory.Error = 'File not found; it may not have been created for this attempt.'
+                continue
+            }
+            $inventory.Exists = $true
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            $inventory.Bytes = $file.Length
+            if ($file.Length -le 64KB) {
+                $content = [string](Get-Content -LiteralPath $path -Raw -ErrorAction Stop)
+            }
+            else {
+                $content = @(Get-Content -LiteralPath $path -Tail 2000 -ErrorAction Stop) -join "`r`n"
+                $inventory.Truncated = $true
+            }
+            $protected = Protect-VMFixDiagnosticText $content ([int]::MaxValue)
+            if ($protected.Length -gt 64KB) {
+                $protected = $protected.Substring($protected.Length - 64KB)
+                $inventory.Truncated = $true
+            }
+            $evidence.Logs += [pscustomobject]@{
+                Path = $path; Bytes = $file.Length; LastWriteTimeUtc = "$($file.LastWriteTimeUtc)"
+                Content = $protected; ContentTruncated = [bool]$inventory.Truncated; CaptureCharacterLimit = 64KB
+                Tail = @($protected -split '\r?\n' | Select-Object -Last 60 |
+                    ForEach-Object { Protect-VMFixDiagnosticText $_ 500 })
+                TailLimit = 60
+            }
+            $inventory.Collected = $true
+        }
+        catch {
+            $inventory.Error = Protect-VMFixDiagnosticText $_.Exception.Message 600
+            $evidence.Errors += "Edge log ${path}: $($inventory.Error)"
+        }
+        finally { $evidence.LogInventory += [pscustomobject]$inventory }
+    }
+    return [pscustomobject]$evidence
+}
+
 function Get-VMFixDiagnosticScriptBlock {
     $redactor = ${function:Protect-VMFixDiagnosticText}.ToString()
+    $edgeCollector = ${function:Get-VMEdgeFailureEvidence}.ToString()
     $collector = {
         $ErrorActionPreference = 'Stop'
         $errors = [System.Collections.Generic.List[string]]::new()
@@ -1717,13 +2129,22 @@ function Get-VMFixDiagnosticScriptBlock {
         }
         $paths = [System.Collections.Generic.List[string]]::new()
         $fixedLogs = @("C:\staging\Fix\$FixName.result.json", 'C:\staging\DSC\DSC_Log.log')
-        if ($FixName -ne 'Fix-ODBC18') { $fixedLogs += @('C:\ConfigMgrAdminUISetup.log', 'C:\ConfigMgrAdminUISetupVerbose.log') }
+        if ($FixName -notin @('Fix-ODBC18', 'Fix-EdgeServicing')) { $fixedLogs += @('C:\ConfigMgrAdminUISetup.log', 'C:\ConfigMgrAdminUISetupVerbose.log') }
         foreach ($path in $fixedLogs) {
             if (Test-Path -LiteralPath $path -PathType Leaf) { $paths.Add($path) }
         }
         $tempPaths = @([IO.Path]::GetTempPath(), 'C:\Windows\Temp')
         $tempPaths += @(Get-ChildItem -LiteralPath 'C:\Users' -Directory -Filter 'vmbuildadmin*' -ErrorAction SilentlyContinue |
             Select-Object -First 4 | ForEach-Object { Join-Path $_.FullName 'AppData\Local\Temp' })
+        if ($FixName -eq 'Fix-EdgeServicing') {
+            $edge = Get-VMEdgeFailureEvidence -TempPaths $tempPaths
+            $snapshot.Edge = $edge | Select-Object BrowserFiles, Services, Tasks, Processes, LogInventory
+            $snapshot.Logs += @($edge.Logs)
+            foreach ($registry in @($edge.RegistryPaths)) {
+                $snapshot.Registry += Read-DiagnosticRegistry -Path $registry.Path -Names $registry.Names
+            }
+            foreach ($errorText in @($edge.Errors)) { $errors.Add($errorText) }
+        }
         $msiLogs = @(foreach ($tempPath in @($tempPaths | Select-Object -Unique)) {
                 if (Test-Path -LiteralPath $tempPath) {
                     Get-ChildItem -LiteralPath $tempPath -File -Filter 'memlabs-msodbcsql-*.log' -ErrorAction SilentlyContinue
@@ -1733,7 +2154,7 @@ function Get-VMFixDiagnosticScriptBlock {
             foreach ($file in @($msiLogs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 7)) { $paths.Add($file.FullName) }
         }
         $installDirectory = $siteSetup.Values.'Installation Directory'
-        if ($installDirectory -and $FixName -ne 'Fix-ODBC18') {
+        if ($installDirectory -and $FixName -notin @('Fix-ODBC18', 'Fix-EdgeServicing')) {
             foreach ($name in @('SMSProv.log', 'hman.log', 'sitecomp.log')) {
                 $path = Join-Path $installDirectory "Logs\$name"
                 if (Test-Path -LiteralPath $path -PathType Leaf) { $paths.Add($path) }
@@ -1758,15 +2179,25 @@ function Get-VMFixDiagnosticScriptBlock {
             foreach ($log in $snapshot.Logs) {
                 $log.Tail = @($log.Tail | Select-Object -Last 10 | ForEach-Object { Protect-VMFixDiagnosticText $_ 200 })
                 $log.TailLimit = 10
+                if ($log.PSObject.Properties['Content'] -and $log.Content.Length -gt 8KB) {
+                    $log.Content = $log.Content.Substring($log.Content.Length - 8KB)
+                    $log.ContentTruncated = $true
+                    $log.CaptureCharacterLimit = 8KB
+                    if ($snapshot.Edge) {
+                        foreach ($inventory in @($snapshot.Edge.LogInventory | Where-Object { $_.Path -eq $log.Path })) {
+                            $inventory.Truncated = $true
+                        }
+                    }
+                }
             }
             $snapshot.TransferTruncated = $true
-            $snapshot.CollectionErrors += 'Log tails reduced to fit the 512 KB transfer limit.'
+            $snapshot.CollectionErrors += 'Log tails and product-log content reduced to fit the 512 KB transfer limit.'
             $json = $snapshot | ConvertTo-Json -Depth 9 -Compress
             if ($json.Length -gt 512KB) { throw 'Maintenance diagnostic context exceeded the 512 KB transfer limit.' }
         }
         return $json
     }
-    return [scriptblock]::Create("param([string]`$FixName, [string]`$Stage)`nfunction Protect-VMFixDiagnosticText {`n$redactor`n}`n$($collector.ToString())")
+    return [scriptblock]::Create("param([string]`$FixName, [string]`$Stage)`nfunction Protect-VMFixDiagnosticText {`n$redactor`n}`nfunction Get-VMEdgeFailureEvidence {`n$edgeCollector`n}`n$($collector.ToString())")
 }
 
 function Save-VMFixFailureEvidence {
@@ -2018,24 +2449,36 @@ function Get-VMFixTranscript {
     if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
     try {
         $r = Invoke-VmCommand @args
-        if ($r -and $r.ScriptBlockOutput) {
-            Write-Log "$VMName`: ===== Transcript [$FixName] BEGIN =====" -LogOnly
-            foreach ($line in @($r.ScriptBlockOutput)) {
-                if ($null -ne $line -and "$line" -ne "") {
+        if (-not $r -or $r.ScriptBlockFailed) {
+            $detail = if ($r -and $r.ErrorDetails) { @($r.ErrorDetails) -join '; ' }
+            elseif ($r) { 'Remote command reported failure without error details.' }
+            else { 'Remote command returned no result.' }
+            Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $(Protect-VMFixDiagnosticText $detail)" -LogOnly -Warning
+        }
+        else {
+            $lines = @($r.ScriptBlockOutput | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+            if ($lines.Count -eq 0) {
+                Write-Log "$VMName`: [$FixName] Transcript unavailable or empty." -LogOnly -Warning
+            }
+            else {
+                Write-Log "$VMName`: ===== Transcript [$FixName] BEGIN =====" -LogOnly
+                foreach ($line in $lines) {
                     Write-Log -LogOnly "$VMName`: [$FixName] $(Protect-VMFixDiagnosticText -Text "$line")"
                 }
-                else {
-                    Write-Log "$VMName`: [$FixName] Transcript unavailable, empty, or timed out: $($r.ErrorDetails)" -LogOnly -Warning
-                }
+                Write-Log "$VMName`: ===== Transcript [$FixName] END =====" -LogOnly
             }
-            Write-Log "$VMName`: ===== Transcript [$FixName] END =====" -LogOnly
-        }
-        if ($CollectDiagnostics) {
-            Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName $FixName -VMDomainAccount $VMDomainAccount -Stage $Stage
         }
     }
     catch {
-        Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $_" -LogOnly -Warning
+        Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $(Protect-VMFixDiagnosticText "$_")" -LogOnly -Warning
+    }
+    if ($CollectDiagnostics) {
+        try {
+            Save-VMFixFailureEvidence -VMName $VMName -VMDomain $VMDomain -FixName $FixName -VMDomainAccount $VMDomainAccount -Stage $Stage
+        }
+        catch {
+            Write-Log "$VMName`: Failed to collect evidence for [$FixName]: $(Protect-VMFixDiagnosticText "$_")" -LogOnly -Warning
+        }
     }
 }
 
@@ -2050,7 +2493,8 @@ function Get-VMFixResultMarker {
         SEPARATE call from the fix execution so that pipeline-stream leakage from
         the fix body (cmdlet output that turns the scriptblock's return value into
         an array and coerces to a bogus Success=$true) can never affect the
-        verdict. No marker == the fix did NOT report explicit success.
+        verdict. Failed reads are rejected even if they return valid partial JSON.
+        No marker == the fix did NOT report explicit success.
     #>
     [CmdletBinding()]
     param (
@@ -2062,7 +2506,7 @@ function Get-VMFixResultMarker {
     $sb = {
         param($name)
         $p = "C:\staging\Fix\$name.result.json"
-        if (Test-Path $p) { Get-Content -Path $p -Raw -ErrorAction SilentlyContinue }
+        if (Test-Path $p) { Get-Content -Path $p -Raw -ErrorAction Stop }
     }
     $args = @{
         VmName       = $VMName
@@ -2079,15 +2523,22 @@ function Get-VMFixResultMarker {
     if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
     try {
         $r = Invoke-VmCommand @args
-        if ($r -and $r.ScriptBlockOutput) {
+        if (-not $r -or $r.ScriptBlockFailed) {
+            $detail = if ($r -and $r.ErrorDetails) { @($r.ErrorDetails) -join '; ' }
+            elseif ($r) { 'Remote command reported failure without error details.' }
+            else { 'Remote command returned no result.' }
+            Write-Log "$VMName`: Failed to read result marker for [$FixName]: $(Protect-VMFixDiagnosticText $detail)" -LogOnly -Warning
+            return $null
+        }
+        if ($r.ScriptBlockOutput) {
             $raw = (@($r.ScriptBlockOutput) -join "`n")
             if (-not [string]::IsNullOrWhiteSpace($raw)) {
-                return ($raw | ConvertFrom-Json)
+                return ($raw | ConvertFrom-Json -ErrorAction Stop)
             }
         }
     }
     catch {
-        Write-Log "$VMName`: Failed to read result marker for [$FixName]: $_" -LogOnly -Warning
+        Write-Log "$VMName`: Failed to read result marker for [$FixName]: $(Protect-VMFixDiagnosticText "$_")" -LogOnly -Warning
     }
     return $null
 }

@@ -37,6 +37,7 @@ function Invoke-StartupCase {
         [switch]$CopyFails,
         [switch]$AssociationFails,
         [switch]$GenerationFails,
+        [switch]$InventoryFails,
         [switch]$InitFailed,
         [switch]$Repeat,
         [switch]$WhatIf
@@ -86,6 +87,9 @@ function Invoke-StartupCase {
         RdcCalls        = 0
         MRemoteCalls    = 0
         RestartRequested = $false
+        InventoryFails  = $InventoryFails.IsPresent
+        InventoryReads  = 0
+        Inventory       = [pscustomobject]@{ vmName = 'AUDIT-DC'; Domain = 'inventory.test'; Role = 'DC' }
     }
     if ($Running -ne 'None') {
         $runningPath = $fallbackExe
@@ -107,6 +111,14 @@ function Invoke-StartupCase {
         [CmdletBinding()]
         param()
         $state.Processes | Where-Object { -not $_.HasExited }
+    }
+    function Get-List {
+        param([string]$Type, [switch]$FailOnError)
+        if ($Type -ne 'VM' -or -not $FailOnError) { throw 'Startup did not request fail-closed VM inventory.' }
+        $state.InventoryReads++
+        $state.Events.Add('Inventory')
+        if ($state.InventoryFails) { throw 'Synthetic startup inventory failure.' }
+        $state.Inventory
     }
     function Stop-RDCMan {
         $state.Events.Add('Stop')
@@ -140,10 +152,14 @@ function Invoke-StartupCase {
         if ($state.AssociationFails) { throw 'Synthetic RDCMan association failure.' }
     }
     function New-RDCManFileFromHyperV {
-        param([string]$rdcmanfile, [bool]$OverWrite, [switch]$NoActivity, [switch]$RestartRDCMan)
+        param([string]$rdcmanfile, [bool]$OverWrite, [switch]$NoActivity, [switch]$RestartRDCMan,
+            [AllowEmptyCollection()][object[]]$VmInventory)
         if ($rdcmanfile -ne $Common.RdcManFilePath -or -not $OverWrite -or -not $NoActivity -or
             @($state.Processes | Where-Object { -not $_.HasExited }).Count -gt 0) {
             throw 'Startup did not rebuild the expected RDG after confirmed shutdown.'
+        }
+        if ($VmInventory.Count -ne 1 -or -not [object]::ReferenceEquals($VmInventory[0], $state.Inventory)) {
+            throw 'RDCMan startup did not reuse its verified inventory snapshot.'
         }
         $state.Events.Add('RdcGenerate')
         $state.RdcCalls++
@@ -155,8 +171,12 @@ function Invoke-StartupCase {
         }
     }
     function New-MRemoteNGFileFromHyperV {
-        param([string]$MRemoteNGFile, [bool]$OverWrite, [switch]$NoActivity)
+        param([string]$MRemoteNGFile, [bool]$OverWrite, [switch]$NoActivity,
+            [AllowEmptyCollection()][object[]]$VmInventory)
         if ($MRemoteNGFile -ne $Common.MRemoteNGFilePath -or -not $OverWrite -or -not $NoActivity) { throw 'Startup did not rebuild the expected mRemoteNG file.' }
+        if ($VmInventory.Count -ne 1 -or -not [object]::ReferenceEquals($VmInventory[0], $state.Inventory)) {
+            throw 'mRemoteNG startup did not reuse the RDCMan inventory snapshot.'
+        }
         $state.Events.Add('MRemoteGenerate')
         $state.MRemoteCalls++
         [IO.File]::WriteAllText($MRemoteNGFile, '<Connections />')
@@ -188,6 +208,8 @@ function Invoke-StartupCase {
             OriginalContent  = $(if ($MissingRdg) { $null } else { $RdgContent })
             Content          = $actualContent
             PreferredPath    = Get-RDCManExePath
+            InventoryReads   = $state.InventoryReads
+            MRemoteExists    = Test-Path -LiteralPath $Common.MRemoteNGFilePath
         }
     }
     finally {
@@ -215,6 +237,7 @@ try {
         @{ Name = 'wrong-download'; Args = @{ StorageVersion = '3.21.0.0'; Running = 'Fallback' }; Refresh = $false }
         @{ Name = 'whatif'; Args = @{ CacheVersion = '3.12.0.0'; Running = 'Fallback'; WhatIf = $true }; Refresh = $false }
         @{ Name = 'init-failed'; Args = @{ CacheVersion = '3.12.0.0'; Running = 'Fallback'; InitFailed = $true }; Refresh = $false }
+        @{ Name = 'inventory-failure'; Args = @{ CacheVersion = '3.12.0.0'; Running = 'Fallback'; InventoryFails = $true }; Refresh = $false; Error = $true }
         @{ Name = 'shutdown-failure'; Args = @{ CacheVersion = '3.12.0.0'; Running = 'Fallback'; StopFails = $true }; Refresh = $false; Error = $true }
         @{ Name = 'copy-failure'; Args = @{ CacheVersion = '3.12.0.0'; Running = 'Fallback'; CopyFails = $true }; Refresh = $false; Error = $true }
         @{ Name = 'association-failure'; Args = @{ CacheVersion = '3.12.0.0'; AssociationFails = $true }; Refresh = $false; Error = $true }
@@ -229,6 +252,7 @@ try {
         if ($case.Refresh) {
             Assert-True ($actual.PinnedVersion -eq [version]'3.12.0.0') "$($case.Name) installs or retains the verified pin"
             Assert-True ($actual.RdcCalls -eq 1 -and $actual.MRemoteCalls -eq 1 -and $actual.StopCalls -eq 1) "$($case.Name) regenerates both files exactly once"
+            Assert-True ($actual.InventoryReads -eq 1 -and $actual.Events[0] -eq 'Inventory') "$($case.Name) captures one shared inventory before stopping clients"
             Assert-True (($actual.Events -join ',') -match 'Stop,(CopyPinned,)?Install,RdcGenerate,MRemoteGenerate') "$($case.Name) closes before installation and file generation"
             $expectedRestart = $case.Args.ContainsKey('Running') -and $case.Args.Running -ne 'None'
             Assert-True ($actual.RestartRequested -eq $expectedRestart) "$($case.Name) restarts only a previously running client"
@@ -254,6 +278,10 @@ try {
         }
         if ($case.Name -eq 'init-failed') {
             Assert-True (@($actual.Logs | Where-Object { $_.Warning -and $_.Message -like '*initialization*' }).Count -eq 1) 'failed initialization explicitly skips client and file changes'
+        }
+        if ($case.Name -eq 'inventory-failure') {
+            Assert-True ($actual.InventoryReads -eq 1 -and $actual.StopCalls -eq 0 -and $actual.InstallCalls -eq 0 -and
+                -not $actual.MRemoteExists) 'failed startup inventory preserves clients, associations, and both connection files'
         }
     }
 }

@@ -79,6 +79,8 @@ if ($SiteCode -ne $Externaldomainsitecode) {
 }
 
 
+if (-not (Disable-MemLabsAutomaticClientPush -SiteCode $Externaldomainsitecode)) { return }
+
 $cm_svc_file = "C:\Windows\Temp\ProvisionScript\certauth.txt"
 if (Test-Path $cm_svc_file) {
     # Add cm_svc user as a CM Account
@@ -236,7 +238,7 @@ if (Test-Path $cm_svc_file) {
                 Restart-Service -ComputerName $mpServer -Name 'WAS' -Force -ErrorAction Stop
             }
             catch {
-                Write-DscStatus "MP boundary refresh: IIS recycle on $mpServer failed ($($_.Exception.Message)); auto-push/ccmsetup retry will recover" -Warning
+                Write-DscStatus "MP boundary refresh: IIS recycle on $mpServer failed ($($_.Exception.Message)); explicit push and ccmsetup retry still need a healthy MP" -Warning
             }
         }
     }
@@ -248,7 +250,7 @@ if (Test-Path $cm_svc_file) {
         Write-DscStatus "Skip Set-CMClientPushInstallation since $cm_svc already exists"
     }
     else {
-        Set-CMClientPushInstallation -SiteCode $Externaldomainsitecode -EnableAutomaticClientPushInstallation $True -AddAccount $cm_svc *>&1 | Write-StatusLogEntry
+        Set-CMClientPushInstallation -SiteCode $Externaldomainsitecode -AddAccount $cm_svc *>&1 | Write-StatusLogEntry
     }
 
     # Restart services to make sure push account is acknowledged by CCM
@@ -258,11 +260,11 @@ if (Test-Path $cm_svc_file) {
     Start-Sleep -Seconds 30
 
     # ---- Explicitly discover + push the external domain's clients NOW ----
-    # Set-CMClientPushInstallation above only ENABLES automatic client push, which
-    # then relies on the slow AD Forest Discovery -> device record -> auto-push
-    # cycle (typically 15-60+ min on the first pass). On its own that means the
+    # Account configuration does not enable automatic client push. Explicit
+    # pushes honor per-VM opt-ins rather than relying on a site-wide discovery
+    # cycle (typically 15-60+ min on the first pass). Without explicit push the
     # cross-forest clients are NOT installed by the time the new domain's Phase 11
-    # validates them (observed: discovery/push enabled at deploy time, Phase 11
+    # validates them (observed: discovery enabled at deploy time, Phase 11
     # ran <3 min later -> every client "CcmExec not installed"). To install the
     # agent DURING the deploy, force a discovery pass and then explicitly
     # Install-CMClient each external-domain DomainMember, mirroring PushClients.ps1.
@@ -277,8 +279,8 @@ if (Test-Path $cm_svc_file) {
 
         # Force a forest + system discovery pass so the cross-forest machines
         # become device records we can push to.
-        try { Invoke-CMForestDiscovery -SiteCode $Externaldomainsitecode *>&1 | Write-StatusLogEntry } catch { Write-DscStatus "External client push: Invoke-CMForestDiscovery failed (auto-push still runs): $_" }
-        try { Invoke-CMSystemDiscovery *>&1 | Write-StatusLogEntry } catch { Write-DscStatus "External client push: Invoke-CMSystemDiscovery failed: $_" }
+        try { Invoke-CMForestDiscovery -SiteCode $Externaldomainsitecode -ErrorAction Stop *>&1 | Write-StatusLogEntry } catch { Write-DscStatus "External client push: Invoke-CMForestDiscovery failed; continuing bounded discovery checks: $_" -Warning }
+        try { Invoke-CMSystemDiscovery -ErrorAction Stop *>&1 | Write-StatusLogEntry } catch { Write-DscStatus "External client push: Invoke-CMSystemDiscovery failed; continuing bounded discovery checks: $_" -Warning }
 
         # Bounded wait shared across ALL targets (forest discovery populates them
         # in one batch, so wait once rather than per-client) -- caps the total
@@ -321,34 +323,42 @@ if (Test-Path $cm_svc_file) {
             $listMeasured = $true
         }
         catch {
-            Write-DscStatus "External client push: final Get-CMDevice on '$CollectionName' failed: $_"
+            Write-DscStatus "External client push: final Get-CMDevice on '$CollectionName' failed: $_" -Warning
+        }
+        if (-not $listMeasured) {
+            Write-DscStatus "External client push: final device list is unavailable; requested targets were not pushed. Automatic push is disabled; repair discovery/provider access and re-run Phase 8." -Failure
+            return
         }
 
+        $pushFailures = [System.Collections.Generic.List[string]]::new()
         foreach ($client in $externalClients) {
-            if (-not $listMeasured) {
-                Write-DscStatus "External client push: device list unavailable, so whether $client was discovered is UNKNOWN, not 'no'; leaving it to automatic client push"
-                continue
-            }
             if ($machinelist -notcontains $client) {
-                Write-DscStatus "External client push: $client not discovered within ${maxWaitSec}s; automatic client push will install it on the next discovery cycle"
+                $failure = "$client not discovered within ${maxWaitSec}s"
+                $pushFailures.Add($failure)
+                Write-DscStatus "External client push: $failure; no automatic push is enabled" -Warning
                 continue
             }
-            # Auto-push may have already installed it -- a second push races with
-            # the first and can throw E_ABORT (0x80004004).
+            # A previous install may have completed; avoid a competing push.
             $device = $null
             try { $device = Get-CMDevice -Name $client -ErrorAction SilentlyContinue } catch {}
             if ($device -and $device.IsClient) {
-                Write-DscStatus "External client push: $client already has the CM client (auto-push won); skipping explicit push"
+                Write-DscStatus "External client push: $client already has the CM client; skipping explicit push"
                 continue
             }
             Write-DscStatus "External client push: Install-CMClient -DeviceName $client -SiteCode $Externaldomainsitecode"
             try {
-                Install-CMClient -DeviceName $client -SiteCode $Externaldomainsitecode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
+                Install-CMClient -DeviceName $client -SiteCode $Externaldomainsitecode -AlwaysInstallClient $true -ErrorAction Stop *>&1 | Write-StatusLogEntry
                 Start-Sleep -Seconds 5
             }
             catch {
-                Write-DscStatus "External client push: Install-CMClient for $client failed: $_ ; automatic push will retry"
+                $failure = "Install-CMClient for $client failed: $_"
+                $pushFailures.Add($failure)
+                Write-DscStatus "External client push: $failure" -Warning
             }
+        }
+        if ($pushFailures.Count -gt 0) {
+            Write-DscStatus "External client push failed: $($pushFailures -join ' | '). Automatic push is disabled; correct the failures and re-run Phase 8." -Failure
+            return
         }
         Write-DscStatus "External client push: explicit push pass complete (clients install asynchronously via ccmsetup)"
     }

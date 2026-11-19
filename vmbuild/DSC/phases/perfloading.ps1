@@ -76,6 +76,69 @@ Write-DscStatus "$Tag Starting perfloading"
     # Set the current location to be the site code.
     Set-Location "$($SiteCode):\" @initParams
 
+    function Sync-MemLabsClientScriptPolicy {
+        [CmdletBinding()]
+        param()
+
+        $name = 'MEMLABS-powershellbypass'
+        try {
+            $settings = @(Get-CMClientSetting -Name $name -ErrorAction Stop |
+                Where-Object { $_.Name -eq $name })
+            if ($settings.Count -eq 0) {
+                New-CMClientSetting -Name $name -Description 'Client settings for making powershell execution policy as bypass' `
+                    -Type Device -ErrorAction Stop | Out-Null
+                $settings = @(Get-CMClientSetting -Name $name -ErrorAction Stop |
+                    Where-Object { $_.Name -eq $name })
+            }
+            $settingsId = 0
+            if ($settings.Count -ne 1 -or
+                -not [int]::TryParse("$($settings[0].SettingsID)", [ref]$settingsId) -or $settingsId -lt 1) {
+                throw "Expected one custom '$name' client setting with a valid SettingsID; found $($settings.Count)."
+            }
+            $readPolicy = {
+                $configuration = @(Get-CMClientSetting -Id "$settingsId" -Setting ComputerAgent -ErrorAction Stop)
+                $agents = @(
+                    foreach ($item in $configuration) {
+                        if ($item.PSObject.Properties['PowerShellExecutionPolicy']) { $item }
+                        elseif ($item.PSObject.Properties['AgentConfigurations']) {
+                            @($item.AgentConfigurations) | Where-Object { $_.PSObject.Properties['PowerShellExecutionPolicy'] }
+                        }
+                    }
+                )
+                if ($agents.Count -eq 0) { return $null }
+                $policy = 0
+                if ($agents.Count -ne 1 -or
+                    -not [int]::TryParse("$($agents[0].PowerShellExecutionPolicy)", [ref]$policy) -or
+                    $policy -notin @(0, 1, 2, 3)) {
+                    throw "Could not read one valid Computer Agent PowerShell policy for '$name'."
+                }
+                return $policy
+            }
+            if ((& $readPolicy) -ne 1) {
+                Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $name -ErrorAction Stop | Out-Null
+            }
+            if ((& $readPolicy) -ne 1) { throw "'$name' did not read back PowerShellExecutionPolicy=1 (Bypass)." }
+
+            $assignments = @(Get-CMClientSettingDeployment -Id "$settingsId" -CollectionId SMS00001 -ErrorAction Stop)
+            if ($assignments.Count -eq 0) {
+                New-CMClientSettingDeployment -Name $name -CollectionId SMS00001 -ErrorAction Stop | Out-Null
+                $assignments = @(Get-CMClientSettingDeployment -Id "$settingsId" -CollectionId SMS00001 -ErrorAction Stop)
+            }
+            if ($assignments.Count -ne 1 -or $assignments[0].CollectionID -ne 'SMS00001' -or
+                "$($assignments[0].ClientSettingsID)" -ne "$settingsId") {
+                throw "'$name' did not read back one All Systems deployment for SettingsID=$settingsId."
+            }
+            Write-DscStatus "$Tag '$name' verified as Bypass and deployed to All Systems; effective client policy is checked in Phase 11."
+            return $true
+        }
+        catch {
+            Write-DscStatus "$Tag Client script policy reconciliation failed: $($_.Exception.Message). Unsigned baseline execution is not verified." -Warning
+            return $false
+        }
+    }
+
+    if ($isTopLevel) { [void](Sync-MemLabsClientScriptPolicy) }
+
     function Get-MemLabsManagedDistributionPointNames {
         param (
             [object[]] $VirtualMachines,
@@ -237,6 +300,51 @@ Write-DscStatus "$Tag Starting perfloading"
             return "site boot-image content has not caught up to SourceVersion $CurrentSourceVersion (StoredPkgVersion=$CurrentStoredVersion)"
         }
         return $null
+    }
+
+    function Get-MemLabsBootImagePayloadRepairTargets {
+        param (
+            [string] $PackageId,
+            [int] $SourceVersion,
+            [string[]] $DistributionPointNames,
+            [object[]] $DistributionStatusRows,
+            [string] $StatusTag
+        )
+
+        if ($SourceVersion -le 0) { throw 'Boot-image SourceVersion was not measured; payload repair cannot be evaluated.' }
+        foreach ($dpName in $DistributionPointNames) {
+            $installed = @($DistributionStatusRows | Where-Object {
+                    (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $dpName -and
+                    "$($_.State)" -eq '0' -and "$($_.SourceVersion)" -and
+                    [int]$_.SourceVersion -ge $SourceVersion
+                })
+            if ($installed.Count -eq 0) { continue }
+            $dpBin = "FileSystem::\\$dpName\SMS_DP`$\sms\bin"
+            try {
+                if (($dpName -split '\.')[0] -ieq $env:COMPUTERNAME) {
+                    $responder = Get-CimInstance -ClassName Win32_Service -Filter "Name='SccmPxe'" -OperationTimeoutSec 10 -ErrorAction Stop
+                    if ($responder -and "$($responder.PathName)" -match '^\s*"?(.+?\.exe)"?(?:\s|$)') {
+                        $dpBin = Split-Path -Path ([Environment]::ExpandEnvironmentVariables($Matches[1])) -Parent
+                    }
+                    else {
+                        $dpBin = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name RootFolder -ErrorAction Stop).RootFolder
+                        if (-not $dpBin) { throw 'No active PXE payload root was found for this site-server DP.' }
+                        $dpBin = [Environment]::ExpandEnvironmentVariables("$dpBin")
+                    }
+                }
+                $null = Get-Item -LiteralPath $dpBin -Force -ErrorAction Stop
+                try {
+                    $payload = Get-Item -LiteralPath "$dpBin\SMSBoot\$PackageId\x64\wdsmgfw.efi" -Force -ErrorAction Stop
+                    if ($payload.PSIsContainer) { $dpName }
+                }
+                catch [System.Management.Automation.ItemNotFoundException] {
+                    $dpName
+                }
+            }
+            catch {
+                Write-DscStatus "$StatusTag Could not measure PXE payload on $dpName`: $($_.Exception.Message). No boot-image rebuild was requested for this unreadable DP." -Warning
+            }
+        }
     }
 
     function Get-MemLabsDistributionPointGroup {
@@ -1999,34 +2107,28 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Boot image '$biName' ($packageId) has NO content destination on $($unTargetedOsdDps -join ', ') after 3 confirmations$(if ($bootDistError) { " (distribution error: $bootDistError)" }). Content is never installed to an untargeted DP, so the coverage wait cannot clear -- skipping it rather than spending the full budget. PXE will not work until this is resolved and Phase 11 validation FAILS on it." -Warning
             }
             else {
-                # A PXE flag that was ALREADY correct -- set by hand in the console, or by an
-                # earlier run -- arms nothing here, so a DP that never extracted would stay
-                # broken through every re-run. Probe the payload itself and republish when it
-                # is POSITIVELY absent. An unreachable DP is skipped rather than counted as
-                # missing, so no permission problem can trigger a pointless 350MB republish.
-                # FileSystem:: because this script runs on the CMSite provider drive, where a
-                # bare UNC reads as absent regardless of what is actually there.
+                # Missing payload is expected during a new DP's first transfer. Only repair
+                # an Installed, current-version DP whose boot file is measurably absent.
                 $pxePayloadMissingOn = @()
                 if (-not $pxeBootFlagSet -and $osdDpFqdns.Count -gt 0) {
-                    foreach ($odp in $osdDpFqdns) {
-                        try {
-                            $dpBin = "FileSystem::\\$odp\SMS_DP`$\sms\bin"
-                            if (-not (Test-Path -LiteralPath $dpBin)) { continue }
-                            if (-not (Test-Path -LiteralPath "$dpBin\SMSBoot\$packageId")) { $pxePayloadMissingOn += $odp }
-                        }
-                        catch { }
+                    try {
+                        $payloadStatusRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction Stop)
+                        $pxePayloadMissingOn = @(Get-MemLabsBootImagePayloadRepairTargets -PackageId $packageId `
+                            -SourceVersion ([int]$biFlags.SourceVersion) -DistributionPointNames $osdDpFqdns `
+                            -DistributionStatusRows $payloadStatusRows -StatusTag $Tag)
+                    }
+                    catch {
+                        Write-DscStatus "$Tag Could not establish Installed/current boot-image state before checking payload repair: $($_.Exception.Message). First-time distribution continues without an unverified rebuild." -Warning
                     }
                     if ($pxePayloadMissingOn.Count -gt 0) {
-                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is already flagged for PXE, but $($pxePayloadMissingOn -join ', ') has no SMSBoot\$packageId -- republishing so the DP extracts it."
+                        Write-DscStatus "$Tag Boot image '$biName' ($packageId) is Installed/current, but $($pxePayloadMissingOn -join ', ') has no SMSBoot\$packageId\x64\wdsmgfw.efi -- republishing so the DP extracts it."
                     }
                 }
 
                 # Set-CMBootImage changes the provider property, but clients keep using
                 # the old WIM until Update Distribution Points rebuilds and republishes it.
-                # Publish only after the assignment above exists. A newly targeted DP also
-                # needs this update when command support was enabled on an earlier run that
-                # had no OSD targets yet.
-                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0 -or $missingOsdDps.Count -gt 0
+                # A new content destination needs the existing WIM, not a site-wide rebuild.
+                $bootImagePublicationNeeded = $commandSupportChanged -or $bootTemplateRestored -or $pxeBootFlagSet -or $pxePayloadMissingOn.Count -gt 0
                 if ($bootImagePublicationNeeded) {
                     $bootImagePublicationError = $null
                     $bootPublicationBaselineError = ''
@@ -2089,6 +2191,7 @@ Write-DscStatus "$Tag Starting perfloading"
                 $bootCoverageProblems = @()
                 $bootCoverageObservedSourceVersion = ''
                 $bootCoverageLastArm = @{}
+                $bootCoverageIncompleteSince = @{}
                 $bootStoredVersion = ''
                 $bootSourceVersion = ''
                 $bootCoverageTerminalProblem = if ($bootImagePublicationNeeded -and -not $bootImagePublicationStarted) {
@@ -2130,6 +2233,7 @@ Write-DscStatus "$Tag Starting perfloading"
                         if ($bootCoverageObservedSourceVersion -ne $bootSourceVersion) {
                             $bootCoverageObservedSourceVersion = $bootSourceVersion
                             $bootCoverageLastArm = @{}
+                            $bootCoverageIncompleteSince = @{}
                         }
                         $bootDpRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue)
                         foreach ($expectedDp in $osdDpFqdns) {
@@ -2150,10 +2254,23 @@ Write-DscStatus "$Tag Starting perfloading"
                     }
                     if ($bootCoverageProblems.Count -eq 0) { break }
 
-                    # ContentValidating can sit until ConfigMgr's 30-minute retry fires. Re-arm
-                    # the existing target without rebuilding the WIM or changing SourceVersion.
+                    # Do not interrupt a first transfer or its hash validation. Give a retry
+                    # five minutes, then re-arm once per DP/version without rebuilding the WIM.
                     foreach ($incompleteDp in @($bootIncompleteDps | Select-Object -Unique)) {
                         $armKey = $incompleteDp.ToUpper()
+                        $armStatus = @($bootDpRows | Where-Object {
+                                (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $incompleteDp
+                            } | Select-Object -First 1)
+                        if ($armStatus.Count -gt 0 -and [int]$armStatus[0].State -in 1, 7) {
+                            $bootCoverageIncompleteSince.Remove($armKey)
+                            continue
+                        }
+                        if ($bootCoverageLastArm.ContainsKey($armKey)) { continue }
+                        if (-not $bootCoverageIncompleteSince.ContainsKey($armKey)) {
+                            $bootCoverageIncompleteSince[$armKey] = Get-Date
+                        }
+                        if (((Get-Date) - $bootCoverageIncompleteSince[$armKey]).TotalSeconds -lt 300) { continue }
+                        $bootCoverageLastArm[$armKey] = Get-Date
                         try {
                             $targetRows = @(Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_DistributionPoint -Filter "PackageID='$packageId'" -ErrorAction SilentlyContinue |
                                     Where-Object { (Get-MemLabsServerFromNalPath $_.ServerNALPath) -ieq $incompleteDp })
@@ -2162,15 +2279,12 @@ Write-DscStatus "$Tag Starting perfloading"
                                 Write-DscStatus "$Tag Boot image coverage: re-established missing target for '$biName' ($packageId) on $incompleteDp"
                             }
                             else {
-                                $lastArm = if ($bootCoverageLastArm.ContainsKey($armKey)) { $bootCoverageLastArm[$armKey] } else { $null }
-                                if ($lastArm -and ((Get-Date) - $lastArm).TotalMinutes -lt 5) { continue }
                                 foreach ($targetRow in $targetRows) {
                                     $targetRow.RefreshNow = $true
                                     [void]$targetRow.Put()
                                 }
                                 Write-DscStatus "$Tag Boot image coverage: re-armed '$biName' ($packageId) on $incompleteDp with RefreshNow at SourceVersion=$bootSourceVersion (StoredPkgVersion=$bootStoredVersion)"
                             }
-                            $bootCoverageLastArm[$armKey] = Get-Date
                         }
                         catch {
                             Write-DscStatus "$Tag Boot image coverage: re-arm failed for $incompleteDp`: $($_.Exception.Message)"
@@ -2983,24 +3097,6 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
     }
     #endregion Microsoft 365 Apps — join background download + create applications
-
-    #we have to make powershell bypass for the baselines to work as expected
-    # Custom client settings — top-level site only (replicate to child sites)
-    if ($isTopLevel) {
-    $customclientsetting = "MEMLABS-powershellbypass"
- 
-    if (!(Get-CMClientSetting -Name $customclientsetting)) {
-        New-CMClientSetting -Name $customclientsetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag $customclientsetting client setting created"
-
-        # Enable the PowerShell Execution Policy setting
-        Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
-        Write-DscStatus "$Tag Powershell policy successfully changed for $customclientsetting client setting "
-
-        New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
-        Write-DscStatus "$Tag Deployed the client setting to all systems collection"
-    }
-    } # end top-level client settings
 
     function Get-WsusDiagnostics {
         # Collect WSUS-native health signals for troubleshooting a stuck sync.

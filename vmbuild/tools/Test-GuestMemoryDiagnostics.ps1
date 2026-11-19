@@ -32,6 +32,7 @@ $script:Warnings = [Collections.Generic.List[string]]::new()
 function Write-Log {
     param($Message, [switch] $OutputStream, [switch] $Warning, [switch] $LogOnly)
     if ($Warning) { $script:Warnings.Add("$Message") }
+    if ($OutputStream) { [pscustomobject]@{ Text = "$Message"; LogLevel = 2 } }
 }
 function Get-Counter {
     param($Counter, $MaxSamples, $ErrorAction)
@@ -128,7 +129,8 @@ $request = [pscustomobject]@{
 }
 try {
     $null = New-Item -ItemType Directory -Path $tempRoot
-    Save-MemLabsGuestMemoryDiagnostics -VmName fixture -DomainName fixture.test -Request $request -Trigger BeforeRecovery
+    $output = @(Save-MemLabsGuestMemoryDiagnostics -VmName fixture -DomainName fixture.test -Request $request -Trigger BeforeRecovery)
+    Assert-True ($output.Count -eq 0) 'Memory diagnostics leaked logging objects into the caller return stream.'
     $file = @(Get-ChildItem -LiteralPath $tempRoot -Filter '*-BeforeRecovery-MemoryDiagnostics.json')
     Assert-True ($file.Count -eq 1 -and $script:GuestTimeout -eq 60) 'Host report was not persisted before recovery with a bounded guest capture.'
     $report = Get-Content -LiteralPath $file[0].FullName -Raw | ConvertFrom-Json
@@ -136,13 +138,15 @@ try {
         $report.Host.Memory.CommittedMB -eq 9500 -and $report.HyperV.MemoryAssignedMB -eq 4096 -and
         $report.HyperV.MemoryDemandMB -eq 5120) 'Persisted report lost origin, guest, host or Hyper-V evidence.'
     $script:GuestFails = $true
-    Save-MemLabsGuestMemoryDiagnostics -VmName fixture -DomainName fixture.test -Request $request -Trigger RecoveryExhausted
+    $output = @(Save-MemLabsGuestMemoryDiagnostics -VmName fixture -DomainName fixture.test -Request $request -Trigger RecoveryExhausted)
+    Assert-True ($output.Count -eq 0) 'Incomplete memory diagnostics leaked logging objects into the caller return stream.'
     $file = @(Get-ChildItem -LiteralPath $tempRoot -Filter '*-RecoveryExhausted-MemoryDiagnostics.json')
     $report = Get-Content -LiteralPath $file[0].FullName -Raw | ConvertFrom-Json
     Assert-True ($null -eq $report.Guest -and $report.Errors.GuestCapture -match 'transport unavailable' -and
         $report.Host -and $report.HyperV -and $report.Request.Origin.ProcessId -eq 42) 'Guest transport failure prevented the host report or lost origin evidence.'
     $Common.LogPath = Join-Path $tempRoot 'missing\VMBuild.log'
-    Save-MemLabsGuestMemoryDiagnostics -VmName fixture -DomainName fixture.test -Request $request -Trigger BeforeRecovery
+    $output = @(Save-MemLabsGuestMemoryDiagnostics -VmName fixture -DomainName fixture.test -Request $request -Trigger BeforeRecovery)
+    Assert-True ($output.Count -eq 0) 'Memory-report failure leaked logging objects into the caller return stream.'
     Assert-True (@($script:Warnings | Where-Object { $_ -match 'capture failed; recovery/failure handling will continue' }).Count -gt 0) 'Report write failure did not warn and leave recovery in control.'
 }
 finally {

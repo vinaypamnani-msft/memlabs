@@ -224,8 +224,10 @@ REM ============================================================
 REM Check PowerShell 7 is available
 REM ============================================================
 IF NOT EXIST %PS7% (
-    ECHO WARNING: PowerShell 7 not available, falling back to PowerShell 5.
-    GOTO PS5
+    ECHO ERROR: PowerShell 7.4 or later is required, but PowerShell 7 was not installed.
+    ECHO Resolve the PowerShell installation errors from maintenance, then run VMBuild.cmd again.
+    POPD
+    EXIT /B 1
 )
 
 REM ============================================================
@@ -249,18 +251,6 @@ IF "%~1"=="" (
         %PS7% -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1 -Configuration %1"
         IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
     )
-)
-GOTO END
-
-REM ============================================================
-REM Launch with PowerShell 5 fallback
-REM ============================================================
-:PS5
-ECHO WARNING: Launching with PowerShell 5. Some features may not work correctly.
-powershell -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
-IF ERRORLEVEL 1 (
-    ECHO ERROR: Failed to launch with PowerShell 5.
-    PAUSE
 )
 GOTO END
 

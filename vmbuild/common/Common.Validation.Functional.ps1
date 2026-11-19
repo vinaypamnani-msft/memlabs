@@ -311,6 +311,9 @@ function Test-VmFunctionality {
                 $siteSystemRolesOk = Test-SiteSystemFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
                 $testsPassed = $testsPassed -and $siteSystemRolesOk
             }
+            Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying parent-owned client package and physical Secondary content"
+            $pkgOk = Test-SecondaryClientPackageDistribution -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            $testsPassed = $testsPassed -and $pkgOk
         }
         'SiteSystem' {
             Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying site system roles"
@@ -356,6 +359,11 @@ function Test-VmFunctionality {
         }
     }
 
+    if (-not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
+        Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Checking ConfigMgr client script policy and execution"
+        [void](Test-ClientScriptFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)
+    }
+
     # A buffered failure is authoritative. Some tests enrich a remoted result
     # collection after the role check; an unsuppressed Add() can emit its index
     # alongside $false, making the multi-item result truthy in PowerShell. Do not
@@ -365,9 +373,10 @@ function Test-VmFunctionality {
     }
 
     # If the VM has installRP, also test reporting services
-    if ($testsPassed -and $CurrentItem.installRP) {
+    if ($CurrentItem.installRP) {
         Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying Reporting Services"
-        $testsPassed = Test-ReportingFunctionality -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        $reportingPassed = Test-ReportingFunctionality -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        $testsPassed = $testsPassed -and $reportingPassed
     }
 
     # If the VM has InstallCA, test Certificate Authority
@@ -2007,9 +2016,125 @@ function Test-SQLAOFunctionality {
 
     $sqlInstName = $CurrentItem.sqlInstanceName
     if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
+    $otherSqlPort = ($DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $otherNode } | Select-Object -First 1).sqlPort
 
     $scriptBlock = {
-        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP)
+        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $otherSqlPort)
+
+        $localSqlTarget = 'localhost'
+        $localReplicaName = $env:COMPUTERNAME
+        $otherReplicaName = $otherNode
+        $sqlServiceName = 'MSSQLSERVER'
+        if ($sqlInstName -ne 'MSSQLSERVER') {
+            $localSqlTarget += "\$sqlInstName"
+            $localReplicaName += "\$sqlInstName"
+            $otherReplicaName += "\$sqlInstName"
+            $sqlServiceName = "MSSQL`$$sqlInstName"
+        }
+        $escapedAgName = $agName.Replace("'", "''")
+
+        function Repair-SqlAoReplicaJoin {
+            param(
+                [string]$ServerInstance,
+                [string]$ReplicaName,
+                [string]$PartnerServerInstance,
+                [string]$PartnerReplicaName,
+                [string]$GroupName,
+                [System.Collections.Generic.List[string]]$Details
+            )
+
+            if (-not $GroupName -or -not $ServerInstance -or -not $ReplicaName -or
+                -not $PartnerServerInstance -or -not $PartnerReplicaName) {
+                throw 'Replica rejoin requires the configured AG and both physical SQL instances.'
+            }
+            $groupLiteral = $GroupName.Replace("'", "''")
+            $membershipQuery = @"
+SELECT ag.group_id AS GroupId, cs.replica_id AS ReplicaId,
+       cs.replica_server_name AS Replica, cs.join_state AS JoinState,
+       cs.join_state_desc AS JoinStateDescription, rs.role_desc AS LocalRole
+FROM sys.availability_groups_cluster ag
+JOIN sys.dm_hadr_availability_replica_cluster_states cs ON cs.group_id = ag.group_id
+LEFT JOIN sys.dm_hadr_availability_replica_states rs
+  ON rs.replica_id = cs.replica_id AND rs.group_id = cs.group_id AND rs.is_local = 1
+WHERE ag.name = N'$groupLiteral'
+  AND cs.replica_server_name = CONVERT(nvarchar(256), SERVERPROPERTY('ServerName'));
+"@
+            $sqlParams = @{ ConnectionTimeout = 10; QueryTimeout = 30; TrustServerCertificate = $true; ErrorAction = 'Stop' }
+            $membership = @(Invoke-Sqlcmd -ServerInstance $ServerInstance -Query $membershipQuery @sqlParams)
+            if ($membership.Count -ne 1 -or $membership[0].Replica -ine $ReplicaName -or
+                $null -eq $membership[0].JoinState -or $membership[0].JoinState -is [DBNull] -or
+                $membership[0].JoinState -notin @(0, 1, 2)) {
+                throw "Cannot establish '$ReplicaName' membership in configured AG '$GroupName' from cluster metadata; no automatic JOIN was attempted. Verify Phase 5 configuration and SQL permissions."
+            }
+            $member = $membership[0]
+            $Details.Add("INFO: AG '$GroupName' replica '$ReplicaName' cluster join state=$($member.JoinStateDescription)")
+            if ($member.JoinState -in @(1, 2)) { return }
+            if ($member.LocalRole -eq 'PRIMARY') {
+                throw "Refusing to JOIN '$ReplicaName': cluster metadata says NOT_JOINED but local SQL reports PRIMARY."
+            }
+
+            $groupId = [guid]$member.GroupId
+            $replicaId = [guid]$member.ReplicaId
+            if ($groupId -eq [guid]::Empty -or $replicaId -eq [guid]::Empty) {
+                throw "Missing group/replica identifiers for '$ReplicaName'; no automatic JOIN was attempted."
+            }
+            $replicaLiteral = $ReplicaName.Replace("'", "''")
+            $primaryQuery = @"
+SELECT ag.group_id AS GroupId, ar.replica_id AS ReplicaId,
+       CONVERT(nvarchar(256), SERVERPROPERTY('ServerName')) AS PrimaryReplica,
+       rs.role_desc AS PrimaryRole
+FROM sys.availability_groups ag
+JOIN sys.dm_hadr_availability_replica_states rs ON rs.group_id = ag.group_id AND rs.is_local = 1
+JOIN sys.availability_replicas ar ON ar.group_id = ag.group_id
+WHERE ag.name = N'$groupLiteral' AND ar.replica_server_name = N'$replicaLiteral';
+"@
+            $primary = @(Invoke-Sqlcmd -ServerInstance $PartnerServerInstance -Query $primaryQuery @sqlParams)
+            if ($primary.Count -ne 1 -or $primary[0].PrimaryRole -ne 'PRIMARY' -or
+                $primary[0].PrimaryReplica -ine $PartnerReplicaName -or
+                "$($primary[0].GroupId)" -ine "$groupId" -or "$($primary[0].ReplicaId)" -ine "$replicaId") {
+                throw "Cannot independently confirm '$PartnerReplicaName' is PRIMARY and configures the same AG/replica identifiers for '$ReplicaName'; no automatic JOIN was attempted."
+            }
+
+            $groupIdentifier = $GroupName.Replace(']', ']]')
+            # Recheck locally so a concurrent join or role change cannot trigger another JOIN.
+            $joinQuery = @"
+IF EXISTS (
+    SELECT 1 FROM sys.dm_hadr_availability_replica_cluster_states
+    WHERE group_id = '$groupId' AND replica_id = '$replicaId' AND join_state = 0
+      AND replica_server_name = CONVERT(nvarchar(256), SERVERPROPERTY('ServerName'))
+)
+AND NOT EXISTS (
+    SELECT 1 FROM sys.dm_hadr_availability_replica_states
+    WHERE group_id = '$groupId' AND is_local = 1 AND role_desc = 'PRIMARY'
+)
+BEGIN
+    ALTER AVAILABILITY GROUP [$groupIdentifier] JOIN;
+END;
+"@
+            $Details.Add("REMEDIATE: AG '$GroupName' replica '$ReplicaName' is NOT_JOINED; primary '$PartnerReplicaName' independently confirmed. Attempting guarded JOIN without database restore or reseeding.")
+            $null = Invoke-Sqlcmd -ServerInstance $ServerInstance -Query $joinQuery @sqlParams
+            $verified = @(Invoke-Sqlcmd -ServerInstance $ServerInstance -Query $membershipQuery @sqlParams)
+            if ($verified.Count -ne 1 -or $verified[0].Replica -ine $ReplicaName -or
+                "$($verified[0].GroupId)" -ine "$groupId" -or "$($verified[0].ReplicaId)" -ine "$replicaId" -or
+                $verified[0].JoinState -notin @(1, 2)) {
+                throw "Guarded JOIN did not establish membership for '$ReplicaName' in AG '$GroupName'; replica and database health remain unverified. No database was restored or reseeded."
+            }
+            $Details.Add("RECOVERED: AG '$GroupName' replica '$ReplicaName' membership verified after guarded JOIN; synchronization health still requires validation.")
+        }
+
+        function Test-SqlAoReplicaHealth {
+            param([object[]]$Replicas, [string]$LocalReplica, [string]$PartnerReplica)
+
+            if ($Replicas.Count -eq 0) { return $false }
+            $local = @($Replicas | Where-Object { $_.Replica -ieq $LocalReplica -and $_.IsLocal -eq 1 })
+            if ($local.Count -ne 1) { return $false }
+            if ($local[0].Role -eq 'PRIMARY') {
+                $partner = @($Replicas | Where-Object { $_.Replica -ieq $PartnerReplica -and $_.IsLocal -eq 0 -and $_.Role -eq 'SECONDARY' })
+                if ($Replicas.Count -ne 2 -or $partner.Count -ne 1) { return $false }
+            }
+            elseif ($local[0].Role -ne 'SECONDARY' -or $Replicas.Count -ne 1) { return $false }
+            return @($Replicas | Where-Object { $_.JoinState -notin @(1, 2) -or $_.ConnState -ne 'CONNECTED' -or $_.Health -ne 'HEALTHY' }).Count -eq 0
+        }
 
         $dnsDiagnostics = [ordered]@{
             SchemaVersion      = 1
@@ -2047,6 +2172,9 @@ function Test-SQLAOFunctionality {
         # ServerAddress across every NIC, skip loopback / APIPA / 0.0.0.0, and
         # try each candidate at the call site until one answers.
         $domain = (Get-CimInstance Win32_ComputerSystem).Domain
+        $otherSqlTarget = "$otherNode.$domain"
+        if ($sqlInstName -ne 'MSSQLSERVER') { $otherSqlTarget += "\$sqlInstName" }
+        if ($otherSqlPort -and "$otherSqlPort" -ne '1433') { $otherSqlTarget += ",$otherSqlPort" }
         $dnsCandidates = @(
             Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                 Where-Object { $_.ServerAddresses } |
@@ -2949,15 +3077,15 @@ SELECT adb.database_name, ag.name AS GroupName, drs.synchronization_state_desc
 FROM sys.dm_hadr_database_replica_states drs
 JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
 JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
-WHERE drs.is_local = 1 AND drs.is_suspended = 1
+WHERE drs.is_local = 1 AND drs.is_suspended = 1 AND ag.name = N'$escapedAgName'
 "@
-            $suspended = @(Invoke-Sqlcmd -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            $suspended = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
             if ($suspended.Count -gt 0) {
                 foreach ($db in $suspended) {
                     $results.Details.Add("REMEDIATE: Resuming suspended database '$($db.database_name)' in AG '$($db.GroupName)'")
                     try {
-                        $resumeQuery = "ALTER DATABASE [$($db.database_name)] SET HADR RESUME"
-                        Invoke-Sqlcmd -Query $resumeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $resumeQuery = "ALTER DATABASE [$($db.database_name.Replace(']', ']]'))] SET HADR RESUME"
+                        $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $resumeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Resumed '$($db.database_name)'")
                     }
                     catch {
@@ -2970,12 +3098,12 @@ WHERE drs.is_local = 1 AND drs.is_suspended = 1
 
             # 2b. Check endpoint state and restart if stopped
             $epQuery = "SELECT name, state_desc FROM sys.database_mirroring_endpoints"
-            $endpoints = @(Invoke-Sqlcmd -Query $epQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            $endpoints = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $epQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
             foreach ($ep in $endpoints) {
                 if ($ep.state_desc -ne 'STARTED') {
                     $results.Details.Add("REMEDIATE: Endpoint '$($ep.name)' is '$($ep.state_desc)', starting it")
                     try {
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name.Replace(']', ']]'))] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Endpoint '$($ep.name)' started")
                         Start-Sleep -Seconds 5
                     }
@@ -2985,14 +3113,20 @@ WHERE drs.is_local = 1 AND drs.is_suspended = 1
                 }
             }
 
+            Repair-SqlAoReplicaJoin -ServerInstance $localSqlTarget -ReplicaName $localReplicaName `
+                -PartnerServerInstance $otherSqlTarget -PartnerReplicaName $otherReplicaName `
+                -GroupName $agName -Details $results.Details
+
             # 2c. Check for DISCONNECTED replicas and cycle endpoint to force reconnection
             $disconnectedQuery = @"
 SELECT ag.name AS GroupName, rs.role_desc, rs.connected_state_desc, rs.is_local
 FROM sys.dm_hadr_availability_replica_states rs
 JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
-WHERE rs.connected_state_desc = 'DISCONNECTED'
+JOIN sys.dm_hadr_availability_replica_cluster_states cs
+  ON cs.replica_id = rs.replica_id AND cs.group_id = rs.group_id
+WHERE rs.connected_state_desc = 'DISCONNECTED' AND ag.name = N'$escapedAgName' AND cs.join_state IN (1, 2)
 "@
-            $disconnected = @(Invoke-Sqlcmd -Query $disconnectedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            $disconnected = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $disconnectedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
             if ($disconnected.Count -gt 0) {
                 $localDisc = @($disconnected | Where-Object { $_.is_local -eq 1 })
                 $remoteDisc = @($disconnected | Where-Object { $_.is_local -eq 0 })
@@ -3004,9 +3138,9 @@ WHERE rs.connected_state_desc = 'DISCONNECTED'
                 }
                 foreach ($ep in $endpoints) {
                     try {
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STOPPED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name.Replace(']', ']]'))] STATE = STOPPED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         Start-Sleep -Seconds 5
-                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER ENDPOINT [$($ep.name.Replace(']', ']]'))] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Cycled endpoint '$($ep.name)' (STOPPED -> STARTED)")
                     }
                     catch {
@@ -3017,12 +3151,12 @@ WHERE rs.connected_state_desc = 'DISCONNECTED'
                 Start-Sleep -Seconds 20
 
                 # Re-check for suspended databases after reconnect and resume them
-                $suspended2 = @(Invoke-Sqlcmd -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+                $suspended2 = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                 if ($suspended2.Count -gt 0) {
                     foreach ($db2 in $suspended2) {
                         $results.Details.Add("REMEDIATE: Resuming database '$($db2.database_name)' after endpoint cycle")
                         try {
-                            Invoke-Sqlcmd -Query "ALTER DATABASE [$($db2.database_name)] SET HADR RESUME" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                            $null = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "ALTER DATABASE [$($db2.database_name.Replace(']', ']]'))] SET HADR RESUME" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                             $results.Details.Add("OK: Resumed '$($db2.database_name)'")
                         }
                         catch {
@@ -3042,54 +3176,44 @@ SELECT ag.name AS GroupName,
        rs.role_desc AS Role,
        rs.connected_state_desc AS ConnState,
        rs.synchronization_health_desc AS Health,
+       rs.is_local AS IsLocal,
+       cs.join_state AS JoinState,
        ar.replica_server_name AS Replica
 FROM sys.dm_hadr_availability_replica_states rs
 JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
 JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
+LEFT JOIN sys.dm_hadr_availability_replica_cluster_states cs
+  ON cs.replica_id = rs.replica_id AND cs.group_id = rs.group_id
+WHERE ag.name = N'$escapedAgName'
 "@
             $results.Details.Add("CMD: AG health query with replica detail")
             $maxRetries = 5
             $healthy = $false
             for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
-                $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                if (-not $ag -or $ag.Count -eq 0) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: No availability group replicas found")
-                    break
-                }
-                $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                if ($unhealthy.Count -eq 0) {
-                    $healthy = $true
+                $ag = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                $healthy = Test-SqlAoReplicaHealth -Replicas $ag -LocalReplica $localReplicaName -PartnerReplica $otherReplicaName
+                if ($healthy) {
                     foreach ($r in $ag) {
                         $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
                     }
                     break
                 }
                 if ($attempt -lt $maxRetries) {
-                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries — $($unhealthy.Count) replica(s) not healthy, waiting 20s...")
+                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries -- AG '$agName' replica coverage/connectivity/health incomplete ($($ag.Count) row(s)), waiting 20s...")
                     Start-Sleep -Seconds 20
                 }
                 else {
-                    $results.Passed = $false
-                    foreach ($r in $ag) {
-                        $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
-                        $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
-                    }
+                    $results.Details.Add("WARN: AG '$agName' is not healthy after $maxRetries attempts; checking bounded restart recovery.")
                 }
             }
 
             # 3b. If still DISCONNECTED after retries, restart SQL on the appropriate node
             #
-            # Root cause: both SQLAO nodes started at different times. Each
-            # timed out trying to reach the other and neither retried. The
-            # fix is to restart SQL on the node that is NOT currently running
-            # this validation (the "other" node) so it freshly attempts to
-            # connect while we are already up and listening.  If only the
-            # local replica shows DISCONNECTED, restart locally instead.
+            # Never interrupt an unjoined partner's independent JOIN with a restart.
             if (-not $healthy) {
-                $stillDisconnected = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' })
-                $localStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.Replica -eq $env:COMPUTERNAME })
-                $remoteStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.Replica -ne $env:COMPUTERNAME })
+                $stillDisconnected = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.JoinState -in @(1, 2) })
+                $localStillDisc = @($stillDisconnected | Where-Object { $_.Replica -eq $localReplicaName })
+                $remoteStillDisc = @($stillDisconnected | Where-Object { $_.Replica -eq $otherReplicaName })
 
                 if ($stillDisconnected.Count -gt 0) {
                     # Determine restart target: prefer restarting the other node
@@ -3111,36 +3235,29 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                         try {
                             if ($restartIsRemote) {
                                 Invoke-Command -ComputerName $restartTarget -ScriptBlock {
-                                    Restart-Service MSSQLSERVER -Force -ErrorAction Stop
-                                } -ErrorAction Stop
+                                    param($serviceName)
+                                    Restart-Service -Name $serviceName -Force -ErrorAction Stop
+                                } -ArgumentList $sqlServiceName -ErrorAction Stop
                             }
                             else {
-                                Restart-Service MSSQLSERVER -Force -ErrorAction Stop
+                                Restart-Service -Name $sqlServiceName -Force -ErrorAction Stop
                             }
                             Start-Sleep -Seconds 30
                             $results.Details.Add("OK: SQL Server on '$restartTarget' restarted, rechecking AG health")
 
                             # Re-run health check after restart
                             for ($attempt2 = 1; $attempt2 -le 5; $attempt2++) {
-                                $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                                $unhealthy2 = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                                if ($unhealthy2.Count -eq 0) {
-                                    $healthy = $true
-                                    $results.Passed = $true
+                                $ag = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                                $healthy = Test-SqlAoReplicaHealth -Replicas $ag -LocalReplica $localReplicaName -PartnerReplica $otherReplicaName
+                                if ($healthy) {
                                     foreach ($r in $ag) {
                                         $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
                                     }
                                     break
                                 }
                                 if ($attempt2 -lt 5) {
-                                    $results.Details.Add("WARN: Post-restart attempt $attempt2/5 — $($unhealthy2.Count) replica(s) not healthy, waiting 20s...")
+                                    $results.Details.Add("WARN: Post-restart attempt $attempt2/5 -- AG '$agName' replica coverage/connectivity/health incomplete ($($ag.Count) row(s)), waiting 20s...")
                                     Start-Sleep -Seconds 20
-                                }
-                                else {
-                                    foreach ($r in $ag) {
-                                        $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
-                                        $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
-                                    }
                                 }
                             }
                         }
@@ -3153,14 +3270,20 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
 
             # 3c. Collect DB-level sync state for diagnostics if still unhealthy
             if (-not $healthy) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: AG '$agName' did not establish healthy expected replica coverage for '$localReplicaName' and '$otherReplicaName' ($($ag.Count) row(s)). Missing rows are not healthy replicas; verify cluster join state, database membership, and SQL error logs on both nodes.")
+                foreach ($r in $ag) {
+                    $results.Details.Add("  Replica '$($r.Replica)': role=$($r.Role), connection=$($r.ConnState), health=$($r.Health)")
+                }
                 $dbStateQuery = @"
 SELECT adb.database_name, drs.synchronization_state_desc, drs.synchronization_health_desc,
        drs.is_suspended, drs.suspend_reason_desc
 FROM sys.dm_hadr_database_replica_states drs
 JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
-WHERE drs.is_local = 1
+JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
+WHERE drs.is_local = 1 AND ag.name = N'$escapedAgName'
 "@
-                $dbStates = @(Invoke-Sqlcmd -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+                $dbStates = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                 foreach ($ds in $dbStates) {
                     $suspInfo = if ($ds.is_suspended) { " (SUSPENDED: $($ds.suspend_reason_desc))" } else { '' }
                     $results.Details.Add("  DB '$($ds.database_name)': sync=$($ds.synchronization_state_desc), health=$($ds.synchronization_health_desc)$suspInfo")
@@ -3174,14 +3297,23 @@ WHERE drs.is_local = 1
             if ($agName) {
                 $results.Details.Add("CMD: Check TESTDB membership in AG '$agName'")
                 try {
-                    $agDBs = @(Invoke-Sqlcmd -Query "SELECT database_name FROM sys.availability_databases_cluster" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
-                    if ($agDBs.database_name -contains 'TESTDB') {
-                        $results.Details.Add("OK: TESTDB is a member of the availability group")
+                    $membershipQuery = @"
+SELECT adb.database_name, drs.database_id AS LocalDatabaseId
+FROM sys.availability_databases_cluster adb
+JOIN sys.availability_groups_cluster ag ON ag.group_id = adb.group_id
+LEFT JOIN sys.dm_hadr_database_replica_states drs
+  ON drs.group_database_id = adb.group_database_id AND drs.is_local = 1
+WHERE ag.name = N'$escapedAgName';
+"@
+                    $agDBs = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $membershipQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                    $localTestDb = @($agDBs | Where-Object { $_.database_name -eq 'TESTDB' -and $null -ne $_.LocalDatabaseId -and $_.LocalDatabaseId -isnot [DBNull] })
+                    if ($localTestDb.Count -eq 1) {
+                        $results.Details.Add("OK: TESTDB is a local member of AG '$agName'")
                     }
                     else {
                         $results.Passed = $false
                         $dbList = if ($agDBs.Count -gt 0) { $agDBs.database_name -join ', ' } else { '(none)' }
-                        $results.Details.Add("FAIL: TESTDB not found in AG databases: $dbList")
+                        $results.Details.Add("FAIL: TESTDB is not a verified local member of AG '$agName' (cluster database list: $dbList). Replica JOIN alone does not prepare or join secondary databases; verify existing database state before manual recovery.")
                     }
                 }
                 catch {
@@ -3440,20 +3572,7 @@ WHERE drs.is_local = 1
             # node instead — that's always a network hop where Kerberos
             # should be in effect.
             if ($otherNode) {
-                # Use FQDN for the remote connection — short hostnames can
-                # prevent SqlClient from constructing the correct Kerberos
-                # SPN, causing silent NTLM fallback.
-                try { $remoteNodeFQDN = ([System.Net.Dns]::GetHostEntry($otherNode)).HostName } catch { $remoteNodeFQDN = $otherNode }
-                # GetHostEntry can return mDNS suffix (.local) instead of
-                # the AD domain suffix — Kerberos SPNs are registered under
-                # the real domain, so .local causes silent NTLM fallback.
-                if ($domain -and -not $remoteNodeFQDN.EndsWith(".$domain", [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $remoteNodeFQDN = "$otherNode.$domain"
-                }
-                $remoteConnStr = $remoteNodeFQDN
-                if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
-                    $remoteConnStr = "$remoteNodeFQDN\$sqlInstName"
-                }
+                $remoteConnStr = $otherSqlTarget
                 $results.Details.Add("CMD: Check auth_scheme on remote node '$remoteConnStr'")
                 $authQuery = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
                 $wd = Invoke-WithWatchdog -TimeoutSec 30 -MaxAttempts 3 -ArgumentList @($remoteConnStr, $authQuery) -ScriptBlock {
@@ -3501,15 +3620,14 @@ WHERE drs.is_local = 1
             # ==============================================================
             Write-Progress -Activity $progressActivity -Status "Verifying TESTDB recovery model and log backups"
             if ($otherNode -and $healthy) {
-                $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
-                $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
+                $localRole = @($ag | Where-Object { $_.IsLocal -eq 1 })[0].Role
 
                 if ($localRole -eq 'PRIMARY') {
                     # 8a. Recovery model must be FULL for AG databases
                     $results.Details.Add("CMD: Check TESTDB recovery model")
                     try {
                         $rmQuery = "SELECT name, recovery_model_desc FROM sys.databases WHERE name = 'TESTDB'"
-                        $rmResult = Invoke-Sqlcmd -Query $rmQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $rmResult = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $rmQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         if ($rmResult.recovery_model_desc -eq 'FULL') {
                             $results.Details.Add("OK: TESTDB recovery model is FULL")
                         }
@@ -3538,7 +3656,7 @@ LEFT JOIN (
 ) h ON h.job_id = j.job_id AND h.rn = 1
 WHERE j.name LIKE 'MemLabs DatabaseBackup%'
 "@
-                        $jobs = @(Invoke-Sqlcmd -Query $jobQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                        $jobs = @(Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $jobQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
                         if ($jobs.Count -eq 0) {
                             $results.Passed = $false
                             $results.Details.Add("FAIL: No MemLabs DatabaseBackup agent jobs found")
@@ -3587,7 +3705,7 @@ EXECUTE [dbo].[DatabaseBackup]
     @LogToTable = 'Y',
     @ChangeBackupType = 'Y'
 "@
-                        Invoke-Sqlcmd -Query $agBackupQuery -QueryTimeout 120 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $agBackupQuery -QueryTimeout 120 -TrustServerCertificate -ErrorAction Stop
                         $activeTestMsg = "OK: AG log backup completed successfully on primary"
                         if ($agJobLastRunFailed) {
                             $activeTestMsg += " (scheduled job failure above was transient)"
@@ -3601,12 +3719,12 @@ EXECUTE [dbo].[DatabaseBackup]
                     # 8c. Run a log backup and verify log space is recycled
                     $results.Details.Add("CMD: BACKUP LOG [TESTDB] TO DISK = 'NUL' (validate log backup works)")
                     try {
-                        Invoke-Sqlcmd -Query "BACKUP LOG [TESTDB] TO DISK = 'NUL'" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "BACKUP LOG [TESTDB] TO DISK = 'NUL'" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Log backup of TESTDB completed successfully")
 
                         # After a successful log backup, log_reuse_wait should no longer be LOG_BACKUP
                         $logQuery = "SELECT log_reuse_wait_desc FROM sys.databases WHERE name = 'TESTDB'"
-                        $logResult = Invoke-Sqlcmd -Query $logQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $logResult = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $logQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $waitReason = $logResult.log_reuse_wait_desc
                         if ($waitReason -eq 'LOG_BACKUP') {
                             $results.Details.Add("WARN: TESTDB log_reuse_wait is still LOG_BACKUP after backup (may need a checkpoint)")
@@ -3627,16 +3745,7 @@ EXECUTE [dbo].[DatabaseBackup]
             # ==============================================================
             Write-Progress -Activity $progressActivity -Status "Testing cross-node replication"
             if ($otherNode -and $healthy) {
-                # Reuse localRole from check #8 if available, otherwise query it
-                if (-not $localRole) {
-                    $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
-                    $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
-                }
-
-                $secondaryConnStr = $otherNode
-                if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
-                    $secondaryConnStr = "$otherNode\$sqlInstName"
-                }
+                $secondaryConnStr = $otherSqlTarget
 
                 if ($localRole -eq 'PRIMARY') {
                     $results.Details.Add("CMD: Cross-node replication test (write local PRIMARY, read from '$secondaryConnStr')")
@@ -3650,7 +3759,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'MemLabsValidation' AND ty
 DELETE FROM dbo.MemLabsValidation WHERE CreatedAt < DATEADD(HOUR, -1, SYSUTCDATETIME());
 INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
 "@
-                        Invoke-Sqlcmd -Query $writeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query $writeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: Wrote test value '$testId' to TESTDB on primary")
 
                         # SynchronousCommit hardens the log on both replicas before commit
@@ -3676,7 +3785,7 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
                     # On secondary role, verify TESTDB is readable
                     $results.Details.Add("CMD: Verify TESTDB readable on secondary role")
                     try {
-                        $readCheck = Invoke-Sqlcmd -Query "USE [TESTDB]; SELECT COUNT(*) AS Cnt FROM sys.tables" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $readCheck = Invoke-Sqlcmd -ServerInstance $localSqlTarget -Query "USE [TESTDB]; SELECT COUNT(*) AS Cnt FROM sys.tables" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $results.Details.Add("OK: TESTDB is readable on secondary ($($readCheck.Cnt) user table(s))")
                     }
                     catch {
@@ -3734,7 +3843,7 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
     # Format-TestResult records a FAIL for the VM and the phase completes.
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
-        -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP `
+        -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP, $otherSqlPort `
         -DisplayName "Phase11-SQLAO-Test" -SuppressLog -AsJob -TimeoutSeconds 600 -PollProgress
 
     try {
@@ -3870,26 +3979,14 @@ function Test-WSUSFunctionality {
         }
 
         # Test WSUS API connectivity
-        $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', ...)")
+        $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()")
         try {
             [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
-            $connected = $false
-            foreach ($port in @(8530, 443)) {
-                try {
-                    $useSSL = ($port -eq 443)
-                    $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', $useSSL, $port)
-                    if ($wsus) {
-                        $results.Details.Add("OK: WSUS API connected on port $port (server version: $($wsus.Version))")
-                        $connected = $true
-                        break
-                    }
-                }
-                catch { }
+            $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+            if (-not $wsus) {
+                throw 'WSUS local API returned no server'
             }
-            if (-not $connected) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: Cannot connect to WSUS API on port 8530 or 443")
-            }
+            $results.Details.Add("OK: WSUS API connected using local server configuration (server version: $($wsus.Version))")
         }
         catch {
             $results.Passed = $false
@@ -5887,12 +5984,24 @@ function Test-SiteSystemFunctionality {
             return $results
         }
 
-        $mpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog `
-            -AsJob -TimeoutSeconds 600
+        $mpPassed = $false
+        try {
+            $mpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+                -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog `
+                -AsJob -TimeoutSeconds 600
 
-        if (-not (Format-TestResult -VMName $VMName -RoleLabel 'MP' -Result $mpResult)) {
-            $allPassed = $false
+            $mpPassed = Format-TestResult -VMName $VMName -RoleLabel 'MP' -Result $mpResult
+            if (-not $mpPassed) { $allPassed = $false }
+        }
+        finally {
+            if (-not $mpPassed) {
+                try {
+                    Save-CMRoleFailureDiagnostics -VmName $VMName -DomainName $domain -Phase $Phase -DeployConfig $DeployConfig -Roles 'MP'
+                }
+                catch {
+                    Write-Log "[Phase $Phase] $VMName [MP]: diagnostic capture failed without changing the validation result: $($_.Exception.Message)" -Warning
+                }
+            }
         }
     }
 
@@ -6386,35 +6495,73 @@ function Test-SiteSystemFunctionality {
             else {
                 $results.Details.Add("CMD: PXE payload check ($($pxeEvidence -join '; '))")
                 $tftpRoots = New-Object System.Collections.Generic.List[string]
-                foreach ($drv in @('E:', 'F:', 'D:', 'G:', 'C:')) {
-                    $cand = "$drv\SMS_DP`$\sms\bin"
-                    if (Test-Path -LiteralPath $cand) { $tftpRoots.Add($cand) }
+                $rootDiscoveryErrors = @()
+                if ($sccmPxe) {
+                    try {
+                        $responder = Get-CimInstance -ClassName Win32_Service -Filter "Name='SccmPxe'" -OperationTimeoutSec 10 -ErrorAction Stop
+                        if (-not $responder -or "$($responder.PathName)" -notmatch '^\s*"?(.+?\.exe)"?(?:\s|$)') {
+                            throw 'SccmPxe has no readable executable path.'
+                        }
+                        $tftpRoots.Add((Split-Path -Path ([Environment]::ExpandEnvironmentVariables($Matches[1])) -Parent))
+                    }
+                    catch { $rootDiscoveryErrors += "SccmPxe root: $($_.Exception.Message)" }
                 }
-                try {
-                    $wdsRoot = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name 'RootFolder' -ErrorAction Stop).RootFolder
-                    if ($wdsRoot -and (Test-Path -LiteralPath $wdsRoot)) { $tftpRoots.Add($wdsRoot) }
+                if ($wds) {
+                    try {
+                        $wdsRoot = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name 'RootFolder' -ErrorAction Stop).RootFolder
+                        if (-not $wdsRoot) { throw 'WDSTFTP has no configured RootFolder.' }
+                        $wdsRoot = [Environment]::ExpandEnvironmentVariables("$wdsRoot")
+                        if (-not $tftpRoots.Contains($wdsRoot)) { $tftpRoots.Add($wdsRoot) }
+                    }
+                    catch { $rootDiscoveryErrors += "WDS root: $($_.Exception.Message)" }
                 }
-                catch { }
+                if ($tftpRoots.Count -eq 0 -and $rootDiscoveryErrors.Count -eq 0) {
+                    foreach ($drv in @('E:', 'F:', 'D:', 'G:', 'C:')) {
+                        $cand = "$drv\SMS_DP`$\sms\bin"
+                        try {
+                            $null = Get-Item -LiteralPath $cand -Force -ErrorAction Stop
+                            $tftpRoots.Add($cand)
+                        }
+                        catch [System.Management.Automation.ItemNotFoundException] { }
+                        catch [System.Management.Automation.DriveNotFoundException] { }
+                        catch { $rootDiscoveryErrors += "'$cand': $($_.Exception.Message)" }
+                    }
+                }
 
+                if ($rootDiscoveryErrors.Count) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: PXE root discovery could NOT be completed: $($rootDiscoveryErrors -join '; '). The responder's configured root was not replaced by an assumed remote-DP directory.")
+                }
                 if ($tftpRoots.Count -eq 0) {
-                    $results.Details.Add("WARN: PXE is enabled but no TFTP root was found (no ?:\SMS_DP`$\sms\bin, no WDS RootFolder) -- the PXE payload could NOT be measured")
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: PXE is enabled but no TFTP root was measured from the responder, WDS, or DP directories -- the PXE payload could NOT be checked")
                 }
                 else {
                     $bootFiles = @()
                     $smsBootDirs = @()
+                    $payloadProbeErrors = @()
                     foreach ($root in $tftpRoots) {
                         $smsBoot = Join-Path $root 'SMSBoot'
-                        if (-not (Test-Path -LiteralPath $smsBoot)) { continue }
-                        $smsBootDirs += $smsBoot
-                        $bootFiles += @(Get-ChildItem -LiteralPath $smsBoot -Recurse -File -Include 'wdsmgfw.efi', 'pxeboot.n12' -ErrorAction SilentlyContinue)
+                        try {
+                            $null = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+                            try { $null = Get-Item -LiteralPath $smsBoot -Force -ErrorAction Stop }
+                            catch [System.Management.Automation.ItemNotFoundException] { continue }
+                            $smsBootDirs += $smsBoot
+                            $bootFiles += @(Get-ChildItem -LiteralPath $smsBoot -Recurse -File -Force -Include 'wdsmgfw.efi', 'pxeboot.n12' -ErrorAction Stop)
+                        }
+                        catch { $payloadProbeErrors += "'$smsBoot': $($_.Exception.Message)" }
                     }
-                    if ($bootFiles.Count -eq 0) {
+                    if ($payloadProbeErrors.Count) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: PXE payload could NOT be measured: $($payloadProbeErrors -join '; '). An unreadable path is not a missing payload. This check runs as SYSTEM because ConfigMgr can restrict sms\bin to SYSTEM and Local Service. Review the configured payload path and captured DP logs; producer SMS_DP$ share access and current Installed content are separate requirements.")
+                    }
+                    if ($bootFiles.Count -eq 0 -and $payloadProbeErrors.Count -eq 0) {
                         $missingWhere = if ($smsBootDirs.Count) { "'$($smsBootDirs -join "', '")' contains no boot files" } else { "no SMSBoot folder exists under $($tftpRoots -join ', ')" }
                         $payloadWhy = "PXE is enabled on this DP but it has NO PXE boot payload -- $missingWhere. These files are extracted locally by smsdpprov (dpprovutils.cpp ExpandPXEImage -> CopyWIMBootFiles), which mounts the boot WIM and copies \Windows\Boot\PXE\* into SMSBoot\<PackageID>\<arch>. It skips silently (ENDOK) when SccmPxe=0 and PxeInstalled=0, when the package content is not exactly one file whose name contains '<PackageID>.WIM', or when the package's PXE-boot flag is not set -- and the package still reports Installed in every one of those cases. Read smsdpprov.log ON THIS DP for 'Extracting boot files' / 'Expanding'; the site's SMSProv.log will not show this. To force a re-extract: Update-CMDistributionPoint -BootImageId <PackageID>."
                         $results.Passed = $false
                         $results.Details.Add("FAIL: $payloadWhy The responder answers DHCP and the client then dies on the TFTP read ('cannot open smsboot\<PackageID>\x64\wdsmgfw.efi').")
                     }
-                    else {
+                    elseif ($bootFiles.Count -gt 0) {
                         # Name the per-package folders: the responder hands out
                         # smsboot\<PackageID>\<arch>\..., so this is what a client asks for.
                         $pkgFolders = @(Get-ChildItem -LiteralPath $smsBootDirs -Directory -ErrorAction SilentlyContinue |
@@ -6544,17 +6691,25 @@ function Test-SiteSystemFunctionality {
 
             return $results
         }
+        $localDpProbe = $localDpScript
+        if ($dpServesOsd) {
+            # Administrator elevation does not grant access to ConfigMgr's service-only bin ACL.
+            $localDpProbe = [scriptblock]::Create(@"
+param(`$dpServesOsdInner)
+function Invoke-Phase11LocalSystemProbe { $(${function:Invoke-Phase11LocalSystemProbe}) }
+`$result = Invoke-Phase11LocalSystemProbe -ScriptBlock { $localDpScript } -ArgumentList @(`$dpServesOsdInner) -TimeoutSeconds 270
+`$null = `$result.Details.Add('INFO: protected DP payload checked as SYSTEM without changing ConfigMgr permissions.')
+return `$result
+"@)
+        }
         $localDpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $localDpScript -ArgumentList ([string]$dpServesOsd) -DisplayName "Phase11-DPLocal-Test" -SuppressLog `
+            -ScriptBlock $localDpProbe -ArgumentList ([string]$dpServesOsd) -DisplayName "Phase11-DPLocal-Test" -SuppressLog `
             -AsJob -TimeoutSeconds 300
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $localDpResult)) {
             $allPassed = $false
-            # Everything this check can fail on -- missing PXE payload, responder settings,
-            # share/vdir state -- is decided by smsdpprov on the DP itself, and it records
-            # its refusals as INFO rather than errors. Without this the answer needs a
-            # hand-run on the guest after the build has already ended.
-            Add-Phase11Output "[Phase $Phase] $VMName [DP]: local DP validation failed -- collecting smsdpprov/SMSPXE/SMSDPMon logs and content-library state into the logs folder"
-            $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'DPLocal' -Collector $Phase11DpContentLogCollector
+            Add-Phase11Output "[Phase $Phase] $VMName [DP]: local DP validation failed -- collecting DP payload and feeding-site distribution evidence into the logs folder"
+            Save-Phase11OsdContentFailureLogs -VMName $VMName -CurrentItem $CurrentItem `
+                -DeployConfig $DeployConfig -DistributionPointNames @($VMName)
         }
     }
 
@@ -6611,51 +6766,40 @@ function Test-SiteSystemFunctionality {
             }
 
             # A listening SUP is not healthy if its latest native sync failed.
-            $syncMeasured = $false
-            $syncProbeErrors = @()
+            $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()")
             try {
                 [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
-                foreach ($port in @(8530, 443, 8531)) {
-                    try {
-                        $useSSL = ($port -in 443, 8531)
-                        $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', $useSSL, $port)
-                        $sub = $wsus.GetSubscription()
-                        $sync = $sub.GetLastSynchronizationInfo()
-                        $nativeState = "$($sub.GetSynchronizationStatus())"
-                        if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
-                            Start-Sleep -Seconds 5
-                            $sync = $sub.GetLastSynchronizationInfo()
-                            $nativeState = "$($sub.GetSynchronizationStatus())"
+                # Match Phase 8's local API connection; localhost fails PKI hostname validation.
+                $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                $sub = $wsus.GetSubscription()
+                $sync = $sub.GetLastSynchronizationInfo()
+                $nativeState = "$($sub.GetSynchronizationStatus())"
+                if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
+                    Start-Sleep -Seconds 5
+                    $sync = $sub.GetLastSynchronizationInfo()
+                    $nativeState = "$($sub.GetSynchronizationStatus())"
+                }
+                if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Last WSUS sync $($sync.Result) ($($sync.Error)); native state=$nativeState, start=$($sync.StartTime), end=$($sync.EndTime), errorText=$($sync.ErrorText). No newer running sync supersedes this result.")
+                    $sdLog = Join-Path $env:ProgramFiles 'Update Services\LogFiles\SoftwareDistribution.log'
+                    if (Test-Path -LiteralPath $sdLog) {
+                        foreach ($line in @(Get-Content -LiteralPath $sdLog -Tail 80 -ErrorAction Stop |
+                                Where-Object { $_ -match 'error|fail|cancel|0x8' } | Select-Object -Last 5)) {
+                            $results.Details.Add("DIAG: $line")
                         }
-                        $syncMeasured = $true
-                        if ("$($sync.Result)" -in @('Failed', 'Canceled') -and $nativeState -ne 'Running') {
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: Last WSUS sync $($sync.Result) ($($sync.Error)); native state=$nativeState, start=$($sync.StartTime), end=$($sync.EndTime), errorText=$($sync.ErrorText). No newer running sync supersedes this result.")
-                            $sdLog = Join-Path $env:ProgramFiles 'Update Services\LogFiles\SoftwareDistribution.log'
-                            if (Test-Path -LiteralPath $sdLog) {
-                                foreach ($line in @(Get-Content -LiteralPath $sdLog -Tail 80 -ErrorAction Stop |
-                                        Where-Object { $_ -match 'error|fail|cancel|0x8' } | Select-Object -Last 5)) {
-                                    $results.Details.Add("DIAG: $line")
-                                }
-                            }
-                        }
-                        elseif ($nativeState -eq 'Running') {
-                            $results.Details.Add("INFO: WSUS synchronization is running; previous result=$($sync.Result). Completion is pending, not proven.")
-                        }
-                        else {
-                            $results.Details.Add("OK: WSUS last sync result = $($sync.Result), at $($sync.StartTime)")
-                        }
-                        break
                     }
-                    catch { $syncProbeErrors += "${port}: $($_.Exception.Message)" }
+                }
+                elseif ($nativeState -eq 'Running') {
+                    $results.Details.Add("INFO: WSUS synchronization is running; previous result=$($sync.Result). Completion is pending, not proven.")
+                }
+                else {
+                    $results.Details.Add("OK: WSUS last sync result = $($sync.Result), at $($sync.StartTime)")
                 }
             }
             catch {
-                $syncProbeErrors += $_.Exception.Message
-            }
-            if (-not $syncMeasured) {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: WSUS native sync health could not be measured: $($syncProbeErrors -join ' | ')")
+                $results.Details.Add("FAIL: WSUS native sync health could not be measured: $($_.Exception.Message)")
             }
 
             return $results
@@ -6680,6 +6824,91 @@ function Test-SiteSystemFunctionality {
     return $allPassed
 }
 
+function Test-ReportingDiagnosticEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$Evidence,
+        [string]$SiteCode
+    )
+
+    $results = @{ Passed = $false; Details = [System.Collections.Generic.List[string]]::new() }
+    if ($Evidence.CollectionStatus -eq 'Partial') {
+        $results.Details.Add("WARN: Diagnostic capture is partial; independent raw files and checkpoints are retained. $((@($Evidence.CollectionErrors)+@($Evidence.Warnings)) -join '; ')")
+    }
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $expectedFolder = if ($SiteCode) { "/ConfigMgr_$SiteCode" } else { 'a ConfigMgr_* folder' }
+    $edgeVersions = @(
+        foreach ($browser in @($Evidence.Browsers)) {
+            [version]$version = $null
+            if ([version]::TryParse("$($browser.Version)",[ref]$version)) { $version }
+        }
+    )
+    $newestEdge = $edgeVersions | Sort-Object -Descending | Select-Object -First 1
+    if (-not $newestEdge) {
+        $results.Details.Add('WARN: Installed Edge version is unavailable; browser-side rendering compatibility is not verified.')
+    }
+    $sqlPublication = @($Evidence.SqlCatalog | Where-Object {
+            $_.VerificationSucceeded -eq $true -and $_.Source -in @('HostSQL','GuestSQL') -and
+            $_.ExpectedFolder -eq $expectedFolder -and $_.FolderExists -eq $true -and $_.ReportCount -ge 1
+        } | Select-Object -First 1)
+    $legacy = @($Evidence.Services | Where-Object { $_.Name -match '^ReportServer(\$|$)' }).Count -gt 0 -and
+        @($Evidence.Services | Where-Object { $_.Name -in @('PowerBIReportServer', 'SQLServerReportingServices') }).Count -eq 0
+    foreach ($endpoint in @($Evidence.Endpoints)) {
+        $reasons = [System.Collections.Generic.List[string]]::new()
+        $catalog = $endpoint.Catalog
+        $publicationSource = 'SOAP'
+        $reportCount = $catalog.ReportCount
+        if ($endpoint.CatalogError -or -not $catalog -or $catalog.RootType -ne 'Folder') {
+            if ($sqlPublication.Count -eq 1) {
+                $publicationSource = "$($sqlPublication[0].Source) ($($sqlPublication[0].Server)/$($sqlPublication[0].Database))"
+                $reportCount = $sqlPublication[0].ReportCount
+            }
+            else { $reasons.Add('report catalog could not be read through SOAP or verified SQL') }
+        }
+        elseif (($SiteCode -and $catalog.ExpectedFolder -ne $expectedFolder) -or
+            -not $catalog.ConfigMgrFolderFound -or $catalog.ReportCount -lt 1) {
+            $reasons.Add("no published reports verified in $expectedFolder")
+        }
+        $portal = $endpoint.Portal
+        if ($endpoint.PortalError -or -not $portal -or $portal.StatusCode -ne 200 -or $portal.HtmlLength -lt 1) {
+            $reasons.Add('web portal did not return a non-empty HTTP 200 page')
+        }
+        else {
+            $assets = @($portal.ScriptAssets | Where-Object { $null -ne $_ })
+            $requirements = @($assets | Where-Object { $_.PSObject.Properties['MinimumChromiumMajor'] -and $_.MinimumChromiumMajor -gt 0 } |
+                    ForEach-Object { [int]$_.MinimumChromiumMajor })
+            $minimumChromium = if ($requirements.Count) { ($requirements | Measure-Object -Maximum).Maximum } else { $null }
+            if ($minimumChromium -and $newestEdge -and $newestEdge.Major -lt $minimumChromium) {
+                $reasons.Add("installed Edge $newestEdge cannot parse the portal's class static initialization blocks (Chromium $minimumChromium+ required); install current Edge Stable")
+            }
+            if ((-not $legacy -and $assets.Count -eq 0) -or
+                @($assets | Where-Object { $_.Error -or $_.StatusCode -ne 200 }).Count -gt 0) {
+                $reasons.Add('portal JavaScript assets are missing or could not be verified')
+            }
+            $legacyApi = $legacy -and $portal.RestApi.StatusCode -eq 404
+            if (-not $legacyApi -and
+                (-not $portal.RestApi -or $portal.RestApi.Error -or $portal.RestApi.StatusCode -ne 200)) {
+                $reasons.Add('portal REST API did not return a valid catalog response')
+            }
+        }
+        if ($reasons.Count -eq 0) {
+            $results.Passed = $true
+            $results.Details.Add("OK: $reportCount published report(s) verified in $expectedFolder through $publicationSource at '$($endpoint.Uri)'")
+            $results.Details.Add("OK: Web portal and its required endpoints/assets verified at '$($portal.Uri)'")
+            if ($legacy -and $portal.RestApi.StatusCode -eq 404) {
+                $results.Details.Add('Legacy ReportServer service has no v2 REST API; SOAP catalog and portal checks were used.')
+            }
+            break
+        }
+        $failures.Add("FAIL: '$($endpoint.Uri)': $($reasons -join '; ')")
+    }
+    if (-not $results.Passed) {
+        if ($failures.Count -eq 0) { $failures.Add('FAIL: No reporting endpoint evidence was returned.') }
+        foreach ($failure in $failures) { $results.Details.Add($failure) }
+    }
+    return $results
+}
+
 function Test-ReportingFunctionality {
     [CmdletBinding()]
     param(
@@ -6693,7 +6922,7 @@ function Test-ReportingFunctionality {
     Write-Log "[Phase $Phase] $VMName [RP]: Testing Reporting Services" -LogOnly
 
     $scriptBlock = {
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new(); ReportServerUri = $null }
 
         # MEMLABS RP role installs Power BI Report Server (PowerBIReportServer
         # service). Pre-2024 builds used classic SSRS (SQLServerReportingServices
@@ -6759,6 +6988,7 @@ function Test-ReportingFunctionality {
                         if ($itemType -eq 'Folder') {
                             $note = if ($attempt -gt 1) { " (attempt $attempt)" } else { "" }
                             $results.Details.Add("OK: SOAP API healthy at '$soapUri' (root = Folder)$note")
+                            $results.ReportServerUri = $soapUri -replace '/ReportService2005\.asmx$', ''
                             $soapOk = $true
                             break
                         }
@@ -6913,89 +7143,163 @@ function Test-ReportingFunctionality {
         return $results
     }
 
-    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 300
+    $runInfrastructureCheck = {
+        try {
+            $infrastructureResult = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+                -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog `
+                -AsJob -TimeoutSeconds 300
+        }
+        catch {
+            try { Save-CMRoleFailureDiagnostics -VmName $VMName -DomainName $Domain -Phase $Phase -DeployConfig $DeployConfig -Roles 'RP' }
+            catch { Write-Log "[Phase $Phase] $VMName [RP]: diagnostic capture failed while preserving the original validation exception: $($_.Exception.Message)" -Warning }
+            throw
+        }
+        Format-TestResult -VMName $VMName -RoleLabel 'RP' -Result $infrastructureResult
+    }
+    $allPassed = $true
 
-    $allPassed = Format-TestResult -VMName $VMName -RoleLabel 'RP' -Result $result
-
-    # CM-level check: verify the Reporting Services Point role is actually
-    # registered in the site. The SSRS service/portal checks above only
-    # validate infrastructure; the CM RP role might not be configured if
-    # InstallRoles.ps1 was skipped (e.g. add-to-existing scenario).
-    if ($CurrentItem -and $DeployConfig -and $CurrentItem.siteCode) {
-        $siteCode = $CurrentItem.siteCode
+    $siteCode = "$($CurrentItem.siteCode)"
+    $cmVmName = $null
+    if ($CurrentItem -and $DeployConfig) {
+        try {
+            if (-not $siteCode) {
+                $sqlNames = @($VMName, "$($CurrentItem.OtherNode)") | Where-Object { $_ }
+                $owners = @($DeployConfig.virtualMachines | Where-Object {
+                        $_.role -in @('Primary', 'CAS') -and $_.remoteSQLVM -in $sqlNames -and
+                        (-not $_.domain -or $_.domain -ieq $Domain)
+                    })
+                if ($owners.Count -eq 0) {
+                    $owners = @(Get-List -Type VM -DomainName $Domain | Where-Object {
+                            $_.role -in @('Primary', 'CAS') -and $_.remoteSQLVM -in $sqlNames
+                        })
+                }
+                if ($owners.Count -ne 1 -or -not $owners[0].siteCode) {
+                    throw "Expected one Primary/CAS owning reporting SQL VM '$VMName'; found $($owners.Count)."
+                }
+                $siteCode = "$($owners[0].siteCode)"
+            }
+            $siteVM = Get-SiteServerForSiteCode -deployConfig $DeployConfig -SiteCode $siteCode -DomainName $Domain -type VM
+            if (-not $siteVM.vmName -or $siteVM.role -notin @('Primary', 'CAS')) {
+                throw "No Primary/CAS found for reporting site '$siteCode' in '$Domain'."
+            }
+            $cmVmName = $siteVM.vmName
+        }
+        catch {
+            $allPassed = $false
+            Add-Phase11Output "[Phase $Phase] $VMName [RP]: FAIL: Cannot resolve the owning ConfigMgr site: $($_.Exception.Message)" -Level Failure
+        }
+    }
+    if ($cmVmName) {
         $rpVmName = $VMName
+        Write-Log "[Phase $Phase] $VMName [RP]: Verifying CM RP role registration from '$cmVmName' (site $siteCode)" -LogOnly
 
-        # Determine which VM has the CM WMI namespace
-        $cmVmName = $null
-        if ($CurrentItem.role -in @('Primary', 'CAS')) {
-            $cmVmName = $VMName
-        }
-        else {
-            $parentVM = $DeployConfig.virtualMachines | Where-Object {
-                $_.siteCode -eq $siteCode -and $_.role -in @('Primary', 'CAS')
-            } | Select-Object -First 1
-            if ($parentVM) {
-                $cmVmName = $parentVM.vmName
-            }
-            else {
-                Write-Log "[Phase $Phase] $VMName [RP]: Cannot find parent site server for site '$siteCode'; skipping CM RP role check" -Warning
-            }
-        }
+        $rpRoleScript = {
+            param($sc, $rpVmName, $rpDomain)
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        if ($cmVmName) {
-            Write-Log "[Phase $Phase] $VMName [RP]: Verifying CM RP role registration from '$cmVmName' (site $siteCode)" -LogOnly
+            $maxAttempts = 3
+            $retryDelay = 20
+            $found = $false
+            $wmiFilter = "RoleName='SMS SRS Reporting Point' AND (ServerName='$rpVmName' OR ServerName='$rpVmName.$rpDomain')"
+            $results.Details.Add("CMD: Get-WmiObject SMS_SystemResourceList -Filter `"$wmiFilter`" (max $maxAttempts attempts)")
 
-            $rpRoleScript = {
-                param($sc, $rpVmName)
-                $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-
-                $maxAttempts = 3
-                $retryDelay = 20
-                $found = $false
-                $wmiFilter = "RoleName='SMS SRS Reporting Point' AND ServerName LIKE '%$rpVmName%'"
-                $results.Details.Add("CMD: Get-WmiObject SMS_SystemResourceList -Filter `"$wmiFilter`" (max $maxAttempts attempts)")
-
-                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                    try {
-                        $rpRole = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SystemResourceList `
-                            -Filter $wmiFilter -ErrorAction Stop | Select-Object -First 1
-                        if ($rpRole) {
-                            $results.Details.Add("OK: Reporting Services Point role registered for server matching '$rpVmName' in site '$sc' (attempt $attempt)")
-                            $found = $true
-                            break
-                        }
-                        else {
-                            $results.Details.Add("  Attempt $attempt/${maxAttempts}: RP role not yet visible in WMI")
-                            if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
-                        }
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                try {
+                    $rpRole = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SystemResourceList `
+                        -Filter $wmiFilter -ErrorAction Stop | Select-Object -First 1
+                    if ($rpRole) {
+                        $results.Details.Add("OK: Reporting Services Point role registered for '$rpVmName' in site '$sc' (attempt $attempt)")
+                        $found = $true
+                        break
                     }
-                    catch {
-                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: WMI query failed: $($_.Exception.Message)")
+                    else {
+                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: RP role not yet visible in WMI")
                         if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                     }
                 }
-
-                if (-not $found) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: Reporting Services Point role not registered for '$rpVmName' in site '$sc' -- InstallRoles may not have run")
+                catch {
+                    $results.Details.Add("  Attempt $attempt/${maxAttempts}: WMI query failed: $($_.Exception.Message)")
+                    if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                 }
-
-                return $results
             }
 
+            if (-not $found) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Reporting Services Point role not registered for '$rpVmName' in site '$sc' -- InstallRoles may not have run")
+            }
+
+            return $results
+        }
+
+        $runRoleCheck = {
             $rpRoleResult = Invoke-VmCommand -VmName $cmVmName -VmDomainName $Domain `
-                -ScriptBlock $rpRoleScript -ArgumentList $siteCode, $rpVmName `
+                -ScriptBlock $rpRoleScript -ArgumentList $siteCode, $rpVmName, $Domain `
                 -DisplayName "Phase11-RP-CMRole-Test" -SuppressLog `
                 -AsJob -TimeoutSeconds 300
-
-            if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-CMRole' -Result $rpRoleResult)) {
-                $allPassed = $false
-            }
+            Format-TestResult -VMName $VMName -RoleLabel 'RP-CMRole' -Result $rpRoleResult
         }
     }
 
+    $diagnosticPath = $null
+    $evidence = $null
+    $snapshotSaved = $false
+    $diagnosticResult = @{ Passed = $false; Details = [System.Collections.Generic.List[string]]::new() }
+    try {
+        $logDir = if ($Common.LogPath) { Split-Path $Common.LogPath -Parent } else { $null }
+        if (-not $logDir -or -not (Test-Path -LiteralPath $logDir)) {
+            throw 'The host build-log directory is unavailable; reporting diagnostics cannot be retained.'
+        }
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'
+        $diagnosticPath = Join-Path $logDir "$VMName-Phase11-$stamp-ReportingDiagnostics.json"
+        $collectorPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\Get-ReportingDiagnostics.ps1'
+        $collectorArguments = @{ VMName = $VMName; AsJson = $true }
+        if ($siteCode) { $collectorArguments.SiteCode = $siteCode }
+        $payload = @(& $collectorPath @collectorArguments)
+        if ($payload.Count -ne 1 -or $payload[0] -isnot [string]) {
+            throw 'Reporting collector did not return one JSON document.'
+        }
+        $evidence = $payload[0] | ConvertFrom-Json -ErrorAction Stop
+        foreach ($property in @('ComputerName', 'CollectedAt', 'Endpoints', 'CollectionErrors')) {
+            if ($property -notin $evidence.PSObject.Properties.Name) { throw "Reporting evidence has no '$property' field." }
+        }
+        $payload[0] | Set-Content -LiteralPath $diagnosticPath -Encoding UTF8 -ErrorAction Stop
+        $snapshotSaved = $true
+        Add-Phase11Output "[Phase $Phase] $VMName [RP]: Reporting diagnostic snapshot -> $diagnosticPath"
+        $diagnosticResult = Test-ReportingDiagnosticEvidence -Evidence $evidence -SiteCode $siteCode
+    }
+    catch {
+        $diagnosticResult.Passed = $false
+        $diagnosticResult.Details.Add("FAIL: Reporting diagnostics could not be collected, saved, or verified: $($_.Exception.Message)")
+        if ($diagnosticPath -and -not $snapshotSaved) {
+            try {
+                [ordered]@{
+                    ComputerName = $VMName
+                    CollectedAt = (Get-Date).ToString('o')
+                    SiteCode = $siteCode
+                    CollectionFailed = $true
+                    Endpoints = @()
+                    CollectionErrors = @($_.Exception.ToString())
+                    ErrorLocation = "$($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)"
+                    StackTrace = $_.ScriptStackTrace
+                } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $diagnosticPath -Encoding UTF8 -ErrorAction Stop
+                Add-Phase11Output "[Phase $Phase] $VMName [RP]: Reporting collection failure recorded -> $diagnosticPath" -Level Warning
+            }
+            catch { Add-Phase11Output "[Phase $Phase] $VMName [RP]: Could not save reporting collection failure: $($_.Exception.Message)" -Level Warning }
+        }
+    }
+    $diagnosticWrapper = [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $diagnosticResult }
+    if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-Publication' -Result $diagnosticWrapper)) { $allPassed = $false }
+    if (-not (& $runInfrastructureCheck)) { $allPassed = $false }
+    if ($cmVmName -and -not (& $runRoleCheck)) { $allPassed = $false }
+    if ($cmVmName) {
+        try {
+            $siteLogs = @(Save-Phase11GuestLogs -VMName $cmVmName -DomainName $Domain -RoleLabel 'RP-Site' -Collector $Phase11ReportingSiteLogCollector)
+            if ($siteLogs.Count -eq 0) {
+                Add-Phase11Output "[Phase $Phase] $VMName [RP]: No site-side reporting logs were saved from '$cmVmName'; see the log-capture error in the build log." -Level Warning
+            }
+        }
+        catch { Add-Phase11Output "[Phase $Phase] $VMName [RP]: Site-side reporting log capture failed on '$cmVmName': $($_.Exception.Message)" -Level Warning }
+    }
     return $allPassed
 }
 
@@ -9006,6 +9310,191 @@ function Save-Phase11GuestLogs {
     return $saved
 }
 
+function Save-Phase11OsdContentFailureLogs {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig,
+        [string[]]$DistributionPointNames = @(),
+        [string[]]$SourceSiteCodes = @()
+    )
+
+    $domain = "$($DeployConfig.vmOptions.domainName)"
+    foreach ($sourceCode in @($SourceSiteCodes | Where-Object { $_ -and $_ -notmatch '^[A-Za-z0-9]{3}$' })) {
+        Write-Log "[Phase 11] $VMName [OSD]: invalid content source site '$sourceCode'; its site-server logs could not be resolved." -Warning -LogOnly
+    }
+    $siteCodes = @(@("$($CurrentItem.siteCode)", "$($CurrentItem.parentSiteCode)") +
+            @($SourceSiteCodes | Where-Object { $_ -match '^[A-Za-z0-9]{3}$' }) |
+            Where-Object { $_ } | ForEach-Object { "$_".ToUpperInvariant() } | Select-Object -Unique)
+    $knownVms = @($DeployConfig.virtualMachines | Where-Object {
+            -not $_.domain -or "$($_.domain)" -ieq $domain
+        })
+    $siteCodes = @(@($siteCodes) + @($knownVms | Where-Object {
+                "$($_.siteCode)" -in $siteCodes -and $_.role -eq 'Primary'
+            } | ForEach-Object { "$($_.parentSiteCode)" }) |
+            Where-Object { $_ } | ForEach-Object { "$_".ToUpperInvariant() } | Select-Object -Unique)
+    $missingSites = @($siteCodes | Where-Object {
+            $code = $_
+            @($knownVms | Where-Object { "$($_.siteCode)" -ieq $code -and $_.role -in 'CAS', 'Primary', 'Secondary' }).Count -eq 0
+        })
+    if ($missingSites.Count -gt 0) {
+        try {
+            $knownVms += @(Get-List -Type VM -DomainName $domain | Where-Object {
+                    -not $_.domain -or "$($_.domain)" -ieq $domain
+                })
+        }
+        catch {
+            Write-Log "[Phase 11] $VMName [OSD]: site-server discovery failed: $($_.Exception.Message). Using the deployment's known site servers." -Warning -LogOnly
+        }
+    }
+    $siteCodes = @(@($siteCodes) + @($knownVms | Where-Object {
+                "$($_.siteCode)" -in $siteCodes -and $_.role -eq 'Primary'
+            } | ForEach-Object { "$($_.parentSiteCode)" }) |
+            Where-Object { $_ } | ForEach-Object { "$_".ToUpperInvariant() } | Select-Object -Unique)
+    foreach ($code in $siteCodes) {
+        $sites = @($knownVms | Where-Object {
+                $_.vmName -and "$($_.siteCode)" -ieq $code -and $_.role -in 'CAS', 'Primary', 'Secondary' -and
+                (-not $_.domain -or "$($_.domain)" -ieq $domain)
+            } | Sort-Object vmName -Unique)
+        if ($sites.Count -eq 0) {
+            Write-Log "[Phase 11] $VMName [OSD]: no site server for site '$code' in '$domain'; sending-site logs were NOT collected." -Warning -LogOnly
+        }
+        foreach ($site in $sites) {
+            Add-Phase11Output "[Phase 11] $VMName [OSD]: collecting distribution/provider/workflow evidence from '$($site.vmName)' (site $code)"
+            $null = Save-Phase11GuestLogs -VMName $site.vmName -DomainName $domain `
+                -RoleLabel 'OSD-Site' -Collector $Phase11SmsSiteLogCollector -TimeoutSeconds 180
+        }
+    }
+    foreach ($dpName in @($DistributionPointNames | Where-Object { $_ } |
+            ForEach-Object { ("$_" -split '\.')[0] } | Sort-Object -Unique)) {
+        $dpCollector = [scriptblock]::Create(@"
+function Invoke-Phase11LocalSystemProbe { $(${function:Invoke-Phase11LocalSystemProbe}) }
+Invoke-Phase11LocalSystemProbe -ScriptBlock { $Phase11DpContentLogCollector } -TimeoutSeconds 120
+"@)
+        $null = Save-Phase11GuestLogs -VMName $dpName -DomainName $domain `
+            -RoleLabel 'OSD-DP' -Collector $dpCollector
+    }
+}
+
+function Invoke-Phase11LocalSystemProbe {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @(),
+        [ValidateRange(1, 270)][int]$TimeoutSeconds = 120
+    )
+
+    $taskName = "MemLabs-Phase11Pxe-$([guid]::NewGuid().ToString('N'))"
+    $workDir = Join-Path $env:windir "Temp\$taskName"
+    $inputPath = Join-Path $workDir 'request.clixml'
+    $outputPath = Join-Path $workDir 'response.clixml'
+    $pendingPath = Join-Path $workDir 'response.pending.clixml'
+    $workCreated = $false
+    $registered = $false
+    $failure = $null
+    $output = $null
+    $cleanupErrors = [System.Collections.Generic.List[string]]::new()
+    try {
+        $null = New-Item -ItemType Directory -Path $workDir -ErrorAction Stop
+        $workCreated = $true
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    ([Security.Principal.SecurityIdentifier]$sid), 'FullControl',
+                    'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+        }
+        Set-Acl -LiteralPath $workDir -AclObject $acl -ErrorAction Stop
+        [pscustomobject]@{
+            ProbeId = $taskName; ScriptText = $ScriptBlock.ToString(); ArgumentList = $ArgumentList
+        } | Export-Clixml -LiteralPath $inputPath -Depth 10 -ErrorAction Stop
+
+        $worker = {
+            param($InputPath, $OutputPath, $PendingPath)
+            $request = Import-Clixml -LiteralPath $InputPath -ErrorAction Stop
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            try { $identitySid = $identity.User.Value }
+            finally { $identity.Dispose() }
+            $response = [pscustomobject]@{
+                ProbeId = $request.ProbeId; IdentitySid = $identitySid
+                Succeeded = $false; Output = $null; Error = ''
+            }
+            try {
+                $probe = [scriptblock]::Create($request.ScriptText)
+                $arguments = @($request.ArgumentList)
+                $response.Output = & $probe @arguments
+                $response.Succeeded = $true
+            }
+            catch { $response.Error = $_.Exception.Message }
+            $response | Export-Clixml -LiteralPath $PendingPath -Depth 20 -ErrorAction Stop
+            Move-Item -LiteralPath $PendingPath -Destination $OutputPath -ErrorAction Stop
+            if (-not $response.Succeeded) { exit 1 }
+        }
+        $command = "& { $worker } '$($inputPath.Replace("'", "''"))' '$($outputPath.Replace("'", "''"))' '$($pendingPath.Replace("'", "''"))'"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $action = New-ScheduledTaskAction -Execute (Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+            -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded" -ErrorAction Stop
+        $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest -ErrorAction Stop
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([timespan]::FromSeconds($TimeoutSeconds)) `
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ErrorAction Stop
+        $null = Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -ErrorAction Stop
+        $registered = $true
+        $startedAt = (Get-Date).AddSeconds(-1)
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        $wait = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $outputPath -ErrorAction Stop)) {
+            if ($wait.Elapsed.TotalSeconds -ge $TimeoutSeconds) { throw "SYSTEM DP probe timed out after $TimeoutSeconds seconds." }
+            $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
+            if ($info.LastRunTime -ge $startedAt -and $task.State -in @('Ready', 'Disabled') -and
+                -not (Test-Path -LiteralPath $outputPath -ErrorAction Stop)) {
+                throw "SYSTEM DP probe ended without a response (LastTaskResult=$($info.LastTaskResult))."
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        $response = Import-Clixml -LiteralPath $outputPath -ErrorAction Stop
+        if (-not $response -or $response.ProbeId -ne $taskName -or $response.IdentitySid -ne 'S-1-5-18' -or
+            $response.Succeeded -isnot [bool]) {
+            throw 'SYSTEM DP probe returned an invalid identity or response envelope.'
+        }
+        if (-not $response.Succeeded) { throw "SYSTEM DP probe failed: $($response.Error)" }
+        $output = $response.Output
+    }
+    catch { $failure = $_ }
+    finally {
+        $taskStopped = -not $registered
+        if ($registered) {
+            try {
+                if ((Get-ScheduledTask -TaskName $taskName -ErrorAction Stop).State -eq 'Running') {
+                    Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+                    $stopWait = [Diagnostics.Stopwatch]::StartNew()
+                    while ((Get-ScheduledTask -TaskName $taskName -ErrorAction Stop).State -eq 'Running') {
+                        if ($stopWait.Elapsed.TotalSeconds -ge 5) { throw 'SYSTEM DP probe task did not stop within five seconds.' }
+                        Start-Sleep -Milliseconds 100
+                    }
+                }
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+                $taskStopped = $true
+            }
+            catch { $cleanupErrors.Add("task '$taskName': $($_.Exception.Message)") }
+        }
+        if ($workCreated -and $taskStopped) {
+            foreach ($path in @($inputPath, $pendingPath, $outputPath, $workDir)) {
+                try {
+                    if (Test-Path -LiteralPath $path -ErrorAction Stop) { Remove-Item -LiteralPath $path -ErrorAction Stop }
+                }
+                catch { $cleanupErrors.Add("'$path': $($_.Exception.Message)") }
+            }
+        }
+    }
+    if ($cleanupErrors.Count) {
+        throw "SYSTEM DP probe cleanup failed ($workDir): $($cleanupErrors -join '; '). Probe failure: $failure"
+    }
+    if ($failure) { throw $failure }
+    return $output
+}
+
 # Collector scriptblocks used by the DP / pull-DP diagnostics below. Each is
 # self-contained (runs IN the guest), resolves its log directory from the
 # authoritative registry key, and tails the named logs into a hashtable.
@@ -9021,7 +9510,7 @@ function Invoke-TftpReadProbe {
         host firewall, the listener and the file in one shot.
 
         The reply separates three failures that are indistinguishable from outside:
-          NoResponse    UDP/69 blocked, or nothing is listening
+          NoResponse    no reply reached this probe (request or return path)
           FileNotFound  responder IS answering, but that file is not there (error 1)
           Served        the file is actually served
 
@@ -9037,33 +9526,63 @@ function Invoke-TftpReadProbe {
 
     $out = [pscustomobject]@{ Server = $Server; FileName = $FileName; Result = 'Error'; Bytes = 0; Detail = '' }
     $udp = $null
+    $firewallRuleName = "MemLabs-Phase11Tftp-$([guid]::NewGuid().ToString('N'))"
+    $firewallRuleCreated = $false
+    $requestSent = $false
+    $localPort = 0
+    $serverAddress = $null
     try {
-        $udp = New-Object System.Net.Sockets.UdpClient
+        $serverAddress = @([System.Net.Dns]::GetHostAddresses($Server) |
+                Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork }) | Select-Object -First 1
+        if (-not $serverAddress) { throw "No IPv4 address was resolved for '$Server'." }
+        $serverEndpoint = [System.Net.IPEndPoint]::new($serverAddress, $Port)
+        $udp = New-Object System.Net.Sockets.UdpClient -ArgumentList 0
         $udp.Client.ReceiveTimeout = $TimeoutMs
+        $localPort = $udp.Client.LocalEndPoint.Port
+        # TFTP DATA comes from a server-selected transfer port, not necessarily UDP/69.
+        $rule = New-NetFirewallRule -Name $firewallRuleName -DisplayName 'MemLabs Phase 11 TFTP probe' `
+            -Direction Inbound -Action Allow -Protocol UDP -LocalPort $localPort `
+            -RemoteAddress $serverAddress.IPAddressToString -Program ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) `
+            -Profile Any -PolicyStore PersistentStore -ErrorAction Stop
+        $firewallRuleCreated = $true
+        if (-not $rule -or $rule.Name -ne $firewallRuleName) { throw 'TFTP probe firewall rule creation returned no matching rule.' }
         $req = New-Object System.Collections.Generic.List[byte]
         $req.Add(0); $req.Add(1)
         $req.AddRange([System.Text.Encoding]::ASCII.GetBytes($FileName)); $req.Add(0)
         $req.AddRange([System.Text.Encoding]::ASCII.GetBytes('octet')); $req.Add(0)
         $payload = $req.ToArray()
-        [void]$udp.Send($payload, $payload.Length, $Server, $Port)
+        [void]$udp.Send($payload, $payload.Length, $serverEndpoint)
+        $requestSent = $true
         $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
         $resp = $udp.Receive([ref]$ep)
         if ($null -eq $resp -or $resp.Length -lt 4) {
-            $out.Result = 'NoResponse'
+            $out.Result = 'Error'
             $out.Detail = 'reply was empty or truncated'
+            return $out
+        }
+        if (-not $ep.Address.Equals($serverAddress)) {
+            $out.Detail = "reply came from unexpected server $($ep.Address), expected $serverAddress"
             return $out
         }
         $opcode = ([int]$resp[0] * 256) + [int]$resp[1]
         if ($opcode -eq 3) {
+            $block = ([int]$resp[2] * 256) + [int]$resp[3]
+            if ($block -ne 1 -or $resp.Length -eq 4) {
+                $out.Detail = "expected nonempty DATA block 1, received block $block with $($resp.Length - 4) byte(s)"
+                return $out
+            }
             $out.Result = 'Served'
             $out.Bytes = $resp.Length - 4
-            $out.Detail = "DATA block $((([int]$resp[2] * 256) + [int]$resp[3])), $($out.Bytes) byte(s)"
+            $out.Detail = "DATA block $block, $($out.Bytes) byte(s), server $ep -> client UDP/$localPort"
             # Abort instead of leaving the server retransmitting block 1 until it gives up.
             try {
                 $abort = [byte[]]@(0, 5, 0, 0, 0)
                 [void]$udp.Send($abort, $abort.Length, $ep)
             }
-            catch { }
+            catch {
+                $out.Result = 'Error'
+                $out.Detail += "; aborting the test transfer failed: $($_.Exception.Message)"
+            }
         }
         elseif ($opcode -eq 5) {
             $code = ([int]$resp[2] * 256) + [int]$resp[3]
@@ -9077,16 +9596,32 @@ function Invoke-TftpReadProbe {
             $out.Detail = "unexpected TFTP opcode $opcode"
         }
     }
-    catch [System.Net.Sockets.SocketException] {
-        $out.Result = 'NoResponse'
-        $out.Detail = $_.Exception.Message
-    }
     catch {
         $out.Result = 'Error'
         $out.Detail = $_.Exception.Message
+        for ($exception = $_.Exception; $exception; $exception = $exception.InnerException) {
+            if ($exception -is [System.Net.Sockets.SocketException] -and $requestSent) {
+                $out.Result = 'NoResponse'
+                $out.Detail = "server $serverAddress -> client UDP/$localPort (TFTP replies use a server-selected transfer port): $($exception.Message)"
+                break
+            }
+        }
     }
     finally {
-        if ($udp) { try { $udp.Close() } catch { } }
+        if ($udp) {
+            try { $udp.Close() }
+            catch {
+                $out.Result = 'Error'
+                $out.Detail += "; closing the TFTP probe socket failed: $($_.Exception.Message)"
+            }
+        }
+        if ($firewallRuleCreated) {
+            try { Remove-NetFirewallRule -Name $firewallRuleName -PolicyStore PersistentStore -ErrorAction Stop }
+            catch {
+                $out.Result = 'Error'
+                $out.Detail += "; removing probe firewall rule '$firewallRuleName' failed: $($_.Exception.Message)"
+            }
+        }
     }
     return $out
 }
@@ -9121,6 +9656,31 @@ $Phase11CcmClientLogCollector = {
     return $out
 }
 
+$Phase11ReportingSiteLogCollector = {
+    $out = @{}
+    $notes = [System.Collections.Generic.List[string]]::new()
+    $smsDir = $null
+    foreach ($key in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+        try { $smsDir = (Get-ItemProperty -LiteralPath $key -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory' }
+        catch { $notes.Add("Could not read SMS install directory from '$key': $($_.Exception.Message)") }
+        if ($smsDir) { break }
+    }
+    if ($smsDir) {
+        foreach ($name in @('srsrp.log', 'srsrpsetup.log', 'sitecomp.log')) {
+            $path = Join-Path $smsDir "Logs\$name"
+            try {
+                $lines = @(Get-Content -LiteralPath $path -Tail 4000 -ErrorAction Stop)
+                if ($lines.Count) { $out[$name] = $lines -join "`r`n" }
+                else { $notes.Add("'$path' is empty.") }
+            }
+            catch { $notes.Add("Could not read '$path': $($_.Exception.Message)") }
+        }
+    }
+    else { $notes.Add('No SMS installation directory was found; site-side reporting logs were not collected.') }
+    if ($notes.Count) { $out['ReportingSiteDiagnostics.txt'] = $notes -join "`r`n" }
+    return $out
+}
+
 $Phase11SmsSiteLogCollector = {
     # Site-server content-distribution + INTER-SITE replication logs live under
     # <SMS install>\Logs. distmgr/PkgXferMgr cover local + pull-DP distribution;
@@ -9145,12 +9705,19 @@ $Phase11SmsSiteLogCollector = {
     # set and every later content bundle aborting on 0x800704d3 (burnin 2026-08-24:
     # stop at 13:23:36, threads back at 13:24:59, HUB00004 -> SEC dead at 13:29:30, and
     # the cause of the stop was unrecoverable from the artifacts collected).
-    foreach ($n in @('distmgr.log', 'PkgXferMgr.log', 'sender.log', 'despool.log', 'rcmctrl.log', 'sitecomp.log')) {
-        $p = Join-Path $smsDir "Logs\$n"
-        if (Test-Path $p) {
-            try { $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue; if ($c) { $out[$n] = ($c -join "`r`n") } else { $diag += "'$n' present but read returned no content" } } catch { $diag += "'$n' read threw: $($_.Exception.Message)" }
+    foreach ($baseName in @('distmgr', 'PkgXferMgr', 'sender', 'despool', 'rcmctrl', 'sitecomp', 'SMSProv', 'smsexec')) {
+        foreach ($extension in @('.log', '.lo_')) {
+            $n = "$baseName$extension"
+            $p = Join-Path $smsDir "Logs\$n"
+            try {
+                $file = Get-Item -LiteralPath $p -ErrorAction Stop
+                $diag += "'$p': bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o')) tailLines=4000"
+                $c = @(Get-Content -LiteralPath $p -Tail 4000 -ErrorAction Stop)
+                if ($c.Count) { $out[$n] = $c -join "`r`n" }
+                else { $diag += "'$n' is empty" }
+            }
+            catch { $diag += "'$p' capture failed: $($_.Exception.Message)" }
         }
-        else { $diag += "'$n' not present at $p" }
     }
     # A remote DP still carries SMS\Identification with an Installation Directory, so
     # the guard above passes and the loop then reports five separate "not present"
@@ -9158,6 +9725,66 @@ $Phase11SmsSiteLogCollector = {
     if ($out.Count -eq 0) {
         $diag += "NONE of the site-server logs exist under '$smsDir\Logs'. This VM is a remote DP/site system, not a site server -- the logs that explain ITS content state are under ?:\SMS_DP`$\sms\logs (see the DpContent capture)."
     }
+
+    foreach ($name in @('InstallCMLog.log', 'DSC_Log.log', 'DSC_Status.txt')) {
+        $path = "C:\staging\DSC\$name"
+        try {
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            $diag += "'$path': bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o')) tailLines=4000"
+            $out[$name] = @(Get-Content -LiteralPath $path -Tail 4000 -ErrorAction Stop) -join "`r`n"
+        }
+        catch { $diag += "'$path' capture failed: $($_.Exception.Message)" }
+    }
+
+    $snapshot = [ordered]@{
+        CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+        ComputerName = $env:COMPUTERNAME
+        SiteCode = ''
+        BootImages = @()
+        OSImages = @()
+        OSUpgradePackages = @()
+        SourceSiteCodes = @()
+        Classes = [ordered]@{}
+        Errors = @()
+    }
+    try {
+        $snapshot.SiteCode = "$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop).'Site Code')"
+        if ($snapshot.SiteCode -notmatch '^[A-Za-z0-9]{3}$') { throw 'No valid local site code was found.' }
+        $namespace = "root\SMS\site_$($snapshot.SiteCode)"
+        foreach ($inventory in @(
+                @{ Class = 'SMS_BootImagePackage'; Property = 'BootImages' },
+                @{ Class = 'SMS_ImagePackage'; Property = 'OSImages' },
+                @{ Class = 'SMS_OperatingSystemInstallPackage'; Property = 'OSUpgradePackages' }
+            )) {
+            try {
+                $packageRows = @(Get-CimInstance -Namespace $namespace -ClassName $inventory.Class `
+                        -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 21)
+                if ($packageRows.Count -gt 20) { $snapshot.Errors += "$($inventory.Class) inventory truncated to 20 rows." }
+                $snapshot[$inventory.Property] = @($packageRows | Select-Object -First 20 -Property * -ExcludeProperty 'Cim*')
+            }
+            catch { $snapshot.Errors += "$($inventory.Class) query failed: $($_.Exception.Message)" }
+        }
+        $packages = @($snapshot.BootImages) + @($snapshot.OSImages) + @($snapshot.OSUpgradePackages)
+        $snapshot.SourceSiteCodes = @($packages | ForEach-Object { "$($_.SourceSite)" } |
+                Where-Object { $_ -match '^[A-Za-z0-9]{3}$' } | Select-Object -Unique)
+        $packageIds = @($packages | ForEach-Object { "$($_.PackageID)" } |
+                Where-Object { $_ -match '^[A-Za-z0-9]{8}$' } | Select-Object -Unique)
+        if ($packageIds.Count) {
+            $filter = ($packageIds | ForEach-Object { "PackageID='$_'" }) -join ' OR '
+            foreach ($class in @('SMS_DistributionPoint', 'SMS_PackageStatusDistPointsSummarizer', 'SMS_DistributionDPStatus')) {
+                try {
+                    $rows = @(Get-CimInstance -Namespace $namespace -ClassName $class -Filter $filter `
+                            -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 251)
+                    if ($rows.Count -gt 250) { $snapshot.Errors += "$class inventory truncated to 250 rows." }
+                    $snapshot.Classes[$class] = @($rows | Select-Object -First 250 -Property * -ExcludeProperty 'Cim*')
+                }
+                catch { $snapshot.Errors += "$class query failed: $($_.Exception.Message)" }
+            }
+        }
+    }
+    catch { $snapshot.Errors += "OSD snapshot failed: $($_.Exception.Message)" }
+    try { $out['OsdDistributionState.json'] = $snapshot | ConvertTo-Json -Depth 6 -ErrorAction Stop }
+    catch { $diag += "OSD snapshot serialization failed: $($_.Exception.Message)" }
 
     # A Secondary can sit in a despooler retry loop -- "This package[X]'s information
     # hasn't arrived yet for this version [N]" -- where the CONTENT arrived but the
@@ -9274,24 +9901,42 @@ $Phase11DpContentLogCollector = {
     $out = @{}
     $diag = @()
 
-    $dpLogDir = $null
+    $dpSharePath = ''
+    try { $dpSharePath = "$((Get-SmbShare -Name 'SMS_DP$' -ErrorAction Stop).Path)" }
+    catch { $diag += "SMS_DP$ share lookup failed: $($_.Exception.Message)" }
+    $logCandidates = @()
+    if ($dpSharePath) { $logCandidates += Join-Path $dpSharePath 'sms\logs' }
     foreach ($d in @('E:', 'D:', 'F:', 'G:', 'C:')) {
-        $cand = "$d\SMS_DP`$\sms\logs"
-        if (Test-Path $cand) { $dpLogDir = $cand; break }
+        $logCandidates += "$d\SMS_DP`$\sms\logs"
     }
-    if ($dpLogDir) {
-        $diag += "DP log dir = '$dpLogDir'"
-        foreach ($n in @('smsdpprov.log', 'SMSDPMon.log', 'PrestageContent.log', 'SMSPXE.log')) {
-            $p = Join-Path $dpLogDir $n
-            if (-not (Test-Path $p)) { $diag += "'$n' not present at $p"; continue }
+    $dpLogDirs = @(
+        foreach ($candidate in @($logCandidates | Select-Object -Unique)) {
             try {
-                $c = Get-Content -LiteralPath $p -Tail 4000 -ErrorAction SilentlyContinue
-                if ($c) { $out[$n] = ($c -join "`r`n") } else { $diag += "'$n' present but read returned no content" }
+                if (Test-Path -LiteralPath $candidate -ErrorAction Stop) { $candidate }
             }
-            catch { $diag += "'$n' read threw: $($_.Exception.Message)" }
+            catch { $diag += "DP log directory '$candidate' probe failed: $($_.Exception.Message)" }
+        }
+    )
+    $dpLogDir = $dpLogDirs | Select-Object -First 1
+    foreach ($directory in $dpLogDirs) {
+        $diag += "DP log dir = '$directory'"
+        $prefix = if ($directory -eq $dpLogDir) { '' } else { "$($directory.Substring(0, 1))-" }
+        foreach ($baseName in @('smsdpprov', 'SMSDPMon', 'PrestageContent', 'SMSPXE')) {
+            foreach ($extension in @('.log', '.lo_')) {
+                $n = "$baseName$extension"
+                $p = Join-Path $directory $n
+                try {
+                    $file = Get-Item -LiteralPath $p -ErrorAction Stop
+                    $diag += "'$p': bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o')) tailLines=4000"
+                    $c = @(Get-Content -LiteralPath $p -Tail 4000 -ErrorAction Stop)
+                    if ($c.Count) { $out["$prefix$n"] = $c -join "`r`n" }
+                    else { $diag += "'$p' is empty" }
+                }
+                catch { $diag += "'$p' capture failed: $($_.Exception.Message)" }
+            }
         }
     }
-    else {
+    if (-not $dpLogDir) {
         $diag += 'no ?:\SMS_DP$\sms\logs found (probed E,D,F,G,C) -- the DP role is not installed on this server.'
     }
 
@@ -9392,6 +10037,85 @@ $Phase11DpContentLogCollector = {
     catch { $lines += "IIS probe unavailable: $($_.Exception.Message)" }
 
     $out['DpContent.txt'] = ($lines -join "`r`n")
+    $payload = @("CapturedAtUtc=$([datetime]::UtcNow.ToString('o')) ComputerName=$env:COMPUTERNAME", "SMS_DP$ share path='$dpSharePath'")
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        try {
+            $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+            $payload += "Probe identity='$($identity.Name)' SID=$($identity.User.Value) ElevatedAdministrator=$($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+        }
+        finally { $identity.Dispose() }
+    }
+    catch { $payload += "Probe token lookup failed: $($_.Exception.Message)" }
+    try {
+        foreach ($access in @(Get-SmbShareAccess -Name 'SMS_DP$' -ErrorAction Stop)) {
+            $payload += "SMS_DP$ share ACE: $($access.AccountName) $($access.AccessControlType) $($access.AccessRight)"
+        }
+    }
+    catch { $payload += "SMS_DP$ share ACL lookup failed: $($_.Exception.Message)" }
+    try {
+        $group = Get-LocalGroup -SID ([Security.Principal.SecurityIdentifier]'S-1-5-32-544') -ErrorAction Stop
+        foreach ($member in @(Get-LocalGroupMember -Group $group.Name -ErrorAction Stop)) {
+            $payload += "Local Administrator: $($member.Name) SID=$($member.SID)"
+        }
+    }
+    catch { $payload += "Local Administrators lookup failed: $($_.Exception.Message)" }
+    if ($dpSharePath) {
+        foreach ($path in @($dpSharePath, (Join-Path $dpSharePath 'sms'), (Join-Path $dpSharePath 'sms\bin'), (Join-Path $dpSharePath 'sms\bin\SMSBoot'))) {
+            try { $payload += "Independent ACL '$path': $((Get-Acl -LiteralPath $path -ErrorAction Stop).Sddl)" }
+            catch { $payload += "Independent ACL '$path' lookup failed: $($_.Exception.Message)" }
+        }
+    }
+    $roots = @()
+    if ($dpSharePath) { $roots += Join-Path $dpSharePath 'sms\bin' }
+    try {
+        foreach ($service in @(Get-CimInstance -ClassName Win32_Service -Filter "Name='SccmPxe' OR Name='WDSServer'" -OperationTimeoutSec 10 -ErrorAction Stop)) {
+            $payload += "Service $($service.Name): State=$($service.State) PID=$($service.ProcessId) PathName='$($service.PathName)'"
+            if ($service.Name -eq 'SccmPxe' -and "$($service.PathName)" -match '^\s*"?(.+?\.exe)"?(?:\s|$)') {
+                $roots += Split-Path -Path $Matches[1] -Parent
+            }
+        }
+    }
+    catch { $payload += "PXE service query failed: $($_.Exception.Message)" }
+    try {
+        $wdsRoot = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\WDSServer\Providers\WDSTFTP' -Name RootFolder -ErrorAction Stop).RootFolder
+        if ($wdsRoot) { $roots += [Environment]::ExpandEnvironmentVariables("$wdsRoot") }
+    }
+    catch { $payload += "WDS root lookup failed: $($_.Exception.Message)" }
+    foreach ($drive in @('E:', 'D:', 'F:', 'G:', 'C:')) { $roots += "$drive\SMS_DP`$\sms\bin" }
+    foreach ($root in @($roots | Select-Object -Unique)) {
+        try {
+            $null = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+            $path = Join-Path $root 'SMSBoot'
+            $payload += "Payload path '$path': Test-Path=$(Test-Path -LiteralPath $path -ErrorAction Stop)"
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            $payload += "  Attributes=$($item.Attributes) LinkType=$($item.LinkType) Target=$($item.Target)"
+            try { $payload += "  SDDL=$((Get-Acl -LiteralPath $path -ErrorAction Stop).Sddl)" }
+            catch { $payload += "  ACL read failed: $($_.Exception.Message)" }
+            $files = @(Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction Stop | Select-Object -First 201)
+            if ($files.Count -gt 200) { $payload += '  Payload inventory truncated to 200 files.' }
+            foreach ($file in @($files | Select-Object -First 200)) {
+                $payload += "  $($file.FullName) bytes=$($file.Length) modifiedUtc=$($file.LastWriteTimeUtc.ToString('o'))"
+            }
+            if ($files.Count -eq 0) { $payload += '  Payload directory is empty.' }
+        }
+        catch { $payload += "Root '$root' payload probe failed: $($_.Exception.Message)" }
+    }
+    if ($clp) {
+        try {
+            foreach ($definition in @(Get-ChildItem -LiteralPath (Join-Path $clp 'DataLib') -Directory -ErrorAction Stop | Select-Object -First 100)) {
+                $entries = @(Get-ChildItem -LiteralPath $definition.FullName -ErrorAction Stop)
+                $wims = @($entries | Where-Object { -not $_.PSIsContainer -and $_.Name -like '*.wim.ini' })
+                if ($wims.Count -eq 0) { continue }
+                $payload += "DataLib '$($definition.Name)': files=$(@($entries | Where-Object { -not $_.PSIsContainer }).Count) folders=$(@($entries | Where-Object { $_.PSIsContainer }).Count) WIMs=$($wims.Name -join ', ') (first 100 definitions inspected)"
+                foreach ($wim in $wims) {
+                    $payload += @(Get-Content -LiteralPath $wim.FullName -TotalCount 40 -ErrorAction Stop)
+                }
+            }
+        }
+        catch { $payload += "Boot-image DataLib probe failed: $($_.Exception.Message)" }
+    }
+    $out['DpPxePayload.txt'] = $payload -join "`r`n"
     # Deliberately NOT '_collector-diag.txt': Save-Phase11GuestLogs names files
     # <vm>-Phase11-<stamp>-<key>, so a second collector finishing in the same second
     # would overwrite the first one's diagnostics.
@@ -9714,13 +10438,223 @@ $Phase11PassiveSiteDiagCollector = {
     return $out
 }
 
+function Get-ClientScriptValidationProbe {
+    return {
+        param([bool]$ExpectLabBypass)
+
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new(); Skipped = $false }
+        try {
+            $client = @(Get-Service -ErrorAction Stop | Where-Object { $_.Name -eq 'CcmExec' })
+            if ($client.Count -eq 0) {
+                $results.Skipped = $true
+                $results.Details.Add('INFO: ConfigMgr client is not installed; client-script checks do not apply.')
+                return $results
+            }
+            if ($client.Count -ne 1 -or "$($client[0].Status)" -ne 'Running') {
+                $results.Details.Add('WARN: ConfigMgr client is not running; effective script policy and execution cannot be verified.')
+                return $results
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: ConfigMgr client presence could not be measured: $($_.Exception.Message)")
+            return $results
+        }
+
+        $machinePolicy = ''
+        try {
+            $machinePolicy = "$((Get-ExecutionPolicy -List -ErrorAction Stop |
+                Where-Object { $_.Scope -eq 'MachinePolicy' }).ExecutionPolicy)"
+            if ($ExpectLabBypass -and $machinePolicy -in @('AllSigned', 'Restricted')) {
+                $results.Details.Add("WARN: PowerShell MachinePolicy=$machinePolicy blocks unsigned lab scripts. Group Policy was not changed.")
+            }
+        }
+        catch { $results.Details.Add("WARN: PowerShell Group Policy could not be measured: $($_.Exception.Message)") }
+
+        $readClientPolicy = {
+            $configuration = @(Get-CimInstance -Namespace 'root\ccm\Policy\Machine\ActualConfig' `
+                -ClassName CCM_ClientAgentConfig -OperationTimeoutSec 10 -ErrorAction Stop |
+                Where-Object { $_.PSObject.Properties['PowerShellExecutionPolicy'] -and $null -ne $_.PowerShellExecutionPolicy })
+            if ($configuration.Count -eq 0) { return $null }
+            $values = @(
+                foreach ($item in $configuration) {
+                    $value = 0
+                    if (-not [int]::TryParse("$($item.PowerShellExecutionPolicy)", [ref]$value) -or $value -notin @(0, 1, 2, 3)) {
+                        throw "Invalid effective PowerShellExecutionPolicy '$($item.PowerShellExecutionPolicy)'."
+                    }
+                    $value
+                }
+            ) | Select-Object -Unique
+            if (@($values).Count -ne 1) { throw 'Effective client PowerShell policy has conflicting values.' }
+            return @($values)[0]
+        }
+        $policy = $null
+        try {
+            $policy = & $readClientPolicy
+            if ($ExpectLabBypass -and $policy -ne 1 -and $machinePolicy -notin @('AllSigned', 'Restricted')) {
+                $requestPolicy = {
+                    param([string]$ScheduleId)
+                    $response = Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule `
+                        -Arguments @{ sScheduleID = $ScheduleId } -OperationTimeoutSec 10 -ErrorAction Stop
+                    $returnValue = -1
+                    if (-not $response -or
+                        -not [int]::TryParse("$($response.ReturnValue)", [ref]$returnValue) -or $returnValue -ne 0) {
+                        throw "Machine-policy schedule $ScheduleId returned '$($response.ReturnValue)'."
+                    }
+                }
+                try {
+                    & $requestPolicy '{00000000-0000-0000-0000-000000000021}'
+                    & $requestPolicy '{00000000-0000-0000-0000-000000000022}'
+                }
+                catch { $results.Details.Add("WARN: Client machine-policy refresh failed: $($_.Exception.Message)") }
+                $deadline = (Get-Date).AddSeconds(60)
+                try {
+                    while ($policy -ne 1 -and (Get-Date) -lt $deadline) {
+                        $remaining = [math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+                        if ($remaining -le 0) { break }
+                        Write-Progress -Activity "$env:COMPUTERNAME [Client scripts]" -Status 'Waiting for effective lab PowerShell policy'
+                        Start-Sleep -Seconds ([math]::Min(5, $remaining))
+                        $policy = & $readClientPolicy
+                    }
+                }
+                finally { Write-Progress -Activity "$env:COMPUTERNAME [Client scripts]" -Completed }
+                if ($policy -eq 1) { $results.Details.Add('RECOVERED: Client received effective Bypass script policy after machine-policy refresh.') }
+            }
+            $policyNames = @{ 0 = 'AllSigned'; 1 = 'Bypass'; 2 = 'Restricted'; 3 = 'Unrestricted' }
+            if ($null -eq $policy) {
+                $results.Details.Add('WARN: Effective ConfigMgr PowerShell policy is not present; policy receipt is unverified.')
+            }
+            elseif ($ExpectLabBypass -and $policy -ne 1) {
+                $results.Details.Add("WARN: Effective ConfigMgr PowerShellExecutionPolicy=$policy ($($policyNames[[int]$policy])); lab Bypass policy was not verified. Check MEMLABS-powershellbypass deployment, policy receipt, and competing client settings.")
+            }
+            elseif ($ExpectLabBypass -and $machinePolicy -in @('AllSigned', 'Restricted')) {
+                $results.Details.Add("INFO: ConfigMgr PowerShellExecutionPolicy=$policy ($($policyNames[[int]$policy])); unsigned execution remains blocked by MachinePolicy=$machinePolicy.")
+            }
+            else {
+                $results.Details.Add("OK: Effective ConfigMgr PowerShellExecutionPolicy=$policy ($($policyNames[[int]$policy])).")
+            }
+        }
+        catch { $results.Details.Add("WARN: Effective ConfigMgr script policy could not be measured: $($_.Exception.Message)") }
+
+        try {
+            $baselines = @(Get-CimInstance -Namespace 'root\ccm\dcm' -ClassName SMS_DesiredConfiguration `
+                -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 101)
+            if ($baselines.Count -gt 100) {
+                $results.Details.Add('WARN: Client baseline inventory is capped at 100; additional evaluation outcomes were not checked.')
+                $baselines = @($baselines | Select-Object -First 100)
+            }
+            $evaluated = 0; $nonCompliant = 0; $errors = 0
+            foreach ($baseline in $baselines) {
+                $state = -1
+                if (-not [int]::TryParse("$($baseline.LastComplianceStatus)", [ref]$state) -or $state -notin @(0, 1, 2, 3, 4)) {
+                    throw "Invalid baseline compliance state for '$($baseline.Name)'."
+                }
+                if ($state -in @(1, 2, 3, 4)) { $evaluated++ }
+                if ($state -eq 2) { $nonCompliant++ }
+                $discoveryFailure = $state -ne 1 -and
+                    "$($baseline.ComplianceDetails)" -match '(?i)DiscoveryFailure\s*=\s*"true"|Setting Discovery Error'
+                if ($state -eq 4 -or $discoveryFailure) {
+                    $errors++
+                    $results.Details.Add("WARN: ConfigMgr baseline '$($baseline.Name)' has an execution/discovery error (state=$state; lastEval=$($baseline.LastEvalTime)). Check DCMAgent, CIAgent, and DCMReporting; non-compliance alone is not classified as an exception.")
+                }
+            }
+            $results.Details.Add("INFO: Client baseline inventory: assigned=$($baselines.Count), evaluated=$evaluated, nonCompliant=$nonCompliant, executionErrors=$errors.")
+            if ($ExpectLabBypass -and $evaluated -eq 0) {
+                $results.Details.Add('WARN: No client baseline evaluation has been observed; successful script execution is not established.')
+            }
+        }
+        catch { $results.Details.Add("WARN: Client baseline execution outcomes could not be measured: $($_.Exception.Message)") }
+
+        try {
+            $events = @(Get-WinEvent -FilterHashtable @{
+                    LogName = 'Microsoft-Windows-PowerShell/Operational'; Id = 4100; StartTime = (Get-Date).AddHours(-2)
+                } -MaxEvents 1000 -ErrorAction Stop)
+            if ($events.Count -eq 1000) { $results.Details.Add('WARN: PowerShell error-event inventory reached its 1000-event cap; earlier client errors may be omitted.') }
+            $rejected = [System.Collections.Generic.List[object]]::new()
+            foreach ($clientEvent in $events) {
+                $xml = [xml]$clientEvent.ToXml()
+                $payload = (($xml.Event.EventData.Data | Where-Object { $_.Name -eq 'Payload' }).'#text') -join "`n"
+                if ($payload -match '(?i)\\CCM\\SystemTemp\\[0-9a-f-]+\.ps1' -and
+                    $payload -match '(?i)not digitally signed|Fully Qualified Error ID\s*=\s*UnauthorizedAccess') {
+                    $rejected.Add($clientEvent)
+                }
+            }
+            if ($rejected.Count) {
+                $samples = @($rejected | Select-Object -First 3 |
+                    ForEach-Object { "record=$($_.RecordId) at=$($_.TimeCreated.ToUniversalTime().ToString('o'))" }) -join '; '
+                $results.Details.Add("WARN: $($rejected.Count) ConfigMgr client PowerShell script rejection(s) in the last two hours ($samples). These are observed execution failures; current policy or a baseline inventory alone does not prove recovery.")
+            }
+        }
+        catch {
+            if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') {
+                $results.Details.Add("WARN: Client PowerShell execution-error events could not be read: $($_.Exception.Message)")
+            }
+        }
+        return $results
+    }
+}
+
+function Test-ClientScriptFunctionality {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $cmo = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $domain = $DeployConfig.vmOptions.domainName
+    $expectBypass = [bool]$cmo.PrePopulateObjects
+    $domainDC = $DeployConfig.virtualMachines | Where-Object {
+        $_.role -in @('DC', 'BDC') -and (-not $_.domain -or $_.domain -eq $domain)
+    } | Select-Object -First 1
+    if ($CurrentItem.role -in @('DomainMember', 'WorkgroupMember', 'InternetClient') -and
+        $domainDC.externalDomainJoinSiteCode -and $domainDC.externalDomainJoinSiteCode -ne 'NONE') {
+        $ownerFqdn = "$($domainDC.thisParams.ExternalSiteServer)"
+        $ownerName = ($ownerFqdn -split '\.')[0]
+        $ownerDomain = if ($ownerFqdn.Contains('.')) { $ownerFqdn.Substring($ownerFqdn.IndexOf('.') + 1) } else { '' }
+        $owners = @($DeployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.siteCode -eq $domainDC.externalDomainJoinSiteCode -and
+            $_.cmOptions -and (-not $ownerName -or $_.vmName -eq $ownerName) -and
+            (-not $ownerDomain -or $_.domain -eq $ownerDomain)
+        })
+        if ($owners.Count -eq 1) { $expectBypass = [bool]$owners[0].cmOptions.PrePopulateObjects }
+        else {
+            $expectBypass = $false
+            Add-Phase11Output "[Phase 11] $VMName [ClientScripts]: WARN: Managing-site prepopulation policy could not be resolved unambiguously; Bypass expectation is unverified." -Level Warning
+        }
+    }
+    try {
+        $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain -ScriptBlock (Get-ClientScriptValidationProbe) `
+            -ArgumentList $expectBypass -DisplayName 'Phase11-ClientScripts' `
+            -SuppressLog -AsJob -TimeoutSeconds 180 -PollProgress
+    }
+    catch {
+        Add-Phase11Output "[Phase 11] $VMName [ClientScripts]: WARN: Client script probe failed: $($_.Exception.Message)" -Level Warning
+        return $true
+    }
+    if (-not $result -or $result.ScriptBlockFailed -or $result.ScriptBlockOutput -isnot [hashtable] -or
+        -not $result.ScriptBlockOutput.Details) {
+        Add-Phase11Output "[Phase 11] $VMName [ClientScripts]: WARN: Client script policy/execution could not be verified: $($result.ErrorDetails)" -Level Warning
+        return $true
+    }
+    if ($result.ScriptBlockOutput.Skipped) {
+        Write-Log "[Phase 11] $VMName [ClientScripts]: $($result.ScriptBlockOutput.Details -join '; ')" -LogOnly
+        return $true
+    }
+    foreach ($detail in $result.ScriptBlockOutput.Details) {
+        $level = if ($detail -like 'WARN:*') { 'Warning' } elseif ($detail -like 'OK:*') { 'Success' } else { 'Info' }
+        Add-Phase11Output "[Phase 11] $VMName [ClientScripts]: $detail" -Level $level
+    }
+    return $true
+}
+
 function Test-DomainMemberFunctionality {
     <#
     .SYNOPSIS
         Lightweight checks for a domain-joined member server / client.
     .DESCRIPTION
-        Verifies domain join, secure-channel health, time sync, and (when the
-        SCCM client is present) CCMExec service + last MP communication.
+        Verifies domain join, secure-channel health, time sync, PKI autoenrollment,
+        and (when the SCCM client is present) CCMExec service + last MP communication.
     #>
     [CmdletBinding()]
     param(
@@ -9766,7 +10700,7 @@ function Test-DomainMemberFunctionality {
             Write-Log "[Phase $Phase] $VMName [DomainMember]: managing site '$expectedSiteCode' resolved from $($mgmtVm.vmName); UsePKI=$usePKI (this domain has no cmOptions of its own)" -LogOnly
         }
         else {
-            Write-Log "[Phase $Phase] $VMName [DomainMember]: domain is managed by remote site '$expectedSiteCode' but no VM in this config carries cmOptions -- UsePKI unknown, client-certificate check will be skipped" -LogOnly
+            Write-Log "[Phase $Phase] $VMName [DomainMember]: domain is managed by remote site '$expectedSiteCode' but no VM in this config carries cmOptions -- managing-site UsePKI is unknown; local CA configuration will still be checked" -Warning -LogOnly
         }
     }
 
@@ -10240,7 +11174,7 @@ function Test-DomainMemberFunctionality {
 
         Test-WindowsTimeSync -Details $results.Details -Activity $progressActivity
 
-        # PKI client authentication certificate (when UsePKI + pushClient)
+        # Domain-wide autoenrollment is independent of client-push selection.
         if ($checkPki) {
             try {
                 $pkiState = & ([scriptblock]::Create($clientCertificateProbeText))
@@ -10488,7 +11422,7 @@ function Test-DomainMemberFunctionality {
 
                 if ($pkiCertFailure) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt after reporting no usable PKI client-auth certificate (CCM_E_NO_CLIENT_PKI_CERT / 0x87D00454). HTTPS client authentication could not complete at that attempt; this is not evidence of missing DP content. The certificate readiness result above shows whether enrollment has since recovered. Check ConfigMgrClientCertificate Read+Enroll+AutoEnroll for this domain's Domain Computers and Root/NTAuth publication. Once readiness passes, allow the existing setup retry to complete and re-run Phase 11; do not launch a competing ccmsetup.")
+                    $results.Details.Add("FAIL: ccmsetup wedged $elapsedTxt after reporting no usable PKI client-auth certificate (CCM_E_NO_CLIENT_PKI_CERT / 0x87D00454). HTTPS client authentication could not complete at that attempt; this is not evidence of missing DP content. Use the PKI readiness diagnostics (when available) to determine whether enrollment has since recovered. Check ConfigMgrClientCertificate Read+Enroll+AutoEnroll for this domain's Domain Computers and Root/NTAuth publication. Once readiness passes, allow the existing setup retry to complete and re-run Phase 11; do not launch a competing ccmsetup.")
                 }
                 elseif ($mpUnavailable) {
                     $results.Passed = $false
@@ -10586,7 +11520,10 @@ function Test-DomainMemberFunctionality {
         return $results
     }
 
-    $checkPkiCert = ($usePKI -and $pushExpected)
+    $checkPkiCert = ($usePKI -or @($DeployConfig.virtualMachines | Where-Object {
+                $_.InstallCA -and $_.role -ne 'StandaloneRootCA' -and
+                (-not $_.domain -or $_.domain -eq $domain)
+            }).Count -gt 0)
     $clientCertificateProbeText = (Get-MemLabsClientCertificateReadinessBlock).ToString()
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $domain, $checkPkiCert, $clientCertificateProbeText `
@@ -10615,7 +11552,7 @@ function Test-DomainMemberFunctionality {
     # logs to the host log directory so the operator can troubleshoot offline
     # (these live only on the guest and are otherwise lost on VHD compaction).
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Details) {
-        $ccmFailed = $result.ScriptBlockOutput.Details | Where-Object { $_ -match 'ccmsetup failed' }
+        $ccmFailed = $result.ScriptBlockOutput.Details | Where-Object { $_ -match 'ccmsetup failed|^FAIL: ccmsetup\b' }
         # ccmsetup.log rolls but is never truncated, so a failure line from an
         # outage hours ago survives the repair. If CcmExec is Running now, that
         # entry is history and pulling ~1MB of guest logs per VM over PSDirect
@@ -11694,6 +12631,104 @@ function Test-PullDPConfiguration {
     return (Format-TestResult -VMName $VMName -RoleLabel 'PullDP' -Result $result)
 }
 
+function Invoke-CmWmiQueryWithRetry {
+    param(
+        [Parameter(Mandatory)][string]$Namespace,
+        [Parameter(Mandatory)][string]$Class,
+        [string]$Filter,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Details,
+        [ValidateRange(1, 10)][int]$Attempts = 3,
+        [ValidateRange(0, 30)][int]$RetrySeconds = 2
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            $query = @{ Namespace = $Namespace; Class = $Class; ErrorAction = 'Stop' }
+            if ($Filter) { $query.Filter = $Filter }
+            $items = @(Get-WmiObject @query)
+            if ($attempt -gt 1) {
+                $Details.Add("RECOVERED: $Label query succeeded on attempt $attempt/$Attempts after a provider failure")
+            }
+            return $items
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt $Attempts) {
+                $Details.Add("INFO: $Label query attempt $attempt/$Attempts failed: $($_.Exception.Message); retrying in ${RetrySeconds}s")
+                Start-Sleep -Seconds $RetrySeconds
+            }
+        }
+    }
+
+    $chain = [System.Collections.Generic.List[string]]::new()
+    $exception = $lastError.Exception
+    for ($depth = 0; $exception -and $depth -lt 8; $depth++) {
+        $errorCode = if ($exception.PSObject.Properties['ErrorCode']) { "$($exception.ErrorCode)" } else { '<none>' }
+        $chain.Add("Type=$($exception.GetType().FullName); Message=$($exception.Message); HResult=0x$($exception.HResult.ToString('X8')); ErrorCode=$errorCode")
+        $exception = $exception.InnerException
+    }
+    throw "$Label query failed after $Attempts attempts: Namespace=$Namespace; Class=$Class; Filter=[$Filter]; $($chain -join ' -> '); FQID=$($lastError.FullyQualifiedErrorId); Stack=$($lastError.ScriptStackTrace)"
+}
+
+function Get-ClientPackageContentProofBlock {
+    return {
+        param([Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9]{8}$')][string]$PackageId)
+
+        $proof = [pscustomobject]@{
+            PackageId = $PackageId
+            CapturedAtUtc = [DateTime]::UtcNow.ToString('o')
+            ContentRoot = ''
+            PackagePath = ''
+            Present = $null
+            Error = ''
+        }
+        try {
+            $proof.ContentRoot = "$((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\DP' -Name ContentLibraryPath -ErrorAction Stop).ContentLibraryPath)"
+            if ([string]::IsNullOrWhiteSpace($proof.ContentRoot)) { throw 'The DP has no configured ContentLibraryPath.' }
+            if (-not (Test-Path -LiteralPath $proof.ContentRoot -PathType Container -ErrorAction Stop)) {
+                throw "The configured content library is not reachable: $($proof.ContentRoot)"
+            }
+            $proof.PackagePath = Join-Path (Join-Path $proof.ContentRoot 'PkgLib') "$PackageId.INI"
+            $proof.Present = Test-Path -LiteralPath $proof.PackagePath -PathType Leaf -ErrorAction Stop
+        }
+        catch { $proof.Error = "$($_.Exception.GetType().FullName): $($_.Exception.Message)" }
+        return $proof
+    }
+}
+
+function Test-SecondaryClientPackageDistribution {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $parentCode = "$($CurrentItem.parentSiteCode)"
+    $parents = @($DeployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'Primary' -and $_.siteCode -eq $parentCode -and $_.vmName
+        })
+    if ($parentCode -and $parents.Count -eq 0) {
+        try {
+            $parents = @(Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName | Where-Object {
+                    $_.role -eq 'Primary' -and $_.siteCode -eq $parentCode -and $_.vmName
+                })
+        }
+        catch {
+            Add-Phase11Output "[Phase 11] $VMName [ClientPkg]: FAIL - could not resolve parent Primary '$parentCode': $($_.Exception.Message)" -Level Failure
+            return $false
+        }
+    }
+    if (-not $parentCode -or $parents.Count -ne 1) {
+        Add-Phase11Output "[Phase 11] $VMName [ClientPkg]: FAIL - expected one parent Primary for '$parentCode', found $($parents.Count); Secondary package coverage is unverified." -Level Failure
+        return $false
+    }
+    return (Test-CMClientPackageDistribution -VMName $parents[0].vmName -CurrentItem $parents[0] `
+        -DeployConfig $DeployConfig -PhysicalDpNames @($VMName))
+}
+
 function Get-ClientPackageValidationScope {
     param(
         [Parameter(Mandatory)][object]$CurrentItem,
@@ -11703,9 +12738,8 @@ function Get-ClientPackageValidationScope {
     $siteCode = "$($CurrentItem.siteCode)"
     # A CAS's package summarizer contains replicated rows for child Primaries,
     # but those rows can lag while the child's own provider is already current.
-    # Every Primary runs this same Phase 11 check, so delegate each child Primary
-    # to its local provider. A Primary still owns directly attached Secondary
-    # sites because Secondary roles do not run this package check themselves.
+    # Delegate child Primaries to their local providers. Secondary validation
+    # also uses its parent's provider, including in Secondary-only expansions.
     $ownedSiteCodes = @($siteCode)
     try {
         $ownedSiteCodes += @($DeployConfig.virtualMachines | Where-Object {
@@ -11774,7 +12808,8 @@ function Test-CMClientPackageDistribution {
     param(
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][object]$CurrentItem,
-        [Parameter(Mandatory)][object]$DeployConfig
+        [Parameter(Mandatory)][object]$DeployConfig,
+        [string[]]$PhysicalDpNames = @()
     )
 
     $Phase = 11
@@ -11793,8 +12828,14 @@ function Test-CMClientPackageDistribution {
     Write-Log "[Phase $Phase] $VMName [ClientPkg]: Verifying client package distribution for site '$siteCode' (owned sites: $ownedSiteCsv; owned DPs: $ownedDpCsv)" -LogOnly
 
     $scriptBlock = {
-        param($sc, $ownedSitesCsv, $ownedDpCsv, $requiredDpCsv)
-        $results = @{ Passed = $true; ContentPendingFromParent = $false; ClientPkgSourceSite = ''; Details = [System.Collections.Generic.List[string]]::new() }
+        param($sc, $ownedSitesCsv, $ownedDpCsv, $requiredDpCsv, $providerQueryDefinition)
+        if (-not $providerQueryDefinition) { throw 'The provider-query helper was not supplied by the host.' }
+        Set-Item -Path Function:\Invoke-CmWmiQueryWithRetry -Value ([scriptblock]::Create($providerQueryDefinition)) -ErrorAction Stop
+        $results = @{
+            Passed = $true; ContentPendingFromParent = $false; ClientPkgSourceSite = ''
+            ClientPackageId = ''; ClientPackageSourceVersion = ''
+            Details = [System.Collections.Generic.List[string]]::new()
+        }
         $ns = "root\SMS\site_$sc"
         $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '4' = 'RemovalPending'; '5' = 'RemovalRetrying'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
         $dpNameOf = {
@@ -11865,7 +12906,9 @@ function Test-CMClientPackageDistribution {
             # for a normal client install and memlabs never distributes it to a DP. Gating
             # Phase 11 on it (NOT distributed to ANY DP / no BG coverage) is a false positive
             # that fails otherwise-healthy sites, so exclude it from this coverage check.
-            $clientPkgs = @(Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "Name LIKE 'Configuration Manager Client%' AND Name NOT LIKE '%Piloting%'" -ErrorAction Stop)
+            $clientPkgs = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_Package `
+                -Filter "Name LIKE 'Configuration Manager Client%' AND Name NOT LIKE '%Piloting%'" `
+                -Label 'Client package inventory' -Details $results.Details)
         }
         catch {
             $results.Passed = $false
@@ -11881,6 +12924,9 @@ function Test-CMClientPackageDistribution {
             "$($productionClientPackages[0].PackageID)"
         }
         else { '' }
+        $results.ClientPackageId = $requiredClientPackageId
+        $requiredPackage = $productionClientPackages | Where-Object { $_.PackageID -eq $requiredClientPackageId } | Select-Object -First 1
+        if ($requiredPackage) { $results.ClientPackageSourceVersion = "$($requiredPackage.SourceVersion)" }
         if ($requiredDps.Count -gt 0 -and $productionClientPackages.Count -eq 0) {
             $results.Passed = $false
             $results.Details.Add("FAIL: no production client package found in site $sc; required DP coverage cannot be verified ($($requiredDps -join ', ')).")
@@ -11891,13 +12937,15 @@ function Test-CMClientPackageDistribution {
 
         foreach ($pkg in $clientPkgs) {
             $pkgId = $pkg.PackageID
-            $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction Stop)
+            $dpRows = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                -Filter "PackageID='$pkgId'" -Label "Client package $pkgId DP status" -Details $results.Details)
             # Convergence: allow in-progress (1/2/7) to settle before judging.
             for ($t = 1; $t -le 3; $t++) {
                 $pending = @($dpRows | Where-Object { $_.State -in 1, 2, 7 })
                 if ($pending.Count -eq 0) { break }
                 Start-Sleep -Seconds 30
-                $dpRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$pkgId'" -ErrorAction Stop)
+                $dpRows = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                    -Filter "PackageID='$pkgId'" -Label "Client package $pkgId DP status" -Details $results.Details)
             }
             if ($dpRows.Count -eq 0) {
                 $results.Passed = $false
@@ -12033,12 +13081,13 @@ function Test-CMClientPackageDistribution {
         # loop -- even though OTHER boundary groups' DPs have the content. This is
         # the check that maps directly to the client symptom.
         try {
-            $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
-            $bgLinks = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -ErrorAction Stop)
+            $bgs = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_BoundaryGroup -Label 'Client package boundary groups' -Details $results.Details)
+            $bgLinks = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_BoundaryGroupSiteSystems -Label 'Client package boundary-group DPs' -Details $results.Details)
             foreach ($pkg in $clientPkgs) {
                 $dpState = @{}
                 $dpSite = @{}
-                foreach ($row in @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($pkg.PackageID)'" -ErrorAction Stop)) {
+                foreach ($row in @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                        -Filter "PackageID='$($pkg.PackageID)'" -Label "Client package $($pkg.PackageID) boundary coverage" -Details $results.Details)) {
                     $rowName = (& $dpNameOf $row.ServerNALPath).ToUpper()
                     $dpState[$rowName] = [int]$row.State
                     $dpSite[$rowName] = "$($row.SiteCode)"
@@ -12079,7 +13128,8 @@ function Test-CMClientPackageDistribution {
         # GIVEN UP (retries exhausted); while it is still retrying, WARN.
         try {
             $clientPkgIds = @($clientPkgs | ForEach-Object { $_.PackageID })
-            $failedRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "State = 3 OR State = 6 OR State = 8" -ErrorAction Stop)
+            $failedRows = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                -Filter "State = 3 OR State = 6 OR State = 8" -Label 'Terminal package distribution states' -Details $results.Details)
             $foreignFailed = @($failedRows | Where-Object { -not (& $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode) })
             $failedRows = @($failedRows | Where-Object { & $isOwnedDp (& $dpNameOf $_.ServerNALPath) $_.SiteCode })
             if ($foreignFailed.Count -gt 0) {
@@ -12168,10 +13218,50 @@ function Test-CMClientPackageDistribution {
         return $results
     }
 
+    $providerQueryDefinition = (Get-Command -Name Invoke-CmWmiQueryWithRetry -CommandType Function -ErrorAction Stop).Definition
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $ownedSiteCsv, $ownedDpCsv, $requiredDpCsv `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $ownedSiteCsv, $ownedDpCsv, $requiredDpCsv, $providerQueryDefinition `
         -DisplayName "Phase11-ClientPkg-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
+
+    if ($result -and -not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -is [hashtable]) {
+        $payload = $result.ScriptBlockOutput
+        $detailLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in @($payload.Details)) { $detailLines.Add("$line") }
+        $payload.Details = $detailLines
+        foreach ($dpName in @($PhysicalDpNames | Where-Object { $_ } | Select-Object -Unique)) {
+            $dpShort = ("$dpName" -split '\.')[0]
+            if ($ownedDpNames -notcontains $dpShort) {
+                $payload.Passed = $false
+                $payload.Details.Add("FAIL: requested physical DP '$dpShort' is outside site '$siteCode' validation scope; no foreign-site content was judged.")
+                continue
+            }
+            $required = @($validationScope.RequiredDpNames) -contains $dpShort
+            $proof = $null
+            $evidence = "No production client-package identity was returned by the provider."
+            if ($payload.ClientPackageId) {
+                $proof = Invoke-VmCommand -VmName $dpShort -VmDomainName $domain `
+                    -ScriptBlock (Get-ClientPackageContentProofBlock) -ArgumentList "$($payload.ClientPackageId)" `
+                    -DisplayName 'Phase11-ClientPkg-Physical' -AsJob -TimeoutSeconds 30 -SessionMaxRetries 1 -SuppressLog
+                $states = @($proof.ScriptBlockOutput)
+                $measured = $proof -and $proof.ScriptBlockFailed -is [bool] -and -not $proof.ScriptBlockFailed -and
+                    $states.Count -eq 1 -and $null -ne $states[0] -and
+                    $states[0].PackageId -eq $payload.ClientPackageId -and $states[0].Present -is [bool] -and
+                    -not [string]::IsNullOrWhiteSpace("$($states[0].ContentRoot)")
+                if ($measured -and $states[0].Present) {
+                    $payload.Details.Add("OK: DP '$dpShort' physical PkgLib presence verified for $($payload.ClientPackageId) at '$($states[0].PackagePath)' ($($states[0].CapturedAtUtc)). Provider SourceVersion=$($payload.ClientPackageSourceVersion) is checked separately; PkgLib presence alone does not establish version currency.")
+                    continue
+                }
+                $evidence = if ($measured) { "PkgLib file is absent at '$($states[0].PackagePath)'." }
+                elseif ($states.Count -eq 1 -and $states[0].Error) { "$($states[0].Error)" }
+                else { "Physical proof is unreadable or malformed. $(@($proof.ErrorDetails) -join '; ')" }
+            }
+            $severity = if ($required) { 'FAIL' } else { 'WARN' }
+            if ($required) { $payload.Passed = $false }
+            $payload.Details.Add("${severity}: DP '$dpShort' physical client-package content is unverified (package=$($payload.ClientPackageId), expected SourceVersion=$($payload.ClientPackageSourceVersion), required=$required). $evidence")
+            $payload.FailingDPs = @(@($payload.FailingDPs) + $dpShort | Where-Object { $_ } | Select-Object -Unique)
+        }
+    }
 
     # On a distribution failure OR any DP behind on the client package (even a
     # WARN, e.g. a Secondary DP stuck at ContentValidating), auto-collect the site
@@ -12179,8 +13269,9 @@ function Test-CMClientPackageDistribution {
     # reason is captured without hand-running commands.
     $failing = @()
     if (($result.ScriptBlockOutput -is [hashtable]) -and $result.ScriptBlockOutput.ContainsKey('FailingDPs')) { $failing = @($result.ScriptBlockOutput.FailingDPs | Where-Object { $_ }) }
-    if (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($failing.Count -gt 0))) {
-        Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: distribution failed or a DP is behind -- collecting distmgr/PkgXferMgr logs into the logs folder"
+    if ($result -and ($result.ScriptBlockFailed -or
+            (($result.ScriptBlockOutput -is [hashtable]) -and (($result.ScriptBlockOutput.Passed -eq $false) -or ($failing.Count -gt 0))))) {
+        Add-Phase11Output "[Phase $Phase] $VMName [ClientPkg]: distribution or provider validation failed, or a DP needs diagnostics -- collecting site logs into the logs folder"
         $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'ClientPkg' -Collector $Phase11SmsSiteLogCollector
 
         # The summarizer is HIERARCHY-wide, so the failing DP routinely belongs to a
@@ -12877,7 +13968,7 @@ function Test-CMSiteWideFunctionality {
         $parseErrors = $null
         $consoleAst = [Management.Automation.Language.Parser]::ParseFile($consoleHelpersPath, [ref]$null, [ref]$parseErrors)
         if ($parseErrors.Count) { throw "Console helper source does not parse: $($parseErrors -join '; ')" }
-        foreach ($name in @('Get-ConsolePayloadState', 'Get-ConsoleVersionState')) {
+        foreach ($name in @('Get-ConsoleSetupInfo', 'Get-ConsolePayloadState', 'Get-ConsoleVersionState')) {
             $definitions = @($consoleAst.FindAll({
                         param($node)
                         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -13012,7 +14103,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner, $consoleHelperSourceInner)
+        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner, $consoleHelperSourceInner, $providerQueryDefinition)
 
         function Get-MemLabsValidationProjectedCimRows {
             param(
@@ -13099,6 +14190,283 @@ function Test-CMSiteWideFunctionality {
             if ($State -in 1, 2, 7) { return 'Pending' }
             return 'Problem'
         }
+
+        function ConvertFrom-MemLabsOsdTransferEvent {
+            param([Parameter(Mandatory)][string]$Line)
+
+            $entry = [regex]::Match($Line,
+                'Sending thread starting for Job:\s*\d+,\s*package:\s*(?<PackageId>[A-Za-z0-9]{8}),\s*Version:\s*(?<Version>\d+).*?\bserver:\s*(?<DP>[^,\s]+)',
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $kind = 'TransferStarted'
+            if (-not $entry.Success) {
+                $entry = [regex]::Match($Line,
+                    'Adding (?<FileName>.+) file in (?<PackageId>[A-Za-z0-9]{8})\.(?<Version>\d+)\.',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'FileCopiedToStaging'
+            }
+            if (-not $entry.Success) {
+                $entry = [regex]::Match($Line,
+                    'Finished sending SWD package (?<PackageId>[A-Za-z0-9]{8}) version (?<Version>\d+) to distribution point (?<DP>[^\s]+)',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'PackageTransferred'
+            }
+            if (-not $entry.Success) {
+                if ($Line -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package') {
+                    throw "Malformed PkgXferMgr transfer record: $Line"
+                }
+                return
+            }
+            $timestamp = [regex]::Match($Line,
+                '><(?<Date>\d{2}-\d{2}-\d{4}) (?<Time>\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?)(?<Offset>[+-]\d+)>')
+            if ($timestamp.Success) {
+                $dateText = $timestamp.Groups['Date'].Value
+                $timeText = $timestamp.Groups['Time'].Value
+                $offsetText = $timestamp.Groups['Offset'].Value
+            }
+            else {
+                $dateField = [regex]::Match($Line, '\bdate="(?<Date>\d{1,2}-\d{1,2}-\d{4})"')
+                $timeField = [regex]::Match($Line, '\btime="(?<Time>\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?)(?<Offset>[+-]\d+)"')
+                if (-not $dateField.Success -or -not $timeField.Success) {
+                    throw "No supported timestamp in PkgXferMgr transfer record: $Line"
+                }
+                $dateText = $dateField.Groups['Date'].Value
+                $timeText = $timeField.Groups['Time'].Value
+                $offsetText = $timeField.Groups['Offset'].Value
+            }
+            $stamp = [datetime]::MinValue
+            $offsetMinutes = 0
+            $sourceVersion = 0
+            if (-not [datetime]::TryParseExact("$dateText $timeText",
+                    [string[]]@('M-d-yyyy HH:mm:ss.FFFFFFF', 'M-d-yyyy HH:mm:ss'),
+                    [System.Globalization.CultureInfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::None, [ref]$stamp) -or
+                -not [int]::TryParse($offsetText, [ref]$offsetMinutes) -or
+                [math]::Abs([long]$offsetMinutes) -gt 840 -or
+                -not [int]::TryParse($entry.Groups['Version'].Value, [ref]$sourceVersion) -or
+                $sourceVersion -lt 1) {
+                throw "Invalid timestamp or version in PkgXferMgr transfer record: $Line"
+            }
+            $thread = [regex]::Match($Line, '\bthread="?(?<ThreadId>\d+)')
+            if (-not $thread.Success) { throw "No thread identity in PkgXferMgr transfer record: $Line" }
+            $atUtc = [datetimeoffset]::new($stamp, [timespan]::FromMinutes(-$offsetMinutes)).UtcDateTime
+            $startedAtUtc = $null
+            $sortOrder = 1
+            if ($kind -eq 'TransferStarted') { $startedAtUtc = $atUtc; $sortOrder = 0 }
+            [pscustomobject]@{
+                PackageId = $entry.Groups['PackageId'].Value
+                DP = $entry.Groups['DP'].Value.TrimEnd('\')
+                SourceVersion = $sourceVersion
+                Kind = $kind
+                FileName = $entry.Groups['FileName'].Value
+                ThreadId = $thread.Groups['ThreadId'].Value
+                AtUtc = $atUtc
+                StartedAtUtc = $startedAtUtc
+                SortOrder = $sortOrder
+            }
+        }
+
+        function Get-MemLabsOsdTransferEvidence {
+            param([Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Details)
+
+            $events = [System.Collections.Generic.List[object]]::new()
+            $starts = [System.Collections.Generic.List[object]]::new()
+            $progress = [System.Collections.Generic.List[object]]::new()
+            $smsDir = ''
+            foreach ($key in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
+                try {
+                    $smsDir = "$((Get-ItemProperty -Path $key -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory')"
+                }
+                catch {
+                    $message = "DIAG: OSD transfer-start directory lookup failed at '$key': $($_.Exception.Message)"
+                    if (-not $Details.Contains($message)) { $Details.Add($message) }
+                }
+                if ($smsDir) { break }
+            }
+            $foundLog = $false
+            if ($smsDir) {
+                foreach ($extension in @('.log', '.lo_')) {
+                    $path = Join-Path $smsDir "Logs\PkgXferMgr$extension"
+                    try {
+                        if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { continue }
+                        $foundLog = $true
+                        foreach ($line in @(Get-Content -LiteralPath $path -Tail 10000 -ErrorAction Stop |
+                                Where-Object { $_ -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package' })) {
+                            try { $events.Add((ConvertFrom-MemLabsOsdTransferEvent -Line "$line")) }
+                            catch {
+                                $message = "DIAG: OSD transfer-evidence parse failed in '$path': $($_.Exception.Message)"
+                                if (-not $Details.Contains($message)) { $Details.Add($message) }
+                            }
+                        }
+                    }
+                    catch {
+                        $message = "DIAG: OSD transfer-evidence read failed at '$path': $($_.Exception.Message)"
+                        if (-not $Details.Contains($message)) { $Details.Add($message) }
+                    }
+                }
+            }
+            if (-not $foundLog) {
+                $message = 'DIAG: PkgXferMgr transfer evidence was not measured; no readable log path was found. A pending state is not proof of progress.'
+                if (-not $Details.Contains($message)) { $Details.Add($message) }
+            }
+            $sessions = @{}
+            $uncorrelated = $false
+            foreach ($transferEvent in @($events | Sort-Object AtUtc, SortOrder)) {
+                if ($transferEvent.Kind -eq 'TransferStarted') {
+                    $sessions[$transferEvent.ThreadId] = $transferEvent
+                    $starts.Add($transferEvent)
+                }
+                elseif ($transferEvent.Kind -eq 'FileCopiedToStaging') {
+                    $session = $sessions[$transferEvent.ThreadId]
+                    if (-not $session -or $session.PackageId -ine $transferEvent.PackageId -or
+                        $session.SourceVersion -ne $transferEvent.SourceVersion -or $session.AtUtc -gt $transferEvent.AtUtc) {
+                        $uncorrelated = $true
+                        continue
+                    }
+                    $progress.Add([pscustomobject]@{
+                            PackageId = $transferEvent.PackageId; DP = $session.DP; SourceVersion = $transferEvent.SourceVersion
+                            Kind = $transferEvent.Kind; Identity = "$($transferEvent.Kind)|$($transferEvent.FileName)".ToUpperInvariant()
+                            AtUtc = $transferEvent.AtUtc; SortOrder = 1
+                        })
+                }
+                else {
+                    $progress.Add([pscustomobject]@{
+                            PackageId = $transferEvent.PackageId; DP = $transferEvent.DP; SourceVersion = $transferEvent.SourceVersion
+                            Kind = $transferEvent.Kind; Identity = $transferEvent.Kind; AtUtc = $transferEvent.AtUtc; SortOrder = 1
+                        })
+                }
+            }
+            if ($uncorrelated) {
+                $message = 'DIAG: Some file-copy records had no matching package/version sending thread in the bounded log tail; they were not used as progress.'
+                if (-not $Details.Contains($message)) { $Details.Add($message) }
+            }
+            [pscustomobject]@{ Starts = $starts.ToArray(); Progress = $progress.ToArray() }
+        }
+
+        function Get-MemLabsOsdContentWaitState {
+            param(
+                [object[]]$PendingTargets,
+                [object[]]$TransferStarts,
+                [object[]]$ProgressEvents = @(),
+                [Parameter(Mandatory)][datetime]$StartedAtUtc,
+                [Parameter(Mandatory)][datetime]$NowUtc,
+                [Parameter(Mandatory)][hashtable]$TransferClocks,
+                [hashtable]$ProgressClocks = @{},
+                [ValidateRange(1, 86400)][int]$PreparationWaitSeconds = 900,
+                [ValidateRange(1, 86400)][int]$TransferWaitSeconds = 900,
+                [ValidateRange(1, 86400)][int]$OverallWaitSeconds = 2700
+            )
+
+            if ($NowUtc -lt $StartedAtUtc) { throw 'The OSD validation clock moved backwards.' }
+            $overallDeadline = $StartedAtUtc.AddSeconds($OverallWaitSeconds)
+            $events = @(
+                foreach ($start in $TransferStarts) {
+                    [pscustomobject]@{
+                        PackageId = $start.PackageId; DP = $start.DP; SourceVersion = $start.SourceVersion
+                        Kind = 'TransferStarted'; Identity = 'TransferStarted'; AtUtc = $start.StartedAtUtc; SortOrder = 0
+                    }
+                }
+            ) + @($ProgressEvents)
+            $targets = [System.Collections.Generic.List[object]]::new()
+            foreach ($target in $PendingTargets) {
+                $sourceVersion = 0
+                if ("$($target.PackageId)" -notmatch '^[A-Za-z0-9]{8}$' -or -not "$($target.DP)" -or
+                    -not [int]::TryParse("$($target.SourceVersion)", [ref]$sourceVersion) -or $sourceVersion -lt 1) {
+                    throw "Cannot time OSD target '$($target.PackageId)' on '$($target.DP)' with source version '$($target.SourceVersion)'."
+                }
+                $wantedDp = "$($target.DP)"
+                $key = "$($target.PackageId)|$wantedDp|$sourceVersion".ToUpperInvariant()
+                $storedVersion = 0L
+                $storedMeasured = [long]::TryParse("$($target.StoredPkgVersion)", [ref]$storedVersion) -and $storedVersion -ge 0
+                if (-not $ProgressClocks.ContainsKey($key)) {
+                    $ProgressClocks[$key] = @{
+                        LastProgressUtc = $StartedAtUtc; LastVerifiedProgressUtc = $null
+                        LastKind = 'ValidationStarted'; Seen = @{}; CopiedFiles = 0; TransferCompleted = $false
+                        SourceWasPending = ($storedMeasured -and $storedVersion -lt $sourceVersion)
+                        BrokenDeadlineUtc = $null
+                    }
+                }
+                $clock = $ProgressClocks[$key]
+                $eligible = @($events | Where-Object {
+                        $actualDp = "$($_.DP)"
+                        $sameDp = $actualDp -ieq $wantedDp -or (
+                            (-not $actualDp.Contains('.') -or -not $wantedDp.Contains('.')) -and
+                            ($actualDp -split '\.')[0] -ieq ($wantedDp -split '\.')[0])
+                        "$($_.PackageId)" -ieq "$($target.PackageId)" -and $sameDp -and
+                        $_.SourceVersion -eq $sourceVersion -and $_.AtUtc -ge $StartedAtUtc -and $_.AtUtc -le $NowUtc
+                    })
+                if ($clock.SourceWasPending -and $storedMeasured -and $storedVersion -ge $sourceVersion) {
+                    $eligible += [pscustomobject]@{
+                        Kind = 'SourceContentReady'; Identity = 'SourceContentReady'; AtUtc = $NowUtc; SortOrder = 1
+                    }
+                    $clock.SourceWasPending = $false
+                }
+                foreach ($transferEvent in @($eligible | Sort-Object AtUtc, SortOrder)) {
+                    if ($clock.Seen.ContainsKey($transferEvent.Identity)) { continue }
+                    if ($transferEvent.Kind -eq 'TransferStarted' -and $TransferClocks.ContainsKey($key)) { continue }
+                    if ($null -ne $clock.BrokenDeadlineUtc) { break }
+                    $budget = $PreparationWaitSeconds
+                    if ($TransferClocks.ContainsKey($key) -or $clock.CopiedFiles -gt 0 -or $clock.TransferCompleted) {
+                        $budget = $TransferWaitSeconds
+                    }
+                    $previousDeadline = $clock.LastProgressUtc.AddSeconds($budget)
+                    if ($transferEvent.AtUtc -gt $previousDeadline) {
+                        $clock.BrokenDeadlineUtc = $previousDeadline
+                        break
+                    }
+                    if ($transferEvent.AtUtc -gt $overallDeadline) { continue }
+                    $clock.Seen[$transferEvent.Identity] = $true
+                    if ($transferEvent.Kind -eq 'TransferStarted') { $TransferClocks[$key] = $transferEvent.AtUtc }
+                    elseif ($transferEvent.Kind -eq 'FileCopiedToStaging') { $clock.CopiedFiles++ }
+                    elseif ($transferEvent.Kind -eq 'PackageTransferred') { $clock.TransferCompleted = $true }
+                    if ($transferEvent.AtUtc -ge $clock.LastProgressUtc) {
+                        $clock.LastProgressUtc = $transferEvent.AtUtc
+                        $clock.LastKind = $transferEvent.Kind
+                        if ($transferEvent.Kind -ne 'TransferStarted') { $clock.LastVerifiedProgressUtc = $transferEvent.AtUtc }
+                    }
+                }
+                $transferStart = $null
+                $stage = 'PreparationOrUnobservedTransfer'
+                $budget = $PreparationWaitSeconds
+                $elapsedSeconds = [math]::Max(0, [int]($NowUtc - $StartedAtUtc).TotalSeconds)
+                if ($TransferClocks.ContainsKey($key)) {
+                    $transferStart = $TransferClocks[$key]
+                    $elapsedSeconds = [math]::Max(0, [int]($NowUtc - $transferStart).TotalSeconds)
+                }
+                if ($null -ne $transferStart -or $clock.CopiedFiles -gt 0 -or $clock.TransferCompleted) {
+                    $stage = 'TransferOrInstallation'
+                    $budget = $TransferWaitSeconds
+                }
+                $noProgressDeadline = $clock.LastProgressUtc.AddSeconds($budget)
+                if ($null -ne $clock.BrokenDeadlineUtc -and $clock.BrokenDeadlineUtc -lt $noProgressDeadline) {
+                    $noProgressDeadline = $clock.BrokenDeadlineUtc
+                }
+                $deadline = $noProgressDeadline
+                $limitKind = 'NoVerifiedProgress'
+                if ($overallDeadline -le $deadline) { $deadline = $overallDeadline; $limitKind = 'OverallHardCap' }
+                $noProgressSeconds = [math]::Max(0, [int]($NowUtc - $clock.LastProgressUtc).TotalSeconds)
+                $description = "${budget}s without verified forward progress; lastClockEvidence=$($clock.LastKind) atUtc=$($clock.LastProgressUtc.ToString('o')) copiedFiles=$($clock.CopiedFiles) deadlineUtc=$($deadline.ToString('o')) overallDeadlineUtc=$($overallDeadline.ToString('o')); intra-file byte progress is unmeasured"
+                $targets.Add([pscustomobject]@{
+                        Key = $key; PackageId = "$($target.PackageId)"; DP = $wantedDp
+                        SourceVersion = $sourceVersion; SourceSite = "$($target.SourceSite)"
+                        StoredPkgVersion = "$($target.StoredPkgVersion)"; StateName = "$($target.StateName)"
+                        Stage = $stage; TransferStartedAtUtc = $transferStart; DeadlineUtc = $deadline
+                        ObservedAtUtc = $NowUtc; ElapsedSeconds = $elapsedSeconds
+                        LastVerifiedProgressUtc = $clock.LastVerifiedProgressUtc; LastEvidenceKind = $clock.LastKind
+                        NoProgressSeconds = $noProgressSeconds; VerifiedCopiedFiles = $clock.CopiedFiles
+                        OverallDeadlineUtc = $overallDeadline; LimitKind = $limitKind
+                        IntraFileBytesMeasured = $false; SourceStoredVersionMeasured = $storedMeasured
+                        RemainingSeconds = [math]::Max(0, [int][math]::Ceiling(($deadline - $NowUtc).TotalSeconds))
+                        Expired = $NowUtc -ge $deadline; Description = $description
+                    })
+            }
+            $remainingSeconds = 0
+            if ($targets.Count) { $remainingSeconds = [int]($targets | Measure-Object RemainingSeconds -Minimum).Minimum }
+            [pscustomobject]@{
+                Targets = $targets.ToArray()
+                ExpiredTargets = @($targets | Where-Object { $_.Expired })
+                RemainingSeconds = $remainingSeconds
+            }
+        }
         $osdProgressActivity = "$env:COMPUTERNAME [OSD content validation]"
 
         $usePki = ($usePkiInner -eq 'True')
@@ -13122,51 +14490,18 @@ function Test-CMSiteWideFunctionality {
         $expectedBoundaries = if ([string]::IsNullOrEmpty($expectedBgCsv)) { @() } else { @($expectedBgCsv -split '\|') }
         $configOsdDpNames = if ([string]::IsNullOrEmpty($expectedOsdDpCsv)) { @() } else { @($expectedOsdDpCsv -split '\|') }
         $uncoveredOsdSubnets = if ([string]::IsNullOrEmpty($uncoveredOsdSubnetCsv)) { @() } else { @($uncoveredOsdSubnetCsv -split '\|') }
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $results = @{
+            Passed = $true
+            Details = [System.Collections.Generic.List[string]]::new()
+            OsdContentSourceSiteCodes = [System.Collections.Generic.List[string]]::new()
+            OsdContentWaitProblems = [System.Collections.Generic.List[string]]::new()
+            OsdContentWaitTargets = @()
+        }
 
         $ns = "root\SMS\site_$sc"
 
-        function Invoke-CmWmiQueryWithRetry {
-            param(
-                [Parameter(Mandatory)][string]$Class,
-                [string]$Filter,
-                [Parameter(Mandatory)][string]$Label,
-                [int]$Attempts = 3,
-                [int]$RetrySeconds = 2
-            )
-
-            $lastError = $null
-            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-                try {
-                    $query = @{
-                        Namespace   = $ns
-                        Class       = $Class
-                        ErrorAction = 'Stop'
-                    }
-                    if ($Filter) { $query.Filter = $Filter }
-                    $items = @(Get-WmiObject @query)
-                    if ($attempt -gt 1) {
-                        $results.Details.Add("RECOVERED: $Label query succeeded on attempt $attempt/$Attempts after a transient provider failure")
-                    }
-                    return $items
-                }
-                catch {
-                    $lastError = $_
-                    if ($attempt -lt $Attempts) {
-                        $results.Details.Add("INFO: $Label query attempt $attempt/$Attempts failed: $($_.Exception.Message); retrying in ${RetrySeconds}s")
-                        Start-Sleep -Seconds $RetrySeconds
-                    }
-                }
-            }
-
-            $exception = $lastError.Exception
-            $exceptionType = if ($exception) { $exception.GetType().FullName } else { '<none>' }
-            $message = if ($exception) { $exception.Message } else { "$lastError" }
-            $hresult = if ($exception) { $exception.HResult } else { '<none>' }
-            $errorCode = if ($exception -and $exception.PSObject.Properties['ErrorCode']) { $exception.ErrorCode } else { '<none>' }
-            $fqid = if ($lastError.FullyQualifiedErrorId) { $lastError.FullyQualifiedErrorId } else { '<none>' }
-            throw "$Label query failed after $Attempts attempts: Type=$exceptionType; Message=$message; HResult=$hresult; ErrorCode=$errorCode; FQID=$fqid"
-        }
+        if (-not $providerQueryDefinition) { throw 'The provider-query helper was not supplied by the host.' }
+        Set-Item -Path Function:\Invoke-CmWmiQueryWithRetry -Value ([scriptblock]::Create($providerQueryDefinition)) -ErrorAction Stop
 
         # 1. Boundary groups -- runs on EVERY Primary/CAS (NOT gated on
         # top-level): each site's own boundary group is created LOCALLY by its
@@ -13178,7 +14513,7 @@ function Test-CMSiteWideFunctionality {
         # site assignment, so existence alone is not enough.
         $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_BoundaryGroup")
         try {
-            $bgs = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup')
+            $bgs = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_BoundaryGroup' -Label 'SMS_BoundaryGroup' -Namespace $ns -Details $results.Details)
             if ($bgs.Count -ge 1) {
                 $results.Details.Add("OK: $($bgs.Count) boundary group(s) defined: $(($bgs | Select-Object -First 5 -ExpandProperty Name) -join ', ')")
             }
@@ -13513,7 +14848,7 @@ function Test-CMSiteWideFunctionality {
 
         # 5. Client push install account configured (warn-only -- some labs disable client push)
         try {
-            $cpComp = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_SCI_Component' `
+            $cpComp = @(Invoke-CmWmiQueryWithRetry -Class 'SMS_SCI_Component' -Namespace $ns -Details $results.Details `
                     -Filter "ComponentName='SMS_DISCOVERY_DATA_MANAGER' AND SiteCode='$sc'" `
                     -Label 'Client push pipeline component') | Select-Object -First 1
             if ($cpComp) {
@@ -14194,11 +15529,16 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     })
             }
             $readPendingOsdContent = {
+                $results.OsdContentWaitProblems.Clear()
                 $pendingRows = [System.Collections.Generic.List[object]]::new()
                 foreach ($contentClass in $osdPackageClasses) {
                     $visibleContent = @(Get-WmiObject -Namespace $ns -Class $contentClass.Class -ErrorAction Stop)
                     $relevantContent = @(& $selectRelevantOsdContent -VisibleContent $visibleContent)
                     foreach ($contentPackage in $relevantContent) {
+                        $sourceSite = "$($contentPackage.SourceSite)"
+                        if ($sourceSite -and -not $results.OsdContentSourceSiteCodes.Contains($sourceSite)) {
+                            $results.OsdContentSourceSiteCodes.Add($sourceSite)
+                        }
                         $statusRows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($contentPackage.PackageID)'" -ErrorAction Stop)
                         foreach ($requiredDp in $expectedOsdDpNames) {
                             $requiredShort = ($requiredDp -split '\.')[0]
@@ -14216,7 +15556,14 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                         DP        = "$requiredDp"
                                         State     = $stateNumber
                                         StateName = @{ 1 = 'InstallPending'; 2 = 'InstallRetrying'; 7 = 'ContentValidating' }[$stateNumber]
+                                        SourceVersion = "$($contentPackage.SourceVersion)"
+                                        StoredPkgVersion = "$($contentPackage.StoredPkgVersion)"
+                                        SourceSite = "$($contentPackage.SourceSite)"
                                     })
+                            }
+                            elseif ($statusRow.Count -eq 1 -and
+                                (Get-MemLabsContentDistributionStateKind -State ([int]$statusRow[0].State)) -eq 'Problem') {
+                                $results.OsdContentWaitProblems.Add("$($contentPackage.PackageID) on $requiredDp is State=$($statusRow[0].State)")
                             }
                             elseif ($statusRow.Count -eq 0 -and
                                 @(& $getOsdContentTargetRows "$($contentPackage.PackageID)" "$requiredDp").Count -gt 0) {
@@ -14227,6 +15574,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                                         DP        = "$requiredDp"
                                         State     = -1
                                         StateName = 'TargetedNoStatus'
+                                        SourceVersion = "$($contentPackage.SourceVersion)"
+                                        StoredPkgVersion = "$($contentPackage.StoredPkgVersion)"
+                                        SourceSite = "$($contentPackage.SourceSite)"
                                     })
                             }
                         }
@@ -14234,7 +15584,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 }
                 return $pendingRows.ToArray()
             }
+            $osdPreparationWaitSeconds = 900
             $osdContentWaitSeconds = 900
+            $osdOverallWaitSeconds = 2700
             $osdContentWaitStarted = $false
             $osdContentWaitTimedOut = $false
             $osdContentWaitProbeFailed = $false
@@ -14242,6 +15594,9 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $osdContentWaitElapsedSeconds = 0
             $osdContentRearmed = @{}
             $osdRetryingSince = @{}
+            $osdTransferClocks = @{}
+            $osdProgressClocks = @{}
+            $osdClockDescriptions = @{}
             $pendingOsdContent = @()
             try { $pendingOsdContent = @(& $readPendingOsdContent) }
             catch {
@@ -14249,19 +15604,57 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 $osdContentWaitFailure = "pre-check failed: $($_.Exception.Message)"
                 $results.Details.Add("WARN: Could not perform the OSD content convergence pre-check: $($_.Exception.Message)")
             }
-            if ($pendingOsdContent.Count -gt 0) {
+            if ($pendingOsdContent.Count -gt 0 -and $results.OsdContentWaitProblems.Count -eq 0) {
                 $osdContentWaitStarted = $true
                 $pendingStart = Get-Date
-                $pendingDeadline = $pendingStart.AddSeconds($osdContentWaitSeconds)
                 $initialPendingSummary = @($pendingOsdContent | ForEach-Object {
-                        "$($_.PackageId) '$($_.Name)' on $($_.DP) is $($_.StateName) (State=$($_.State))"
+                        "$($_.PackageId) '$($_.Name)' on $($_.DP) is $($_.StateName) (State=$($_.State), SourceSite=$($_.SourceSite), SourceVersion=$($_.SourceVersion), StoredPkgVersion=$($_.StoredPkgVersion))"
                     }) -join '; '
-                $results.Details.Add("INFO: Waiting up to ${osdContentWaitSeconds}s for required OSD content to finish distributing: $initialPendingSummary")
-                while ($pendingOsdContent.Count -gt 0 -and (Get-Date) -lt $pendingDeadline) {
+                $results.Details.Add("INFO: Required OSD content has ${osdContentWaitSeconds}s without verified progress per package/DP/version and a ${osdOverallWaitSeconds}s overall hard cap. A first transfer start seeds its transfer window; unique staged-file confirmations, package-transfer completion and observed source-content readiness renew progress. Retries, pending states and log freshness do not: $initialPendingSummary")
+                while ($pendingOsdContent.Count -gt 0 -and $results.OsdContentWaitProblems.Count -eq 0) {
                     $now = Get-Date
                     $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
-                    $remainingSeconds = [math]::Max(0, [int]($pendingDeadline - $now).TotalSeconds)
-                    Write-Progress -Activity $osdProgressActivity -Status "Waiting for $($pendingOsdContent.Count) required OSD content target(s); ${elapsedSeconds}s elapsed, ${remainingSeconds}s remaining"
+                    try {
+                        $transferEvidence = Get-MemLabsOsdTransferEvidence -Details $results.Details
+                        $transferStarts = @($transferEvidence.Starts)
+                        $now = Get-Date
+                        $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
+                        $waitState = Get-MemLabsOsdContentWaitState -PendingTargets $pendingOsdContent `
+                            -TransferStarts $transferStarts -ProgressEvents @($transferEvidence.Progress) `
+                            -StartedAtUtc $pendingStart.ToUniversalTime() `
+                            -NowUtc $now.ToUniversalTime() -TransferClocks $osdTransferClocks `
+                            -ProgressClocks $osdProgressClocks -PreparationWaitSeconds $osdPreparationWaitSeconds `
+                            -TransferWaitSeconds $osdContentWaitSeconds -OverallWaitSeconds $osdOverallWaitSeconds
+                    }
+                    catch {
+                        $osdContentWaitProbeFailed = $true
+                        $osdContentWaitFailure = "clock recheck failed after ${elapsedSeconds}s: $($_.Exception.Message)"
+                        $results.Details.Add("WARN: OSD content convergence $osdContentWaitFailure")
+                        break
+                    }
+                    $results.OsdContentWaitTargets = @($waitState.Targets)
+                    foreach ($timing in $waitState.Targets) {
+                        if (-not $osdClockDescriptions.ContainsKey($timing.Key) -or $osdClockDescriptions[$timing.Key] -ne $timing.Description) {
+                            $results.Details.Add("DIAG: OSD timing $($timing.PackageId) on $($timing.DP), SourceSite=$($timing.SourceSite), SourceVersion=$($timing.SourceVersion), StoredPkgVersion=$($timing.StoredPkgVersion): $($timing.Description)")
+                            $osdClockDescriptions[$timing.Key] = $timing.Description
+                        }
+                    }
+                    if ($waitState.ExpiredTargets.Count -gt 0) {
+                        $osdContentWaitTimedOut = $true
+                        $results.Passed = $false
+                        $expiredSummary = @($waitState.ExpiredTargets | ForEach-Object {
+                                "$($_.PackageId) on $($_.DP): $($_.LimitKind); $($_.Description), no verified progress for $($_.NoProgressSeconds)s"
+                            }) -join '; '
+                        $results.Details.Add("FAIL: OSD content wait expired: $expiredSummary")
+                        break
+                    }
+                    $remainingSeconds = $waitState.RemainingSeconds
+                    $operation = @($waitState.Targets | Select-Object -First 3 | ForEach-Object {
+                            "$($_.PackageId)/$($_.DP): $($_.Stage), $($_.NoProgressSeconds)s without progress, $($_.RemainingSeconds)s remaining"
+                        }) -join '; '
+                    Write-Progress -Activity $osdProgressActivity `
+                        -Status "Waiting for $($pendingOsdContent.Count) required OSD content target(s); ${elapsedSeconds}s total elapsed" `
+                        -CurrentOperation $operation
                     $currentRetryKeys = @{}
                     foreach ($retrying in @($pendingOsdContent | Where-Object { $_.State -eq 2 })) {
                         $retryKey = "$($retrying.PackageId)|$($retrying.DP)".ToUpperInvariant()
@@ -14307,9 +15700,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 if (-not $osdContentWaitProbeFailed -and $pendingOsdContent.Count -eq 0) {
                     $results.Details.Add("RECOVERED: Required OSD content left its pending/retrying state after ${osdContentWaitElapsedSeconds}s.")
                 }
-                elseif (-not $osdContentWaitProbeFailed -and (Get-Date) -ge $pendingDeadline) {
-                    $osdContentWaitTimedOut = $true
-                }
+            }
+            if ($results.OsdContentWaitProblems.Count -gt 0) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Required OSD content entered a problem state; not extending the wait for other targets: $($results.OsdContentWaitProblems -join '; ')")
             }
 
             $getOsdContentFailureDiagnostic = {
@@ -14317,6 +15711,13 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
 
                 $parts = [System.Collections.Generic.List[string]]::new()
                 $parts.Add("package SourceVersion=$($Package.SourceVersion) StoredPkgVersion=$($Package.StoredPkgVersion) SourceSite=$($Package.SourceSite)")
+                $timing = @($results.OsdContentWaitTargets | Where-Object {
+                        $_.PackageId -eq "$($Package.PackageID)" -and $_.DP -ieq $RequiredDp -and
+                        "$($_.SourceVersion)" -eq "$($Package.SourceVersion)"
+                    } | Select-Object -First 1)
+                if ($timing.Count -eq 1) {
+                    $parts.Add("validation clock: $($timing[0].Description); observedUtc=$($timing[0].ObservedAtUtc.ToString('o')) targetElapsed=$($timing[0].ElapsedSeconds)s remaining=$($timing[0].RemainingSeconds)s expired=$($timing[0].Expired)")
+                }
                 try {
                     $targetRows = @(& $getOsdContentTargetRows "$($Package.PackageID)" "$RequiredDp")
                     if ($targetRows.Count -eq 0) {
@@ -14350,18 +15751,22 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 catch { $parts.Add("provider detail query failed: $($_.Exception.Message)") }
                 try {
                     $smsDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'Installation Directory' -ErrorAction Stop).'Installation Directory'
-                    $distmgrLog = Join-Path $smsDir 'Logs\distmgr.log'
-                    $distmgrLines = @(Get-Content -LiteralPath $distmgrLog -Tail 5000 -ErrorAction Stop |
-                        Where-Object { $_ -match [regex]::Escape("$($Package.PackageID)") } |
-                        Select-Object -Last 8)
-                    if ($distmgrLines.Count -gt 0) {
-                        $parts.Add("distmgr tail: $(@($distmgrLines | ForEach-Object {
-                                    $match = [regex]::Match("$_", '<!\[LOG\[(.*?)\]LOG\]!>')
-                                    if ($match.Success) { $match.Groups[1].Value } else { "$_" }
-                                }) -join ' | ')")
+                    foreach ($logName in @('distmgr', 'PkgXferMgr', 'despool', 'sender')) {
+                        foreach ($extension in @('.log', '.lo_')) {
+                            $logPath = Join-Path $smsDir "Logs\$logName$extension"
+                            try {
+                                if (-not (Test-Path -LiteralPath $logPath -ErrorAction Stop)) { continue }
+                                $lines = @(Get-Content -LiteralPath $logPath -Tail 5000 -ErrorAction Stop |
+                                    Where-Object { $_ -match "\b$([regex]::Escape("$($Package.PackageID)"))\b" } |
+                                    Select-Object -Last 8)
+                                if ($lines.Count -gt 0) { $parts.Add("$logName$extension package tail: $($lines -join ' | ')") }
+                                else { $parts.Add("$logName$extension has no package-correlated records in its 5000-line tail") }
+                            }
+                            catch { $parts.Add("$logName$extension diagnostic failed: $($_.Exception.Message)") }
+                        }
                     }
                 }
-                catch { $parts.Add("distmgr diagnostic failed: $($_.Exception.Message)") }
+                catch { $parts.Add("site-log diagnostic failed: $($_.Exception.Message)") }
                 try {
                     $dpHost = ($RequiredDp -split '\.')[0]
                     $sessionOption = New-PSSessionOption -OpenTimeout 10000 -OperationTimeout 60000
@@ -14386,8 +15791,11 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             }
                             if ($dpLog) {
                                 $result.SmsDpProv = @(Get-Content -LiteralPath $dpLog -Tail 3000 -ErrorAction Stop |
-                                    Where-Object { $_ -match [regex]::Escape($PackageId) -or $_ -match 'error|failed|0x8' } |
+                                    Where-Object { $_ -match "\b$([regex]::Escape($PackageId))\b" } |
                                     Select-Object -Last 8)
+                                if ($result.SmsDpProv.Count -eq 0) {
+                                    $result.Errors += 'No package-correlated smsdpprov records in the 3000-line tail; unrelated startup errors are not evidence for this package.'
+                                }
                             }
                             else {
                                 $result.Errors += 'smsdpprov.log was not found on E:, D:, F:, or C:'
@@ -14440,6 +15848,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $osPkgProblems = @()
                     $osPkgProblemRows = [System.Collections.Generic.List[object]]::new()
                     foreach ($osPkg in $osPkgs) {
+                        $sourceSite = "$($osPkg.SourceSite)"
+                        if ($sourceSite -and -not $results.OsdContentSourceSiteCodes.Contains($sourceSite)) {
+                            $results.OsdContentSourceSiteCodes.Add($sourceSite)
+                        }
                         $rows = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$($osPkg.PackageID)'" -ErrorAction SilentlyContinue)
                         foreach ($wantDp in $expectedOsdDpNames) {
                             $wantShort = ($wantDp -split '\.')[0]
@@ -14503,6 +15915,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         $results.Passed = $false
                         $results.Details.Add("FAIL: $($pkgClass.Label) content cannot reach every required OSD DP: $($osPkgProblems -join '; '). PXE will boot into WinPE and the task sequence will then fail to find its content.")
                         foreach ($problemRow in $osPkgProblemRows) {
+                            Write-Progress -Activity $osdProgressActivity -Status "Collecting $($problemRow.Package.PackageID) failure evidence from $($problemRow.DP)"
                             $results.Details.Add("DIAG: $(& $getOsdContentFailureDiagnostic $problemRow.Package $problemRow.DP $problemRow.State)")
                         }
                     }
@@ -14553,17 +15966,19 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                             }
                             elseif ($probe.Result -eq 'NoResponse') {
                                 $results.Passed = $false
-                                $results.Details.Add("FAIL: no TFTP response from $tftpDp on UDP/69 for '$($probe.FileName)' [$($probe.Detail)]. Every PXE boot stops here. The responder service is down, or UDP/69 is blocked between this site server and that DP -- content state and DP settings all look fine and cannot see this.")
+                                $results.Details.Add("FAIL: no TFTP reply reached this site-server probe from $tftpDp for '$($probe.FileName)' [$($probe.Detail)]. Check both the UDP/69 request and the return path from the responder's transfer port, including the receiving host's firewall. A request/sending entry in SMSPXE.log proves the responder received the request; this timeout alone does not prove the responder is down or that PXE clients on another path cannot boot.")
                             }
                             else {
-                                $results.Details.Add("WARN: TFTP read of '$($probe.FileName)' from $tftpDp was inconclusive [$($probe.Detail)] -- treat as NOT measured")
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: TFTP read of '$($probe.FileName)' from $tftpDp was inconclusive [$($probe.Detail)] -- required PXE delivery was NOT measured")
                             }
                         }
                     }
                 }
             }
             catch {
-                $results.Details.Add("WARN: TFTP read probe could not run, so PXE file delivery was NOT measured: $($_.Exception.Message)")
+                $results.Passed = $false
+                $results.Details.Add("FAIL: TFTP read probe could not run, so required PXE file delivery was NOT measured: $($_.Exception.Message)")
             }
         }
 
@@ -15092,16 +16507,29 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $results.Details.Add("WARN: WSUS update count could not be measured: $($_.Exception.Message). Native synchronization health is checked independently.")
                 }
 
-                # CM-side subscription = what we EXPECT WSUS to have. WCM
-                # reads this from CM and pushes it to WSUS; a mismatch
-                # means WCM hasn't pushed (yet). Best-effort -- if we
-                # can't read CM, the parity test falls back to a plain
-                # ">0" check on the WSUS side.
+                # Read the same category inventory as the CM cmdlet without
+                # depending on the guest's current PowerShell drive.
                 $cmProdCount = $null; $cmClassCount = $null; $wcmName = $null
-                try {
-                    $cmProdCount  = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'Product'              -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed }).Count
-                    $cmClassCount = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'UpdateClassification' -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed }).Count
-                } catch {}
+                if (-not $offlineSup) {
+                    try {
+                        $cmCategories = @(Invoke-CmWmiQueryWithRetry -Namespace $ns -Class 'SMS_UpdateCategoryInstance' `
+                            -Filter "IsSubscribed=TRUE AND (CategoryTypeName='Product' OR CategoryTypeName='UpdateClassification')" `
+                            -Label 'CM SUP subscription' -Details $results.Details)
+                        foreach ($category in $cmCategories) {
+                            if ($category.CategoryTypeName -notin @('Product', 'UpdateClassification') -or
+                                $category.IsSubscribed -isnot [bool] -or -not $category.IsSubscribed) {
+                                throw 'The CM provider returned an invalid subscribed product/classification row.'
+                            }
+                        }
+                        $cmProdCount = @($cmCategories | Where-Object { $_.CategoryTypeName -eq 'Product' }).Count
+                        $cmClassCount = @($cmCategories | Where-Object { $_.CategoryTypeName -eq 'UpdateClassification' }).Count
+                    }
+                    catch {
+                        $cmProdCount = $null; $cmClassCount = $null
+                        $results.WsusDiagnosticsRequired = $true
+                        $results.Details.Add("WARN: CM SUP subscription parity could not be measured: $($_.Exception.Message). WSUS subscription is checked independently; parity is unverified.")
+                    }
+                }
                 try {
                     $wcmStateVal = [int](Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER' -Name 'ConfigurationState' -ErrorAction Stop)
                     $wcmStateMap = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
@@ -15162,10 +16590,8 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     }
                 }
                 else {
-                    # Fallback: CM cmdlets unavailable; just check WSUS-side
-                    # has SOMETHING subscribed.
                     if (($subCats -is [int] -and $subCats -gt 0) -and ($subClas -is [int] -and $subClas -gt 0)) {
-                        $results.Details.Add("OK: WSUS subscription set [Products=$subCats; Classifications=$subClas$wcmBit] (CM-side parity not checked - cmdlets unavailable)")
+                        $results.Details.Add("INFO: WSUS subscription set [Products=$subCats; Classifications=$subClas$wcmBit]; CM-side parity remains unverified")
                     }
                     elseif ($isDownstreamSup) {
                         # Downstream SUP: the subscription replicates from the upstream
@@ -15351,10 +16777,27 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
     # The probe has to exist inside the guest session, and a hyphenated name needs the
     # braced form -- $function:Invoke-TftpReadProbe is a parse error.
     $tftpProbeText = "function Invoke-TftpReadProbe { $(${function:Invoke-TftpReadProbe}) }"
+    $providerQueryDefinition = (Get-Command -Name Invoke-CmWmiQueryWithRetry -CommandType Function -ErrorAction Stop).Definition
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource, $providerQueryDefinition `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600 -PollProgress
+
+    $osdFailureLines = @()
+    $osdSourceSiteCodes = @()
+    if ($result -and $result.ScriptBlockOutput -is [hashtable]) {
+        $osdFailureLines = @($result.ScriptBlockOutput.Details | Where-Object {
+                $_ -match '^FAIL:.*(?:boot image|OS image|OS upgrade|OSD|TFTP|PXE)'
+            })
+        $osdSourceSiteCodes = @($result.ScriptBlockOutput.OsdContentSourceSiteCodes | Where-Object { $_ } | Select-Object -Unique)
+    }
+    if ($prePopulate -and $hasOsdClient -and
+        (-not $result -or $result.ScriptBlockFailed -or $osdFailureLines.Count -gt 0)) {
+        Add-Phase11Output "[Phase $Phase] $VMName [$siteRoleLabel]: OSD validation failed -- collecting sending-site and DP evidence, including pending/retrying boot-image failures"
+        Save-Phase11OsdContentFailureLogs -VMName $VMName -CurrentItem $CurrentItem `
+            -DeployConfig $DeployConfig -DistributionPointNames @($expectedOsdDpCsv -split '\|' | Where-Object { $_ }) `
+            -SourceSiteCodes $osdSourceSiteCodes
+    }
 
     # Failed/unreachable native health needs both sides of the WSUS exchange,
     # not just CM's projection. Include the configured upstream SUP for SOAP faults.

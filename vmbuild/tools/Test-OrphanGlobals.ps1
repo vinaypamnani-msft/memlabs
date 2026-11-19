@@ -22,11 +22,15 @@
     that actually means "typo": the unassigned name is within a small edit distance
     of a name that IS assigned. A genuine external toggle resembles nothing and
     stays silent.
+
+    Default scans include Git-tracked and non-ignored untracked source, not
+    downloaded tool caches. Maintained injection-staging scripts remain in scope.
+    Use -Path to explicitly audit other local script directories.
 #>
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [string]$Path = (Join-Path (Split-Path $PSScriptRoot -Parent) ''),
+    [string]$Path,
 
     [Parameter(Mandatory = $false)]
     [switch]$Quiet,
@@ -105,8 +109,23 @@ $Description = 'network'
     $sources = @([pscustomobject]@{ Name = '<self-test>'; Ast = $fixtureAst })
 }
 else {
-    $files = @(Get-ChildItem $Path -Recurse -Include *.ps1, *.psm1 -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -notmatch '\\(logs|azureFiles)\\' })
+    if ($PSBoundParameters.ContainsKey('Path')) {
+        $files = @(Get-ChildItem $Path -Recurse -Include *.ps1, *.psm1 -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notmatch '\\(logs|azureFiles)\\' })
+    }
+    else {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $Path = Join-Path $repoRoot 'vmbuild'
+        $repositoryPaths = @(& git -C $repoRoot ls-files --cached --others --exclude-standard -- `
+                'vmbuild/*.ps1' 'vmbuild/*.psm1' 'vmbuild/**/*.ps1' 'vmbuild/**/*.psm1')
+        if ($LASTEXITCODE -ne 0) {
+            throw "git ls-files failed with exit code $LASTEXITCODE while enumerating PowerShell sources."
+        }
+        $files = @($repositoryPaths |
+                ForEach-Object { Get-Item -LiteralPath (Join-Path $repoRoot $_) -ErrorAction SilentlyContinue } |
+                Where-Object { $_ -and $_.FullName.Substring($repoRoot.Length) -notmatch '\\(logs|azureFiles|temp)\\' })
+    }
+    if ($files.Count -eq 0) { throw "No PowerShell scripts or modules were found under '$Path'." }
     foreach ($file in $files) {
         $parseErrors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$parseErrors)

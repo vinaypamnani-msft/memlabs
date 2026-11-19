@@ -67,6 +67,21 @@ try {
         throw 'Initial workflow state did not round-trip.'
     }
 
+    $readinessPath = Join-Path $workDir 'Readiness.json'
+    foreach ($proof in @($false, $true)) {
+        foreach ($dictionaryStep in @($true, $false)) {
+            $step = @{ Status = 'Completed'; ReplicationVerified = $proof }
+            if (-not $dictionaryStep) { $step = [pscustomobject]$step }
+            Write-ScriptWorkFlowData -Configuration @{ PSReadyToUsePRIMARY1 = $step } -ConfigurationFile $readinessPath
+            $readiness = Read-ScriptWorkflowData -ConfigurationFile $readinessPath -RequiredSteps @('PSReadyToUsePRIMARY1')
+            if ($readiness.PSReadyToUsePRIMARY1.ReplicationVerified -isnot [bool] -or
+                $readiness.PSReadyToUsePRIMARY1.ReplicationVerified -ne $proof) {
+                throw 'The verified CAS handoff lost its Boolean proof during workflow persistence.'
+            }
+        }
+    }
+    Remove-Item -LiteralPath $readinessPath -ErrorAction Stop
+
     $contentBefore = [IO.File]::ReadAllText($target)
     $blockedWriteThrew = $false
     $lock = [IO.File]::Open($target, 'Open', 'ReadWrite', 'None')

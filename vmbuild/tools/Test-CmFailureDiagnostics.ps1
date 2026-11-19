@@ -65,7 +65,7 @@ foreach ($entry in $manifestArrays.GetEnumerator()) {
         }
     }
 }
-foreach ($logName in @('SMSProv.log', 'SMSProv.lo_', 'dmpdownloader.log', 'dmpdownloader.lo_', 'cmupdate.log', 'cmupdate.lo_', 'hman.log', 'hman.lo_', 'distmgr.log', 'smsexec.log', 'ConfigMgrPrereq.log', 'SmsAdminUI')) {
+foreach ($logName in @('SMSProv.log', 'SMSProv.lo_', 'dmpdownloader.log', 'dmpdownloader.lo_', 'cmupdate.log', 'cmupdate.lo_', 'hman.log', 'hman.lo_', 'distmgr.log', 'smsexec.log', 'rcmctrl.log', 'rcmctrl.lo_', 'replmgr.log', 'replmgr.lo_', 'sender.log', 'sender.lo_', 'despool.log', 'despool.lo_', 'DRSReadinessFailure.json', 'ConfigMgrPrereq.log', 'SmsAdminUI')) {
     Assert-Equal $true $collectorText.Contains($logName) "failure collector names $logName"
 }
 foreach ($className in @(
@@ -77,7 +77,9 @@ foreach ($className in @(
         'SMS_DPGroupMembers',
         'SMS_DPGroupPackages',
         'SMS_DPGroupCollections',
-        'SMS_DistributionPointInfo'
+        'SMS_DistributionPointInfo',
+        'SMS_ReplicationLinkSummary',
+        'SMS_ReplicationGroup'
     )) {
     Assert-Equal $true $collectorText.Contains("'$className'") "failure snapshot queries $className"
 }

@@ -515,8 +515,41 @@ $blocksText = Get-Content -LiteralPath (Join-Path $root 'common\Common.ScriptBlo
 Assert-True (-not $blocksText.Contains('retaining the VM for diagnostics') -and
     $blocksText.Contains('use -KeepFailedVMs to prevent failed-build cleanup')) `
     'Fresh setup failure falsely promises retention despite normal Phase 1 cleanup.'
-Assert-True ([regex]::Matches($blocksText, 'Wait-MemLabsWindowsClientSetup -VmName \$currentItem\.vmName').Count -eq 3) `
-    'Fresh, retained, and post-resume-reboot paths do not all enforce client setup readiness.'
+Assert-True ([regex]::Matches($blocksText, 'Wait-MemLabsWindowsClientSetup -VmName \$currentItem\.vmName').Count -eq 5) `
+    'Fresh, retained, post-resume-reboot, pre-apply, and setup-regression retry paths do not all enforce client setup readiness.'
+& {
+    $tokens = $null; $gateErrors = $null
+    $blocksAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'common\Common.ScriptBlocks.ps1'), [ref]$tokens, [ref]$gateErrors)
+    Assert-True ($gateErrors.Count -eq 0) 'The Phase 2 client setup call sites do not parse.'
+    $gates = @($blocksAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.IfStatementAst] -and
+                $node.Extent.Text.StartsWith('if ($Phase -eq 2 -and -not $Migrate') -and
+                $node.Extent.Text.Contains('Wait-MemLabsWindowsClientSetup')
+            }, $true))
+    Assert-True ($gates.Count -eq 2) 'Expected the shipped pre-apply and setup-regression gates.'
+    $script:GateCalls = 0
+    $script:GateReady = $false
+    function Wait-MemLabsWindowsClientSetup {
+        param($VmName, $VmDomainName)
+        $script:GateCalls++
+        return $script:GateReady
+    }
+    function Write-Log { param($Message, [switch]$Failure, [switch]$OutputStream) }
+    foreach ($gate in $gates) {
+        $runGate = [scriptblock]::Create("param(`$Phase, `$Migrate, `$currentItem, `$domainName, `$dscStartWhy)`n" + $gate.Extent.Text + "`n'reached-apply'")
+        foreach ($scenario in @('NotReady', 'Ready', 'AAD', 'Migration', 'OtherPhase')) {
+            $script:GateCalls = 0
+            $script:GateReady = $scenario -eq 'Ready'
+            $phaseValue = if ($scenario -eq 'OtherPhase') { 3 } else { 2 }
+            $fixtureItem = [pscustomobject]@{ vmName = 'TEST-W11'; role = $(if ($scenario -eq 'AAD') { 'AADClient' } else { 'DomainMember' }) }
+            $outcome = & $runGate $phaseValue ($scenario -eq 'Migration') $fixtureItem 'fixture.test' 'Windows client setup is not complete'
+            $shouldWait = $scenario -in @('Ready', 'NotReady')
+            Assert-True ($script:GateCalls -eq [int]$shouldWait) "$scenario changed the AAD/migration/phase exemptions."
+            Assert-True (($outcome -eq 'reached-apply') -eq ($scenario -ne 'NotReady')) "$scenario allowed an unsafe DSC start or blocked a ready/exempt VM."
+        }
+    }
+}
 Assert-True ($blocksText -match '(?s)Windows client setup is not ready; resume preparation.+?if \(\$resumePreparation\)') `
     'The retained gate runs after the resume reboot probe instead of before it.'
 $phase2 = Get-Content -LiteralPath (Join-Path $root 'DSC\phases\Phase2DomainMember.ps1') -Raw

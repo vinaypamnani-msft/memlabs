@@ -67,6 +67,11 @@ param (
 
 )
 
+if ($PSVersionTable.PSVersion -lt [Version]'7.4') {
+    Write-Host "ERROR: New-Lab requires PowerShell 7.4 or above (current: $($PSVersionTable.PSVersion)). Use VMBuild.cmd to install or launch the supported version, or run this script from pwsh.exe. Host initialization has not run." -ForegroundColor Red
+    exit 1
+}
+
 if ($NoSnapshot.IsPresent -and $AutoSnapshot.IsPresent) {
     throw '-NoSnapshot and -AutoSnapshot cannot be used together.'
 }
@@ -376,12 +381,6 @@ if (-not $NoWindowResize.IsPresent) {
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
-    exit 1
-}
-
-# Validate PS7
-if (-not $Common.PS7) {
-    Write-Log "You must use PowerShell version 7.4 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
     exit 1
 }
 
@@ -711,8 +710,8 @@ try {
 
     # The deploy config JSON is written to a sidecar file next to the log
     # (<logbase>.config.json) instead of a giant single line inside the log,
-    # so the log stays readable/greppable while the deployment remains
-    # self-contained.
+    # so the log stays readable/greppable. Diagnostic copies exclude secrets;
+    # the runtime deployConfig remains unchanged.
     $configSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".config.json")
     $jsonlSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".jsonl")
     $sourceSidecar = [System.IO.Path]::ChangeExtension($Common.LogPath, ".source.json")
@@ -744,8 +743,7 @@ try {
         Write-Log -verbose "Could not rename existing $($Common.LogPath)"
     }
 
-    # Banner: stamp the fresh log with session details and a copy of the config
-    # so the deployment is self-contained even if the JSON on disk is removed.
+    # Retain session details and redacted settings even if the source config is removed.
     Write-Log "========================================" -LogOnly
     Write-Log "Deployment log started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -LogOnly
     Write-Log "Configuration: $Configuration" -LogOnly
@@ -837,16 +835,22 @@ try {
         Write-Log "Source identity sidecar write failed: $($_.Exception.Message)" -Warning
     }
     $configSidecarWritten = $false
+    $diagnosticConfigJson = $null
     try {
         # Pretty-print (no -Compress) to the sidecar so it's readable + diffable.
-        ($deployConfig | ConvertTo-Json -Depth 10) | Set-Content -Path $configSidecar -Encoding UTF8 -ErrorAction Stop
+        $diagnosticConfigJson = ConvertTo-ConfigDiagnosticJson -Config $deployConfig
+        $diagnosticConfigJson | Set-Content -Path $configSidecar -Encoding UTF8 -ErrorAction Stop
         $configSidecarWritten = $true
         Write-Log "Deploy config JSON written to: $configSidecar" -LogOnly
     }
     catch {
-        # Fall back to inline if the sidecar can't be written, so the deployment stays self-contained.
-        Write-Log "Deploy config JSON (sidecar write failed: $($_.Exception.Message)):" -LogOnly
-        Write-Log ($deployConfig | ConvertTo-Json -Depth 10 -Compress) -LogOnly
+        if ($diagnosticConfigJson) {
+            Write-Log "Deploy config JSON (sidecar write failed: $($_.Exception.Message)):" -LogOnly
+            Write-Log ($diagnosticConfigJson | ConvertFrom-Json -ErrorAction Stop | ConvertTo-Json -Depth 10 -Compress -ErrorAction Stop) -LogOnly
+        }
+        else {
+            Write-Log 'Deploy config diagnostic redaction failed; configuration omitted from diagnostic output.' -Warning
+        }
     }
     if ($RequireCleanSource -and
         (-not $sourceIdentity.Reproducible -or -not $sourceSidecarWritten -or -not $configSidecarWritten)) {
@@ -1291,9 +1295,9 @@ try {
                     # post-dcpromo window. Letting Phase 3 (media download/prep) run first gives
                     # the DC extra settle time so the common case installs on the first attempt;
                     # the in-guest write-probe gate + retry/remediation loop still wait the window
-                    # out if it hasn't closed yet. Phase 3 consumes no PKI certs (the first cert
-                    # consumer is the Phase 8 HTTPS flip), so deferring one phase costs no
-                    # autoenrollment lead time in practice.
+                    # out if it hasn't closed yet. Phase 3 applies computer policy before these
+                    # templates exist; Install-PKI verifies member autoenrollment after publishing
+                    # them, without waiting for a later background cycle or client-push request.
                     # Only trigger for NEW VMs (non-hidden). If only existing/hidden VMs have
                     # InstallCA, PKI is already deployed and should not be re-orchestrated.
                     $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA -and -not $_.hidden }).Count -gt 0
@@ -1504,7 +1508,15 @@ try {
 
 }
 catch {
-    Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json -Depth 12)
+    $deploymentError = $_
+    $diagnosticConfigJson = $null
+    try {
+        $diagnosticConfigJson = ConvertTo-ConfigDiagnosticJson -Config $deployConfig -Depth 12
+    }
+    catch {
+        Write-Log 'Deploy config diagnostic redaction failed; configuration omitted from error context.' -Warning
+    }
+    Write-Exception -ExceptionInfo $deploymentError -AdditionalInfo $diagnosticConfigJson
     $NewLabsuccess = $false
 }
 finally {
