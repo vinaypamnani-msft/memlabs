@@ -699,9 +699,11 @@ Write-DscStatus "$Tag Starting perfloading"
             [string] $LegacyDistributionPointGroupName,
             [bool] $MigrateLegacy,
             [string] $StatusTag,
-            [string] $SiteCode
+            [string] $SiteCode,
+            [switch] $WarnOnly
         )
 
+        $distributionFailureMode = @{ Failure = -not $WarnOnly; Warning = [bool]$WarnOnly }
         $targetIdentity = $DistributionPointGroupName
         $useExactTargeting = $DistributionPointGroupId -and
             (Get-Command -Name Get-MemLabsDistributionPointGroup -ErrorAction SilentlyContinue) -and
@@ -715,7 +717,7 @@ Write-DscStatus "$Tag Starting perfloading"
                 $contentPackageIds = @(Get-MemLabsContentPackageIds -ContentType $ContentType -ContentName $ContentName -PackageId $PackageId -SiteCode $SiteCode)
             }
             catch {
-                Write-DscStatus "$StatusTag Failed to resolve $ContentType '$ContentName' distribution target '$DistributionPointGroupName': $($_.Exception.Message)" -Failure
+                Write-DscStatus "$StatusTag Failed to resolve $ContentType '$ContentName' distribution target '$DistributionPointGroupName': $($_.Exception.Message)" @distributionFailureMode
                 return $false
             }
         }
@@ -746,7 +748,7 @@ Write-DscStatus "$Tag Starting perfloading"
             $distributionError = $_.Exception.Message
             if ($distributionError -notmatch 'No content destination was found|already been distributed') {
                 $legacyNote = if ($MigrateLegacy -and $LegacyDistributionPointGroupName) { '; legacy targeting was retained' } else { '' }
-                Write-DscStatus "$StatusTag Failed to distribute $ContentType '$ContentName' to '$targetIdentity'${legacyNote}: $distributionError" -Failure
+                Write-DscStatus "$StatusTag Failed to distribute $ContentType '$ContentName' to '$targetIdentity'${legacyNote}: $distributionError" @distributionFailureMode
                 return $false
             }
         }
@@ -754,7 +756,7 @@ Write-DscStatus "$Tag Starting perfloading"
         if (-not (Test-MemLabsContentDistributionTarget -ContentType $ContentType -ContentName $ContentName -PackageId $PackageId -DistributionPointGroupName $DistributionPointGroupName -DistributionPointGroupId $DistributionPointGroupId -SiteCode $SiteCode -StatusTag $StatusTag)) {
             $detail = if ($distributionError) { $distributionError } else { 'the distribution request returned without an error, but the target assignment was not visible' }
             $legacyNote = if ($MigrateLegacy -and $LegacyDistributionPointGroupName) { '; legacy targeting was retained' } else { '' }
-            Write-DscStatus "$StatusTag Failed to verify $ContentType '$ContentName' on '$targetIdentity'${legacyNote}: $detail" -Failure
+            Write-DscStatus "$StatusTag Failed to verify $ContentType '$ContentName' on '$targetIdentity'${legacyNote}: $detail" @distributionFailureMode
             return $false
         }
         if ($distributionError) {
@@ -2223,41 +2225,20 @@ if ($licensed) { Write-Output 'Activated' }
     if ($CurrentRole -ne "CAS") {
 
     $apps = $deployconfig.Tools | where-object { $_.Appinstall -eq $True }
+    $allowOptionalAppWarnings = $ThisVM.phase8RetainedSite -eq $true
+    $appFailureMode = @{ Failure = -not $allowOptionalAppWarnings; Warning = $allowOptionalAppWarnings }
     $apps | ForEach-Object {
+        $applicationTool = $_
+        try {
 
         $appSourceDirectory = "C:\Apps\$($_.Name)"
-        $appSourceFile = "C:\tools\$($_.AppMsi)"
-        $appLinkPath = Join-Path $appSourceDirectory $_.AppMsi
+        $appSourceFile = Join-Path $appSourceDirectory $_.AppMsi
         $appContentLocation = "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)"
         if (-not (Test-Path -LiteralPath $appSourceFile -PathType Leaf -ErrorAction Stop)) {
             throw "Required application installer '$appSourceFile' is missing. Rerun Phase 8 so the host preflight can restore the configured MSI."
         }
-        if (-not (Test-Path -LiteralPath $appSourceDirectory -PathType Container -ErrorAction Stop)) {
-            New-Item -ItemType Directory -Path $appSourceDirectory -Force -ErrorAction Stop | Out-Null
-            Write-DscStatus "$Tag Created application source directory: $appSourceDirectory"
-        }
-
-        $appLinkIsCurrent = $false
-        if (Test-Path -LiteralPath $appLinkPath -ErrorAction Stop) {
-            try {
-                $appLinkItem = Get-Item -LiteralPath $appLinkPath -ErrorAction Stop
-                $appLinkIsCurrent = $appLinkItem.LinkType -eq "HardLink" -and
-                    (Get-FileHash -LiteralPath $appSourceFile -Algorithm SHA256 -ErrorAction Stop).Hash -eq (Get-FileHash -LiteralPath $appLinkPath -Algorithm SHA256 -ErrorAction Stop).Hash
-            }
-            catch {
-                Write-DscStatus "$Tag Could not verify the application source hardlink for $($_.Name); recreating it: $($_.Exception.Message)"
-            }
-        }
-        if ($appLinkIsCurrent) {
-            Write-DscStatus "$Tag Application source link is already current for $($_.Name) -- skipping filesystem write"
-        }
-        else {
-            if (Test-Path -LiteralPath $appLinkPath -ErrorAction Stop) { Remove-Item -LiteralPath $appLinkPath -Force -ErrorAction Stop }
-            New-Item -ItemType HardLink -Value $appSourceFile -Path $appLinkPath -Force -ErrorAction Stop | Out-Null
-            Write-DscStatus "$Tag Created application source hardlink for $($_.Name)"
-        }
         if (-not (Test-Path -LiteralPath "FileSystem::$appContentLocation" -PathType Leaf -ErrorAction Stop)) {
-            throw "Application MSI '$appLinkPath' is not visible at the importer path '$appContentLocation'. Check the local administrative share and workflow identity."
+            throw "Application MSI '$appSourceFile' is not visible at the importer path '$appContentLocation'. Check the local administrative share and workflow identity."
         }
 
         #creating an application
@@ -2265,7 +2246,7 @@ if ($licensed) { Write-Output 'Activated' }
 
         $applications = @(Get-CMApplication -Name "$appname" -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
         if ($applications.Count -gt 1) {
-            Write-DscStatus "$Tag Found $($applications.Count) applications named '$appname'; expected at most one. No application content or deployment was changed." -Failure
+            Write-DscStatus "$Tag Found $($applications.Count) applications named '$appname'; expected at most one. No application content or deployment was changed." @appFailureMode
             return
         }
         $appExists = $applications.Count -eq 1
@@ -2274,7 +2255,7 @@ if ($licensed) { Write-Output 'Activated' }
             New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction Stop | Out-Null
             $applications = @(Get-CMApplication -Name "$appname" -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
             if ($applications.Count -ne 1) {
-                Write-DscStatus "$Tag Application '$appname' was not uniquely readable after creation (found $($applications.Count))." -Failure
+                Write-DscStatus "$Tag Application '$appname' was not uniquely readable after creation (found $($applications.Count))." @appFailureMode
                 return
             }
             Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
@@ -2290,17 +2271,17 @@ if ($licensed) { Write-Output 'Activated' }
             Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
         }
         elseif ($deploymentTypes.Count -ne 1 -or $deploymentTypes[0].LocalizedDisplayName -ne $_.AppMsi) {
-            Write-DscStatus "$Tag Application '$appname' has $($deploymentTypes.Count) deployment type(s), but not exactly the expected '$($_.AppMsi)'. Content distribution and deployment were not changed." -Failure
+            Write-DscStatus "$Tag Application '$appname' has $($deploymentTypes.Count) deployment type(s), but not exactly the expected '$($_.AppMsi)'. Content distribution and deployment were not changed." @appFailureMode
             return
         }
 
-        if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $appname -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($appExists -and $legacyDPGroupExists) -StatusTag $Tag -SiteCode $SiteCode)) { return }
+        if (-not (Sync-MemLabsContentDistribution -ContentType Application -ContentName $appname -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($appExists -and $legacyDPGroupExists) -StatusTag $Tag -SiteCode $SiteCode -WarnOnly:$allowOptionalAppWarnings)) { return }
 
         try {
             $applicationDeployments = @(Get-CMApplicationDeployment -Name $appname -CollectionName "All Systems" -ErrorAction Stop | Where-Object { $null -ne $_ })
         }
         catch {
-            Write-DscStatus "$Tag Could not read '$appname' deployments to 'All Systems'; no deployment was created: $($_.Exception.Message)" -Failure
+            Write-DscStatus "$Tag Could not read '$appname' deployments to 'All Systems'; no deployment was created: $($_.Exception.Message)" @appFailureMode
             return
         }
         if ($applicationDeployments.Count -eq 0) {
@@ -2309,7 +2290,7 @@ if ($licensed) { Write-Output 'Activated' }
             Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
         }
         elseif ($applicationDeployments.Count -ne 1) {
-            Write-DscStatus "$Tag Found $($applicationDeployments.Count) '$appname' deployments to 'All Systems'; expected exactly one." -Failure
+            Write-DscStatus "$Tag Found $($applicationDeployments.Count) '$appname' deployments to 'All Systems'; expected exactly one." @appFailureMode
             return
         }
 
@@ -2317,7 +2298,7 @@ if ($licensed) { Write-Output 'Activated' }
 
         $packages = @(Get-CMPackage -Name "$pkgName" -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
         if ($packages.Count -gt 1) {
-            Write-DscStatus "$Tag Found $($packages.Count) packages named '$pkgName'; expected at most one. No package content or deployment was changed." -Failure
+            Write-DscStatus "$Tag Found $($packages.Count) packages named '$pkgName'; expected at most one. No package content or deployment was changed." @appFailureMode
             return
         }
         $packageExists = $packages.Count -eq 1
@@ -2326,7 +2307,7 @@ if ($licensed) { Write-Output 'Activated' }
             $Package = New-CMPackage -Name "$pkgName" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)" -ErrorAction Stop
             $packages = @(Get-CMPackage -Name "$pkgName" -Fast -ErrorAction Stop | Where-Object { $null -ne $_ })
             if ($packages.Count -ne 1) {
-                Write-DscStatus "$Tag Package '$pkgName' was not uniquely readable after creation (found $($packages.Count))." -Failure
+                Write-DscStatus "$Tag Package '$pkgName' was not uniquely readable after creation (found $($packages.Count))." @appFailureMode
                 return
             }
             $Package = $packages[0]
@@ -2345,17 +2326,17 @@ if ($licensed) { Write-Output 'Activated' }
             Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
         }
         elseif ($programs.Count -ne 1) {
-            Write-DscStatus "$Tag Package '$pkgName' has $($programs.Count) programs named '$($_.AppMsi)'; expected exactly one. Content distribution and deployment were not changed." -Failure
+            Write-DscStatus "$Tag Package '$pkgName' has $($programs.Count) programs named '$($_.AppMsi)'; expected exactly one. Content distribution and deployment were not changed." @appFailureMode
             return
         }
 
-        if (-not (Sync-MemLabsContentDistribution -ContentType Package -ContentName $pkgName -PackageId $Package.PackageID -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($packageExists -and $legacyDPGroupExists) -StatusTag $Tag -SiteCode $SiteCode)) { return }
+        if (-not (Sync-MemLabsContentDistribution -ContentType Package -ContentName $pkgName -PackageId $Package.PackageID -DistributionPointGroupName $DPGroupName -DistributionPointGroupId $DPGroupId -LegacyDistributionPointGroupName $LegacyDPGroupName -MigrateLegacy ($packageExists -and $legacyDPGroupExists) -StatusTag $Tag -SiteCode $SiteCode -WarnOnly:$allowOptionalAppWarnings)) { return }
 
         try {
             $packageDeployments = @(Get-CMPackageDeployment -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -ErrorAction Stop | Where-Object { $null -ne $_ })
         }
         catch {
-            Write-DscStatus "$Tag Could not read '$pkgName' deployments to 'All Systems'; no deployment was created: $($_.Exception.Message)" -Failure
+            Write-DscStatus "$Tag Could not read '$pkgName' deployments to 'All Systems'; no deployment was created: $($_.Exception.Message)" @appFailureMode
             return
         }
         if ($packageDeployments.Count -eq 0) {
@@ -2364,8 +2345,13 @@ if ($licensed) { Write-Output 'Activated' }
             Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
         }
         elseif ($packageDeployments.Count -ne 1) {
-            Write-DscStatus "$Tag Found $($packageDeployments.Count) '$pkgName' deployments to 'All Systems'; expected exactly one." -Failure
+            Write-DscStatus "$Tag Found $($packageDeployments.Count) '$pkgName' deployments to 'All Systems'; expected exactly one." @appFailureMode
             return
+        }
+        }
+        catch {
+            if (-not $allowOptionalAppWarnings) { throw }
+            Write-DscStatus "$Tag Optional demo application/package '$($applicationTool.Name)' was skipped on this retained site: $($_.Exception.Message). Core site configuration remains required." -Warning
         }
     }
 

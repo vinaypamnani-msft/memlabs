@@ -1457,16 +1457,33 @@ Validate with `vmbuild\tools\Test-OrphanRunspaceCleanup.ps1`.
 
 Before dispatching Phase 8 workers, the host repairs missing Primary OS media,
 baselines, and application installers enabled by `Tools[].Appinstall`. Installer
-bytes in `C:\tools` must match the host download cache by SHA-256; interrupted or
-corrupt copies cannot pass verification. Current installers are not recopied.
-Missing host installers fail preparation explicitly.
+bytes in `C:\Apps\<tool name>` must match the host download cache by SHA-256.
+Copies are verified under a temporary name before replacing the source, so an
+interrupted update does not overwrite the previous MSI. Application sources do
+not depend on `C:\tools` or share its cleanup lifecycle. Current sources are not
+recopied, and old application-source versions are retained for existing content.
 
 Application preloading requires the local MSI and its exact administrative-share
 UNC file path to be visible through FileSystem, even from the CMSite drive,
-before creating ConfigMgr objects. Directory or hardlink creation errors stop
-preloading instead of logging false success.
+before creating ConfigMgr objects. A site detected as already installed before
+Phase 8 may warn and skip failed optional demo application/package population;
+the same run's Phase 11 reports missing demo apps as warnings. Fresh sites remain
+strict. Required OS/baseline payloads, site setup, and role configuration failures
+remain fatal. An unreadable retained-site probe never enables warning-only mode.
 Validate with `vmbuild\tools\Test-PrimaryPrepopulationPayload.ps1` and
 `vmbuild\tools\Test-PerfloadingApplicationPackageReconciliation.ps1`.
+
+Tool injection records verified file ownership in `C:\tools\.memlabs-tool-versions.json`.
+A replacement removes obsolete files for the same tool only after its new files
+match SHA-256. Locally modified files, paths shared with other tools, and
+untracked files are preserved. Existing 7-Zip x64 MSIs can also be cleaned up
+after their MSI product family, manufacturer, upgrade code, platform, and older
+version are verified against the replacement. Unknown or invalid installers
+are preserved with diagnostics. Cleanup never targets `C:\Apps`.
+Validate with `vmbuild\tools\Test-ToolVersionCleanup.ps1` and
+`vmbuild\tools\Test-ToolInjectionRecovery.ps1`. Host-side ownership migration
+and matching-bundle skip behavior are covered by
+`vmbuild\tools\Test-ToolOwnershipMigration.ps1`.
 
 ### Phase 8 ConfigMgr proxy scope
 

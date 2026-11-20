@@ -48,6 +48,9 @@ $script:BaselineStrict = $false
 $script:ApplicationCopies = 0
 $script:ApplicationStrict = $false
 $script:ApplicationCopyMode = 'normal'
+$script:ApplicationDestinations = [Collections.Generic.List[string]]::new()
+$script:SitePresent = $false
+$script:Warnings = [Collections.Generic.List[string]]::new()
 $script:StrictCalls = 0
 $script:ProbeMode = 'normal'
 
@@ -58,7 +61,10 @@ function Get-TestPayloadState {
     [pscustomobject]@{
         BaselinesPresent = $script:GuestState.Baselines -and -not $script:BaselinePending
         MissingOs        = [string[]]$missing
-        MissingApplications = [string[]]@('7z.msi' | Where-Object { -not $script:GuestState.Application })
+        MissingApplications = [string[]]@('7-Zip\7z.msi' | Where-Object {
+                -not $script:GuestState.Application -or -not (Test-Path -LiteralPath (Join-Path $tempRoot 'tools\7z.msi'))
+            })
+        SitePresent = $script:SitePresent
     }
 }
 
@@ -93,6 +99,16 @@ function Invoke-VmCommand {
         $script:BaselinePending = $false
         return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @('BASELINE_COPY_VERIFIED'); ErrorDetails = @() }
     }
+    if ($DisplayName -like 'Prepare Primary application source*') {
+        return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @('APPLICATION_SOURCE_READY'); ErrorDetails = @() }
+    }
+    if ($DisplayName -like 'Verify Primary application source*') {
+        if ($script:ApplicationCopyMode -eq 'partial') {
+            return [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @('Hash mismatch') }
+        }
+        $script:GuestState.Application = $true
+        return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @('APPLICATION_SOURCE_VERIFIED'); ErrorDetails = @() }
+    }
     if ($DisplayName -like 'Repair Primary OSD media*') {
         if ($DisplayName -match 'Windows 11') { $script:GuestState.W11 = $true; $script:CopiedOs.Add('Windows 11 24h2') }
         elseif ($DisplayName -match 'Windows 10') { $script:GuestState.W10 = $true; $script:CopiedOs.Add('Windows 10 22h2') }
@@ -115,9 +131,9 @@ function Copy-ItemSafe {
     if ($RequireDomainIdentity) { $script:StrictCalls++ }
     if ((Split-Path $Path -Leaf) -eq '7z.msi') {
         $script:ApplicationCopies++
+        $script:ApplicationDestinations.Add($Destination)
         if ($RequireDomainIdentity) { $script:ApplicationStrict = $true }
         if ($script:ApplicationCopyMode -eq 'interrupted') { return $false }
-        if ($script:ApplicationCopyMode -ne 'partial') { $script:GuestState.Application = $true }
         return $true
     }
     if ($RequireDomainIdentity) { $script:BaselineStrict = $true }
@@ -162,6 +178,7 @@ function Write-Log {
         [switch]$OutputStream,
         [switch]$LogOnly
     )
+    if ($Warning) { $script:Warnings.Add($Message) }
 }
 
 function Write-Progress2 {
@@ -185,7 +202,7 @@ try {
     $vm = [pscustomobject]@{ vmName = 'LAB-PRI'; role = 'Primary'; cmInstallDir = 'E:\ConfigMgr' }
     $fileList = [pscustomobject]@{
         Tools = @(
-            [pscustomobject]@{ Appinstall = $true; AppMsi = '7z.msi' },
+            [pscustomobject]@{ Name = '7-Zip'; Appinstall = $true; AppMsi = '7z.msi' },
             [pscustomobject]@{ Appinstall = $false; AppMsi = 'disabled.msi' }
         )
         OSISO = @(
@@ -206,6 +223,8 @@ try {
     Assert-True ($repairedApplication -and $script:ApplicationCopies -eq 1 -and $script:GuestState.Application) `
         'A retained Primary with complete OS media and baselines must still repair its missing application installer.'
     Assert-True $script:ApplicationStrict 'Application installer repair should require the selected domain identity.'
+    Assert-True ($script:ApplicationDestinations[0] -eq 'C:\Apps\7-Zip\.7z.msi.memlabs-pending') `
+        'Installer copies must stage under the durable application directory, not the tools folder or live source filename.'
     foreach ($copyMode in 'interrupted', 'partial') {
         $script:GuestState.Application = $false
         $script:ApplicationCopies = 0
@@ -227,7 +246,20 @@ try {
         -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
     Assert-True (-not $missingHostApplication -and -not $repairDiagnostics.Retryable) `
         'A missing host installer must fail permanently instead of claiming preflight success.'
+    $script:SitePresent = $true
+    $script:Warnings.Clear()
+    $retainedMissingSource = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+        -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
+    Assert-True ($retainedMissingSource -and $repairDiagnostics.RetainedSite -and $script:Warnings.Count -gt 0) `
+        'An unavailable optional host installer on a verified retained site must warn without blocking core preparation.'
     Set-Content -LiteralPath (Join-Path $tempRoot 'tools\7z.msi') -Value 'expected-msi' -Encoding ASCII
+    $script:GuestState.Application = $false
+    $script:ApplicationCopyMode = 'interrupted'
+    $retainedCopyFailure = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
+        -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -Diagnostics $repairDiagnostics
+    Assert-True $retainedCopyFailure 'An optional installer transfer failure on a retained site should not abort required setup.'
+    $script:ApplicationCopyMode = 'normal'
+    $script:SitePresent = $false
 
     $script:GuestState = @{ Baselines = $false; W11 = $false; W10 = $true; Application = $true }
     $script:Mounted.Clear()
@@ -258,9 +290,11 @@ try {
     $script:GuestState = @{ Baselines = $true; W11 = $true; W10 = $false; Application = $true }
     Remove-Item -LiteralPath (Join-Path $tempRoot 'w10.iso') -Force
     $repairDiagnostics = @{}
+    $script:SitePresent = $true
     $missingHostMedia = Repair-PrimaryPrepopulationPayload -VirtualMachine $vm -VmDomainName 'example.test' `
         -AzureFileList $fileList -AzureFilesPath $tempRoot -Phase 8 -RequireDomainIdentity -Diagnostics $repairDiagnostics
     Assert-True (-not $missingHostMedia -and $repairDiagnostics.Retryable -eq $false) 'Missing host ISO should fail permanently.'
+    $script:SitePresent = $false
     foreach ($probeMode in 'transient', 'malformed', 'ambiguous') {
         $script:ProbeMode = $probeMode
         $repairDiagnostics = @{}
@@ -287,8 +321,11 @@ try {
         $mediaRoot = Join-Path $tempRoot 'media'
         $guestRoot = Join-Path $tempRoot 'guest-osd'
         $guestApplicationPath = Join-Path $tempRoot 'guest-7z.msi'
+        $script:ApplicationProbeFailure = ''
+        $script:ProbeRetainedSite = $false
         Microsoft.PowerShell.Management\Copy-Item -LiteralPath (Join-Path $tempRoot 'tools\7z.msi') -Destination $guestApplicationPath
         $applicationPayloads = @([pscustomobject]@{
+                DirectoryName = '7-Zip'
                 FileName = '7z.msi'
                 Sha256 = (Get-FileHash -LiteralPath $guestApplicationPath -Algorithm SHA256).Hash
             })
@@ -308,14 +345,37 @@ try {
             param($LiteralPath, $PathType = 'Any')
             if ($LiteralPath -eq 'C:\tools\baselines.zip') { return $true }
             if ($LiteralPath -eq 'C:\tools\.memlabs-baselines.pending') { return $false }
-            if ($LiteralPath -eq 'C:\tools\7z.msi') { $LiteralPath = $guestApplicationPath }
+            if ($LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\SMS\Identification') { return $script:ProbeRetainedSite }
+            if ($LiteralPath -eq 'C:\Apps\7-Zip\7z.msi') {
+                if ($script:ApplicationProbeFailure -eq 'path') { throw [IO.IOException]::new('Synthetic optional MSI path error.') }
+                $LiteralPath = $guestApplicationPath
+            }
             Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType $PathType
         }
         function Get-FileHash {
             [CmdletBinding()]
             param($LiteralPath, $Algorithm)
-            if ($LiteralPath -eq 'C:\tools\7z.msi') { $LiteralPath = $guestApplicationPath }
+            if ($LiteralPath -eq 'C:\Apps\7-Zip\7z.msi') {
+                if ($script:ApplicationProbeFailure -eq 'hash') { throw [IO.IOException]::new('Synthetic optional MSI hash error.') }
+                $LiteralPath = $guestApplicationPath
+            }
             Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm $Algorithm -ErrorAction Stop
+        }
+        function Get-Item {
+            [CmdletBinding()]
+            param($LiteralPath)
+            if ($LiteralPath -eq 'C:\Apps\7-Zip\7z.msi') {
+                if ($script:ApplicationProbeFailure -eq 'metadata') { throw [IO.IOException]::new('Synthetic optional MSI metadata error.') }
+                $LiteralPath = $guestApplicationPath
+            }
+            Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath -ErrorAction Stop
+        }
+        function Get-ItemPropertyValue {
+            [CmdletBinding()]
+            param($LiteralPath, $Name)
+            if ($script:ApplicationProbeFailure -eq 'registry') { throw 'Synthetic unreadable site identification.' }
+            if ($script:ApplicationProbeFailure -eq 'registry-empty') { return '' }
+            return 'PS1'
         }
         function Copy-Item {
             param($Path, $Destination, [switch]$Recurse, [switch]$Force, [switch]$Confirm, $ErrorAction)
@@ -349,20 +409,183 @@ try {
             $corruptApplication = & $probeMedia $guestRoot $applicationPayloads
             Assert-True ((Get-Item -LiteralPath $guestApplicationPath).Length -eq
                 (Get-Item -LiteralPath (Join-Path $tempRoot 'tools\7z.msi')).Length -and
-                $corruptApplication.MissingApplications -contains '7z.msi') `
+                $corruptApplication.MissingApplications -contains '7-Zip\7z.msi') `
                 'The guest probe must reject a same-length installer whose SHA-256 differs.'
             Remove-Item -LiteralPath $guestApplicationPath -Force
             $missingApplication = & $probeMedia $guestRoot $applicationPayloads
             Assert-True ($missingApplication.MissingApplications.Count -eq 1 -and
-                $missingApplication.MissingApplications -contains '7z.msi') 'The guest probe must report an absent configured installer.'
+                $missingApplication.MissingApplications -contains '7-Zip\7z.msi') 'The guest probe must report an absent configured installer.'
             $noApplications = & $probeMedia $guestRoot @()
             Assert-True ($noApplications.MissingApplications.Count -eq 0) 'An empty application list must not require installers.'
             Microsoft.PowerShell.Management\Copy-Item -LiteralPath (Join-Path $tempRoot 'tools\7z.msi') -Destination $guestApplicationPath -Force
             $currentApplication = & $probeMedia $guestRoot $applicationPayloads
             Assert-True ($currentApplication.MissingApplications.Count -eq 0) 'The guest probe rejected a verified current installer.'
+            $sharedFilePayloads = @($applicationPayloads[0], [pscustomobject]@{
+                    DirectoryName = 'OtherDemoApp'; FileName = '7z.msi'; Sha256 = $applicationPayloads[0].Sha256
+                })
+            foreach ($orderedPayloads in @(@($sharedFilePayloads), @($sharedFilePayloads[1], $sharedFilePayloads[0]))) {
+                $sharedFileState = & $probeMedia $guestRoot $orderedPayloads
+                Assert-True ($sharedFileState.MissingApplications.Count -eq 1 -and
+                    $sharedFileState.MissingApplications -contains 'OtherDemoApp\7z.msi') `
+                    'The guest protocol must retain directory identity when MSI filenames are shared.'
+            }
+            $verificationAssignment = $repairDefinition.Ast.Find({
+                    param($node)
+                    $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$applicationVerified'
+                }, $true)
+            $verificationArgument = $verificationAssignment.Right.Find({
+                    param($node) $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
+                }, $true)
+            $publishApplication = $verificationArgument.ScriptBlock.GetScriptBlock()
+            $toolPath = Join-Path $tempRoot 'legacy-tool.msi'
+            $publishedPath = Join-Path $tempRoot 'published-source.msi'
+            $pendingPath = Join-Path $tempRoot '.pending-source.msi'
+            Set-Content -LiteralPath $toolPath -Value 'previous-source' -Encoding ASCII
+            $null = New-Item -ItemType HardLink -Path $publishedPath -Value $toolPath
+            Set-Content -LiteralPath $pendingPath -Value 'corrupt-copy' -Encoding ASCII
+            $publicationFailed = $false
+            try { $null = & $publishApplication $pendingPath $publishedPath $applicationPayloads[0].Sha256 }
+            catch { $publicationFailed = $true }
+            Assert-True ($publicationFailed -and (Get-Content -LiteralPath $publishedPath -Raw).Trim() -eq 'previous-source') `
+                'A failed source verification overwrote the previous application source.'
+            Microsoft.PowerShell.Management\Copy-Item -LiteralPath $guestApplicationPath -Destination $pendingPath -Force
+            $null = & $publishApplication $pendingPath $publishedPath $applicationPayloads[0].Sha256
+            Assert-True ((Get-Content -LiteralPath $toolPath -Raw).Trim() -eq 'previous-source') `
+                'Publishing an independent source changed a legacy hardlinked tool.'
+            Remove-Item -LiteralPath $toolPath -Force
+            Assert-True ((Get-FileHash -LiteralPath $publishedPath -Algorithm SHA256).Hash -eq $applicationPayloads[0].Sha256) `
+                'Removing the old tool must not invalidate the durable ConfigMgr source.'
+            $probeToolPath = Join-Path $tempRoot 'probe-tool.msi'
+            Microsoft.PowerShell.Management\Copy-Item -LiteralPath $guestApplicationPath -Destination $probeToolPath
+            Remove-Item -LiteralPath $guestApplicationPath -Force
+            $null = New-Item -ItemType HardLink -Path $guestApplicationPath -Value $probeToolPath
+            $legacyLink = & $probeMedia $guestRoot $applicationPayloads
+            Assert-True ($legacyLink.MissingApplications -contains '7-Zip\7z.msi') 'A hash-current legacy hardlink must still be migrated to an independent application source.'
+
+            function Invoke-VmCommand {
+                param($VmName, $VmDomainName, [switch]$RequireDomainIdentity, [switch]$AsJob, $TimeoutSeconds, $DisplayName, $ScriptBlock, $ArgumentList)
+                if ($DisplayName -in @('Inspect Primary prepopulation payload', 'Verify Primary prepopulation payload')) {
+                    try {
+                        $snapshot = & $ScriptBlock $guestRoot $ArgumentList[1]
+                        return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = @($snapshot); ErrorDetails = @() }
+                    }
+                    catch {
+                        return [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @("$($_.Exception.Message)") }
+                    }
+                }
+                return [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @('Synthetic unavailable optional source directory') }
+            }
+            $probeVm = [pscustomobject]@{ vmName = 'PROBE-PRI'; role = 'Primary'; cmInstallDir = 'C:\ConfigMgr' }
+            foreach ($retained in @($false, $true)) {
+                $script:ProbeRetainedSite = $retained
+                foreach ($inspection in 'path', 'hash', 'metadata') {
+                    $script:ApplicationProbeFailure = $inspection
+                    $inspectionState = & $probeMedia $guestRoot $applicationPayloads
+                    Assert-True ($inspectionState.ApplicationReadErrors.Count -eq 1 -and $inspectionState.MissingApplications -contains '7-Zip\7z.msi') `
+                        "Optional $inspection errors must be explicit unavailable-source state, not failed site identification."
+                    $inspectionResult = Repair-PrimaryPrepopulationPayload -VirtualMachine $probeVm -VmDomainName 'example.test' `
+                        -AzureFileList $fileList -AzureFilesPath $tempRoot -Diagnostics @{}
+                    Assert-True ($inspectionResult -eq $retained) "Optional $inspection failures must warn only on verified retained sites."
+                }
+            }
+            foreach ($registryFailure in 'registry', 'registry-empty') {
+                $script:ApplicationProbeFailure = $registryFailure
+                $registryResult = Repair-PrimaryPrepopulationPayload -VirtualMachine $probeVm -VmDomainName 'example.test' `
+                    -AzureFileList $fileList -AzureFilesPath $tempRoot -Diagnostics @{}
+                Assert-True (-not $registryResult) 'An unreadable or empty site identity must never enable warning-only mode.'
+            }
         }
         finally {
             Remove-PSDrive -Name $script:MediaDrive -Force -ErrorAction Stop
+        }
+    }
+
+    & {
+        $identityRoot = Join-Path $tempRoot 'shared-msi'
+        $identityCache = Join-Path $identityRoot 'cache'
+        $identityApps = Join-Path $identityRoot 'Apps'
+        $identityOsd = Join-Path $identityRoot 'OSD'
+        $null = New-Item -ItemType Directory -Path (Join-Path $identityCache 'tools') -Force
+        foreach ($os in 'Windows 11 24h2', 'Windows 10 22h2') {
+            $null = New-Item -ItemType Directory -Path (Join-Path $identityOsd "$os\sources") -Force
+            Set-Content -LiteralPath (Join-Path $identityOsd "$os\sources\install.wim") -Value 'complete' -Encoding ASCII
+        }
+        $sharedMsi = Join-Path $identityCache 'tools\shared.msi'
+        Set-Content -LiteralPath $sharedMsi -Value 'shared-installer-bytes' -Encoding ASCII
+        $expectedHash = (Get-FileHash -LiteralPath $sharedMsi -Algorithm SHA256).Hash
+        $identityCopies = [Collections.Generic.List[string]]::new()
+        $identityRetained = $false
+        function Test-Path {
+            [CmdletBinding()]
+            param($LiteralPath, $PathType = 'Any')
+            if ($LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\SMS\Identification') { return $identityRetained }
+            if ($LiteralPath -eq 'C:\tools\baselines.zip') { return $true }
+            if ($LiteralPath -eq 'C:\tools\.memlabs-baselines.pending') { return $false }
+            Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType $PathType
+        }
+        function Get-ItemPropertyValue {
+            [CmdletBinding()]
+            param($LiteralPath, $Name)
+            return 'PS1'
+        }
+        function Invoke-VmCommand {
+            param($VmName, $VmDomainName, [switch]$RequireDomainIdentity, [switch]$AsJob, $TimeoutSeconds, $DisplayName, $ScriptBlock, $ArgumentList)
+            $mappedArguments = @($ArgumentList)
+            for ($index = 0; $index -lt $mappedArguments.Count; $index++) {
+                if ($mappedArguments[$index] -is [string] -and $mappedArguments[$index].StartsWith('C:\Apps\')) {
+                    $mappedArguments[$index] = $mappedArguments[$index].Replace('C:\Apps\', "$identityApps\")
+                }
+            }
+            if ($DisplayName -in @('Inspect Primary prepopulation payload', 'Verify Primary prepopulation payload')) {
+                $mappedArguments[0] = $identityOsd
+            }
+            $translated = [scriptblock]::Create($ScriptBlock.ToString().Replace('C:\Apps\', "$identityApps\"))
+            try {
+                $output = @(& $translated @mappedArguments)
+                return [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $output; ErrorDetails = @() }
+            }
+            catch {
+                return [pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @("$($_.Exception.Message)") }
+            }
+        }
+        function Copy-ItemSafe {
+            param($VmName, $VmDomainName, $Path, $Destination, [switch]$Force, [switch]$RequireDomainIdentity)
+            $mapped = $Destination.Replace('C:\Apps\', "$identityApps\")
+            Microsoft.PowerShell.Management\Copy-Item -LiteralPath $Path -Destination $mapped -Force -ErrorAction Stop
+            $identityCopies.Add($mapped)
+            return $true
+        }
+        $identityVm = [pscustomobject]@{ vmName = 'IDENTITY-PRI'; role = 'Primary'; cmInstallDir = 'C:\ConfigMgr' }
+        foreach ($identityRetained in @($false, $true)) {
+            foreach ($names in @(@('AppA', 'AppB'), @('AppB', 'AppA'))) {
+                $identityCatalog = [pscustomobject]@{
+                    Tools = @($names | ForEach-Object { [pscustomobject]@{ Name = $_; Appinstall = $true; AppMsi = 'shared.msi' } })
+                    OSISO = @()
+                }
+                foreach ($missingNames in @(@('AppA', 'AppB'), @('AppA'), @('AppB'))) {
+                    foreach ($name in @('AppA', 'AppB')) {
+                        $directory = Join-Path $identityApps $name
+                        $null = New-Item -ItemType Directory -Path $directory -Force
+                        $path = Join-Path $directory 'shared.msi'
+                        if ($name -in $missingNames) {
+                            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+                        }
+                        else { Microsoft.PowerShell.Management\Copy-Item -LiteralPath $sharedMsi -Destination $path -Force }
+                    }
+                    $identityCopies.Clear()
+                    $ready = Repair-PrimaryPrepopulationPayload -VirtualMachine $identityVm -VmDomainName 'example.test' `
+                        -AzureFileList $identityCatalog -AzureFilesPath $identityCache -Diagnostics @{}
+                    Assert-True ($ready -and $identityCopies.Count -eq $missingNames.Count) 'Shared installer filenames must repair each independently missing tool directory exactly once.'
+                    foreach ($name in @('AppA', 'AppB')) {
+                        Assert-True ((Get-FileHash -LiteralPath (Join-Path $identityApps "$name\shared.msi") -Algorithm SHA256).Hash -eq $expectedHash) `
+                            'Each application must retain the shared installer under its own durable source directory.'
+                    }
+                    $identityCopies.Clear()
+                    $again = Repair-PrimaryPrepopulationPayload -VirtualMachine $identityVm -VmDomainName 'example.test' `
+                        -AzureFileList $identityCatalog -AzureFilesPath $identityCache -Diagnostics @{}
+                    Assert-True ($again -and $identityCopies.Count -eq 0) 'A repaired shared-filename catalog must be a no-op on its next preflight.'
+                }
+            }
         }
     }
 
@@ -415,6 +638,7 @@ try {
             $script:PreparationSeconds += 11 * 60
             Assert-True ($script:PreflightDispatches -eq 0) 'A preparation exceeding ten minutes exposed a DC recovery worker.'
             Assert-True ($RequireDomainIdentity -and $Phase -eq 8) 'Phase 8 preparation lost its domain-identity requirement.'
+            $Diagnostics.RetainedSite = $true
             $script:PreflightCopies.Add([pscustomobject]@{ Name = $VirtualMachine.vmName; Domain = $VmDomainName })
             $attemptsForVm = @($script:PreflightCopies | Where-Object { $_.Name -eq $VirtualMachine.vmName }).Count
             if ($VirtualMachine.vmName -eq $script:RetryTarget -and $attemptsForVm -le $script:TransientFailures) {

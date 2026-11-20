@@ -39,7 +39,13 @@ $appLoops = @($ast.FindAll({
             $node.Extent.Text -match '^\s*\$apps\s*\|\s*ForEach-Object\s*\{'
         }, $true))
 if ($appLoops.Count -ne 1) { throw "Expected one application/package loop, found $($appLoops.Count)" }
-$appLoop = [scriptblock]::Create($appLoops[0].Extent.Text)
+$appModes = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -in @('$allowOptionalAppWarnings', '$appFailureMode')
+        }, $true) | Sort-Object { $_.Extent.StartOffset })
+if ($appModes.Count -ne 2) { throw 'Expected the retained-site application failure policy assignments.' }
+$appLoop = [scriptblock]::Create(($appModes.Extent.Text -join "`n") + "`n" + $appLoops[0].Extent.Text)
 $officeLoops = @($ast.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.ForEachStatementAst] -and
@@ -82,8 +88,9 @@ function Reset-Scenario {
     $script:Statuses = New-Object System.Collections.Generic.List[object]
     $script:FilesystemWrites = 0
     $script:ImportedMsi = ''
+    $script:ThisVM = [pscustomobject]@{ phase8RetainedSite = $Name -like 'Retained*' }
     $script:AppExists = $Name -notin @('Fresh', 'CreateUnreadable', 'OfficeDistributionFailure')
-    $script:DeploymentTypeExists = $Name -notin @('Fresh', 'Partial')
+    $script:DeploymentTypeExists = $Name -notin @('Fresh', 'Partial', 'MsiImportFailure', 'RetainedMsiImportFailure')
     $script:AppDeploymentExists = $Name -in @('DuplicatePackage', 'PackageDeploymentQueryFailure')
     $script:PackageExists = $Name -notin @('Fresh', 'CreateUnreadable', 'DuplicateApp', 'AppDeploymentQueryFailure', 'DistributionFailure')
     $script:ProgramExists = $Name -in @('DuplicatePackage', 'PackageDeploymentQueryFailure')
@@ -91,18 +98,18 @@ function Reset-Scenario {
 }
 
 function Write-DscStatus {
-    param ([Parameter(Position = 0)][string] $Message, [switch] $Failure)
+    param ([Parameter(Position = 0)][string] $Message, [switch] $Failure, [switch] $Warning)
 
-    [void]$script:Statuses.Add([pscustomobject]@{ Message = $Message; Failure = [bool]$Failure })
+    [void]$script:Statuses.Add([pscustomobject]@{ Message = $Message; Failure = [bool]$Failure; Warning = [bool]$Warning })
 }
 function Test-Path {
     [CmdletBinding()]
     param($LiteralPath, $PathType)
 
-    if ($script:Scenario -eq 'MissingSource' -and $LiteralPath -eq 'C:\tools\7z.msi') { return $false }
-    if ($script:Scenario -eq 'LinkCreationFailure' -and $LiteralPath -eq 'C:\Apps\7-Zip 64-bit\7z.msi') { return $false }
+    if ($script:Scenario -in @('MissingSource', 'RetainedMissingSource') -and $LiteralPath -eq 'C:\Apps\7-Zip 64-bit\7z.msi') { return $false }
+    if ($LiteralPath -like 'C:\tools\*') { return $false }
     if ($LiteralPath -like '\\*') { return $false }
-    if ($script:Scenario -eq 'UncNotVisible' -and $LiteralPath -like 'FileSystem::\\*') { return $false }
+    if ($script:Scenario -in @('UncNotVisible', 'RetainedUncNotVisible') -and $LiteralPath -like 'FileSystem::\\*') { return $false }
     return $true
 }
 function New-Item {
@@ -110,7 +117,6 @@ function New-Item {
     param($ItemType, $Value, $Path, [switch]$Force)
 
     $script:FilesystemWrites++
-    if ($script:Scenario -eq 'LinkCreationFailure') { Write-Error 'Synthetic hardlink creation failure.' }
     return [pscustomobject]@{ FullName = $Path }
 }
 function Get-Item { param($LiteralPath); return [pscustomobject]@{ LinkType = 'HardLink' } }
@@ -137,6 +143,7 @@ function Get-CMDeploymentType {
 function Add-CMMSiDeploymentType {
     param($ApplicationName, $DeploymentTypeName, $ContentLocation, $Comment, [switch]$Force, $ErrorAction)
 
+    if ($script:Scenario -like '*MsiImportFailure') { throw [IO.FileNotFoundException]::new('Synthetic MSI import failure.') }
     [void]$script:Mutations.Add('AddDeploymentType')
     $script:ImportedMsi = $ContentLocation
     $script:DeploymentTypeExists = $true
@@ -148,7 +155,7 @@ function Add-CMScriptDeploymentType {
     $script:DeploymentTypeExists = $true
 }
 function Sync-MemLabsContentDistribution {
-    param($ContentType, $ContentName, $DistributionPointGroupName, $LegacyDistributionPointGroupName, $MigrateLegacy, $StatusTag, $SiteCode)
+    param($ContentType, $ContentName, $DistributionPointGroupName, $LegacyDistributionPointGroupName, $MigrateLegacy, $StatusTag, $SiteCode, [switch]$WarnOnly)
 
     [void]$script:Mutations.Add("Sync$ContentType")
     return $script:Scenario -notin @('DistributionFailure', 'OfficeDistributionFailure', 'OfficeRecoveryDistributionFailure')
@@ -210,19 +217,27 @@ Assert-Equal 'NewApplication,AddDeploymentType,SyncApplication,NewApplicationDep
 Assert-Equal 0 $script:FilesystemWrites 'a current source remains a no-op while the CMSite provider rejects bare UNC paths'
 Assert-Equal '\\PS1SITE\c$\Apps\7-Zip 64-bit\7z.msi' $script:ImportedMsi 'MSI import uses the verified UNC file, not its containing directory'
 
-foreach ($scenario in 'MissingSource', 'LinkCreationFailure', 'UncNotVisible') {
+foreach ($scenario in 'MissingSource', 'MsiImportFailure', 'UncNotVisible') {
     Reset-Scenario -Name $scenario
     $caught = $null
     try { & $appLoop } catch { $caught = $_ }
     Assert-Equal $true ($null -ne $caught) "$scenario stops preloading with an explicit error"
     Assert-Equal '' ($script:Mutations -join ',') "$scenario stops before ConfigMgr object mutation"
     if ($scenario -eq 'MissingSource') {
-        Assert-Equal $true ("$caught" -match [regex]::Escape('C:\tools\7z.msi')) 'missing-source error identifies the required local installer'
+        Assert-Equal $true ("$caught" -match [regex]::Escape('C:\Apps\7-Zip 64-bit\7z.msi')) 'missing-source error identifies the durable local installer'
         Assert-Equal 0 $script:FilesystemWrites 'missing installer stops before creating a source link'
     }
     elseif ($scenario -eq 'UncNotVisible') {
         Assert-Equal $true ("$caught" -match [regex]::Escape('\\PS1SITE\c$\Apps\7-Zip 64-bit\7z.msi')) 'UNC visibility error identifies the exact importer path'
     }
+}
+foreach ($scenario in 'RetainedMissingSource', 'RetainedMsiImportFailure', 'RetainedUncNotVisible') {
+    Reset-Scenario -Name $scenario
+    $caught = $null
+    try { & $appLoop } catch { $caught = $_ }
+    Assert-Equal $true ($null -eq $caught -and @($script:Statuses | Where-Object Failure).Count -eq 0) "$scenario does not fail the retained-site workflow"
+    Assert-Equal 1 @($script:Statuses | Where-Object Warning).Count "$scenario reports the skipped optional application explicitly"
+    Assert-Equal '' ($script:Mutations -join ',') "$scenario does not deploy incomplete application content"
 }
 
 Reset-Scenario -Name Partial
@@ -269,6 +284,26 @@ $officeColName = 'MEMLABS-Office Install Targets'
 Reset-Scenario -Name OfficeRecoveryDistributionFailure
 & $officeRecoveryLoop
 Assert-Equal 'SyncApplication' ($script:Mutations -join ',') 'Office distribution failure suppresses recovery deployment'
+
+& {
+    $validationPath = Join-Path $RootPath 'common\Common.Validation.Functional.ps1'
+    $validationAst = [System.Management.Automation.Language.Parser]::ParseFile($validationPath, [ref]$null, [ref]$null)
+    $appChecks = @($validationAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.IfStatementAst] -and
+                $node.Extent.Text -match '^if \(\$expectedApps -and' -and
+                $node.Extent.Text -match 'SMS_ApplicationLatest'
+            }, $true))
+    if ($appChecks.Count -ne 1) { throw 'Expected one Phase 11 demo-application presence check.' }
+    $checkApplications = [scriptblock]::Create($appChecks[0].Extent.Text)
+    function Get-WmiObject { param($Namespace, $Class, $Filter, $ErrorAction) }
+    $expectedApps = @('MEMLABS-7-Zip 64-bit')
+    foreach ($retainedSiteInner in 'False', 'True') {
+        $results = @{ Passed = $true; Details = [Collections.Generic.List[string]]::new() }
+        & $checkApplications
+        Assert-Equal ($retainedSiteInner -eq 'True') $results.Passed "Phase 11 applies the selected retained-site warning policy ($retainedSiteInner)"
+    }
+}
 
 if ($script:Failures -gt 0) {
     Write-Host "$script:Failures check(s) failed."

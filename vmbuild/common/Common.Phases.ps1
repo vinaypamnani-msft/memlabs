@@ -2578,7 +2578,11 @@ function Start-PhaseJobs {
                         if ($payloadDiagnostics.Retryable -isnot [bool] -or -not $payloadDiagnostics.Retryable) { throw }
                         Write-Log "[Phase 8] $($primary.vmName) preparation connection/copy failed: $($_.Exception.Message)" -Warning
                     }
-                    if ($payloadReady) { break }
+                    if ($payloadReady) {
+                        if ($payloadDiagnostics.RetainedSite -isnot [bool]) { throw "$($primary.vmName) preparation did not report whether a ConfigMgr site already existed." }
+                        $primary | Add-Member -NotePropertyName 'phase8RetainedSite' -NotePropertyValue $payloadDiagnostics.RetainedSite -Force
+                        break
+                    }
                     if ($payloadDiagnostics.Retryable -isnot [bool] -or -not $payloadDiagnostics.Retryable -or $preparationRetry -ge 2) {
                         throw "$($primary.vmName) prepopulation preparation failed after $preparationRetry recovery attempt(s). See preceding diagnostics."
                     }

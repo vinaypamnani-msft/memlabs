@@ -1082,18 +1082,26 @@ function Repair-PrimaryPrepopulationPayload {
     $applicationPayloads = @()
     foreach ($tool in @($AzureFileList.Tools | Where-Object { $_.Appinstall -eq $true })) {
         $fileName = "$($tool.AppMsi)"
-        if (-not $fileName -or [IO.Path]::GetFileName($fileName) -ne $fileName -or [IO.Path]::GetExtension($fileName) -ne '.msi') {
-            Write-Log "[Phase $Phase]: ${vmName}: Application '$($tool.Name)' must declare an MSI filename in AppMsi." -Failure
+        $directoryName = "$($tool.Name)"
+        if (-not $fileName -or [IO.Path]::GetFileName($fileName) -ne $fileName -or [IO.Path]::GetExtension($fileName) -ne '.msi' -or
+            -not $directoryName -or [IO.Path]::GetFileName($directoryName) -ne $directoryName -or $directoryName -in @('.', '..')) {
+            Write-Log "[Phase $Phase]: ${vmName}: Application '$directoryName' must declare a source directory name and MSI filename without path components." -Failure
             return $false
         }
         $applicationSource = Join-Path $AzureFilesPath "tools\$fileName"
-        if (-not (Test-Path -LiteralPath $applicationSource -PathType Leaf)) {
-            Write-Log "[Phase $Phase]: ${vmName}: Cannot verify application prepopulation; host installer is missing: $applicationSource" -Failure
-            return $false
+        $sha256 = ''
+        $sourceError = "Host installer is missing: $applicationSource"
+        try {
+            if (Test-Path -LiteralPath $applicationSource -PathType Leaf -ErrorAction Stop) {
+                $sha256 = (Get-FileHash -LiteralPath $applicationSource -Algorithm SHA256 -ErrorAction Stop).Hash
+            }
         }
+        catch { $sourceError = "Host installer could not be verified: $applicationSource. $($_.Exception.Message)" }
         $applicationPayloads += [pscustomobject]@{
-            FileName = $fileName
-            Sha256   = (Get-FileHash -LiteralPath $applicationSource -Algorithm SHA256 -ErrorAction Stop).Hash
+            DirectoryName = $directoryName
+            FileName      = $fileName
+            Sha256        = $sha256
+            SourceError   = $sourceError
         }
     }
     $probeScript = {
@@ -1103,16 +1111,34 @@ function Repair-PrimaryPrepopulationPayload {
                 -not (Test-Path -LiteralPath (Join-Path $osdRoot "$_\sources\install.wim") -PathType Leaf) -or
                 (Test-Path -LiteralPath (Join-Path $osdRoot "$_\.memlabs-copy.pending") -PathType Leaf)
             })
-        $missingApplications = @($applicationPayloads | Where-Object {
-                $path = Join-Path 'C:\tools' $_.FileName
-                -not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop) -or
-                (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash -ne $_.Sha256
-            } | ForEach-Object { $_.FileName })
+        $sitePresent = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop
+        if ($sitePresent) {
+            $installedSiteCode = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop
+            if ([string]::IsNullOrWhiteSpace($installedSiteCode)) { throw 'Existing ConfigMgr identification has no site code.' }
+        }
+        $missingApplications = @()
+        $applicationReadErrors = @()
+        foreach ($application in $applicationPayloads) {
+            $path = Join-Path "C:\Apps\$($application.DirectoryName)" $application.FileName
+            try {
+                if (-not $application.Sha256 -or -not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop) -or
+                    (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash -ne $application.Sha256 -or
+                    (Get-Item -LiteralPath $path -ErrorAction Stop).LinkType -eq 'HardLink') {
+                    $missingApplications += "$($application.DirectoryName)\$($application.FileName)"
+                }
+            }
+            catch {
+                $missingApplications += "$($application.DirectoryName)\$($application.FileName)"
+                $applicationReadErrors += "Could not inspect optional application source '$path': $($_.Exception.Message)"
+            }
+        }
         [pscustomobject]@{
             BaselinesPresent = (Test-Path -LiteralPath 'C:\tools\baselines.zip' -PathType Leaf) -and
                 -not (Test-Path -LiteralPath 'C:\tools\.memlabs-baselines.pending' -PathType Leaf)
             MissingOs        = [string[]]$missing
             MissingApplications = [string[]]$missingApplications
+            SitePresent = [bool]$sitePresent
+            ApplicationReadErrors = [string[]]$applicationReadErrors
         }
     }
     $readState = {
@@ -1133,9 +1159,9 @@ function Repair-PrimaryPrepopulationPayload {
         }
         $states = @($result.ScriptBlockOutput | Where-Object {
                 $_ -and $_.PSObject.Properties['BaselinesPresent'] -and $_.PSObject.Properties['MissingOs'] -and
-                $_.PSObject.Properties['MissingApplications']
+                $_.PSObject.Properties['MissingApplications'] -and $_.PSObject.Properties['SitePresent']
             })
-        if ($states.Count -ne 1 -or $states[0].BaselinesPresent -isnot [bool]) {
+        if ($states.Count -ne 1 -or $states[0].BaselinesPresent -isnot [bool] -or $states[0].SitePresent -isnot [bool]) {
             $Diagnostics.Retryable = $false
             Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation probe returned invalid or ambiguous state." -Failure
             return $null
@@ -1146,6 +1172,8 @@ function Repair-PrimaryPrepopulationPayload {
 
     $state = & $readState 'Inspect Primary prepopulation payload'
     if ($null -eq $state) { return $false }
+    $Diagnostics.RetainedSite = $state.SitePresent
+    foreach ($readError in $state.ApplicationReadErrors) { Write-Log "[Phase $Phase]: ${vmName}: $readError. Source repair will be attempted." -LogOnly }
     $missingOs = @($state.MissingOs | ForEach-Object { "$_" })
     $missingApplications = @($state.MissingApplications | ForEach-Object { "$_" })
     if ($state.BaselinesPresent -and $missingOs.Count -eq 0 -and $missingApplications.Count -eq 0) {
@@ -1208,15 +1236,59 @@ function Repair-PrimaryPrepopulationPayload {
         }
     }
 
-    foreach ($fileName in $missingApplications) {
-        Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status "Copying $fileName" -Force
-        $Diagnostics.Retryable = $true
-        $applicationCopied = Copy-ItemSafe -VmName $vmName -VMDomainName $VmDomainName `
-            -Path (Join-Path $AzureFilesPath "tools\$fileName") -Destination 'C:\tools' -Force `
-            -RequireDomainIdentity:$RequireDomainIdentity
-        if (-not $applicationCopied) {
-            Write-Log "[Phase $Phase]: ${vmName}: Failed to copy application installer '$fileName' to C:\tools." -Failure
+    foreach ($sourceId in $missingApplications) {
+        $matchingPayloads = @($applicationPayloads | Where-Object { "$($_.DirectoryName)\$($_.FileName)" -eq $sourceId })
+        if ($matchingPayloads.Count -ne 1) {
+            $Diagnostics.Retryable = $false
+            Write-Log "[Phase $Phase]: ${vmName}: Application source '$sourceId' is not uniquely identified by the configured tool name and MSI filename." -Failure
             return $false
+        }
+        $application = $matchingPayloads[0]
+        $fileName = $application.FileName
+        try {
+            $Diagnostics.Retryable = $false
+            if (-not $application.Sha256) { throw [IO.IOException]::new($application.SourceError) }
+            $destination = "C:\Apps\$($application.DirectoryName)"
+            Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status "Copying $fileName" -Force
+            $Diagnostics.Retryable = $true
+            $preparedApplication = Invoke-VmCommand -VmName $vmName -VmDomainName $VmDomainName `
+                -RequireDomainIdentity:$RequireDomainIdentity -AsJob -TimeoutSeconds 120 `
+                -DisplayName "Prepare Primary application source ($fileName)" -ScriptBlock {
+                param($destination)
+                New-Item -Path $destination -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                'APPLICATION_SOURCE_READY'
+            } -ArgumentList $destination
+            if (-not $preparedApplication -or $preparedApplication.ScriptBlockFailed -isnot [bool] -or
+                $preparedApplication.ScriptBlockFailed -or $preparedApplication.ScriptBlockOutput -notcontains 'APPLICATION_SOURCE_READY') {
+                throw "Could not prepare application source directory '$destination'."
+            }
+            $pendingPath = Join-Path $destination ".$fileName.memlabs-pending"
+            if (-not (Copy-ItemSafe -VmName $vmName -VMDomainName $VmDomainName `
+                        -Path (Join-Path $AzureFilesPath "tools\$fileName") -Destination $pendingPath -Force `
+                        -RequireDomainIdentity:$RequireDomainIdentity)) {
+                throw "Could not copy '$fileName' to '$pendingPath'."
+            }
+            $applicationVerified = Invoke-VmCommand -VmName $vmName -VmDomainName $VmDomainName `
+                -RequireDomainIdentity:$RequireDomainIdentity -AsJob -TimeoutSeconds 120 `
+                -DisplayName "Verify Primary application source ($fileName)" -ScriptBlock {
+                param($pendingPath, $finalPath, $expectedHash)
+                if ((Get-FileHash -LiteralPath $pendingPath -Algorithm SHA256 -ErrorAction Stop).Hash -ne $expectedHash) {
+                    throw "Application source copy has an unexpected SHA-256: $pendingPath"
+                }
+                Move-Item -LiteralPath $pendingPath -Destination $finalPath -Force -ErrorAction Stop
+                'APPLICATION_SOURCE_VERIFIED'
+            } -ArgumentList $pendingPath, (Join-Path $destination $fileName), $application.Sha256
+            if (-not $applicationVerified -or $applicationVerified.ScriptBlockFailed -isnot [bool] -or
+                $applicationVerified.ScriptBlockFailed -or $applicationVerified.ScriptBlockOutput -notcontains 'APPLICATION_SOURCE_VERIFIED') {
+                throw "Application source verification failed for '$fileName'; the previous source was not intentionally removed."
+            }
+        }
+        catch {
+            if (-not $state.SitePresent) {
+                Write-Log "[Phase $Phase]: ${vmName}: Application source '$fileName' failed: $($_.Exception.Message)" -Failure
+                return $false
+            }
+            Write-Log "[Phase $Phase]: ${vmName}: Optional application source '$fileName' could not be refreshed on this retained site: $($_.Exception.Message). Phase 8 will warn and skip unavailable demo applications." -Warning
         }
     }
 
@@ -1301,10 +1373,16 @@ function Repair-PrimaryPrepopulationPayload {
     if ($null -eq $verified) { return $false }
     $stillMissing = @($verified.MissingOs | ForEach-Object { "$_" })
     $stillMissingApplications = @($verified.MissingApplications | ForEach-Object { "$_" })
-    if (-not $verified.BaselinesPresent -or $stillMissing.Count -gt 0 -or $stillMissingApplications.Count -gt 0) {
+    if (-not $verified.BaselinesPresent -or $stillMissing.Count -gt 0 -or
+        ($stillMissingApplications.Count -gt 0 -and -not $state.SitePresent)) {
         $Diagnostics.Retryable = $true
         Write-Log "[Phase $Phase]: ${vmName}: Prepopulation repair verification failed (baselinesPresent=$($verified.BaselinesPresent), missingOS=$($stillMissing -join ', '), missingMSI=$($stillMissingApplications -join ', '))." -Failure
         return $false
+    }
+    if ($stillMissingApplications.Count -gt 0) {
+        Write-Log "[Phase $Phase]: ${vmName}: Required Primary payload is ready; optional retained-site MSI sources remain unverified: $($stillMissingApplications -join ', '). These applications may be skipped." -Warning
+        Write-Progress2 -Activity "${vmName}: Pre-populating ConfigMgr content" -Status 'Required payload ready; optional app warnings' -Completed -Force
+        return $true
     }
 
     Write-Log "[Phase $Phase]: ${vmName}: Primary prepopulation payload repair completed and verified." -Success

@@ -16250,6 +16250,8 @@ function Test-CMSiteWideFunctionality {
     # multi-hierarchy deploy can have one Primary with PrePopulateObjects=true
     # and another with false.
     $expectedAppNames = @()
+    $retainedSiteConfig = @($DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VMName })
+    $retainedSite = $retainedSiteConfig.Count -eq 1 -and $retainedSiteConfig[0].phase8RetainedSite -eq $true
     $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
     $releaseResolution = Resolve-EffectiveHierarchyCmRelease -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     $effectiveCmVersion = $releaseResolution.Version
@@ -16404,7 +16406,7 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner, $consoleHelperSourceInner, $providerQueryDefinition)
+        param($sc, $hierarchySc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner, $expectedBgCsv, $supServer, $offlineSupInner, $expectOsdInner, $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $cmVersionInner, $consoleHelperSourceInner, $providerQueryDefinition, $retainedSiteInner)
 
         function Get-MemLabsValidationProjectedCimRows {
             param(
@@ -17255,7 +17257,7 @@ function Test-CMSiteWideFunctionality {
                 if ($missing.Count -eq 0) {
                     $results.Details.Add("OK: All $($expectedApps.Count) MEMLABS apps present in CM site")
                 }
-                elseif ($missing.Count -le ($expectedApps.Count / 2)) {
+                elseif ($retainedSiteInner -eq 'True' -or $missing.Count -le ($expectedApps.Count / 2)) {
                     $results.Details.Add("WARN: $($missing.Count)/$($expectedApps.Count) apps missing: $(($missing | Select-Object -First 5) -join ', ')")
                 }
                 else {
@@ -19233,7 +19235,7 @@ function Invoke-TftpReadProbeWithRetry { $(${function:Invoke-TftpReadProbeWithRe
 "@
     $providerQueryDefinition = (Get-Command -Name Invoke-CmWmiQueryWithRetry -CommandType Function -ErrorAction Stop).Definition
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource, $providerQueryDefinition `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $hierarchySiteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP), $expectedBoundaryCsv, $supServer, ([string]$offlineSup), ([string]$hasOsdClient), $expectedOsdDpCsv, $uncoveredOsdSubnetCsv, $tftpProbeText, $effectiveCmVersion, $consoleHelperSource, $providerQueryDefinition, ([string]$retainedSite) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600 -PollProgress
 

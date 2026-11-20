@@ -11869,7 +11869,7 @@ function Get-ToolSetFingerprint {
     $memo = $null
     $setKey = $null
     try {
-        $keySource = ($sorted | ForEach-Object { "$($_.TargetRelative)|$($_.SourcePath)" }) -join "`n"
+        $keySource = "tool-ownership-v1`n" + (($sorted | ForEach-Object { "$($_.TargetRelative)|$($_.SourcePath)" }) -join "`n")
         $keyStream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($keySource))
         $setKey = (Get-FileHash -InputStream $keyStream -Algorithm MD5).Hash
         $keyStream.Dispose()
@@ -11897,7 +11897,7 @@ function Get-ToolSetFingerprint {
             "$($entry.TargetRelative)|$($item.Length)"
         }
     }
-    $str = $parts -join "`n"
+    $str = "tool-ownership-v1`n" + ($parts -join "`n")
     $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($str))
     $hash = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
     $stream.Dispose()
@@ -12272,7 +12272,8 @@ function Copy-ToolToVM {
                     $cachedBundleHash = $cached.BundleMD5
                     $hashCheck = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
                         if (Test-Path $using:vmHashPath) {
-                            return (Get-Content $using:vmHashPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+                            $receipt = @(Get-Content -LiteralPath $using:vmHashPath -ErrorAction Stop)
+                            if ($receipt.Count -ge 2 -and $receipt[1] -eq 'OwnershipSchema=1') { return $receipt[0] }
                         }
                         return $null
                     }
@@ -12396,7 +12397,8 @@ function Copy-ToolToVM {
     if (-not $WhatIf -and -not $Force) {
         $hashCheck = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
             if (Test-Path $using:vmHashPath) {
-                return (Get-Content $using:vmHashPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+                $receipt = @(Get-Content -LiteralPath $using:vmHashPath -ErrorAction Stop)
+                if ($receipt.Count -ge 2 -and $receipt[1] -eq 'OwnershipSchema=1') { return $receipt[0] }
             }
             return $null
         }
@@ -12414,16 +12416,104 @@ function Copy-ToolToVM {
             @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash; ZipFiles = $activeZipNames } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
             try { Update-VMNoteProperty -VmName $vm.vmName -PropertyName 'ToolsFingerprint' -PropertyValue $combinedFingerprint } catch { }
         }
+        if ($null -ne $Outcome) { $Outcome.Value = 'Skipped' }
         return $true
     }
 
     Write-Log "$vmName`: Copying tools bundle (${totalSizeMB} MB, $totalItems items) to VM..."
     Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${totalSizeMB} MB) to $VMName" -Log -force
 
+    $toolFilesByBundle = @{}
+    $allToolFiles = @()
+    foreach ($zipPath in $zipPaths) {
+        $bundleEntries = if ($zipPath -eq $commonZipPath) { $commonEntries } else { $extraEntries }
+        $toolFiles = @(foreach ($entry in $bundleEntries) {
+                if ($entry.Name -like 'MaintFix:*' -or $entry.TargetRelative -notlike 'tools\*') { continue }
+                $sourceItem = Get-Item -LiteralPath $entry.SourcePath -ErrorAction Stop
+                $files = if ($sourceItem.PSIsContainer) {
+                    @(Get-ChildItem -LiteralPath $sourceItem.FullName -Recurse -File -ErrorAction Stop)
+                }
+                else { @($sourceItem) }
+                foreach ($file in $files) {
+                    $relativePath = if ($sourceItem.PSIsContainer) {
+                        Join-Path $entry.TargetRelative $file.FullName.Substring($sourceItem.FullName.Length).TrimStart('\')
+                    }
+                    else { $entry.TargetRelative }
+                    [pscustomobject]@{
+                        ToolName = $entry.Name
+                        RelativePath = $relativePath
+                        Sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                    }
+                }
+            })
+        $toolFilesByBundle[$zipPath] = ConvertTo-Json -InputObject $toolFiles -Depth 4 -Compress
+        $allToolFiles += $toolFiles
+    }
+    $allToolFilesJson = ConvertTo-Json -InputObject $allToolFiles -Depth 4 -Compress
+
     $expandToolsBundles = {
-        param([string]$BundlePath, [string]$ExpectedHash, [string]$VolumeLabel)
+        param([string]$BundlePath, [string]$ExpectedHash, [string]$VolumeLabel, [string]$ToolFilesJson)
 
         $destinationRoot = 'C:\'
+        $toolsRoot = [IO.Path]::GetFullPath((Join-Path $destinationRoot 'tools')).TrimEnd('\') + '\'
+        function Resolve-OwnedToolPath {
+            param([string]$RelativePath)
+            if ([string]::IsNullOrWhiteSpace($RelativePath) -or [IO.Path]::IsPathRooted($RelativePath)) {
+                throw "Invalid managed tool relative path '$RelativePath'."
+            }
+            $fullPath = [IO.Path]::GetFullPath((Join-Path $destinationRoot $RelativePath))
+            if (-not $fullPath.StartsWith($toolsRoot, [StringComparison]::OrdinalIgnoreCase) -or $fullPath.Substring(2).Contains(':')) {
+                throw "Managed tool path is outside the tools directory: $RelativePath"
+            }
+            $ancestor = $fullPath
+            while ($ancestor -and $ancestor.Length -ge $toolsRoot.TrimEnd('\').Length) {
+                if (Test-Path -LiteralPath $ancestor -ErrorAction Stop) {
+                    $item = Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop
+                    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Managed tool cleanup cannot traverse reparse point '$ancestor'." }
+                }
+                $ancestor = [IO.Path]::GetDirectoryName($ancestor)
+            }
+            return $fullPath
+        }
+        function Read-ToolMsiIdentity {
+            param([string]$Path)
+            $installer = $null
+            $database = $null
+            $summary = $null
+            try {
+                $installer = New-Object -ComObject WindowsInstaller.Installer
+                $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 0))
+                $identity = @{}
+                foreach ($property in @('ProductName', 'Manufacturer', 'ProductVersion', 'UpgradeCode')) {
+                    $view = $null
+                    $record = $null
+                    try {
+                        $query = 'SELECT `Value` FROM `Property` WHERE `Property`=''{0}''' -f $property
+                        $view = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database, @($query))
+                        $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+                        $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+                        if (-not $record) { throw "MSI has no $property property: $Path" }
+                        $identity[$property] = [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+                    }
+                    finally {
+                        if ($record) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record) }
+                        if ($view) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view) }
+                    }
+                }
+                $summary = $database.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null, $database, @(0))
+                $identity.Template = [string]$summary.GetType().InvokeMember('Property', 'GetProperty', $null, $summary, @(7))
+                $identity.Version = [version]$identity.ProductVersion
+                $identity.UpgradeCode = ([guid]$identity.UpgradeCode).ToString('B')
+                if (-not $identity.ProductName -or -not $identity.Manufacturer -or -not $identity.Template -or
+                    $identity.UpgradeCode -eq [guid]::Empty.ToString('B')) { throw "Incomplete MSI identity: $Path" }
+                return [pscustomobject]$identity
+            }
+            finally {
+                if ($summary) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($summary) }
+                if ($database) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database) }
+                if ($installer) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer) }
+            }
+        }
         $bundlePaths = @($BundlePath)
         if ($VolumeLabel) {
             $volume = Get-Volume -FileSystemLabel $VolumeLabel -ErrorAction SilentlyContinue |
@@ -12447,6 +12537,7 @@ function Copy-ToolToVM {
 
         Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem -ErrorAction Stop
         $stoppedProcessIds = @()
+        $expandedArchivePaths = @()
         foreach ($path in $bundlePaths) {
             $archivePath = (Get-Item -LiteralPath $path -ErrorAction Stop).FullName
             $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
@@ -12482,11 +12573,90 @@ function Copy-ToolToVM {
             }
 
             Expand-Archive -LiteralPath $archivePath -DestinationPath $destinationRoot -Force -ErrorAction Stop
-            if (-not $VolumeLabel) {
-                Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+            $expandedArchivePaths += $archivePath
+        }
+        $removedToolFiles = [Collections.Generic.List[string]]::new()
+        $cleanupWarnings = [Collections.Generic.List[string]]::new()
+        if ($ToolFilesJson) {
+            $decodedFiles = ConvertFrom-Json -InputObject $ToolFilesJson -ErrorAction Stop
+            $currentFiles = @($decodedFiles)
+            $ledgerPath = Join-Path $toolsRoot '.memlabs-tool-versions.json'
+            $previousFiles = @()
+            if (Test-Path -LiteralPath $ledgerPath -PathType Leaf -ErrorAction Stop) {
+                $ledger = Get-Content -LiteralPath $ledgerPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                if ($ledger.SchemaVersion -ne 1 -or -not $ledger.PSObject.Properties['Files']) { throw 'Invalid managed tool ownership ledger.' }
+                $previousFiles = @($ledger.Files | Where-Object { $null -ne $_ })
+            }
+            foreach ($file in @($currentFiles) + @($previousFiles)) {
+                if (-not $file.ToolName -or "$($file.Sha256)" -notmatch '^[0-9a-fA-F]{64}$') { throw 'Invalid managed tool ownership entry.' }
+                $resolvedPath = Resolve-OwnedToolPath -RelativePath $file.RelativePath
+                $file.RelativePath = $resolvedPath.Substring($destinationRoot.Length)
+            }
+            foreach ($file in $currentFiles) {
+                $path = Resolve-OwnedToolPath -RelativePath $file.RelativePath
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop) -or
+                    (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash -ne $file.Sha256) {
+                    throw "Replacement tool was not verified; no obsolete versions were removed: $path"
+                }
+            }
+            $updatedToolNames = @($currentFiles | Select-Object -ExpandProperty ToolName -Unique)
+            $retainedFiles = @($previousFiles | Where-Object { $_.ToolName -notin $updatedToolNames })
+            $activePaths = @(@($currentFiles) + @($retainedFiles) | Select-Object -ExpandProperty RelativePath)
+            $modifiedToolPaths = @()
+            $preservedModifiedFiles = @()
+            foreach ($file in $previousFiles) {
+                if ($file.ToolName -notin $updatedToolNames -or $file.RelativePath -in $activePaths) { continue }
+                $path = Resolve-OwnedToolPath -RelativePath $file.RelativePath
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf -ErrorAction Stop)) { continue }
+                if ((Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash -ne $file.Sha256) {
+                    $cleanupWarnings.Add("Preserved locally modified former tool file: $path")
+                    $modifiedToolPaths += $file.RelativePath
+                    $preservedModifiedFiles += $file
+                    continue
+                }
+                Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                $removedToolFiles.Add($path)
+            }
+            foreach ($file in $currentFiles | Where-Object { $_.ToolName -eq '7-Zip 64-bit' -and $_.RelativePath -match '^tools\\7z[0-9]+-x64\.msi$' }) {
+                $currentPath = Resolve-OwnedToolPath -RelativePath $file.RelativePath
+                try { $currentIdentity = Read-ToolMsiIdentity -Path $currentPath }
+                catch { $cleanupWarnings.Add("Legacy 7-Zip cleanup could not verify the current MSI '$currentPath': $($_.Exception.Message)"); continue }
+                if ($currentIdentity.ProductName -notmatch '^7-Zip\s') { continue }
+                $currentProductFamily = $currentIdentity.ProductName -replace '\d+(?:\.\d+)+', '{version}'
+                foreach ($candidate in Get-ChildItem -LiteralPath $toolsRoot -Filter '7z*-x64.msi' -File -ErrorAction Stop) {
+                    $relativePath = Join-Path 'tools' $candidate.Name
+                    if ($relativePath -in $activePaths -or $relativePath -in $modifiedToolPaths -or $candidate.Name -notmatch '^7z[0-9]+-x64\.msi$') { continue }
+                    $candidatePath = Resolve-OwnedToolPath -RelativePath $relativePath
+                    try { $identity = Read-ToolMsiIdentity -Path $candidatePath }
+                    catch { $cleanupWarnings.Add("Preserved unverified legacy MSI '$candidatePath': $($_.Exception.Message)"); continue }
+                    if (($identity.ProductName -replace '\d+(?:\.\d+)+', '{version}') -ine $currentProductFamily -or
+                        $identity.Manufacturer -ine $currentIdentity.Manufacturer -or
+                        $identity.UpgradeCode -ine $currentIdentity.UpgradeCode -or
+                        $identity.Template -ine $currentIdentity.Template -or
+                        $identity.Version -ge $currentIdentity.Version) { continue }
+                    Remove-Item -LiteralPath $candidatePath -Force -ErrorAction Stop
+                    $removedToolFiles.Add($candidatePath)
+                }
+            }
+            if ($currentFiles.Count -gt 0) {
+                $pendingLedger = "$ledgerPath.$([guid]::NewGuid().ToString('N')).pending"
+                try {
+                    @{ SchemaVersion = 1; Files = @($retainedFiles) + @($preservedModifiedFiles) + @($currentFiles) } |
+                        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $pendingLedger -Encoding UTF8 -ErrorAction Stop
+                    Move-Item -LiteralPath $pendingLedger -Destination $ledgerPath -Force -ErrorAction Stop
+                }
+                finally {
+                    if (Test-Path -LiteralPath $pendingLedger) { Remove-Item -LiteralPath $pendingLedger -Force -ErrorAction Stop }
+                }
             }
         }
-        return [PSCustomObject]@{ Ok = $true; Reason = ''; StoppedLogMachineProcessIds = $stoppedProcessIds }
+        if (-not $VolumeLabel) {
+            foreach ($archivePath in $expandedArchivePaths) { Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue }
+        }
+        return [PSCustomObject]@{
+            Ok = $true; Reason = ''; StoppedLogMachineProcessIds = $stoppedProcessIds
+            RemovedToolFiles = [string[]]$removedToolFiles.ToArray(); CleanupWarnings = [string[]]$cleanupWarnings.ToArray()
+        }
     }
 
     # --- Prefer a content-addressed ISO, then fall back to PSDirect copy ---
@@ -12506,7 +12676,7 @@ function Copy-ToolToVM {
                         try {
                             $visible = Confirm-IsoVisibleInGuest -VmName $vm.vmName -VmDomainName $vm.domain -MarkerRelativePath 'Tools.Bundle.md5' -Context 'tools' -TimeoutSeconds 90 -Phase 2
                             if ($visible) {
-                                $isoResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($null, $bundleHash, $global:MemlabsToolsVolumeLabel) -DisplayName 'Tools: Expand bundles from mounted ISO' -ScriptBlock $expandToolsBundles
+                                $isoResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($null, $bundleHash, $global:MemlabsToolsVolumeLabel, $allToolFilesJson) -DisplayName 'Tools: Expand bundles from mounted ISO' -ScriptBlock $expandToolsBundles
                                 if (-not $isoResult.ScriptBlockFailed -and $isoResult.ScriptBlockOutput -and $isoResult.ScriptBlockOutput.Ok) {
                                     $isoDelivered = $true
                                     $success = $true
@@ -12514,6 +12684,8 @@ function Copy-ToolToVM {
                                         Write-Log "$vmName`: Stopped LogMachine PID(s) $($isoResult.ScriptBlockOutput.StoppedLogMachineProcessIds -join ', ') before tools replacement." -LogOnly
                                     }
                                     Write-Log "$vmName`: Expanded tools bundle from $([System.IO.Path]::GetFileName($toolsIso))." -Success
+                                    foreach ($path in $isoResult.ScriptBlockOutput.RemovedToolFiles) { Write-Log "$vmName`: Removed obsolete managed tool '$path'." -LogOnly }
+                                    foreach ($warning in $isoResult.ScriptBlockOutput.CleanupWarnings) { Write-Log "$vmName`: $warning" -Warning }
                                 }
                                 else {
                                     $reason = if ($isoResult.ScriptBlockFailed) { "$($isoResult.ScriptBlockOutput)" } elseif ($isoResult.ScriptBlockOutput) { $isoResult.ScriptBlockOutput.Reason } else { 'in-guest ISO extraction failed' }
@@ -12561,7 +12733,7 @@ function Copy-ToolToVM {
                 }
 
                 if (-not $WhatIf) {
-                    $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($vmZipPath) -DisplayName 'Tools: Expand directly transferred bundle' -ScriptBlock $expandToolsBundles
+                    $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ArgumentList @($vmZipPath, $null, $null, $toolFilesByBundle[$zp]) -DisplayName 'Tools: Expand directly transferred bundle' -ScriptBlock $expandToolsBundles
                     if ($expandResult.ScriptBlockFailed -or -not $expandResult.ScriptBlockOutput.Ok) {
                         Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
                         $success = $false
@@ -12570,6 +12742,8 @@ function Copy-ToolToVM {
                     if ($expandResult.ScriptBlockOutput.StoppedLogMachineProcessIds) {
                         Write-Log "$vmName`: Stopped LogMachine PID(s) $($expandResult.ScriptBlockOutput.StoppedLogMachineProcessIds -join ', ') before tools replacement." -LogOnly
                     }
+                    foreach ($path in $expandResult.ScriptBlockOutput.RemovedToolFiles) { Write-Log "$vmName`: Removed obsolete managed tool '$path'." -LogOnly }
+                    foreach ($warning in $expandResult.ScriptBlockOutput.CleanupWarnings) { Write-Log "$vmName`: $warning" -Warning }
                 }
             }
         }
@@ -12577,7 +12751,7 @@ function Copy-ToolToVM {
         # Write the combined bundle hash to the VM
         if ($success -and -not $WhatIf) {
             $writeHash = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
-                $using:bundleHash | Set-Content -Path $using:vmHashPath -Force -ErrorAction SilentlyContinue
+                @($using:bundleHash, 'OwnershipSchema=1') | Set-Content -Path $using:vmHashPath -Force -ErrorAction Stop
             }
             if ($writeHash.ScriptBlockFailed) {
                 Write-Log "$vmName`: Could not write Tools.MD5 hash file. Next run will re-copy." -LogOnly
