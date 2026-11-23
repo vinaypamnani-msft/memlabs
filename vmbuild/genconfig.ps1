@@ -815,7 +815,7 @@ function Get-ExistingVmQuickUpdatePlan {
 
     $configChanged = [string]::IsNullOrWhiteSpace($ConfigBaselineJson) -or
         (($Config | ConvertTo-Json -Depth 10 -Compress) -cne $ConfigBaselineJson)
-    $newVms = @($Config.virtualMachines | Where-Object { -not $_.Hidden -and -not $_.ExistingVM })
+    $newVms = @($Config.virtualMachines | Where-Object { $null -ne $_ -and -not $_.Hidden -and -not $_.ExistingVM })
     $modified = @($ExistingMachines | Where-Object { get-IsExistingVMModified -virtualMachine $_ })
     $unsupported = [System.Collections.Generic.List[string]]::new()
     foreach ($vm in $modified) {
@@ -827,6 +827,11 @@ function Get-ExistingVmQuickUpdatePlan {
         }
     }
 
+    $rejectionReasons = @()
+    if ($modified.Count -eq 0) { $rejectionReasons += 'No modified existing VMs' }
+    if ($newVms.Count -gt 0) { $rejectionReasons += "$($newVms.Count) new VM(s)" }
+    if ($unsupported.Count -gt 0) { $rejectionReasons += "Non-memory VM edits: $($unsupported -join ', ')" }
+    if ($configChanged) { $rejectionReasons += 'Global configuration changed or its baseline is unavailable' }
     return [pscustomobject]@{
         CanApplyQuickly = $modified.Count -gt 0 -and $newVms.Count -eq 0 -and
             $unsupported.Count -eq 0 -and -not $configChanged
@@ -834,6 +839,9 @@ function Get-ExistingVmQuickUpdatePlan {
         NewVmCount = $newVms.Count
         UnsupportedChanges = @($unsupported)
         ConfigurationChanged = $configChanged
+        RejectionReasons = $rejectionReasons
+        RequiresScopeConfirmation = $modified.Count -gt 0 -and $newVms.Count -eq 0 -and
+            $unsupported.Count -eq 0 -and $configChanged
     }
 }
 
@@ -847,6 +855,7 @@ function Invoke-ExistingVmQuickUpdates {
     $plan = Get-ExistingVmQuickUpdatePlan -Config $Config -ExistingMachines $ExistingMachines `
         -ConfigBaselineJson $global:GenConfigQuickApplyBaselineJson
     if (-not $plan.CanApplyQuickly) {
+        Write-Log "GenConfig RAM fast path rejected: $($plan.RejectionReasons -join '; '). Modified=$($plan.VMs.Count), New=$($plan.NewVmCount), Unsupported=$($plan.UnsupportedChanges.Count), ConfigurationChanged=$($plan.ConfigurationChanged)." -LogOnly
         return [pscustomobject]@{ Handled = $false; Applied = 0; Failed = 0; Plan = $plan }
     }
 
@@ -1077,6 +1086,14 @@ function Select-MainMenu {
                     $quickResult = Invoke-ExistingVmQuickUpdates -Config $Global:Config -ExistingMachines $global:existingMachines
                     if ($quickResult.Handled) {
                         continue
+                    }
+                    if ($quickResult.Plan.RequiresScopeConfirmation) {
+                        Write-OrangePoint "The VM edits are RAM-only, but other configuration changes prevent the direct RAM path. Continuing can configure dependency servers."
+                        $confirmScope = Read-YesOrNoWithTimeout -Prompt "Apply the broader configuration instead of RAM-only changes? (y/N)" -Default 'n' -HideHelp -timeout 60
+                        if ($confirmScope -notin @('y', 'yes')) {
+                            Write-Log "GenConfig broader deployment declined after RAM fast-path rejection; no existing VM edits were staged." -LogOnly
+                            continue
+                        }
                     }
                     Add-ModifiedExistingVMsToConfig
                     $global:DisableSmartUpdate = $false

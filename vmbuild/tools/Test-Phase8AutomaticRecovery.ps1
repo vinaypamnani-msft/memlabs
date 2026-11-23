@@ -22,6 +22,13 @@ function Get-TestAst {
 
 $phaseAst = Get-TestAst (Join-Path $RootPath 'common\Common.Phases.ps1')
 $blocksAst = Get-TestAst (Join-Path $RootPath 'common\Common.ScriptBlocks.ps1')
+$statusSourceAssignment = $blocksAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -eq '$dscStatus' -and $node.Right.Extent.Text.Contains('[bool]$ReturnStatus')
+    }, $true)
+$statusSourceArgument = $statusSourceAssignment.Right.Find({ param($node) $node -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true)
+$actualDscStatusProbe = $statusSourceArgument.ScriptBlock.GetScriptBlock()
 $resumeAssignment = $blocksAst.Find({
         param($node)
         $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$phase8ResumeExisting'
@@ -205,7 +212,7 @@ try {
                         $node.Extent.Text.Contains('$phase8FailureText')
                     }, $true))
             Assert-True ($historyGates.Count -eq 1) 'Expected one complete DSC history consumer.'
-            $consumeHistory = [scriptblock]::Create("foreach (`$tick in @(1)) {`n" + $historyGates[0].Extent.Text + "`n}`nreturn 'continued'")
+            $consumeHistory = [scriptblock]::Create("foreach (`$tick in @(1)) {`n" + $classifyFailure.Extent.Text + "`n" + $historyGates[0].Extent.Text + "`n}`nreturn 'continued'")
             function Get-DscConfigurationStatus {
                 [CmdletBinding()]
                 param()
@@ -310,7 +317,7 @@ try {
                     $node.Clauses[0].Item1.Extent.Text -eq '$dscStatus.ScriptBlockFailed' -and
                     $node.Extent.Text.Contains('$phase8FailureText')
                 }, $true)
-            $consumeStatus = [scriptblock]::Create("foreach (`$tick in @(1)) {`n" + $consumerAst.Extent.Text + "`n}`nreturn 'continued'")
+            $consumeStatus = [scriptblock]::Create("foreach (`$tick in @(1)) {`n" + $classifyFailure.Extent.Text + "`n" + $consumerAst.Extent.Text + "`n}`nreturn 'continued'")
             function Test-Path {
                 param($LiteralPath)
                 if ($LiteralPath -like '*completed.runid') { return $script:HasReceipt }
@@ -459,6 +466,7 @@ try {
             function Get-DscLocalConfigurationManager {
                 [CmdletBinding()]
                 param()
+                if ($script:BusyProbeLcmUnavailable) { throw 'Synthetic LCM probe failure.' }
                 [pscustomobject]@{ LCMState = $script:LcmState }
             }
             function Get-ScheduledTask {
@@ -469,6 +477,9 @@ try {
             function Get-DscConfigurationStatus {
                 [CmdletBinding()]
                 param()
+                if ($script:BusyStatusError) {
+                    throw [InvalidOperationException]::new('Cannot invoke Get-DscConfigurationStatus while Start-DscConfiguration is in progress.')
+                }
                 if ($script:RebootUnknown) { return [pscustomobject]@{} }
                 [pscustomobject]@{ RebootRequested = $script:RebootOwed }
             }
@@ -525,6 +536,144 @@ try {
             Assert-True ($legacyComplete -eq 'ALREADY_COMPLETE') 'A current-run non-workflow node completion was ignored.'
             $legacyResume = & $resumeExisting 'RUN42' 'GUID42' $false
             Assert-True ($legacyResume -eq 'ALREADY_COMPLETE' -and $script:DscStarts -eq 0) 'A status-only completed node was resumed despite its nonempty RunId.'
+
+            $busySnapshots = [Collections.Generic.List[object]]::new()
+            $script:BusyStatusError = $true
+            foreach ($case in @(
+                    @{ Lcm = 'Busy'; Workflow = 'Ready'; Deferred = $true },
+                    @{ Lcm = 'PendingConfiguration'; Workflow = 'Ready'; Deferred = $true },
+                    @{ Lcm = 'PendingReboot'; Workflow = 'Ready'; Deferred = $true },
+                    @{ Lcm = 'Idle'; Workflow = 'Running'; Deferred = $true },
+                    @{ Lcm = 'Unknown'; LcmUnavailable = $true; Workflow = 'Running'; Deferred = $true },
+                    @{ Lcm = 'Idle'; Workflow = 'Ready'; Deferred = $false }
+                )) {
+                $script:LcmState = $case.Lcm
+                $script:WorkflowState = $case.Workflow
+                $script:BusyProbeLcmUnavailable = [bool]$case.LcmUnavailable
+                $probeOutput = @()
+                $probeFailure = $null
+                try { $probeOutput = @(& $actualDscStatusProbe $true) } catch { $probeFailure = $_ }
+                if ($case.Deferred) {
+                    Assert-True ($null -eq $probeFailure -and $probeOutput.Count -eq 1 -and
+                        $probeOutput[0].StatusProbeDeferred -eq $true -and
+                        $probeOutput[0].ProbeError -like '*in progress*') 'The real guest probe treated active DSC/workflow as a transport failure or lost its diagnostic.'
+                }
+                else {
+                    Assert-True ($probeFailure -and $probeFailure.Exception.Message -like '*in progress*') 'An unverified status-query failure became success-shaped output.'
+                }
+                $failed = $null -ne $probeFailure
+                $busySnapshots.Add([pscustomobject]@{
+                        ScriptBlockFailed = $failed
+                        ScriptBlockOutput = $probeOutput
+                        ErrorDetails = @($probeFailure)
+                    })
+            }
+            Assert-True (@(& $actualDscStatusProbe $false).Count -eq 0) 'Earlier-phase probe output changed while handling a busy API.'
+            $script:BusyStatusError = $false
+            $script:BusyProbeLcmUnavailable = $false
+
+            if (-not $GuestOnly) {
+                $queryFailure = $blocksAst.Find({
+                        param($node)
+                        $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$phase8StatusQueryFailed'
+                    }, $true)
+                $queryGuards = @($blocksAst.FindAll({
+                            param($node)
+                            $node -is [Management.Automation.Language.IfStatementAst] -and
+                            $node.Clauses[0].Item1.Extent.Text -eq '$phase8StatusQueryFailed'
+                        }, $true))
+                Assert-True ($queryGuards.Count -eq 1) 'Expected one supplementary-status recovery guard.'
+                $queryGuard = [scriptblock]::Create("foreach (`$tick in @(1)) {`n" +
+                    $classifyFailure.Extent.Text + "`n" + $queryFailure.Extent.Text + "`n" +
+                    $queryGuards[0].Extent.Text + "`n`$script:WorkflowReads++`n}`nreturn `$dscFails")
+                $busyHistory = $blocksAst.Find({
+                        param($node)
+                        $node -is [Management.Automation.Language.IfStatementAst] -and
+                        $node.Clauses[0].Item1.Extent.Text -eq '$dscStatus.ScriptBlockFailed' -and
+                        $node.Extent.Text.Contains('$phase8FailureText')
+                    }, $true)
+                $busyConsumer = [scriptblock]::Create("foreach (`$tick in @(1)) {`n" + $classifyFailure.Extent.Text + "`n" + $busyHistory.Extent.Text + "`n}`nreturn 'monitoring'")
+                function Stop-VM2 { throw 'A supplementary DSC query attempted to stop a live VM.' }
+                function Start-VM2 { throw 'A supplementary DSC query attempted to restart a live VM.' }
+                $busySnapshots.Add([pscustomobject]@{ ScriptBlockFailed = $true; ScriptBlockOutput = @(); ErrorDetails = @('Synthetic transport failure.') })
+                $Phase = 8
+                foreach ($snapshot in $busySnapshots) {
+                    $dscStatus = $snapshot
+                    $dscFails = 19
+                    $forcedRestartCount = 0
+                    $forcedRestartMax = 3
+                    $script:WorkflowReads = 0
+                    $afterQuery = & $queryGuard
+                    Assert-True ($afterQuery -eq 0 -and $script:WorkflowReads -eq 1 -and
+                        $forcedRestartCount -eq 0) 'Optional DSC-query errors skipped authoritative status polling or triggered the transport reboot threshold.'
+                    if (-not $snapshot.ScriptBlockFailed -and $snapshot.ScriptBlockOutput.StatusProbeDeferred) {
+                        $noStatus = $false
+                        $phase8DscFailure = $false
+                        $msg = $null
+                        $lasterror = $null
+                        $failCount = 101
+                        $script:Messages.Clear()
+                        $continued = & $busyConsumer
+                        Assert-True ($continued -eq 'monitoring' -and
+                            @($script:Messages | Where-Object { $_.Failure -and $_.OutputStream }).Count -eq 0) `
+                            'A busy/deferred status record accumulated a terminal resource failure.'
+                    }
+                }
+                $pollIf = $blocksAst.Find({
+                        param($node)
+                        $node -is [Management.Automation.Language.IfStatementAst] -and
+                        $node.Clauses[0].Item1.Extent.Text -eq '$dscStatusPolls -ge 10'
+                    }, $true)
+                $siblings = @($pollIf.Parent.Statements)
+                $pollStart = -1
+                $workflowRead = -1
+                for ($i = 0; $i -lt $siblings.Count; $i++) {
+                    if ([object]::ReferenceEquals($siblings[$i], $pollIf)) { $pollStart = $i }
+                    if ($siblings[$i] -is [Management.Automation.Language.AssignmentStatementAst] -and
+                        $siblings[$i].Left.Extent.Text -eq '$status' -and
+                        $siblings[$i].Right.Extent.Text.Contains('ScriptWorkflow.failed.json')) { $workflowRead = $i }
+                }
+                Assert-True ($pollStart -ge 0 -and $workflowRead -gt $pollStart) 'Cannot isolate the contiguous DSC/workflow polling path.'
+                $pollSource = (@(for ($i = $pollStart; $i -le $workflowRead; $i++) { $siblings[$i].Extent.Text })) -join "`n"
+                $pollCurrentWorkflow = [scriptblock]::Create("foreach (`$tick in @(1)) {`n" + $pollSource + "`n}`nreturn `$status")
+                function Write-ProgressElapsed { param($Stopwatch, $Timespan, $Text) }
+                function Invoke-VmCommand {
+                    param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, [switch]$AsJob, $TimeoutSeconds, [switch]$SuppressLog)
+                    if ($VmName -ne 'SQL1') { throw "Polling touched unrelated VM '$VmName'." }
+                    if ($ScriptBlock.ToString().Contains('[bool]$ReturnStatus')) {
+                        Assert-True (@($ArgumentList).Count -eq 1 -and $ArgumentList[0] -eq $true) 'Phase 8 did not request its real DSC status payload.'
+                        return $script:CurrentBusySnapshot
+                    }
+                    if ($ScriptBlock.ToString().Contains('ScriptWorkflow.failed.json')) {
+                        $script:ActualWorkflowReads++
+                        return [pscustomobject]@{
+                            ScriptBlockFailed = $false
+                            ScriptBlockOutput = [pscustomobject]@{ StatusText = 'Still making progress'; CompletedRunId = $null; MemoryRecovery = $null }
+                            ErrorDetails = @()
+                        }
+                    }
+                    throw 'Unexpected guest operation in the polling regression.'
+                }
+                $currentItem = [pscustomobject]@{ vmName = 'SQL1'; role = 'DomainMember' }
+                $domainName = 'example.test'
+                $expectedRunId = 'RUN42'
+                $suppressNoisyLogging = $true
+                foreach ($snapshot in $busySnapshots) {
+                    $script:CurrentBusySnapshot = $snapshot
+                    $script:ActualWorkflowReads = 0
+                    $dscStatusPolls = 10
+                    $dscFails = 19
+                    $noStatus = $false
+                    $forcedRestartCount = 0
+                    $forcedRestartMax = 3
+                    $lastDscStatusProbeNotice = [DateTime]::MinValue
+                    $result = & $pollCurrentWorkflow
+                    Assert-True ($script:ActualWorkflowReads -eq 1 -and
+                        -not $result.ScriptBlockFailed -and
+                        $result.ScriptBlockOutput.StatusText -eq 'Still making progress') `
+                        'The shipped DSC-query path did not reach the actual authoritative workflow-read invocation.'
+                }
+            }
         }
 
     }

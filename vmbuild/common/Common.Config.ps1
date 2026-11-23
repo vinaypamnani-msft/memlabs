@@ -189,8 +189,7 @@ function Get-ConfigCmOptions {
             if (-not $recoveredCm) {
                 throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($Config.vmOptions.domainName)': site server '$($anySiteServerInDomain.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
             }
-            Write-Log "Get-ConfigCmOptions: Recovered cmOptions (UsePKI=$($recoveredCm.UsePKI)) from '$($anySiteServerInDomain.vmName)' deployConfig backup on disk; stamping onto its VM note." -Verbose
-            try { Set-VMNote -vmName $anySiteServerInDomain.vmName -vmNote ([PSCustomObject]@{ cmOptions = $recoveredCm }) } catch {}
+            Write-Log "Get-ConfigCmOptions: Read authoritative cmOptions from '$($anySiteServerInDomain.vmName)' deployConfig backup without changing its VM note." -Verbose
             return $recoveredCm
         }
     }
@@ -277,8 +276,7 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
             throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$($hierarchy.Domain)': site server '$($topSite.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
         }
         if ($recoveredFromBackup) {
-            Write-Log "Recovered authoritative ConfigMgr options (UsePKI=$($authoritativeCm.UsePKI)) from '$($topSite.vmName)' deployConfig backup and stamped its VM note." -Verbose
-            try { Set-VMNote -vmName $topSite.vmName -vmNote ([PSCustomObject]@{ cmOptions = $authoritativeCm }) } catch {}
+            Write-Log "Read authoritative ConfigMgr options from '$($topSite.vmName)' deployConfig backup without changing its VM note." -Verbose
         }
         $hierarchy.CmOptions = $authoritativeCm
     }
@@ -492,7 +490,8 @@ function Set-AddToExistingCmOptionsOnHiddenSiteRole {
 function Get-CmOptionsFingerprint {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $false)] [object] $CmOptions
+        [Parameter(Mandatory = $false)] [object] $CmOptions,
+        [switch] $CompareEffectiveDefaults
     )
 
     if (-not $CmOptions) { return '' }
@@ -516,6 +515,20 @@ function Get-CmOptionsFingerprint {
         }
     }
 
+    if ($CompareEffectiveDefaults) {
+        $effectiveValues = @{}
+        foreach ($key in $values.Keys) { $effectiveValues[$key.ToLowerInvariant()] = $values[$key] }
+        $defaults = @{
+            evalversion = $false; usepki = $false; prepopulateobjects = $true
+            offlinescp = $false; offlinesup = $false; wsusimportbaseline = $true; enableblm = $false
+        }
+        foreach ($key in $defaults.Keys) {
+            if (-not $effectiveValues.ContainsKey($key) -or $null -eq $effectiveValues[$key]) {
+                $effectiveValues[$key] = $defaults[$key]
+            }
+        }
+        $values = $effectiveValues
+    }
     $names = [string[]]@($values.Keys)
     [Array]::Sort($names, [StringComparer]::Ordinal)
     $orderedOptions = [ordered]@{}
@@ -654,8 +667,13 @@ function Test-AddToExistingCmOptionsChanged {
     $owner = Get-AddToExistingCmOptionsOwner -Config $Config
     if (-not $owner) { return $false }
     $persistedNote = Get-VMNote -VMName $owner.vmName
-    $authoredFingerprint = Get-CmOptionsFingerprint -CmOptions $Config.cmOptions
-    $persistedFingerprint = Get-CmOptionsFingerprint -CmOptions $persistedNote.cmOptions
+    $persistedOptions = $persistedNote.cmOptions
+    if (-not $persistedOptions) {
+        $persistedOptions = Get-CmOptionsFromSiteServerBackup -VmName $owner.vmName -DomainName $Config.vmOptions.domainName
+        if (-not $persistedOptions) { throw "Cannot compare ConfigMgr options for '$($owner.vmName)': its note and authoritative backup contain no options." }
+    }
+    $authoredFingerprint = Get-CmOptionsFingerprint -CmOptions $Config.cmOptions -CompareEffectiveDefaults
+    $persistedFingerprint = Get-CmOptionsFingerprint -CmOptions $persistedOptions -CompareEffectiveDefaults
     return $authoredFingerprint -ne $persistedFingerprint
 }
 

@@ -446,6 +446,11 @@ directly through Hyper-V without running deployment phases or guest DSC. Running
 targets may restart. Initial legacy editor defaults are not treated as user
 changes, and RAM-only updates do not backfill unrelated locale/proxy fields into
 VM notes. Explicit locale, proxy, or global-option edits still require deployment.
+An existing-domain template with no proposed VMs also uses this RAM-only path;
+an empty/null authoring list is not a new VM. If otherwise RAM-only edits are
+blocked by changed global configuration or a missing baseline, GenConfig logs
+the exact rejection and requires a separate, default-No confirmation before
+expanding into deployment that can configure dependency servers.
 
 ## ConfigMgr options
 
@@ -454,6 +459,11 @@ Child site roles inherit the resolved block. Legacy root-level `cmOptions` is
 accepted and mirrored into the deploy model. `Invoke-CMOptionsMenu` in
 [Common.GenConfig.CmMenus.ps1](../../common/Common.GenConfig.CmMenus.ps1)
 opens the only top-level directly or asks which hierarchy to edit.
+Importing/recovering hierarchy options for discovery, preview, or authoring is
+read-only for deployed VM notes. Missing legacy fields at their effective
+runtime defaults do not count as an authored options change or create a Primary
+deployment target. Explicit nondefault changes still target the selected
+hierarchy and are persisted only through the successful deployment path.
 
 | Label | Default | What it does | When/why to use it |
 |---|---|---|---|
@@ -491,6 +501,11 @@ The same guards precede AD-related restart decisions. Completion checks use the
 authoritative phase role: CAS/Primary workflow receipts are distinct from
 current-run `Complete!` status on nodes that do not run their own workflow.
 These retries do not reset existing reboot limits or restart the whole phase.
+An unavailable/busy `Get-DscConfigurationStatus` query is supplementary evidence,
+not a reason to restart a Phase 8 VM. Proven active DSC/workflow queries are
+deferred, and authoritative workflow-status polling continues even when that
+supplementary query fails; genuine workflow/status-channel failures retain
+their existing bounded recovery.
 
 ### ConfigMgr picker and action submenus
 

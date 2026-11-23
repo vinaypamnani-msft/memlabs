@@ -84,7 +84,7 @@ function Invoke-MemLabsClientPackageCoverage {
     foreach ($name in @(
             'Write-MemLabsClientPackageTimelineRecord', 'Invoke-MemLabsClientPackageDiagnosticProbe',
             'Get-MemLabsDpVmMetadataMap', 'Test-MemLabsLocalComputerName',
-            'Set-MemLabsClientPackageProgress'
+            'Set-MemLabsClientPackageProgress', 'Test-MemLabsCloudDistributionPoint'
         )) {
         $definitions[$name] = (Get-Command -Name $name -CommandType Function -ErrorAction Stop).Definition
     }
@@ -196,6 +196,40 @@ function Test-MemLabsLocalComputerName {
         $LocalComputerName.Trim(), [StringComparison]::OrdinalIgnoreCase) -or
         $candidateShort.Equals(
             $LocalComputerName.Trim(), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-MemLabsCloudDistributionPoint {
+    param([Parameter(Mandatory)]$DistributionPoint)
+
+    $classified = $false
+    $isCloud = $false
+    $serviceType = $DistributionPoint.PSObject.Properties['ServiceType']
+    if ($serviceType) {
+        $value = [uint32]0
+        if (-not [uint32]::TryParse("$($serviceType.Value)", [ref]$value) -or $value -gt 1) {
+            throw "Distribution point has an invalid ServiceType '$($serviceType.Value)'; refusing to manage it."
+        }
+        $classified = $true
+        $isCloud = $value -eq 1
+    }
+    if ($null -ne $DistributionPoint.Props) {
+        $markers = @($DistributionPoint.Props | Where-Object { $_.PropertyName -eq 'IsCloud' })
+        if ($markers.Count -gt 1) { throw 'Distribution point has ambiguous IsCloud properties; refusing to manage it.' }
+        if ($markers.Count -eq 1) {
+            $value = [uint32]0
+            if (-not [uint32]::TryParse("$($markers[0].Value)", [ref]$value)) {
+                throw 'Distribution point has an invalid IsCloud property; refusing to manage it.'
+            }
+            $isCloud = $isCloud -or $value -ne 0
+        }
+        $classified = $true
+    }
+    if ($DistributionPoint.NALType -eq 'Windows Azure') {
+        $isCloud = $true
+        $classified = $true
+    }
+    if (-not $classified) { throw 'Distribution point has no cloud classification metadata; refusing to manage it.' }
+    return $isCloud
 }
 
 # Read config json
@@ -383,16 +417,6 @@ $getMissingBoundaryGroupSiteSystems = {
 # Phase 8 re-run self-heals a stuck DP, not just a first deploy. Phase 8 is the right
 # home for this (content-distribution context + a generous wait budget).
 $ensureClientPkgCoverageCore = {
-    # Get-CMPackage returns one client package PER SITE in a hierarchy, so an unfiltered
-    # read makes $PackageID an array and every WQL filter built from it matches nothing.
-    $allClientPkgs = @(Get-CMPackage -Fast -Name 'Configuration Manager Client Package')
-    if ($allClientPkgs.Count -eq 0) { Write-DscStatus "Client pkg coverage: client package not found."; return }
-    $localClientPkgs = @($allClientPkgs | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
-    $PackageID = if ($localClientPkgs.Count -gt 0) { "$($localClientPkgs[0].PackageID)" } else { "$($allClientPkgs[0].PackageID)" }
-    Set-MemLabsClientPackageProgress -PackageId $PackageID -Message "Resolved client package $PackageID"
-    if ($allClientPkgs.Count -gt 1) {
-        Write-DscStatus "Client pkg coverage: chose $PackageID from $($allClientPkgs.Count) same-named packages ($(if ($localClientPkgs.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
-    }
     $ns = "root\SMS\site_$SiteCode"
     $fqdnOf = { param($nal) if ("$nal" -match '\\([^\\"\]]+)') { $Matches[1] } else { $null } }
     $stateName = @{ '0' = 'Installed'; '1' = 'InstallPending'; '2' = 'InstallRetrying'; '3' = 'InstallFailed'; '6' = 'RemovalFailed'; '7' = 'ContentValidating'; '8' = 'ContentValidationFailed' }
@@ -906,6 +930,18 @@ $ensureClientPkgCoverageCore = {
     # something looks missing.
     $expectedBgNames = @($bgs.SiteCode | Where-Object { $_ } | Select-Object -Unique)
     $shortOf = { param($name) ("$name" -split '\.')[0].ToUpperInvariant() }
+    $cloudDpHosts = @{}
+    $onPremDpHosts = @{}
+    foreach ($dpRole in @(Get-CMDistributionPoint -AllSite -ErrorAction Stop)) {
+        $dpName = ("$($dpRole.NetworkOSPath)" -replace '\\', '').Trim()
+        if (-not $dpName) { throw 'Distribution point has no NetworkOSPath; its scope cannot be resolved.' }
+        $key = & $shortOf $dpName
+        if (Test-MemLabsCloudDistributionPoint -DistributionPoint $dpRole) {
+            $cloudDpHosts[$dpName] = $true
+            Write-DscStatus "Client pkg coverage: skipping CMG/cloud DP '$dpName'; no distribution, refresh, or wait will be performed."
+        }
+        else { $onPremDpHosts[$key] = $true }
+    }
     $configDpHosts = @{}
     foreach ($v in @($deployConfig.virtualMachines)) {
         # KEEP IN SYNC with Phase 11's owned-DP rule (Common.Validation.Functional.ps1, the
@@ -944,6 +980,8 @@ $ensureClientPkgCoverageCore = {
         # it holds the DP role; keys are short host names because the two classes
         # disagree on FQDN vs NetBIOS.
         $dpHostSet = @{}
+        # A failed or lagging provider view must not erase positive site-control evidence.
+        foreach ($key in $onPremDpHosts.Keys) { $dpHostSet[$key] = $true }
         $dpSources = @()
         $dpQueryErrors = @()
         foreach ($q in @(
@@ -955,7 +993,19 @@ $ensureClientPkgCoverageCore = {
                 foreach ($d in @(Get-WmiObject -Namespace $ns -Class $q.Class -Filter $q.Filter -ErrorAction Stop)) {
                     $df = & $fqdnOf $d.NALPath
                     if (-not $df -and $d.ServerName) { $df = "$($d.ServerName)" }
-                    if ($df) { $dpHostSet[(& $shortOf $df)] = $true; $seen++ }
+                    if (-not $df) { continue }
+                    $key = & $shortOf $df
+                    if ($q.Class -eq 'SMS_DistributionPointInfo') {
+                        if (Test-MemLabsCloudDistributionPoint -DistributionPoint $d) {
+                            $cloudDpHosts[$df] = $true
+                            continue
+                        }
+                        $onPremDpHosts[$key] = $true
+                    }
+                    if ($cloudDpHosts.ContainsKey($df)) { continue }
+                    if (-not $onPremDpHosts.ContainsKey($key) -and -not $configDpHosts.ContainsKey($key)) { continue }
+                    $dpHostSet[$key] = $true
+                    $seen++
                 }
                 $dpSources += "$($q.Name)=$seen"
             }
@@ -968,9 +1018,17 @@ $ensureClientPkgCoverageCore = {
         foreach ($expectedBg in $expectedBgObjects) {
             $linkedDps = @($bgLinks | Where-Object { $_.GroupID -eq $expectedBg.GroupID } |
                     ForEach-Object { & $fqdnOf $_.ServerNALPath } |
-                    Where-Object { $_ -and $dpHostSet.ContainsKey((& $shortOf $_)) } |
+                    Where-Object { $_ -and -not $cloudDpHosts.ContainsKey($_) -and $dpHostSet.ContainsKey((& $shortOf $_)) } |
                     Select-Object -Unique)
-            if ($linkedDps.Count -eq 0) { $groupsWithoutDps += $expectedBg.Name }
+            if ($linkedDps.Count -eq 0) {
+                $groupHosts = @($bgLinks | Where-Object { $_.GroupID -eq $expectedBg.GroupID } |
+                    ForEach-Object { & $fqdnOf $_.ServerNALPath } | Where-Object { $_ })
+                $cloudLinks = @($groupHosts | Where-Object { $cloudDpHosts.ContainsKey($_) })
+                $pendingOnPrem = @($groupHosts | Where-Object {
+                        -not $cloudDpHosts.ContainsKey($_) -and $configDpHosts.ContainsKey((& $shortOf $_))
+                    })
+                if ($cloudLinks.Count -eq 0 -or $pendingOnPrem.Count -gt 0) { $groupsWithoutDps += $expectedBg.Name }
+            }
         }
         if ($groupsWithoutDps.Count -eq 0 -or (Get-Date) -ge $resolveDeadline) { break }
 
@@ -988,7 +1046,7 @@ $ensureClientPkgCoverageCore = {
             if ($bgObj.Count -eq 0) { continue }
             $cfgDps = @($bgLinks | Where-Object { $_.GroupID -eq $bgObj[0].GroupID } |
                     ForEach-Object { & $fqdnOf $_.ServerNALPath } |
-                    Where-Object { $_ -and $configDpHosts.ContainsKey((& $shortOf $_)) } |
+                    Where-Object { $_ -and -not $cloudDpHosts.ContainsKey($_) -and $configDpHosts.ContainsKey((& $shortOf $_)) } |
                     Select-Object -Unique)
             if ($cfgDps.Count -eq 0) { continue }
             $configCovered += $groupName
@@ -1015,7 +1073,7 @@ $ensureClientPkgCoverageCore = {
     # the job started 01:01:58 and BI-SECONDARY was excluded at 01:13:09, which took the one DP
     # that mattered out of scope for the whole phase and let coverage exit "Installed on all 3".
     # deployConfig knows the difference, so trust it over a WMI read that is merely early.
-    $nonDp = @($bgDpFqdns | Where-Object { -not $dpHostSet.ContainsKey((& $shortOf $_)) })
+    $nonDp = @($bgDpFqdns | Where-Object { -not $cloudDpHosts.ContainsKey($_) -and -not $dpHostSet.ContainsKey((& $shortOf $_)) })
     $pendingDp = @($nonDp | Where-Object { $configDpHosts.ContainsKey((& $shortOf $_)) })
     $neverDp = @($nonDp | Where-Object { -not $configDpHosts.ContainsKey((& $shortOf $_)) })
     if ($neverDp.Count -gt 0) {
@@ -1024,8 +1082,19 @@ $ensureClientPkgCoverageCore = {
     if ($pendingDp.Count -gt 0) {
         Write-DscStatus "Client pkg coverage: KEEPING $($pendingDp.Count) boundary-group site system(s) whose DP role has not registered yet but which this deploy declares installDP (a Secondary installs asynchronously and registers late): $($pendingDp -join ', ')"
     }
-    $bgDpFqdns = @($bgDpFqdns | Where-Object { $dpHostSet.ContainsKey((& $shortOf $_)) -or $configDpHosts.ContainsKey((& $shortOf $_)) })
-    if ($bgDpFqdns.Count -eq 0) { Write-DscStatus "Client pkg coverage: no DP site systems in expected boundary groups to cover." -Failure; return }
+    $cloudBgDps = @($bgDpFqdns | Where-Object { $cloudDpHosts.ContainsKey($_) })
+    $bgDpFqdns = @($bgDpFqdns | Where-Object {
+            -not $cloudDpHosts.ContainsKey($_) -and
+                ($dpHostSet.ContainsKey((& $shortOf $_)) -or $configDpHosts.ContainsKey((& $shortOf $_)))
+        })
+    if ($bgDpFqdns.Count -eq 0) {
+        if ($cloudBgDps.Count -gt 0) {
+            Set-MemLabsClientPackageProgress -Outcome 'NotRequired'
+            Write-DscStatus "Client pkg coverage: only CMG/cloud distribution points are linked; skipping their coverage without changing existing membership."
+        }
+        else { Write-DscStatus "Client pkg coverage: no DP site systems in expected boundary groups to cover." -Failure }
+        return
+    }
 
     # A SECONDARY-site DP only receives the client package via slow inter-site
     # content replication (parent Primary -> secondary despool -> secondary distmgr),
@@ -1078,6 +1147,19 @@ $ensureClientPkgCoverageCore = {
         Set-MemLabsClientPackageProgress -Outcome 'NotRequired'
         Write-DscStatus "Client pkg coverage: no DP site systems require client-package coverage."
         return
+    }
+    if ($cloudDpHosts.Count -gt 0) {
+        Write-DscStatus "Client pkg coverage: package-wide source refresh recovery is disabled because it cannot exclude CMG/cloud targets. Required on-premises coverage and per-DP recovery remain enabled."
+    }
+
+    # A hierarchy can expose one client package per site.
+    $allClientPkgs = @(Get-CMPackage -Fast -Name 'Configuration Manager Client Package')
+    if ($allClientPkgs.Count -eq 0) { Write-DscStatus "Client pkg coverage: client package not found."; return }
+    $localClientPkgs = @($allClientPkgs | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
+    $PackageID = if ($localClientPkgs.Count -gt 0) { "$($localClientPkgs[0].PackageID)" } else { "$($allClientPkgs[0].PackageID)" }
+    Set-MemLabsClientPackageProgress -PackageId $PackageID -Message "Resolved client package $PackageID"
+    if ($allClientPkgs.Count -gt 1) {
+        Write-DscStatus "Client pkg coverage: chose $PackageID from $($allClientPkgs.Count) same-named packages ($(if ($localClientPkgs.Count) { "owned by this site $SiteCode" } else { "no $SiteCode-owned copy; using hierarchy-owned" }))"
     }
 
     # We ARE covering one or more secondary-site DPs (clients depend on them).
@@ -1564,6 +1646,10 @@ $ensureClientPkgCoverageCore = {
     # $retryPkgToSite does.
     $bumpPkgSourceVersion = {
         param($TargetSiteCode)
+        if ($cloudDpHosts.Count -gt 0) {
+            Write-DscStatus "Client pkg coverage: skipping package-wide RefreshPkgSource recovery for $PackageID because it could refresh existing CMG/cloud targets. On-premises coverage remains required."
+            return $false
+        }
         $srcSite = ''
         try { $srcSite = "$((Get-WmiObject -Namespace $ns -Class SMS_Package -Filter "PackageID='$PackageID'" -ErrorAction Stop | Select-Object -First 1).SourceSite)" } catch {}
         if (-not $srcSite) {
@@ -2008,7 +2094,7 @@ $ensureClientPkgCoverageCore = {
                     # Repair, in this order: a fresh process clears the cancel flag, THEN the bump
                     # re-arms the send distmgr abandoned. Bumping first just re-snapshots into the
                     # stuck flag and aborts again, burning the whole re-send for nothing.
-                    if (-not $pkgSourceBumped) {
+                    if (-not $pkgSourceBumped -and $cloudDpHosts.Count -eq 0) {
                         # Two independent ways for the send to be dead, sharing one repair. The abort
                         # signature is checked first because it is the only one whose cancel flag has
                         # to be cleared before the bump; if it does not hold, the flag is provably not
@@ -2389,7 +2475,9 @@ $ensureClientPkgCoverage = {
 # fresh client-push path) so a re-run adds them to already-existing child BGs too.
 $ensureChildBgFallbackDps = {
     try {
-        $parentDps = @((Get-CMDistributionPoint -SiteCode $SiteCode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", "" | Where-Object { $_ -and $_.Trim() })
+        $parentDps = @((Get-CMDistributionPoint -SiteCode $SiteCode -ErrorAction SilentlyContinue |
+                Where-Object { -not (Test-MemLabsCloudDistributionPoint -DistributionPoint $_) }).NetworkOSPath -replace "\\", "" |
+            Where-Object { $_ -and $_.Trim() })
         if ($parentDps.Count -eq 0) { return }
         foreach ($childSite in ($bgs.SiteCode | Select-Object -Unique | Where-Object { $_ -and $_ -ne $SiteCode })) {
             $childBoundaryGroup = Get-CMBoundaryGroup -Name $childSite -ErrorAction SilentlyContinue
@@ -2451,7 +2539,8 @@ if ($allBGsExist) {
         }
         # Verify boundary is actually in its group
         $memberOf = @(Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue)
-        if (-not ($memberOf | Where-Object { $_.BoundaryID -eq $boundary.BoundaryID -or $_.DisplayName -eq $boundary.DisplayName })) {
+        $memberIds = @($memberOf.BoundaryID)
+        if (@($boundary | Where-Object { $_.BoundaryID -notin $memberIds }).Count -gt 0) {
             $allBGsExist = $false
             break
         }
@@ -2474,7 +2563,8 @@ if ($allBGsExist) {
             $boundaryGroup = Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue
             if (-not $boundaryGroup) { continue }
             $sitesystems = @()
-            $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+            $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue |
+                Where-Object { -not (Test-MemLabsCloudDistributionPoint -DistributionPoint $_) }).NetworkOSPath -replace "\\", ""
             $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
             $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
             $sitesystems = @($sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique)
@@ -2547,7 +2637,8 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     # Resolve currently-registered site systems (best-effort; a still-installing
     # secondary's DP/MP/SUP may not be present yet -- that's fine).
     $sitesystems = @()
-    $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
+    $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-MemLabsCloudDistributionPoint -DistributionPoint $_) }).NetworkOSPath -replace "\\", ""
     $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
     $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode -ErrorAction SilentlyContinue).NetworkOSPath -replace "\\", ""
     $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
@@ -2633,35 +2724,42 @@ foreach ($bg in $bgs) {
     $boundaryChanged = $false
     if ($exists) {
         $boundaryGroupMembers = @(Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue)
-        $alreadyMember = @($boundaryGroupMembers | Where-Object { $_.BoundaryID -eq $exists.BoundaryID -or $_.DisplayName -eq $exists.DisplayName }).Count -gt 0
-        if ($alreadyMember) {
-            Write-DscStatus "Boundary '$($exists.DisplayName)' is already in Boundary Group $($bg.SiteCode) -- skipping provider write"
-        }
-        else {
+        $memberIds = @($boundaryGroupMembers.BoundaryID)
+        foreach ($existingBoundary in @($exists)) {
+            if ($null -eq $existingBoundary.BoundaryID) {
+                throw "Boundary '$($existingBoundary.DisplayName)' has no BoundaryID; membership cannot be reconciled safely."
+            }
+            if ($existingBoundary.BoundaryID -in $memberIds) {
+                Write-DscStatus "Boundary '$($existingBoundary.DisplayName)' (ID $($existingBoundary.BoundaryID)) is already in Boundary Group $($bg.SiteCode) -- skipping provider write"
+                continue
+            }
             try {
-                Write-DscStatus "Adding Boundary '$($exists.DisplayName)' ($rangeValue) to Boundary Group $($bg.SiteCode)"
-                Add-CMBoundaryToGroup -BoundaryName $exists.DisplayName -BoundaryGroupName $bg.SiteCode -ErrorAction Stop
+                Write-DscStatus "Adding Boundary '$($existingBoundary.DisplayName)' (ID $($existingBoundary.BoundaryID), $rangeValue) to Boundary Group $($bg.SiteCode)"
+                Add-CMBoundaryToGroup -BoundaryId $existingBoundary.BoundaryID -BoundaryGroupName $bg.SiteCode -ErrorAction Stop
                 $boundaryChanged = $true
             }
             catch {
-                Write-DscStatus "Failed to add boundary '$($exists.DisplayName)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+                Write-DscStatus "Failed to add boundary '$($existingBoundary.DisplayName)' (ID $($existingBoundary.BoundaryID)) to Boundary Group '$($bg.SiteCode)'. Error: $_" -Failure
             }
         }
     }
     else {
         try {
             Write-DscStatus "Creating Boundary '$boundaryName' with range $rangeValue"
-            New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue -ErrorAction Stop
+            $createdBoundary = New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue -ErrorAction Stop
+            if ($null -eq $createdBoundary.BoundaryID) {
+                throw "New boundary '$boundaryName' returned no BoundaryID."
+            }
             $boundaryChanged = $true
             try {
-                Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $bg.SiteCode -ErrorAction Stop
+                Add-CMBoundaryToGroup -BoundaryId $createdBoundary.BoundaryID -BoundaryGroupName $bg.SiteCode -ErrorAction Stop
             }
             catch {
-                Write-DscStatus "Failed to add boundary '$boundaryName' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+                Write-DscStatus "Failed to add boundary '$boundaryName' to Boundary Group '$($bg.SiteCode)'. Error: $_" -Failure
             }
         }
         catch {
-            Write-DscStatus "Failed to create boundary '$boundaryName'. Error: $_"
+            Write-DscStatus "Failed to create boundary '$boundaryName'. Error: $_" -Failure
         }
     }
 

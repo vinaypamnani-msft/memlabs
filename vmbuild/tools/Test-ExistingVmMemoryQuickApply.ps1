@@ -43,13 +43,13 @@ foreach ($entry in @(
 
 function Write-Log {
     [CmdletBinding()]
-    param([string]$Message, [switch]$Activity, [switch]$SubActivity, [switch]$LogOnly, [switch]$Failure, [switch]$Success, [switch]$Warning)
+    param([string]$Message, [switch]$Activity, [switch]$SubActivity, [switch]$LogOnly, [switch]$Failure, [switch]$Success, [switch]$Warning, [switch]$NoNewLine)
 }
 function Write-GreenCheck { param([string]$Message) }
 function Write-OrangePoint { param([string]$Message) }
 function Write-RedX { param([string]$Message) $script:VisibleErrors += $Message }
 function Add-ErrorMessage {
-    param([string]$Message, [string]$Property, [switch]$Warning)
+    param([string]$Message, [string]$Property, [switch]$Warning, [switch]$Persist)
     if (-not $Warning) { throw "Unexpected GenConfig error for $Property`: $Message" }
     $script:MemoryEditWarnings += $Message
 }
@@ -150,6 +150,22 @@ $configBaseline = $config | ConvertTo-Json -Depth 10 -Compress
 $global:GenConfigQuickApplyBaselineJson = $configBaseline
 $plan = Get-ExistingVmQuickUpdatePlan -Config $config -ExistingMachines @($vm) -ConfigBaselineJson $configBaseline
 Assert-True ($plan.CanApplyQuickly -and $plan.VMs.Count -eq 1) 'A RAM-only existing VM edit was not eligible for the quick path.'
+
+foreach ($shape in 'missing', 'null', 'empty', 'null-entry', 'new-with-null') {
+    $shapeConfig = [pscustomobject]@{ vmOptions = $config.vmOptions }
+    if ($shape -ne 'missing') {
+        $authoringVms = $null
+        if ($shape -eq 'empty') { $authoringVms = @() }
+        if ($shape -eq 'null-entry') { $authoringVms = @($null) }
+        if ($shape -eq 'new-with-null') { $authoringVms = @($null, [pscustomobject]@{ vmName = 'NEW'; hidden = $false }) }
+        $shapeConfig | Add-Member -NotePropertyName virtualMachines -NotePropertyValue $authoringVms
+    }
+    $shapePlan = Get-ExistingVmQuickUpdatePlan -Config $shapeConfig -ExistingMachines @($vm) `
+        -ConfigBaselineJson ($shapeConfig | ConvertTo-Json -Depth 10 -Compress)
+    $expectedNew = [int]($shape -eq 'new-with-null')
+    Assert-True ($shapePlan.NewVmCount -eq $expectedNew -and
+        $shapePlan.CanApplyQuickly -eq ($expectedNew -eq 0)) "Authoring VM shape '$shape' counted a null placeholder as a new VM or ignored a real VM."
+}
 
 $unsupported = $vm.PSObject.Copy()
 $unsupported | Add-Member -NotePropertyName 'installOffice-Original' -NotePropertyValue $false -Force
@@ -323,7 +339,12 @@ foreach ($case in @(
             @{ Path = 'genconfig.ps1'; Name = 'Get-ExistingVMs' },
             @{ Path = 'genconfig.ps1'; Name = 'Select-MainMenu' },
             @{ Path = 'genconfig.ps1'; Name = 'Build-MainMenuOptions' },
+            @{ Path = 'common\Common.GenConfig.Existing.ps1'; Name = 'New-UserConfig' },
+            @{ Path = 'common\Common.GenConfig.VMList.ps1'; Name = 'Select-VirtualMachines' },
+            @{ Path = 'common\Common.GenConfig.VMList.ps1'; Name = 'Select-Options' },
+            @{ Path = 'common\Common.GenConfig.Summary.ps1'; Name = 'Get-SortedProperties' },
             @{ Path = 'common\Common.GenConfig.Summary.ps1'; Name = 'get-VMOptionsSummary' },
+            @{ Path = 'common\Common.GenConfig.Summary.ps1'; Name = 'get-CMOptionsSummary' },
             @{ Path = 'common\Common.GenConfig.NewDomain.ps1'; Name = 'Initialize-PerVmLocales' },
             @{ Path = 'common\Common.GenConfig.NewDomain.ps1'; Name = 'Set-DefaultLocaleForVM' }
         )) {
@@ -332,9 +353,15 @@ foreach ($case in @(
 
     $script:LegacyCatalogPath = Join-Path $RootPath 'common\LocaleCatalog.json'
     $script:LegacyLocaleInitializer = ${function:Initialize-PerVmLocales}
+    $script:LegacyLocaleSetter = ${function:Set-DefaultLocaleForVM}
+    $script:LegacyPropertyEditor = ${function:Select-Options}
     function Initialize-PerVmLocales {
         param($ConfigToCheck)
         & $script:LegacyLocaleInitializer -ConfigToCheck $ConfigToCheck -CatalogPath $script:LegacyCatalogPath
+    }
+    function Set-DefaultLocaleForVM {
+        param($ConfigToCheck, $VirtualMachine)
+        & $script:LegacyLocaleSetter -ConfigToCheck $ConfigToCheck -VirtualMachine $VirtualMachine -CatalogPath $script:LegacyCatalogPath
     }
 
     function Add-OfflineRootCAVMIfMissing { param($ConfigToModify) }
@@ -351,33 +378,67 @@ foreach ($case in @(
     function Get-LocaleProfiles { param($Path) @{ 'en-US' = [pscustomobject]@{ LanguageTag = 'en-US' } } }
     function Get-LocaleDefinitionForOperatingSystem { param($LocaleDefinition, $OperatingSystem) $LocaleDefinition }
     function Get-LocaleAcquisitionMethod { param([Alias('Profile')]$LocaleDefinition, $OperatingSystem, $ConfigPath) 'Included' }
+    function get-PrefixForDomain { param($Domain) 'LAB-' }
+    function Get-MemlabsVmStorageRoot { 'C:\fixture-vms' }
+    function Get-DomainNetbiosName { param($DomainName) 'LEGACY' }
+    function Get-AdditionalInformation { param($Item, $Data) "$Data" }
+    function Get-AdditionalInformationColor { param($Item, $Data) 'Gray' }
+    function Get-MenuItems { param($MenuName, $ExistingMenuItems, $AdditionalOptions) }
+    function Add-MenuItem {
+        param($MenuName, [ref]$MenuItems, $ItemName, $ItemText, $Selectable, $Selected, $Color1, $Color2, $HelpFunction)
+        $item = [pscustomobject]@{ ItemName = "$ItemName"; ItemText = $ItemText }
+        $null = $MenuItems.Value.Add($item)
+        $item
+    }
+    function Read-Host2 {
+        param($Prompt, $CurrentValue)
+        if ($Prompt -notlike '*Memory*') { throw "Unexpected property edit: $Prompt" }
+        '4GB'
+    }
+    function Read-YesOrNoWithTimeout {
+        param($Prompt, $Default, [switch]$HideHelp, $Timeout)
+        $script:LegacyScopePrompts++
+        if ($Default -ne 'n') { throw 'Scope expansion must default to no.' }
+        if ($script:LegacyApproveScope) { 'y' } else { 'n' }
+    }
     function Get-List {
         param($Type, $Domain)
-        $script:LegacyNotes.Values | ForEach-Object { $_ | ConvertTo-Json -Depth 5 | ConvertFrom-Json }
+        $script:LegacyNotes.Values | Sort-Object @{
+            Expression = {
+                if ($_.vmName -like 'LAB-OLD*') { [int]$script:LegacyServersFirst }
+                else { [int](-not $script:LegacyServersFirst) }
+            }
+        }, vmName | ForEach-Object { $_ | ConvertTo-Json -Depth 5 | ConvertFrom-Json }
     }
     function Get-Menu2 {
-        param($MenuName, $Prompt, $OptionArray, $AdditionalOptions, $PreOptions, $Test, [switch]$AcceptsDelete)
+        param($MenuName, $Prompt, $OptionArray, $AdditionalOptions, $PreOptions, $MenuItems, $Test, [switch]$AcceptsDelete, $HideHelp, $DroppableItemPattern)
+        if ($MenuName -like 'Modify Properties for LAB-OLD*') {
+            $visits = [int]$script:LegacyEditorVisits[$MenuName]
+            $script:LegacyEditorVisits[$MenuName] = $visits + 1
+            if ($visits -eq 0) { return '1' }
+            return '!'
+        }
         if ($script:LegacyResponses.Count -eq 0) { throw 'Legacy RAM fixture exhausted its menu responses.' }
         $script:LegacyResponses.Dequeue()
     }
-    function Select-VirtualMachines {
-        param($VmName)
-        $target = $global:existingMachines | Where-Object { $_.vmName -eq $VmName }
-        Set-DefaultLocaleForVM -ConfigToCheck $global:Config -VirtualMachine $target -CatalogPath $script:LegacyCatalogPath
-        $target | Add-Member -NotePropertyName 'memory-Original' -NotePropertyValue $target.memory
-        $target.memory = '4GB'
-    }
     function Select-Options {
-        param($MenuName, $Rootproperty, $PropertyName, $Prompt, $HelpFunction)
-        $Rootproperty.vmOptions.network = '192.168.3.0'
+        param($MenuName, $Rootproperty, $PropertyName, $Prompt, $HelpFunction, $PropertyEnum, $PropertyNum, $AdditionalOptions, $Test)
+        if ($PropertyName -eq 'vmOptions') {
+            $Rootproperty.vmOptions.network = '192.168.3.0'
+            return
+        }
+        & $script:LegacyPropertyEditor @PSBoundParameters
     }
     function Set-MemLabsVmMemoryConfiguration {
         param($VmName, $Memory, $DynamicMinRam, $Role, $SqlVersion)
+        if ($VmName -notin @('LAB-OLD1', 'LAB-OLD2')) { throw "Unrelated VM memory mutation: $VmName" }
         $script:LegacyMemoryRequests.Add($VmName)
         [pscustomobject]@{ Changed = $true; Restarted = $true }
     }
     function Set-VMNote {
         param($VmName, $VmNote)
+        $script:LegacyNoteWrites.Add($VmName)
+        if ($VmName -notin @('LAB-OLD1', 'LAB-OLD2')) { throw "Unrelated VM note mutation: $VmName" }
         foreach ($property in $VmNote.PSObject.Properties) {
             $script:LegacyNotes[$VmName] | Add-Member -NotePropertyName $property.Name -NotePropertyValue $property.Value -Force
         }
@@ -389,21 +450,34 @@ foreach ($case in @(
     $global:Common = [pscustomobject]@{
         ConfigPath = Join-Path $RootPath 'config'
         Colors = [pscustomobject]@{}
+        Supported = [pscustomobject]@{ UpdatablePropList = @('memory', 'dynamicMinRam', 'useProxy', 'locale', 'installOffice') }
     }
-    foreach ($editGlobalOptions in $false, $true) {
-        $global:Config = [pscustomobject]@{
-            vmOptions = [pscustomobject]@{ domainName = 'legacy.test'; network = '192.168.2.0'; prefix = 'LAB-' }
-            virtualMachines = @()
-        }
+    foreach ($mode in 'ram-server-first', 'ram-client-first', 'global-approved', 'global-declined') {
+        $editGlobalOptions = $mode -like 'global-*'
+        $script:LegacyServersFirst = $mode -ne 'ram-client-first'
         $global:existingMachines = $null
         $global:GenConfigQuickApplyBaselineJson = $null
         $global:PendingValidationErrors = $null
         $script:LegacyNotes = @{}
         foreach ($vmName in 'LAB-OLD1', 'LAB-OLD2') {
             $script:LegacyNotes[$vmName] = [pscustomobject]@{
-                vmName = $vmName; role = 'DomainMember'; ExistingVM = $true
+                vmName = $vmName; role = 'DomainMember'; domain = 'legacy.test'
                 operatingSystem = 'Windows 10 Latest'; memory = '2GB'; dynamicMinRam = '2GB'
             }
+            $script:LegacyNotes['ZZ-DC'] = [pscustomobject]@{ vmName = 'ZZ-DC'; role = 'DC'; domain = 'legacy.test' }
+            $script:LegacyNotes['ZZ-PRI'] = [pscustomobject]@{
+                vmName = 'ZZ-PRI'; role = 'Primary'; siteCode = 'PS1'; domain = 'legacy.test'
+                cmOptions = [pscustomobject]@{ version = '2203'; install = $true; PrePopulateObjects = $true }
+            }
+            $script:LegacyNotes['ZZ-SQL'] = [pscustomobject]@{ vmName = 'ZZ-SQL'; role = 'DomainMember'; domain = 'legacy.test'; sqlVersion = 'SQL Server 2019' }
+            $serverBaseline = @{}
+            foreach ($name in 'ZZ-DC', 'ZZ-PRI', 'ZZ-SQL') { $serverBaseline[$name] = $script:LegacyNotes[$name] | ConvertTo-Json -Depth 5 -Compress }
+            $global:Config = New-UserConfig -Domain 'legacy.test' -Subnet '192.168.2.0'
+            Assert-True ($null -eq $global:Config.virtualMachines) 'The real existing-domain template no longer exercises its null authoring list.'
+            $script:LegacyEditorVisits = @{}
+            $script:LegacyScopePrompts = 0
+            $script:LegacyApproveScope = $mode -eq 'global-approved'
+            $script:LegacyNoteWrites = [Collections.Generic.List[string]]::new()
         }
         $script:LegacyMemoryRequests = [Collections.Generic.List[string]]::new()
         $script:LegacyDeploymentRequests = 0
@@ -413,13 +487,20 @@ foreach ($case in @(
         foreach ($response in 'D', 'S') { $script:LegacyResponses.Enqueue($response) }
 
         $deploy = Select-MainMenu
+        $expectedFirst = if ($script:LegacyServersFirst) { 'ZZ-*' } else { 'LAB-OLD*' }
+        Assert-True ($global:existingMachines[0].vmName -like $expectedFirst) 'The RAM fixture did not exercise its selected inventory ordering.'
+        foreach ($name in 'ZZ-DC', 'ZZ-PRI', 'ZZ-SQL') {
+            Assert-True (($script:LegacyNotes[$name] | ConvertTo-Json -Depth 5 -Compress) -eq $serverBaseline[$name]) 'RAM authoring changed an unrelated server note.'
+        }
         if ($editGlobalOptions) {
-            Assert-True ($deploy -eq $true -and $script:LegacyDeploymentRequests -eq 1 -and
-                $script:LegacyMemoryRequests.Count -eq 0) 'An intentional global edit after normalization incorrectly bypassed deployment.'
+            Assert-True ($deploy -eq $script:LegacyApproveScope -and
+                $script:LegacyDeploymentRequests -eq [int]$script:LegacyApproveScope -and
+                $script:LegacyMemoryRequests.Count -eq 0 -and $script:LegacyScopePrompts -eq 1) 'Global plus RAM edits bypassed the explicit broader-scope decision.'
             continue
         }
         Assert-True ($deploy -eq $false -and $script:LegacyDeploymentRequests -eq 0 -and
-            $script:LegacyMemoryRequests.Count -eq 2) 'Legacy RAM-only edits entered deployment after the menu added missing defaults.'
+            $script:LegacyMemoryRequests.Count -eq 2 -and $script:LegacyScopePrompts -eq 0 -and
+            (($script:LegacyNoteWrites | Sort-Object) -join ',') -eq 'LAB-OLD1,LAB-OLD2') 'Real legacy RAM editor flow entered deployment or wrote unrelated VM notes.'
         Assert-True ($global:Config.domainDefaults.DefaultLocale -eq 'en-US' -and
             $global:Config.vmOptions.timeZone -eq 'UTC') 'The legacy menu fixture did not exercise initial locale/time-zone normalization.'
         foreach ($vmName in 'LAB-OLD1', 'LAB-OLD2') {
@@ -432,7 +513,7 @@ foreach ($case in @(
                     get-IsExistingVMModified -virtualMachine $_
                 }).Count) 'Successfully applied legacy RAM edits remained queued for deployment.'
         foreach ($propertyName in 'locale', 'useProxy') {
-            $explicitEdit = $global:existingMachines[0].PSObject.Copy()
+            $explicitEdit = ($global:existingMachines | Where-Object { $_.vmName -eq 'LAB-OLD1' }).PSObject.Copy()
             $explicitEdit.memory = '6GB'
             $explicitEdit | Add-Member -NotePropertyName "$propertyName-Original" -NotePropertyValue $explicitEdit.$propertyName -Force
             if ($propertyName -eq 'locale') { $explicitEdit.locale = 'fr-FR' }

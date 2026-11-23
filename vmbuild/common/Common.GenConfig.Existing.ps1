@@ -1048,8 +1048,7 @@ function New-UserConfig {
             throw "Cannot safely reconstruct ConfigMgr options for legacy domain '$Domain': site server '$($topLevelSite.vmName)' has no cmOptions in its VM note and no authoritative deployConfig backup was readable. UsePKI cannot be inferred from InstallCA."
         }
         $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $recoveredCmOptions -force
-        try { Set-VMNote -vmName $topLevelSite.vmName -vmNote ([pscustomobject]@{ cmOptions = $recoveredCmOptions }) } catch { }
-        Write-Log "New-UserConfig: Recovered authoritative cmOptions (UsePKI=$($recoveredCmOptions.UsePKI)) from legacy site server '$($topLevelSite.vmName)' and stamped its VM note." -Verbose
+        Write-Log "New-UserConfig: Read authoritative cmOptions from legacy site server '$($topLevelSite.vmName)' without changing its VM note." -Verbose
     }
     if ($topLevelSite -and $configGenerated.cmOptions) {
         $configGenerated | Add-Member -MemberType NoteProperty -Name 'cmOptionsOwnerVM' -Value $topLevelSite.vmName -Force

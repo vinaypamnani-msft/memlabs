@@ -30,7 +30,8 @@ function Assert-True {
 foreach ($name in @(
         'Write-MemLabsClientPackageTimelineRecord', 'Invoke-MemLabsClientPackageDiagnosticProbe',
         'Get-MemLabsDpVmMetadataMap', 'Test-MemLabsLocalComputerName',
-        'Set-MemLabsClientPackageProgress', 'Invoke-MemLabsClientPackageCoverage'
+        'Set-MemLabsClientPackageProgress', 'Invoke-MemLabsClientPackageCoverage',
+        'Test-MemLabsCloudDistributionPoint'
     )) {
     . (Import-TestFunction -Path $boundaryPath -Name $name)
 }
@@ -174,6 +175,22 @@ function Set-Location { param($Path) }
     }
     Assert-True (@($script:Statuses | Where-Object { $_.Failure -and $_.Message -match 'synthetic provider failure' }).Count -eq 1) `
         'A non-timeout provider failure was hidden by warning-only timeout policy.'
+
+    $script:Statuses.Clear()
+    Invoke-MemLabsClientPackageCoverage -ScriptRoot $fixtureRoot -LogPath $logPath -Variables $variables -CoverageScript {
+        if (-not (Test-MemLabsCloudDistributionPoint -DistributionPoint ([pscustomobject]@{ ServiceType = 1 })) -or
+            (Test-MemLabsCloudDistributionPoint -DistributionPoint ([pscustomobject]@{ ServiceType = 0 }))) {
+            throw 'The worker did not classify native cloud/on-premises metadata correctly.'
+        }
+        $rejected = $false
+        try { $null = Test-MemLabsCloudDistributionPoint -DistributionPoint ([pscustomobject]@{ ServiceType = $null }) }
+        catch { $rejected = $_.Exception.Message -like '*refusing to manage*' }
+        if (-not $rejected) { throw 'The worker treated unreadable DP metadata as on-premises.' }
+        Set-MemLabsClientPackageProgress -Outcome 'NotRequired' -Message 'Worker cloud-classification checks completed'
+    }
+    $state = Get-Content -LiteralPath (Join-Path $logPath 'ClientPackageCoverage.progress.json') -Raw | ConvertFrom-Json
+    Assert-True ($state.Outcome -eq 'NotRequired' -and $state.Message -eq 'Worker cloud-classification checks completed' -and
+        @($script:Statuses | Where-Object Failure).Count -eq 0) 'The cloud classifier was not available and correct inside the actual bounded coverage worker.'
 
     $tokens = $null
     $errors = $null

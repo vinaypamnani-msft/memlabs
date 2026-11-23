@@ -8647,6 +8647,7 @@ $global:VM_Config = {
         $memoryRecoveryCount = 0
         $lastStaleWarningTime = [DateTime]::MinValue
         $lastStatusReadWarningTime = [DateTime]::MinValue
+        $lastDscStatusProbeNotice = [DateTime]::MinValue
         $deadWorkflowConfirmations = 0     # consecutive stale checks that proved the ScriptWorkflow task is not running
         $deadWorkflowMax = 3               # after this many, the wait is provably unclearable -- fail instead of warning forever
         $staleNoticeCount = 0              # stale notices emitted for the CURRENT status (reset on every status change)
@@ -9145,7 +9146,29 @@ $global:VM_Config = {
                             }
                         }
                         catch {
-                            if ($ReturnStatus) { throw }
+                            if ($ReturnStatus) {
+                                $statusError = $_
+                                $observedLcmState = 'Unknown'
+                                try { $observedLcmState = [string](Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState }
+                                catch { $observedLcmState = 'Unknown' }
+                                $activeWorkflow = $false
+                                if ($observedLcmState -notin @('Busy', 'PendingConfiguration', 'PendingReboot')) {
+                                    try {
+                                        $activeWorkflow = @(Get-ScheduledTask -ErrorAction Stop |
+                                            Where-Object { $_.TaskName -eq 'ScriptWorkflow' -and $_.State -eq 'Running' }).Count -gt 0
+                                    }
+                                    catch { throw $statusError }
+                                }
+                                if ($observedLcmState -in @('Busy', 'PendingConfiguration', 'PendingReboot') -or $activeWorkflow) {
+                                    [pscustomobject]@{
+                                        Status = 'InProgress'
+                                        StatusProbeDeferred = $true
+                                        LcmState = $observedLcmState
+                                        ProbeError = $statusError.Exception.Message
+                                    }
+                                }
+                                else { throw $statusError }
+                            }
                         }
 
                         $ProgressPreference = 'Continue'
@@ -9153,7 +9176,18 @@ $global:VM_Config = {
 
                     $phase8DscFailure = $Phase -eq 8 -and $dscStatus.ScriptBlockFailed -is [bool] -and
                         -not $dscStatus.ScriptBlockFailed -and $dscStatus.ScriptBlockOutput.Status -eq 'Failure'
-                    if ($dscStatus.ScriptBlockFailed -or ($dscStatus.ScriptBlockOutput.Error -and -not $phase8DscFailure)) {
+                    $phase8StatusQueryFailed = $Phase -eq 8 -and
+                        ($dscStatus.ScriptBlockFailed -or ($dscStatus.ScriptBlockOutput.Error -and -not $phase8DscFailure))
+                    if ($Phase -eq 8 -and ($phase8StatusQueryFailed -or $dscStatus.ScriptBlockOutput.StatusProbeDeferred) -and
+                        ([DateTime]::UtcNow - $lastDscStatusProbeNotice).TotalSeconds -ge 60) {
+                        $lastDscStatusProbeNotice = [DateTime]::UtcNow
+                        $probeDetail = ((@($dscStatus.ErrorDetails) + @($dscStatus.ScriptBlockOutput.ProbeError)) | Where-Object { $_ }) -join '; '
+                        Write-Log "[Phase 8]: $($currentItem.vmName): Supplementary DSC status query is unavailable/deferred; continuing authoritative workflow-status monitoring without a probe-driven restart. $probeDetail" -LogOnly
+                    }
+                    if ($phase8StatusQueryFailed) {
+                        $dscFails = 0
+                    }
+                    elseif ($dscStatus.ScriptBlockFailed -or ($dscStatus.ScriptBlockOutput.Error -and -not $phase8DscFailure)) {
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Get-DscConfigurationStatus did not complete"
                         Write-log "[Phase $Phase]: $($currentItem.vmName): $($dscStatus.ScriptBlockOutput) $($dscStatus.ScriptBlockOutput) $($dscStatus.ScriptBlockOutput.Error)"
                         $dscFails++
@@ -9189,7 +9223,7 @@ $global:VM_Config = {
                     }
                     else {
                         if ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -ne "Success" -and
-                            ($Phase -ne 8 -or -not $noStatus)) {
+                            ($Phase -ne 8 -or (-not $noStatus -and $phase8DscFailure))) {
                             if ($Phase -eq 8 -and -not $noStatus -and $dscStatus.ScriptBlockOutput.Status -eq 'Failure') {
                                 $phase8FailureText = (@($dscStatus.ScriptBlockOutput.Error) +
                                     @($dscStatus.ScriptBlockOutput.ResourcesNotInDesiredState | ForEach-Object { $_.Error })) -join '; '

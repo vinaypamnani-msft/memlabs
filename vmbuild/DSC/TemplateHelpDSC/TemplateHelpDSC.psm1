@@ -50,6 +50,8 @@ function Get-InstalledProducts {
     $Installer = New-Object -ComObject WindowsInstaller.Installer
     $InstallerProducts = $Installer.ProductsEx("", "", 7)
     $InstalledProducts = ForEach ($Product in $InstallerProducts) {
+        # Advertised registrations do not expose installed-only MSI properties.
+        if ($Product.InstallProperty("State") -ne "5") { continue }
         [PSCustomObject]@{
             ProductCode   = $Product.ProductCode()
             LocalPackage  = $Product.InstallProperty("LocalPackage")

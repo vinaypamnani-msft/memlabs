@@ -1485,6 +1485,30 @@ Validate with `vmbuild\tools\Test-ToolVersionCleanup.ps1` and
 and matching-bundle skip behavior are covered by
 `vmbuild\tools\Test-ToolOwnershipMigration.ps1`.
 
+### Phase 8 retained-site prerequisites and client content
+
+Report Builder readiness ignores advertised-only MSI registrations. Those
+registrations do not expose installed-only properties and must not break
+detection of an already-installed Report Builder.
+
+Boundary reconciliation checks and adds membership by `BoundaryID`, including
+when legacy boundaries share a display name. It does not delete or rename
+existing boundaries. A genuine membership write failure fails the workflow.
+
+Boundary-group additions, parent-DP fallback, and client-package coverage skip
+CMG/cloud distribution points using native `IsCloud`/`ServiceType` metadata, not
+DNS names or HTTPS/pull-DP settings. Existing CMG memberships are left unchanged;
+these paths do not distribute, refresh, or wait for CMG content. CMG-only coverage
+is explicitly not required. Unreadable on-premises provider state still fails
+rather than being reported as covered. Site-control evidence of a retained
+on-premises DP is preserved when the lagging provider views are empty or fail.
+Package-wide source-version recovery is skipped when the hierarchy has cloud
+DPs, since that recovery cannot exclude existing CMG targets; per-DP on-premises
+coverage remains required.
+
+Validate with `vmbuild\tools\Test-Phase8RerunResilience.ps1` and
+`vmbuild\tools\Test-ClientPackageCoverageBounds.ps1`.
+
 ### Phase 8 ConfigMgr proxy scope
 
 ConfigMgr proxy enable/disable runs against the connected site's systems only.
