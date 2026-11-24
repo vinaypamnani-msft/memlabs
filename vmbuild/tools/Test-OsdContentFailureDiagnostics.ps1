@@ -394,4 +394,119 @@ $dpCollector = Get-TestDefinition 'Phase11DpContentLogCollector' -Collector
         $out.ContainsKey('smsdpprov.lo_') -and $out.ContainsKey('DpPxePayload.txt')) 'An unreadable active log hid its error or prevented independent evidence.'
 }
 
-Write-Host 'PASS -- OSD failures retain feeding-site, provider, workflow, current/rolled DP logs, and timestamped PXE payload evidence.'
+& {
+    . (Get-TestDefinition 'Get-MemLabsOsdSourceImportSnapshot')
+    $fixture = @{ UsersFail = $false; ProviderFail = $false; ManyRows = $false }
+    $hash = 'ABCD' + ('A' * 60)
+    $failure = [pscustomobject]@{
+        PackageId = 'SRC00007'; SourceVersion = 1; ErrorCode = 5; AtUtc = [datetime]::UtcNow.AddSeconds(-10)
+        FromPath = 'C:\FixtureContent\FileLib\TB00000001'
+        ToPath = "C:\FixtureContent\FileLib\ABCD\$hash"
+    }
+    function Get-CimInstance {
+        param($Namespace, $ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
+        Assert-True ($OperationTimeoutSec -eq 10 -and $Filter -eq "PackageID='SRC00007'") 'Source diagnostics lost bounded exact-package queries.'
+        if ($fixture.ProviderFail) { throw 'fixture source provider unavailable' }
+        $row = [pscustomobject]@{
+            PackageID = 'SRC00007'; SourceSite = 'SRC'; SourceVersion = 1; StoredPkgVersion = 0
+            ActionInProgress = 0; State = 7; SiteCode = 'PRI'; ServerNALPath = '\\DP.fixture.test\'
+        }
+        if ($fixture.ManyRows) { 1..21 | ForEach-Object { $row } } else { $row }
+    }
+    function Get-Item {
+        param($LiteralPath, [switch]$Force, $ErrorAction)
+        Assert-True $Force 'Hidden content-library metadata is not inspected with Force.'
+        [pscustomobject]@{
+            Attributes = 'ReadOnly'; PSIsContainer = ($LiteralPath -notin @($failure.FromPath, $failure.ToPath))
+            Length = 123; LastWriteTimeUtc = [datetime]::UtcNow
+        }
+    }
+    function Get-Acl { param($LiteralPath, $ErrorAction) [pscustomobject]@{ Owner = 'SYSTEM'; Sddl = 'fixture-source-sddl' } }
+    function Get-MemLabsOsdFileUsers {
+        param($Path)
+        if ($fixture.UsersFail) { throw 'fixture Restart Manager denied' }
+        [pscustomobject]@{ ProcessId = 123; ProcessStartedAtUtc = '2026-11-24T00:00:00Z'; Application = 'SMS Executive'; Service = 'SMS_EXECUTIVE' }
+    }
+    function Get-MpComputerStatus { param($ErrorAction) [pscustomobject]@{ AMRunningMode = 'Normal'; RealTimeProtectionEnabled = $true } }
+    function Get-MpPreference {
+        param($ErrorAction)
+        $paths = @('C:\FixtureContent')
+        if ($fixture.ManyRows) { $paths = @(1..21 | ForEach-Object { "C:\FixtureContent$_" }) }
+        [pscustomobject]@{ ExclusionPath = $paths }
+    }
+    function Get-WinEvent {
+        param($FilterHashtable, $MaxEvents, $ErrorAction)
+        Assert-True ($MaxEvents -eq 21 -and $FilterHashtable.Id -contains 1123) 'Defender evidence lost its bounded truncation detection or event-ID filter.'
+        if ($fixture.ManyRows) { 1..21 | ForEach-Object { [pscustomobject]@{ TimeCreated = [datetime]::Now; Id = 1123; RecordId = $_; Message = 'fixture event' } } }
+    }
+    function Get-Content { throw 'A source diagnostic must not open the WIM payload.' }
+    $snapshot = Get-MemLabsOsdSourceImportSnapshot -Failure $failure -Namespace 'root\SMS\site_PRI'
+    Assert-True ($snapshot.Paths.Count -eq 4 -and $snapshot.Paths[1].Attributes -eq 'ReadOnly' -and
+        $snapshot.Paths[1].Sddl -eq 'fixture-source-sddl' -and $snapshot.Paths[1].PossibleUsers[0].ProcessId -eq 123 -and
+        $snapshot.Paths[1].UsersMeasured -and $snapshot.Errors.Count -eq 0) 'Source diagnostics lost file attributes, ACLs, possible users, or independent provider evidence.'
+    Assert-True ($snapshot.SourcePackage[0].StoredPkgVersion -eq 0 -and $snapshot.Distribution[0].State -eq 7 -and
+        $snapshot.FileUserCaveat -match 'not proven blocking handles') 'Source diagnostics overstated handle evidence or lost the retry state.'
+    $fixture.UsersFail = $true; $fixture.ProviderFail = $true
+    $partial = Get-MemLabsOsdSourceImportSnapshot -Failure $failure -Namespace 'root\SMS\site_PRI'
+    Assert-True (-not $partial.Paths[1].UsersMeasured -and
+        ($partial.Paths[1].Errors -join ' ') -match 'Restart Manager denied' -and
+        ($partial.Errors -join ' ') -match 'source provider unavailable' -and
+        $partial.Paths[1].Owner -eq 'SYSTEM') 'Failed source probes hid their error or discarded independent metadata.'
+    $fixture.UsersFail = $false; $fixture.ProviderFail = $false; $fixture.ManyRows = $true
+    $bounded = Get-MemLabsOsdSourceImportSnapshot -Failure $failure -Namespace 'root\SMS\site_PRI'
+    Assert-True ($bounded.SourcePackage.Count -eq 20 -and $bounded.Distribution.Count -eq 20 -and
+        $bounded.Defender.Events.Count -eq 20 -and $bounded.Defender.EventsTruncated -and
+        $bounded.Defender.ExclusionPaths.Count -eq 20 -and $bounded.Defender.ExclusionPathsTruncated -and
+        ($bounded.Errors -join ' ') -match 'truncated to 20') 'Source diagnostics exceeded a measured 20-entry limit or silently hid truncation.'
+    $failure.ToPath = '\\remote\library\FileLib\ABCD\' + $hash
+    $remote = Get-MemLabsOsdSourceImportSnapshot -Failure $failure -Namespace 'root\SMS\site_PRI'
+    Assert-True ($remote.Paths.Count -eq 0 -and ($remote.Errors -join ' ') -match 'No correlated local FileLib') 'An unbounded remote content-library probe was attempted.'
+}
+
+& {
+    . (Get-TestDefinition 'Get-MemLabsOsdFileUsers')
+    . (Get-TestDefinition 'Save-Phase11GuestLogs')
+    $usersDefinition = $ast.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-MemLabsOsdFileUsers'
+        }, $true)
+    $conversion = @($usersDefinition.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$fileTime'
+            }, $true))
+    Assert-True ($conversion.Count -eq 1) 'The FILETIME conversion was not uniquely exercised.'
+    $converted = & {
+        $user = [pscustomobject]@{ Process = [pscustomobject]@{ StartTime = [pscustomobject]@{ dwHighDateTime = 1; dwLowDateTime = -1 } } }
+        & ([scriptblock]::Create($conversion[0].Extent.Text + "`n`$fileTime"))
+    }
+    Assert-True ($converted -eq 8589934591) 'A native FILETIME with its low-word sign bit set lost the process-start identity.'
+    $directory = Join-Path ([IO.Path]::GetTempPath()) ("MemLabs-OsdImport-" + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $directory -ErrorAction Stop
+    $file = Join-Path $directory 'held-file.fixture'
+    $stream = $null
+    $saved = @()
+    try {
+        $stream = [IO.File]::Open($file, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $users = @(Get-MemLabsOsdFileUsers -Path $file)
+        Assert-True (@($users | Where-Object { $_.ProcessId -eq $PID }).Count -eq 1) 'Restart Manager failed the known-held-file control; an empty user list cannot be trusted.'
+        $stream.Dispose(); $stream = $null
+        $Common = [pscustomobject]@{ LogPath = (Join-Path $directory 'VMBuild.fixture.log') }
+        $messages = [System.Collections.Generic.List[string]]::new()
+        function Invoke-VmCommand { throw 'Already captured diagnostics must not require another guest call.' }
+        function Add-Phase11Output { param($Message) $messages.Add("$Message") }
+        function Write-Log { param($Message, [switch]$Warning, [switch]$LogOnly) throw "Unexpected capture warning: $Message" }
+        $payload = '{"RunId":"fixture","Captures":[{"Observation":"FailureObserved"},{"Observation":"ConvergenceWaitExit"}]}'
+        $saved = @(Save-Phase11GuestLogs -VMName 'PRI-FIXTURE' -DomainName 'fixture.test' -RoleLabel 'OSD-SourceImport' `
+                -CollectedContent @{ 'OsdSourceImportDiagnostics.json' = $payload })
+        Assert-True ($saved.Count -eq 1 -and [IO.File]::ReadAllText($saved[0]).Trim() -eq $payload -and
+            ($messages -join ' ') -match 'Saved OsdSourceImportDiagnostics.json') 'Already captured evidence was not persisted verbatim with the normal host artifact naming.'
+    }
+    finally {
+        if ($stream) { $stream.Dispose() }
+        foreach ($savedPath in $saved) { Remove-Item -LiteralPath $savedPath -ErrorAction Stop }
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -ErrorAction Stop }
+        Remove-Item -LiteralPath $directory -ErrorAction Stop
+    }
+}
+
+Write-Host 'PASS -- OSD failures retain site/DP evidence, source FileLib metadata and possible users, bounded provider/Defender probes, and persisted first/final import diagnostics.'

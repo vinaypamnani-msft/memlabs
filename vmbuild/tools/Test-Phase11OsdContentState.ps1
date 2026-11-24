@@ -177,6 +177,9 @@ $waitScript = [scriptblock]::Create($waitText + @'
     Sources = @($results.OsdContentSourceSiteCodes)
     Details = @($results.Details)
     Refreshes = $fixture.Refreshes
+    SourceCaptures = @($results.OsdSourceImportDiagnostics.ToArray())
+    CacheWrites = $fixture.CacheWrites
+    SourceDiagnosticsTruncated = $results.OsdSourceImportDiagnosticsTruncated
 }
 '@)
 
@@ -208,7 +211,7 @@ function Invoke-WaitFixture {
     param([object[]]$Targets, [switch]$LogReadFails, [int]$QueryFailsAt = -1)
 
     $fixture = [pscustomobject]@{
-        Seconds = 0; Refreshes = 0; Targets = $Targets
+        Seconds = 0; Refreshes = 0; Targets = $Targets; CacheWrites = 0
         LogReadFails = $LogReadFails.IsPresent; QueryFailsAt = $QueryFailsAt
     }
     $baseUtc = ([datetime]'2026-11-04T00:49:50Z').ToUniversalTime()
@@ -218,6 +221,8 @@ function Invoke-WaitFixture {
         OsdContentSourceSiteCodes = [System.Collections.Generic.List[string]]::new()
         OsdContentWaitProblems = [System.Collections.Generic.List[string]]::new()
         OsdContentWaitTargets = @()
+        OsdSourceImportDiagnostics = [System.Collections.Generic.List[object]]::new()
+        OsdSourceImportDiagnosticsTruncated = $false
     }
     $ns = 'root\SMS\site_PRI'
     $osdProgressActivity = 'Fixture OSD'
@@ -241,6 +246,15 @@ function Invoke-WaitFixture {
         if ($fixture.Seconds -gt 3600) { throw 'The production OSD wait exceeded the fixture safety limit.' }
     }
     function Write-Progress { param($Activity, $Status, $CurrentOperation, [switch]$Completed) }
+    function Get-MemLabsOsdSourceImportSnapshot {
+        param($Failure, $Namespace, $Observation = 'FailureObserved')
+        [pscustomobject]@{ PackageId = $Failure.PackageId; Observation = $Observation; Errors = @() }
+    }
+    function Set-Content {
+        param($LiteralPath, $Value, $Encoding, $ErrorAction)
+        if ($LiteralPath -ne 'C:\staging\DSC\OsdSourceImportDiagnostics.json') { throw 'Unexpected diagnostic cache path.' }
+        $fixture.CacheWrites++
+    }
     function Get-ItemProperty {
         param($Path, $Name, $ErrorAction)
         [pscustomobject]@{ 'Installation Directory' = 'C:\FixtureSite' }
@@ -432,6 +446,11 @@ if (($sourceRetry.Details -join ' ') -notmatch 'native despooler retry' -or
     ($sourceRetry.Details -join ' ') -notmatch 'Win32 5') {
     throw 'The source-import retry allowance hid its access-denied evidence.'
 }
+if ($sourceRetry.SourceCaptures.Count -ne 2 -or $sourceRetry.CacheWrites -ne 2 -or
+    $sourceRetry.SourceCaptures[0].Observation -ne 'FailureObserved' -or
+    $sourceRetry.SourceCaptures[1].Observation -ne 'ConvergenceWaitExit') {
+    throw 'The import failure did not retain both immediate evidence and the retry/convergence outcome.'
+}
 $sourceRetryCap = Invoke-WaitFixture -Targets @(
     (New-WaitTarget -SourceImportRetryAt 600, 1500, 2400 -SourceReadyAt 10000)
 )
@@ -442,6 +461,17 @@ if ($sourceRetryCap.Passed -or $sourceRetryCap.Targets[0].Stage -ne 'SourceImpor
     $sourceRetryCap.Targets[0].VerifiedCopiedFiles -ne 0 -or
     $sourceRetryCap.Targets[0].LimitKind -ne 'OverallHardCap') {
     throw 'Source-import failures became progress, renewed the retry allowance, or bypassed Installed validation.'
+}
+$boundedSourceDiagnostics = Invoke-WaitFixture -Targets @(
+    (New-WaitTarget -PackageId 'PRI00011' -SourceImportRetryAt 600 -SourceReadyAt 10000),
+    (New-WaitTarget -PackageId 'PRI00012' -SourceImportRetryAt 600 -SourceReadyAt 10000),
+    (New-WaitTarget -PackageId 'PRI00013' -SourceImportRetryAt 600 -SourceReadyAt 10000),
+    (New-WaitTarget -PackageId 'PRI00014' -SourceImportRetryAt 600 -SourceReadyAt 10000)
+)
+if ($boundedSourceDiagnostics.SourceCaptures.Count -ne 6 -or
+    -not $boundedSourceDiagnostics.SourceDiagnosticsTruncated -or
+    ($boundedSourceDiagnostics.Details -join ' ') -notmatch 'limited to three package/version pairs') {
+    throw 'The source diagnostics did not enforce or disclose their three-package first/final capture limit.'
 }
 foreach ($ineligibleRetry in @(
         (New-WaitTarget -SourceImportRetryAt 600 -SourceReadyAt 10000 -SourceImportErrorCode 3),
@@ -571,10 +601,11 @@ if (-not $noResurrection.Targets[0].Expired -or
 & {
     $receive = 'Received package PRI00007 version 1. Compressed file - C:\SMSPKG\PRI00007.PCK.1 as C:\Site\inboxes\despoolr.box\receive\fixture.pkg $$<SMS_DESPOOLER><11-04-2026 00:01:00.000+000><thread=1234>'
     $failure = 'STATMSG: ID=4402 SEV=E ISTR0="PRI00007" NUMATTRS=1 LE=0X5 $$<SMS_DESPOOLER><11-04-2026 00:02:00.000+000><thread=1234>'
+    $rename = 'MoveFileW failed for C:\Content\FileLib\TB00000001 to C:\Content\FileLib\ABCD\ABCD' + ('A' * 60) + ' $$<SMS_DESPOOLER><11-04-2026 00:01:59.000+000><thread=1234>'
     $retry = 'Created retry instruction for job 00000001 $$<SMS_DESPOOLER><11-04-2026 00:02:00.100+000><thread=1234>'
     $fixtureLogs = @{
         'C:\FixtureSite\Logs\despool.lo_' = @($receive)
-        'C:\FixtureSite\Logs\despool.log' = @($failure, $retry)
+        'C:\FixtureSite\Logs\despool.log' = @($rename, $failure, $retry)
     }
     function Get-ItemProperty {
         param($Path, $Name, $ErrorAction)
@@ -589,6 +620,11 @@ if (-not $noResurrection.Targets[0].Expired -or
         $evidence.SourceRetries[0].FailureAtUtc -ne ([datetime]'2026-11-04T00:02:00Z').ToUniversalTime() -or
         $evidence.Starts.Count -ne 0 -or $evidence.Progress.Count -ne 0) {
         throw 'A rolled source receive and current native retry lost their exact package/version correlation or became transfer progress.'
+    }
+    if ($evidence.SourceFailures.Count -ne 1 -or
+        $evidence.SourceFailures[0].FromPath -ne 'C:\Content\FileLib\TB00000001' -or
+        $evidence.SourceFailures[0].ToPath -ne ('C:\Content\FileLib\ABCD\ABCD' + ('A' * 60))) {
+        throw 'The denied rename paths were not correlated to their exact package/version receive thread.'
     }
     $fixtureLogs['C:\FixtureSite\Logs\despool.log'] = @($failure)
     if ((Get-MemLabsOsdTransferEvidence -Details $details).SourceRetries.Count -ne 0) {

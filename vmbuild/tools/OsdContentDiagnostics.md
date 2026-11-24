@@ -111,6 +111,58 @@ package-correlated; unrelated historical startup errors are not presented as the
 package's failure. Full DP logs remain in the capture for wider investigation.
 No additional redistribution, service restart, or database repair is introduced.
 
+## Source-import diagnostics and duplicate-import protection
+
+Phase 11 captures the first observed source-import Win32 5 failure for up to
+three package/version pairs, then captures those packages again when convergence
+waiting ends. `OsdSourceImportDiagnostics.json` is saved beside the host build
+log even if validation recovers. A timestamped/run-identified cache in
+`C:\staging\DSC` is also included in ordinary site failure captures; its run ID
+and timestamps must be checked before treating a cached file as current.
+
+The snapshot records the exact package/version/thread-correlated failed rename
+paths, source/stored versions, current distribution states, file attributes,
+owner/ACL SDDL, possible local file users, and bounded Defender state/events.
+Parent FileLib metadata is retained independently. Provider calls have
+ten-second operation limits, each inventory is limited to 20 rows, and Defender
+events/exclusion paths are limited to 20 entries. Missing paths, query failures,
+unavailable probes, and truncation remain explicit. Remote content-library paths
+are recorded but not probed with potentially unbounded filesystem calls.
+
+Restart Manager observes at most 64 possible users per file. It does **not**
+identify the denying handle or its share mode; an empty result does not prove a
+file is unlocked. Both ConfigMgr components can run inside `SMS_EXECUTIVE`, so a
+filtered Process Monitor trace may still be needed to distinguish same-process
+contention from ACLs, attributes, or security software. These probes never read
+or hash the WIM payload, change permissions, terminate processes, or alter
+native retries.
+
+Phase 8 also guards work initiated by MemLabs:
+
+- Image/upgrade creation reuses existing or pending package objects instead of
+  importing again. Failed/ambiguous provider reads never authorize creation.
+  A per-source-WIM Windows mutex on the publishing VM excludes a second MemLabs
+  caller, and remains held while local source import is pending. Source
+  version zero is pending, not completed. The wait is limited to 15 minutes.
+- An unverified import blocks further imports and new distribution requests
+  for that media family in the current pass, while preserving existing targets.
+- New image/upgrade distribution requests sharing a WIM are sequenced. A
+  previously targeted counterpart is allowed to finish first; upgrades require
+  their image prerequisite to finish. The guard checks source readiness and
+  current-version Installed status on all local target DPs, including local DPs
+  outside the current OSD-client set. Each prerequisite wait is limited to
+  45 minutes; failures skip the new request visibly rather than queueing more
+  overlapping work. Targeting is rechecked after waiting.
+- Already-targeted packages are not redistributed or cancelled, even when
+  native imports are still running. Windows 10 and Windows 11 can progress
+  independently. These guards can lengthen Phase 8.
+
+The mutex coordinates MemLabs callers on one VM, not native ConfigMgr workers
+or another publisher VM. Sequencing controls **new MemLabs requests**; it cannot
+serialize work already queued by ConfigMgr, another site, or an administrator.
+Use **Phase 8** to apply the producer guards and **Phase 11** for the new evidence.
+Neither stage removes content-library files or weakens Installed validation.
+
 ## Existing-site expansion behavior
 
 Adding a DP targets the existing boot-image version instead of rebuilding the WIM

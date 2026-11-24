@@ -780,6 +780,205 @@ Write-DscStatus "$Tag Starting perfloading"
             })
     }
 
+    function Get-MemLabsOsdImportMutexName {
+        param([string]$WimPath)
+
+        $canonical = [IO.Path]::GetFullPath($WimPath).TrimEnd('\').ToUpperInvariant()
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonical))).Replace('-', '') }
+        finally { $sha.Dispose() }
+        return "Global\MemLabs_OsdImport_$key"
+    }
+
+    function Invoke-MemLabsOsdPackageImport {
+        param(
+            [ValidateSet('OperatingSystemImage', 'OperatingSystemInstaller')][string]$ContentType,
+            [string]$Name,
+            [string]$Path,
+            [string]$Version,
+            [string]$OtherContentName,
+            [string]$SiteCode,
+            [string]$StatusTag,
+            [ValidateRange(1, 2700)][int]$TimeoutSeconds = 900
+        )
+
+        $mutex = $null
+        $owned = $false
+        try {
+            $wimPath = $Path
+            if ($ContentType -eq 'OperatingSystemInstaller') { $wimPath = [IO.Path]::Combine($Path, 'sources\install.wim') }
+            $mutex = [Threading.Mutex]::new($false, (Get-MemLabsOsdImportMutexName -WimPath $wimPath))
+            try { $owned = $mutex.WaitOne(0) }
+            catch [Threading.AbandonedMutexException] {
+                $owned = $true
+                Write-DscStatus "$StatusTag An earlier OSD importer exited; rechecking provider state before importing '$Name'." -Warning
+            }
+            if (-not $owned) {
+                Write-DscStatus "$StatusTag Another MemLabs import already owns '$wimPath'; not submitting a duplicate import for '$Name'." -Warning
+                return $false
+            }
+
+            $started = Get-Date
+            $requested = $false
+            while ($true) {
+                if ($ContentType -eq 'OperatingSystemImage') {
+                    $rows = @(Get-CMOperatingSystemImage -Name $Name -ErrorAction Stop | Where-Object { $_.Name -eq $Name })
+                    $otherRows = @(Get-CMOperatingSystemUpgradePackage -Name $OtherContentName -ErrorAction Stop | Where-Object { $_.Name -eq $OtherContentName })
+                }
+                else {
+                    $rows = @(Get-CMOperatingSystemUpgradePackage -Name $Name -ErrorAction Stop | Where-Object { $_.Name -eq $Name })
+                    $otherRows = @(Get-CMOperatingSystemImage -Name $OtherContentName -ErrorAction Stop | Where-Object { $_.Name -eq $OtherContentName })
+                }
+                $localRows = @($rows | Where-Object { "$($_.PackageID)" -like "$SiteCode*" })
+                if ($localRows.Count -gt 1) { throw "Found $($localRows.Count) site-owned packages named '$Name'; refusing an ambiguous import." }
+                if ($localRows.Count -eq 1) { $rows = @($localRows[0]) }
+                elseif ($rows.Count -gt 1) {
+                    Write-DscStatus "$StatusTag '$Name' has $($rows.Count) hierarchy-owned copies; reusing '$($rows[0].PackageID)' rather than importing another copy."
+                    $rows = @($rows[0])
+                }
+                if (@($otherRows | Where-Object { "$($_.PackageID)" -like "$SiteCode*" }).Count -gt 1) {
+                    throw "The shared-WIM counterpart '$OtherContentName' has ambiguous site-owned copies."
+                }
+                $pending = @()
+                foreach ($row in @($rows) + @($otherRows)) {
+                    if ("$($row.PackageID)" -notmatch '^[A-Za-z0-9]{8}$' -or
+                        "$($row.SourceSite)" -notmatch '^[A-Za-z0-9]{3}$') {
+                        throw "Package '$($row.Name)' has unmeasured identity or source-site metadata."
+                    }
+                    if ("$($row.SourceSite)" -ine $SiteCode) { continue }
+                    $sourceVersion = 0
+                    $storedVersion = 0
+                    $action = 0
+                    if (-not [int]::TryParse("$($row.SourceVersion)", [ref]$sourceVersion) -or $sourceVersion -lt 0 -or
+                        -not [int]::TryParse("$($row.StoredPkgVersion)", [ref]$storedVersion) -or $storedVersion -lt 0 -or
+                        -not [int]::TryParse("$($row.ActionInProgress)", [ref]$action)) {
+                        throw "Package '$($row.PackageID)' has unmeasured import/version metadata."
+                    }
+                    if ($action -eq 3) { throw "Package '$($row.PackageID)' is being deleted." }
+                    if ($sourceVersion -eq 0 -or $action -ne 0 -or $storedVersion -lt $sourceVersion) {
+                        $pending += "$($row.PackageID) SourceVersion=$sourceVersion StoredPkgVersion=$storedVersion ActionInProgress=$action"
+                    }
+                }
+                if ($rows.Count -eq 1 -and $pending.Count -eq 0) {
+                    Write-DscStatus "$StatusTag Reusing $ContentType '$Name' ($($rows[0].PackageID)); no import request is needed."
+                    return $true
+                }
+                if ($rows.Count -eq 0 -and $pending.Count -eq 0 -and -not $requested) {
+                    $requested = $true
+                    if ($ContentType -eq 'OperatingSystemImage') {
+                        $null = New-CMOperatingSystemImage -Name $Name -Path $Path -Version $Version -ErrorAction Stop
+                    }
+                    else {
+                        $null = New-CMOperatingSystemInstaller -Name $Name -Path $Path -Version $Version -ErrorAction Stop
+                    }
+                    Write-DscStatus "$StatusTag Submitted one import for $ContentType '$Name'; waiting for provider readback and source readiness."
+                    continue
+                }
+                $elapsed = ((Get-Date) - $started).TotalSeconds
+                if ($elapsed -lt 0 -or $elapsed -ge $TimeoutSeconds) {
+                    throw "Import of '$Name' did not become ready within ${TimeoutSeconds}s; requested=$requested; pending=$($pending -join '; '). No additional import was submitted."
+                }
+                Write-DscStatus "$StatusTag Waiting for the existing shared-WIM import before '$Name': $($pending -join '; ')" -RetrySeconds 15
+                Start-Sleep -Seconds ([math]::Min(15, [math]::Ceiling($TimeoutSeconds - $elapsed)))
+            }
+        }
+        catch {
+            Write-DscStatus "$StatusTag OSD import for '$Name' was not verified: $($_.Exception.Message)" -Warning
+            return $false
+        }
+        finally {
+            try { if ($owned) { $mutex.ReleaseMutex() } }
+            finally { if ($mutex) { $mutex.Dispose() } }
+        }
+    }
+
+    function Test-MemLabsOsdDpIdentity {
+        param([string]$Actual, [string]$Expected)
+        if (-not $Actual -or -not $Expected) { return $false }
+        if ($Actual.Contains('.') -and $Expected.Contains('.')) { return $Actual -ieq $Expected }
+        return ($Actual -split '\.')[0] -ieq ($Expected -split '\.')[0]
+    }
+
+    function Wait-MemLabsOsdSharedWimReady {
+        param(
+            [string]$PackageId,
+            [string[]]$ExpectedDistributionPointNames,
+            [string]$SiteCode,
+            [string]$StatusTag,
+            [switch]$Required,
+            [ValidateRange(1, 2700)][int]$TimeoutSeconds = 2700
+        )
+
+        if (-not $PackageId -and -not $Required) { return $true }
+        $started = Get-Date
+        try {
+            if ($PackageId -notmatch '^[A-Za-z0-9]{8}$') { throw 'The shared-WIM prerequisite PackageID was not resolved.' }
+            $namespace = "root\SMS\site_$SiteCode"
+            while ($true) {
+                $packages = @(Get-CimInstance -Namespace $namespace -ClassName SMS_PackageBaseclass -Filter "PackageID='$PackageId'" -OperationTimeoutSec 10 -ErrorAction Stop)
+                if ($packages.Count -ne 1) { throw "Expected one shared-WIM package '$PackageId'; found $($packages.Count)." }
+                $package = $packages[0]
+                if ("$($package.PackageID)" -ine $PackageId -or "$($package.SourceSite)" -notmatch '^[A-Za-z0-9]{3}$') {
+                    throw "Shared-WIM package '$PackageId' has unmeasured identity/source metadata."
+                }
+                $sourceVersion = 0
+                $storedVersion = 0
+                $action = 0
+                if (-not [int]::TryParse("$($package.SourceVersion)", [ref]$sourceVersion) -or $sourceVersion -lt 0 -or
+                    -not [int]::TryParse("$($package.StoredPkgVersion)", [ref]$storedVersion) -or $storedVersion -lt 0 -or
+                    -not [int]::TryParse("$($package.ActionInProgress)", [ref]$action)) {
+                    throw "Shared-WIM package '$PackageId' has unmeasured source/import metadata."
+                }
+                if ($action -eq 3) { throw "Shared-WIM package '$PackageId' is being deleted." }
+                $targets = @(Get-CimInstance -Namespace $namespace -ClassName SMS_DistributionPoint -Filter "PackageID='$PackageId'" -OperationTimeoutSec 10 -ErrorAction Stop)
+                $localNames = @($targets | Where-Object { $_.SiteCode -ieq $SiteCode } |
+                    ForEach-Object { Get-MemLabsServerFromNalPath $_.ServerNALPath } | Where-Object { $_ })
+                $localNames += @($ExpectedDistributionPointNames | Where-Object {
+                        $expected = "$_"
+                        @($targets | Where-Object { Test-MemLabsOsdDpIdentity (Get-MemLabsServerFromNalPath $_.ServerNALPath) $expected }).Count -gt 0
+                    })
+                $localNames = @($localNames | Select-Object -Unique)
+                if (-not $Required -and $localNames.Count -eq 0 -and
+                    ("$($package.SourceSite)" -ine $SiteCode -or ($sourceVersion -gt 0 -and $storedVersion -ge $sourceVersion -and $action -eq 0))) {
+                    return $true
+                }
+                $wanted = @($localNames)
+                if ($Required) { $wanted += @($ExpectedDistributionPointNames) }
+                $wanted = @($wanted | Where-Object { $_ } | Select-Object -Unique)
+                $statusRows = @(Get-CimInstance -Namespace $namespace -ClassName SMS_PackageStatusDistPointsSummarizer -Filter "PackageID='$PackageId'" -OperationTimeoutSec 10 -ErrorAction Stop)
+                $waiting = @()
+                foreach ($name in $wanted) {
+                    $status = @($statusRows | Where-Object { Test-MemLabsOsdDpIdentity (Get-MemLabsServerFromNalPath $_.ServerNALPath) $name })
+                    if ($status.Count -gt 1) { throw "Ambiguous distribution status for '$PackageId' on '$name'." }
+                    if ($status.Count -eq 0) { $waiting += "$name status unmeasured"; continue }
+                    $distributionState = -1
+                    $dpVersion = 0
+                    if (-not [int]::TryParse("$($status[0].State)", [ref]$distributionState) -or
+                        -not [int]::TryParse("$($status[0].SourceVersion)", [ref]$dpVersion)) {
+                        throw "Unmeasured distribution state/version for '$PackageId' on '$name'."
+                    }
+                    if ($distributionState -notin 0, 1, 2, 7) { throw "Shared-WIM package '$PackageId' is in problem state $distributionState on '$name'." }
+                    if ($distributionState -ne 0 -or $dpVersion -ne $sourceVersion) { $waiting += "$name State=$distributionState SourceVersion=$dpVersion" }
+                }
+                if ($sourceVersion -eq 0 -or $storedVersion -lt $sourceVersion -or $action -ne 0) {
+                    $waiting += "source StoredPkgVersion=$storedVersion SourceVersion=$sourceVersion ActionInProgress=$action"
+                }
+                if ($waiting.Count -eq 0) {
+                    Write-DscStatus "$StatusTag Shared-WIM package '$PackageId' has finished source import and distribution to this site's target DPs."
+                    return $true
+                }
+                $elapsed = ((Get-Date) - $started).TotalSeconds
+                if ($elapsed -lt 0 -or $elapsed -ge $TimeoutSeconds) { throw "Shared-WIM package '$PackageId' is still busy after ${TimeoutSeconds}s: $($waiting -join '; ')" }
+                Write-DscStatus "$StatusTag Deferring another shared-WIM distribution request until '$PackageId' completes: $($waiting -join '; ')" -RetrySeconds 15
+                Start-Sleep -Seconds ([math]::Min(15, [math]::Ceiling($TimeoutSeconds - $elapsed)))
+            }
+        }
+        catch {
+            Write-DscStatus "$StatusTag Not starting overlapping shared-WIM distribution: $($_.Exception.Message)" -Warning
+            return $false
+        }
+    }
+
     function Sync-MemLabsOsdContentDistribution {
         param(
             [ValidateSet('Package', 'OperatingSystemImage', 'OperatingSystemInstaller')]
@@ -791,7 +990,9 @@ Write-DscStatus "$Tag Starting perfloading"
             [string] $SiteCode,
             [string] $StatusTag,
             [int] $Attempts = 6,
-            [int] $RetrySeconds = 5
+            [int] $RetrySeconds = 5,
+            [string] $SharedWimPackageId,
+            [switch] $RequireSharedWimCompletion
         )
 
         if (-not $PackageId) {
@@ -814,6 +1015,25 @@ Write-DscStatus "$Tag Starting perfloading"
         if ($missingNames.Count -eq 0) {
             Write-DscStatus "$StatusTag $ContentType '$ContentName' ($PackageId) is already targeted to every OSD DP -- skipping distribution request"
             return $true
+        }
+        if (($SharedWimPackageId -or $RequireSharedWimCompletion) -and
+            -not (Wait-MemLabsOsdSharedWimReady -PackageId $SharedWimPackageId `
+                -ExpectedDistributionPointNames $expectedNames -SiteCode $SiteCode -StatusTag $StatusTag `
+                -Required:$RequireSharedWimCompletion)) {
+            return $false
+        }
+        if ($SharedWimPackageId -or $RequireSharedWimCompletion) {
+            try {
+                $missingNames = @(Get-MemLabsMissingContentTargets -PackageId $PackageId -ExpectedDistributionPointNames $expectedNames -SiteCode $SiteCode)
+            }
+            catch {
+                Write-DscStatus "$StatusTag Could not recheck '$PackageId' after waiting for shared-WIM work: $($_.Exception.Message)" -Warning
+                return $false
+            }
+            if ($missingNames.Count -eq 0) {
+                Write-DscStatus "$StatusTag '$PackageId' became targeted while waiting; no duplicate distribution request was submitted."
+                return $true
+            }
         }
 
         $distributionError = $null
@@ -2347,47 +2567,22 @@ Write-DscStatus "$Tag Starting perfloading"
     }
     else {
 
-    #get OS upgrade package (guard existence so a re-run doesn't throw
-    # "An object with the specified name already exists" -- mirrors the OS
-    # image block below. Get-CMOperatingSystemUpgradePackage is the read-side
-    # cmdlet for the upgrade packages New-CMOperatingSystemInstaller creates.)
-    try {
-        $upgradePackageSpecs = @(
-            @{ Name = "Windows 11 upgrade"; Path = "\\$ThisMachineName\OSD\Windows 11 24h2"; Version = "10.0.26100" },
-            @{ Name = "Windows 10 upgrade"; Path = "\\$ThisMachineName\OSD\Windows 10 22h2"; Version = "10.0.19041" }
-        )
-        foreach ($upgradePackageSpec in $upgradePackageSpecs) {
-            if (Get-CMOperatingSystemUpgradePackage -Name $upgradePackageSpec.Name) {
-                Write-DscStatus "$Tag OS upgrade package '$($upgradePackageSpec.Name)' already exists -- skipping creation"
-            }
-            else {
-                New-CMOperatingSystemInstaller -Name $upgradePackageSpec.Name -Path $upgradePackageSpec.Path -Version $upgradePackageSpec.Version
-                Write-DscStatus "$Tag Created OS upgrade package '$($upgradePackageSpec.Name)'"
-            }
+    $osdMediaImports = @(
+        @{ Type = 'OperatingSystemInstaller'; Name = 'Windows 11 upgrade'; Other = 'Windows 11'; Media = 'Win11'; Path = "\\$ThisMachineName\OSD\Windows 11 24h2"; Version = '10.0.26100' },
+        @{ Type = 'OperatingSystemInstaller'; Name = 'Windows 10 upgrade'; Other = 'Windows 10'; Media = 'Win10'; Path = "\\$ThisMachineName\OSD\Windows 10 22h2"; Version = '10.0.19041' },
+        @{ Type = 'OperatingSystemImage'; Name = 'Windows 11'; Other = 'Windows 11 upgrade'; Media = 'Win11'; Path = "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim"; Version = '10.0.26100' },
+        @{ Type = 'OperatingSystemImage'; Name = 'Windows 10'; Other = 'Windows 10 upgrade'; Media = 'Win10'; Path = "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim"; Version = '10.0.19041' }
+    )
+    $unverifiedOsdMedia = @{}
+    foreach ($media in $osdMediaImports) {
+        if ($unverifiedOsdMedia.ContainsKey($media.Media)) {
+            Write-DscStatus "$Tag Not submitting another '$($media.Media)' import after an unverified import of the same WIM." -Warning
+            continue
         }
-    }
-    catch {
-        Write-DscStatus "$Tag WARNING: Failed to create OS upgrade packages: $_"
-    }
-
-    #get OS package
-    try {
-        $osImageSpecs = @(
-            @{ Name = "Windows 11"; Path = "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim"; Version = "10.0.26100" },
-            @{ Name = "Windows 10"; Path = "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim"; Version = "10.0.19041" }
-        )
-        foreach ($osImageSpec in $osImageSpecs) {
-            if (Get-CMOperatingSystemImage -Name $osImageSpec.Name) {
-                Write-DscStatus "$Tag OS image '$($osImageSpec.Name)' already exists -- skipping creation"
-            }
-            else {
-                New-CMOperatingSystemImage -Name $osImageSpec.Name -Path $osImageSpec.Path -Version $osImageSpec.Version
-                Write-DscStatus "$Tag Created OS image '$($osImageSpec.Name)'"
-            }
+        if (-not (Invoke-MemLabsOsdPackageImport -ContentType $media.Type -Name $media.Name -OtherContentName $media.Other `
+                    -Path $media.Path -Version $media.Version -SiteCode $SiteCode -StatusTag $Tag)) {
+            $unverifiedOsdMedia[$media.Media] = $true
         }
-    }
-    catch {
-        Write-DscStatus "$Tag WARNING: Failed to create OS image packages: $_"
     }
 
     # Every site in a hierarchy has its own same-named client/USMT/OS content, so a bare
@@ -2420,15 +2615,34 @@ Write-DscStatus "$Tag Starting perfloading"
     # and recreating otherwise healthy task sequences.
     if ($hasOsdTargets) {
         $osdContentSpecs = @(
-            [pscustomobject]@{ Type = 'Package'; Id = $UserStateMigrationToolPackageId; Name = 'User State Migration Tool' }
-            [pscustomobject]@{ Type = 'OperatingSystemImage'; Id = $win11OSimagepackageID; Name = 'Windows 11' }
-            [pscustomobject]@{ Type = 'OperatingSystemImage'; Id = $win10OSimagepackageID; Name = 'Windows 10' }
-            [pscustomobject]@{ Type = 'OperatingSystemInstaller'; Id = $win11UpgradePackageID; Name = 'Windows 11 upgrade' }
-            [pscustomobject]@{ Type = 'OperatingSystemInstaller'; Id = $win10UpgradePackageID; Name = 'Windows 10 upgrade' }
+            [pscustomobject]@{ Type = 'Package'; Id = $UserStateMigrationToolPackageId; Name = 'User State Migration Tool'; SharedWim = ''; Media = '' }
+            [pscustomobject]@{ Type = 'OperatingSystemImage'; Id = $win11OSimagepackageID; Name = 'Windows 11'; SharedWim = $win11UpgradePackageID; Media = 'Win11' }
+            [pscustomobject]@{ Type = 'OperatingSystemImage'; Id = $win10OSimagepackageID; Name = 'Windows 10'; SharedWim = $win10UpgradePackageID; Media = 'Win10' }
+            [pscustomobject]@{ Type = 'OperatingSystemInstaller'; Id = $win11UpgradePackageID; Name = 'Windows 11 upgrade'; SharedWim = $win11OSimagepackageID; Media = 'Win11' }
+            [pscustomobject]@{ Type = 'OperatingSystemInstaller'; Id = $win10UpgradePackageID; Name = 'Windows 10 upgrade'; SharedWim = $win10OSimagepackageID; Media = 'Win10' }
         )
         $osdContentTargetFailures = @()
+        $osdContentTargetResults = @{}
         foreach ($osdContentSpec in $osdContentSpecs) {
-            $targeted = Sync-MemLabsOsdContentDistribution -ContentType $osdContentSpec.Type -PackageId $osdContentSpec.Id -ContentName $osdContentSpec.Name -DistributionPointGroupName $osdDistTarget -ExpectedDistributionPointNames $osdDpFqdns -SiteCode $SiteCode -StatusTag $Tag
+            $targeted = $false
+            if ($osdContentSpec.Media -and $unverifiedOsdMedia.ContainsKey($osdContentSpec.Media)) {
+                try {
+                    if ($osdContentSpec.Id) {
+                        $targeted = @(Get-MemLabsMissingContentTargets -PackageId $osdContentSpec.Id -ExpectedDistributionPointNames $osdDpFqdns -SiteCode $SiteCode).Count -eq 0
+                    }
+                    Write-DscStatus "$Tag Import state for '$($osdContentSpec.Media)' is unverified; retaining existing targeting but not submitting new distribution for '$($osdContentSpec.Name)'." -Warning
+                }
+                catch { Write-DscStatus "$Tag Could not verify existing targeting after the import guard blocked '$($osdContentSpec.Name)': $($_.Exception.Message)" -Warning }
+            }
+            elseif ($osdContentSpec.SharedWim -and $osdContentTargetResults.ContainsKey($osdContentSpec.SharedWim) -and
+                -not $osdContentTargetResults[$osdContentSpec.SharedWim]) {
+                Write-DscStatus "$Tag Not targeting '$($osdContentSpec.Name)' after unverified targeting of its shared-WIM package '$($osdContentSpec.SharedWim)'." -Warning
+            }
+            else {
+                $targeted = Sync-MemLabsOsdContentDistribution -ContentType $osdContentSpec.Type -PackageId $osdContentSpec.Id -ContentName $osdContentSpec.Name -DistributionPointGroupName $osdDistTarget -ExpectedDistributionPointNames $osdDpFqdns -SiteCode $SiteCode -StatusTag $Tag `
+                    -SharedWimPackageId $osdContentSpec.SharedWim -RequireSharedWimCompletion:($osdContentSpec.Type -eq 'OperatingSystemInstaller')
+            }
+            if ($osdContentSpec.Id) { $osdContentTargetResults[$osdContentSpec.Id] = $targeted }
             if (-not $targeted) { $osdContentTargetFailures += "$($osdContentSpec.Id) '$($osdContentSpec.Name)'" }
         }
         if ($osdContentTargetFailures.Count -eq 0) {

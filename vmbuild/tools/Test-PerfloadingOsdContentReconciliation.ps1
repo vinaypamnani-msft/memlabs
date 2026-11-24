@@ -270,3 +270,208 @@ if (($script:DistributionCalls -join ',') -ne 'PRI00002,PRI00003,PRI00004,PRI000
 }
 
 Write-Host "PASS -- per-package commands=$($distributionCommands.Count), already-targeted skip=1, positive-readback recovery=1, provider failures continued=2, target-read failure isolated=1"
+
+& {
+    foreach ($name in @('Get-MemLabsOsdImportMutexName', 'Invoke-MemLabsOsdPackageImport', 'Test-MemLabsOsdDpIdentity', 'Wait-MemLabsOsdSharedWimReady')) {
+        $definition = @($ast.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+                }, $true))
+        if ($definition.Count -ne 1) { throw "Expected one $name helper." }
+        . ([scriptblock]::Create($definition[0].Extent.Text))
+    }
+    $state = @{
+        Seconds = 0; Rows = @(); NewCalls = 0; NewAt = -1; ReadFails = $false
+        NewFails = $false; DistributionCalls = 0; TargetSecond = $false; AutoTargetAt = -1
+        SourceReadyAt = 30; DpReadyAt = 60; ExtraDpReadyAt = 90; StatusVersion = 1; StatusState = 1
+        FailClass = ''; Messages = [System.Collections.Generic.List[string]]::new()
+    }
+    $base = [datetime]'2026-11-24T00:00:00Z'
+    function Get-Date { $base.AddSeconds($state.Seconds) }
+    function Start-Sleep {
+        param($Seconds)
+        $state.Seconds += $Seconds
+        if ($state.Seconds -gt 180) { throw 'Import fixture exceeded its bounded wait.' }
+    }
+    function Write-DscStatus {
+        param($Message, [switch]$Warning, $RetrySeconds)
+        $state.Messages.Add("$Message")
+    }
+    function Read-ImportFixture {
+        param($Name)
+        if ($state.ReadFails) { throw 'fixture provider read denied' }
+        foreach ($row in @($state.Rows | Where-Object { $_.Name -eq $Name })) {
+            $stored = 0; $action = 2; $version = 0
+            if ($state.Seconds -ge $row.ReadyAt) { $stored = 1; $action = 0; $version = 1 }
+            $sourceSite = 'PRI'
+            if ($row.PSObject.Properties['SourceSite']) { $sourceSite = $row.SourceSite }
+            [pscustomobject]@{
+                Name = $Name; PackageID = $row.PackageID; SourceSite = $sourceSite
+                SourceVersion = $version; StoredPkgVersion = $stored; ActionInProgress = $action
+            }
+        }
+    }
+    function Get-CMOperatingSystemUpgradePackage { param($Name, $ErrorAction) Read-ImportFixture $Name }
+    function Get-CMOperatingSystemImage { param($Name, $ErrorAction) Read-ImportFixture $Name }
+    function New-CMOperatingSystemImage {
+        param($Name, $Path, $Version, $ErrorAction)
+        $state.NewCalls++; $state.NewAt = $state.Seconds
+        $state.Rows += [pscustomobject]@{ Name = $Name; PackageID = 'PRI00007'; ReadyAt = $state.Seconds + 30 }
+        if ($state.NewFails) { throw 'fixture accepted import but response failed' }
+    }
+    function New-CMOperatingSystemInstaller {
+        param($Name, $Path, $Version, $ErrorAction)
+        New-CMOperatingSystemImage @PSBoundParameters
+    }
+    $import = @{
+        ContentType = 'OperatingSystemImage'; Name = 'Windows 11'; OtherContentName = 'Windows 11 upgrade'
+        Path = "\\fixture-$([guid]::NewGuid().ToString('N'))\OSD\Windows 11\sources\install.wim"
+        Version = '10.0.26100'; SiteCode = 'PRI'; StatusTag = '[fixture]'; TimeoutSeconds = 120
+    }
+    $state.Rows = @([pscustomobject]@{ Name = 'Windows 11'; PackageID = 'PRI00007'; ReadyAt = 30 })
+    if (-not (Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0 -or $state.Seconds -ne 30) {
+        throw 'An existing pending import was resubmitted or its zero source version was not treated as pending.'
+    }
+    $state.Seconds = 0; $state.Rows = @()
+    if (-not (Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 1 -or $state.Seconds -ne 30) {
+        throw 'A new import was not requested exactly once and verified asynchronously.'
+    }
+    $state.Seconds = 0; $state.NewCalls = 0
+    $state.Rows = @([pscustomobject]@{ Name = 'Windows 11 upgrade'; PackageID = 'PRI00004'; ReadyAt = 30 })
+    if (-not (Invoke-MemLabsOsdPackageImport @import) -or $state.NewAt -ne 30 -or $state.NewCalls -ne 1) {
+        throw 'An image import overlapped an existing upgrade import of its WIM.'
+    }
+    $state.Seconds = 0; $state.Rows = @(); $state.NewCalls = 0; $state.ReadFails = $true
+    if ((Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0) { throw 'A failed existence query became permission to import.' }
+    $state.ReadFails = $false; $state.NewFails = $true
+    if ((Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 1) { throw 'An uncertain creation response was blindly retried.' }
+    $state.NewFails = $false
+    $state.NewCalls = 0; $state.Seconds = 0
+    $state.Rows = @(
+        [pscustomobject]@{ Name = 'Windows 11'; PackageID = 'SRC00007'; SourceSite = 'SRC'; ReadyAt = 0 },
+        [pscustomobject]@{ Name = 'Windows 11'; PackageID = 'PRI00007'; SourceSite = 'PRI'; ReadyAt = 0 }
+    )
+    if (-not (Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0) {
+        throw 'A healthy unique site-owned package was rejected because another site owns a same-named copy.'
+    }
+    $state.Rows = @(
+        [pscustomobject]@{ Name = 'Windows 11'; PackageID = 'SRC00007'; SourceSite = 'SRC'; ReadyAt = 0 },
+        [pscustomobject]@{ Name = 'Windows 11'; PackageID = 'OTH00007'; SourceSite = 'OTH'; ReadyAt = 0 }
+    )
+    if (-not (Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0) {
+        throw 'The existing hierarchy-owned fallback stopped reusing a multi-site catalog.'
+    }
+    $state.Rows = @(
+        [pscustomobject]@{ Name = 'Windows 11'; PackageID = 'PRI00007'; ReadyAt = 0 },
+        [pscustomobject]@{ Name = 'Windows 11'; PackageID = 'PRI00008'; ReadyAt = 0 }
+    )
+    if ((Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0) {
+        throw 'Genuinely ambiguous local packages authorized another import.'
+    }
+    if (-not ('MemLabsOsdImportLockFixture' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Threading;
+public sealed class MemLabsOsdImportLockFixture : IDisposable {
+    readonly ManualResetEvent ready = new ManualResetEvent(false), release = new ManualResetEvent(false);
+    readonly Thread thread;
+    public MemLabsOsdImportLockFixture(string name) {
+        thread = new Thread(delegate() {
+            using (Mutex mutex = new Mutex(false, name)) {
+                mutex.WaitOne(); ready.Set();
+                try { release.WaitOne(); } finally { mutex.ReleaseMutex(); }
+            }
+        });
+        thread.IsBackground = true; thread.Start();
+        if (!ready.WaitOne(5000)) { release.Set(); throw new Exception("Fixture lease did not become ready"); }
+    }
+    public void Dispose() {
+        release.Set();
+        if (!thread.Join(5000)) throw new Exception("Fixture lease did not stop");
+        ready.Dispose(); release.Dispose();
+    }
+}
+'@ -ErrorAction Stop
+    }
+    $holder = [MemLabsOsdImportLockFixture]::new((Get-MemLabsOsdImportMutexName -WimPath $import.Path))
+    try {
+        $state.NewCalls = 0; $state.Rows = @()
+        if ((Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0) { throw 'Concurrent MemLabs callers both submitted an import.' }
+    }
+    finally { $holder.Dispose() }
+
+    function Get-WmiObject {
+        param($Namespace, $Class, $Filter, $ErrorAction)
+        if ($Class -eq $state.FailClass) { throw 'fixture shared-WIM provider read failed' }
+        if ($Filter -notmatch "PackageID='([^']+)'") { throw "Unexpected filter: $Filter" }
+        $id = $Matches[1]
+        if ($Class -eq 'SMS_PackageBaseclass') {
+            $stored = 0
+            if ($state.Seconds -ge $state.SourceReadyAt) { $stored = 1 }
+            return [pscustomobject]@{ PackageID = $id; SourceSite = 'SRC'; SourceVersion = 1; StoredPkgVersion = $stored; ActionInProgress = 0 }
+        }
+        if ($Class -eq 'SMS_DistributionPoint') {
+            if ($id -eq 'PRI00002') {
+                if ($state.TargetSecond -or ($state.AutoTargetAt -ge 0 -and $state.Seconds -ge $state.AutoTargetAt)) {
+                    [pscustomobject]@{ SiteCode = 'PRI'; ServerNALPath = '\\OSD-DP.memlabs.test\' }
+                }
+                return
+            }
+            [pscustomobject]@{ SiteCode = 'PRI'; ServerNALPath = '\\OSD-DP.memlabs.test\' }
+            [pscustomobject]@{ SiteCode = 'PRI'; ServerNALPath = '\\EXTRA-DP.memlabs.test\' }
+            return
+        }
+        if ($Class -eq 'SMS_PackageStatusDistPointsSummarizer') {
+            foreach ($dp in @('OSD-DP', 'EXTRA-DP')) {
+                $readyAt = $state.DpReadyAt
+                if ($dp -eq 'EXTRA-DP') { $readyAt = $state.ExtraDpReadyAt }
+                $number = $state.StatusState
+                if ($state.Seconds -ge $readyAt) { $number = 0 }
+                [pscustomobject]@{ ServerNALPath = "\\$dp.memlabs.test\"; State = $number; SourceVersion = $state.StatusVersion }
+            }
+            return
+        }
+        throw "Unexpected class: $Class"
+    }
+    function Start-CMContentDistribution {
+        param($OperatingSystemInstallerId, $OperatingSystemImageId, $PackageId, $DistributionPointGroupName, $ErrorAction)
+        $state.DistributionCalls++; $state.TargetSecond = $true
+    }
+    function Get-CimInstance {
+        param($Namespace, $ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
+        if ($OperationTimeoutSec -ne 10) { throw 'Shared-WIM provider checks must have an operation timeout.' }
+        Get-WmiObject -Namespace $Namespace -Class $ClassName -Filter $Filter -ErrorAction $ErrorAction
+    }
+    $gate = @{
+        PackageId = 'PRI00001'; ExpectedDistributionPointNames = @('OSD-DP.memlabs.test')
+        SiteCode = 'PRI'; StatusTag = '[fixture]'; Required = $true; TimeoutSeconds = 120
+    }
+    $state.Seconds = 0
+    if (-not (Wait-MemLabsOsdSharedWimReady @gate) -or $state.Seconds -ne 90) {
+        throw 'Shared-WIM delivery proceeded before source readiness and every local target DP finished.'
+    }
+    $state.Seconds = 0; $state.StatusVersion = 0
+    $gate.TimeoutSeconds = 30
+    if (Wait-MemLabsOsdSharedWimReady @gate) { throw 'Installed status for an old package version bypassed the guard.' }
+    $state.StatusVersion = 1; $state.FailClass = 'SMS_PackageStatusDistPointsSummarizer'
+    if (Wait-MemLabsOsdSharedWimReady @gate) { throw 'An unmeasured prerequisite authorized distribution.' }
+    $sync = @{
+        ContentType = 'OperatingSystemInstaller'; PackageId = 'PRI00002'; ContentName = 'upgrade'
+        DistributionPointGroupName = 'OSD DPS'; ExpectedDistributionPointNames = @('OSD-DP.memlabs.test')
+        SiteCode = 'PRI'; StatusTag = '[fixture]'; SharedWimPackageId = 'PRI00001'; RequireSharedWimCompletion = $true
+        Attempts = 1; RetrySeconds = 0
+    }
+    if ((Sync-MemLabsOsdContentDistribution @sync) -or $state.DistributionCalls -ne 0) {
+        throw 'A prerequisite read failure still submitted shared-WIM distribution.'
+    }
+    $state.TargetSecond = $true; $state.FailClass = 'SMS_PackageBaseclass'
+    if (-not (Sync-MemLabsOsdContentDistribution @sync) -or $state.DistributionCalls -ne 0) {
+        throw 'An already targeted package was re-requested or blocked by unrelated prerequisite state.'
+    }
+    $state.TargetSecond = $false; $state.FailClass = ''; $state.Seconds = 0; $state.AutoTargetAt = 90
+    if (-not (Sync-MemLabsOsdContentDistribution @sync) -or $state.DistributionCalls -ne 0) {
+        throw 'Targeting that appeared during the wait was requested a second time.'
+    }
+    if (($state.Messages -join ' ') -notmatch 'not submitting a duplicate import|not verified') { throw 'Import guard failures were not surfaced.' }
+}
+Write-Host 'PASS -- pending imports reused, source-WIM mutex excludes a second caller, provider errors fail closed, and shared-WIM delivery waits for current-version installation.'

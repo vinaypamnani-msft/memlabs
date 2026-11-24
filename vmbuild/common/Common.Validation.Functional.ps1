@@ -9238,12 +9238,13 @@ function Save-Phase11GuestLogs {
         logs without hand-running commands against the VM. Best-effort and
         non-fatal. Returns the List of host paths written (may be empty).
     #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'Collect')]
     param(
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][string]$DomainName,
         [Parameter(Mandatory)][string]$RoleLabel,
-        [Parameter(Mandatory)][scriptblock]$Collector,
+        [Parameter(Mandatory, ParameterSetName = 'Collect')][scriptblock]$Collector,
+        [Parameter(Mandatory, ParameterSetName = 'Captured')][hashtable]$CollectedContent,
         [int]$TimeoutSeconds = 150
     )
 
@@ -9256,6 +9257,10 @@ function Save-Phase11GuestLogs {
         return $saved
     }
 
+    if ($PSCmdlet.ParameterSetName -eq 'Captured') {
+        $res = [pscustomobject]@{ ScriptBlockFailed = $false; ScriptBlockOutput = $CollectedContent }
+    }
+    else {
     try {
         $res = Invoke-VmCommand -VmName $VMName -VmDomainName $DomainName -ScriptBlock $Collector `
             -SuppressLog -AsJob -TimeoutSeconds $TimeoutSeconds -DisplayName "Pull $RoleLabel logs"
@@ -9263,6 +9268,7 @@ function Save-Phase11GuestLogs {
     catch {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: log capture PSDirect call threw: $($_.Exception.Message)" -Warning -LogOnly
         return $saved
+    }
     }
     if (-not $res -or $res.ScriptBlockFailed -or -not ($res.ScriptBlockOutput -is [hashtable]) -or $res.ScriptBlockOutput.Count -eq 0) {
         # This used to collapse four very different causes into one useless string.
@@ -9300,7 +9306,8 @@ function Save-Phase11GuestLogs {
         try {
             Set-Content -LiteralPath $dest -Value $content -Encoding UTF8 -ErrorAction Stop
             $kb = [math]::Round(([System.Text.Encoding]::UTF8.GetByteCount($content)) / 1KB, 1)
-            Add-Phase11Output "[Phase $Phase] $VMName [$RoleLabel]: Pulled $name (${kb}KB tail) -> $dest"
+            $verb = if ($PSCmdlet.ParameterSetName -eq 'Captured') { 'Saved' } else { 'Pulled' }
+            Add-Phase11Output "[Phase $Phase] $VMName [$RoleLabel]: $verb $name (${kb}KB tail) -> $dest"
             $saved.Add($dest)
         }
         catch {
@@ -9726,7 +9733,7 @@ $Phase11SmsSiteLogCollector = {
         $diag += "NONE of the site-server logs exist under '$smsDir\Logs'. This VM is a remote DP/site system, not a site server -- the logs that explain ITS content state are under ?:\SMS_DP`$\sms\logs (see the DpContent capture)."
     }
 
-    foreach ($name in @('InstallCMLog.log', 'DSC_Log.log', 'DSC_Status.txt')) {
+    foreach ($name in @('InstallCMLog.log', 'DSC_Log.log', 'DSC_Status.txt', 'OsdSourceImportDiagnostics.json')) {
         $path = "C:\staging\DSC\$name"
         try {
             $file = Get-Item -LiteralPath $path -ErrorAction Stop
@@ -14191,6 +14198,177 @@ function Test-CMSiteWideFunctionality {
             return 'Problem'
         }
 
+        function Get-MemLabsOsdFileUsers {
+            param([Parameter(Mandatory)][string]$Path)
+
+            if (-not ('MemLabs.OsdFileUsers' -as [type])) {
+                Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace MemLabs {
+    public static class OsdFileUsers {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct UniqueProcess {
+            public int ProcessId;
+            public System.Runtime.InteropServices.ComTypes.FILETIME StartTime;
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct ProcessInfo {
+            public UniqueProcess Process;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string Application;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string Service;
+            public uint ApplicationType, Status, SessionId;
+            [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+        }
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmStartSession(out uint session, int flags, StringBuilder key);
+        [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+        private static extern int RmRegisterResources(uint session, uint files, string[] paths, uint apps, IntPtr processes, uint services, IntPtr names);
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmGetList(uint session, out uint needed, ref uint count, [In, Out] ProcessInfo[] processes, ref uint reasons);
+        [DllImport("rstrtmgr.dll")]
+        private static extern int RmEndSession(uint session);
+        public static ProcessInfo[] Get(string path) {
+            uint session;
+            int code = RmStartSession(out session, 0, new StringBuilder(33));
+            if (code != 0) throw new Win32Exception(code, "RmStartSession failed");
+            int closeCode = 0;
+            string stage = "RmRegisterResources";
+            ProcessInfo[] data = null;
+            uint count = 0, needed = 0, reasons = 0;
+            try {
+                code = RmRegisterResources(session, 1, new string[] { path }, 0, IntPtr.Zero, 0, IntPtr.Zero);
+                if (code == 0) {
+                    stage = "RmGetList (at most 64 possible users, three attempts)";
+                    for (int attempt = 0; attempt < 3; attempt++) {
+                        code = RmGetList(session, out needed, ref count, data, ref reasons);
+                        if (code != 234) break;
+                        if (needed > 64) break;
+                        count = needed;
+                        data = new ProcessInfo[count];
+                    }
+                }
+            }
+            finally { closeCode = RmEndSession(session); }
+            if (code != 0 || closeCode != 0)
+                throw new Win32Exception(code != 0 ? code : closeCode, stage + " returned " + code + "; RmEndSession returned " + closeCode);
+            if (data == null) return new ProcessInfo[0];
+            Array.Resize(ref data, (int)count);
+            return data;
+        }
+    }
+}
+'@
+            }
+            foreach ($user in @([MemLabs.OsdFileUsers]::Get($Path))) {
+                $fileTime = ([long]$user.Process.StartTime.dwHighDateTime -shl 32) -bor ([long]$user.Process.StartTime.dwLowDateTime -band 4294967295)
+                [pscustomobject]@{
+                    ProcessId = $user.Process.ProcessId
+                    ProcessStartedAtUtc = [datetime]::FromFileTimeUtc($fileTime).ToString('o')
+                    Application = $user.Application
+                    Service = $user.Service
+                }
+            }
+        }
+
+        function Get-MemLabsOsdSourceImportSnapshot {
+            param(
+                [Parameter(Mandatory)]$Failure,
+                [Parameter(Mandatory)][string]$Namespace,
+                [string]$Observation = 'FailureObserved'
+            )
+
+            $snapshot = [ordered]@{
+                CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+                ComputerName = $env:COMPUTERNAME
+                Observation = $Observation
+                PackageId = $Failure.PackageId
+                SourceVersion = $Failure.SourceVersion
+                FailureAtUtc = $Failure.AtUtc.ToString('o')
+                Win32Error = $Failure.ErrorCode
+                FromPath = $Failure.FromPath
+                ToPath = $Failure.ToPath
+                SourcePackage = @()
+                Distribution = @()
+                Paths = @()
+                FileUserCaveat = 'Restart Manager lists possible local users, not proven blocking handles or share modes. Zero users does not prove a file is unlocked.'
+                Defender = [ordered]@{}
+                Errors = @()
+            }
+            foreach ($probe in @(
+                    @{ Class = 'SMS_PackageBaseclass'; Field = 'SourcePackage'; Properties = @('PackageID', 'SourceSite', 'SourceVersion', 'StoredPkgVersion', 'ActionInProgress') },
+                    @{ Class = 'SMS_PackageStatusDistPointsSummarizer'; Field = 'Distribution'; Properties = @('PackageID', 'SiteCode', 'State', 'SourceVersion', 'ServerNALPath') }
+                )) {
+                try {
+                    $rows = @(Get-CimInstance -Namespace $Namespace -ClassName $probe.Class -Filter "PackageID='$($Failure.PackageId)'" -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 21)
+                    if ($rows.Count -gt 20) { $snapshot.Errors += "$($probe.Class) truncated to 20 rows." }
+                    if ($probe.Field -eq 'SourcePackage' -and $rows.Count -ne 1) { $snapshot.Errors += "Source package metadata was not uniquely measured; found $($rows.Count) rows." }
+                    $snapshot[$probe.Field] = @($rows | Select-Object -First 20 -Property $probe.Properties)
+                }
+                catch { $snapshot.Errors += "$($probe.Class): $($_.Exception.Message)" }
+            }
+            $destination = [regex]::Match("$($Failure.ToPath)", '^(?<Root>[A-Za-z]:\\.+\\FileLib)\\(?<Prefix>[A-Fa-f0-9]{4})\\(?<Hash>[A-Fa-f0-9]{64})$')
+            if (-not $destination.Success -or
+                $destination.Groups['Hash'].Value.Substring(0, 4) -ine $destination.Groups['Prefix'].Value -or
+                [IO.Path]::GetDirectoryName("$($Failure.FromPath)") -ine $destination.Groups['Root'].Value) {
+                $snapshot.Errors += 'No correlated local FileLib rename paths were measured; file metadata and file users were not probed.'
+                return [pscustomobject]$snapshot
+            }
+            $filePaths = @("$($Failure.FromPath)", "$($Failure.ToPath)")
+            $paths = @($filePaths + @([IO.Path]::GetDirectoryName("$($Failure.ToPath)"), $destination.Groups['Root'].Value) | Select-Object -Unique)
+            foreach ($path in $paths) {
+                $state = [ordered]@{ Path = $path; Exists = $null; Attributes = ''; Length = $null; ModifiedUtc = $null; Owner = ''; Sddl = ''; UsersMeasured = $false; PossibleUsers = @(); Errors = @() }
+                try {
+                    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                    $state.Exists = $true
+                    $state.Attributes = "$($item.Attributes)"
+                    if (-not $item.PSIsContainer) { $state.Length = $item.Length }
+                    $state.ModifiedUtc = $item.LastWriteTimeUtc.ToString('o')
+                    try {
+                        $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+                        $state.Owner = "$($acl.Owner)"
+                        $state.Sddl = "$($acl.Sddl)"
+                    }
+                    catch { $state.Errors += "ACL: $($_.Exception.Message)" }
+                    if ($path -in $filePaths) {
+                        try {
+                            $state.PossibleUsers = @(Get-MemLabsOsdFileUsers -Path $path)
+                            $state.UsersMeasured = $true
+                        }
+                        catch { $state.Errors += "Possible local file users: $($_.Exception.Message)" }
+                    }
+                }
+                catch [Management.Automation.ItemNotFoundException] { $state.Exists = $false }
+                catch { $state.Errors += "Metadata: $($_.Exception.Message)" }
+                $snapshot.Paths += [pscustomobject]$state
+            }
+            try {
+                $status = Get-MpComputerStatus -ErrorAction Stop
+                $snapshot.Defender.Status = $status | Select-Object AMRunningMode, AntivirusEnabled, RealTimeProtectionEnabled, AMProductVersion
+                $preferences = Get-MpPreference -ErrorAction Stop
+                $snapshot.Defender.ExclusionPaths = @($preferences.ExclusionPath | Select-Object -First 20)
+                $snapshot.Defender.ExclusionPathsTruncated = @($preferences.ExclusionPath).Count -gt 20
+            }
+            catch { $snapshot.Errors += "Defender state: $($_.Exception.Message)" }
+            try {
+                $events = @(Get-WinEvent -FilterHashtable @{
+                        LogName = 'Microsoft-Windows-Windows Defender/Operational'
+                        StartTime = $Failure.AtUtc.ToLocalTime().AddMinutes(-2)
+                        EndTime = [datetime]::Now
+                        Id = @(1116, 1117, 1123, 1124, 5007)
+                    } -MaxEvents 21 -ErrorAction Stop)
+                $snapshot.Defender.EventsTruncated = $events.Count -gt 20
+                $snapshot.Defender.Events = @($events | Select-Object -First 20 -Property TimeCreated, Id, RecordId, @{ Name = 'Message'; Expression = { "$($_.Message)".Substring(0, [math]::Min(2000, "$($_.Message)".Length)) } })
+            }
+            catch {
+                if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $snapshot.Defender.Events = @() }
+                else { $snapshot.Errors += "Defender events: $($_.Exception.Message)" }
+            }
+            return [pscustomobject]$snapshot
+        }
+
         function ConvertFrom-MemLabsOsdTransferEvent {
             param([Parameter(Mandatory)][string]$Line)
 
@@ -14198,6 +14376,12 @@ function Test-CMSiteWideFunctionality {
                 'Sending thread starting for Job:\s*\d+,\s*package:\s*(?<PackageId>[A-Za-z0-9]{8}),\s*Version:\s*(?<Version>\d+).*?\bserver:\s*(?<DP>[^,\s]+)',
                 [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
             $kind = 'TransferStarted'
+            if (-not $entry.Success) {
+                $entry = [regex]::Match($Line,
+                    'MoveFileW failed for (?<FromPath>.+?) to (?<ToPath>.+?)(?=\s+\$\$<|\]LOG\]!)',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'SourceImportRenameFailed'
+            }
             if (-not $entry.Success) {
                 $entry = [regex]::Match($Line,
                     'Adding (?<FileName>.+) file in (?<PackageId>[A-Za-z0-9]{8})\.(?<Version>\d+)\.',
@@ -14234,7 +14418,7 @@ function Test-CMSiteWideFunctionality {
                 $kind = 'SourceImportEnded'
             }
             if (-not $entry.Success) {
-                if ($Line -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package|Received package |STATMSG:\s*ID=4402\b|Created retry instruction for job') {
+                if ($Line -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package|Received package |MoveFileW failed for |STATMSG:\s*ID=4402\b|Created retry instruction for job') {
                     throw "Malformed PkgXferMgr/despool content record: $Line"
                 }
                 return
@@ -14260,7 +14444,7 @@ function Test-CMSiteWideFunctionality {
             $offsetMinutes = 0
             $sourceVersion = 0
             [uint32]$errorCode = 0
-            $hasVersion = $kind -notin 'SourceImportFailed', 'SourceImportRetryScheduled', 'SourceImportEnded'
+            $hasVersion = $kind -notin 'SourceImportFailed', 'SourceImportRenameFailed', 'SourceImportRetryScheduled', 'SourceImportEnded'
             if (-not [datetime]::TryParseExact("$dateText $timeText",
                     [string[]]@('M-d-yyyy HH:mm:ss.FFFFFFF', 'M-d-yyyy HH:mm:ss'),
                     [System.Globalization.CultureInfo]::InvariantCulture,
@@ -14291,6 +14475,8 @@ function Test-CMSiteWideFunctionality {
                 FileName = $entry.Groups['FileName'].Value
                 ThreadId = $thread.Groups['ThreadId'].Value
                 ErrorCode = $errorCode
+                FromPath = $entry.Groups['FromPath'].Value
+                ToPath = $entry.Groups['ToPath'].Value
                 AtUtc = $atUtc
                 StartedAtUtc = $startedAtUtc
                 SortOrder = $sortOrder
@@ -14304,6 +14490,8 @@ function Test-CMSiteWideFunctionality {
             $starts = [System.Collections.Generic.List[object]]::new()
             $progress = [System.Collections.Generic.List[object]]::new()
             $sourceRetries = [System.Collections.Generic.List[object]]::new()
+            $sourceFailures = [System.Collections.Generic.List[object]]::new()
+            $failureKeys = @{}
             $smsDir = ''
             foreach ($key in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
                 try {
@@ -14325,7 +14513,7 @@ function Test-CMSiteWideFunctionality {
                         $foundLogs[$logName] = $true
                         $pattern = 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package'
                         if ($logName -eq 'despool') {
-                            $pattern = 'Received package |STATMSG:\s*ID=4402\b|Created retry instruction for job|Despooler (?:successfully executed one instruction|failed to execute the instruction)'
+                            $pattern = 'Received package |MoveFileW failed for |STATMSG:\s*ID=4402\b|Created retry instruction for job|Despooler (?:successfully executed one instruction|failed to execute the instruction)'
                         }
                         foreach ($line in @(Get-Content -LiteralPath $path -Tail 10000 -ErrorAction Stop |
                                 Where-Object { $_ -match $pattern })) {
@@ -14357,13 +14545,32 @@ function Test-CMSiteWideFunctionality {
             $uncorrelatedImport = $false
             foreach ($transferEvent in @($events | Sort-Object AtUtc, SortOrder)) {
                 if ($transferEvent.Kind -eq 'SourceImportStarted') {
-                    $imports[$transferEvent.ThreadId] = @{ Start = $transferEvent; Failure = $null }
+                    $imports[$transferEvent.ThreadId] = @{ Start = $transferEvent; Failure = $null; Rename = $null }
+                }
+                elseif ($transferEvent.Kind -eq 'SourceImportRenameFailed') {
+                    $import = $imports[$transferEvent.ThreadId]
+                    if ($import -and $import.Start.AtUtc -le $transferEvent.AtUtc) { $import.Rename = $transferEvent }
                 }
                 elseif ($transferEvent.Kind -eq 'SourceImportFailed') {
                     $import = $imports[$transferEvent.ThreadId]
                     if ($import -and $import.Start.PackageId -ieq $transferEvent.PackageId -and
                         $import.Start.AtUtc -le $transferEvent.AtUtc) {
                         $import.Failure = $transferEvent
+                        $failureKey = "$($transferEvent.PackageId)|$($import.Start.SourceVersion)|$($transferEvent.AtUtc.ToString('o'))"
+                        if (-not $failureKeys.ContainsKey($failureKey)) {
+                            $failureKeys[$failureKey] = $true
+                            $fromPath = ''
+                            $toPath = ''
+                            if ($import.Rename -and $import.Rename.AtUtc -le $transferEvent.AtUtc) {
+                                $fromPath = $import.Rename.FromPath
+                                $toPath = $import.Rename.ToPath
+                            }
+                            $sourceFailures.Add([pscustomobject]@{
+                                    PackageId = $transferEvent.PackageId; SourceVersion = $import.Start.SourceVersion
+                                    AtUtc = $transferEvent.AtUtc; ErrorCode = $transferEvent.ErrorCode
+                                    FromPath = $fromPath; ToPath = $toPath
+                                })
+                        }
                     }
                     else {
                         $imports.Remove($transferEvent.ThreadId)
@@ -14420,6 +14627,7 @@ function Test-CMSiteWideFunctionality {
             }
             [pscustomobject]@{
                 Starts = $starts.ToArray(); Progress = $progress.ToArray(); SourceRetries = $sourceRetries.ToArray()
+                SourceFailures = $sourceFailures.ToArray()
             }
         }
 
@@ -14609,6 +14817,8 @@ function Test-CMSiteWideFunctionality {
             OsdContentSourceSiteCodes = [System.Collections.Generic.List[string]]::new()
             OsdContentWaitProblems = [System.Collections.Generic.List[string]]::new()
             OsdContentWaitTargets = @()
+            OsdSourceImportDiagnostics = [System.Collections.Generic.List[object]]::new()
+            OsdSourceImportDiagnosticsTruncated = $false
         }
 
         $ns = "root\SMS\site_$sc"
@@ -15710,6 +15920,17 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             $osdTransferClocks = @{}
             $osdProgressClocks = @{}
             $osdClockDescriptions = @{}
+            $osdSourceDiagnosticKeys = @{}
+            $osdSourceDiagnosticRunId = [guid]::NewGuid().ToString('N')
+            $results.OsdSourceImportDiagnosticRunId = $osdSourceDiagnosticRunId
+            $saveOsdSourceDiagnosticCache = {
+                try {
+                    @{ RunId = $osdSourceDiagnosticRunId; StartedAtUtc = $pendingStart.ToUniversalTime().ToString('o'); Captures = @($results.OsdSourceImportDiagnostics.ToArray()); Truncated = $results.OsdSourceImportDiagnosticsTruncated } |
+                        ConvertTo-Json -Depth 10 -ErrorAction Stop |
+                        Set-Content -LiteralPath 'C:\staging\DSC\OsdSourceImportDiagnostics.json' -Encoding UTF8 -ErrorAction Stop
+                }
+                catch { $results.Details.Add("WARN: Could not persist source-import diagnostic cache: $($_.Exception.Message)") }
+            }
             $pendingOsdContent = @()
             try { $pendingOsdContent = @(& $readPendingOsdContent) }
             catch {
@@ -15720,6 +15941,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
             if ($pendingOsdContent.Count -gt 0 -and $results.OsdContentWaitProblems.Count -eq 0) {
                 $osdContentWaitStarted = $true
                 $pendingStart = Get-Date
+                $results.OsdSourceImportDiagnosticStartedAtUtc = $pendingStart.ToUniversalTime().ToString('o')
                 $initialPendingSummary = @($pendingOsdContent | ForEach-Object {
                         "$($_.PackageId) '$($_.Name)' on $($_.DP) is $($_.StateName) (State=$($_.State), SourceSite=$($_.SourceSite), SourceVersion=$($_.SourceVersion), StoredPkgVersion=$($_.StoredPkgVersion))"
                     }) -join '; '
@@ -15729,6 +15951,27 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                     $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
                     try {
                         $transferEvidence = Get-MemLabsOsdTransferEvidence -Details $results.Details
+                        foreach ($failure in @($transferEvidence.SourceFailures | Where-Object { $_.ErrorCode -eq 5 })) {
+                            $matching = @($pendingOsdContent | Where-Object {
+                                    $_.PackageId -ieq $failure.PackageId -and "$($_.SourceVersion)" -eq "$($failure.SourceVersion)" -and
+                                    "$($_.StoredPkgVersion)" -match '^\d+$' -and [long]$_.StoredPkgVersion -lt [long]$_.SourceVersion
+                                })
+                            $key = "$($failure.PackageId)|$($failure.SourceVersion)"
+                            if ($matching.Count -eq 0 -or $osdSourceDiagnosticKeys.ContainsKey($key)) { continue }
+                            if ($osdSourceDiagnosticKeys.Count -ge 3) {
+                                if (-not $results.OsdSourceImportDiagnosticsTruncated) {
+                                    $results.OsdSourceImportDiagnosticsTruncated = $true
+                                    $results.Details.Add('WARN: Source-import diagnostics were limited to three package/version pairs; further failures remain in the raw logs.')
+                                    & $saveOsdSourceDiagnosticCache
+                                }
+                                continue
+                            }
+                            $osdSourceDiagnosticKeys[$key] = $failure
+                            $capture = Get-MemLabsOsdSourceImportSnapshot -Failure $failure -Namespace $ns
+                            $results.OsdSourceImportDiagnostics.Add($capture)
+                            $results.Details.Add("DIAG: Captured source-import failure metadata for $key; errors=$($capture.Errors.Count). Possible file users are not proof of the blocking handle.")
+                            & $saveOsdSourceDiagnosticCache
+                        }
                         $transferStarts = @($transferEvidence.Starts)
                         $now = Get-Date
                         $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
@@ -15819,6 +16062,10 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 $results.Passed = $false
                 $results.Details.Add("FAIL: Required OSD content entered a problem state; not extending the wait for other targets: $($results.OsdContentWaitProblems -join '; ')")
             }
+            foreach ($failure in @($osdSourceDiagnosticKeys.Values)) {
+                $results.OsdSourceImportDiagnostics.Add((Get-MemLabsOsdSourceImportSnapshot -Failure $failure -Namespace $ns -Observation 'ConvergenceWaitExit'))
+            }
+            if ($osdSourceDiagnosticKeys.Count -gt 0) { & $saveOsdSourceDiagnosticCache }
 
             $getOsdContentFailureDiagnostic = {
                 param($Package, [string]$RequiredDp, [string]$StateDescription)
@@ -16904,6 +17151,20 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 $_ -match '^FAIL:.*(?:boot image|OS image|OS upgrade|OSD|TFTP|PXE)'
             })
         $osdSourceSiteCodes = @($result.ScriptBlockOutput.OsdContentSourceSiteCodes | Where-Object { $_ } | Select-Object -Unique)
+        if ($result.ScriptBlockOutput.ContainsKey('OsdSourceImportDiagnostics') -and
+            $result.ScriptBlockOutput.OsdSourceImportDiagnostics.Count -gt 0) {
+            try {
+                $content = @{
+                    RunId = $result.ScriptBlockOutput.OsdSourceImportDiagnosticRunId
+                    StartedAtUtc = $result.ScriptBlockOutput.OsdSourceImportDiagnosticStartedAtUtc
+                    Captures = @($result.ScriptBlockOutput.OsdSourceImportDiagnostics | ForEach-Object { $_ })
+                    Truncated = $result.ScriptBlockOutput.OsdSourceImportDiagnosticsTruncated
+                } | ConvertTo-Json -Depth 10 -ErrorAction Stop
+                $null = Save-Phase11GuestLogs -VMName $VMName -DomainName $domain -RoleLabel 'OSD-SourceImport' `
+                    -CollectedContent @{ 'OsdSourceImportDiagnostics.json' = $content }
+            }
+            catch { Write-Log "[Phase $Phase] $VMName [OSD-SourceImport]: saving captured source-import evidence failed: $($_.Exception.Message)" -Warning }
+        }
     }
     if ($prePopulate -and $hasOsdClient -and
         (-not $result -or $result.ScriptBlockFailed -or $osdFailureLines.Count -gt 0)) {
