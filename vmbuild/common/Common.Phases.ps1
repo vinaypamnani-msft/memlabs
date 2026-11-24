@@ -4896,7 +4896,7 @@ function Get-Phase2ConfigurationData {
 
         # Filter out machines with an unconnectable OS, except AADClient, which has a special case to skip the DSC
         if ($vm.role -ne "OSDClient") {
-            if (-not $vm.Hidden) {
+            if (-not $vm.Hidden -or $vm.pkiReconfigure -eq $true) {
                 $cd
                 #Write-Host "xxxReturning $cd for $($vm.vmName)"
                 return $cd
@@ -4972,7 +4972,11 @@ function Get-Phase4ConfigurationData {
     # Include SQL VMs (they install SQL) plus site servers / site systems even when
     # they use REMOTE SQL: Phase 4 installs the SqlServer PS module on them (module
     # only, no SQL install) so Invoke-Sqlcmd is available for later phases/testing.
-    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.SqlVersion -or $_.Role -eq "DC" -or ($_.Role -in @("Primary", "CAS", "Secondary", "SiteSystem") -and -not $_.Hidden) }) {
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object {
+            $_.SqlVersion -or $_.Role -eq "DC" -or
+            ($_.Role -in @("Primary", "CAS", "Secondary", "SiteSystem") -and (-not $_.Hidden -or $_.pkiReconfigure)) -or
+            ($_.Role -eq 'PassiveSite' -and $_.pkiReconfigure)
+        }) {
 
         $global:preparePhasePercent++
 
@@ -5222,7 +5226,7 @@ function Get-Phase8ConfigurationData {
                 return $false
             }
             $effectiveCmOptions = if ($_.cmOptions) { $_.cmOptions } else { $deployConfig.cmOptions }
-            return $effectiveCmOptions -and $effectiveCmOptions.Install -ne $false
+            return $effectiveCmOptions -and ($effectiveCmOptions.Install -ne $false -or $_.pkiReconfigure -eq $true)
         })
     if ($cmPhase8Vms.Count -gt 0) {
 

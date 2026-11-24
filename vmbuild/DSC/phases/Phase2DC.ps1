@@ -77,7 +77,7 @@
  
     $sitecount = 0
     $GroupMembersList = @()
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.Hidden }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and (-not $_.Hidden -or $_.pkiReconfigure) }
     [System.Collections.ArrayList]$cmgroupMembers = @()
     foreach ($member in $GroupMembersList) {
         $memberName = $member.vmName + "$"
@@ -87,10 +87,10 @@
         }
     }
 
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP -and -not $_.Hidden }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP -and -not $_.Hidden }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP -and (-not $_.Hidden -or $_.pkiReconfigure) }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP -and (-not $_.Hidden -or $_.pkiReconfigure) }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and (-not $_.Hidden -or $_.pkiReconfigure) }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and (-not $_.Hidden -or $_.pkiReconfigure) }
     $iiscount = 0
     [System.Collections.ArrayList]$iisgroupMembers = @()
     foreach ($member in $GroupMembersList) {

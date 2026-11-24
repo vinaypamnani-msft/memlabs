@@ -135,8 +135,15 @@ function Install-PKICertificateTemplates {
         [Parameter(Mandatory)] [string] $LogPrefix
     )
 
-    # Determine which templates are needed
-    $hasIISServers = @($DeployConfig.virtualMachines | Where-Object {
+    # A CA-only addition can omit every existing ConfigMgr IIS server from the deployment.
+    try {
+        $domainVMs = @(Get-List -Type VM -DomainName $DomainName -DeployConfig $DeployConfig -FailOnError)
+    }
+    catch {
+        Write-Log "[$LogPrefix] Cannot determine certificate templates for '$DomainName': domain VM inventory failed. $($_.Exception.Message)" -Failure
+        return $false
+    }
+    $hasIISServers = @($domainVMs | Where-Object {
         ($_.role -in "CAS", "Primary", "Secondary", "PassiveSite") -or
         $_.InstallSUP -or $_.InstallMP -or $_.InstallDP -or $_.InstallRP
     }).Count -gt 0
@@ -1280,14 +1287,14 @@ function Initialize-PKIMemberCertificates {
 
     $memberRoles = @('DomainMember', 'CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem', 'SQLAO')
     $members = @($DeployConfig.virtualMachines | Where-Object {
-            $_.role -in $memberRoles -and -not $_.hidden
+            $_.role -in $memberRoles -and (-not $_.hidden -or $_.pkiReconfigure -eq $true)
         })
     if ($members.Count -eq 0) {
         Write-Log '[PKI] No new Windows domain members require certificate autoenrollment.' -LogOnly
         return $true
     }
 
-    Write-Log "[PKI] Verifying certificate autoenrollment on $($members.Count) new Windows domain member(s), independent of client-push selection."
+    Write-Log "[PKI] Verifying certificate autoenrollment on $($members.Count) new or PKI-conversion Windows domain member(s), independent of client-push selection."
     $allReady = $true
     foreach ($member in $members) {
         $domain = if ($member.domain) { $member.domain } else { $DeployConfig.vmOptions.domainName }
@@ -1331,7 +1338,43 @@ function Install-PKI {
         return $false
     }
 
-    if ($caVM.UseOfflineRoot) {
+    $existingCaReady = $false
+    if ($caVM.hidden) {
+        $probe = Invoke-VmCommand -VmName $caVM.vmName -VmDomainName $DeployConfig.vmOptions.domainName `
+            -DisplayName 'PKI: Inspect existing issuing CA' -ScriptBlock {
+                try {
+                    $active = $null
+                    $configurationPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration'
+                    if (Test-Path -LiteralPath $configurationPath -ErrorAction Stop) {
+                        $configuration = Get-ItemProperty -LiteralPath $configurationPath -ErrorAction Stop
+                        $activeProperty = $configuration.PSObject.Properties['Active']
+                        if ($activeProperty) { $active = $activeProperty.Value }
+                    }
+                    $service = Get-Service -ErrorAction Stop | Where-Object { $_.Name -eq 'CertSvc' }
+                    @{ Success = $true; Configured = [bool]$active; Ready = [bool]($active -and $service -and $service.Status -eq 'Running'); Log = @() }
+                }
+                catch { @{ Success = $false; Error = $_.Exception.Message; Log = @() } }
+            }
+        if (-not $probe) {
+            Write-Log '[PKI] Existing issuing CA inspection returned no result.' -Failure
+            return $false
+        }
+        if (-not (Test-PKIStepResult -Result $probe -StepName 'Existing issuing CA inspection' -LogPrefix 'PKI')) { return $false }
+        if ($probe.ScriptBlockOutput.Ready -isnot [bool] -or $probe.ScriptBlockOutput.Configured -isnot [bool]) {
+            Write-Log '[PKI] Existing issuing CA inspection returned no Boolean readiness state.' -Failure
+            return $false
+        }
+        if ($probe.ScriptBlockOutput.Configured -and -not $probe.ScriptBlockOutput.Ready) {
+            Write-Log '[PKI] The existing issuing CA is configured but not running. Restore CA health before converting ConfigMgr.' -Failure
+            return $false
+        }
+        $existingCaReady = $probe.ScriptBlockOutput.Ready
+    }
+    if ($existingCaReady) {
+        $pkiReady = Install-PKICertificateTemplates -CAVMName $caVM.vmName `
+            -DomainName $DeployConfig.vmOptions.domainName -DeployConfig $DeployConfig -LogPrefix 'PKI'
+    }
+    elseif ($caVM.UseOfflineRoot) {
         $pkiReady = Install-TwoTierPKI -DeployConfig $DeployConfig
     }
     else {

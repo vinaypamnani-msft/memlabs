@@ -330,8 +330,8 @@ function Get-PKIHelp {
 
     switch (($text -split "=")[0].Trim()) {
         "EnablePKI" { "Deploy Certificate Authority infrastructure. Works with or without ConfigMgr. Installs an Enterprise CA on the selected VM." }
-        "UsePKI for ConfigMgr" { "Use HTTPS for all ConfigMgr roles (DP/MP/SUP/RP). Automatically enables PKI infrastructure if not already enabled." }
-        { $_ -like 'UsePKI on *' } { "Use HTTPS for all ConfigMgr roles on this site server (DP/MP/SUP/RP). Automatically enables PKI infrastructure if not already enabled." }
+        "UsePKI for ConfigMgr" { "Deploy PKI and configure HTTPS for ConfigMgr roles (DP/MP/SUP/RP), including existing hierarchy servers and certificates. Multiple existing hierarchies require an explicit top-level site selection." }
+        { $_ -like 'UsePKI on *' } { "Deploy PKI and configure HTTPS for this hierarchy (DP/MP/SUP/RP), including existing role servers, certificate enrollment, and TLS bindings." }
         "IssuingCA" { "The VM that will host the Issuing (Enterprise) CA. Defaults to the domain controller." }
         "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA issues a certificate for an Enterprise Subordinate CA. The Root CA VM is powered off after setup." }
         "OfflineRootCA" { "The standalone workgroup VM that will host the Offline Root CA. Auto-created if not specified." }

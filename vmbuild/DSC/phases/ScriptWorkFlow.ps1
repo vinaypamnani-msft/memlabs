@@ -241,6 +241,11 @@ if (Test-Path -Path $ConfigurationFile) {
     $firstRun = $false
     # Immediately reset status so WaitForEvent won't find stale "Completed" from a previous run
     if ($Configuration.ScriptWorkflow -and $Configuration.ScriptWorkflow.Status -eq "Completed") {
+        if ($ThisVM.pkiReconfigure -and $CurrentRole -in @('CAS', 'Primary')) {
+            Invoke-MemLabsConfigMgrPkiConversion -DeployConfig $deployConfig -CurrentVM $ThisVM `
+                -ConfigFilePath $ConfigFilePath -LogPath $LogPath
+        }
+
         $Configuration.ScriptWorkflow.Status = "Running"
         $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
         Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
@@ -1206,28 +1211,58 @@ if ($ThisVM.role -ne "CAS") {
         #     LSASS/Schannel trusted-issuer cache, which iisreset alone does not),
         #   - the local site-server MP: iisreset + CcmExec restart (we run inside
         #     this box's ScriptWorkflow task and cannot reboot ourselves).
-        # Gated by $needCertPulse (only when push targets aren't yet Client=1 -- if
-        # every target already installed, the MP already negotiated certs fine) and
-        # a one-shot flag so retries / -StartPhase re-runs don't re-bounce.
+        # A PKI conversion needs this even when every client already reports Client=1:
+        # those clients were installed over HTTP. Conversion uses a per-run flag so
+        # an old successful build cannot suppress the required TLS refresh.
+        $requiresTlsRefresh = $needCertPulse -or $ThisVM.pkiReconfigure -eq $true
         $mpBounceFlag = Join-Path -Path $LogPath -ChildPath "MPCertNegotiationBounce.flag"
-        if ($needCertPulse -and -not (Test-Path $mpBounceFlag)) {
+        if ($ThisVM.pkiReconfigure -and $ScriptWorkflowRunId) {
+            $mpBounceFlag = Join-Path -Path $LogPath -ChildPath "MPCertNegotiationBounce.$ScriptWorkflowRunId.flag"
+        }
+        if ($requiresTlsRefresh -and -not (Test-Path $mpBounceFlag)) {
             $siteMPs = @()
             try {
-                $siteMPs = @($deployConfig.virtualMachines | Where-Object { $_.installMP -and $_.siteCode -eq $ThisVM.siteCode })
+                $mpSiteCodes = @($ThisVM.siteCode)
+                if ($ThisVM.pkiReconfigure) {
+                    $mpSiteCodes += @($deployConfig.virtualMachines | Where-Object {
+                            $_.role -eq 'Secondary' -and $_.parentSiteCode -eq $ThisVM.siteCode -and $_.pkiReconfigure
+                        } | ForEach-Object { $_.siteCode })
+                }
+                $siteMPs = @(
+                    foreach ($candidate in $deployConfig.virtualMachines | Where-Object { $_.siteCode -in $mpSiteCodes }) {
+                        if ($candidate.installMP) { $candidate }
+                        elseif ($ThisVM.pkiReconfigure -and $candidate.role -in @('Primary', 'Secondary') -and
+                            @(Get-CMManagementPoint -SiteSystemServerName "$($candidate.vmName).$DomainFullName" `
+                                -SiteCode $candidate.siteCode -ErrorAction Stop).Count -eq 1) { $candidate }
+                    }
+                )
             }
             catch {
+                if ($ThisVM.pkiReconfigure) { throw }
                 Write-DscStatus "MP TLS bounce: failed to enumerate MPs ($($_.Exception.Message)); skipping" -Warning
                 $siteMPs = @()
             }
             if ($siteMPs.Count -gt 0) {
-                Write-DscStatus "MP TLS bounce: refreshing client-cert negotiation on $($siteMPs.Count) MP(s) in site $($ThisVM.siteCode) before client push"
+                Write-DscStatus "MP TLS bounce: refreshing client-cert negotiation on $($siteMPs.Count) MP(s) in site $($ThisVM.siteCode) before HTTPS validation/client push"
                 foreach ($mp in $siteMPs) {
                     if ($mp.vmName -eq $ThisVM.vmName) {
                         # Local site-server MP -- cannot reboot mid-workflow.
                         Write-DscStatus "MP TLS bounce: local iisreset + CcmExec restart on $($mp.vmName)"
-                        try { & iisreset.exe /restart | Out-Null }
-                        catch { Write-DscStatus "MP TLS bounce: iisreset on $($mp.vmName) failed: $($_.Exception.Message)" -Warning }
-                        try { Restart-Service -Name CcmExec -Force -ErrorAction SilentlyContinue } catch {}
+                        try {
+                            & iisreset.exe /restart | Out-Null
+                            if ($ThisVM.pkiReconfigure -and $LASTEXITCODE -ne 0) {
+                                throw "iisreset failed with exit code $LASTEXITCODE."
+                            }
+                        }
+                        catch {
+                            if ($ThisVM.pkiReconfigure) { throw }
+                            Write-DscStatus "MP TLS bounce: iisreset on $($mp.vmName) failed: $($_.Exception.Message)" -Warning
+                        }
+                        try {
+                            if ($ThisVM.pkiReconfigure) { Restart-Service -Name CcmExec -Force -ErrorAction Stop }
+                            else { Restart-Service -Name CcmExec -Force -ErrorAction SilentlyContinue }
+                        }
+                        catch { if ($ThisVM.pkiReconfigure) { throw } }
                         continue
                     }
                     # Remote MP -- full reboot to clear stale TLS state.
@@ -1236,6 +1271,7 @@ if ($ThisVM.role -ne "CAS") {
                         Restart-Computer -ComputerName $mp.vmName -Force -ErrorAction Stop
                     }
                     catch {
+                        if ($ThisVM.pkiReconfigure) { throw }
                         Write-DscStatus "MP TLS bounce: reboot of $($mp.vmName) failed ($($_.Exception.Message)); skipping" -Warning
                         continue
                     }
@@ -1256,11 +1292,13 @@ if ($ThisVM.role -ne "CAS") {
                         Start-Sleep -Seconds 30
                     }
                     if (-not $mpHealthy) {
+                        if ($ThisVM.pkiReconfigure) { throw "MP TLS refresh did not restore W3SVC on '$($mp.vmName)'." }
                         Write-DscStatus "MP TLS bounce: $($mp.vmName) not confirmed healthy after reboot; the bounded pre-push health check still must pass" -Warning
                     }
                 }
             }
-            try { Set-Content -Path $mpBounceFlag -Value "bounced $(Get-Date -Format s)" -Force -Encoding ASCII } catch {}
+            try { Set-Content -Path $mpBounceFlag -Value "bounced $(Get-Date -Format s)" -Force -Encoding ASCII -ErrorAction Stop }
+            catch { if ($ThisVM.pkiReconfigure) { throw } }
         }
 
         # The one-shot TLS bounce flag survives later phase reruns, and W3SVC can
@@ -1269,7 +1307,7 @@ if ($ThisVM.role -ne "CAS") {
         # If unhealthy, reset the shared WAS/W3SVC listener stack once and retry.
         # Do not launch client push into a known-broken MP: ccmsetup otherwise
         # parks every target in an HTTP 503 retry loop for ten minutes at a time.
-        if ($needCertPulse) {
+        if ($requiresTlsRefresh) {
             $probeMpEndpoint = {
                 param([string]$PoolName)
                 try { Import-Module WebAdministration -ErrorAction Stop | Out-Null }

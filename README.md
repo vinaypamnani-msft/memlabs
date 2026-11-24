@@ -1523,6 +1523,39 @@ A `Canceled`/`UserCanceled` outcome is not proof of a service restart: SQL or
 transport failures can precede cancellation. Idle failures still fail validation;
 only a running replacement or a newer successful cycle supersedes the old failure.
 
+CA template selection includes both the deployment and existing same-domain VM
+inventory. Adding a CA after a ConfigMgr build therefore still publishes
+`ConfigMgrWebServerCertificate`, `ConfigMgrClientDistributionPointCertificate`,
+and `ConfigMgrClientCertificate`. Domains without ConfigMgr IIS servers need
+only the client template. Inventory discovery errors stop template provisioning
+rather than silently selecting client-only.
+
+Enabling ConfigMgr `UsePKI` on an existing hierarchy is a deployment operation,
+not just CA provisioning. The deployment includes the existing site servers,
+MP/DP/SUP/RP hosts, and identifiable domain-member clients in that hierarchy.
+Existing VMs remain hidden from rebuild phases, but participate in enrollment
+permissions, certificate readiness, IIS/WSUS/reporting TLS configuration, and
+Phase 11 validation. An operational existing issuing CA is reused without
+starting its offline root. Existing MP/DP/SUP roles are updated in place,
+including the DP identity certificate, and site-control readback must confirm
+HTTPS configuration before conversion succeeds. Discovery, enrollment, or
+configuration failures stop the conversion rather than reporting CA setup as
+ConfigMgr PKI completion.
+Existing MPs refresh their TLS state even when no new client push is required;
+conversion does not reuse an old build's TLS-refresh flag, and refresh failures
+are terminal rather than warning-only.
+
+The legacy domain-wide CM toggle is accepted only when the domain has one
+existing hierarchy. With multiple hierarchies, explicitly include the selected
+top-level site and enable its `cmOptions.UsePKI`; unrelated hierarchies and
+forests are not converted. A child-site default cannot change its parent's
+communication mode. Run the normal deployment through Phase 11; publishing
+templates alone or skipping the conversion phases does not complete a retrofit.
+Validate the offline fixtures with
+`vmbuild\tools\Test-ConfigMgrPkiRetrofit.ps1` (PowerShell 7 host checks) and
+`powershell.exe -NoProfile -File vmbuild\tools\Test-ConfigMgrPkiRetrofit.ps1 -GuestOnly`
+(Windows PowerShell 5.1 guest checks).
+
 Certificate autoenrollment is domain-wide and independent of client push.
 Phase 2 creates the computer autoenrollment GPO (`AEPolicy=7`). Phase 3 applies
 computer policy before the CA templates are published. After CA/template
@@ -1530,8 +1563,10 @@ provisioning, `Install-PKI` verifies autoenrollment for every new Windows domain
 member, including clients with `pushClient=false`, using bounded computer-policy
 refresh and `certutil -pulse` retries. A current client-auth certificate with a
 private key and trusted chain is required before PKI setup reports success.
-Workgroup/offline-root machines, domain controllers, and hidden existing VMs are
-not part of this member-enrollment pass. Validate with
+Workgroup/offline-root machines, domain controllers, and unrelated hidden
+existing VMs are not part of this member-enrollment pass. Existing members
+selected for ConfigMgr PKI conversion are verified before the HTTPS flip.
+Validate with
 `vmbuild\tools\Test-PkiAutoEnrollment.ps1`.
 
 For HTTPS client push, the guest requests host certificate pre-staging and waits

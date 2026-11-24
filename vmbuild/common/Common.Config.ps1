@@ -178,6 +178,75 @@ function Get-ConfigCmOptions {
     return $null
 }
 
+function Get-ExistingConfigMgrPkiConversionTargets {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [object] $Config,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $ExistingVMs
+    )
+
+    $domainName = "$($Config.vmOptions.domainName)"
+    $domainVMs = @($ExistingVMs | Where-Object { "$($_.domain)" -ieq $domainName })
+    $topSites = @($domainVMs | Where-Object {
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.siteCode
+        })
+    if ($topSites.Count -eq 0) { return }
+
+    $configuredSites = @($Config.virtualMachines | Where-Object {
+            $_.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem', 'WSUS') -and $_.siteCode
+        })
+    $requestedTops = @()
+    foreach ($site in $configuredSites | Where-Object {
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
+        }) {
+        $options = if ($site.cmOptions) { $site.cmOptions } else { $Config.cmOptions }
+        if ($options.UsePKI -ne $true) { continue }
+        $matches = @($topSites | Where-Object { "$($_.siteCode)" -ieq "$($site.siteCode)" })
+        if ($matches.Count -gt 1) {
+            throw "Cannot scope ConfigMgr PKI conversion: site '$($site.siteCode)' has multiple top-level owners in '$domainName'."
+        }
+        $requestedTops += $matches
+    }
+    if ($configuredSites.Count -eq 0 -and $Config.cmOptions.UsePKI -eq $true) {
+        if ($topSites.Count -ne 1) {
+            throw "Cannot scope ConfigMgr PKI conversion in '$domainName': select a top-level site explicitly when multiple hierarchies exist."
+        }
+        $requestedTops = $topSites
+    }
+
+    $targets = @{}
+    foreach ($top in $requestedTops) {
+        $siteCodes = @{}
+        $siteCodes["$($top.siteCode)"] = $true
+        do {
+            $added = $false
+            foreach ($site in $domainVMs) {
+                if ($site.siteCode -and $site.parentSiteCode -and
+                    $siteCodes.ContainsKey("$($site.parentSiteCode)") -and
+                    -not $siteCodes.ContainsKey("$($site.siteCode)")) {
+                    $siteCodes["$($site.siteCode)"] = $true
+                    $added = $true
+                }
+            }
+        } while ($added)
+
+        foreach ($vm in $domainVMs) {
+            $siteCode = "$($vm.siteCode)"
+            $clientTarget = ConvertFrom-MemLabsVmNoteScalar -Value $vm.pushClient
+            if (-not $siteCode -and $clientTarget -is [string]) { $siteCode = "$clientTarget".Trim() }
+            $isRoleHost = $vm.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem', 'WSUS') -or
+                $vm.installMP -or $vm.installDP -or $vm.installSUP -or $vm.installRP
+            $isMember = $vm.role -in @('DomainMember', 'SQLAO')
+            if (($siteCodes.ContainsKey($siteCode) -and ($isRoleHost -or $isMember)) -or
+                ($topSites.Count -eq 1 -and $isMember -and -not $siteCode)) {
+                if (-not $vm.vmName) { throw "ConfigMgr PKI conversion in '$domainName' contains an unnamed VM." }
+                $targets["$($vm.vmName)"] = $vm
+            }
+        }
+    }
+    foreach ($name in @($targets.Keys | Sort-Object)) { $targets[$name] }
+}
+
 function Sync-ExistingHierarchyOptionsToDeployConfig {
     [CmdletBinding()]
     param (
@@ -260,6 +329,10 @@ function Sync-ExistingHierarchyOptionsToDeployConfig {
         if ($recoveredFromBackup) {
             Write-Log "Recovered authoritative ConfigMgr options (UsePKI=$($authoritativeCm.UsePKI)) from '$($topSite.vmName)' deployConfig backup and stamped its VM note." -Verbose
             try { Set-VMNote -vmName $topSite.vmName -vmNote ([PSCustomObject]@{ cmOptions = $authoritativeCm }) } catch {}
+        }
+        if ($hierarchy.MatchingConfigVms | Where-Object { $_.pkiReconfigure -eq $true }) {
+            $authoritativeCm = $authoritativeCm | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            $authoritativeCm | Add-Member -MemberType NoteProperty -Name 'UsePKI' -Value $true -Force
         }
         $hierarchy.CmOptions = $authoritativeCm
     }
@@ -1230,7 +1303,45 @@ function New-DeployConfig {
         # cannot independently change their hierarchy's version or HTTPS mode.
         if ($Common -and -not $Common.InJob -and $configObject.vmOptions.domainName) {
             try {
-                $existingDomainVMs = @(Get-List -Type VM -DomainName $configObject.vmOptions.domainName)
+                $pkiRequested = $configObject.cmOptions.UsePKI -eq $true -or
+                    @($configObject.virtualMachines | Where-Object { $_.cmOptions.UsePKI -eq $true }).Count -gt 0
+                $existingDomainVMs = @(Get-List -Type VM -DomainName $configObject.vmOptions.domainName -FailOnError:$pkiRequested)
+                $pkiTargets = @(Get-ExistingConfigMgrPkiConversionTargets -Config $configObject -ExistingVMs $existingDomainVMs)
+                foreach ($target in $pkiTargets) {
+                    $matches = @($configObject.virtualMachines | Where-Object {
+                            $_.vmName -ieq $target.vmName -or
+                            "$($configObject.vmOptions.prefix)$($_.vmName)" -ieq $target.vmName
+                        })
+                    if ($matches.Count -gt 1) { throw "ConfigMgr PKI conversion contains duplicate VM '$($target.vmName)'." }
+                    if ($matches.Count -eq 0) {
+                        Add-ExistingVMToDeployConfig -vmName $target.vmName -configToModify $configObject
+                        $matches = @($configObject.virtualMachines | Where-Object { $_.vmName -ieq $target.vmName })
+                    }
+                    if ($matches.Count -ne 1) { throw "Could not include '$($target.vmName)' in ConfigMgr PKI conversion." }
+                    $conversionVm = $matches[0]
+                    $conversionVm.vmName = $target.vmName
+                    $conversionVm | Add-Member -MemberType NoteProperty -Name 'hidden' -Value $true -Force
+                    $conversionVm | Add-Member -MemberType NoteProperty -Name 'pkiReconfigure' -Value $true -Force
+                    $conversionVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
+                    $conversionVm.PSObject.Properties.Remove('cmOptions')
+                }
+                if ($pkiTargets.Count -gt 0 -and
+                    -not ($configObject.virtualMachines | Where-Object { $_.InstallCA })) {
+                    $caReference = "$($configObject.pkiOptions.IssuingCAVM)"
+                    $existingCAs = @($existingDomainVMs | Where-Object {
+                            ($caReference -and ($_.vmName -ieq $caReference -or
+                                $_.vmName -ieq "$($configObject.vmOptions.prefix)$caReference")) -or
+                            (-not $caReference -and $_.InstallCA -and $_.role -ne 'StandaloneRootCA')
+                        })
+                    if ($existingCAs.Count -ne 1) {
+                        throw 'ConfigMgr PKI conversion requires exactly one selected issuing CA.'
+                    }
+                    Add-ExistingVMToDeployConfig -vmName $existingCAs[0].vmName -configToModify $configObject
+                    $issuingCA = $configObject.virtualMachines | Where-Object { $_.vmName -ieq $existingCAs[0].vmName }
+                    if (-not $issuingCA) { throw 'Could not include the issuing CA in ConfigMgr PKI conversion.' }
+                    $issuingCA | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true -Force
+                    $issuingCA | Add-Member -MemberType NoteProperty -Name 'UseOfflineRoot' -Value ([bool]$configObject.pkiOptions.UseOfflineRoot) -Force
+                }
                 $null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $configObject -ExistingVMs $existingDomainVMs
             }
             catch {
@@ -2462,6 +2573,7 @@ function Add-ModifiedExistingVMToDeployConfig {
         "osdMetadataOnly",
         "osdValidate",
         "phase11Validate",
+        "pkiReconfigure",
         "state",
         "vmBuild",
         "DiskUsedGB",
@@ -2563,7 +2675,8 @@ function Add-ExistingVMToDeployConfig {
         "ExistingVM",
         "osdMetadataOnly",
         "osdValidate",
-        "phase11Validate"
+        "phase11Validate",
+        "pkiReconfigure"
     )
     foreach ($prop in $vmNote.PSObject.Properties) {
         if ($prop.Name -in $propsToExclude) {

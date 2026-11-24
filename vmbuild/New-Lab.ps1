@@ -1298,10 +1298,12 @@ try {
                     # out if it hasn't closed yet. Phase 3 applies computer policy before these
                     # templates exist; Install-PKI verifies member autoenrollment after publishing
                     # them, without waiting for a later background cycle or client-push request.
-                    # Only trigger for NEW VMs (non-hidden). If only existing/hidden VMs have
-                    # InstallCA, PKI is already deployed and should not be re-orchestrated.
+                    # Ordinary expansions only provision a NEW CA. An explicit existing-
+                    # hierarchy conversion also reconciles templates on the existing CA
+                    # and verifies its selected members before the HTTPS flip.
                     $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA -and -not $_.hidden }).Count -gt 0
-                    if ($hasPKI) {
+                    $hasPkiConversion = @($deployConfig.virtualMachines | Where-Object { $_.pkiReconfigure -eq $true }).Count -gt 0
+                    if ($hasPKI -or $hasPkiConversion) {
                         $pkiSuccess = Install-PKI -DeployConfig $deployConfig
                         if (-not $pkiSuccess) {
                             Write-Log "[PKI] PKI deployment failed." -Failure

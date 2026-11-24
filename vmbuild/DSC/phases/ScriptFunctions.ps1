@@ -3620,6 +3620,161 @@ function Write-CMRoleProvisioningDiagnostics {
     }
 }
 
+function Get-MemLabsConfigMgrRoleHttpsState {
+    param(
+        [Parameter(Mandatory)] [string] $ServerFQDN,
+        [Parameter(Mandatory)] [string] $SiteCode,
+        [Parameter(Mandatory)] [ValidateSet('MP', 'DP', 'SUP')] [string] $Role,
+        [string] $ProviderSiteCode = $SiteCode
+    )
+
+    $roleNames = @{ MP = 'SMS Management Point'; DP = 'SMS Distribution Point'; SUP = 'SMS Software Update Point' }
+    $shortName = ($ServerFQDN -split '\.')[0]
+    $rows = @(Get-WmiObject -Namespace "root\SMS\site_$ProviderSiteCode" -Class SMS_SCI_SysResUse `
+            -Filter "SiteCode='$SiteCode' AND RoleName='$($roleNames[$Role])'" -ErrorAction Stop |
+            Where-Object {
+                "$($_.NALPath)".IndexOf("\\$ServerFQDN\", [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                "$($_.NALPath)".IndexOf("\\$shortName\", [StringComparison]::OrdinalIgnoreCase) -ge 0
+            })
+    if ($rows.Count -ne 1) {
+        return [pscustomobject]@{ Ready = $false; Detail = "$Role on $ServerFQDN/${SiteCode}: expected one site-control row, found $($rows.Count)." }
+    }
+    $rows[0].Get()
+    $propertyName = if ($Role -eq 'SUP') { 'SSLWSUS' } else { 'SslState' }
+    $properties = @($rows[0].Props | Where-Object { $_.PropertyName -eq $propertyName })
+    $value = 0
+    $measured = $properties.Count -eq 1 -and [int]::TryParse("$($properties[0].Value)", [ref]$value)
+    $ready = $measured -and (($Role -eq 'SUP' -and $value -eq 1) -or ($Role -ne 'SUP' -and ($value -band 1) -eq 1))
+    if ($Role -eq 'SUP') {
+        $ports = @($rows[0].Props | Where-Object { $_.PropertyName -eq 'WSUSIISSSLPort' })
+        $ready = $ready -and $ports.Count -eq 1 -and "$($ports[0].Value)" -eq '8531'
+    }
+    [pscustomobject]@{
+        Ready = [bool]$ready
+        Detail = "$Role on $ServerFQDN/${SiteCode}: $propertyName measured=$measured, value=$value, HTTPS ready=$ready."
+    }
+}
+
+function Invoke-MemLabsConfigMgrPkiConversion {
+    param(
+        [Parameter(Mandatory)] [object] $DeployConfig,
+        [Parameter(Mandatory)] [object] $CurrentVM,
+        [Parameter(Mandatory)] [string] $ConfigFilePath,
+        [Parameter(Mandatory)] [string] $LogPath
+    )
+
+    $options = if ($CurrentVM.cmOptions) { $CurrentVM.cmOptions } else { $DeployConfig.cmOptions }
+    if (-not $CurrentVM.pkiReconfigure -or -not $options.UsePKI -or
+        $CurrentVM.role -notin @('CAS', 'Primary') -or -not $CurrentVM.siteCode) {
+        throw 'ConfigMgr PKI conversion requires a selected existing CAS or Primary with UsePKI enabled.'
+    }
+    $siteCode = "$($CurrentVM.siteCode)"
+    $provider = Get-SMSProvider -SiteCode $siteCode
+    if (-not $provider.FQDN -or -not (Set-CMSiteProvider -SiteCode $siteCode -ProviderFQDN $provider.FQDN)) {
+        throw "Cannot connect to the ConfigMgr provider for PKI conversion of site '$siteCode'."
+    }
+    Set-Location "$siteCode`:\" -ErrorAction Stop
+    $domainName = "$($DeployConfig.vmOptions.domainName)"
+    $managedSites = @($siteCode)
+    if ($CurrentVM.role -eq 'Primary') {
+        $managedSites += @($DeployConfig.virtualMachines | Where-Object {
+                $_.role -eq 'Secondary' -and $_.parentSiteCode -eq $siteCode -and $_.pkiReconfigure
+            } | ForEach-Object { "$($_.siteCode)" })
+    }
+    $roleHosts = @($DeployConfig.virtualMachines | Where-Object {
+            $_.pkiReconfigure -and "$($_.siteCode)" -in $managedSites -and
+            (-not $_.domain -or "$($_.domain)" -ieq $domainName)
+        })
+    $roleTargets = @()
+    foreach ($hostVM in $roleHosts) {
+        $fqdn = "$($hostVM.vmName).$domainName"
+        foreach ($role in @('MP', 'DP', 'SUP')) {
+            $selected = switch ($role) {
+                'MP' { $hostVM.installMP }
+                'DP' { $hostVM.installDP -or $hostVM.enablePullDP }
+                'SUP' { $hostVM.installSUP }
+            }
+            # Default co-located MP/DP roles need not have explicit InstallMP/DP flags.
+            if ($hostVM.role -in @('Primary', 'Secondary') -and $role -in @('MP', 'DP')) {
+                $installed = @(
+                    if ($role -eq 'MP') {
+                        Get-CMManagementPoint -SiteSystemServerName $fqdn -SiteCode $hostVM.siteCode -ErrorAction Stop
+                    }
+                    else {
+                        Get-CMDistributionPoint -SiteSystemServerName $fqdn -SiteCode $hostVM.siteCode -ErrorAction Stop
+                    }
+                )
+                if ($installed.Count -gt 1) { throw "Ambiguous $role configuration on '$fqdn'." }
+                $selected = $selected -or $installed.Count -eq 1
+            }
+            if ($selected) {
+                $roleTargets += [pscustomobject]@{ HostVM = $hostVM; FQDN = $fqdn; Role = $role }
+            }
+        }
+    }
+    $dpHosts = @($roleTargets | Where-Object { $_.Role -eq 'DP' })
+    $certificatePath = 'C:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
+    $certificatePassword = $null
+    if ($dpHosts.Count -gt 0) {
+        $credentialPath = Join-Path $env:windir 'temp\ProvisionScript\certauth.txt'
+        if (-not (Test-Path -LiteralPath $certificatePath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $credentialPath -PathType Leaf)) {
+            throw "Site '$siteCode' cannot convert existing DPs without its exported DP certificate and password file."
+        }
+        $certificatePassword = Get-Content -LiteralPath $credentialPath -ErrorAction Stop |
+            ConvertTo-SecureString -AsPlainText -Force
+    }
+    foreach ($fqdn in @($roleTargets | Where-Object { $_.Role -in @('MP', 'DP') } |
+            ForEach-Object { $_.FQDN } | Select-Object -Unique)) {
+        if (-not (Test-MPHttpsBinding -MPFQDN $fqdn)) {
+            throw "PKI conversion cannot proceed: '$fqdn' has no usable IIS HTTPS certificate binding."
+        }
+    }
+
+    Invoke-DotSource -Script "$PSScriptRoot\EnableHTTPS.ps1" -Arguments $ConfigFilePath, $LogPath, $true -Rethrow
+    Set-CMSite -SiteCode $siteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -ErrorAction Stop
+    foreach ($target in $roleTargets) {
+        $hostVM = $target.HostVM
+        $fqdn = $target.FQDN
+        $role = $target.Role
+        switch ($role) {
+            'MP' {
+                Set-CMManagementPoint -SiteSystemServerName $fqdn -SiteCode $hostVM.siteCode -EnableSsl $true -ErrorAction Stop
+            }
+            'DP' {
+                Set-CMDistributionPoint -SiteSystemServerName $fqdn -SiteCode $hostVM.siteCode `
+                    -ClientCommunicationType Https -CertificatePath $certificatePath `
+                    -CertificatePassword $certificatePassword -Force -ErrorAction Stop
+            }
+            'SUP' {
+                Set-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -SiteCode $hostVM.siteCode `
+                    -EnableSsl $true -HttpPort 8530 -HttpsPort 8531 -ErrorAction Stop
+            }
+        }
+        $verified = Wait-CMRoleRegistered -RoleName "$role HTTPS configuration" -ServerFQDN $fqdn `
+            -TimeoutSeconds 180 -PollSeconds 5 -Probe {
+                $state = Get-MemLabsConfigMgrRoleHttpsState -ServerFQDN $fqdn -SiteCode $hostVM.siteCode -Role $role -ProviderSiteCode $siteCode
+                if ($state.Ready) { return $state }
+            }
+        if (-not $verified) {
+            $state = Get-MemLabsConfigMgrRoleHttpsState -ServerFQDN $fqdn -SiteCode $hostVM.siteCode -Role $role -ProviderSiteCode $siteCode
+            throw "ConfigMgr PKI conversion was not verified: $($state.Detail)"
+        }
+        Write-DscStatus "PKI conversion verified: $role on $fqdn/$($hostVM.siteCode)."
+    }
+    $siteVerified = Wait-CMRoleRegistered -RoleName 'Site HTTPS-only mode' -ServerFQDN $provider.FQDN `
+        -TimeoutSeconds 180 -PollSeconds 5 -Probe {
+            $sites = @(Get-CMSite -SiteCode $siteCode -ErrorAction Stop)
+            $components = @(Get-CMSiteComponent -SiteCode $siteCode -ComponentName SMS_SITE_COMPONENT_MANAGER -ErrorAction Stop)
+            $ssl = @($components.Props | Where-Object { $_.PropertyName -eq 'IISSSLState' })
+            if ($sites.Count -eq 1 -and $ssl.Count -eq 1 -and ([int]$ssl[0].Value -band 1) -eq 1 -and
+                ($CurrentVM.role -eq 'CAS' -or "$($sites[0].Mode)" -eq '1')) {
+                return $sites[0]
+            }
+        }
+    if (-not $siteVerified) { throw "ConfigMgr PKI conversion did not establish verified HTTPS-only mode for site '$siteCode'." }
+}
+
 function Install-DP {
     param (
         [Parameter()]

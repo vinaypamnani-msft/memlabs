@@ -21,7 +21,7 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 . (Import-TestFunction (Join-Path $root 'common\Common.ScriptBlocks.ps1') 'Invoke-MemLabsClientCertificateReadiness')
-foreach ($name in @('Initialize-PKIMemberCertificates', 'Install-PKI')) {
+foreach ($name in @('Initialize-PKIMemberCertificates', 'Install-PKI', 'Install-PKICertificateTemplates', 'Test-PKIStepResult')) {
     . (Import-TestFunction (Join-Path $root 'common\Common.PKI.ps1') $name)
 }
 function Get-MemLabsClientCertificateReadinessBlock { { throw 'Fixture must not execute guest commands locally.' } }
@@ -31,7 +31,7 @@ $script:Failures = [Collections.Generic.List[string]]::new()
 $script:Mode = 'Ready'
 $script:CaReady = $true; $script:SingleCalls = 0; $script:TwoCalls = 0
 function Write-Log {
-    param($Message, [switch]$Failure, [switch]$LogOnly)
+    param($Message, [switch]$Failure, [switch]$LogOnly, [switch]$NoIndent)
     $script:Messages.Add("$Message")
     if ($Failure) { $script:Failures.Add("$Message") }
 }
@@ -110,6 +110,12 @@ Reset-Fixture
 $noMembers = [pscustomobject]@{ vmOptions = $config.vmOptions; virtualMachines = @($ca) }
 Assert-True ((Install-PKI -DeployConfig $noMembers) -and $script:Calls.Count -eq 0) `
     'A CA-only deployment attempted member enrollment.'
+Reset-Fixture
+$existingMember = $config.virtualMachines | Where-Object vmName -eq 'OLD'
+$existingMember | Add-Member -MemberType NoteProperty -Name 'pkiReconfigure' -Value $true
+Assert-True ((Install-PKI -DeployConfig $config) -and $script:Calls.Contains('OLD')) `
+    'PKI conversion skipped certificate readiness for an existing selected member.'
+$existingMember.PSObject.Properties.Remove('pkiReconfigure')
 
 $dcPath = Join-Path $root 'DSC\phases\Phase2DC.ps1'
 $dcText = [IO.File]::ReadAllText($dcPath)
@@ -125,4 +131,89 @@ $postPhaseThree = @($launcherAst.FindAll({
                 $node.Clauses[0].Item1.Extent.Text -eq '$i -eq 3' -and $node.Extent.Text -match 'Install-PKI'
         }, $true))
 Assert-True ($postPhaseThree.Count -eq 1) 'PKI must run after Phase 3 domain join/policy readiness.'
+
+$script:TemplateCalls = [Collections.Generic.List[string]]::new()
+$script:TemplateInventoryThrows = $false
+function Flush-LogBuffer { param([switch]$All) }
+function Get-List {
+    param($Type, $DomainName, $DeployConfig, [switch]$FailOnError)
+    Assert-True ($Type -eq 'VM' -and $DomainName -eq 'lab.test' -and
+        $null -ne $DeployConfig -and $FailOnError) `
+        'Template selection must merge the deployment with fail-closed, same-domain inventory.'
+    if ($script:TemplateInventoryThrows) { throw 'fixture inventory failure' }
+    @($DeployConfig.virtualMachines) + @($script:ExistingTemplateVMs | Where-Object { $_.domain -eq $DomainName })
+}
+function Invoke-VmCommand {
+    param($VmName, $VmDomainName, $ScriptBlock, $ArgumentList, $DisplayName)
+    Assert-True ($VmName -eq 'CA' -and $VmDomainName -eq 'lab.test' -and
+        $ArgumentList.Count -eq 2 -and $ArgumentList[0] -eq 'lab.test') `
+        'Template provisioning changed its CA or guest argument contract.'
+    $script:TemplateCalls.Add($ArgumentList[1])
+    [pscustomobject]@{
+        ScriptBlockFailed = $false
+        ScriptBlockOutput = @{ Success = $true; Log = @() }
+    }
+}
+$templateCases = @(
+    @{
+        Name = 'CA added to an existing ConfigMgr domain'
+        NewVMs = @()
+        ExistingVMs = @([pscustomobject]@{ vmName = 'OLD-SITE'; role = 'Primary'; domain = 'lab.test' })
+        IIS = $true
+    },
+    @{
+        Name = 'Existing IIS site system omitted from the deployment'
+        NewVMs = @()
+        ExistingVMs = @([pscustomobject]@{ vmName = 'OLD-MP'; role = 'SiteSystem'; InstallMP = $true; domain = 'lab.test' })
+        IIS = $true
+    },
+    @{
+        Name = 'New ConfigMgr site in the deployment'
+        NewVMs = @([pscustomobject]@{ vmName = 'NEW-SITE'; role = 'Primary' })
+        ExistingVMs = @()
+        IIS = $true
+    },
+    @{
+        Name = 'Domain without ConfigMgr IIS servers'
+        NewVMs = @()
+        ExistingVMs = @([pscustomobject]@{ vmName = 'OLD-CLIENT'; role = 'DomainMember'; domain = 'lab.test' })
+        IIS = $false
+    },
+    @{
+        Name = 'ConfigMgr server in an unrelated domain'
+        NewVMs = @()
+        ExistingVMs = @([pscustomobject]@{ vmName = 'OTHER-SITE'; role = 'Primary'; domain = 'other.test' })
+        IIS = $false
+    }
+)
+foreach ($case in $templateCases) {
+    $script:TemplateCalls.Clear()
+    $script:ExistingTemplateVMs = $case.ExistingVMs
+    $templateConfig = [pscustomobject]@{
+        vmOptions = @{ domainName = 'lab.test' }
+        virtualMachines = @($ca) + @($case.NewVMs)
+    }
+    $output = @(Install-PKICertificateTemplates -CAVMName 'CA' -DomainName 'lab.test' `
+        -DeployConfig $templateConfig -LogPrefix 'Fixture')
+    Assert-True ($output.Count -eq 1 -and $output[0] -is [bool] -and $output[0] -and
+        $script:TemplateCalls.Count -eq 1) "$($case.Name): template provisioning did not succeed once."
+    $expectedTemplates = 'ConfigMgrClientCertificate'
+    if ($case.IIS) {
+        $expectedTemplates = 'ConfigMgrWebServerCertificate|ConfigMgrClientDistributionPointCertificate|ConfigMgrClientCertificate'
+    }
+    Assert-True ($script:TemplateCalls[0] -eq $expectedTemplates) `
+        "$($case.Name): incorrect templates passed to the issuing CA: $($script:TemplateCalls[0])."
+}
+$script:TemplateCalls.Clear()
+$script:Failures.Clear()
+$script:TemplateInventoryThrows = $true
+$output = @(Install-PKICertificateTemplates -CAVMName 'CA' -DomainName 'lab.test' `
+    -DeployConfig $templateConfig -LogPrefix 'Fixture')
+Assert-True ($output.Count -eq 1 -and $output[0] -is [bool] -and -not $output[0] -and
+    $script:TemplateCalls.Count -eq 0) 'Inventory failure must stop template provisioning before any guest command.'
+Assert-True (($script:Failures -join ' ') -match 'lab\.test' -and
+    ($script:Failures -join ' ') -match 'fixture inventory failure') `
+    'Inventory failure lost its domain or explicit failure diagnostic.'
+
+Write-Host 'PASS -- template provisioning includes existing same-domain ConfigMgr IIS servers and fails closed on inventory errors.'
 Write-Host 'PASS -- CA provisioning is followed by verified autoenrollment for new Windows members, independent of client push.'
