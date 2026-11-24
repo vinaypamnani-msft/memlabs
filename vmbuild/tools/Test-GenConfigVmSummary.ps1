@@ -80,5 +80,41 @@ $osd.PSObject.Properties.Remove('OperatingSystem')
 $afterLegacyCache = get-VMString -config $config -virtualMachine $osd
 Assert-Equal $false ($afterLegacyCache.Contains('CPU, ]')) 'versioned cache ignores a pre-fix formatter entry'
 
+$displayVMs = @(
+    [pscustomobject]@{ VmName = 'RAM-EXACT'; Domain = 'lab.test'; State = 'Running'; Role = 'DomainMember'; DeployedOS = 'Windows 11 Latest'; MemoryStartupGB = 4; DiskUsedGB = 77.72 },
+    [pscustomobject]@{ VmName = 'RAM-FRACTION'; Domain = 'lab.test'; State = 'Running'; Role = 'DomainMember'; DeployedOS = 'Windows 11 Latest'; MemoryStartupGB = 4.001953125; DiskUsedGB = 77.72 },
+    [pscustomobject]@{ VmName = 'RAM-ROUNDED'; Domain = 'lab.test'; State = 'Running'; Role = 'DomainMember'; DeployedOS = 'Windows 11 Latest'; MemoryStartupGB = 4.126953125; DiskUsedGB = 77.72 }
+)
+$displayBefore = $displayVMs | ConvertTo-Json -Compress
+$rendered = & {
+    . (Import-TestFunction -Path (Join-Path $RootPath 'common\Common.Layout.ps1') -Name 'Get-LabVMs')
+    $lines = [Collections.Generic.List[string]]::new()
+    $line = [Text.StringBuilder]::new()
+    function Get-List { param($Type, $domain, [switch]$SmartUpdate); return $displayVMs }
+    function Write-Host {
+        param($Object, [switch]$NoNewline, $ForegroundColor, $BackgroundColor)
+        $null = $line.Append("$Object")
+        if (-not $NoNewline) {
+            $lines.Add($line.ToString())
+            $null = $line.Clear()
+        }
+    }
+    function Write-Host2 { param($Object, [switch]$NoNewline, $ForegroundColor); Write-Host $Object -NoNewline:$NoNewline }
+    Get-LabVMs
+    $lines.ToArray()
+}
+foreach ($case in @(
+        @{ Name = 'RAM-EXACT'; Memory = '4 GB' },
+        @{ Name = 'RAM-FRACTION'; Memory = '4 GB' },
+        @{ Name = 'RAM-ROUNDED'; Memory = '4.13 GB' }
+    )) {
+    $row = @($rendered | Where-Object { $_ -like "$($case.Name) *" })
+    Assert-Equal $true ($row.Count -eq 1 -and $row[0] -match "\s$([regex]::Escape($case.Memory))\s+77\.72 GB") `
+        "deployed VM list rounds $($case.Name) memory to at most two decimal places"
+}
+$header = @($rendered | Where-Object { $_ -like 'VM Name *' })[0]
+Assert-Equal 9 ($header.IndexOf('Disk Used') - $header.IndexOf('Memory')) 'memory column width uses the rounded display value'
+Assert-Equal $displayBefore ($displayVMs | ConvertTo-Json -Compress) 'display rounding leaves the underlying VM memory values unchanged'
+
 if ($script:Failures) { Write-Host "$script:Failures check(s) failed."; exit 1 }
 Write-Host 'All GenConfig VM summary checks passed.'

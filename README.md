@@ -193,11 +193,13 @@ acquire their base images; SQL/ConfigMgr media checks remain enabled for reruns.
 
 When every staged existing-VM change is limited to RAM or dynamic-memory
 settings, **Deploy / Apply Changes** applies the Hyper-V host changes directly
-and returns to the domain edit menu without running deployment phases. The VM
+and returns to the domain edit menu without running deployment phases. Results
+stay visible until you press Enter, including failures queued for retry. The VM
 restarts only when its memory settings actually change; its VM notes and pending
 edit markers update only after Hyper-V succeeds. Mixed changes still use the full
 deployment path. Post-deployment memory restoration now also honors static
 memory (`DynamicMinRam = Memory`) instead of re-enabling dynamic memory.
+The deployed-VM list rounds displayed RAM to at most two decimal places.
 
 When expanding an existing lab, hidden dependency VMs are reference context, not
 permission to replay their configuration. They do not receive ordinary DSC,

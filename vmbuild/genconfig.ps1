@@ -1085,6 +1085,7 @@ function Select-MainMenu {
                 "d" {
                     $quickResult = Invoke-ExistingVmQuickUpdates -Config $Global:Config -ExistingMachines $global:existingMachines
                     if ($quickResult.Handled) {
+                        $null = Read-Host2 -Prompt "Press Enter to return to the menu" -HideHelp
                         continue
                     }
                     if ($quickResult.Plan.RequiresScopeConfirmation) {

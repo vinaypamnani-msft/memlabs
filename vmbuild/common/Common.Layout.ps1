@@ -45,7 +45,7 @@ Function Get-LabVMs {
             $headerLength = $headers[$i].Length
             $maxDataLength = ($displayVms | ForEach-Object { 
                     $value = $_.($properties[$i])
-                    if ($i -in 6, 7) { "$value GB" } else { "$value" } 
+                    if ($i -in 6, 7) { "$([Math]::Round($value, 2)) GB" } else { "$value" }
                 } | Measure-Object -Property Length -Maximum).Maximum
             
             if ($i -eq $headers.Length - 1) {
@@ -61,7 +61,7 @@ Function Get-LabVMs {
                 $headerLength = $headers[$i].Length
                 $maxDataLength = ($displayVms | ForEach-Object { 
                         $value = $_.($properties[$i])
-                        if ($i -in 6, 7) { "$value GB" } else { "$value" } 
+                        if ($i -in 6, 7) { "$([Math]::Round($value, 2)) GB" } else { "$value" }
                     } | Measure-Object -Property Length -Maximum).Maximum
                 
                 if ($i -eq $headers.Length - 1) {
@@ -78,7 +78,7 @@ Function Get-LabVMs {
                 $headerLength = $headers[$i].Length
                 $maxDataLength = ($displayVms | ForEach-Object { 
                         $value = $_.($properties[$i])
-                        if ($i -in 6, 7) { "$value GB" } else { "$value" } 
+                        if ($i -in 6, 7) { "$([Math]::Round($value, 2)) GB" } else { "$value" }
                     } | Measure-Object -Property Length -Maximum).Maximum
                 
                 if ($i -eq $headers.Length - 1) {
@@ -121,7 +121,7 @@ Function Get-LabVMs {
                     $vm.Role,
                     $vm.SiteCode,
                     $vm.DeployedOS,
-                    "$($vm.MemoryStartupGB) GB",
+                    "$([Math]::Round($vm.MemoryStartupGB, 2)) GB",
                     "$([Math]::Round($vm.DiskUsedGB, 2)) GB",
                     $vm.SqlVersion,
                     $vm.LastKnownIP

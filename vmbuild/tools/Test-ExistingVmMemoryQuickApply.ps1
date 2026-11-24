@@ -391,9 +391,22 @@ foreach ($case in @(
         $item
     }
     function Read-Host2 {
-        param($Prompt, $CurrentValue)
+        param($Prompt, $CurrentValue, [switch]$HideHelp)
+        if ($Prompt -eq 'Press Enter to return to the menu') {
+            Assert-True ($HideHelp -and $script:LegacyMemoryRequests.Count -eq 2 -and
+                $script:LegacyUiResults.Count -eq 3) 'The menu paused before all per-VM results and the batch summary were visible.'
+            $script:LegacyUiEvents.Add('pause')
+            $script:LegacyPauses++
+            return 'acknowledged'
+        }
         if ($Prompt -notlike '*Memory*') { throw "Unexpected property edit: $Prompt" }
         '4GB'
+    }
+    function Write-GreenCheck { param($Message); $script:LegacyUiResults.Add("$Message") }
+    function Write-RedX { param($Message); $script:LegacyUiResults.Add("$Message") }
+    function Write-OrangePoint {
+        param($Message)
+        if ($Message -like '*update(s) applied;*') { $script:LegacyUiResults.Add("$Message") }
     }
     function Read-YesOrNoWithTimeout {
         param($Prompt, $Default, [switch]$HideHelp, $Timeout)
@@ -412,6 +425,7 @@ foreach ($case in @(
     }
     function Get-Menu2 {
         param($MenuName, $Prompt, $OptionArray, $AdditionalOptions, $PreOptions, $MenuItems, $Test, [switch]$AcceptsDelete, $HideHelp, $DroppableItemPattern)
+        if ($MenuName -like 'VM Deployment Menu -*') { $script:LegacyUiEvents.Add('menu') }
         if ($MenuName -like 'Modify Properties for LAB-OLD*') {
             $visits = [int]$script:LegacyEditorVisits[$MenuName]
             $script:LegacyEditorVisits[$MenuName] = $visits + 1
@@ -433,6 +447,7 @@ foreach ($case in @(
         param($VmName, $Memory, $DynamicMinRam, $Role, $SqlVersion)
         if ($VmName -notin @('LAB-OLD1', 'LAB-OLD2')) { throw "Unrelated VM memory mutation: $VmName" }
         $script:LegacyMemoryRequests.Add($VmName)
+        if ($VmName -in $script:LegacyFailMemoryVMs) { throw "Synthetic memory update failure for $VmName." }
         [pscustomobject]@{ Changed = $true; Restarted = $true }
     }
     function Set-VMNote {
@@ -452,7 +467,7 @@ foreach ($case in @(
         Colors = [pscustomobject]@{}
         Supported = [pscustomobject]@{ UpdatablePropList = @('memory', 'dynamicMinRam', 'useProxy', 'locale', 'installOffice') }
     }
-    foreach ($mode in 'ram-server-first', 'ram-client-first', 'global-approved', 'global-declined') {
+    foreach ($mode in 'ram-server-first', 'ram-client-first', 'ram-partial-failure', 'ram-all-failure', 'global-approved', 'global-declined') {
         $editGlobalOptions = $mode -like 'global-*'
         $script:LegacyServersFirst = $mode -ne 'ram-client-first'
         $global:existingMachines = $null
@@ -480,6 +495,14 @@ foreach ($case in @(
             $script:LegacyNoteWrites = [Collections.Generic.List[string]]::new()
         }
         $script:LegacyMemoryRequests = [Collections.Generic.List[string]]::new()
+        $script:LegacyUiResults = [Collections.Generic.List[string]]::new()
+        $script:LegacyUiEvents = [Collections.Generic.List[string]]::new()
+        $script:LegacyPauses = 0
+        $script:LegacyFailMemoryVMs = switch ($mode) {
+            'ram-partial-failure' { @('LAB-OLD1') }
+            'ram-all-failure' { @('LAB-OLD1', 'LAB-OLD2') }
+            default { @() }
+        }
         $script:LegacyDeploymentRequests = 0
         $script:LegacyResponses = [Collections.Generic.Queue[string]]::new()
         foreach ($response in '1', '2') { $script:LegacyResponses.Enqueue($response) }
@@ -487,6 +510,14 @@ foreach ($case in @(
         foreach ($response in 'D', 'S') { $script:LegacyResponses.Enqueue($response) }
 
         $deploy = Select-MainMenu
+        Assert-True ($deploy -is [bool] -and $script:LegacyPauses -eq [int](-not $editGlobalOptions)) `
+            'The quick-update acknowledgement leaked into the menu result or paused an unhandled deployment path.'
+        if (-not $editGlobalOptions) {
+            $pauseIndex = $script:LegacyUiEvents.IndexOf('pause')
+            Assert-True ($pauseIndex -ge 0 -and $script:LegacyUiEvents[$pauseIndex + 1] -eq 'menu' -and
+                $script:LegacyUiEvents.IndexOf('menu', $pauseIndex + 1) -eq $script:LegacyUiEvents.Count - 1) `
+                'The domain menu did not wait for acknowledgement before its next redraw.'
+        }
         $expectedFirst = if ($script:LegacyServersFirst) { 'ZZ-*' } else { 'LAB-OLD*' }
         Assert-True ($global:existingMachines[0].vmName -like $expectedFirst) 'The RAM fixture did not exercise its selected inventory ordering.'
         foreach ($name in 'ZZ-DC', 'ZZ-PRI', 'ZZ-SQL') {
@@ -496,6 +527,16 @@ foreach ($case in @(
             Assert-True ($deploy -eq $script:LegacyApproveScope -and
                 $script:LegacyDeploymentRequests -eq [int]$script:LegacyApproveScope -and
                 $script:LegacyMemoryRequests.Count -eq 0 -and $script:LegacyScopePrompts -eq 1) 'Global plus RAM edits bypassed the explicit broader-scope decision.'
+            continue
+        }
+        if ($mode -in @('ram-partial-failure', 'ram-all-failure')) {
+            $pending = @($global:existingMachines | Where-Object { get-IsExistingVMModified -virtualMachine $_ })
+            $failedCount = @($script:LegacyFailMemoryVMs).Count
+            Assert-True (-not $deploy -and $script:LegacyDeploymentRequests -eq 0 -and
+                $pending.Count -eq $failedCount -and $script:LegacyNoteWrites.Count -eq 2 - $failedCount) `
+                'Acknowledging failed quick updates changed the retry queue or entered deployment.'
+            Assert-True ($script:LegacyUiResults[-1] -eq "$(2 - $failedCount) update(s) applied; $failedCount update(s) remain queued for retry.") `
+                'The failure acknowledgement did not preserve the actual batch outcome.'
             continue
         }
         Assert-True ($deploy -eq $false -and $script:LegacyDeploymentRequests -eq 0 -and
