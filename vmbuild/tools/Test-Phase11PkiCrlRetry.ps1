@@ -158,9 +158,13 @@ function Import-PkiFixtureFunction {
     $targetGuid = [guid]::NewGuid()
     $guidEvent = New-LifecycleEvent 'renamed VM'
     $guidEvent.Xml = "<Event><EventData><Data Name='VmId'>$targetGuid</Data></EventData></Event>"
-    $fixture.Events = @($guidEvent, (New-LifecycleEvent 'OTHER-VM'))
-    $byId = Get-Phase11InterruptionEvents -Channel 'host' -TargetIdentities @("$targetGuid") @window
-    if ($byId.Events.Count -ne 1 -or $byId.Events[0].Data.VmId -ne "$targetGuid") { throw 'Exact VM-ID lifecycle evidence was not retained.' }
+    $sameNameOtherId = New-LifecycleEvent
+    $sameNameOtherId.Xml = "<Event><EventData><Data Name='VmName'>CAS1</Data><Data Name='VmId'>$([guid]::NewGuid())</Data></EventData></Event>"
+    $unrelatedPayload = New-LifecycleEvent 'OTHER-VM'
+    $unrelatedPayload.Xml = "<Event><EventData><Data Name='VmId'>$([guid]::NewGuid())</Data><Data Name='CommandLine'>$targetGuid</Data></EventData></Event>"
+    $fixture.Events = @($guidEvent, $sameNameOtherId, $unrelatedPayload, (New-LifecycleEvent))
+    $byId = Get-Phase11InterruptionEvents -Channel 'host' -TargetIdentities @('CAS1', "$targetGuid") @window
+    if ($byId.IdentityMode -ne 'VmId' -or $byId.Events.Count -ne 1 -or $byId.Events[0].Data.VmId -ne "$targetGuid") { throw 'VM-ID scoping fell back to another VM with the same friendly name.' }
     $fixture.Events = @((New-LifecycleEvent))
     $psEvents = Get-Phase11InterruptionEvents -Channel 'Windows PowerShell' @window
     if ($psEvents.Events[0].Data.Count -ne 0) { throw 'PowerShell event payload/script text was retained.' }
@@ -187,17 +191,22 @@ function Import-PkiFixtureFunction {
 
 & {
     . (Import-PkiFixtureFunction 'Save-Phase11VmInterruptionDiagnostics')
-    $fixture = @{ State = 'Stopping'; VmReads = 0; GuestCalls = 0; ChangeState = $false; GuestFails = $false; Saved = $null; Redactions = 0 }
+    $fixture = @{ State = 'Stopping'; VmReads = 0; GuestCalls = 0; HostEventCalls = 0; ChangeState = $false; GuestFails = $false; Ambiguous = $false; Saved = $null; Redactions = 0 }
     $vmId = [guid]::NewGuid()
     function Get-VM {
         param($Name, $ErrorAction)
         $fixture.VmReads++
+        if ($fixture.Ambiguous) {
+            @([pscustomobject]@{ Name = 'CAS1'; Id = $vmId }, [pscustomobject]@{ Name = 'CAS1'; Id = [guid]::NewGuid() })
+            return
+        }
         $state = $fixture.State
         if ($fixture.ChangeState -and $fixture.VmReads -gt 1) { $state = 'Stopping' }
         [pscustomobject]@{ Name = 'CAS1'; Id = $vmId; State = $state; Status = 'fixture'; Heartbeat = 'OkApplicationsUnknown'; Uptime = [timespan]::FromMinutes(3) }
     }
     function Get-Phase11InterruptionEvents {
         param($Channel, $StartUtc, $EndUtc, $Id, $TargetIdentities)
+        $fixture.HostEventCalls++
         [pscustomobject]@{ Channel = $Channel; Measured = $true; Truncated = $false; Events = @(); Errors = @() }
     }
     function Get-CimInstance {
@@ -231,6 +240,12 @@ function Import-PkiFixtureFunction {
     $arguments = @{ VMName = 'CAS1'; Domain = 'fixture.test'; ProbeStartedUtc = [datetime]::UtcNow }
     $null = Save-Phase11VmInterruptionDiagnostics @arguments
     if ($fixture.GuestCalls -ne 0 -or $fixture.Saved.HostEvents.Count -ne 2 -or $fixture.Saved.Guest.Attempted) { throw 'A stopping VM was connected to, or its host evidence was lost.' }
+    $fixture.Ambiguous = $true; $beforeEvents = $fixture.HostEventCalls
+    $null = Save-Phase11VmInterruptionDiagnostics @arguments
+    if ($fixture.GuestCalls -ne 0 -or $fixture.HostEventCalls -ne $beforeEvents -or $fixture.Saved.HostEvents[0].Measured) {
+        throw 'Ambiguous VM inventory authorized lifecycle capture by a non-unique friendly name.'
+    }
+    $fixture.Ambiguous = $false
     $fixture.State = 'Running'; $fixture.VmReads = 0; $fixture.ChangeState = $true
     $null = Save-Phase11VmInterruptionDiagnostics @arguments
     if ($fixture.GuestCalls -ne 0 -or $fixture.Saved.HostVm[-1].State -ne 'Stopping') { throw 'A VM that began stopping during capture still received a guest request.' }
@@ -242,7 +257,7 @@ function Import-PkiFixtureFunction {
     $null = Save-Phase11VmInterruptionDiagnostics @arguments
     if (-not $fixture.Saved.Guest.ResultReceived -or $fixture.Saved.Guest.Evidence.Processes.Count -ne 20 -or
         -not $fixture.Saved.Guest.Evidence.ProcessesTruncated -or
-        ($fixture.Saved | ConvertTo-Json -Depth 12) -match 'must not be saved' -or $fixture.Redactions -ne 4) {
+        ($fixture.Saved | ConvertTo-Json -Depth 12) -match 'must not be saved' -or $fixture.Redactions -ne 5) {
         throw 'Guest metadata was not measured, bounded, or passed through diagnostic redaction.'
     }
 }

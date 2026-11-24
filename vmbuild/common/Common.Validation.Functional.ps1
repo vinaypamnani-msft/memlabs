@@ -7616,7 +7616,13 @@ function Get-Phase11InterruptionEvents {
         [string[]]$TargetIdentities = @()
     )
 
-    $result = [ordered]@{ Channel = $Channel; Measured = $false; Truncated = $false; CandidatesExamined = 0; Events = @(); Errors = @() }
+    $result = [ordered]@{ Channel = $Channel; Measured = $false; Truncated = $false; CandidatesExamined = 0; IdentityMode = 'Unscoped'; Events = @(); Errors = @() }
+    $queryTargets = @($TargetIdentities)
+    if ($queryTargets.Count) {
+        $result.IdentityMode = 'ExactName'
+        $guidTargets = @($queryTargets | Where-Object { $parsed = [guid]::Empty; [guid]::TryParse($_, [ref]$parsed) })
+        if ($guidTargets.Count) { $queryTargets = $guidTargets; $result.IdentityMode = 'VmId' }
+    }
     try {
         $filter = @{ LogName = $Channel; StartTime = $StartUtc.ToLocalTime(); EndTime = $EndUtc.ToLocalTime() }
         if ($Id.Count) { $filter.Id = $Id }
@@ -7628,25 +7634,25 @@ function Get-Phase11InterruptionEvents {
             try {
                 $xml = [xml]$entry.ToXml()
                 $fields = $xml.SelectNodes('/*[local-name()="Event"]/*[local-name()="EventData"]/* | /*[local-name()="Event"]/*[local-name()="UserData"]//*[not(*)]')
-                if ($TargetIdentities.Count) {
+                if ($queryTargets.Count) {
                     $matched = $false
-                    foreach ($identity in $TargetIdentities) {
+                    foreach ($identity in $queryTargets) {
                         if (-not $identity) { continue }
                         $guid = [guid]::Empty
-                        if ([guid]::TryParse($identity, [ref]$guid)) {
-                            $pattern = '(?<![A-Za-z0-9_-])' + [regex]::Escape($identity) + '(?![A-Za-z0-9_-])'
-                            if ($xml.OuterXml -match $pattern) { $matched = $true; break }
-                        }
-                        else {
-                            foreach ($field in @($fields)) {
-                                $key = $field.LocalName
-                                if ($field.HasAttribute('Name')) { $key = $field.GetAttribute('Name') }
-                                if ($key -in 'VmName', 'VirtualMachineName', 'ElementName' -and $field.InnerText -ieq $identity) {
-                                    $matched = $true; break
-                                }
+                        $isGuid = [guid]::TryParse($identity, [ref]$guid)
+                        foreach ($field in @($fields)) {
+                            $key = $field.LocalName
+                            if ($field.HasAttribute('Name')) { $key = $field.GetAttribute('Name') }
+                            $recordGuid = [guid]::Empty
+                            if ($isGuid -and $key -in 'VmId', 'VirtualMachineId' -and
+                                [guid]::TryParse($field.InnerText, [ref]$recordGuid) -and $recordGuid -eq $guid) {
+                                $matched = $true; break
                             }
-                            if ($matched) { break }
+                            if (-not $isGuid -and $key -in 'VmName', 'VirtualMachineName', 'ElementName' -and $field.InnerText -ieq $identity) {
+                                $matched = $true; break
+                            }
                         }
+                        if ($matched) { break }
                     }
                     if (-not $matched) { continue }
                 }
@@ -7719,7 +7725,12 @@ function Save-Phase11VmInterruptionDiagnostics {
     }
     catch { $snapshot.Errors += "Host VM observation: $($_.Exception.Message)" }
     foreach ($channel in @('Microsoft-Windows-Hyper-V-VMMS/Admin', 'Microsoft-Windows-Hyper-V-Worker/Admin')) {
-        $snapshot.HostEvents += Get-Phase11InterruptionEvents -Channel $channel -StartUtc $startUtc -EndUtc $endUtc -TargetIdentities $identities
+        if ($vm) {
+            $snapshot.HostEvents += Get-Phase11InterruptionEvents -Channel $channel -StartUtc $startUtc -EndUtc $endUtc -TargetIdentities $identities
+        }
+        else {
+            $snapshot.HostEvents += [pscustomobject]@{ Channel = $channel; Measured = $false; Events = @(); Errors = @('Exact VM identity unavailable; lifecycle events were not collected by name.') }
+        }
     }
     $snapshot.Guest = [pscustomobject]@{ Attempted = $false; Reason = 'Exact running VM not observed; no guest connection or VM start was attempted.' }
     if ($vm -and "$($vm.State)" -eq 'Running') {

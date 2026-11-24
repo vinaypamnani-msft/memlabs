@@ -49,7 +49,9 @@ also verifies the primary path against an installed modern mRemoteNG package.
 If a PKI probe loses PowerShell Direct or times out, Phase 11 keeps the original
 validation failure and saves `<VM>-Phase11-<timestamp>-VmInterruption.json`
 beside the build log. It records fresh host VM state and target-scoped Hyper-V
-lifecycle events. A guest already observed as running also gets one bounded,
+lifecycle events matched by its resolved VM ID, never by a reused friendly name.
+An unresolved/ambiguous VM produces explicit capture errors instead. A guest
+already observed as running also gets one bounded,
 non-rebooting evidence request for boot time, reboot flags, relevant services,
 process IDs/start times, and shutdown/application/PowerShell/WMI event metadata.
 Unavailable guests and partial or truncated captures remain explicit.
