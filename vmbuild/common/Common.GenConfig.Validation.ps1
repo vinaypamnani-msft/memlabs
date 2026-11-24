@@ -573,6 +573,25 @@ function Get-AdditionalValidations {
                 }
             }
         }
+        "wsusUseHTTPS" {
+            if ($property.Role -ne 'WSUS' -or $property.InstallSUP -or $property.ExistingVM -or $property.hidden) {
+                $property.$name = $CurrentValue
+                Add-ErrorMessage -property $name -Persist "WSUS HTTPS can be selected only for a new standalone WSUS VM. Converting deployed WSUS servers is not supported."
+                return
+            }
+            if ($value -eq $true) {
+                if (-not $Global:Config.pkiOptions) {
+                    $Global:Config | Add-Member -NotePropertyName pkiOptions -NotePropertyValue ([pscustomobject]@{
+                        EnablePKI = $false; IssuingCAVM = ''; UseOfflineRoot = $false; OfflineRootCAVM = ''
+                    })
+                }
+                $Global:Config.pkiOptions.EnablePKI = $true
+                if (-not $Global:Config.pkiOptions.IssuingCAVM) {
+                    $firstDC = $Global:Config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                    if ($firstDC) { $Global:Config.pkiOptions.IssuingCAVM = $firstDC.vmName }
+                }
+            }
+        }
         "wsusContentDir" {
             $invalidReason = $null
             $wsusLetter = $null

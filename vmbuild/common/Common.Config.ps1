@@ -1077,6 +1077,10 @@ function Get-UserConfiguration {
 
         foreach ($vm in $config.VirtualMachines) {
 
+            if ($vm.role -eq 'WSUS' -and -not $vm.PSObject.Properties['wsusUseHTTPS']) {
+                $vm | Add-Member -MemberType NoteProperty -Name 'wsusUseHTTPS' -Value $false
+            }
+
             # Linux VMs run with static memory (Hyper-V Dynamic Memory on Linux
             # is flaky), so dynamicMinRam is meaningless. Strip it from configs
             # that picked it up before the AddVM guard was in place.
@@ -4662,6 +4666,8 @@ function Get-LabWsusUrl {
     $standaloneWsus = $allVMs | Where-Object { $_.role -eq 'WSUS' } | Select-Object -First 1
     if ($standaloneWsus) {
         $fqdn = "$($standaloneWsus.vmName).$domainName"
+        $protocol = if ($standaloneWsus.wsusUseHTTPS -eq $true) { 'https' } else { 'http' }
+        $port = if ($standaloneWsus.wsusUseHTTPS -eq $true) { 8531 } else { 8530 }
         return [PSCustomObject]@{ WsusUrl = "${protocol}://${fqdn}:${port}"; IsRealWsus = $true }
     }
 

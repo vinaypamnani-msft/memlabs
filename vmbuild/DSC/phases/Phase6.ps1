@@ -152,7 +152,7 @@
         $usePKI = if ($thisVM.cmOptions) { $thisVM.cmOptions.UsePKI } else { $deployConfig.cmOptions.UsePKI }
 
         if ($standalone) {
-            $usePKI = $false
+            $usePKI = ($thisVM.wsusUseHTTPS -eq $true)
         }
 
         if ($usePKI) {
@@ -165,7 +165,7 @@
         }
 
         $nextDepend = "[ConfigureWSUS]UpdateServices"
-        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer) {
+        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer -or ($standalone -and $sqlServer -ne 'WID')) {
             ConfigureWSUS UpdateServices {
                 DependsOn            = @('[WindowsFeatureSet]UpdateServices')
                 ContentPath          = $contentDir
@@ -173,6 +173,7 @@
                 PsDscRunAsCredential = $Admincreds
                 HTTPSUrl             = $SSLHost
                 TemplateName         = $SSLTemplate
+                StandaloneHTTPS      = ($standalone -and $usePKI)
 
             }
         }
@@ -182,6 +183,7 @@
                 ContentPath  = $contentDir
                 HTTPSUrl     = $SSLHost
                 TemplateName = $SSLTemplate
+                StandaloneHTTPS = ($standalone -and $usePKI)
             }
         }
 

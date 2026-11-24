@@ -96,6 +96,7 @@ function Get-GenericHelp {
         "InstallSUP" { "Install WSUS and the Software Update Point role on this VM" }
         "InstallSMSProv" { "Install an additional SMS Provider on this machine (Along with the ADK)" }
         "wsusContentDir" { "Change the location where WSUS will store its content" }
+        "wsusUseHTTPS" { "New standalone WSUS only: enroll a server certificate and require HTTPS on WSUS metadata services (8531). Keeps required HTTP content endpoints (8530). Enables CA infrastructure, never ConfigMgr HTTPS. Offline catalog/import/approvals remain user-managed." }
         "wsusDataBaseServer" { "Change the database WSUS will use.  Can be WID, or a local or remote SQL Server" }
         "Add SQL" { "Adds a SQL Instance to this VM" }
         "Remove SQL" { "Removes SQL from this VM" }

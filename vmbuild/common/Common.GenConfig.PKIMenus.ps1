@@ -230,6 +230,10 @@ function Select-PKIOptions {
 
         switch ($response) {
             "1" {
+                if ($pkiOptions.EnablePKI -and @($Global:Config.virtualMachines | Where-Object { $_.role -eq 'WSUS' -and $_.wsusUseHTTPS -eq $true }).Count -gt 0) {
+                    Add-ErrorMessage -property 'EnablePKI' -Persist "CA infrastructure is required by standalone WSUS HTTPS. Disable wsusUseHTTPS on the proposed WSUS VMs first."
+                    break
+                }
                 # Toggle EnablePKI
                 $pkiOptions.EnablePKI = -not $pkiOptions.EnablePKI
                 if ($pkiOptions.EnablePKI) {
@@ -329,7 +333,7 @@ function Get-PKIHelp {
     param($text)
 
     switch (($text -split "=")[0].Trim()) {
-        "EnablePKI" { "Deploy Certificate Authority infrastructure. Works with or without ConfigMgr. Installs an Enterprise CA on the selected VM." }
+        "EnablePKI" { "Deploy Certificate Authority infrastructure. Works with or without ConfigMgr. Installs an Enterprise CA on the selected VM. Cannot be disabled while standalone WSUS HTTPS depends on it." }
         "UsePKI for ConfigMgr" { "Use HTTPS for all ConfigMgr roles (DP/MP/SUP/RP). Automatically enables PKI infrastructure if not already enabled." }
         { $_ -like 'UsePKI on *' } { "Use HTTPS for all ConfigMgr roles on this site server (DP/MP/SUP/RP). Automatically enables PKI infrastructure if not already enabled." }
         "IssuingCA" { "The VM that will host the Issuing (Enterprise) CA. Defaults to the domain controller." }

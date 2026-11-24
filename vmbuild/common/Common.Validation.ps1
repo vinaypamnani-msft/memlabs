@@ -582,6 +582,50 @@ function Test-MachineNameExists {
     }
 }
 
+function Test-ValidStandaloneWsusHttps {
+    param([object]$ConfigObject, [object]$ReturnObject)
+
+    $configured = @($ConfigObject.virtualMachines | Where-Object { $_.PSObject.Properties['wsusUseHTTPS'] })
+    if ($configured.Count -eq 0) { return }
+    $inventory = @(Get-List -Type VM -DomainName $ConfigObject.vmOptions.domainName)
+    foreach ($vm in $configured) {
+        if ($vm.wsusUseHTTPS -isnot [bool]) {
+            Add-ValidationMessage -Message "WSUS HTTPS: [$($vm.vmName)] wsusUseHTTPS must be a Boolean." -ReturnObject $ReturnObject -Failure
+            continue
+        }
+        $deployed = @($inventory | Where-Object { $_.vmName -eq $vm.vmName })
+        if ($deployed.Count -gt 1 -or
+            ($deployed.Count -eq 1 -and [bool]$deployed[0].wsusUseHTTPS -ne $vm.wsusUseHTTPS) -or
+            ($deployed.Count -eq 0 -and ($vm.ExistingVM -or $vm.hidden) -and $vm.wsusUseHTTPS)) {
+            Add-ValidationMessage -Message "WSUS HTTPS: [$($vm.vmName)] cannot change or infer the HTTPS mode of a deployed WSUS server. Rebuild it to change transport." -ReturnObject $ReturnObject -Failure
+        }
+        if (-not $vm.wsusUseHTTPS) { continue }
+        if ($vm.role -ne 'WSUS' -or $vm.InstallSUP) {
+            Add-ValidationMessage -Message "WSUS HTTPS: [$($vm.vmName)] wsusUseHTTPS is supported only on standalone WSUS, not ConfigMgr roles." -ReturnObject $ReturnObject -Failure
+        }
+        if (-not $ConfigObject.pkiOptions.EnablePKI -or -not $ConfigObject.pkiOptions.IssuingCAVM) {
+            Add-ValidationMessage -Message "WSUS HTTPS: [$($vm.vmName)] requires EnablePKI and an IssuingCA selection in PKI Settings." -ReturnObject $ReturnObject -Failure
+            continue
+        }
+        $caRef = Resolve-DomainVmReference -ConfigObject $ConfigObject -VmReference $ConfigObject.pkiOptions.IssuingCAVM
+        $ca = $caRef.Vm
+        $deployedCa = @($inventory | Where-Object { $_.vmName -eq $caRef.ResolvedName })
+        $caExistsWithoutEvidence = $deployedCa.Count -gt 1 -or
+            ($deployedCa.Count -eq 1 -and $deployedCa[0].InstallCA -ne $true) -or
+            ($deployedCa.Count -eq 0 -and (-not $caRef.InConfig -or $ca.hidden -or $ca.ExistingVM))
+        if ($deployedCa.Count -eq 1) { $ca = $deployedCa[0] }
+        $caOS = if ($ca.operatingSystem) { $ca.operatingSystem } else { $ca.deployedOS }
+        $domainServerRoles = @('DC', 'BDC', 'DomainMember', 'CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem', 'WSUS', 'FileServer', 'SQLAO')
+        $eligibleCa = $ca -and $ca.role -in $domainServerRoles -and
+            ($caOS -like 'Server *' -or $caOS -like 'Windows Server *') -and
+            -not (Test-VmIsLinux -Vm $ca) -and
+            (-not $ca.domain -or $ca.domain -eq $ConfigObject.vmOptions.domainName)
+        if (-not $caRef.Exists -or -not $eligibleCa -or $caExistsWithoutEvidence) {
+            Add-ValidationMessage -Message "WSUS HTTPS: the issuing CA must be a new domain-joined Windows server or an existing MemLabs CA. Select a valid IssuingCA." -ReturnObject $ReturnObject -Failure
+        }
+    }
+}
+
 function Test-ValidMachineName {
     param (
         [string] $name,
@@ -1949,6 +1993,7 @@ function Test-Configuration {
         # ===========
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing Vm Options" -PercentComplete 7
         Test-ValidVmOptions -ConfigObject $deployConfig -ReturnObject $return
+        Test-ValidStandaloneWsusHttps -ConfigObject $deployConfig -ReturnObject $return
 
         Test-ValidMachineName $deployConfig.vmOptions.domainNetBiosName -ReturnObject $return
         # CM Options

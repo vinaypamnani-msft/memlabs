@@ -1472,6 +1472,16 @@ try {
                             break
                         }
                     }
+                    elseif (@($deployConfig.virtualMachines | Where-Object { $_.role -eq 'WSUS' -and $_.wsusUseHTTPS -eq $true -and -not $_.hidden }).Count -gt 0) {
+                        $pkiSuccess = Install-PKICertificateTemplates -CAVMName $deployConfig.pkiOptions.IssuingCAVM `
+                            -DomainName $deployConfig.vmOptions.domainName -DeployConfig $deployConfig `
+                            -LogPrefix 'WSUS HTTPS' -StandaloneWsusOnly
+                        if (-not $pkiSuccess) {
+                            Write-Log '[PKI] Standalone WSUS certificate template/enrollment preparation failed.' -Failure
+                            $configured = $false
+                            break
+                        }
+                    }
                 }
                 if ($i -eq 5) {
                     # Validate SQLAO health immediately after Phase 5 DSC so

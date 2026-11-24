@@ -132,7 +132,8 @@ function Install-PKICertificateTemplates {
         [Parameter(Mandatory)] [string] $CAVMName,
         [Parameter(Mandatory)] [string] $DomainName,
         [Parameter(Mandatory)] [object] $DeployConfig,
-        [Parameter(Mandatory)] [string] $LogPrefix
+        [Parameter(Mandatory)] [string] $LogPrefix,
+        [switch] $StandaloneWsusOnly
     )
 
     # Determine which templates are needed
@@ -140,19 +141,34 @@ function Install-PKICertificateTemplates {
         ($_.role -in "CAS", "Primary", "Secondary", "PassiveSite") -or
         $_.InstallSUP -or $_.InstallMP -or $_.InstallDP -or $_.InstallRP
     }).Count -gt 0
+    $wsusComputers = @($DeployConfig.virtualMachines | Where-Object {
+        $_.role -eq 'WSUS' -and $_.wsusUseHTTPS -eq $true -and -not $_.InstallSUP -and -not $_.hidden
+    } | ForEach-Object { $_.vmName })
+    if ($StandaloneWsusOnly -and $wsusComputers.Count -eq 0) {
+        Write-Log "[$LogPrefix] No new standalone WSUS HTTPS consumers require template preparation." -LogOnly
+        return $true
+    }
 
     $templateList = @()
-    if ($hasIISServers) {
+    if ($hasIISServers -or $wsusComputers.Count -gt 0) {
         $templateList += 'ConfigMgrWebServerCertificate'
+    }
+    if ($hasIISServers -and -not $StandaloneWsusOnly) {
         $templateList += 'ConfigMgrClientDistributionPointCertificate'
     }
-    $templateList += 'ConfigMgrClientCertificate'
+    if (-not $StandaloneWsusOnly) { $templateList += 'ConfigMgrClientCertificate' }
+    $webTemplateContent = ''
+    if ($StandaloneWsusOnly) {
+        $templateList = @('ConfigMgrWebServerCertificate')
+        $hasIISServers = $false
+        $webTemplateContent = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\DSC\CertificateTemplates\ConfigMgrWebServerCertificate.ldf') -Raw -ErrorAction Stop
+    }
 
     Write-Log "[$LogPrefix] Importing $($templateList.Count) certificate template(s) on $CAVMName..." -NoIndent
     $stepStart = Get-Date
 
     $templateScript = {
-        param($DomainName, $TemplateListString)
+        param($DomainName, $TemplateListString, $WsusComputerNames, $CmWebNeeded, $WebTemplateContent)
 
         $TemplateList = $TemplateListString -split '\|'
         $ErrorActionPreference = 'Stop'
@@ -201,6 +217,26 @@ function Install-PKICertificateTemplates {
                 }
             }
 
+            if ($WsusComputerNames) {
+                Import-Module ActiveDirectory -ErrorAction Stop
+                $groupPath = "CN=MemLabs WSUS Servers,CN=Users,$dnPath"
+                $group = Get-ADGroup -LDAPFilter '(cn=MemLabs WSUS Servers)' -SearchBase "CN=Users,$dnPath" -Server $DomainName -Properties member -ErrorAction Stop
+                if (-not $group) {
+                    $group = New-ADGroup -Name 'MemLabs WSUS Servers' -GroupScope Global -GroupCategory Security -Path "CN=Users,$dnPath" -Server $DomainName -PassThru -ErrorAction Stop
+                }
+                foreach ($computerName in ($WsusComputerNames -split '\|')) {
+                    $computer = Get-ADComputer -Identity $computerName -Server $DomainName -ErrorAction Stop
+                    if ($group.member -notcontains $computer.DistinguishedName) {
+                        Add-ADGroupMember -Identity $groupPath -Members $computer -Server $DomainName -ErrorAction Stop
+                    }
+                    $group = Get-ADGroup -Identity $groupPath -Server $DomainName -Properties member -ErrorAction Stop
+                    if ($group.member -notcontains $computer.DistinguishedName) {
+                        throw "WSUS enrollment group membership readback failed for $computerName."
+                    }
+                }
+                _Log "Standalone WSUS enrollment group is ready (web-template enrollment only)."
+            }
+
             # ---- Phase A: Import templates into AD via ldifde ----
             # The LDF files contain both the msPKI-Enterprise-Oid object (in
             # CN=OID) and the template object (in CN=Certificate Templates).
@@ -234,13 +270,14 @@ function Install-PKICertificateTemplates {
                 }
 
                 $ldfSource = "C:\staging\DSC\CertificateTemplates\$tplName.ldf"
-                if (-not (Test-Path $ldfSource)) {
+                if (-not $WebTemplateContent -and -not (Test-Path $ldfSource)) {
                     _Log "FATAL: LDF file not found: $ldfSource"
                     return @{ Success = $false; Log = $report.ToArray(); Error = "LDF not found: $ldfSource" }
                 }
 
                 $ldfTarget = Join-Path $ldfDirectory "$tplName.ldf"
-                (Get-Content $ldfSource) -replace 'DC=TEMPLATE,DC=com', $dnPath |
+                $ldfText = if ($WebTemplateContent) { $WebTemplateContent } else { Get-Content $ldfSource -Raw }
+                $ldfText -replace 'DC=TEMPLATE,DC=com', $dnPath |
                     Set-Content $ldfTarget -Force
 
                 _Log "Importing template '$tplName' via ldifde..."
@@ -269,14 +306,26 @@ function Install-PKICertificateTemplates {
             $domainSidBytes = [byte[]]$domainEntry.Properties['objectSid'].Value
             $domainSid = [System.Security.Principal.SecurityIdentifier]::new($domainSidBytes, 0)
 
-            $tplIndex = 0
-            foreach ($tplName in $TemplateList) {
-                $tplIndex++
+            $grants = @(
+                foreach ($tplName in $TemplateList) {
                 $groupName = switch ($tplName) {
                     'ConfigMgrWebServerCertificate'               { 'ConfigMgr IIS Servers' }
                     'ConfigMgrClientDistributionPointCertificate' { 'ConfigMgr IIS Servers' }
                     'ConfigMgrClientCertificate'                  { "$($domainSid.Value)-515" }
                 }
+                    if ($tplName -ne 'ConfigMgrWebServerCertificate' -or $CmWebNeeded) {
+                        @{ Template = $tplName; Group = $groupName }
+                    }
+                    if ($tplName -eq 'ConfigMgrWebServerCertificate' -and $WsusComputerNames) {
+                        @{ Template = $tplName; Group = 'MemLabs WSUS Servers' }
+                    }
+                }
+            )
+            $tplIndex = 0
+            foreach ($grant in $grants) {
+                $tplIndex++
+                $tplName = $grant.Template
+                $groupName = $grant.Group
                 $doAutoEnroll = ($tplName -eq 'ConfigMgrClientCertificate')
 
                 _Log "[$tplIndex/$($TemplateList.Count)] Setting ACL on '$tplName' for '$groupName'..."
@@ -428,7 +477,7 @@ function Install-PKICertificateTemplates {
     Flush-LogBuffer -All
     $result = Invoke-VmCommand -VmName $CAVMName -VmDomainName $DomainName `
         -ScriptBlock $templateScript `
-        -ArgumentList $DomainName, ($templateList -join '|') `
+        -ArgumentList $DomainName, ($templateList -join '|'), ($wsusComputers -join '|'), $hasIISServers, $webTemplateContent `
         -DisplayName "$LogPrefix`: Import certificate templates"
 
     if (-not (Test-PKIStepResult -Result $result -StepName "Certificate template import" -LogPrefix $LogPrefix -LogSource "CA")) {

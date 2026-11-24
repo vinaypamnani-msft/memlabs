@@ -11,6 +11,8 @@ enum Ensure {
     Present
 }
 
+. (Join-Path $PSScriptRoot 'WsusHttps.ps1')
+
 function Test-TcpPortFast {
     # Hard-timeout TCP probe using TcpClient + WaitHandle. Never use Test-NetConnection
     # (hangs past its own timeouts on DNS reverse lookups / ICMP fallbacks) and never a
@@ -8555,6 +8557,8 @@ class ConfigureWSUS {
     # Should usually be 'ConfigMgr WebServer Certificate'
     [DscProperty()]
     [string]$TemplateName
+    [DscProperty()]
+    [bool]$StandaloneHTTPS
 
     hidden [void] CleanupWSUS() {
         Write-Status "Cleaning up WSUS IIS configuration..."
@@ -8651,6 +8655,27 @@ class ConfigureWSUS {
     }
 
     [void] Set() {
+
+        if ($this.StandaloneHTTPS) {
+            if (-not $this.HTTPSUrl) { throw 'Standalone WSUS HTTPS requires its FQDN.' }
+            $installed = $false
+            try { $installed = $null -ne (Get-WsusServer -ErrorAction Stop) }
+            catch { Write-Verbose "WSUS postinstall is not ready: $_" }
+            if (-not $installed) {
+                if (-not $this.EnsureIisMetabaseHealthy()) { return }
+                $null = New-Item -Path $this.ContentPath -ItemType Directory -Force -ErrorAction Stop
+                $postinstallArguments = @('postinstall', "CONTENT_DIR=$($this.ContentPath)")
+                if ($this.SqlServer) { $postinstallArguments += "SQL_INSTANCE_NAME=$($this.SqlServer)" }
+                Write-Status "Running standalone WSUS postinstall in $($this.ContentPath)"
+                $postinstallOutput = Invoke-MemLabsWsusUtil -Arguments $postinstallArguments
+                Write-Verbose $postinstallOutput
+                if (-not (Get-WsusServer -ErrorAction Stop)) { throw 'WSUS API unavailable after postinstall.' }
+                if (-not $this.SqlServer) { $this.GrantWidSysadmin() }
+            }
+            Enable-MemLabsWsusHttps -Fqdn $this.HTTPSUrl
+            $this.HardenWsusPool()
+            return
+        }
 
         # --- Preflight: ensure the IIS 6 metabase (IISADMIN) is usable before postinstall ---
         # WSUS postinstall's ConfigureWebsite step creates the WSUS Administration site by
@@ -9090,6 +9115,11 @@ class ConfigureWSUS {
     [bool] Test() {
 
         try {
+            if ($this.StandaloneHTTPS) {
+                $state = Get-MemLabsWsusHttpsState -Fqdn $this.HTTPSUrl
+                Write-Verbose ($state.Details -join ' ')
+                return $state.Passed
+            }
             $wsus = get-WsusServer
             if (-not $wsus) {
                 return $false
@@ -9137,6 +9167,8 @@ class ConfigureWSUS {
 class WSUSSync {
     [DscProperty(Key)]
     [string] $ServerName
+    [DscProperty()]
+    [bool] $UseSsl
 
     [void] Set() {
         # Pre-Phase-7 cab import has been moved out of this DSC resource
@@ -9172,9 +9204,10 @@ class WSUSSync {
         # update metadata is needed.
         Write-Status "Starting early WSUS catalog sync for $($this.ServerName) (fire-and-forget, no cab available)"
         try {
-            $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530
+            $syncPort = if ($this.UseSsl) { 8531 } else { 8530 }
+            $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber $syncPort -UseSsl:$this.UseSsl -ErrorAction Stop
             if (-not $WSUS) {
-                Write-Status "WSUS server not found at $($this.ServerName):8530. Skipping early sync."
+                Write-Status "WSUS server not found at $($this.ServerName):$syncPort. Skipping early sync."
                 return
             }
 

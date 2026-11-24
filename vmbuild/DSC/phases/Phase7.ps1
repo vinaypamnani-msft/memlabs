@@ -211,6 +211,7 @@ configuration Phase7
             WSUSSync WSUSSync {
                 DependsOn  = "[PendingReboot]DrainBeforeWSUSSync"
                 ServerName = $thisVM.vmName + "." + $DomainName
+                UseSsl     = ($thisVM.role -eq 'WSUS' -and $thisVM.wsusUseHTTPS -eq $true)
             }
             WriteStatus Complete {
                 Status    = "Complete!"

@@ -221,6 +221,7 @@ function Get-SortedProperties {
         'replicaDbName'       = 'replicaDbName'
         'installRP'           = 'InstallRP'
         'installSUP'          = 'InstallSUP'
+        'wsusUseHTTPS'        = 'wsusUseHTTPS'
         'installSMSProv'      = 'InstallSMSProv'
         'Version'             = 'Version'
         'Install'             = 'Install'
@@ -680,6 +681,7 @@ function get-VMString {
         if ($virtualMachine.joinDomain) { $name += " [AD]" }
     }
     if ($virtualMachine.useProxy) { $name += " [Proxy]" }
+    if ($virtualMachine.role -eq 'WSUS' -and $virtualMachine.wsusUseHTTPS) { $name += " [WSUS HTTPS:8531]" }
     if ($virtualMachine.BitLocker) { $name += " [BL]" }
     $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 12)
     # Demoted from -LogOnly: this runs once per VM on every menu redraw and

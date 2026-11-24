@@ -414,6 +414,7 @@ These labels are stable; numbers are not an API.
 | `InstallRP` | Adds Reporting Services/Reporting Point; one RP per site. | Exercise reporting. |
 | `InstallSUP` | Adds WSUS/SUP, site code, DB, content path, disk, and minimum sizing. | Exercise software updates. Parent sites need SUP before downlevel sites. |
 | `wsusDataBaseServer` / `wsusContentDir` | Select WID/local/remote SQL and content storage. | Control SUP/WSUS database placement. |
+| `wsusUseHTTPS` | New standalone WSUS only; default `false`. Enables CA infrastructure and WSUS HTTPS independently of ConfigMgr. Read-only after deployment. | Serve WSUS metadata over TLS without changing ConfigMgr communication settings. |
 | `InstallSMSProv` | Adds an SMS Provider plus ADK to a SiteSystem. | Test remote provider/console access. |
 | `InstallPatchMyPC` / `PatchMyPCFileServer` | Adds Patch My PC and selects a FileServer. | Test third-party update publishing on the top-level SUP. |
 | `remoteContentLibVM` | Selects a FileServer for a PassiveSite. | Required when HA relocates the content library. |
@@ -569,13 +570,71 @@ Important dependencies:
 
 ## PKI and HTTPS options
 
+### Standalone WSUS HTTPS
+
+On a **new WSUS VM**, set `wsusUseHTTPS=true`. Review **PKI Settings** and
+select the MemLabs issuing CA (single-tier or two-tier). The toggle enables CA
+infrastructure but never enables ConfigMgr `UsePKI`; ConfigMgr is not required.
+Saved configurations retain the Boolean on the WSUS VM:
+
+```json
+{
+  "vmName": "WSUS1",
+  "role": "WSUS",
+  "wsusUseHTTPS": true
+}
+```
+
+This is a VM-property excerpt, not a complete lab configuration. Existing
+configurations without this property retain standalone HTTP. Converting deployed
+WSUS servers, external CAs/certificates, DNS aliases, custom ports, and SUP
+onboarding are not supported by this option.
+
+After CA setup, MemLabs publishes the existing `ConfigMgrWebServerCertificate`
+template and grants the dedicated **MemLabs WSUS Servers** group Read/Enroll
+permission on that template only. Phase 6 runs normal WSUS `postinstall`, enrolls
+a Server Authentication certificate in `LocalMachine\My` with the machine FQDN
+in its SAN, binds **WSUS Administration:8531**, then runs
+`wsusutil configuressl <FQDN>`. Existing eligible certificates are reused.
+
+Only `ApiRemoting30`, `ClientWebService`, `DSSAuthWebService`,
+`ServerSyncWebService`, and `SimpleAuthWebService` require SSL. Client
+certificates are ignored (not mutual TLS). HTTP **8530** remains available for
+`Content`, `Inventory`, `ReportingWebService`, and `SelfUpdate`; requiring SSL
+on the entire site breaks WSUS. See Microsoft's
+[WSUS TLS requirements](https://learn.microsoft.com/en-us/windows-server/administration/windows-server-update-services/deploy/2-configure-wsus#23-secure-wsus-with-the-tls-protocol).
+MemLabs-owned standalone client URLs use the WSUS server's flag; external
+Windows Update policies and ConfigMgr routing retain their existing ownership.
+
+Enrollment, DNS/AD/time, trust distribution, and the certificate's internal
+CDP/AIA services must remain reachable even for guests without Internet access.
+Untrusted/expired certificates, unavailable revocation checks, failed
+enrollment/native commands, and incorrect TLS state fail explicitly; there is
+no HTTP metadata fallback or certificate-validation bypass. Phase 11 checks
+server-side HTTPS/API readiness and reports intended-client scans as **not
+tested**. A server-only pass does not prove client connectivity or update supply.
+
+No update import, approval, installation, or offline-source automation is added.
+Offline WSUS data preparation, initial import, repeat refresh, and approvals are
+the administrator's responsibility. The existing catalog-bootstrap behavior is
+not an offline update supply.
+
+There is no new renewal scheduler. Before expiry, explicitly enroll a replacement
+from the same template with the same FQDN, then reapply Phase 6 on this
+feature-deployed WSUS VM to select/rebind it and validate HTTPS. TLS-only reruns
+do not repeat postinstall when the local WSUS API is ready. Phase 11 warns within
+30 days of certificate expiry; administrators also own timely CRL republication.
+Do not remove the previous certificate until the replacement is verified.
+
+### PKI Settings menu
+
 `Select-PKIOptions` in
 [Common.GenConfig.PKIMenus.ps1](../../common/Common.GenConfig.PKIMenus.ps1)
 owns this menu.
 
 | Key | Label and availability | Default | What it does | When/why to use it |
 |---|---|---|---|---|
-| `1` | EnablePKI | `false` | Toggles CA infrastructure. Enabling defaults `IssuingCAVM` to the first DC; disabling clears CA references, offline root, and CM `UsePKI`. | Deploy certificates even without ConfigMgr. |
+| `1` | EnablePKI | `false` | Toggles CA infrastructure. Enabling defaults `IssuingCAVM` to the first DC; disabling clears CA references, offline root, and CM `UsePKI`. Disabling is blocked while standalone WSUS HTTPS depends on it. | Deploy certificates even without ConfigMgr. |
 | `2` | IssuingCA; when EnablePKI | First DC | Selects an eligible DC/domain server; `N` creates `ISSUINGCA`. | Place the Enterprise Issuing CA. |
 | `3` | UseOfflineRoot; when EnablePKI | `false` | Toggles two-tier PKI. Enabling selects or auto-adds one StandaloneRootCA. | Keep the trust anchor offline after issuing the subordinate CA cert. |
 | `4` | OfflineRootCA; when UseOfflineRoot | Auto-created | Selects the root VM; `N` creates one. | Override the auto-selected offline root. |

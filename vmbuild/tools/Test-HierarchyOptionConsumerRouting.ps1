@@ -56,8 +56,13 @@ foreach ($consumerName in @('MX-WSUS', 'MX-CLIENT')) {
 }
 
 $wsus = Get-LabWsusUrl -DeployConfig $mixedConfig -CurrentItem $mixedConfig.virtualMachines[1]
+if ($wsus.WsusUrl -ne 'http://MX-WSUS.mixed.test:8530') {
+    throw "Standalone WSUS without HTTPS opt-in inherited ConfigMgr HTTPS: $($wsus.WsusUrl)"
+}
+$mixedConfig.virtualMachines[1] | Add-Member -NotePropertyName wsusUseHTTPS -NotePropertyValue $true
+$wsus = Get-LabWsusUrl -DeployConfig $mixedConfig -CurrentItem $mixedConfig.virtualMachines[1]
 if ($wsus.WsusUrl -ne 'https://MX-WSUS.mixed.test:8531') {
-    throw "WSUS routing used root hierarchy PKI options instead of the VM options: $($wsus.WsusUrl)"
+    throw "Standalone WSUS HTTPS opt-in was ignored: $($wsus.WsusUrl)"
 }
 
 $global:preparePhasePercent = 0

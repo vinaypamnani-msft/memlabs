@@ -581,7 +581,7 @@ function Test-VmFunctionality {
         }
         'WSUS' {
             Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying WSUS"
-            $testsPassed = Test-WSUSFunctionality -VMName $VMName -Domain $domain
+            $testsPassed = Test-WSUSFunctionality -VMName $VMName -Domain $domain -UseHTTPS:($CurrentItem.wsusUseHTTPS -eq $true)
         }
         'FileServer' {
             Write-ValidationStep -VMName $VMName -RoleLabel $role -Activity $validationActivity -Status "Verifying file server"
@@ -5002,14 +5002,32 @@ function Test-WSUSFunctionality {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$Domain
+        [Parameter(Mandatory)][string]$Domain,
+        [switch]$UseHTTPS
     )
 
     $Phase = 11
     Write-Log "[Phase $Phase] $VMName [WSUS]: Testing WSUS services and connectivity" -LogOnly
 
     $scriptBlock = {
+        param([bool]$UseHTTPS, [string]$Fqdn)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        if ($UseHTTPS) {
+            try {
+                $module = Get-Module -ListAvailable TemplateHelpDSC | Sort-Object Version -Descending | Select-Object -First 1
+                if (-not $module) { throw 'TemplateHelpDSC module is not installed.' }
+                . (Join-Path $module.ModuleBase 'WsusHttps.ps1')
+                $tls = Get-MemLabsWsusHttpsState -Fqdn $Fqdn
+                if (-not $tls.Passed) { $results.Passed = $false }
+                foreach ($detail in $tls.Details) { $results.Details.Add($detail) }
+                $results.Details.Add('INFO: Intended-client connectivity/update scanning was not tested (server-only validation).')
+            }
+            catch {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: WSUS HTTPS validation could not run: $($_.Exception.Message)")
+            }
+        }
 
         # Check WSUS and IIS services
         foreach ($svc in @('WsusService', 'W3SVC')) {
@@ -5028,19 +5046,20 @@ function Test-WSUSFunctionality {
             }
         }
 
-        # Test WSUS API connectivity
-        $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()")
-        try {
-            [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
-            $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
-            if (-not $wsus) {
-                throw 'WSUS local API returned no server'
+        if (-not $UseHTTPS) {
+            $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()")
+            try {
+                [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
+                $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                if (-not $wsus) {
+                    throw 'WSUS local API returned no server'
+                }
+                $results.Details.Add("OK: WSUS API connected using local server configuration (server version: $($wsus.Version))")
             }
-            $results.Details.Add("OK: WSUS API connected using local server configuration (server version: $($wsus.Version))")
-        }
-        catch {
-            $results.Passed = $false
-            $results.Details.Add("FAIL: WSUS API test failed: $($_.Exception.Message)")
+            catch {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: WSUS API test failed: $($_.Exception.Message)")
+            }
         }
 
         # WsusPool app pool must be Started
@@ -5075,7 +5094,7 @@ function Test-WSUSFunctionality {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock -DisplayName "Phase11-WSUS-Test" -SuppressLog `
-        -AsJob -TimeoutSeconds 300
+        -ArgumentList @([bool]$UseHTTPS.IsPresent, "$VMName.$Domain") -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'WSUS' -Result $result)
 }

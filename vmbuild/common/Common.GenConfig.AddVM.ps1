@@ -983,6 +983,7 @@ function Add-NewVMForRole {
             # which the WID+WSUS memory validation flags as a hard failure. Default to
             # 8GB so a freshly-added WSUS passes validation out of the box.
             $virtualMachine.Memory = "8GB"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusUseHTTPS' -Value $false -Force
             #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
             if (-not (Set-WsusDedicatedContentDisk -VirtualMachine $virtualMachine)) {
                 Write-RedX "Could not allocate a dedicated WSUS content disk. Cancelling"
