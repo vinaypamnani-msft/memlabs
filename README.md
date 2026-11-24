@@ -200,6 +200,11 @@ edit markers update only after Hyper-V succeeds. Mixed changes still use the ful
 deployment path. Post-deployment memory restoration now also honors static
 memory (`DynamicMinRam = Memory`) instead of re-enabling dynamic memory.
 The deployed-VM list rounds displayed RAM to at most two decimal places.
+Smart inventory refreshes read startup and assigned RAM from the current Hyper-V
+objects, including changes made outside MemLabs, without remeasuring disks.
+RAM quick-apply marks that inventory dirty, so its next smart refresh also runs
+while the edit menu normally suppresses background refreshes. Ordinary refreshes
+retain their three-second throttle; this does not add a Hyper-V event watcher.
 
 When expanding an existing lab, hidden dependency VMs are reference context, not
 permission to replay their configuration. They do not receive ordinary DSC,

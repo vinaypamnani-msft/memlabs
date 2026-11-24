@@ -21,7 +21,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile(
     (Join-Path $RootPath 'common\Common.Config.ps1'), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw "Common.Config.ps1 parse errors: $($errors -join '; ')" }
 $definitions = @{}
-foreach ($name in @('Test-VMResourceCacheMetrics', 'Save-VMListDiskCache', 'Read-VMListDiskCache', 'Get-VMSizeCached', 'Test-CacheValid', 'Get-List', 'Get-VMFromHyperV')) {
+foreach ($name in @('Test-VMResourceCacheMetrics', 'Save-VMListDiskCache', 'Read-VMListDiskCache', 'Get-VMSizeCached', 'Test-CacheValid', 'Get-List', 'Get-VMFromHyperV', 'Update-VMFromHyperV')) {
     $definition = $ast.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -354,6 +354,56 @@ try {
                 Invoke-RebuildRetryCase -FailureStage $failureStage -DisableSmart:$disabled -RecoverEmpty:$empty
             }
         }
+    }
+    & {
+        . ([scriptblock]::Create($definitions['Update-VMFromHyperV']))
+        function Test-SiteSystemClientOperatingSystem { param($VirtualMachine); return $false }
+        function Get-VMFromHyperV { throw 'Refreshing an existing VM must not rebuild its resource cache.' }
+        function Get-VMSizeCached { throw 'Refreshing RAM must not remeasure disks.' }
+        function Set-VM { throw 'Cache refresh must not modify Hyper-V or VM notes.' }
+        foreach ($case in @('ExternalChange', 'Stopped', 'DiskSeed', 'DirtyWhileEditing', 'Throttled', 'Editing', 'WorkerEditing')) {
+            $global:Common.InJob = $case -eq 'WorkerEditing'
+            $global:DisableSmartUpdate = $case -in @('DirtyWhileEditing', 'Editing', 'WorkerEditing')
+            $global:vm_List_Dirty = $case -in @('DirtyWhileEditing', 'WorkerEditing')
+            $global:vm_List_LastUpdate = if ($case -in @('Throttled', 'DirtyWhileEditing', 'WorkerEditing')) { Get-Date } else { (Get-Date).AddSeconds(-10) }
+            $script:LiveVM | Add-Member -NotePropertyName State -NotePropertyValue $(if ($case -eq 'Stopped') { 'Off' } else { 'Running' }) -Force
+            $script:LiveVM.MemoryStartup = if ($case -eq 'Stopped') { 2GB } else { 8GB }
+            $script:LiveVM.MemoryAssigned = if ($case -eq 'Stopped') { 0 } else { 6GB + 2MB }
+            $script:LiveVM | Add-Member -NotePropertyName Notes -NotePropertyValue (
+                [pscustomobject]@{
+                    role = 'DomainMember'; domain = 'cache.test'; memory = '4GB'; dynamicMinRam = '4GB'
+                    memoryStartupGB = 4.001953125; memoryGB = 4
+                } | ConvertTo-Json -Compress) -Force
+            $global:vm_List = @([pscustomobject]@{
+                    vmName = 'CACHE-VM'; vmId = $script:VmId; domain = 'cache.test'; role = 'DomainMember'
+                    memoryStartupGB = 4.001953125; memoryGB = 4; diskUsedGB = 12
+                })
+            if ($case -eq 'DiskSeed') {
+                Save-VMListDiskCache
+                $global:vm_List = $null
+                $global:vm_List_LastUpdate = $null
+            }
+            $notesBefore = $script:LiveVM.Notes
+            $readsBefore = $script:InventoryReads
+            $disksBefore = $script:DiskReads
+            $result = @(Get-List -Type VM -DomainName 'cache.test' -SmartUpdate -ErrorAction Stop)
+            $refreshExpected = $case -notin @('Throttled', 'Editing', 'WorkerEditing')
+            $expectedStartup = if ($refreshExpected) { $script:LiveVM.MemoryStartup / 1GB } else { 4.001953125 }
+            $expectedAssigned = if ($refreshExpected) { $script:LiveVM.MemoryAssigned / 1GB } else { 4 }
+            Assert-True ($result.Count -eq 1 -and $result[0].memoryStartupGB -eq $expectedStartup -and
+                $result[0].memoryGB -eq $expectedAssigned) "$case kept stale RAM, lost precision, or bypassed an ordinary editing/throttle guard."
+            $expectedReads = if ($case -eq 'DiskSeed') { 2 } elseif ($refreshExpected) { 1 } else { 0 }
+            Assert-True ($script:InventoryReads - $readsBefore -eq $expectedReads -and
+                $script:DiskReads -eq $disksBefore) "$case introduced extra inventory or disk reads for RAM."
+            Assert-True ($script:LiveVM.Notes -ceq $notesBefore) "$case rewrote desired VM-note settings while refreshing observed RAM."
+            if ($refreshExpected) {
+                $persisted = @(Read-VMListDiskCache)
+                Assert-True ($persisted.Count -eq 1 -and $persisted[0].memoryStartupGB -eq $expectedStartup -and
+                    $persisted[0].memoryGB -eq $expectedAssigned -and -not $global:vm_List_Dirty) "$case did not persist the live RAM refresh and clear the dirty flag."
+            }
+        }
+        $global:Common.InJob = $false
+        $global:DisableSmartUpdate = $false
     }
     $global:DisableSmartUpdate = $false
     $global:vm_List = @($entry)

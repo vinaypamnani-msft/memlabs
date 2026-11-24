@@ -6068,6 +6068,14 @@ function Update-VMFromHyperV {
         }
     }
 
+    # Live measurements take precedence over persisted VM-note and cache values.
+    if ($vm.PSObject.Properties['MemoryStartup']) {
+        $vmObject | Add-Member -MemberType NoteProperty -Name 'memoryStartupGB' -Value ($vm.MemoryStartup / 1GB) -Force
+    }
+    if ($vm.PSObject.Properties['MemoryAssigned']) {
+        $vmObject | Add-Member -MemberType NoteProperty -Name 'memoryGB' -Value ($vm.MemoryAssigned / 1GB) -Force
+    }
+
 }
 
 function Save-VMListDiskCache {
@@ -6194,7 +6202,8 @@ function Get-List {
     $inMutex = $false
     $return = $null
     #Get-PSCallStack | out-host
-    if ($global:DisableSmartUpdate -eq $true -and -not $FailOnError.IsPresent -and -not $rebuildVMList) {
+    if ($global:DisableSmartUpdate -eq $true -and -not $FailOnError.IsPresent -and
+        -not $rebuildVMList -and ($Common.InJob -or -not $global:vm_List_Dirty)) {
         $doSmartUpdate = $false        
     }
     else {        
