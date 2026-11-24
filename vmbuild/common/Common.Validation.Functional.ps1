@@ -7607,6 +7607,208 @@ function Test-CAFunctionality {
     return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
 }
 
+function Get-Phase11InterruptionEvents {
+    param(
+        [Parameter(Mandatory)][string]$Channel,
+        [Parameter(Mandatory)][datetime]$StartUtc,
+        [Parameter(Mandatory)][datetime]$EndUtc,
+        [int[]]$Id = @(),
+        [string[]]$TargetIdentities = @()
+    )
+
+    $result = [ordered]@{ Channel = $Channel; Measured = $false; Truncated = $false; CandidatesExamined = 0; Events = @(); Errors = @() }
+    try {
+        $filter = @{ LogName = $Channel; StartTime = $StartUtc.ToLocalTime(); EndTime = $EndUtc.ToLocalTime() }
+        if ($Id.Count) { $filter.Id = $Id }
+        $events = @(Get-WinEvent -FilterHashtable $filter -MaxEvents 201 -ErrorAction Stop)
+        $result.Measured = $true
+        $result.Truncated = $events.Count -gt 200
+        foreach ($entry in @($events | Select-Object -First 200)) {
+            $result.CandidatesExamined++
+            try {
+                $xml = [xml]$entry.ToXml()
+                $fields = $xml.SelectNodes('/*[local-name()="Event"]/*[local-name()="EventData"]/* | /*[local-name()="Event"]/*[local-name()="UserData"]//*[not(*)]')
+                if ($TargetIdentities.Count) {
+                    $matched = $false
+                    foreach ($identity in $TargetIdentities) {
+                        if (-not $identity) { continue }
+                        $guid = [guid]::Empty
+                        if ([guid]::TryParse($identity, [ref]$guid)) {
+                            $pattern = '(?<![A-Za-z0-9_-])' + [regex]::Escape($identity) + '(?![A-Za-z0-9_-])'
+                            if ($xml.OuterXml -match $pattern) { $matched = $true; break }
+                        }
+                        else {
+                            foreach ($field in @($fields)) {
+                                $key = $field.LocalName
+                                if ($field.HasAttribute('Name')) { $key = $field.GetAttribute('Name') }
+                                if ($key -in 'VmName', 'VirtualMachineName', 'ElementName' -and $field.InnerText -ieq $identity) {
+                                    $matched = $true; break
+                                }
+                            }
+                            if ($matched) { break }
+                        }
+                    }
+                    if (-not $matched) { continue }
+                }
+                if ($result.Events.Count -ge 50) { $result.Truncated = $true; break }
+                $data = [ordered]@{}
+                $dataTruncated = $false
+                if ($Channel -notmatch 'PowerShell') {
+                    foreach ($field in @($fields)) {
+                        $name = $field.LocalName
+                        if ($field.HasAttribute('Name')) { $name = $field.GetAttribute('Name') }
+                        $allowed = $name -match '^(VmId|VmName|VirtualMachineId|VirtualMachineName|ProcessId|ProcessCreationTime|UserSid|UserName|Operation|State|OldState|NewState|Reason|ErrorCode|ResultCode|AppName|AppVersion|AppPath|ModuleName|ModuleVersion|ModulePath|ExceptionCode|FaultingOffset|ReportId)$'
+                        if ($Channel -eq 'System' -and [int]$entry.Id -in 1074, 1076) {
+                            $allowed = $allowed -or $name -in 'param1', 'param2', 'param3', 'param4', 'param5', 'param7'
+                        }
+                        if ($allowed) {
+                            $value = "$($field.InnerText)"
+                            if ($value.Length -gt 2000) { $dataTruncated = $true; $result.Truncated = $true }
+                            $data[$name] = $value.Substring(0, [math]::Min(2000, $value.Length))
+                        }
+                    }
+                }
+                $userSid = ''
+                if ($entry.UserId) { $userSid = "$($entry.UserId.Value)" }
+                $result.Events += [pscustomobject]@{
+                    TimeCreatedUtc = $entry.TimeCreated.ToUniversalTime().ToString('o')
+                    Id = $entry.Id; RecordId = $entry.RecordId; Provider = $entry.ProviderName
+                    Level = $entry.Level; UserSid = $userSid; Data = $data; DataTruncated = $dataTruncated
+                }
+            }
+            catch { $result.Errors += "Event $($entry.RecordId) could not be projected: $($_.Exception.GetType().FullName)" }
+        }
+    }
+    catch {
+        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $result.Measured = $true }
+        else { $result.Errors += $_.Exception.Message }
+    }
+    return [pscustomobject]$result
+}
+
+function Save-Phase11VmInterruptionDiagnostics {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Domain,
+        [Parameter(Mandatory)][datetime]$ProbeStartedUtc
+    )
+
+    $startUtc = $ProbeStartedUtc.ToUniversalTime().AddMinutes(-20)
+    $endUtc = [datetime]::UtcNow
+    $snapshot = [ordered]@{
+        SchemaVersion = 1; CapturedAtUtc = $endUtc.ToString('o'); HostName = $env:COMPUTERNAME
+        VMName = $VMName; ProbeStartedUtc = $ProbeStartedUtc.ToUniversalTime().ToString('o')
+        WindowStartUtc = $startUtc.ToString('o'); WindowEndUtc = $endUtc.ToString('o')
+        HostVm = @(); HostEvents = @(); Guest = $null; Errors = @()
+        Caveat = 'A broken transport is not a certificate verdict. VM state and events are observations, not proof of the shutdown initiator.'
+    }
+    $identities = @($VMName)
+    $vm = $null
+    try {
+        $matches = @(Get-VM -Name $VMName -ErrorAction Stop)
+        if ($matches.Count -ne 1 -or $matches[0].Name -ine $VMName) { throw 'The exact VM was not uniquely resolved.' }
+        $vm = $matches[0]
+        $identities += "$($vm.Id)"
+        $identities += $vm.Id.ToString('N')
+        $snapshot.HostVm += [pscustomobject]@{
+            CapturedAtUtc = [datetime]::UtcNow.ToString('o'); Id = "$($vm.Id)"
+            State = "$($vm.State)"; Status = "$($vm.Status)"; Heartbeat = "$($vm.Heartbeat)"
+            UptimeSeconds = $vm.Uptime.TotalSeconds
+        }
+    }
+    catch { $snapshot.Errors += "Host VM observation: $($_.Exception.Message)" }
+    foreach ($channel in @('Microsoft-Windows-Hyper-V-VMMS/Admin', 'Microsoft-Windows-Hyper-V-Worker/Admin')) {
+        $snapshot.HostEvents += Get-Phase11InterruptionEvents -Channel $channel -StartUtc $startUtc -EndUtc $endUtc -TargetIdentities $identities
+    }
+    $snapshot.Guest = [pscustomobject]@{ Attempted = $false; Reason = 'Exact running VM not observed; no guest connection or VM start was attempted.' }
+    if ($vm -and "$($vm.State)" -eq 'Running') {
+        try {
+            $fresh = @(Get-VM -Name $VMName -ErrorAction Stop)
+            if ($fresh.Count -eq 1) {
+                $snapshot.HostVm += [pscustomobject]@{
+                    CapturedAtUtc = [datetime]::UtcNow.ToString('o'); Id = "$($fresh[0].Id)"
+                    State = "$($fresh[0].State)"; Status = "$($fresh[0].Status)"; Heartbeat = "$($fresh[0].Heartbeat)"
+                    UptimeSeconds = $fresh[0].Uptime.TotalSeconds
+                }
+            }
+            if ($fresh.Count -ne 1 -or $fresh[0].Id -ne $vm.Id -or "$($fresh[0].State)" -ne 'Running') {
+                throw 'VM identity/state changed during host capture; guest collection was skipped.'
+            }
+            $readerDefinition = (Get-Command Get-Phase11InterruptionEvents -CommandType Function -ErrorAction Stop).Definition
+            $collector = {
+                param($StartText, $ReaderDefinition)
+                Set-Item Function:\Get-Phase11InterruptionEvents -Value ([scriptblock]::Create($ReaderDefinition)) -ErrorAction Stop
+                $out = [ordered]@{
+                    ComputerName = $env:COMPUTERNAME; CapturedAtUtc = [datetime]::UtcNow.ToString('o')
+                    OperatingSystem = $null; Services = @(); Processes = @(); ProcessesTruncated = $false; PendingReboot = @()
+                    Events = @(); Errors = @()
+                }
+                try {
+                    $out.OperatingSystem = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 10 -ErrorAction Stop |
+                        Select-Object LastBootUpTime, LocalDateTime, FreePhysicalMemory
+                }
+                catch { $out.Errors += "Guest OS: $($_.Exception.Message)" }
+                try {
+                    $out.Services = @(Get-CimInstance Win32_Service -Filter "Name='CcmExec' OR Name='Winmgmt' OR Name='RpcSs' OR Name='vmicvmsession' OR Name='SMS_EXECUTIVE'" -OperationTimeoutSec 10 -ErrorAction Stop |
+                        Select-Object Name, State, StartMode, ProcessId)
+                }
+                catch { $out.Errors += "Guest services: $($_.Exception.Message)" }
+                try {
+                    $processes = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe' OR Name='wsmprovhost.exe' OR Name='WmiPrvSE.exe'" -OperationTimeoutSec 10 -ErrorAction Stop | Select-Object -First 21)
+                    $out.ProcessesTruncated = $processes.Count -gt 20
+                    $out.Processes = @($processes | Select-Object -First 20 -Property Name, ProcessId, ParentProcessId, CreationDate)
+                }
+                catch { $out.Errors += "Guest process metadata: $($_.Exception.Message)" }
+                foreach ($path in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
+                    try { $out.PendingReboot += [pscustomobject]@{ Path = $path; Present = (Test-Path -LiteralPath $path -ErrorAction Stop) } }
+                    catch { $out.Errors += "Pending reboot '$path': $($_.Exception.Message)" }
+                }
+                $start = [datetime]::Parse($StartText).ToUniversalTime()
+                $end = [datetime]::UtcNow
+                $out.EventWindowEndUtc = $end.ToString('o')
+                foreach ($query in @(
+                        @{ Channel = 'System'; Id = @(1074, 1076, 41, 12, 13, 6005, 6006, 6008, 7031, 7034) },
+                        @{ Channel = 'Application'; Id = @(1000, 1001, 1026) },
+                        @{ Channel = 'Windows PowerShell'; Id = @(400, 403, 600) },
+                        @{ Channel = 'Microsoft-Windows-PowerShell/Operational'; Id = @(4100) },
+                        @{ Channel = 'Microsoft-Windows-WMI-Activity/Operational'; Id = @(5857, 5858, 5859, 5860, 5861) }
+                    )) {
+                    $out.Events += Get-Phase11InterruptionEvents -Channel $query.Channel -StartUtc $start -EndUtc $end -Id $query.Id
+                }
+                return [pscustomobject]$out
+            }
+            $snapshot.Guest = [pscustomobject]@{ Attempted = $true; ResultReceived = $false; Error = 'Guest collection did not return.' }
+            $guest = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain -ScriptBlock $collector `
+                -ArgumentList $startUtc.ToString('o'), $readerDefinition `
+                -DisplayName 'Phase11-PKI interruption evidence' -SuppressLog -AsJob -TimeoutSeconds 90 `
+                -SessionMaxRetries 1 -SkipDomainFallback -RebootIfUnresponsive:$false
+            if (-not $guest -or $guest.ScriptBlockFailed -or -not $guest.ScriptBlockOutput) {
+                $details = if ($guest) { "$($guest.ErrorDetails)" } else { 'No diagnostic result returned.' }
+                $snapshot.Guest = [pscustomobject]@{ Attempted = $true; ResultReceived = $false; Error = $details }
+            }
+            elseif ($guest.ScriptBlockOutput.ComputerName -ine $VMName -or
+                -not $guest.ScriptBlockOutput.PSObject.Properties['Errors'] -or
+                -not $guest.ScriptBlockOutput.PSObject.Properties['Events']) {
+                $snapshot.Guest = [pscustomobject]@{ Attempted = $true; ResultReceived = $false; Error = 'Guest evidence had an invalid shape or a different computer identity.' }
+            }
+            else {
+                $snapshot.Guest = [pscustomobject]@{ Attempted = $true; ResultReceived = $true; Evidence = $guest.ScriptBlockOutput }
+            }
+        }
+        catch { $snapshot.Errors += "Guest interruption capture: $($_.Exception.Message)" }
+    }
+    try {
+        $content = ConvertTo-ConfigDiagnosticJson -Config $snapshot -Depth 12
+        return (Save-Phase11GuestLogs -VMName $VMName -DomainName $Domain -RoleLabel 'PKI-Interruption' `
+                -CollectedContent @{ 'VmInterruption.json' = $content })
+    }
+    catch {
+        Write-Log "[Phase 11] $VMName [PKI-Interruption]: interruption evidence could not be safely saved: $($_.Exception.Message)" -Warning
+        return @()
+    }
+}
+
 function Test-PKICertificatesOnVM {
     <#
     .SYNOPSIS
@@ -8070,11 +8272,19 @@ function Test-PKICertificatesOnVM {
         return $results
     }
 
+    $probeStartedUtc = [datetime]::UtcNow
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock -ArgumentList $isPrimaryFlag `
         -DisplayName "Phase11-PKI-Certs-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 300
 
+    $failureText = if ($result) { (@($result.ErrorDetails) + @($result.ScriptBlockOutput)) -join ' ' } else { '' }
+    if (-not $result -or $result.ChannelBroken -eq $true -or $result.TimedOut -eq $true -or
+        ($result.ScriptBlockFailed -and $failureText -match 'PSRemotingTransportException|Hyper-V socket|runspace.*(broken|closed)')) {
+        Add-Phase11Output "[Phase 11] $VMName [PKI-Interruption]: collecting VM lifecycle/transport evidence; certificate validation remains unverified."
+        try { $null = Save-Phase11VmInterruptionDiagnostics -VMName $VMName -Domain $Domain -ProbeStartedUtc $probeStartedUtc }
+        catch { Write-Log "[Phase 11] $VMName [PKI-Interruption]: diagnostic capture failed: $($_.Exception.Message)" -Warning }
+    }
     return (Format-TestResult -VMName $VMName -RoleLabel 'PKI-Certs' -Result $result)
 }
 

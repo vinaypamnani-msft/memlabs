@@ -44,6 +44,22 @@ and [`Test-LogSecretRedaction.ps1`](vmbuild/tools/Test-LogSecretRedaction.ps1).
 [`Test-MRemoteNGEncryption.ps1`](vmbuild/tools/Test-MRemoteNGEncryption.ps1)
 also verifies the primary path against an installed modern mRemoteNG package.
 
+## Phase 11 interrupted certificate validation
+
+If a PKI probe loses PowerShell Direct or times out, Phase 11 keeps the original
+validation failure and saves `<VM>-Phase11-<timestamp>-VmInterruption.json`
+beside the build log. It records fresh host VM state and target-scoped Hyper-V
+lifecycle events. A guest already observed as running also gets one bounded,
+non-rebooting evidence request for boot time, reboot flags, relevant services,
+process IDs/start times, and shutdown/application/PowerShell/WMI event metadata.
+Unavailable guests and partial or truncated captures remain explicit.
+
+The capture does not start/restart a VM, change certificates, or retry validation.
+It omits command lines, script-block text, full event messages/XML, and unrelated
+VM events; the saved document uses the shared diagnostic redactor. PowerShell
+events retain metadata only. A `Stopping` observation or broken socket does not
+by itself identify the shutdown initiator or prove a certificate defect.
+
 ## Reporting diagnostics
 
 For missing ConfigMgr reports or a blank report portal, run
