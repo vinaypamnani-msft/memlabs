@@ -10,6 +10,7 @@ $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CSName = $ThisVM.thisParams.ParentSiteServer
+$retainedCasContext = Get-MemLabsRetainedCasContext -DeployConfig $deployConfig -ChildPrimaryVM $ThisVM
 # Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
 $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
 $CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
@@ -105,13 +106,22 @@ $Configuration = Read-ScriptWorkflowData -ConfigurationFile $ConfigurationFile `
     -RequiredSteps @('WaitingForCASFinishedInstall', 'InstallSCCM')
 $setupStagePath = Join-Path -Path $LogPath -ChildPath 'InstallPSForHierarchy.setup.stage'
 
-if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+$contextSql = @($deployConfig.virtualMachines | Where-Object {
+        $_.vmName -in @($sqlAoMaxDopParameters.Node1, $sqlAoMaxDopParameters.Node2) -and (Test-MemLabsWorkflowContextOnlyVM -VM $_)
+    })
+$sqlAoPolicyRequested = $installToAO -and $contextSql.Count -eq 0
+if ($sqlAoPolicyRequested -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+if ($installToAO -and -not $sqlAoPolicyRequested) { Write-DscStatus 'Existing SQLAO MAXDOP policy is preserved; SQL baseline changes were not requested.' }
 
 # Set Install action as Running
 $Configuration.WaitingForCASFinishedInstall.Status = 'Running'
 $Configuration.WaitingForCASFinishedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
+if ($retainedCasContext) {
+    Assert-MemLabsRetainedCasNativePrerequisites -CasContext $retainedCasContext
+}
+else {
 # Read Actions file on CAS
 $LogFolder = Split-Path $LogPath -Leaf
 $CSFilePath = "\\$CSName\$LogFolder"
@@ -189,6 +199,7 @@ while ($CSConfiguration.UpgradeSCCM.Status -ne "Completed") {
         -RequiredSteps @('UpgradeSCCM')
 }
 Write-DscStatus "$CSName finished upgrading ConfigMgr ($([int]((Get-Date) - $casUpgradeStart).TotalMinutes)m elapsed)."
+}
 
 # Write actions file, wait finished
 $Configuration.WaitingForCASFinishedInstall.Status = 'Completed'
@@ -300,8 +311,14 @@ CurrentBranch=1
     #$sqlinfo = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\$p\$inst"
 
     # Set CM Source Path
-    $csShare = Invoke-Command -ComputerName $CSName -ScriptBlock { Get-SmbShare | Where-Object { $_.Name -like 'SMS_*' -and $_.Path -notlike '*despoolr.box*' -and $_.Description -like 'SMS Site *' } }
-    $cmsourcepath = "\\$CSName\$($csShare.Name)\cd.latest"
+    if ($retainedCasContext) {
+        $cmsourcepath = $retainedCasContext.SourcePath
+        if (-not $cmsourcepath) { throw 'Retained CAS source share was not verified for this child setup.' }
+    }
+    else {
+        $csShare = Invoke-Command -ComputerName $CSName -ScriptBlock { Get-SmbShare | Where-Object { $_.Name -like 'SMS_*' -and $_.Path -notlike '*despoolr.box*' -and $_.Description -like 'SMS Site *' } }
+        $cmsourcepath = "\\$CSName\$($csShare.Name)\cd.latest"
+    }
 
     # Set ini values
     $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
@@ -330,7 +347,8 @@ CurrentBranch=1
     $cmini = $cmini.Replace('%SqlPort%', $sqlPort)
     # $cmini = $cmini.Replace('%SQLDataFilePath%',$sqlinfo.DefaultData)
     # $cmini = $cmini.Replace('%SQLLogFilePath%',$sqlinfo.DefaultLog)
-    $cmini = $cmini.Replace('%CASMachineFQDN%', "$CSName.$DomainFullName")
+    $parentFqdn = if ($retainedCasContext) { $retainedCasContext.Fqdn } elseif ($CSName -like '*.*') { $CSName } else { "$CSName.$DomainFullName" }
+    $cmini = $cmini.Replace('%CASMachineFQDN%', $parentFqdn)
     $cmini = $cmini.Replace('%REdistPath%', "$cmsourcepath\REdist")
 
     if ($installToAO) {
@@ -442,7 +460,7 @@ CurrentBranch=1
         Stop-HierarchyInstall "Hierarchy child Primary setup did not complete: $failureDetail. Restore the Phase 8 checkpoint before retrying."
         return
     }
-    if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+    if ($sqlAoPolicyRequested -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
     $uiInstallDirectory = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -Name 'UI Installation Directory' -ErrorAction SilentlyContinue
     $configurationManagerModule = if ($uiInstallDirectory) { Join-Path $uiInstallDirectory 'bin\ConfigurationManager.psd1' } else { '' }
@@ -505,6 +523,10 @@ WHERE ip_address IN
 
 }
 
+if ($retainedCasContext) {
+    Wait-MemLabsNewChildReplicationNative -CasContext $retainedCasContext
+}
+else {
 # Recheck the CAS handshake on resumes too; an old Completed flag may be unverified.
 $propName = "PSReadyToUse" + $ThisVm.VmName
 $CSConfiguration = Read-ScriptWorkflowData -ConfigurationFile $CSConfigurationFile `
@@ -530,6 +552,7 @@ while ($casReady.Status -ne 'Completed' -or
 }
 Assert-CasWorkflowStepCanContinue -CasConfiguration $CSConfiguration -Step $propName
 Write-DscStatus "$CSName verified Primary replication readiness ($([int]((Get-Date) - $psReadyStart).TotalMinutes)m elapsed)."
+}
 
 $Configuration.InstallSCCM.Status = 'Completed'
 $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"

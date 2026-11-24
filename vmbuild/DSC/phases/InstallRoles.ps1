@@ -13,6 +13,7 @@ $NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$requestedVMs = @(Get-MemLabsWorkflowRequestedVMs -DeployConfig $deployConfig)
 $CSName = $ThisVM.thisParams.ParentSiteServer
 # Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
 $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
@@ -31,8 +32,13 @@ $Configuration.InstallSUP.Status = "Running"
 $Configuration.InstallSUP.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
-# Wait for CS
-if ($CSName) {
+$retainedCasContext = Get-MemLabsRetainedCasContext -DeployConfig $deployConfig -ChildPrimaryVM $ThisVM
+$supSiteCodes = @($ThisVM.siteCode) + @($requestedVMs | Where-Object { $_.role -eq 'Secondary' -and $_.parentSiteCode -eq $ThisVM.siteCode } | ForEach-Object { $_.siteCode })
+$requestedSups = @($requestedVMs | Where-Object { $_.installSUP -eq $true -and $_.siteCode -in $supSiteCodes })
+if ($retainedCasContext -and $requestedSups.Count -gt 0) {
+    Assert-MemLabsSelectedSupPrerequisite -SiteContext $retainedCasContext
+}
+elseif ($CSName -and -not $retainedCasContext -and $requestedSups.Count -gt 0) {
     # Read Actions file on CAS
     $LogFolder = Split-Path $LogPath -Leaf
     $CSFilePath = "\\$CSName\$LogFolder"
@@ -113,7 +119,7 @@ function Invoke-VerifiedWsusBaselineImport {
 # redundant work when everything is already in place.
 $allRolesInstalled = $true
 
-$rpVMs = @($deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true -and ($_.SiteCode -eq $thisVM.SiteCode -or $_.vmName -eq $thisVM.RemoteSQLVM) })
+$rpVMs = @($requestedVMs | Where-Object { $_.installRP -eq $true -and ($_.SiteCode -eq $thisVM.SiteCode -or $_.vmName -eq $thisVM.RemoteSQLVM) })
 foreach ($rp in $rpVMs) {
     $rpFQDN = $rp.vmName + "." + $DomainFullName
     if (-not (Get-CMReportingPointReadiness -ServerFQDN $rpFQDN -SiteCode $thisVM.SiteCode).Ready) {
@@ -127,7 +133,7 @@ if ($allRolesInstalled) {
     if ($ThisVM.role -eq "Primary") {
         $ValidSiteCodes += (Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode)
     }
-    $supVMs = @($deployConfig.virtualMachines | Where-Object { $_.installSUP -eq $true -and $_.siteCode -in $ValidSiteCodes })
+    $supVMs = @($requestedVMs | Where-Object { $_.installSUP -eq $true -and $_.siteCode -in $ValidSiteCodes })
     foreach ($sup in $supVMs) {
         $supFQDN = $sup.vmName.Trim() + "." + $DomainFullName
         if (-not (Get-CMSoftwareUpdatePointReadiness -ServerFQDN $supFQDN -SiteCode $sup.siteCode).Ready) {
@@ -153,7 +159,7 @@ if ($allRolesInstalled) {
 # Reporting Install
 Write-DscStatus "Installing Reporting Point"
 $rpFailed = $false
-foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true } ) {
+foreach ($rp in $requestedVMs | Where-Object { $_.installRP -eq $true } ) {
 
     $thisSiteCode = $thisVM.SiteCode
     if ($rp.SiteCode -ne $thisSiteCode) {
@@ -225,7 +231,7 @@ if ($ThisVM.role -eq "Primary") {
     $ValidSiteCodes += $ReportingSiteCodes
 }
 
-foreach ($sup in $deployConfig.virtualMachines | Where-Object { $_.installSUP -eq $true } ) {
+foreach ($sup in $requestedVMs | Where-Object { $_.installSUP -eq $true } ) {
     if ($sup.siteCode -in $ValidSiteCodes) {
         $secondarysite = Get-CMSite -SiteCode $sup.siteCode | Where-Object { $_.Type -eq 1 }
         if ($secondarysite) {

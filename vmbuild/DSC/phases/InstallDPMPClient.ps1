@@ -13,6 +13,7 @@ $NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$requestedVMs = @(Get-MemLabsWorkflowRequestedVMs -DeployConfig $deployConfig)
 
 # bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
@@ -564,7 +565,7 @@ $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
 $ValidSiteCodes += $ReportingSiteCodes
 
-foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" } ) {
+foreach ($vm in $requestedVMs | Where-Object { $_.role -eq "SiteSystem" } ) {
     if ($vm.siteCode -in $ValidSiteCodes) {
         $hasAnyRole = $vm.installDP -or $vm.installMP -or $vm.installSUP -or $vm.installRP -or $vm.installSMSProv
         if ($vm.installDP) {
@@ -793,15 +794,25 @@ foreach ($MP in $MPs) {
 # frequently the site server itself (e.g. the Primary), which is NOT in $DPs and
 # only gets a DP from the "force install DP on Site Server" fallback further
 # below -- code that never runs once the pull-DP add throws. That leaves the site
-# with no DP and the pull DP permanently uninstalled. Install every unique pull-DP
-# source as a standard DP FIRST so the source object exists before we add pull DPs.
+# with no DP and the pull DP permanently uninstalled. Provision only requested
+# sources; retained sources are read-only prerequisites.
 $EnsuredSourceDPs = @{}
 foreach ($PDP in $PullDPs) {
     if ([string]::IsNullOrWhiteSpace($PDP.ServerName)) { continue }
     if ([string]::IsNullOrWhiteSpace($PDP.SourceDP)) { continue }
-    $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
+    $SourceDPFQDN = if ($PDP.SourceDP -like '*.*') { $PDP.SourceDP.Trim() } else { $PDP.SourceDP.Trim() + "." + $DomainFullName }
     if ($EnsuredSourceDPs.ContainsKey($SourceDPFQDN)) { continue }
     $EnsuredSourceDPs[$SourceDPFQDN] = $true
+    $sourceRequested = @($requestedVMs | Where-Object {
+            $_.vmName -eq $PDP.SourceDP -or "$($_.vmName).$DomainFullName" -eq $SourceDPFQDN
+        }).Count -eq 1
+    if (-not $sourceRequested) {
+        $sourceReadiness = Get-CMDistributionPointReadiness -ServerFQDN $SourceDPFQDN -SiteCode $PDP.ServerSiteCode -ReadOnly
+        if (-not $sourceReadiness.Ready) {
+            throw "Required existing pull-DP source '$SourceDPFQDN' is not ready ($($sourceReadiness.Detail)); it was not installed or repaired."
+        }
+        continue
+    }
     if (-not (Get-CMDistributionPoint -SiteSystemServerName $SourceDPFQDN -SiteCode $PDP.ServerSiteCode)) {
         Write-DscStatus "Pull DP source '$SourceDPFQDN' is not a Distribution Point yet. Installing standard DP on the source first (required before adding pull DPs)."
         $dpInstallResult = @(Install-DP -ServerFQDN $SourceDPFQDN -ServerSiteCode $PDP.ServerSiteCode -usePKI:$usePKI -DeployConfig $deployConfig)
@@ -828,8 +839,11 @@ foreach ($PDP in $PullDPs) {
     }
 
     $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
-    $SourceDPFQDN = $PDP.SourceDP.Trim() + "." + $DomainFullName
-    $dpInstallResult = @(Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI -DeployConfig $deployConfig)
+    $SourceDPFQDN = if ($PDP.SourceDP -like '*.*') { $PDP.SourceDP.Trim() } else { $PDP.SourceDP.Trim() + "." + $DomainFullName }
+    $sourceRequested = @($requestedVMs | Where-Object {
+            $_.vmName -eq $PDP.SourceDP -or "$($_.vmName).$DomainFullName" -eq $SourceDPFQDN
+        }).Count -eq 1
+    $dpInstallResult = @(Install-PullDP -ServerFQDN $DPFQDN -ServerSiteCode $PDP.ServerSiteCode -SourceDPFQDN $SourceDPFQDN -usePKI:$usePKI -DeployConfig $deployConfig -ReadOnlySource:(-not $sourceRequested))
     if ($dpInstallResult.Count -eq 0 -or -not [bool]$dpInstallResult[-1]) {
         $dpInstallFailed = $true
     }

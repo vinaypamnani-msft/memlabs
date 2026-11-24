@@ -2893,6 +2893,7 @@ function Restore-DynamicMemory {
 
     # Linux VMs are pinned static (no balloon driver dependency); skip them.
     $vmsToRestore = @($DeployConfig.virtualMachines | Where-Object {
+        (-not $_.hidden -or $_.ExistingVM -eq $true) -and
         $_.memory -and $_.dynamicMinRam -and -not (Test-VmIsLinux -Vm $_)
     })
 
@@ -3272,7 +3273,8 @@ function Set-VmProxyEnforcementForConfig {
     )
 
     $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
-    foreach ($osdVm in @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' -and $_.vmName })) {
+    $requested = @(Get-MemLabsRequestedDeploymentVMs -DeployConfig $deployConfig)
+    foreach ($osdVm in @($requested | Where-Object { $_.role -eq 'OSDClient' -and $_.vmName })) {
         Clear-VmProxyEnforcement -VmName $osdVm.vmName
         Write-Log "[Proxy] $($osdVm.vmName): OSDClient uses direct NAT; cleared any stale proxy enforcement ACLs"
     }
@@ -3283,7 +3285,7 @@ function Set-VmProxyEnforcementForConfig {
     # on 80/443) before the guest knows to route through Squid. Linux VM ACLs
     # are stamped later by Set-VmProxyEnforcementForAllLabs (post-Phase-11),
     # by which time the Phase 3 proxy config is in place.
-    $clients = @($deployConfig.virtualMachines | Where-Object { (Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig) -and -not (Test-VmIsLinux -Vm $_) })
+    $clients = @($requested | Where-Object { (Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig) -and -not (Test-VmIsLinux -Vm $_) })
 
     if (-not $clients) { return $true }
     if (-not $proxyVm) {
@@ -3333,10 +3335,19 @@ function Set-VmProxyEnforcementForAllLabs {
         touching any ACLs.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param ()
+    param ([string[]]$VMNames)
 
+    if ($PSBoundParameters.ContainsKey('VMNames') -and $VMNames.Count -eq 0) {
+        Write-Log '[Proxy] Reconcile: no requested VM identities; existing enforcement was left unchanged.'
+        return $true
+    }
     try {
         $allVms = @(Get-List -Type VM)
+        if ($PSBoundParameters.ContainsKey('VMNames')) {
+            $allVms = @($allVms | Where-Object { $_.vmName -in $VMNames })
+            $missing = @($VMNames | Where-Object { $_ -notin $allVms.vmName })
+            if ($missing.Count) { throw "Requested proxy enforcement VM identities are absent from inventory: $($missing -join ', ')." }
+        }
     }
     catch {
         Write-Log "[Proxy] Reconcile: Get-List -Type VM failed: $_" -Warning

@@ -899,12 +899,18 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
 $sqlAoMaxDopParameters = $null
+$sqlAoPolicyRequested = $false
 if ($installToAO) {
     $sqlAoMaxDopParameters = @{
         Node1 = $sqlNode1; Node2 = $sqlNode2
         Node1Port = "$sqlNode1Port"; Node2Port = "$sqlNode2Port"
     }
-    if (-not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+    $contextSql = @($deployConfig.virtualMachines | Where-Object {
+            $_.vmName -in @($sqlNode1, $sqlNode2) -and (Test-MemLabsWorkflowContextOnlyVM -VM $_)
+        })
+    $sqlAoPolicyRequested = $contextSql.Count -eq 0
+    if ($sqlAoPolicyRequested -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+    if (-not $sqlAoPolicyRequested) { Write-DscStatus 'Existing SQLAO MAXDOP policy is preserved; SQL baseline changes were not requested.' }
 }
 
 # Reset upgrade action (in case called again in add to existing scenario), but not if already completed
@@ -1972,7 +1978,7 @@ WHERE drs.is_suspended = 1
         return
     }
     $setupExitCode = $setupProcess.ExitCode
-    if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+    if ($sqlAoPolicyRequested -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
     # Check if setup.exe failed the prerequisite check. If so, rename the
     # log, re-run the SQL pre-flight (Kerberos may have settled since our
@@ -2043,7 +2049,7 @@ WHERE drs.is_suspended = 1
             Write-DscStatus "Re-launching setup.exe (attempt 2)"
             $setupProcess = Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -Wait -PassThru
             $setupExitCode = $setupProcess.ExitCode
-            if ($installToAO -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
+            if ($sqlAoPolicyRequested -and -not (Set-SqlAoLabMaxDop @sqlAoMaxDopParameters)) { return }
 
             # Check if the retry also failed prereq
             if (Test-Path 'C:\ConfigMgrSetup.log') {

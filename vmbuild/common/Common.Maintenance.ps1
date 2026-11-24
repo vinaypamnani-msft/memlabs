@@ -225,10 +225,15 @@ function Start-Maintenance {
 function Start-RequiredExistingVMMaintenance {
     <#
     .SYNOPSIS
-        Phase 0 maintenance gate: mandatory, non-interactive maintenance for every
-        DeployConfig.virtualMachines entry that already exists in live Hyper-V
-        inventory, regardless of its Hidden flag or ExistingVM marker.
+        Phase 0 maintenance for full provisioning runs. Expansion runs preserve
+        their existing hierarchy and never enter automatic maintenance.
     .DESCRIPTION
+        When DeployConfig contains existing hierarchy context, this function
+        returns before inventory, fix selection, note updates, or guest jobs.
+        Missing required prerequisites are reported by the read-only deployment
+        preflight instead. The full-provisioning maintenance behavior below
+        applies only when no existing hierarchy context is present.
+
         This IS Phase 0 maintenance: New-Lab.ps1 calls this immediately after Phase
         0's existing-VM preparation (Start-Phase -Phase 0) and its own prior
         DHCP/network reconciliation, and strictly before Phase 1 dispatch begins.
@@ -304,6 +309,11 @@ function Start-RequiredExistingVMMaintenance {
         [object] $DeployConfig,
         [string[]] $OwnedMutexVmNames = @()
     )
+
+    if (Test-MemLabsPreserveExistingHierarchy -DeployConfig $DeployConfig) {
+        Write-Log "[Phase 0] Existing hierarchy is dependency context. Automatic maintenance was not requested and will not be applied." -LogOnly
+        return $true
+    }
 
     # Fail closed: an enumeration failure must abort the deployment, never be
     # silently read as "zero live VMs, so zero required targets, so success".

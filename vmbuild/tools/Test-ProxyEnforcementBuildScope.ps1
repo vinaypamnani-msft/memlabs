@@ -50,6 +50,8 @@ function Get-List { param($Type); return $script:TestVms }
 function Write-Log { param($Message, [switch]$Warning, [switch]$Verbose, [switch]$Failure) }
 
 $hyperVPath = Join-Path $RootPath 'common\Common.HyperV.ps1'
+. (Import-TestFunction (Join-Path $RootPath 'common\Common.Config.ps1') 'Get-MemLabsRequestedDeploymentVMs')
+. (Import-TestFunction (Join-Path $RootPath 'common\Common.Config.ps1') 'Test-MemLabsContextOnlyVM')
 . (Import-TestFunction $hyperVPath 'Set-VmProxyEnforcementForConfig')
 . (Import-TestFunction $hyperVPath 'Set-VmProxyEnforcementForAllLabs')
 $linuxPath = Join-Path $RootPath 'common\Common.Linux.ps1'

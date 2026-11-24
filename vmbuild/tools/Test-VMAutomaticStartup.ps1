@@ -28,6 +28,7 @@ function Import-StartupFunction {
 }
 
 . (Import-StartupFunction -Path (Join-Path $RootPath 'common\Common.Phases.ps1') -Name 'Get-CriticalVMs')
+. (Import-StartupFunction -Path (Join-Path $RootPath 'common\Common.Config.ps1') -Name 'Test-MemLabsPreserveExistingHierarchy')
 foreach ($name in @('Get-VM2', 'Get-VMAutomaticStartupPlan', 'Set-VMAutomaticStartup')) {
     . (Import-StartupFunction -Path (Join-Path $RootPath 'common\Common.HyperV.ps1') -Name $name)
 }
@@ -490,8 +491,9 @@ $phase11Passed = $true
 Assert-Startup $phase11Passed 'The dependency-update fixture must represent a validated deployment.'
 . ([scriptblock]::Create($updateLoop.Extent.Text))
 . ([scriptblock]::Create($guard.Extent.Text))
-Assert-Startup (($script:StartupFixture.Changes | Where-Object Name -eq 'FS01').Delay -eq 120) 'Finalization must use a newly saved existing-VM file-server dependency.'
-Assert-Startup (($script:StartupFixture.Changes | Where-Object Name -eq 'PRI01').Delay -eq 240) 'An updated primary must boot after its newly selected file server.'
+Assert-Startup ($script:StartupFixture.Changes.Count -eq 0) 'Existing-VM edits must not implicitly reconfigure domain-wide startup settings.'
+Assert-Startup (($script:StartupFixture.Inventory | Where-Object vmName -eq 'PRI01').patchMyPCFileServer -eq 'FS01') `
+    'Preserving startup settings must not discard the explicitly requested dependency-note update.'
 
 & {
     foreach ($name in @('Test-VMResourceCacheMetrics', 'Get-List', 'Get-VMFromHyperV', 'Update-VMFromHyperV')) {
@@ -556,10 +558,17 @@ Assert-Startup (($script:StartupFixture.Changes | Where-Object Name -eq 'PRI01')
             Assert-Startup (-not ($global:vm_List | Where-Object vmName -eq 'PRI01').patchMyPCFileServer) 'The recent-cache fixture must still contain the pre-update metadata.'
         }
         . ([scriptblock]::Create($guard.Extent.Text))
-        Assert-Startup (($script:StartupFixture.Changes | Where-Object Name -eq 'FS01').Delay -eq 120) "$cacheMode : live inventory must put the updated file-server dependency first."
-        Assert-Startup (($script:StartupFixture.Changes | Where-Object Name -eq 'PRI01').Delay -eq 240) "$cacheMode : finalization must use refreshed primary metadata."
+        Assert-Startup ($script:StartupFixture.Changes.Count -eq 0) "$cacheMode : an existing-VM update must preserve hierarchy startup settings."
     }
 
+    $deployConfig = [pscustomobject]@{
+        vmOptions = [pscustomobject]@{ domainName = 'lab.test' }
+        virtualMachines = @(
+            [pscustomobject]@{ vmName = 'DC01'; role = 'DC' },
+            [pscustomobject]@{ vmName = 'PRI01'; role = 'Primary' },
+            [pscustomobject]@{ vmName = 'FS01'; role = 'DomainMember' }
+        )
+    }
     foreach ($cacheMode in @('recent', 'cold', 'disk')) {
         foreach ($failure in @('Enumeration', 'EnumerationNonterminating')) {
             Reset-LiveInventoryFixture -CacheMode $cacheMode

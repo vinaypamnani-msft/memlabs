@@ -796,9 +796,20 @@ try {
         Write-Host
         exit 1
     }
+    try {
+        Assert-MemLabsExistingDeploymentDependencies -DeployConfig $deployConfig -WhatIf:$WhatIf
+    }
+    catch {
+        Write-Log "Existing deployment prerequisite is blocked: $($_.Exception.Message) No automatic hierarchy repair was attempted." -Failure
+        exit 1
+    }
     #Create VM Mutexes
     $global:mutexes = @()
-    foreach ($vm in $deployConfig.virtualMachines) {
+    $existingActionOwners = @(Get-MemLabsExistingHierarchyActions -DeployConfig $deployConfig | ForEach-Object { $_.OwnerVMName })
+    $existingActionOwners += @(Get-MemLabsRequestedDirectoryBindingPlan -DeployConfig $deployConfig | ForEach-Object { $_.OwnerVMName })
+    foreach ($vm in @($deployConfig.virtualMachines | Where-Object {
+                -not (Test-MemLabsContextOnlyVM -VM $_) -or $_.vmName -in $existingActionOwners
+            })) {
         $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
         write-log -Verbose "Created Mutex $($vm.vmName)"
         if ($mtx.WaitOne(1000)) {
@@ -1239,9 +1250,8 @@ try {
     }
 
     if ($prepared) {
-        # DHCP-appliance reconciliation runs before Phase 0; existing dependencies
-        # must receive required maintenance before any deployment phase continues.
-        Write-Log "[Phase 0] Running mandatory existing-VM maintenance gate." -Activity
+        # Expansion dependencies are observed, never brought up to a maintenance baseline.
+        Write-Log "[Phase 0] Evaluating maintenance for explicit deployment targets." -Activity
         $requiredExistingMaintenanceOk = Start-RequiredExistingVMMaintenance -DeployConfig $deployConfig -OwnedMutexVmNames @($deployConfig.virtualMachines.vmName)
         if (-not $requiredExistingMaintenanceOk) {
             Write-Log "[Phase 0] Required maintenance failed for one or more existing VM deployment targets. Aborting deployment." -Failure
@@ -1488,10 +1498,9 @@ try {
                         Write-Log "[Phase 11] Skipping snapshot merge (-NoSnapshot was specified)" -LogOnly
                     }
 
-                    # Cross-lab proxy ACL reconciliation. Uses fixed RFC 1918
-                    # allow ranges so no subnet-union computation is needed.
+                    # Reconcile only this operation's requested proxy identities.
                     try {
-                        Set-VmProxyEnforcementForAllLabs | Out-Null
+                        Set-VmProxyEnforcementForAllLabs -VMNames @(Get-MemLabsRequestedDeploymentVMs -DeployConfig $deployConfig | ForEach-Object { $_.vmName }) | Out-Null
                     }
                     catch {
                         Write-Log "[Phase 11] Proxy cross-lab reconcile failed (non-fatal): $_" -Warning
@@ -1642,7 +1651,8 @@ try {
             }
         }
 
-        if ($phase11Passed -and -not (Set-VMAutomaticStartup -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf)) {
+        if ($phase11Passed -and -not (Test-MemLabsPreserveExistingHierarchy -DeployConfig $deployConfig) -and
+            -not (Set-VMAutomaticStartup -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf)) {
             throw "Automatic startup maintenance failed after Phase 11; the build cannot be reported as successful."
         }
 

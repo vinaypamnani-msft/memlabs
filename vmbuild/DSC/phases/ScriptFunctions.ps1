@@ -2,6 +2,414 @@
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 
+function Test-MemLabsWorkflowContextOnlyVM {
+    param([Parameter(Mandatory)]$VM)
+
+    return $VM.hidden -eq $true -and $VM.ExistingVM -ne $true -and $VM.cmOptionsChanged -ne $true
+}
+
+function Get-MemLabsWorkflowRequestedVMs {
+    param([Parameter(Mandatory)]$DeployConfig)
+
+    $DeployConfig.virtualMachines | Where-Object { $null -ne $_ -and -not (Test-MemLabsWorkflowContextOnlyVM -VM $_) }
+}
+
+function Get-MemLabsRetainedCasContext {
+    param([Parameter(Mandatory)]$DeployConfig, [Parameter(Mandatory)]$ChildPrimaryVM)
+
+    if ($ChildPrimaryVM.role -ne 'Primary' -or -not $ChildPrimaryVM.parentSiteCode) { return }
+    $parents = @($DeployConfig.virtualMachines | Where-Object {
+            $_.role -eq 'CAS' -and $_.siteCode -eq $ChildPrimaryVM.parentSiteCode
+        })
+    if ($parents.Count -ne 1) { throw "New child Primary '$($ChildPrimaryVM.vmName)' has no unique CAS dependency." }
+    $parent = $parents[0]
+    $domain = if ($parent.domain) { "$($parent.domain)" } else { "$($DeployConfig.vmOptions.domainName)" }
+    $fqdn = if ("$($parent.vmName)" -like '*.*') { "$($parent.vmName)" } else { "$($parent.vmName).$domain" }
+    $declared = "$($ChildPrimaryVM.thisParams.ParentSiteServer)"
+    if ($declared -and $declared -ne $parent.vmName -and $declared -ne $fqdn) {
+        throw "Child Primary '$($ChildPrimaryVM.vmName)' declares a conflicting CAS '$declared'."
+    }
+    if (-not (Test-MemLabsWorkflowContextOnlyVM -VM $parent)) { return }
+    [pscustomobject]@{
+        VM = $parent; Fqdn = $fqdn; SiteCode = "$($parent.siteCode)"
+        ChildSiteCode = "$($ChildPrimaryVM.siteCode)"; ChildVMName = "$($ChildPrimaryVM.vmName)"
+        SqlDataSource = Get-VmSqlConnectionTarget -SiteVm $parent -DeployConfig $DeployConfig -DomainFullName $domain
+        Database = "CM_$($parent.siteCode)"
+    }
+}
+
+function Get-MemLabsRetainedCasSqlState {
+    param([Parameter(Mandatory)]$CasContext)
+
+    $connectionString = [Data.SqlClient.SqlConnectionStringBuilder]::new()
+    $connectionString.DataSource = $CasContext.SqlDataSource
+    $connectionString.InitialCatalog = $CasContext.Database
+    $connectionString.IntegratedSecurity = $true
+    $connectionString.ConnectTimeout = 15
+    $connectionString.Encrypt = $false
+    $connectionString.TrustServerCertificate = $true
+    $connection = [Data.SqlClient.SqlConnection]::new($connectionString.ConnectionString)
+    $command = $null
+    $adapter = $null
+    $data = [Data.DataSet]::new()
+    try {
+        $connection.Open()
+        $command = $connection.CreateCommand()
+        $command.CommandTimeout = 30
+        $command.CommandText = @'
+SELECT IS_SRVROLEMEMBER('sysadmin') AS IsSysadmin;
+SELECT SiteCode FROM dbo.v_Site WHERE SiteCode = @site;
+SELECT es.PackageGuid AS SelectedPackageGuid, p.PackageGuid AS CatalogPackageGuid,
+       ISNULL(p.Flag,0) AS PrereqFlag, s.PackageGuid AS CasStatusPackageGuid,
+       s.State AS CasLocalState
+FROM dbo.EasySetupSettings AS es
+LEFT JOIN dbo.CM_UpdatePackages AS p ON p.PackageGuid = es.PackageGuid
+LEFT JOIN dbo.CM_UpdatePackageSiteStatus AS s
+    ON s.PackageGuid = es.PackageGuid AND s.SiteNumber = dbo.fnGetSiteNumber();
+'@
+        [void]$command.Parameters.AddWithValue('@site', $CasContext.SiteCode)
+        $adapter = [Data.SqlClient.SqlDataAdapter]::new($command)
+        [void]$adapter.Fill($data)
+        if ($data.Tables.Count -ne 3 -or $data.Tables[0].Rows.Count -ne 1 -or $data.Tables[1].Rows.Count -ne 1) {
+            throw 'Existing CAS SQL identity/installation-account access could not be verified.'
+        }
+        $updates = @(
+            foreach ($row in $data.Tables[2].Rows) {
+                $record = [ordered]@{}
+                foreach ($name in @('SelectedPackageGuid', 'CatalogPackageGuid', 'PrereqFlag', 'CasStatusPackageGuid', 'CasLocalState')) {
+                    $record[$name] = if ($row[$name] -is [DBNull]) { $null } else { $row[$name] }
+                }
+                [pscustomobject]$record
+            }
+        )
+        [pscustomobject]@{
+            IsSysadmin = $data.Tables[0].Rows[0].IsSysadmin
+            SiteCode = "$($data.Tables[1].Rows[0].SiteCode)"
+            Updates = $updates
+        }
+    }
+    finally {
+        if ($adapter) { $adapter.Dispose() }
+        if ($command) { $command.Dispose() }
+        $data.Dispose()
+        $connection.Dispose()
+    }
+}
+
+function Assert-MemLabsRetainedCasNativePrerequisites {
+    param([Parameter(Mandatory)]$CasContext)
+
+    $proof = Invoke-Command -ComputerName $CasContext.Fqdn -ArgumentList @($CasContext.SiteCode) -ErrorAction Stop -ScriptBlock {
+        param($ExpectedSiteCode)
+        $ErrorActionPreference = 'Stop'
+        $identity = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        $setup = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Setup'
+        if ($identity -ne $ExpectedSiteCode -or ([int]$setup.Phase -band 0x80) -eq 0) {
+            throw 'Required existing CAS installation identity/installed phase is not valid.'
+        }
+        foreach ($name in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')) {
+            if ((Get-Service -Name $name).Status -ne 'Running') { throw "Required existing CAS service '$name' is not running." }
+        }
+        $directory = "$($setup.'Installation Directory')"
+        $siteSetup = @(Get-Process -Name setup, setupwpf -ErrorAction SilentlyContinue | Where-Object {
+                $_.Path -and $_.Path.StartsWith($directory.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
+            })
+        if ($siteSetup.Count -gt 0) {
+            throw 'Required existing CAS currently has site setup running.'
+        }
+        $fullVersion = [version]::new("$($setup.'Full Version')")
+        $source = Join-Path $directory 'cd.latest'
+        foreach ($relative in @('SMSSETUP\BIN\X64\setup.exe', 'SMSSETUP\install.map', 'redist\ConfigMgr.Manifest.cab')) {
+            $path = Join-Path $source $relative
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -le 0) {
+                throw "Required existing CAS source '$path' is missing/unreadable; it will not be repaired."
+            }
+        }
+        $fileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $source 'SMSSETUP\BIN\X64\setup.exe'))
+        $sourceVersion = [version]::new($fileVersion.FileMajorPart, $fileVersion.FileMinorPart,
+            $fileVersion.FileBuildPart, ([int][math]::Floor($fileVersion.FilePrivatePart / 1000) * 1000))
+        if ($sourceVersion -ne $fullVersion) { throw 'Existing CAS cd.latest setup source does not match the installed parent version.' }
+        $shares = @(Get-SmbShare -Name "SMS_$ExpectedSiteCode" -ErrorAction Stop)
+        if ($shares.Count -ne 1 -or
+            [IO.Path]::GetFullPath("$($shares[0].Path)").TrimEnd('\') -ne [IO.Path]::GetFullPath($directory).TrimEnd('\')) {
+            throw 'Required existing CAS site source share does not map to the installed site directory; it will not be recreated.'
+        }
+        [pscustomobject]@{ SiteCode = $identity; FullVersion = "$fullVersion"; InstallDir = $directory; SourceShare = "$($shares[0].Name)" }
+    }
+    if (@($proof).Count -ne 1 -or $proof.SiteCode -ne $CasContext.SiteCode -or $proof.SourceShare -ne "SMS_$($CasContext.SiteCode)") {
+        throw 'Existing CAS native prerequisite probe returned an invalid identity/source share.'
+    }
+    $providers = @(Get-WmiObject -ComputerName $CasContext.Fqdn -Namespace 'root\SMS' -Class SMS_ProviderLocation -ErrorAction Stop |
+        Where-Object { $_.ProviderForLocalSite -eq $true -and $_.SiteCode -eq $CasContext.SiteCode -and $_.Machine })
+    $verifiedProvider = $null
+    $providerErrors = [Collections.Generic.List[string]]::new()
+    foreach ($provider in $providers) {
+        try {
+            $machine = "$($provider.Machine)".TrimStart('\')
+            $sites = @(Get-WmiObject -ComputerName $machine -Namespace "root\SMS\site_$($CasContext.SiteCode)" `
+                -Class SMS_Site -Filter "SiteCode='$($CasContext.SiteCode)'" -ErrorAction Stop)
+            if ($sites.Count -ne 1 -or $sites[0].Type -ne 4 -or $sites[0].Status -ne 1 -or
+                ("$($sites[0].ServerName)" -split '\.')[0] -ne ("$($CasContext.VM.vmName)" -split '\.')[0] -or
+                [version]"$($sites[0].Version)" -ne [version]"$($proof.FullVersion)") {
+                throw 'Existing CAS provider/site type, identity, status or version does not match.'
+            }
+            $verifiedProvider = $machine
+            break
+        }
+        catch { $providerErrors.Add($_.Exception.Message) }
+    }
+    if (-not $verifiedProvider) { throw "Required existing CAS provider/site could not be verified: $($providerErrors -join '; ')" }
+    $sql = Get-MemLabsRetainedCasSqlState -CasContext $CasContext
+    if ($sql.SiteCode -ne $CasContext.SiteCode -or $sql.IsSysadmin -ne 1) { throw 'Current installation identity lacks required existing CAS SQL/site access.' }
+    $updates = @($sql.Updates)
+    if ($updates.Count -gt 1) { throw 'Existing CAS has ambiguous selected update state; it was not changed.' }
+    if ($updates.Count -eq 1 -and $null -ne $updates[0].SelectedPackageGuid) {
+        $update = $updates[0]
+        if ($null -eq $update.CatalogPackageGuid -or $null -eq $update.CasStatusPackageGuid -or $null -eq $update.CasLocalState) {
+            throw 'Existing CAS selected update lacks attributable CAS-local state; no update/repair was attempted.'
+        }
+        $accepted = $update.CasLocalState -eq 196612 -or
+            ($update.CasLocalState -in @(131074, 131075) -and ([int]$update.PrereqFlag -band 1) -eq 1)
+        if (-not $accepted) { throw "Existing CAS selected local update state '$($update.CasLocalState)' blocks new setup; no upgrade/recovery was attempted." }
+    }
+    $CasContext | Add-Member -NotePropertyName ProviderMachine -NotePropertyValue $verifiedProvider -Force
+    $CasContext | Add-Member -NotePropertyName SourcePath -NotePropertyValue "\\$($CasContext.Fqdn)\$($proof.SourceShare)\cd.latest" -Force
+    Write-DscStatus "Existing CAS '$($CasContext.VM.vmName)' native prerequisites verified for this new child; no old workflow receipt or repair was used."
+}
+
+function Assert-MemLabsSelectedSupPrerequisite {
+    param([Parameter(Mandatory)]$SiteContext)
+
+    $getProperty = {
+        param($Properties, [string]$Name, [string]$Field)
+        $propertyRows = @($Properties | Where-Object { $_.PropertyName -eq $Name })
+        if ($propertyRows.Count -ne 1) { throw "Required existing CAS SUP property '$Name' is missing/ambiguous." }
+        return $propertyRows[0].$Field
+    }
+    $sameServer = {
+        param([string]$Left, [string]$Right)
+        $leftName = $Left.TrimStart('\').TrimEnd('.')
+        $rightName = $Right.TrimStart('\').TrimEnd('.')
+        return $leftName -eq $rightName -or (($leftName -notlike '*.*' -or $rightName -notlike '*.*') -and
+            ($leftName -split '\.')[0] -eq ($rightName -split '\.')[0])
+    }
+    $providers = @(Get-WmiObject -ComputerName $SiteContext.Fqdn -Namespace 'root\SMS' -Class SMS_ProviderLocation -ErrorAction Stop |
+        Where-Object { $_.ProviderForLocalSite -eq $true -and $_.SiteCode -eq $SiteContext.SiteCode -and $_.Machine })
+    $endpoint = $null
+    $errors = [Collections.Generic.List[string]]::new()
+    foreach ($provider in $providers) {
+        try {
+            $machine = "$($provider.Machine)".TrimStart('\')
+            $namespace = "root\SMS\site_$($SiteContext.SiteCode)"
+            $components = @(Get-WmiObject -ComputerName $machine -Namespace $namespace -Class SMS_SCI_Component `
+                -Filter "SiteCode='$($SiteContext.SiteCode)' AND ComponentName='SMS_WSUS_CONFIGURATION_MANAGER' AND Name='SMS Site Server'" -ErrorAction Stop)
+            if ($components.Count -ne 1 -or $components[0].ItemName -ne 'SMS_WSUS_CONFIGURATION_MANAGER|SMS Site Server') {
+                throw 'Required existing CAS logical WCM configuration could not be resolved uniquely.'
+            }
+            $default = & $getProperty $components[0].Props 'DefaultWSUS' 'Value2'
+            if ($default -isnot [string] -or [string]::IsNullOrWhiteSpace($default)) { throw 'Required existing CAS has no selected upstream SUP.' }
+            $roles = @(Get-WmiObject -ComputerName $machine -Namespace $namespace -Class SMS_SCI_SysResUse `
+                -Filter "SiteCode='$($SiteContext.SiteCode)' AND RoleName='SMS Software Update Point'" -ErrorAction Stop | Where-Object {
+                    $server = "$($_.NetworkOSPath)".Trim('\')
+                    if (-not $server) {
+                        $address = [regex]::Match("$($_.NALPath)", '\\\\(?<Server>[^\\]+)\\?$')
+                        if ($address.Success) { $server = $address.Groups['Server'].Value }
+                    }
+                    $server -and (& $sameServer $server $default)
+                })
+            if ($roles.Count -ne 1) { throw 'The selected existing CAS SUP is missing/ambiguous; other SUPs were not substituted.' }
+            $props = $roles[0].Props
+            if ((& $getProperty $props 'Enabled' 'Value') -ne 1) { throw 'The selected existing CAS SUP is disabled.' }
+            $ssl = & $getProperty $props 'SSLWSUS' 'Value'
+            if ($ssl -notin @(0, 1)) { throw 'The selected existing CAS SUP has unknown SSL configuration.' }
+            $portName = if ($ssl -eq 1) { 'WSUSIISSSLPort' } else { 'WSUSIISPort' }
+            $portValue = & $getProperty $props $portName 'Value'
+            $port = 0
+            if (-not [int]::TryParse("$portValue", [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+                throw 'The selected existing CAS SUP has an invalid endpoint port.'
+            }
+            $vip = & $getProperty $props 'NLBVIP' 'Value2'
+            if ($null -ne $vip -and $vip -isnot [string]) { throw 'The selected existing CAS SUP has an invalid endpoint name.' }
+            $endpoint = [pscustomobject]@{ Server = $(if ([string]::IsNullOrWhiteSpace($vip)) { $default.TrimStart('\') } else { $vip }); SSL = $ssl -eq 1; Port = $port }
+            break
+        }
+        catch { $errors.Add($_.Exception.Message) }
+    }
+    if (-not $endpoint) { throw "Required selected SUP for site '$($SiteContext.SiteCode)' cannot be verified: $($errors -join '; '). No SUP was installed or repaired." }
+    $probe = @(Invoke-CMRoleTargetCommand -ComputerName $env:COMPUTERNAME -ArgumentList @($endpoint.Server, $endpoint.SSL, $endpoint.Port) -ScriptBlock {
+            param([string]$ServerName, [bool]$UseSSL, [int]$Port)
+            $assembly = [Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+            if (-not $assembly) { throw 'The requested child site needs the WSUS administration API prerequisite before probing its existing CAS upstream.' }
+            $server = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer($ServerName, $UseSSL, $Port)
+            $configuration = $server.GetConfiguration()
+            [pscustomobject]@{ State = "$($configuration.GetUpdateServerConfigurationState())" }
+        })
+    if ($probe.Count -ne 1 -or $probe[0].State -isnot [string] -or $probe[0].State -ne 'Ready') {
+        throw "Required selected SUP '$($endpoint.Server):$($endpoint.Port)' is not verified ready; no configuration or synchronization was changed."
+    }
+    Write-DscStatus "Selected upstream '$($endpoint.Server):$($endpoint.Port)' is accessible from this action's site owner; unrelated SUPs and old workflow receipts were not used."
+}
+
+function Get-MemLabsEnabledTaskSequenceApplications {
+    param([AllowNull()][object[]]$Steps, [bool]$AncestorEnabled = $true)
+
+    foreach ($step in @($Steps | Where-Object { $null -ne $_ })) {
+        if ($step.Enabled -isnot [bool]) { throw 'Task sequence step has unreadable Enabled metadata.' }
+        if (-not $AncestorEnabled -or -not $step.Enabled) { continue }
+        if ($step.__CLASS -eq 'SMS_TaskSequence_Group') {
+            Get-MemLabsEnabledTaskSequenceApplications -Steps $step.Steps -AncestorEnabled $true
+        }
+        elseif ($step.__CLASS -eq 'SMS_TaskSequence_InstallApplicationAction' -and $step.Name -notlike 'MEMLABS install Office: *') {
+            if (-not [string]::IsNullOrWhiteSpace("$($step.BaseVariableName)")) {
+                throw 'Enabled inherited dynamic application variables require explicit resolved inputs; no application content was assumed.'
+            }
+            foreach ($model in @("$($step.ApplicationName)" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) { $model }
+        }
+    }
+}
+
+function Get-MemLabsApplicationContentSnapshot {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Models, [Parameter(Mandatory)][object[]]$Paths,
+        [Parameter(Mandatory)][string]$Namespace)
+
+    $applications = @{}
+    $deploymentTypes = @{}
+    $packages = @{}
+    $contentSnapshots = @{}
+    $pending = [Collections.Generic.Queue[object]]::new()
+    foreach ($model in @($Models | Sort-Object -Unique)) {
+        if ($model -notmatch '^ScopeId_[a-zA-Z0-9-]+/Application_[a-zA-Z0-9-]+$') { throw "Unreadable inherited application identity '$model'." }
+        $rows = @(Get-WmiObject -Namespace $Namespace -Class SMS_ApplicationLatest -Filter "ModelName='$model'" -ErrorAction Stop)
+        if ($rows.Count -ne 1 -or $rows[0].ModelName -ne $model -or $rows[0].IsExpired -eq $true) {
+            throw "Required inherited application '$model' is missing/ambiguous/expired; it was not repaired."
+        }
+        $pending.Enqueue($rows[0])
+    }
+    while ($pending.Count) {
+        $app = $pending.Dequeue()
+        $null = $app.Get()
+        $id = 0
+        if (-not [int]::TryParse("$($app.CI_ID)", [ref]$id) -or $id -le 0 -or
+            -not $app.CI_UniqueID -or [int]$app.CIVersion -le 0) { throw 'Inherited application revision cannot be verified.' }
+        if ($applications.ContainsKey("$id")) { continue }
+        $applications["$id"] = [pscustomobject]@{ CI_ID = $id; UniqueID = "$($app.CI_UniqueID)"; Version = [int]$app.CIVersion; Model = "$($app.ModelName)" }
+        $relations = @(Get-WmiObject -Namespace $Namespace -Class SMS_CIRelation -Filter "FromCIID=$id AND RelationType=9" -ErrorAction Stop)
+        if ($relations.Count -eq 0 -or @($relations | Where-Object IsBroken).Count) { throw "Inherited application '$($app.ModelName)' has missing/broken deployment-type relationships." }
+        foreach ($relation in $relations) {
+            $dtId = 0
+            if (-not [int]::TryParse("$($relation.ToCIID)", [ref]$dtId) -or $dtId -le 0) { throw 'Inherited application has an invalid deployment-type identity.' }
+            if ($deploymentTypes.ContainsKey("$dtId")) { continue }
+            $rows = @(Get-WmiObject -Namespace $Namespace -Class SMS_DeploymentType -Filter "CI_ID=$dtId" -ErrorAction Stop)
+            if ($rows.Count -ne 1) { throw "Required exact deployment type '$dtId' is missing/ambiguous." }
+            $dt = $rows[0]
+            $null = $dt.Get()
+            if ($dt.CI_ID -ne $dtId -or -not $dt.CI_UniqueID -or [int]$dt.CIVersion -le 0) { throw "Deployment type '$dtId' has no exact readable revision." }
+            $deploymentTypes["$dtId"] = [pscustomobject]@{ CI_ID = $dtId; UniqueID = "$($dt.CI_UniqueID)"; Version = [int]$dt.CIVersion }
+            $rawDependencies = @(Get-WmiObject -Namespace $Namespace -Class SMS_CIRelation -Filter "FromCIID=$dtId AND RelationType=10" -ErrorAction Stop)
+            $dependencies = @(Get-WmiObject -Namespace $Namespace -Class SMS_AppDependenceRelation -Filter "FromDeploymentTypeCIID=$dtId" -ErrorAction Stop)
+            if (@($rawDependencies | Where-Object IsBroken).Count -or
+                (@($rawDependencies.ToCIID | Sort-Object -Unique) -join ',') -ne (@($dependencies.ToDeploymentTypeCIID | Sort-Object -Unique) -join ',')) {
+                throw "Deployment type '$dtId' has broken/unresolved dependency metadata."
+            }
+            foreach ($dependency in $dependencies) {
+                $dependencyAppId = 0
+                if (-not [int]::TryParse("$($dependency.ToApplicationCIID)", [ref]$dependencyAppId) -or $dependencyAppId -le 0) { throw 'Inherited application dependency has no exact application CI.' }
+                $dependencyApps = @(Get-WmiObject -Namespace $Namespace -Class SMS_Application -Filter "CI_ID=$dependencyAppId" -ErrorAction Stop)
+                if ($dependencyApps.Count -ne 1 -or $dependencyApps[0].CI_ID -ne $dependencyAppId -or $dependencyApps[0].IsExpired -eq $true) { throw 'Required exact inherited dependency application is missing/ambiguous/expired.' }
+                $pending.Enqueue($dependencyApps[0])
+            }
+            $contents = @(Get-WmiObject -Namespace $Namespace -Class SMS_CIToContent -Filter "CI_ID=$dtId" -ErrorAction Stop)
+            if ($contents.Count -eq 0) {
+                if (-not $app.SDMPackageXML) { throw "Contentless deployment type '$dtId' has no positive application definition." }
+                $serializer = @([AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object {
+                        $_.GetType('Microsoft.ConfigurationManagement.ApplicationManagement.Serialization.SccmSerializer', $false)
+                    } | Where-Object { $_ })
+                if ($serializer.Count -ne 1) { throw "Contentless deployment type '$dtId' cannot be verified with the existing application serializer." }
+                $method = $serializer[0].GetMethod('DeserializeFromString', [type[]]@([string]))
+                if (-not $method -or -not $method.IsPublic -or -not $method.IsStatic) { throw 'Existing public application deserializer is unavailable.' }
+                $definition = $method.Invoke($null, [object[]]@("$($app.SDMPackageXML)"))
+                $definitions = @($definition.DeploymentTypes | Where-Object {
+                        $_.Id -and (("$($_.Id)" -split ':') -join '/').Equals("$($dt.CI_UniqueID)", [StringComparison]::OrdinalIgnoreCase)
+                    })
+                if ($definitions.Count -ne 1 -or
+                    -not $definitions[0].Installer.PSObject.Properties['Contents'] -or -not $definitions[0].Installer.PSObject.Properties['InstallContent'] -or
+                    @($definitions[0].Installer.Contents).Count -gt 0 -or $null -ne $definitions[0].Installer.InstallContent) {
+                    throw "Deployment type '$dtId' has no exact-revision contentless definition; missing content was not treated as success."
+                }
+            }
+            foreach ($content in $contents) {
+                $contentId = 0
+                if (-not [int]::TryParse("$($content.ContentID)", [ref]$contentId) -or $contentId -le 0 -or
+                    -not $content.ContentUniqueID -or [int]$content.ContentVersion -le 0) { throw "Deployment type '$dtId' has invalid content identity/version." }
+                $mappings = @(Get-WmiObject -Namespace $Namespace -Class SMS_PackageToContent -Filter "ContentID=$contentId" -ErrorAction Stop |
+                    Where-Object { $_.PackageID -eq $app.PackageID -and $_.ContentID -eq $contentId -and $_.ContentUniqueID -eq $content.ContentUniqueID -and $_.ContentVersionInPkg -eq $content.ContentVersion })
+                if ($mappings.Count -ne 1 -or [int]$mappings[0].MinPackageVersion -le 0) { throw "Inherited application content '$contentId' has no exact application-package coverage." }
+                $packageId = "$($mappings[0].PackageID)"
+                if ($packageId -notmatch '^[a-zA-Z0-9]{8}$') { throw 'Inherited application has no physical content PackageID.' }
+                $packageRows = @(Get-WmiObject -Namespace $Namespace -Class SMS_ContentPackage -Filter "PackageID='$packageId'" -ErrorAction Stop)
+                if ($packageRows.Count -ne 1) { throw "Inherited application package '$packageId' is missing/ambiguous." }
+                $package = $packageRows[0]
+                $null = $package.Get()
+                $version = [int]$package.SourceVersion
+                if ($version -lt [int]$mappings[0].MinPackageVersion) { throw "Inherited application package '$packageId' does not contain the required content revision." }
+                foreach ($path in @($Paths | Sort-Object DPFqdn, DPSiteCode -Unique)) {
+                    $dpRows = @(Get-WmiObject -Namespace $Namespace -Class SMS_DistributionPointInfo -Filter "SiteCode='$($path.DPSiteCode)'" -ErrorAction Stop |
+                        Where-Object { "$($_.ServerName)".TrimStart('\') -eq $path.DPFqdn -or "$($_.NetworkOSPath)".TrimStart('\') -eq $path.DPFqdn })
+                    if ($dpRows.Count -ne 1 -or -not $dpRows[0].NALPath -or $dpRows[0].ServiceType -ne 0) { throw 'Required application DP identity is missing/ambiguous/cloud.' }
+                    $nal = "$($dpRows[0].NALPath)" -replace '\\', '\\' -replace "'", "\'"
+                    $status = @(Get-WmiObject -Namespace $Namespace -Class SMS_PackageStatusDistPointsSummarizer `
+                        -Filter "PackageID='$packageId' AND SiteCode='$($path.DPSiteCode)' AND ServerNALPath='$nal'" -ErrorAction Stop)
+                    # SourceVersion correlates the current package snapshot; State is the native DP completion report.
+                    if ($status.Count -ne 1 -or $status[0].State -ne 0 -or [int]$status[0].SourceVersion -ne $version) {
+                        throw "Required inherited application package '$packageId' is not reported Installed on exact DP '$($path.DPFqdn)'."
+                    }
+                }
+                $packages[$packageId] = $version
+                $contentSnapshots["$dtId|$contentId"] = [pscustomobject]@{
+                    DeploymentTypeCIID = $dtId; ContentID = $contentId; UniqueID = "$($content.ContentUniqueID)"
+                    Version = [int]$content.ContentVersion; PackageID = $packageId; MinimumPackageVersion = [int]$mappings[0].MinPackageVersion
+                }
+            }
+        }
+    }
+    [pscustomobject]@{
+        Applications = @($applications.Values | Sort-Object CI_ID)
+        DeploymentTypes = @($deploymentTypes.Values | Sort-Object CI_ID)
+        Packages = @($packages.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ PackageID = $_; SourceVersion = $packages[$_] } })
+        Contents = @($contentSnapshots.Values | Sort-Object DeploymentTypeCIID, ContentID)
+    }
+}
+
+function Wait-MemLabsNewChildReplicationNative {
+    param([Parameter(Mandatory)]$CasContext, [ValidateRange(1, 240)][int]$TimeoutMinutes = 120)
+
+    $deadline = [DateTime]::UtcNow.AddMinutes($TimeoutMinutes)
+    do {
+        $rows = @(Get-WmiObject -ComputerName $CasContext.ProviderMachine -Namespace "root\SMS\site_$($CasContext.SiteCode)" `
+            -Class SMS_ReplicationLinkSummary -Filter "Site1='$($CasContext.SiteCode)' AND Site2='$($CasContext.ChildSiteCode)'" -ErrorAction Stop)
+        if ($rows.Count -gt 1) { throw 'New child/CAS replication link is ambiguous; no replication repair was attempted.' }
+        if ($rows.Count -eq 1) {
+            $link = $rows[0]
+            if ($link.Site1 -ne $CasContext.SiteCode -or $link.Site2 -ne $CasContext.ChildSiteCode) {
+                throw 'Replication provider returned a different link than the requested new child/CAS pair.'
+            }
+            foreach ($name in @('SiteType1', 'SiteType2', 'LinkStatus', 'Site1ToSite2GlobalState', 'Site2ToSite1GlobalState', 'Site2ToSite1SiteState')) {
+                if (-not $link.PSObject.Properties[$name] -or $null -eq $link.$name) { throw "New child/CAS replication evidence has no '$name'." }
+            }
+            if ($link.SiteType1 -ne 4 -or $link.SiteType2 -ne 2) { throw 'Replication evidence does not describe the requested CAS/Primary pair.' }
+            if ($link.LinkStatus -eq 2 -and $link.Site1ToSite2GlobalState -eq 2 -and
+                $link.Site2ToSite1GlobalState -eq 2 -and $link.Site2ToSite1SiteState -eq 2) {
+                Write-DscStatus "New child '$($CasContext.ChildVMName)' native CAS replication is Active in both global directions and child-to-CAS site data."
+                return
+            }
+            if ($link.LinkStatus -in @(0, 1, 6, 9)) { throw "Required new child/CAS link is failed/deleted (LinkStatus=$($link.LinkStatus)); it was not repaired." }
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { throw 'New child/CAS native replication did not become ready before its bounded deadline; no force-send or reinitialization was attempted.' }
+        Write-DscStatus "Waiting on $($CasContext.VM.vmName) for native replication of only new child $($CasContext.ChildVMName); no hierarchy recovery." -RetrySeconds 30
+        Start-Sleep -Seconds 30
+    } while ($true)
+}
+
 function Invoke-MemLabsDrsGroupSend {
     [CmdletBinding()]
     param(
@@ -2899,12 +3307,12 @@ function Confirm-CMRoleTargetPrerequisites {
 }
 
 function Get-CMDistributionPointShareAccess {
-    param([Parameter(Mandatory = $true)][string]$ServerFQDN)
+    param([Parameter(Mandatory = $true)][string]$ServerFQDN, [switch]$ReadOnly)
 
     $job = $null
     try {
-        $job = Start-Job -ArgumentList $ServerFQDN -ScriptBlock {
-            param($Server)
+        $job = Start-Job -ArgumentList @($ServerFQDN, [bool]$ReadOnly) -ScriptBlock {
+            param($Server, [bool]$OnlyRead)
             $path = "\\$Server\SMS_DP`$"
             try {
                 if (($Server -split '\.')[0] -ieq $env:COMPUTERNAME) {
@@ -2912,6 +3320,7 @@ function Get-CMDistributionPointShareAccess {
                 }
                 $null = Get-Item -LiteralPath $path -Force -ErrorAction Stop
                 $null = Get-ChildItem -LiteralPath $path -Force -ErrorAction Stop | Select-Object -First 1
+                if ($OnlyRead) { return [pscustomobject]@{ Ready = $true; Category = ''; Error = '' } }
                 $probePath = Join-Path $path ".MemLabsDpAccess-$([guid]::NewGuid().ToString('N')).tmp"
                 try {
                     Set-Content -LiteralPath $probePath -Value 'MemLabs DP producer access probe' -NoNewline -Encoding ASCII -ErrorAction Stop
@@ -3156,7 +3565,8 @@ function Get-CMDistributionPointReadiness {
         [Parameter(Mandatory = $true)]
         [string] $ServerFQDN,
         [Parameter(Mandatory = $true)]
-        [string] $SiteCode
+        [string] $SiteCode,
+        [switch] $ReadOnly
     )
 
     $shortName = ($ServerFQDN -split '\.')[0]
@@ -3201,7 +3611,7 @@ function Get-CMDistributionPointReadiness {
     }
     catch { $errors += "SMS_DP`$: $($_.Exception.Message)" }
     if ($configuration -and $providerInfo -and $shareReady) {
-        if ($siteServerAdmin) { $access = Get-CMDistributionPointShareAccess -ServerFQDN $ServerFQDN }
+        if ($siteServerAdmin) { $access = Get-CMDistributionPointShareAccess -ServerFQDN $ServerFQDN -ReadOnly:$ReadOnly }
         else {
             $access = [pscustomobject]@{ Ready = $false; Category = 'AccessDenied'; Error = "Owning site computer '$env:COMPUTERNAME`$' is not a local Administrator on the DP." }
         }
@@ -4245,7 +4655,8 @@ function Install-PullDP {
         [bool]
         $usePKI = $false,
         [object]
-        $DeployConfig
+        $DeployConfig,
+        [switch]$ReadOnlySource
     )
 
     $i = 0
@@ -4289,7 +4700,7 @@ function Install-PullDP {
             # "No object corresponds to the specified parameters" that aborts the
             # caller. Guard here so a not-yet-ready source degrades to a retry/skip
             # instead of taking down the whole InstallDPMPClient run.
-            $sourceDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $SourceDPFQDN -SiteCode $ServerSiteCode
+            $sourceDpReadiness = Get-CMDistributionPointReadiness -ServerFQDN $SourceDPFQDN -SiteCode $ServerSiteCode -ReadOnly:$ReadOnlySource
             if (-not $sourceDpReadiness.Ready) {
                 Write-DscStatus "Pull DP source '$SourceDPFQDN' is not physically ready ($($sourceDpReadiness.Detail)); cannot add pull DP $DPFQDN this pass."
                 if ($i -ge $maxAttempts) { $installFailure = $true }

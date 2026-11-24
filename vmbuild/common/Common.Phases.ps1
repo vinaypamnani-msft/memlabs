@@ -33,8 +33,406 @@ function Test-MemLabsIncludeHiddenVmForPhase {
     )
 
     if (-not $Vm.hidden) { return $true }
-    if ($Phase -notin @(1, 10, 11)) { return $true }
-    return $Phase -eq 11 -and ($Vm.osdValidate -eq $true -or $Vm.phase11Validate -eq $true)
+    if ($Phase -in @(1, 10)) { return $false }
+    if ($Vm.ExistingVM -eq $true) { return $true }
+    return $Phase -in @(8, 11) -and $Vm.cmOptionsChanged -eq $true
+}
+
+function Get-MemLabsExistingClientPushPlan {
+    param([Parameter(Mandatory)]$DeployConfig)
+
+    if (@($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Primary' -and (Test-MemLabsContextOnlyVM -VM $_) }).Count -eq 0) { return }
+    $targets = @($DeployConfig.virtualMachines | Where-Object {
+            $null -ne $_ -and (-not $_.hidden -or $_.ExistingVM -eq $true) -and
+            $_.role -in @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite') -and
+            (Test-PushClientRequested -VM $_)
+        })
+    $sites = @($DeployConfig.virtualMachines | Where-Object { $_.role -in @('Primary', 'Secondary') })
+    foreach ($target in $targets) {
+        $siteCode = "$($target.pushClient)"
+        if ($target.pushClient -eq $true) {
+            $primaries = @($sites | Where-Object { $_.role -eq 'Primary' })
+            if ($primaries.Count -ne 1) { throw "Client push for '$($target.vmName)' has no unambiguous owning site." }
+            $siteCode = "$($primaries[0].siteCode)"
+        }
+        $owners = @($sites | Where-Object { "$($_.siteCode)" -eq $siteCode })
+        if ($owners.Count -eq 1 -and $owners[0].role -eq 'Secondary') {
+            $siteCode = "$($owners[0].parentSiteCode)"
+            $owners = @($sites | Where-Object { $_.role -eq 'Primary' -and "$($_.siteCode)" -eq $siteCode })
+        }
+        if ($owners.Count -ne 1) { throw "Client push for '$($target.vmName)' cannot resolve exactly one owner for site '$siteCode'." }
+        if (-not (Test-MemLabsContextOnlyVM -VM $owners[0])) { continue }
+        [pscustomobject]@{ OwnerVMName = $owners[0].vmName; SiteCode = $siteCode; ClientVMName = $target.vmName }
+    }
+}
+
+function Select-MemLabsPhaseConfigurationData {
+    param($ConfigurationData, [Parameter(Mandatory)]$DeployConfig, [int]$Phase)
+
+    if (-not $ConfigurationData -or $ConfigurationData.AllNodes.NodeName -contains 'LOCALHOST') { return $ConfigurationData }
+    $nodes = @($ConfigurationData.AllNodes | Where-Object {
+            $nodeName = "$($_.NodeName)"
+            if ($nodeName -eq '*') { return $true }
+            $nodeVms = @($DeployConfig.virtualMachines | Where-Object {
+                    $nodeDomain = if ($_.domain) { $_.domain } else { $DeployConfig.vmOptions.domainName }
+                    $_.vmName -eq $nodeName -or "$($_.vmName).$nodeDomain" -eq $nodeName
+                })
+            if ($nodeVms.Count -ne 1) { return $true }
+            $selected = Test-MemLabsIncludeHiddenVmForPhase -Vm $nodeVms[0] -Phase $Phase
+            if (-not $selected) {
+                Write-Log "[Phase $Phase] $nodeName is dependency context, not a configuration target; preserving its existing state." -LogOnly
+            }
+            return $selected
+        })
+    if (@($nodes | Where-Object { $_.NodeName -ne '*' }).Count -eq 0) { return }
+    $ConfigurationData.AllNodes = $nodes
+    return $ConfigurationData
+}
+
+function Assert-MemLabsExistingDeploymentDependencies {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$DeployConfig, [switch]$WhatIf)
+
+    if (-not (Test-MemLabsPreserveExistingHierarchy -DeployConfig $DeployConfig)) { return }
+    $targets = @($DeployConfig.virtualMachines | Where-Object { -not $_.hidden -or $_.ExistingVM -eq $true })
+    $contextVms = @($DeployConfig.virtualMachines | Where-Object { Test-MemLabsContextOnlyVM -VM $_ })
+    $required = @{}
+    foreach ($action in @(Get-MemLabsExistingHierarchyActions -DeployConfig $DeployConfig)) {
+        $required[$action.OwnerVMName] = "$($action.Kind) only for $(@($action.TargetVMNames) -join ', ')"
+    }
+    if ($DeployConfig.parameters.ExistingDCName -and @($targets | Where-Object {
+                $_.role -notin @('DC', 'WorkgroupMember', 'InternetClient', 'AADClient', 'OSDClient', 'StandaloneRootCA', 'Proxy', 'DHCPRelay') -and
+                -not ($_.osFamily -eq 'Linux' -and $_.joinDomain -eq $false)
+            }).Count -gt 0) {
+        $required["$($DeployConfig.parameters.ExistingDCName)"] = 'domain join/authentication for requested VMs'
+    }
+    foreach ($target in $targets) {
+        foreach ($property in @('remoteSQLVM', 'OtherNode', 'fileServerVM', 'remoteContentLibVM', 'pullDPSourceDP')) {
+            if ($target.$property) { $required["$($target.$property)"] = "$property required by $($target.vmName)" }
+        }
+    }
+    foreach ($vm in $contextVms) {
+        $reason = $required["$($vm.vmName)"]
+        if (-not $reason) {
+            Write-Log "[Deployment intent] $($vm.vmName): context only; not a deployment, maintenance, validation, or repair target." -LogOnly
+            continue
+        }
+        Write-Log "[Deployment intent] $($vm.vmName): observe existing prerequisite only ($reason); no automatic repair."
+        if ($WhatIf) { continue }
+        $live = Get-VM -Name $vm.vmName -ErrorAction Stop
+        if ("$($live.State)" -ne 'Running') {
+            throw "'$($vm.vmName)' is '$($live.State)' and is required for $reason. Start or repair it explicitly; the deployment will not change its power state."
+        }
+        if ($vm.role -in @('DC', 'BDC')) {
+            $probe = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $DeployConfig.vmOptions.domainName `
+                -ScriptBlock (Get-MemLabsDomainControllerReadinessProbe) -ArgumentList @($vm.role) `
+                -AsJob -TimeoutSeconds 60 -SessionMaxRetries 1 -RebootIfUnresponsive:$false -SuppressLog
+            $state = @($probe.ScriptBlockOutput | Where-Object { $_.PSObject.Properties['Ready'] })
+            if (-not $probe -or $probe.ScriptBlockFailed -or $state.Count -ne 1 -or $state[0].Ready -ne $true) {
+                throw "'$($vm.vmName)' cannot provide existing AD DS/DNS/Netlogon needed for $reason. Its services, configuration, and power state were left unchanged. State: $($state | ConvertTo-Json -Compress). $($probe.ErrorDetails)"
+            }
+        }
+    }
+}
+
+function Invoke-MemLabsExistingClientPush {
+    param([Parameter(Mandatory)]$DeployConfig, [string[]]$OnlyVMs, [string[]]$OnlyClients)
+
+    $plan = @(Get-MemLabsExistingClientPushPlan -DeployConfig $DeployConfig)
+    if ($PSBoundParameters.ContainsKey('OnlyVMs')) {
+        $plan = @($plan | Where-Object { $_.OwnerVMName -in $OnlyVMs })
+    }
+    if ($PSBoundParameters.ContainsKey('OnlyClients')) {
+        $plan = @($plan | Where-Object { $_.ClientVMName -in $OnlyClients })
+        if ((@($plan.ClientVMName | Sort-Object -Unique) -join ',') -ne (@($OnlyClients | Sort-Object -Unique) -join ',')) {
+            throw 'The requested client-push action does not match the authorized owner/client deployment plan.'
+        }
+    }
+    foreach ($ownerGroup in @($plan | Group-Object OwnerVMName)) {
+        $requests = @($ownerGroup.Group)
+        $siteCodes = @($requests.SiteCode | Select-Object -Unique)
+        if ($siteCodes.Count -ne 1) { throw "Existing client-push owner '$($ownerGroup.Name)' has conflicting site codes." }
+        $clientNames = @($requests.ClientVMName | Select-Object -Unique)
+        $ownerVm = @($DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $ownerGroup.Name })[0]
+        $ownerDomain = if ($ownerVm.domain) { $ownerVm.domain } else { $DeployConfig.vmOptions.domainName }
+        $ownerAdmin = if ($ownerVm.adminName) { $ownerVm.adminName } else { $DeployConfig.vmOptions.adminName }
+        $liveOwner = Get-VM -Name $ownerGroup.Name -ErrorAction Stop
+        if ("$($liveOwner.State)" -ne 'Running') {
+            throw "Existing client-push owner '$($ownerGroup.Name)' is '$($liveOwner.State)'; start or repair it explicitly. Its power state was left unchanged."
+        }
+        Write-Log "[Deployment intent] $($ownerGroup.Name): submit client push only for $($clientNames -join ', '); no site configuration or recovery."
+        $result = Invoke-VmCommand -VmName $ownerGroup.Name -VmDomainName $ownerDomain `
+            -VmDomainAccount $ownerAdmin -RequireDomainIdentity -AsJob -TimeoutSeconds 180 -SessionMaxRetries 1 -RebootIfUnresponsive:$false -FailOnRemoteError -ScriptBlock {
+            param([string]$ExpectedSiteCode, [string[]]$ClientNames, [string]$ConnectionScriptText)
+            $ErrorActionPreference = 'Stop'
+            . ([scriptblock]::Create($ConnectionScriptText)) $ExpectedSiteCode
+            $pushSetup = @(Get-CMClientPushInstallation -SiteCode $siteCode -ErrorAction Stop)
+            if ($pushSetup.Count -ne 1) { throw 'Existing client-push configuration is missing or ambiguous; no account or site settings were changed.' }
+            $resolved = @(
+                foreach ($client in $ClientNames) {
+                    $devices = @(Get-CMDevice -Name $client -ErrorAction Stop | Where-Object { $_.Name -ieq $client })
+                    $resourceId = 0
+                    if ($devices.Count -ne 1 -or
+                        -not [int]::TryParse("$($devices[0].ResourceID)", [ref]$resourceId) -or $resourceId -le 0) {
+                        throw "Client '$client' is not uniquely discovered/visible in the existing site. Resolve discovery explicitly; no discovery, cleanup, or site repair was triggered."
+                    }
+                    [pscustomobject]@{ Client = $client; ResourceID = "$resourceId" }
+                }
+            )
+            foreach ($request in $resolved) {
+                Install-CMClient -DeviceId $request.ResourceID -SiteCode $siteCode -ErrorAction Stop | Out-Null
+            }
+            [pscustomobject]@{ Status = 'Submitted'; SiteCode = $siteCode; Clients = @($resolved.Client) }
+        } -ArgumentList @($siteCodes[0], $clientNames, (Get-MemLabsExistingSiteConnectionScript).ToString())
+        $receipts = @($result.ScriptBlockOutput | Where-Object { $_.Status -eq 'Submitted' })
+        if (-not $result -or $result.ScriptBlockFailed -or $receipts.Count -ne 1 -or
+            $receipts[0].SiteCode -ne $siteCodes[0] -or
+            (@($receipts[0].Clients | Sort-Object) -join ',') -ne (@($clientNames | Sort-Object) -join ',')) {
+            throw "Existing client-push prerequisite/request failed on '$($ownerGroup.Name)'; no general hierarchy repair was attempted. $($result.ScriptBlockOutput) $($result.ErrorDetails)"
+        }
+    }
+}
+
+function Get-MemLabsExistingSiteConnectionScript {
+    {
+        param([string]$ExpectedSiteCode)
+        $siteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        if ($siteCode -ne $ExpectedSiteCode) { throw "Existing site identity '$siteCode' does not match required site '$ExpectedSiteCode'." }
+        if ((Get-Service -Name SMS_EXECUTIVE -ErrorAction Stop).Status -ne 'Running') {
+            throw 'Existing SMS_EXECUTIVE is not running. The requested action is blocked; no service recovery was attempted.'
+        }
+        $consoleKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\ConfigMgr10\Setup'
+        if (-not (Test-Path -LiteralPath $consoleKey)) { $consoleKey = 'HKLM:\SOFTWARE\Microsoft\ConfigMgr10\Setup' }
+        $installation = Get-ItemPropertyValue -Path $consoleKey -Name 'UI Installation Directory'
+        $modulePath = Join-Path $installation 'bin\ConfigurationManager.psd1'
+        if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+            throw "Existing ConfigMgr console module is missing at '$modulePath'; it will not be installed automatically."
+        }
+        if (Get-Command -Name Initialize-CMConsoleAssemblyResolver -CommandType Function -ErrorAction SilentlyContinue) {
+            $null = Initialize-CMConsoleAssemblyResolver -ModulePath $modulePath
+        }
+        Import-Module -Name $modulePath -ErrorAction Stop
+        $providers = @(Get-WmiObject -Namespace 'root\SMS' -Class SMS_ProviderLocation -ErrorAction Stop |
+            Where-Object { $_.ProviderForLocalSite -eq $true -and $_.SiteCode -eq $siteCode -and $_.Machine })
+        $drive = Get-PSDrive -Name $siteCode -PSProvider CMSite -ErrorAction SilentlyContinue
+        if ($drive) {
+            $driveRoot = "$($drive.Root)".TrimStart('\').TrimEnd('.')
+            $matchingProviders = @($providers | Where-Object {
+                    $machine = "$($_.Machine)".TrimStart('\').TrimEnd('.')
+                    $machine -eq $driveRoot -or (($machine -notlike '*.*' -or $driveRoot -notlike '*.*') -and
+                        ($machine -split '\.')[0] -eq ($driveRoot -split '\.')[0])
+                })
+            if (-not $driveRoot -or $matchingProviders.Count -ne 1) {
+                throw 'Existing CMSite drive does not identify a verified provider for this site; it was not repointed or repaired.'
+            }
+        }
+        else {
+            if ($providers.Count -ne 1) { throw 'Existing SMS Provider cannot be resolved uniquely; no provider recovery was attempted.' }
+            $null = New-PSDrive -Name $siteCode -PSProvider CMSite -Root $providers[0].Machine -ErrorAction Stop
+        }
+        Set-Location "$($siteCode):"
+    }
+}
+
+function Sync-MemLabsRequestedDhcpRelays {
+    param([Parameter(Mandatory)]$DeployConfig, [string[]]$OnlyVMs)
+
+    $relays = @(Get-MemLabsRequestedDeploymentVMs -DeployConfig $DeployConfig | Where-Object { $_.role -eq 'DHCPRelay' -and (-not $OnlyVMs -or $_.vmName -in $OnlyVMs) })
+    if ($relays.Count -eq 0) { return }
+    $names = @($relays.vmName)
+    $networks = @($DeployConfig.osdPxePaths | Where-Object { $_.relayVM -in $names } | ForEach-Object { $_.clientNetwork })
+    $paths = @(Get-OsdPxePaths -Config $DeployConfig | Where-Object { $_.relayVM -in $names -or $_.clientNetwork -in $networks })
+    $projection = $DeployConfig.PSObject.Copy()
+    $projection.virtualMachines = @($DeployConfig.virtualMachines | Where-Object { $_.role -ne 'DHCPRelay' -or $_.vmName -in $names })
+    $projection | Add-Member -NotePropertyName osdPxePaths -NotePropertyValue $paths -Force
+    Write-Log "[Deployment intent] Configure requested relay(s) only: $($names -join ', '); existing relays are read-only prerequisites."
+    if (-not (Sync-LinuxDhcpRelay -DeployConfig $projection -Paths $paths)) { throw "Requested relay configuration failed for $($names -join ', ')." }
+}
+
+function Get-MemLabsRequestedDirectoryBindingPlan {
+    param([Parameter(Mandatory)]$DeployConfig)
+
+    $newTargets = @(Get-MemLabsRequestedDeploymentVMs -DeployConfig $DeployConfig | Where-Object { -not $_.hidden -and $_.ExistingVM -ne $true })
+    $bindings = @(
+        foreach ($vm in $newTargets) {
+            $siteServer = $vm.role -in @('Primary', 'CAS', 'Secondary', 'PassiveSite')
+            $options = if ($vm.cmOptions) { $vm.cmOptions } else { $DeployConfig.cmOptions }
+            $iis = $options.UsePKI -eq $true -and ($siteServer -or $vm.installDP -or $vm.installMP -or $vm.installSUP -or $vm.installRP)
+            if (-not $siteServer -and -not $iis) { continue }
+            $domain = if ($vm.domain) { "$($vm.domain)" } else { "$($DeployConfig.vmOptions.domainName)" }
+            [pscustomobject]@{ VMName = "$($vm.vmName)"; Domain = $domain; SiteServer = $siteServer; IIS = [bool]$iis }
+        }
+    )
+    foreach ($group in @($bindings | Group-Object Domain)) {
+        $dcs = @($DeployConfig.virtualMachines | Where-Object {
+                $_.role -in @('DC', 'OtherDC') -and
+                $(if ($_.domain) { $_.domain } else { $DeployConfig.vmOptions.domainName }) -eq $group.Name
+            })
+        if ($dcs.Count -ne 1) { throw "Required directory bindings for '$($group.Name)' have no unique declared DC." }
+        if (-not (Test-MemLabsContextOnlyVM -VM $dcs[0])) { continue }
+        $existingSites = @($DeployConfig.virtualMachines | Where-Object {
+                $_.role -in @('Primary', 'CAS', 'Secondary', 'PassiveSite') -and ($_.hidden -or $_.ExistingVM -eq $true) -and
+                $(if ($_.domain) { $_.domain } else { $DeployConfig.vmOptions.domainName }) -eq $group.Name
+            })
+        [pscustomobject]@{
+            OwnerVMName = "$($dcs[0].vmName)"; Domain = $group.Name
+            AdminName = $(if ($dcs[0].adminName) { $dcs[0].adminName } else { $DeployConfig.vmOptions.adminName })
+            Bindings = @($group.Group)
+            NewHierarchy = $existingSites.Count -eq 0 -and @($group.Group | Where-Object SiteServer).Count -gt 0
+        }
+    }
+}
+
+function Invoke-MemLabsRequestedDirectoryBindings {
+    param([Parameter(Mandatory)]$DeployConfig)
+
+    foreach ($plan in @(Get-MemLabsRequestedDirectoryBindingPlan -DeployConfig $DeployConfig)) {
+        Write-Log "[Deployment intent] $($plan.OwnerVMName): authorize only requested new computer bindings; no existing AD/PKI policy or membership repair."
+        $result = Invoke-VmCommand -VmName $plan.OwnerVMName -VmDomainName $plan.Domain -VmDomainAccount $plan.AdminName `
+            -RequireDomainIdentity -AsJob -TimeoutSeconds 180 -SessionMaxRetries 1 -RebootIfUnresponsive:$false -FailOnRemoteError -ScriptBlock {
+            param([string]$BindingsJson, [string]$Domain, [bool]$NewHierarchy)
+            $ErrorActionPreference = 'Stop'
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $bindings = ConvertFrom-Json -InputObject $BindingsJson
+            $bindings = @($bindings)
+            $groups = @{}
+            $groupNames = @()
+            if (@($bindings | Where-Object SiteServer).Count) { $groupNames += 'ConfigMgr Site Servers' }
+            if (@($bindings | Where-Object IIS).Count) { $groupNames += 'ConfigMgr IIS Servers' }
+            foreach ($name in $groupNames) {
+                try { $group = Get-ADGroup -Identity $name -ErrorAction Stop }
+                catch {
+                    if (-not $NewHierarchy -or $_.CategoryInfo.Category -ne 'ObjectNotFound') { throw }
+                    $group = New-ADGroup -Name $name -GroupScope Global -GroupCategory Security -PassThru -ErrorAction Stop
+                }
+                if ($group.GroupCategory -ne 'Security' -or -not $group.SID) { throw "Required existing group '$name' has invalid security identity; it was not repaired." }
+                $groups[$name] = $group
+            }
+            $containerPath = $null
+            $acl = $null
+            if (@($bindings | Where-Object SiteServer).Count) {
+                $root = (Get-ADRootDSE -ErrorAction Stop).defaultNamingContext
+                $dn = "CN=System Management,CN=System,$root"
+                try { $container = Get-ADObject -Identity $dn -ErrorAction Stop }
+                catch {
+                    if (-not $NewHierarchy -or $_.CategoryInfo.Category -ne 'ObjectNotFound') { throw }
+                    $container = New-ADObject -Type Container -Name 'System Management' -Path "CN=System,$root" -PassThru -ErrorAction Stop
+                }
+                if ($container.ObjectClass -ne 'container') { throw 'Existing System Management identity is not a container; it was not replaced.' }
+                $containerPath = "AD:\$dn"
+                $acl = Get-Acl -LiteralPath $containerPath -ErrorAction Stop
+            }
+            $computers = @{}
+            foreach ($binding in $bindings) {
+                $computer = Get-ADComputer -Identity $binding.VMName -Properties DNSHostName, tokenGroups -ErrorAction Stop
+                if (-not $computer.SID -or $computer.DNSHostName -ne "$($binding.VMName).$Domain") {
+                    throw "Requested new computer '$($binding.VMName)' has not proved its domain identity."
+                }
+                $computers[$binding.VMName] = $computer
+                if ($binding.SiteServer) {
+                    $sids = @("$($computer.SID)", 'S-1-1-0', 'S-1-5-11', "$($groups['ConfigMgr Site Servers'].SID)")
+                    foreach ($token in @($computer.tokenGroups | Where-Object { $null -ne $_ })) {
+                        $sids += [Security.Principal.SecurityIdentifier]::new([byte[]]$token, 0).Value
+                    }
+                    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+                    if (@($rules | Where-Object { "$($_.IdentityReference)" -in $sids -and $_.AccessControlType -eq 'Deny' }).Count) {
+                        throw "Existing System Management deny policy blocks '$($binding.VMName)'; it was not changed."
+                    }
+                }
+            }
+            $aclChanged = $false
+            foreach ($binding in $bindings) {
+                $computer = $computers[$binding.VMName]
+                foreach ($name in @($groupNames | Where-Object {
+                            ($_ -eq 'ConfigMgr Site Servers' -and $binding.SiteServer) -or ($_ -eq 'ConfigMgr IIS Servers' -and $binding.IIS)
+                        })) {
+                    $members = @(Get-ADGroupMember -Identity $groups[$name].DistinguishedName -Recursive -ErrorAction Stop)
+                    if (@($members | Where-Object { "$($_.SID)" -eq "$($computer.SID)" }).Count -eq 0) {
+                        Add-ADGroupMember -Identity $groups[$name].DistinguishedName -Members $computer.DistinguishedName -ErrorAction Stop
+                        if (@(Get-ADGroupMember -Identity $groups[$name].DistinguishedName -Recursive -ErrorAction Stop |
+                                Where-Object { "$($_.SID)" -eq "$($computer.SID)" }).Count -ne 1) {
+                            throw "New requested group binding for '$($binding.VMName)' could not be verified."
+                        }
+                    }
+                }
+                if ($binding.SiteServer) {
+                    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+                    $granted = @($rules | Where-Object {
+                            "$($_.IdentityReference)" -eq "$($computer.SID)" -and $_.AccessControlType -eq 'Allow' -and
+                            ($_.ActiveDirectoryRights -band [DirectoryServices.ActiveDirectoryRights]::GenericAll) -eq [DirectoryServices.ActiveDirectoryRights]::GenericAll -and
+                            $_.InheritanceType -eq [DirectoryServices.ActiveDirectorySecurityInheritance]::All -and
+                            $_.ObjectType -eq [guid]::Empty -and $_.InheritedObjectType -eq [guid]::Empty -and
+                            $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None
+                        }).Count -gt 0
+                    if (-not $granted) {
+                        $rule = [DirectoryServices.ActiveDirectoryAccessRule]::new($computer.SID,
+                            [DirectoryServices.ActiveDirectoryRights]::GenericAll, [Security.AccessControl.AccessControlType]::Allow,
+                            [guid]::Empty, [DirectoryServices.ActiveDirectorySecurityInheritance]::All, [guid]::Empty)
+                        $acl.AddAccessRule($rule)
+                        $aclChanged = $true
+                    }
+                }
+            }
+            if ($aclChanged) {
+                Set-Acl -LiteralPath $containerPath -AclObject $acl -ErrorAction Stop
+                $verified = Get-Acl -LiteralPath $containerPath -ErrorAction Stop
+                foreach ($binding in @($bindings | Where-Object SiteServer)) {
+                    if (@($verified.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object {
+                                "$($_.IdentityReference)" -eq "$($computers[$binding.VMName].SID)" -and $_.AccessControlType -eq 'Allow' -and
+                                ($_.ActiveDirectoryRights -band [DirectoryServices.ActiveDirectoryRights]::GenericAll) -eq [DirectoryServices.ActiveDirectoryRights]::GenericAll -and
+                                $_.InheritanceType -eq [DirectoryServices.ActiveDirectorySecurityInheritance]::All -and
+                                $_.ObjectType -eq [guid]::Empty -and $_.InheritedObjectType -eq [guid]::Empty -and
+                                $_.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None
+                            }).Count -eq 0) { throw "New System Management binding for '$($binding.VMName)' could not be verified." }
+                }
+            }
+            'READY'
+        } -ArgumentList @((ConvertTo-Json -InputObject @($plan.Bindings) -Depth 8 -Compress), $plan.Domain, $plan.NewHierarchy)
+        if (-not $result -or $result.ScriptBlockFailed -or @($result.ScriptBlockOutput).Count -ne 1 -or $result.ScriptBlockOutput -ne 'READY') {
+            throw "Requested directory bindings on '$($plan.OwnerVMName)' failed; no baseline repair was attempted. $($result.ErrorDetails)"
+        }
+    }
+}
+
+function Assert-MemLabsExistingSqlPrerequisite {
+    param([Parameter(Mandatory)]$VM, [Parameter(Mandatory)][string]$Domain,
+        [Parameter(Mandatory)][string]$Account, [switch]$ProvisionNewSiteAccount)
+
+    $live = Get-VM -Name $VM.vmName -ErrorAction Stop
+    if ("$($live.State)" -ne 'Running') { throw "Existing SQL dependency '$($VM.vmName)' is not running; it will not be started or repaired." }
+    $instance = if ($VM.sqlInstanceName) { "$($VM.sqlInstanceName)" } else { 'MSSQLSERVER' }
+    $serviceName = if ($instance -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { 'MSSQL$' + $instance }
+    $result = Invoke-VmCommand -VmName $VM.vmName -VmDomainName $Domain -RequireDomainIdentity -AsJob -TimeoutSeconds 60 `
+        -SessionMaxRetries 1 -RebootIfUnresponsive:$false -FailOnRemoteError -SuppressLog -ScriptBlock {
+        param([string]$SqlService, [string]$Account, [bool]$ProvisionNewSiteAccount)
+        $ErrorActionPreference = 'Stop'
+        if ((Get-Service -Name $SqlService -ErrorAction Stop).Status -ne 'Running') {
+            throw "Required existing SQL service '$SqlService' is not running."
+        }
+        if (-not (Test-ComputerSecureChannel -ErrorAction Stop)) { throw 'Existing SQL domain trust is broken.' }
+        $sid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+        $groupName = ($sid.Translate([Security.Principal.NTAccount]).Value -split '\\')[-1]
+        $group = [ADSI]("WinNT://$env:COMPUTERNAME/$groupName,group")
+        $expectedPath = 'WinNT://' + ($Account -replace '\\', '/')
+        $members = @($group.psbase.Invoke('Members') | ForEach-Object {
+                $_.GetType().InvokeMember('ADsPath', 'GetProperty', $null, $_, $null)
+            })
+        if ($expectedPath -notin $members) {
+            if (-not $ProvisionNewSiteAccount) {
+                throw "Required existing site-server account '$Account' is missing; existing SQL group membership was not repaired."
+            }
+            $group.Add($expectedPath)
+            $members = @($group.psbase.Invoke('Members') | ForEach-Object {
+                    $_.GetType().InvokeMember('ADsPath', 'GetProperty', $null, $_, $null)
+                })
+            if ($expectedPath -notin $members) { throw "New requested site-server account '$Account' could not be verified after its scoped authorization." }
+        }
+        'READY'
+    } -ArgumentList @($serviceName, $Account, [bool]$ProvisionNewSiteAccount)
+    if (-not $result -or $result.ScriptBlockFailed -or @($result.ScriptBlockOutput).Count -ne 1 -or $result.ScriptBlockOutput -ne 'READY') {
+        $authorization = if ($ProvisionNewSiteAccount) { 'Only the requested new-site account authorization may have been added.' } else { 'Existing group membership was left unchanged.' }
+        throw "Existing SQL prerequisite '$($VM.vmName)' for '$Account' is blocked. No service or trust repair was attempted. $authorization $($result.ScriptBlockOutput) $($result.ErrorDetails)"
+    }
 }
 
 function Get-CriticalVMs {
@@ -618,7 +1016,10 @@ function Mount-SqlIsoForPhase {
     # New SQL installs (non-hidden) always need the media. ALSO mount for existing
     # (hidden) SQL VMs that must gain the 'Replication' feature for an MP replica.
     $replNeeded = Get-SqlVMNamesNeedingReplication -deployConfig $deployConfig
-    $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and (-not $_.hidden -or $replNeeded.Contains([string]$_.vmName)) }
+    $sqlVMs = $deployConfig.virtualMachines | Where-Object {
+        $_.sqlVersion -and (Test-MemLabsIncludeHiddenVmForPhase -Vm $_ -Phase 4) -and
+        (-not $_.hidden -or $replNeeded.Contains([string]$_.vmName))
+    }
     foreach ($vm in $sqlVMs) {
         $sqlIsoPath = Get-SqlIsoPathForVm -VirtualMachine $vm
         if (-not $sqlIsoPath) {
@@ -707,7 +1108,10 @@ function Dismount-SqlIsoForPhase {
     param([object]$deployConfig)
 
     $replNeeded = Get-SqlVMNamesNeedingReplication -deployConfig $deployConfig
-    $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and (-not $_.hidden -or $replNeeded.Contains([string]$_.vmName)) }
+    $sqlVMs = $deployConfig.virtualMachines | Where-Object {
+        $_.sqlVersion -and (Test-MemLabsIncludeHiddenVmForPhase -Vm $_ -Phase 4) -and
+        (-not $_.hidden -or $replNeeded.Contains([string]$_.vmName))
+    }
     foreach ($vm in $sqlVMs) {
         $sqlIsoPath = Get-SqlIsoPathForVm -VirtualMachine $vm
         if ($sqlIsoPath) {
@@ -829,7 +1233,7 @@ function Get-CmExternalSchemaServers {
             continue
         }
         $shareName = if ($cmVer -eq "tech-preview") { "CMTP" } else { "CMCB" }
-        Write-Log "[Phase 2]: External schema server '$extName' resolved host-wide (domain '$($hostVm.domain)', CM '$cmVer'); will re-mount CM ISO + '$shareName' share." -LogOnly
+        Write-Log "[Phase 2]: External schema server '$extName' resolved host-wide (domain '$($hostVm.domain)', CM '$cmVer'); verify existing '$shareName' schema media without repair." -LogOnly
         $list += [pscustomobject]@{ Vm = $hostVm; IsoPath = $isoPath; ShareName = $shareName }
     }
     return $list
@@ -844,6 +1248,22 @@ function Set-CmMediaMountAndShare {
     $isoPath = $Target.IsoPath
     $shareName = $Target.ShareName
     $domain = if ($vm.Domain) { $vm.Domain } else { $deployConfig.vmOptions.domainName }
+    if (-not (Test-MemLabsRequestedVMIdentity -DeployConfig $deployConfig -VMName $vmName)) {
+        $result = Invoke-VmCommand -VmName $vmName -VmDomainName $domain -AsJob -TimeoutSeconds 30 `
+            -SessionMaxRetries 1 -RebootIfUnresponsive:$false -FailOnRemoteError -ScriptBlock {
+            param([string]$ShareName)
+            $share = Get-SmbShare -Name $ShareName -ErrorAction Stop
+            if (-not $share -or -not (Test-Path -LiteralPath (Join-Path $share.Path 'SMSSETUP\BIN\X64\extadsch.exe') -PathType Leaf)) {
+                throw 'Required existing ConfigMgr schema media share is missing or unreadable.'
+            }
+            'READY'
+        } -ArgumentList @($shareName)
+        if (-not $result -or $result.ScriptBlockFailed -or @($result.ScriptBlockOutput).Count -ne 1 -or $result.ScriptBlockOutput -ne 'READY') {
+            throw "Required existing CM media on '$vmName' is unavailable; no ISO, volume or share was changed. $($result.ErrorDetails)"
+        }
+        Write-Log "[Deployment intent] Existing schema media on '$vmName' was observed; mounting/share repair is not authorized."
+        return
+    }
 
     # ---- Guest probe: locate the CM media DVD, returning structured diagnostics.
     # This is the "signal back to the host": a short, self-contained in-guest check
@@ -1232,6 +1652,10 @@ function Set-CmMediaMountAndShare {
 # SQL / cache / OS ISO on the drive untouched by matching the exact ISO path).
 function Clear-CmMediaMount {
     param([object]$Target, [object]$deployConfig, [int]$Phase)
+    if (-not (Test-MemLabsRequestedVMIdentity -DeployConfig $deployConfig -VMName $Target.Vm.vmName)) {
+        Write-Log "[Deployment intent] Existing CM media on '$($Target.Vm.vmName)' was left mounted/shared."
+        return
+    }
     $vm = $Target.Vm
     $vmName = $vm.vmName
     $isoPath = $Target.IsoPath
@@ -1252,7 +1676,8 @@ function Clear-CmMediaMount {
 # the media unmounted, so the DC hung waiting for extadsch.exe on a share never created.
 function Mount-CmIsoForPhase {
     param([object]$deployConfig, [int]$Phase)
-    $targets = Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden
+    $targets = Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden |
+        Where-Object { Test-MemLabsIncludeHiddenVmForPhase -Vm $_.Vm -Phase $Phase }
     foreach ($t in $targets) { Set-CmMediaMountAndShare -Target $t -deployConfig $deployConfig -Phase $Phase }
 }
 
@@ -1261,7 +1686,8 @@ function Mount-CmIsoForPhase {
 # isn't left mounted and baked into checkpoints / .memlabs exports.
 function Dismount-CmIsoForPhase {
     param([object]$deployConfig, [int]$Phase)
-    $targets = Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden
+    $targets = Get-CmMediaSiteServers -deployConfig $deployConfig -IncludeHidden |
+        Where-Object { Test-MemLabsIncludeHiddenVmForPhase -Vm $_.Vm -Phase $Phase }
     foreach ($t in $targets) { Clear-CmMediaMount -Target $t -deployConfig $deployConfig -Phase $Phase }
 }
 
@@ -1545,6 +1971,7 @@ function Start-Phase {
         try {
             $registeredNames = @((Get-VM -ErrorAction Stop).Name)
             $missingRequiredVMs = @($deployConfig.virtualMachines | Where-Object {
+                    (-not (Test-MemLabsContextOnlyVM -VM $_)) -and
                     ($_.hidden -or ($deployConfig.parameters.RequireExistingVMs -and
                         -not ($_.role -eq 'AADClient' -and $deployConfig.parameters.AllowAADClientRecovery))) -and
                     $_.vmName -notin $registeredNames
@@ -1888,6 +2315,7 @@ function Start-Phase {
             else {
                 Get-Phase8ConfigurationData -deployConfig $deployConfig
             }
+            $cmConfigurationData = Select-MemLabsPhaseConfigurationData -ConfigurationData $cmConfigurationData -DeployConfig $deployConfig -Phase $Phase
             $missingCmNodes = @(Get-MissingHyperVNodes -ConfigurationData $cmConfigurationData | Select-Object -Unique)
             if ($missingCmNodes.Count -gt 0) {
                 Write-RedX "[Phase $Phase] Required DSC VMs do not exist in Hyper-V: $($missingCmNodes -join ', '). Aborting before snapshots, CM media preparation, or job dispatch. Re-run from Phase 1 to re-create them, or remove them from the config." -WriteLog
@@ -2005,13 +2433,19 @@ function Start-Phase {
         return $false
     }
 
-    # Normal deployments reconcile immediately after Linux Phase 3. Phase 8
-    # repeats this idempotently so -StartPhase 8 repairs expansions and drift.
+    if ($Phase -eq 3) {
+        try { $null = Invoke-MemLabsRequestedDirectoryBindings -DeployConfig $deployConfig }
+        catch {
+            Write-Log "[Phase 3] Requested directory authorization failed: $($_.Exception.Message)" -Failure
+            return $false
+        }
+    }
+
+    # Provision requested relays after Linux setup; Phase 8 repeats only that scope.
     if ($Phase -eq 3 -and @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'DHCPRelay' }).Count -gt 0) {
         try {
             Write-Log "[Phase 3] Reconciling DHCP relay networking and service state after Linux role setup." -Activity
-            $relayReady = Sync-LinuxDhcpRelay -DeployConfig $deployConfig
-            if (-not $relayReady) { throw 'relay reconciler returned false' }
+            $null = Sync-MemLabsRequestedDhcpRelays -DeployConfig $deployConfig
         }
         catch {
             Write-Log "[Phase 3] DHCP relay reconciliation failed: $($_.Exception.Message)" -Failure
@@ -2248,11 +2682,12 @@ function Set-OsdClientMacAddresses {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [object]$DeployConfig
+        [object]$DeployConfig,
+        [string[]]$OnlyVMs
     )
 
     $seenMacs = @{}
-    foreach ($osdVm in @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'OSDClient' })) {
+    foreach ($osdVm in @(Get-MemLabsRequestedDeploymentVMs -DeployConfig $DeployConfig | Where-Object { $_.role -eq 'OSDClient' -and (-not $OnlyVMs -or $_.vmName -in $OnlyVMs) })) {
         $vmName = "$($osdVm.vmName)".Trim()
         if (-not $vmName) { throw 'An OSDClient has no vmName; OSDComputerName cannot be authored.' }
 
@@ -2311,7 +2746,9 @@ function Start-PhaseJobs {
         [int]$Phase,
         [object]$deployConfig,
         # Re-dispatch pass: restrict to these VMs and leave every other one alone.
-        [string[]]$OnlyVMs
+        [string[]]$OnlyVMs,
+        [string]$PreparationRunId,
+        [hashtable]$CoordinatorConfigurationData
     )
 
     # Detect if DSC source files changed since last copy; if so, force re-copy
@@ -2332,6 +2769,7 @@ function Start-PhaseJobs {
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
     $job_created_no = 0
+    $failedDispatchVMNames = [Collections.Generic.List[string]]::new()
 
     # Phase10Job/Phase11Job (and any other scriptblock dispatched from here
     # that uses the bare-name form) reference $using:devBranchValue. The
@@ -2358,6 +2796,8 @@ function Start-PhaseJobs {
     $multiNodeDsc = $true
     $ConfigurationData = $null
     $linuxDispatchOnly = $false
+    $scopedHierarchyActions = @()
+    $hierarchyActionsOnly = $false
     if ($Phase -gt 1 -and $Phase -lt 10) {
         if ($Phase -eq 2) {
             $dcConfig = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
@@ -2396,7 +2836,14 @@ function Start-PhaseJobs {
             }
         }
         try {
-            $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
+            if ($Phase -eq 8) {
+                $null = Set-OsdClientMacAddresses -DeployConfig $deployConfig -OnlyVMs $OnlyVMs
+                Sync-MemLabsRequestedDhcpRelays -DeployConfig $deployConfig -OnlyVMs $OnlyVMs
+                $scopedHierarchyActions = @(Get-MemLabsExistingHierarchyActions -DeployConfig $deployConfig | Where-Object {
+                        -not $OnlyVMs -or $_.OwnerVMName -in $OnlyVMs
+                    })
+            }
+            $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig -ScopedRoleActions $scopedHierarchyActions -OnlyVMs $OnlyVMs
         }
         catch {
             Write-Log "[Phase $Phase] Configuration preflight FAILED: $($_.Exception.Message). Aborting before any per-VM jobs are dispatched." -Failure
@@ -2431,7 +2878,7 @@ function Start-PhaseJobs {
                 $hasLinuxPhaseWork = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' -and -not $_.hidden }).Count -gt 0
             }
 
-            if (-not $hasLinuxPhaseWork) {
+            if (-not $hasLinuxPhaseWork -and $scopedHierarchyActions.Count -eq 0) {
                 # Nothing applicable for this phase
                 return [PSCustomObject]@{
                     Failed         = 0
@@ -2442,14 +2889,15 @@ function Start-PhaseJobs {
                 }
             }
 
-            Write-Log "[Phase $Phase] No Windows DSC nodes, but Linux VM(s) require this phase; proceeding to per-VM Linux dispatch." -LogOnly
+            Write-Log "[Phase $Phase] No Windows DSC nodes; proceeding only with requested Linux/scoped hierarchy actions." -LogOnly
             $multiNodeDsc = $false
             # Linux-only fall-through: there is NO Windows DSC work this phase, so
             # the loop must dispatch ONLY the Linux/Proxy per-VM jobs and skip every
             # Windows VM (including the DC). Without this the DC would fall through
             # to a single-node Windows DSC dispatch and fail on a missing
             # Phase3DC.ps1 (the DC has no standalone Phase-3 config).
-            $linuxDispatchOnly = $true
+            $linuxDispatchOnly = $hasLinuxPhaseWork
+            $hierarchyActionsOnly = -not $hasLinuxPhaseWork
         }
         elseif ($ConfigurationData.AllNodes.NodeName -contains "LOCALHOST") {
             $multiNodeDsc = $false
@@ -2546,7 +2994,7 @@ function Start-PhaseJobs {
     # every dependent node (Primary waiting on CAS replication, secondary
     # waiting on Primary) would block on the same wall-clock, turning a
     # 30-second misconfig into a 9-hour stuck deploy.
-    if ($Phase -eq 8) {
+    if ($Phase -eq 8 -and $ConfigurationData) {
         # Finish media copies before DC readiness recovery can reboot a preparing Primary.
         try {
             $phase8PrimaryNames = @($ConfigurationData.AllNodes | Where-Object {
@@ -2604,7 +3052,7 @@ function Start-PhaseJobs {
         }
 
         try {
-            $null = Set-OsdClientMacAddresses -DeployConfig $deployConfig
+            $null = Set-OsdClientMacAddresses -DeployConfig $deployConfig -OnlyVMs $OnlyVMs
         }
         catch {
             Write-Log "[Phase 8] OSD computer-name precondition failed: $($_.Exception.Message)" -Failure
@@ -2618,31 +3066,11 @@ function Start-PhaseJobs {
             }
         }
 
-        $relayPathsForPhase = @($deployConfig.osdPxePaths | Where-Object { $_.mode -eq 'Relay' })
-        $relayVmsForPhase = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'DHCPRelay' })
-        if ($relayPathsForPhase.Count -gt 0 -or $relayVmsForPhase.Count -gt 0) {
-            try {
-            Write-Log "[Phase 8] Reconciling $($relayPathsForPhase.Count) active DHCP relay PXE path(s) across $($relayVmsForPhase.Count) relay VM(s) before ConfigMgr work." -Activity
-                $relayReady = Sync-LinuxDhcpRelay -DeployConfig $deployConfig
-                if (-not $relayReady) { throw 'relay reconciler returned false' }
-            }
-            catch {
-                Write-Log "[Phase 8] DHCP relay precondition failed: $($_.Exception.Message)" -Failure
-                return [PSCustomObject]@{
-                    Failed         = 1
-                    Success        = 0
-                    Jobs           = 0
-                    Applicable     = $true
-                    AdditionalData = $null
-                    PreflightFailed = $true
-                }
-            }
-        }
-
         $netbios = $deployConfig.vmOptions.domainNetBiosName
         $domain = $deployConfig.vmOptions.domainName
         $siteServers = @($deployConfig.virtualMachines | Where-Object {
-            ($_.role -eq 'CAS' -or $_.role -eq 'Primary') -and $_.remoteSQLVM
+            ($_.role -eq 'CAS' -or $_.role -eq 'Primary') -and $_.remoteSQLVM -and
+            (Test-MemLabsIncludeHiddenVmForPhase -Vm $_ -Phase 8) -and (-not $OnlyVMs -or $_.vmName -in $OnlyVMs)
         })
         $preflightFailures = New-Object System.Collections.Generic.List[string]
 
@@ -2659,6 +3087,25 @@ function Start-PhaseJobs {
             $account = "$netbios\$($ss.vmName)" + '$'
 
             foreach ($sqlHost in $sqlHosts) {
+                $sqlDependency = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $sqlHost } | Select-Object -First 1
+                if ($sqlDependency -and (Test-MemLabsContextOnlyVM -VM $sqlDependency)) {
+                    try {
+                        $siteNote = Get-VMNote -VMName $ss.vmName
+                        $lastCompleted = 0
+                        $newSiteAccount = $ss.ExistingVM -ne $true -and $siteNote -and
+                            [int]::TryParse("$($siteNote.lastPhaseComplete)", [ref]$lastCompleted) -and
+                            $lastCompleted -ge 1 -and $lastCompleted -lt 8
+                        if ($newSiteAccount) {
+                            Write-Log "[Deployment intent] ${sqlHost}: authorize only new requested site-server account '$account' if missing; existing services/trust and other memberships are not repaired."
+                        }
+                        Assert-MemLabsExistingSqlPrerequisite -VM $sqlDependency -Domain $domain -Account $account -ProvisionNewSiteAccount:$newSiteAccount
+                    }
+                    catch {
+                        $preflightFailures.Add($_.Exception.Message)
+                        Write-Log "[Phase 8] $($_.Exception.Message) No automatic SQL dependency repair was attempted." -Failure
+                    }
+                    continue
+                }
                 # Step 1: make sure the SQL host VM is Running and reachable
                 # via PSDirect. If it's not, start it and wait briefly --
                 # without a running, reachable VM there's no point trying
@@ -3078,6 +3525,25 @@ DROP TABLE #memlabs_idxprobe;
     # DSC_Status.txt -- both of which defeated the old "DSC_Status.txt absent"
     # readiness signal and dead-waited the loop.
     $phaseRunGuid = [guid]::NewGuid().ToString()
+    if ($PreparationRunId) {
+        $generation = [guid]::Empty
+        if (-not [guid]::TryParse($PreparationRunId, [ref]$generation) -or $generation -eq [guid]::Empty) {
+            throw 'Requested recovery has no valid original DSC preparation generation.'
+        }
+        $phaseRunGuid = $generation.ToString()
+    }
+    if ($Phase -eq 8) {
+        if ($OnlyVMs) {
+            $retryRunId = Get-MemLabsScopedRoleRetryRunId -DeployConfig $deployConfig -VMNames $OnlyVMs
+            if ($retryRunId) {
+                if ($PreparationRunId -and $phaseRunGuid -ne $retryRunId) { throw 'Recovery generation conflicts with the outstanding scoped actor.' }
+                $phaseRunGuid = $retryRunId
+            }
+        }
+        else {
+            Initialize-MemLabsScopedHierarchyActionRun -DeployConfig $deployConfig -Actions $scopedHierarchyActions -RunId $phaseRunGuid
+        }
+    }
 
     # Per-run MOF output folder, consumed as $using:mofFolderName by the DSC
     # compile/start/recover scriptblocks. It MUST be built here, not inside
@@ -3131,6 +3597,7 @@ DROP TABLE #memlabs_idxprobe;
         # Include BDCs (and any other DCs) from the domain that may not be in deployConfig
         $allDomainVMs = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate
         foreach ($domVm in $allDomainVMs) {
+            if (Test-MemLabsPreserveExistingHierarchy -DeployConfig $deployConfig) { continue }
             if ($domVm.Role -in @("DC", "BDC") -and $domVm.vmName -notin $vmsToStart) {
                 $vmsToStart += $domVm.vmName
             }
@@ -3594,6 +4061,28 @@ DROP TABLE #memlabs_idxprobe;
     foreach ($currentItem in $vmDispatchList) {
 
         if ($OnlyVMs -and $currentItem.vmName -notin $OnlyVMs) { continue }
+        $configurationDataForJob = if ($CoordinatorConfigurationData -and $currentItem.role -eq 'DC') { $CoordinatorConfigurationData } else { $ConfigurationData }
+
+        $scopedHierarchyActionsForOwner = @($scopedHierarchyActions | Where-Object { $_.OwnerVMName -eq $currentItem.vmName })
+        if ($Phase -eq 8 -and $scopedHierarchyActionsForOwner.Count -gt 0) {
+            $enableVerbose = [bool]$Common.VerboseEnabled
+            $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
+            try {
+                $job = Start-Job -ScriptBlock $global:VM_ExistingHierarchyActions -Name $jobName -ErrorAction Stop
+                if (-not $job) { throw 'Scoped action job creation returned no job.' }
+                $jobs += $job
+                $job_created_yes++
+                $maxVmNameLength = [Math]::Max($maxVmNameLength, "$($currentItem.vmName)".Length)
+                $maxRoleNameLength = [Math]::Max($maxRoleNameLength, "$($currentItem.role)".Length)
+            }
+            catch {
+                Write-Log "[Phase 8] Could not dispatch scoped actions for '$($currentItem.vmName)': $($_.Exception.Message)" -Failure
+                $failedDispatchVMNames.Add("$($currentItem.vmName)")
+                $job_created_no++
+            }
+            continue
+        }
+        if ($hierarchyActionsOnly) { continue }
 
         $global:preparePhasePercent++
         Write-Progress2 "Preparing Phase $Phase" -Status "Evaluating virtual machine $($currentItem.vmName)" -PercentComplete $global:preparePhasePercent
@@ -3954,6 +4443,11 @@ DROP TABLE #memlabs_idxprobe;
             $job_created_no++
         }
         else {
+            $job | Add-Member -NotePropertyName MemLabsPreparationRunId -NotePropertyValue $phaseRunGuid -Force
+            $job | Add-Member -NotePropertyName MemLabsUsesDscCoordinator -NotePropertyValue ($multiNodeDsc -and -not (Test-MemLabsPreserveExistingHierarchy -DeployConfig $deployConfig)) -Force
+            if ($currentItem.role -eq 'DC' -and $multiNodeDsc) {
+                $job | Add-Member -NotePropertyName MemLabsCoordinatorConfigurationData -NotePropertyValue $configurationDataForJob -Force
+            }
             Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             if ($Phase -eq 2 -and $phase2HeadStartSeconds -gt 0 -and $currentItem.role -eq 'DC' -and -not $phase2DcJob) {
                 $phase2DcJob = $job
@@ -3966,6 +4460,7 @@ DROP TABLE #memlabs_idxprobe;
     $additionalData = [PSCustomObject]@{
         MaxVmNameLength   = $maxVmNameLength
         MaxRoleNameLength = $maxRoleNameLength + 2
+        FailedVMNames     = $failedDispatchVMNames.ToArray()
     }
 
     # If no jobs were dispatched and none failed to dispatch, nothing in this
@@ -4349,6 +4844,11 @@ function Wait-Phase {
         # WaitForAll itself is RetryCount 7200 x 5s = 10 HOURS. Track VMs that have
         # DEFINITIVELY failed so a wait that can never be satisfied can be cut short.
         $failedVmNames = @{}
+        if ($AdditionalData -and $AdditionalData.PSObject.Properties['FailedVMNames']) {
+            foreach ($failedName in @($AdditionalData.FailedVMNames)) {
+                if ($failedName) { $failedVmNames["$failedName".ToUpperInvariant()] = Get-Date }
+            }
+        }
 
         # A worker process can die from an unhandled engine callback without its VM
         # configuration failing. Re-dispatch it here, while dependent jobs are still
@@ -4433,7 +4933,15 @@ function Wait-Phase {
                     try {
                         $hist = $global:JobProgressHistory[$job.Id]
                         $statusText = if ($hist) { "$($hist.Status)" } else { '' }
-                        foreach ($waitedOn in @(Get-JobWaitTargets -StatusText $statusText)) {
+                        $waitTargets = @(Get-JobWaitTargets -StatusText $statusText)
+                        if ($Phase -eq 8 -and $DeployConfig -and $job.Name -match '^(.+?)\s+\[') {
+                            $targetName = $Matches[1]
+                            $targetVm = @($DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $targetName })
+                            if ($targetVm.Count -eq 1 -and $targetVm[0].phase8ScopedHierarchyAction.Kind -eq 'SiteRoles') {
+                                $waitTargets += "$($targetVm[0].phase8ScopedHierarchyAction.OwnerVMName)".ToUpperInvariant()
+                            }
+                        }
+                        foreach ($waitedOn in $waitTargets) {
                             if ($failedVmNames.ContainsKey($waitedOn)) {
                                 $deadDep = $waitedOn
                                 $deadStatus = $statusText
@@ -4608,7 +5116,10 @@ function Wait-Phase {
                     # and takes the process with it. Re-dispatch once immediately: another VM
                     # may already be waiting on this one inside a 10-hour DSC WaitForAll, so a
                     # retry deferred until Wait-Phase returns is unreachable recovery.
-                    $workerCrashed = $fvmName -and $jobOutput -match 'background process reported an error|Unhandled exception'
+                    $contextFailure = @($DeployConfig.virtualMachines | Where-Object {
+                            $_.vmName -eq $fvmName -and (Test-MemLabsContextOnlyVM -VM $_)
+                        }).Count -gt 0
+                    $workerCrashed = -not $contextFailure -and $fvmName -and $jobOutput -match 'background process reported an error|Unhandled exception'
                     $redispatchCrashedVm = $false
                     $fvmKey = if ($fvmName) { $fvmName.ToUpperInvariant() } else { $null }
                     if ($workerCrashed) {
@@ -4623,6 +5134,7 @@ function Wait-Phase {
                             Write-Log "[Phase $Phase]: ${fvmName}: replacement worker process also died; no further re-dispatch will be attempted." -Failure
                         }
                     }
+                    if ($fvmKey -and -not $redispatchCrashedVm) { $failedVmNames[$fvmKey] = Get-Date }
 
                     # Capture per-VM timing for failed jobs too
                     if ($global:BuildStats -and $fvmName) {
@@ -4653,7 +5165,16 @@ function Wait-Phase {
                         $replacement = $null
                         $replacementError = $null
                         try {
-                            $replacement = Start-PhaseJobs -Phase $Phase -deployConfig $DeployConfig -OnlyVMs @($fvmName)
+                            $retryParameters = @{ Phase = $Phase; deployConfig = $DeployConfig; OnlyVMs = @($fvmName) }
+                            if ($job.MemLabsUsesDscCoordinator -and -not $job.MemLabsPreparationRunId) {
+                                throw 'Original coordinator preparation generation is unavailable; restarting the hierarchy is not authorized.'
+                            }
+                            if ($fRole -eq 'DC' -and $job.MemLabsUsesDscCoordinator -and -not $job.MemLabsCoordinatorConfigurationData) {
+                                throw 'Original coordinator cohort is unavailable; target-only coordinator replay cannot safely continue.'
+                            }
+                            if ($job.MemLabsPreparationRunId) { $retryParameters.PreparationRunId = "$($job.MemLabsPreparationRunId)" }
+                            if ($job.MemLabsCoordinatorConfigurationData) { $retryParameters.CoordinatorConfigurationData = $job.MemLabsCoordinatorConfigurationData }
+                            $replacement = Start-PhaseJobs @retryParameters
                             $replacementJobs = @($replacement.Jobs)
                             if ($replacement -and $replacement.Applicable -and $replacement.Failed -eq 0 -and $replacementJobs.Count -eq 1) {
                                 [void]$jobs.Add($replacementJobs[0])
@@ -5139,6 +5660,7 @@ function Invoke-Phase8PreInstallSnapshot {
 
     if ($global:MemLabsNoSnapshot) { return $true }
     $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
+    $cd = Select-MemLabsPhaseConfigurationData -ConfigurationData $cd -DeployConfig $deployConfig -Phase 8
     if (-not $cd) { return $true }
 
     $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Global:ConfigurationShort
@@ -5204,7 +5726,9 @@ function Invoke-Phase8PreInstallSnapshot {
 function Get-ConfigurationData {
     param (
         [int]$Phase,
-        [object]$deployConfig
+        [object]$deployConfig,
+        [object[]]$ScopedRoleActions = @(),
+        [string[]]$OnlyVMs
     )
 
     #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
@@ -5227,10 +5751,17 @@ function Get-ConfigurationData {
             # the CM media is mounted and BEFORE Start-PhaseJobs dispatches the DSC
             # workers -- so the checkpoint stays ISO-free and the media can be
             # locked in up front. Here we only build the configuration data.
-            $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
+            $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig -ScopedRoleActions $ScopedRoleActions
         }
         "9" { $cd = Get-Phase9ConfigurationData -deployConfig $deployConfig }
         Default { return }
+    }
+    $cd = Select-MemLabsPhaseConfigurationData -ConfigurationData $cd -DeployConfig $deployConfig -Phase $Phase
+    if ($OnlyVMs -and $cd) {
+        $cd.AllNodes = @($cd.AllNodes | Where-Object {
+                $_.NodeName -in @('*', 'LOCALHOST') -or ("$($_.NodeName)" -split '\.')[0] -in $OnlyVMs
+            })
+        if (@($cd.AllNodes | Where-Object { $_.NodeName -ne '*' }).Count -eq 0) { return }
     }
     if ($global:Common.VerboseEnabled) {
         $cd | ConvertTo-Json -Depth 10 | out-host
@@ -5245,8 +5776,14 @@ function Get-ConfigurationData {
         # A blank name is not a VM: it reaches Get-VM2/Test-VmResponsive and burns the
         # hard-restart attempts before Get-MissingDscDispatchNodes gets to reject it.
         $nodes = $cd.AllNodes.NodeName | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne "*" -and ($_ -ne "LOCALHOST") }
+        $critlist = $null
+        $allDomainVMs = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate
         if ($nodes) {
-            $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+            $criticalParameters = @{ domain = $deployConfig.vmOptions.domainName; vmNames = $nodes }
+            if (Test-MemLabsPreserveExistingHierarchy -DeployConfig $deployConfig) {
+                $criticalParameters.InputVMs = @($allDomainVMs | Where-Object { $_.vmName -in $nodes })
+            }
+            $critlist = Get-CriticalVMs @criticalParameters
         }
 
         # Start BDCs alongside the primary DC in every phase.  BDCs aren't in
@@ -5254,9 +5791,10 @@ function Get-ConfigurationData {
         # must be running for AD replication and DNS availability.
         # Use Get-List to discover all BDCs in the domain, since deployConfig
         # only contains VMs explicitly added to the current configuration.
-        $allDomainVMs = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate
         $bdcVMs = @($allDomainVMs | Where-Object { $_.Role -eq "BDC" })
         foreach ($bdc in $bdcVMs) {
+            if ($OnlyVMs -and $bdc.vmName -notin $OnlyVMs) { continue }
+            if (Test-MemLabsPreserveExistingHierarchy -DeployConfig $deployConfig) { continue }
             if ($bdc.State -ne 'Running') {
                 Write-Log "[Phase $Phase] BDC [$($bdc.vmName)] is $($bdc.State). Starting..." -LogOnly
                 Start-VM2 -Name $bdc.vmName -ErrorAction SilentlyContinue
@@ -5575,6 +6113,17 @@ function Get-Phase6ConfigurationData {
         }
     }
 
+    $requested = @(Get-MemLabsRequestedDeploymentVMs -DeployConfig $deployConfig)
+    foreach ($primary in @($requested | Where-Object { $_.role -eq 'Primary' -and $_.parentSiteCode -and $_.installSUP -ne $true })) {
+        $parent = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'CAS' -and $_.siteCode -eq $primary.parentSiteCode })
+        $supSiteCodes = @($primary.siteCode) + @($requested | Where-Object { $_.role -eq 'Secondary' -and $_.parentSiteCode -eq $primary.siteCode } | ForEach-Object { $_.siteCode })
+        if ($parent.Count -eq 1 -and (Test-MemLabsContextOnlyVM -VM $parent[0]) -and
+            @($requested | Where-Object { $_.installSUP -eq $true -and $_.siteCode -in $supSiteCodes }).Count -gt 0) {
+            $cd.AllNodes += @{ NodeName = $primary.vmName; Role = 'WSUSApiOnly' }
+            $NumberOfNodesAdded++
+        }
+    }
+
     $all = @{
         NodeName                    = "*"
         PSDscAllowDomainUser        = $true
@@ -5655,7 +6204,8 @@ function Get-Phase7ConfigurationData {
 }
 function Get-Phase8ConfigurationData {
     param (
-        [object]$deployConfig
+        [object]$deployConfig,
+        [object[]]$ScopedRoleActions = @()
     )
 
     $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
@@ -5671,7 +6221,13 @@ function Get-Phase8ConfigurationData {
         }
     }
 
+    $scopedTargets = @(
+        @($ScopedRoleActions | Where-Object { $_.Kind -eq 'SiteRoles' } | ForEach-Object { $_.TargetVMNames }) +
+        @($deployConfig.virtualMachines | Where-Object { $_.phase8ScopedHierarchyAction.Kind -eq 'SiteRoles' } | ForEach-Object { $_.vmName }) |
+        Select-Object -Unique
+    )
     $cmPhase8Vms = @($deployConfig.virtualMachines | Where-Object {
+            if ($_.vmName -in $scopedTargets) { return $true }
             if ($_.role -notin @('Primary', 'CAS', 'PassiveSite', 'Secondary', 'SiteSystem', 'WSUS') -or $_.osdMetadataOnly) {
                 return $false
             }
@@ -5696,7 +6252,9 @@ function Get-Phase8ConfigurationData {
 
             $newItem = @{
                 NodeName = $vm.vmName
-                Role     = $vm.Role
+                Role     = $(if ($vm.vmName -in $scopedTargets -and $vm.role -notin @('SiteSystem', 'Secondary', 'PassiveSite', 'WSUS')) {
+                        if ($vm.sqlVersion -or $vm.role -eq 'SQLAO') { 'SqlServer' } else { 'SiteSystem' }
+                    } else { $vm.Role })
             }
 
             $cd.AllNodes += $newItem

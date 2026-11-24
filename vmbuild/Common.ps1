@@ -13908,6 +13908,10 @@ else {
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
 . $PSScriptRoot\common\Common.Phases.ps1
+. $PSScriptRoot\common\Common.ExistingHierarchy.ps1
+. $PSScriptRoot\common\Common.ExistingHierarchy.BitLocker.ps1
+. $PSScriptRoot\common\Common.ExistingHierarchy.Osd.ps1
+. $PSScriptRoot\common\Common.ExistingHierarchy.Roles.ps1
 # Config validation is entry-point work (New-Lab, genconfig); no function in it is
 # reachable from a job scriptblock. Common.Validation.Functional.ps1 is the opposite --
 # 50 of its 51 functions are job-reachable -- so it stays.

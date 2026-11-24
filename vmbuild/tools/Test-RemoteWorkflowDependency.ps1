@@ -30,7 +30,7 @@ foreach ($relativePath in @('DSC\phases\Phase8.ps1', 'DSC\phases\Phase9.ps1')) {
         throw "$relativePath still relies on mutable JSON or cross-node DSC state for workflow completion."
     }
     if ($text -notmatch
-        '(?s)WaitForWorkflowReceipt\s+WaitSCCM\s*\{.+?MachineName\s*=\s*@\(\$WaitFor\)\[0\].+?PsDscRunAsCredential\s*=\s*\$CMAdmin') {
+        '(?s)WaitForWorkflowReceipt\s+WaitSCCM\s*\{.+?MachineName\s*=[^\r\n]*@\(\$WaitFor\)\[0\].+?PsDscRunAsCredential\s*=\s*\$CMAdmin') {
         throw "$relativePath does not read the owner RunId receipt under explicit domain credentials."
     }
     if ($text -notmatch
@@ -38,7 +38,7 @@ foreach ($relativePath in @('DSC\phases\Phase8.ps1', 'DSC\phases\Phase9.ps1')) {
         throw "$relativePath does not gate SQL Agent re-enable on the credentialed workflow receipt."
     }
     if ($text -notmatch
-        '(?s)WaitForWorkflowReceipt\s+ActiveNode\s*\{.+?MachineName\s*=\s*\$ThisVM\.thisParams\.ActiveNode.+?PsDscRunAsCredential\s*=\s*\$CMAdmin') {
+        '(?s)WaitForWorkflowReceipt\s+ActiveNode\s*\{.+?MachineName\s*=[^\r\n]*\$ThisVM\.thisParams\.ActiveNode.+?PsDscRunAsCredential\s*=\s*\$CMAdmin') {
         throw "$relativePath does not gate Passive completion on the active workflow receipt."
     }
     if ($text -notmatch 'WaitForWorkflowReceipt\s+WorkflowComplete') {
@@ -94,6 +94,8 @@ Assert-ReceiptTest ((@(Get-JobWaitTargets $firstStatus.Replace('LAB-PRI', 'LAB-P
     'A fully qualified receipt owner was not matched to its Hyper-V VM name.'
 Assert-ReceiptTest ((@(Get-JobWaitTargets 'Waiting on LAB-PRI,LAB-CAS to Complete') -join ',') -eq 'LAB-PRI,LAB-CAS') `
     'Legacy multi-node dependency tracking changed.'
+Assert-ReceiptTest ((@(Get-JobWaitTargets 'WaitForWorkflowReceipt: Waiting on LAB-PRI for scoped site-role action current-run.') -join ',') -eq 'LAB-PRI') `
+    'Scoped action waiters cannot observe an owner-job failure before their target-local receipt is available.'
 Assert-ReceiptTest ((@(Get-JobWaitTargets 'Setting up ConfigMgr. [LAB-PRI]: Installing secondary') -join ',') -eq 'LAB-PRI') `
     'Mirrored workflow owner tracking changed.'
 
@@ -550,4 +552,61 @@ finally {
     Remove-Item -LiteralPath $script:ReceiptTestRoot -Recurse -Force -ErrorAction Stop
 }
 
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    & {
+        . (Import-ReceiptTestFunction -Path $phasePath -Name 'Wait-Phase')
+        function Set-PS7ProgressWidth {}
+        function Write-Progress2 { param($Id, $Activity, $Status, $PercentComplete, [switch]$Completed, [switch]$force) }
+        function Write-JobProgress { param($Job) }
+        function Write-JobProgressDiag { param($Job) }
+        function Write-ProgressDiagLog { param($Message) }
+        $waitTrace = [Collections.Generic.List[string]]::new()
+        function Write-Log { param($Message, [switch]$Failure, [switch]$Warning, [switch]$LogOnly, [switch]$Verbose); if ($Failure) { $waitTrace.Add("$Message") } }
+        function Write-RedX { param($Message, $ForegroundColor) }
+        function Write-GreenCheck { param($Message, $ForegroundColor) }
+        function Write-OrangePoint { param($Message, $ForegroundColor) }
+        function Write-Phase8DiagnosticSnapshot { param($DeployConfig, $Jobs, $Reason) }
+        function Get-VmSessionCacheCensus { [pscustomobject]@{} }
+        function Get-JobStreamSource { param($Job); if ($Job.ChildJobs.Count) { return $Job.ChildJobs[0] }; return $Job }
+        function Test-JobTransportCloseFalseFailure { param($Job); return $false }
+        function Test-MemLabsContextOnlyVM { param($VM); return $VM.hidden -eq $true }
+        function Invoke-VmCommand { throw 'A terminal actor failure must not access or repair the retained guest.' }
+        function Start-PhaseJobs { throw 'A failed context actor must not be redispatched.' }
+        function Start-Sleep { param($Seconds, $Milliseconds); Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 20 }
+        $Common = [pscustomobject]@{ PS7 = $true; VerboseEnabled = $false }
+        $fixture = [pscustomobject]@{ virtualMachines = @(
+                [pscustomobject]@{ vmName = 'OWNER'; role = 'Primary'; hidden = $true },
+                [pscustomobject]@{ vmName = 'TARGET'; role = 'SiteSystem'; phase8ScopedHierarchyAction = [pscustomobject]@{
+                        Kind = 'SiteRoles'; OwnerVMName = 'OWNER'; TargetVMName = 'TARGET'; RunId = [guid]::NewGuid().ToString()
+                    } }
+            ) }
+        foreach ($case in @('Failed', 'DispatchFailed')) {
+            $actor = $null
+            $target = Start-Job -Name 'TARGET [SiteSystem]' -ScriptBlock { Start-Sleep -Seconds 60 }
+            $jobs = [Collections.ArrayList]::new()
+            $null = $jobs.Add($target)
+            $additional = [pscustomobject]@{ MaxVmNameLength = 8; MaxRoleNameLength = 12; FailedVMNames = @() }
+            try {
+                if ($case -eq 'Failed') {
+                    $actor = Start-Job -Name 'OWNER [Primary]' -ScriptBlock { throw 'background process reported an error: expected actor failure' }
+                    $null = Wait-Job -Job $actor -Timeout 20
+                    Assert-ReceiptTest ($actor.State -eq 'Failed') 'Real failed-owner positive control did not reach Failed job state.'
+                    $null = $jobs.Add($actor)
+                }
+                else { $additional.FailedVMNames = @('OWNER') }
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                $result = @(Wait-Phase -Phase 8 -Jobs $jobs -AdditionalData $additional -DeployConfig $fixture)
+                Assert-ReceiptTest ($result.Count -eq 1 -and $result[0].Failed -ge 1 -and
+                    $target.State -eq 'Stopped' -and $timer.Elapsed.TotalSeconds -lt 20) `
+                    "Terminal actor '$case' did not stop its scoped waiter promptly without owner redispatch (results=$($result.Count), target=$($target.State), seconds=$($timer.Elapsed.TotalSeconds)): $($waitTrace -join '; ')"
+            }
+            finally {
+                foreach ($job in @($actor, $target | Where-Object { $_ })) {
+                    if ($job.State -eq 'Running') { Stop-Job -Job $job -ErrorAction Stop }
+                    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+}
 Write-Host 'PASS -- exact local/cross-node receipts fail promptly, ignore stale failures, and preserve meaningful progress.'

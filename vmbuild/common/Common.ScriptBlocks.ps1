@@ -4861,6 +4861,23 @@ $Set_WSManRetryWindow = {
     return ("max_retry_timeout_ms was {0}, now {1}; server window is this +15000 (applies at next WinRM start)" -f $priorText, $now)
 }
 
+$global:VM_ExistingHierarchyActions = {
+    $ProgressPreference = 'SilentlyContinue'
+    $rootPath = Split-Path $using:PSScriptRoot -Parent
+    . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue
+    $config = $using:deployConfig
+    $actions = $using:scopedHierarchyActionsForOwner
+    $ownerName = $using:currentItem.vmName
+    try {
+        Invoke-MemLabsExistingHierarchyActions -DeployConfig $config -Actions $actions
+        Write-Log "[Phase 8]: ${ownerName}: Requested scoped hierarchy actions completed/submitted; no general configuration was applied." -Success -OutputStream
+    }
+    catch {
+        Write-Log "[Phase 8]: ${ownerName}: Required existing prerequisite/action is blocked: $($_.Exception.Message). No hierarchy repair or replay was attempted." -Failure -OutputStream
+        throw
+    }
+}
+
 $global:VM_Config = {
     # Suppress CIM cmdlet progress in child process (see VM_Create comment).
     $Global:ProgressPreference = 'SilentlyContinue'
@@ -4874,7 +4891,8 @@ $global:VM_Config = {
         $currentItem = $using:currentItem
         $enableVerbose = $using:enableVerbose
         $Phase = $using:Phase
-        $ConfigurationData = $using:ConfigurationData
+        $configurationDataForJob = $using:configurationDataForJob
+        $ConfigurationData = $configurationDataForJob
         $multiNodeDsc = $using:multiNodeDsc
         $reservation = $using:reservation
         $phaseDhcpHint = $using:phaseDhcpHint
@@ -4915,8 +4933,19 @@ $global:VM_Config = {
         $DscFolder = "phases"
 
         # Don't start DSC on any node except DC, for multi-DSC
+        $isolatedDsc = $multiNodeDsc -and (Test-MemLabsPreserveExistingHierarchy -DeployConfig $deployConfig)
+        if ($isolatedDsc) {
+            $nodeDomain = if ($currentItem.domain) { $currentItem.domain } else { $deployConfig.vmOptions.domainName }
+            $ownNodes = @($ConfigurationData.AllNodes | Where-Object {
+                    $_.NodeName -eq $currentItem.vmName -or $_.NodeName -eq "$($currentItem.vmName).$nodeDomain"
+                })
+            if ($ownNodes.Count -ne 1) { throw "Cannot isolate Phase $Phase configuration for requested VM '$($currentItem.vmName)'." }
+            $ConfigurationData = @{
+                AllNodes = @($ownNodes[0]) + @($ConfigurationData.AllNodes | Where-Object { $_.NodeName -eq '*' })
+            }
+        }
         $skipStartDsc = $false
-        if ($multiNodeDsc -and $currentItem.role -ne "DC") {
+        if ($multiNodeDsc -and -not $isolatedDsc -and $currentItem.role -ne "DC") {
             $skipStartDsc = $true
         }
 
@@ -7155,7 +7184,7 @@ $global:VM_Config = {
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $deployConfig = $using:deployConfig
-                $ConfigurationData = $using:ConfigurationData
+                $ConfigurationData = $using:configurationDataForJob
                 $adminCreds = $using:Common.LocalAdmin
                 $Phase = $using:Phase
 
@@ -7399,7 +7428,7 @@ $global:VM_Config = {
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
                 $deployConfig = $using:deployConfig
-                $ConfigurationData = $using:ConfigurationData
+                $ConfigurationData = $using:configurationDataForJob
                 $adminCreds = $using:Common.LocalAdmin
                 $Phase = $using:Phase
                 $dscRole = "Phase$Phase"
@@ -7632,7 +7661,7 @@ $global:VM_Config = {
                 #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
                 # Get required variables from parent scope
                 $currentItem = $using:currentItem
-                $ConfigurationData = $using:ConfigurationData
+                $ConfigurationData = $using:configurationDataForJob
                 $Phase = $using:Phase
                 $mofFolderName = $using:mofFolderName
                 if ([string]::IsNullOrWhiteSpace($mofFolderName)) { throw "DSC_StartConfig: per-run MOF folder name did not resolve from the host." }
@@ -9035,7 +9064,7 @@ $global:VM_Config = {
                         }
 
                         if ($Phase -eq 8) {
-                            $phase8Nodes = @($using:ConfigurationData.AllNodes | Where-Object { $_.NodeName -eq $nodeName })
+                            $phase8Nodes = @($using:configurationDataForJob.AllNodes | Where-Object { $_.NodeName -eq $nodeName })
                             if ($phase8Nodes.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$phase8Nodes[0].Role)) {
                                 "Cannot resolve one authoritative Phase 8 DSC role for $nodeName." | Out-File $log -Append
                                 return "NODE_ROLE_UNRESOLVED"

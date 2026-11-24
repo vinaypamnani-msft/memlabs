@@ -2911,14 +2911,62 @@ class WaitForWorkflowReceipt {
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
+    [DscProperty()]
+    [string] $ScopedActionRunId
+
+    [DscProperty()]
+    [string] $ScopedActionOwnerVMName
+
+    [DscProperty()]
+    [string] $ScopedActionTargetVMName
+
+    [DscProperty()]
+    [bool] $ScopedActionRequired
+
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
+    [bool] IsScopedAction() {
+        return $this.ScopedActionRequired -or $this.ScopedActionRunId -or
+            $this.ScopedActionOwnerVMName -or $this.ScopedActionTargetVMName
+    }
+
     [string] GetReceiptRoot() {
+        if ($this.IsScopedAction()) {
+            return (Join-Path $env:SystemDrive "staging\$($this.LogFolder)")
+        }
         if ($this.MachineName -eq $env:COMPUTERNAME) {
             return (Join-Path $env:SystemDrive "staging\$($this.LogFolder)")
         }
         return "\\$($this.MachineName)\$($this.LogFolder)"
+    }
+
+    [bool] ScopedReceiptMatches() {
+        $runId = [guid]::Empty
+        if (-not [guid]::TryParse($this.ScopedActionRunId, [ref]$runId) -or $runId -eq [guid]::Empty -or
+            [string]::IsNullOrWhiteSpace($this.ScopedActionOwnerVMName) -or
+            [string]::IsNullOrWhiteSpace($this.ScopedActionTargetVMName) -or
+            $this.MachineName -ne $this.ScopedActionOwnerVMName -or
+            ($this.ScopedActionTargetVMName -split '\.')[0] -ne $env:COMPUTERNAME) {
+            throw 'Invalid scoped hierarchy-action receipt identity.'
+        }
+        $path = Join-Path $this.GetReceiptRoot() "ScopedHierarchyActions\$($this.ScopedActionRunId).json"
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+        $receipt = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (($receipt.SchemaVersion -isnot [int] -and $receipt.SchemaVersion -isnot [long]) -or
+            $receipt.SchemaVersion -ne 1 -or $receipt.RunId -isnot [string] -or
+            $receipt.OwnerVMName -isnot [string] -or $receipt.TargetVMName -isnot [string] -or
+            $receipt.Status -isnot [string] -or $receipt.Kind -isnot [string] -or
+            $receipt.RunId -ne $this.ScopedActionRunId -or
+            $receipt.OwnerVMName -ne $this.ScopedActionOwnerVMName -or
+            $receipt.TargetVMName -ne $this.ScopedActionTargetVMName -or $receipt.Kind -ne 'SiteRoles') {
+            throw 'Scoped hierarchy-action receipt does not match this requested deployment.'
+        }
+        if ($receipt.Status -eq 'Failed') {
+            throw "Required scoped action on $($this.ScopedActionOwnerVMName) failed: $($receipt.Message)"
+        }
+        if ($receipt.Status -ne 'Completed') { throw "Invalid scoped hierarchy-action receipt status '$($receipt.Status)'." }
+        return $true
     }
 
     [string] GetFailureMessage([string] $ExpectedRunId) {
@@ -2937,6 +2985,7 @@ class WaitForWorkflowReceipt {
     }
 
     [bool] ReceiptMatches() {
+        if ($this.IsScopedAction()) { return $this.ScopedReceiptMatches() }
         try {
             $root = $this.GetReceiptRoot()
             $expectedPath = Join-Path $root 'ScriptWorkflow.expected.runid'
@@ -2959,6 +3008,14 @@ class WaitForWorkflowReceipt {
     [void] Set() {
         $started = Get-Date
         while (-not $this.ReceiptMatches()) {
+            if ($this.IsScopedAction()) {
+                if (((Get-Date) - $started).TotalMinutes -ge 120) {
+                    throw "Timed out waiting for scoped action on $($this.ScopedActionOwnerVMName); no existing workflow was replayed."
+                }
+                Write-Status "Waiting on $($this.ScopedActionOwnerVMName) for scoped site-role action $($this.ScopedActionRunId)."
+                Start-Sleep -Seconds 10
+                continue
+            }
             $root = $this.GetReceiptRoot()
             $expected = '<missing>'
             $completed = '<missing>'

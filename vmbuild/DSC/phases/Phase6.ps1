@@ -26,6 +26,18 @@
     }
 
 
+    Node $AllNodes.Where{ $_.Role -eq 'WSUSApiOnly' }.NodeName
+    {
+        WindowsFeatureSet WsusAdministrationApi {
+            Name   = @('UpdateServices-RSAT', 'UpdateServices-API')
+            Ensure = 'Present'
+        }
+        WriteStatus Complete {
+            DependsOn = '[WindowsFeatureSet]WsusAdministrationApi'
+            Status    = 'Complete!'
+        }
+    }
+
     Node $AllNodes.Where{ $_.Role -eq 'WSUS' }.NodeName
     {
         $thisVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $node.NodeName }

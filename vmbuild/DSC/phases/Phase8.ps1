@@ -13,6 +13,18 @@
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
 
+    $compileVMNames = @($AllNodes | ForEach-Object { ("$($_.NodeName)" -split '\.')[0] })
+    foreach ($scopedVM in @($deployConfig.virtualMachines | Where-Object {
+                $_.vmName -in $compileVMNames -and $_.PSObject.Properties['phase8ScopedHierarchyAction']
+            })) {
+        $marker = $scopedVM.phase8ScopedHierarchyAction
+        $id = [guid]::Empty
+        if (-not $marker -or $marker.Kind -ne 'SiteRoles' -or
+            -not [guid]::TryParse("$($marker.RunId)", [ref]$id) -or $id -eq [guid]::Empty -or
+            [string]::IsNullOrWhiteSpace("$($marker.OwnerVMName)") -or $marker.TargetVMName -ne $scopedVM.vmName) {
+            throw "Invalid scoped role-action metadata for '$($scopedVM.vmName)'; an old workflow barrier cannot be substituted."
+        }
+    }
 
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
@@ -378,13 +390,14 @@
             $nextDepend = '[Script]ImportWsusBaseline'
         }
 
-        if ($ThisVM.InstallPatchMyPC) {
+        if ($ThisVM.InstallPatchMyPC -or $ThisVM.PSObject.Properties['phase8ScopedHierarchyAction']) {
             $WaitFor = @()
 
             $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") -and $_.Sitecode -eq $ThisVM.Sitecode }
             if ($serverToWait) {
                 $WaitFor += $serverToWait.vmName        
             }
+            if ($ThisVM.phase8ScopedHierarchyAction) { $WaitFor = @($ThisVM.phase8ScopedHierarchyAction.OwnerVMName) }
        
             $WaitFor = $WaitFor | Where-Object { $_ } | select-object -Unique
             if ($WaitFor) {
@@ -394,7 +407,11 @@
                 }
 
                 WaitForWorkflowReceipt WaitSCCM {
-                    MachineName         = @($WaitFor)[0]
+                    MachineName         = $(if ($ThisVM.phase8ScopedHierarchyAction) { $ThisVM.phase8ScopedHierarchyAction.OwnerVMName } else { @($WaitFor)[0] })
+                    ScopedActionRequired = $null -ne $ThisVM.PSObject.Properties['phase8ScopedHierarchyAction']
+                    ScopedActionRunId    = "$($ThisVM.phase8ScopedHierarchyAction.RunId)"
+                    ScopedActionOwnerVMName = "$($ThisVM.phase8ScopedHierarchyAction.OwnerVMName)"
+                    ScopedActionTargetVMName = "$($ThisVM.phase8ScopedHierarchyAction.TargetVMName)"
                     LogFolder           = $LogFolder
                     Ensure              = 'Present'
                     PsDscRunAsCredential = $CMAdmin
@@ -402,6 +419,8 @@
                 }
                 $nextDepend = '[WaitForWorkflowReceipt]WaitSCCM'
             }
+        }
+        if ($ThisVM.InstallPatchMyPC) {
             InstallConsole InstallConsole {
                 SiteServerFQDN = $serverToWait.VmName + "." + $DomainName
                 CMInstallDir   = $serverToWait.CMInstallDir
@@ -543,6 +562,20 @@
             $nextDepend = "[AddCertificateToIIS]PkiAddCert"
         }
 
+        if ($ThisVM.PSObject.Properties['phase8ScopedHierarchyAction']) {
+            WaitForWorkflowReceipt ScopedSiteRoles {
+                MachineName = "$($ThisVM.phase8ScopedHierarchyAction.OwnerVMName)"
+                ScopedActionRequired = $true
+                ScopedActionRunId = "$($ThisVM.phase8ScopedHierarchyAction.RunId)"
+                ScopedActionOwnerVMName = "$($ThisVM.phase8ScopedHierarchyAction.OwnerVMName)"
+                ScopedActionTargetVMName = "$($ThisVM.phase8ScopedHierarchyAction.TargetVMName)"
+                LogFolder = $LogFolder
+                Ensure = 'Present'
+                PsDscRunAsCredential = $CMAdmin
+                DependsOn = $nextDepend
+            }
+            $nextDepend = '[WaitForWorkflowReceipt]ScopedSiteRoles'
+        }
         WriteStatus Complete {
             DependsOn = $nextDepend
             Status    = "Complete!"
@@ -585,6 +618,7 @@
         $nextDepend = '[SqlScript]DisableAgentJob'
 
         $WaitFor = @()
+        if ($ThisVM.phase8ScopedHierarchyAction) { $WaitFor += $ThisVM.phase8ScopedHierarchyAction.OwnerVMName }
         $serverToWait = $deployConfig.virtualMachines | Where-Object { $_.RemoteSQLVM -eq $node.NodeName -and $_.role -in "CAS", "Primary" }
         if ($serverToWait) {
             $WaitFor += $serverToWait.vmName
@@ -604,7 +638,11 @@
             }
 
             WaitForWorkflowReceipt WaitSCCM {
-                MachineName         = @($WaitFor)[0]
+                MachineName         = $(if ($ThisVM.phase8ScopedHierarchyAction) { $ThisVM.phase8ScopedHierarchyAction.OwnerVMName } else { @($WaitFor)[0] })
+                ScopedActionRequired = $null -ne $ThisVM.PSObject.Properties['phase8ScopedHierarchyAction']
+                ScopedActionRunId    = "$($ThisVM.phase8ScopedHierarchyAction.RunId)"
+                ScopedActionOwnerVMName = "$($ThisVM.phase8ScopedHierarchyAction.OwnerVMName)"
+                ScopedActionTargetVMName = "$($ThisVM.phase8ScopedHierarchyAction.TargetVMName)"
                 LogFolder           = $LogFolder
                 Ensure              = 'Present'
                 PsDscRunAsCredential = $CMAdmin
@@ -913,7 +951,11 @@
         }
 
         WaitForWorkflowReceipt WaitPrimary {
-            MachineName         = $PSName
+            MachineName         = $(if ($ThisVM.phase8ScopedHierarchyAction) { $ThisVM.phase8ScopedHierarchyAction.OwnerVMName } else { $PSName })
+            ScopedActionRequired = $null -ne $ThisVM.PSObject.Properties['phase8ScopedHierarchyAction']
+            ScopedActionRunId    = "$($ThisVM.phase8ScopedHierarchyAction.RunId)"
+            ScopedActionOwnerVMName = "$($ThisVM.phase8ScopedHierarchyAction.OwnerVMName)"
+            ScopedActionTargetVMName = "$($ThisVM.phase8ScopedHierarchyAction.TargetVMName)"
             LogFolder           = $LogFolder
             Ensure              = 'Present'
             PsDscRunAsCredential = $CMAdmin
@@ -1492,7 +1534,11 @@
         }
 
         WaitForWorkflowReceipt ActiveNode {
-            MachineName         = $ThisVM.thisParams.ActiveNode
+            MachineName         = $(if ($ThisVM.phase8ScopedHierarchyAction) { $ThisVM.phase8ScopedHierarchyAction.OwnerVMName } else { $ThisVM.thisParams.ActiveNode })
+            ScopedActionRequired = $null -ne $ThisVM.PSObject.Properties['phase8ScopedHierarchyAction']
+            ScopedActionRunId    = "$($ThisVM.phase8ScopedHierarchyAction.RunId)"
+            ScopedActionOwnerVMName = "$($ThisVM.phase8ScopedHierarchyAction.OwnerVMName)"
+            ScopedActionTargetVMName = "$($ThisVM.phase8ScopedHierarchyAction.TargetVMName)"
             LogFolder           = $LogFolder
             Ensure              = 'Present'
             PsDscRunAsCredential = $CMAdmin

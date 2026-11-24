@@ -5556,7 +5556,7 @@ function Sync-CmSetupProxyClients {
 
     $cmRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
     $targets = @($deployConfig.virtualMachines | Where-Object {
-            $_.role -in $cmRoles -and
+            $_.role -in $cmRoles -and -not (Test-MemLabsContextOnlyVM -VM $_) -and
             -not (Test-VmIsLinux -Vm $_) -and
             (Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig)
         })
@@ -5960,14 +5960,15 @@ function Sync-LinuxDhcpRelay {
     #>
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)] [object] $DeployConfig
+        [Parameter(Mandatory = $true)] [object] $DeployConfig,
+        [object[]]$Paths
     )
 
     # Re-resolve from current VM metadata on every reconciliation. A fresh
     # -StartPhase 3/8 process reloads the pre-Phase config snapshot, whose
     # serialized relay path may still say the new DP's IPv4 is pending even
     # though Phase 1 later persisted AssignedIP/LastKnownIP in its VM note.
-    $paths = @(Get-OsdPxePaths -Config $DeployConfig)
+    $paths = if ($PSBoundParameters.ContainsKey('Paths')) { @($Paths) } else { @(Get-OsdPxePaths -Config $DeployConfig) }
     $DeployConfig | Add-Member -MemberType NoteProperty -Name 'osdPxePaths' -Value $paths -Force
     $badPaths = @($paths | Where-Object { $_.mode -in @('Missing', 'Invalid') })
     if ($badPaths.Count -gt 0) {

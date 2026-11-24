@@ -22,7 +22,7 @@ $cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployC
 
 # Determine if BLM should run: either cmOptions.EnableBLM is set, or VMs have BitLocker=true
 $blmEnabled = $cmo.EnableBLM
-$blmVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true })
+$blmVMs = @(Get-MemLabsWorkflowRequestedVMs -DeployConfig $deployConfig | Where-Object { $_.BitLocker -eq $true })
 if (-not $blmEnabled -and $blmVMs.Count -eq 0) {
     Write-DscStatus "$Tag EnableBLM is not set and no VMs have BitLocker=true. Skipping."
     return

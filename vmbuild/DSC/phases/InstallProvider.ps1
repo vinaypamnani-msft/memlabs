@@ -13,13 +13,14 @@ $NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$requestedVMs = @(Get-MemLabsWorkflowRequestedVMs -DeployConfig $deployConfig)
 
 # Announce the workload up front. Without this the no-op path (no VM flagged
 # InstallSMSProv, i.e. every re-run of a config that has no additional provider)
 # emitted ZERO lines, so "job ran and did nothing in 0.4s" was indistinguishable
 # from "job never started" or "job hung" in ConfigMgrSetup.log.
 $installProvStart = Get-Date
-$provList = @($deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true })
+$provList = @($requestedVMs | Where-Object { $_.InstallSMSProv -eq $true })
 if ($provList.Count -eq 0) {
     Write-DscStatus "[InstallProv] Nothing to do: no VM in this config has InstallSMSProv=true"
     return

@@ -136,7 +136,7 @@ foreach ($call in $policyCalls) {
     $sqlAoGuarded = $false
     while ($parent) {
         if ($parent -is [Management.Automation.Language.IfStatementAst] -and
-            $parent.Clauses[0].Item1.Extent.Text -match '\$installToAO\b') {
+            $parent.Clauses[0].Item1.Extent.Text -match '\$(installToAO|sqlAoPolicyRequested)\b') {
             $sqlAoGuarded = $true
             break
         }
@@ -154,9 +154,43 @@ $hierarchyCalls = @($hierarchyAst.FindAll({
 Assert-True ($hierarchyCalls.Count -eq 2) 'Hierarchy-primary setup is not covered before and after setup.exe.'
 $hierarchyText = Get-Content -LiteralPath $hierarchyPath -Raw
 Assert-True ($hierarchyCalls[0].Extent.StartOffset -lt $hierarchyText.IndexOf('# Set Install action as Running') -and
-    $hierarchyText -match '(?s)Start-Process.+?-wait\s+if \(\$installToAO -and -not \(Set-SqlAoLabMaxDop' -and
+    $hierarchyCalls[1].Extent.StartOffset -gt $hierarchyText.IndexOf('$setupProcess.WaitForExit()') -and
+    $hierarchyText -match 'if \(\$sqlAoPolicyRequested -and -not \(Set-SqlAoLabMaxDop' -and
     $hierarchyText -match 'Node2Port = \$\(if \(\$sqlNode2Vm.sqlPort\)') `
     'Hierarchy re-entry/setup ordering or physical partner-port selection is not preserved.'
+
+& {
+    function Test-MemLabsWorkflowContextOnlyVM { param($VM); return $VM.hidden -eq $true }
+    function Set-SqlAoLabMaxDop {
+        param($Node1, $Node2, $Node1Port, $Node2Port)
+        $script:ScopedPolicyCalls++
+        return $true
+    }
+    function Write-DscStatus { param($Status) }
+    $standaloneGuard = $ast.Find({
+            param($node)
+            $node -is [Management.Automation.Language.IfStatementAst] -and
+            $node.Clauses[0].Item1.Extent.Text -eq '$installToAO' -and
+            $node.Extent.Text.Contains('$sqlAoPolicyRequested')
+        }, $true)
+    if (-not $standaloneGuard) { throw 'Scoped SQLAO policy initializer was not found.' }
+    $factory = [scriptblock]::Create(
+        'param($deployConfig,$installToAO,$sqlNode1,$sqlNode2,$sqlNode1Port,$sqlNode2Port)' +
+        "`n`$sqlAoPolicyRequested=`$false`n" + $standaloneGuard.Extent.Text + "`nreturn `$sqlAoPolicyRequested")
+    foreach ($isAo in @($true, $false)) {
+        foreach ($isContext in @($true, $false)) {
+            $script:ScopedPolicyCalls = 0
+            $fixture = [pscustomobject]@{ virtualMachines = @(
+                    [pscustomobject]@{ vmName = 'SQL1'; role = 'SQLAO'; hidden = $isContext },
+                    [pscustomobject]@{ vmName = 'SQL2'; role = 'SQLAO'; hidden = $isContext }
+                ) }
+            $selected = & $factory $fixture $isAo 'SQL1' 'SQL2' '1433' '1544'
+            $expected = $isAo -and -not $isContext
+            Assert-True ($selected -eq $expected -and $script:ScopedPolicyCalls -eq [int]$expected) `
+                'Existing dependency SQLAO policy was changed, or explicitly owned SQLAO policy was not applied.'
+        }
+    }
+}
 
 $validationAst = Get-TestAst $validationPath
 $branches = @($validationAst.FindAll({

@@ -2922,6 +2922,56 @@ function ConvertFrom-MemLabsVmNoteScalar {
     return $trimmed
 }
 
+function Test-MemLabsContextOnlyVM {
+    param([Parameter(Mandatory)]$VM)
+
+    return $VM.hidden -eq $true -and $VM.ExistingVM -ne $true -and $VM.cmOptionsChanged -ne $true
+}
+
+function Test-MemLabsPreserveExistingHierarchy {
+    param([Parameter(Mandatory)]$DeployConfig)
+
+    return @($DeployConfig.virtualMachines | Where-Object {
+            $null -ne $_ -and ($_.hidden -eq $true -or $_.ExistingVM -eq $true)
+        }).Count -gt 0
+}
+
+function Test-MemLabsRequestedVMIdentity {
+    param([Parameter(Mandatory)]$DeployConfig, [Parameter(Mandatory)][string]$VMName)
+
+    return @(Get-MemLabsRequestedDeploymentVMs -DeployConfig $DeployConfig | Where-Object { $_.vmName -eq $VMName }).Count -eq 1
+}
+
+function Get-MemLabsRequestedDeploymentVMs {
+    param([Parameter(Mandatory)]$DeployConfig)
+
+    $DeployConfig.virtualMachines | Where-Object {
+        $null -ne $_ -and (-not $_.hidden -or $_.ExistingVM -eq $true -or $_.cmOptionsChanged -eq $true)
+    }
+}
+
+function Resolve-MemLabsDeploymentPrimary {
+    param([Parameter(Mandatory)]$DeployConfig, [string]$SiteCode)
+
+    $sites = @($DeployConfig.virtualMachines | Where-Object { $_.role -in @('Primary', 'Secondary') })
+    if ($SiteCode) {
+        $owners = @($sites | Where-Object { "$($_.siteCode)" -eq $SiteCode })
+        if ($owners.Count -eq 1 -and $owners[0].role -eq 'Secondary') {
+            $SiteCode = "$($owners[0].parentSiteCode)"
+            $owners = @($sites | Where-Object { $_.role -eq 'Primary' -and "$($_.siteCode)" -eq $SiteCode })
+        }
+    }
+    else {
+        $owners = @($sites | Where-Object {
+                $_.role -eq 'Primary' -and (-not $_.domain -or $_.domain -eq $DeployConfig.vmOptions.domainName)
+            })
+    }
+    if ($owners.Count -ne 1 -or $owners[0].role -ne 'Primary' -or -not $owners[0].siteCode) {
+        throw "Cannot resolve one Primary owner for deployment site '$SiteCode'; no existing hierarchy action is authorized."
+    }
+    return $owners[0]
+}
+
 function Add-ModifiedExistingVMToDeployConfig {
     [CmdletBinding()]
     param (
@@ -2947,10 +2997,6 @@ function Add-ModifiedExistingVMToDeployConfig {
     }
 
     Write-Log -Verbose "Adding $vmName as a modified existing VM"
-    if ($existingVM.state -ne "Running") {
-        Start-VM2 -Name $existingVM.vmName
-    }
-
     $newVMObject = [PSCustomObject]@{
         hidden = $hidden
     }
@@ -3058,10 +3104,6 @@ function Add-ExistingVMToDeployConfig {
     }
 
     Write-Log -Verbose "Adding $vmName as an existing VM"
-    if ($existingVM.state -ne "Running") {
-        Start-VM2 -Name $existingVM.vmName
-    }
-
     $newVMObject = [PSCustomObject]@{
         hidden = $hidden
     }
@@ -6504,6 +6546,7 @@ function Test-InProgress {
 
     $InProgressVMs = @()
     foreach ($thisVM in $deployConfig.virtualMachines) {
+        if (Test-MemLabsContextOnlyVM -VM $thisVM) { continue }
         $thisVMObject = Get-VMFromList2 -deployConfig $deployConfig -vmName $thisVM.vmName
         if ($thisVMObject.inProgress -eq $true) {
             $InProgressVMs += $thisVMObject.vmName

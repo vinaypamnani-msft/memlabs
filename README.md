@@ -199,6 +199,93 @@ edit markers update only after Hyper-V succeeds. Mixed changes still use the ful
 deployment path. Post-deployment memory restoration now also honors static
 memory (`DynamicMinRam = Memory`) instead of re-enabling dynamic memory.
 
+When expanding an existing lab, hidden dependency VMs are reference context, not
+permission to replay their configuration. They do not receive ordinary DSC,
+automatic maintenance, validation/recovery jobs, memory restoration, or startup
+setting changes. Requested VMs compile their own phase configuration rather
+than clearing or replacing the existing DC's DSC state. Deployment logs identify
+the requested action and why an existing prerequisite is observed.
+
+Existing prerequisites use **stop and report**, not automatic repair. An
+unrelated broken/stopped SQL server does not block adding a client. A required
+DC that is stopped or cannot serve AD/DNS does block domain-dependent work,
+without starting it, restarting it, or repairing its services.
+
+The existing Primary's client-push action only submits the explicitly requested,
+uniquely discovered resource IDs. It does not configure push accounts, disable
+automatic push, trigger discovery, force reinstallation, or run the Primary's
+setup/content workflow. Missing discovery or an unavailable existing provider
+is a specific blocker; successful submission is not proof of client installation.
+Phase 11 still validates the requested client.
+
+Existing-site BitLocker enrollment, OSD targeting, and role additions use
+separate owner-site action jobs, concurrent with the requested new VM's setup.
+They do not launch the Primary's DSC or general workflow. BitLocker enrolls only
+requested clients into the existing policy; OSD uses private target-only objects
+instead of rewriting existing sequences/deployments; role actions configure
+only the requested role and its minimum new account bindings. Missing required
+existing infrastructure is a specific blocker, not permission to repair it.
+
+Requested role workers wait on a current-run receipt written to their own
+staging folder, not the existing Primary's old workflow receipt. Failed scoped
+actions publish their specific blocker without replaying the hierarchy.
+Role preparation and barriers also apply when site installation is disabled,
+including ordinary SiteSystem, WSUS and remote-SQL targets. A target-only worker
+retry preserves the outstanding action identity and never restarts its owner.
+Ordinary coordinator-based retries retain their original preparation generation
+and coordinator cohort; missing recovery identity stops instead of replaying
+the hierarchy. Malformed scoped metadata fails before barrier declaration.
+Explicit existing-VM edits and ConfigMgr-option changes remain requested work,
+rather than dependency-only context.
+
+Adding a child Primary uses the retained CAS's native installation/source,
+provider and CAS-local update state, then observes only the new child link.
+The CAS's old install/SUM receipts and unrelated replication links are not
+recovery targets. A requested child SUP checks only the CAS's selected WCM
+upstream endpoint; a child without a requested SUP skips that dependency.
+If needed, WSUS administration API tools are provisioned only on the requested
+child, not the retained CAS. Existing SQL dependencies keep their service,
+trust and MAXDOP state; only a proven new requested site's account binding may
+be added.
+
+After domain join, only new requested machines receive necessary existing
+ConfigMgr group membership and System Management delegation. An existing
+hierarchy's missing/conflicting group, container or deny policy stops the run;
+DC DSC, templates and old memberships are not reconciled. Introducing the first
+site can provision its new directory objects, rather than repair an old site.
+New delegation is verified as unrestricted object/descendant access, not a
+matching SID with an object-restricted ACE.
+Proxy ACLs and relay changes are scoped to requested VM/path identities, even
+in post-phase hooks. External schema media is observed, not remounted or
+re-shared merely because host inventory resolved its VM.
+
+Inherited enabled OSD application steps require exact application/DT/content
+revision mapping and reported Installed content on each selected DP before
+target import or PXE advertisement. Disabled ancestor groups are excluded,
+dynamic unresolved application lists stop explicitly, and old application
+content is never redistributed to make the operation pass.
+Contentless deployment types are verified against their exact definition
+identity/revision, so a content-bearing sibling does not invalidate them.
+
+Remote SMS Provider installation is a product-safety exception: its native
+setup also performs broader existing-site maintenance. A missing/broken
+provider therefore stops with that explanation instead of running setup.
+A healthy exact-target provider can be verified without reinstalling it.
+Passive expansion never removes an existing active-site DP automatically.
+Any required content-library relocation is an explicit site-wide prerequisite,
+not a general repair: its destination must be reserved and empty, package
+processing can pause, and native cutover/prerequisite checks must complete
+before adding the Passive role. Populated unrelated destinations are rejected.
+
+Validate with `vmbuild\tools\Test-DeploymentIntentIsolation.ps1`; use
+`-GuestOnly` under Windows PowerShell 5.1 for the guest action/owned-workflow
+contracts and read-only dependency probes.
+The isolated runtime, scoped role receipts, BitLocker, OSD, and role actors have
+focused `Test-ExistingHierarchy*` / `Test-ScopedHierarchyActionReceipts.ps1`
+regressions under `vmbuild\tools`. The retained-CAS and exact SQL authorization
+checks are `Test-RetainedCasNativeDependencies.ps1` and
+`Test-ExistingSqlAuthorization.ps1`.
+
 VM inventory and disk-size caches are published atomically, so Ctrl+C during a
 cache write leaves the previous complete cache intact. Unreadable or incomplete
 inventory is discarded and rebuilt rather than reused as zero resource totals.
