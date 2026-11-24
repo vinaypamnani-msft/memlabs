@@ -6890,6 +6890,10 @@ function New-VirtualMachine {
         # Add VMNote as soon as VM is created
         if ($DeployConfig) {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+            $internetPolicyVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($internetPolicyVM.noInternet -eq $true) {
+                Initialize-VmNoInternetPolicy -VMName $VmName
+            }
         }
 
         # Create DHCP reservation now that the MAC is available.
@@ -7488,6 +7492,9 @@ function Wait-ForVm {
     if ($VmState) {
         Write-Log "$VmName`: Waiting for VM to enter $VmState state..."
         do {
+            if ([AppDomain]::CurrentDomain.GetData("MemLabsInternetLease.$([Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId)")) {
+                Update-VmInternetExceptionHeartbeat -Force
+            }
             try {
                 $vmTest = Get-VM2 -Name $VmName -Fallback
                 if (-not $vmTest) {
@@ -8340,7 +8347,16 @@ function Invoke-VmCommand {
     $inflightToken = $null
     $caughtException = $null
     $jobFailureReason = $null
+    $job = $null
     try {
+        $internetHandle = [AppDomain]::CurrentDomain.GetData("MemLabsInternetLease.$([Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId)")
+        if ($internetHandle) {
+            Update-VmInternetExceptionHeartbeat -Force
+            if (-not $AsJob) {
+                $AsJob = $true
+                $FailOnRemoteError = $true
+            }
+        }
         # Set display name for logging
         if (-not $DisplayName) {
             $DisplayName = ($ScriptBlock.ToString() -replace '\s+', ' ').Trim()
@@ -8473,6 +8489,7 @@ function Invoke-VmCommand {
                         $lastForwarded = $null
                         $lastProgressCount = 0
                         while ($job.State -eq "Running" -and (Get-Date) -lt $stallDeadline -and (Get-Date) -lt $absoluteCeiling) {
+                            if ($internetHandle) { Update-VmInternetExceptionHeartbeat }
                             Start-Sleep -Milliseconds 750
                             try {
                                 # PSRemotingJob exposes per-session streams on its child job.
@@ -8508,7 +8525,15 @@ function Invoke-VmCommand {
                         }
                     }
                     else {
-                        $job | Wait-Job -Timeout $TimeoutSeconds | Out-Null
+                        if ($internetHandle) {
+                            $internetWait = [Diagnostics.Stopwatch]::StartNew()
+                            while ($job.State -eq 'Running' -and $internetWait.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+                                Update-VmInternetExceptionHeartbeat
+                                $remainingWait = [int][Math]::Ceiling($TimeoutSeconds - $internetWait.Elapsed.TotalSeconds)
+                                $null = Wait-Job -Job $job -Timeout ([Math]::Min(10, $remainingWait))
+                            }
+                        }
+                        else { $job | Wait-Job -Timeout $TimeoutSeconds | Out-Null }
                     }
                     if ($job.State -eq "Completed") {
                         # Read the child's error stream BEFORE Receive-Job drains it.
@@ -8592,18 +8617,27 @@ function Invoke-VmCommand {
                                 $probeDeadline = (Get-Date).AddSeconds(5)
                                 $probeReady = $false
                                 $probeAttempts = 0
+                                $internetProbeAbandoned = $false
                                 while (-not $probeReady -and (Get-Date) -lt $probeDeadline) {
                                     $probeAttempts++
                                     $probeErr = $null
                                     $probeOut = $null
                                     try {
-                                        $probeOut = Invoke-Command -Session $ps -ScriptBlock { 1 } -ErrorVariable probeErr -ErrorAction SilentlyContinue
+                                        if ($internetHandle) {
+                                            $probeRemaining = [int][Math]::Max(1, [Math]::Ceiling(($probeDeadline - (Get-Date)).TotalSeconds))
+                                            $internetProbe = Invoke-MemLabsInternetSessionProbe -Session $ps -VMName $VmName -TimeoutSeconds $probeRemaining
+                                            if ($internetProbe.Ready) { $probeOut = 1 }
+                                            else { $probeErr = @($internetProbe.Error) }
+                                            $internetProbeAbandoned = $internetProbe.Abandoned
+                                        }
+                                        else { $probeOut = Invoke-Command -Session $ps -ScriptBlock { 1 } -ErrorVariable probeErr -ErrorAction SilentlyContinue }
                                     }
                                     catch {
                                         $probeErr = @($_)
                                     }
                                     $probeBlob = ""
                                     if ($probeErr -and $probeErr.Count -gt 0) { $probeBlob = ($probeErr | ForEach-Object { "$_" }) -join ' ' }
+                                    if ($internetProbeAbandoned) { break }
                                     if ($probeOut -eq 1 -and -not $probeBlob) {
                                         $probeReady = $true
                                     }
@@ -8632,7 +8666,13 @@ function Invoke-VmCommand {
                                     # job is demonstrably still alive, and disposing a session
                                     # whose transport is mid-teardown is the disposed-object
                                     # callback crash documented above.
-                                    Remove-VmSessionFromCache -VmName $VmName -LeakSession
+                                    if (-not $internetProbeAbandoned) { Remove-VmSessionFromCache -VmName $VmName -LeakSession }
+                                    if ($internetHandle) {
+                                        $failed = $true
+                                        $return.ScriptBlockFailed = $true
+                                        $return.ChannelBroken = $true
+                                        $return.ErrorDetails = @("Leased session readiness could not be verified: $probeBlob")
+                                    }
                                 }
                                 # Stamp the timeline AFTER the probe so the next failure autopsy
                                 # reports the gap from "we declared this session usable" to the
@@ -8640,7 +8680,13 @@ function Invoke-VmCommand {
                                 Set-VmSessionPipelineEvent -Session $ps -Kind "asjob-probed(ready=$probeReady,attempts=$probeAttempts)" -Op $DisplayName
                             }
                         }
-                        catch { }
+                        catch {
+                            if ($internetHandle) {
+                                $failed = $true
+                                $return.ScriptBlockFailed = $true
+                                $return.ErrorDetails = @("Leased session readiness failed: $($_.Exception.Message)")
+                            }
+                        }
                     }
                     else {
                         Write-Log "$VmName`: Job '$DisplayName' Failed State: $($job.State)" -LogOnly
@@ -8917,7 +8963,7 @@ function Invoke-VmCommand {
                             ("$($Err2 -join ' ')" -match $createSig)) {
                             # -LogOnly, so safe to emit even for -SuppressLog callers (the
                             # post-phase pending-reboot check is one).
-                            Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -Errors $Err2)" -LogOnly
+                            Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -VmName $VmName -Errors $Err2)" -LogOnly
                         }
                     }
                     finally {
@@ -8934,7 +8980,12 @@ function Invoke-VmCommand {
             }
             catch {
                 $failed = $true
+                $return.ScriptBlockFailed = $true
                 $caughtException = $_
+                if ($internetHandle -and $job) {
+                    Stop-MemLabsInternetGuestJob -Job $job -Session $ps -VMName $VmName
+                    $return.ChannelBroken = $true
+                }
                 if (-not $SuppressLog) {
                     Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
                     Write-Log "$($_.ScriptStackTrace)" -LogOnly
@@ -9034,7 +9085,7 @@ function Invoke-VmCommand {
                     # real state + how long ago the previous pipeline on it finished. The
                     # race diag above reported an identical, non-discriminating
                     # 'Available/null/none' on all 800+ historical failures.
-                    Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -Errors $Err2 -CaughtException $caughtException)" -LogOnly
+                    Write-Log "$VmName`: '$DisplayName' pipeline-create autopsy -- $(Get-VmPipelineFailureAutopsy -Session $ps -VmName $VmName -Errors $Err2 -CaughtException $caughtException)" -LogOnly
                 }
             }
         }
@@ -9190,7 +9241,7 @@ function Get-VmPipelineFailureAutopsy {
     #      Runspace.RunspaceStateInfo.State+Reason -- all different from Availability),
     #   3. how long ago the previous pipeline on this session finished, and what it was.
     # Never throws.
-    param($Session, $Errors, $CaughtException)
+    param($Session, $Errors, $CaughtException, [string]$VmName)
     try {
         $parts = @()
 
@@ -9322,10 +9373,18 @@ function Get-VmPipelineFailureAutopsy {
             # limitation: every recorded failure had Availability='Available', so this
             # is exactly the interesting case, and it avoids issuing a round trip into
             # an obviously-dead session (Invoke-Command has no timeout to bound it).
-            if ($Session -and "$($Session.Availability)" -eq 'Available') {
+            if ($Session._InternetProbeAbandoned -eq $true) {
+                $parts += 'postFailTrivial=[skipped: existing readiness probe was abandoned]'
+            }
+            elseif ($Session -and "$($Session.Availability)" -eq 'Available') {
                 $probeSw = [Diagnostics.Stopwatch]::StartNew()
                 $probeErr = $null
-                $probeOut = Invoke-Command -Session $Session -ScriptBlock { 1 } -ErrorAction SilentlyContinue -ErrorVariable probeErr
+                if ([AppDomain]::CurrentDomain.GetData("MemLabsInternetLease.$([Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId)")) {
+                    $probe = Invoke-MemLabsInternetSessionProbe -Session $Session -VMName $VmName
+                    $probeOut = if ($probe.Ready) { 1 } else { $null }
+                    if ($probe.Error) { $probeErr = @($probe.Error) }
+                }
+                else { $probeOut = Invoke-Command -Session $Session -ScriptBlock { 1 } -ErrorAction SilentlyContinue -ErrorVariable probeErr }
                 $probeSw.Stop()
                 $probeMs = [int]$probeSw.Elapsed.TotalMilliseconds
                 if ($probeOut -eq 1 -and -not $probeErr) {
@@ -9369,7 +9428,8 @@ function New-PSSessionWithTimeout {
         [string]$Name,
         [guid]$VMId,
         [pscredential]$Credential,
-        [int]$TimeoutSec = 30
+        [int]$TimeoutSec = 30,
+        [scriptblock]$ConnectOperation
     )
 
     # Return a diagnostic hashtable so callers can distinguish
@@ -9387,20 +9447,39 @@ function New-PSSessionWithTimeout {
     # still verify that parked work is terminal; removing jobs does not finish a
     # New-PSSession call that remains blocked inside VMBus.
 
+    if ([AppDomain]::CurrentDomain.GetData("MemLabsInternetLease.$([Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId)")) {
+        Update-VmInternetExceptionHeartbeat -Force
+    }
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $rs.Open()
 
     $psi = [System.Management.Automation.PowerShell]::Create()
     $psi.Runspace = $rs
 
-    $null = $psi.AddScript({
-        param($name, $vmId, $cred)
-        New-PSSession -Name $name -VMId $vmId -Credential $cred -ErrorAction Stop
-    }).AddArgument($Name).AddArgument($VMId).AddArgument($Credential)
+    if (-not $ConnectOperation) {
+        $ConnectOperation = {
+            param($name, $vmId, $cred)
+            New-PSSession -Name $name -VMId $vmId -Credential $cred -ErrorAction Stop
+        }
+    }
+    $null = $psi.AddScript($ConnectOperation.ToString()).AddArgument($Name).AddArgument($VMId).AddArgument($Credential)
 
     $async = $psi.BeginInvoke()
 
-    if (-not $async.AsyncWaitHandle.WaitOne($TimeoutSec * 1000)) {
+    try {
+        $sessionConnected = if ([AppDomain]::CurrentDomain.GetData("MemLabsInternetLease.$([Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId)")) {
+            Wait-MemLabsInternetHandle -Handle $async.AsyncWaitHandle -TimeoutSeconds $TimeoutSec
+        }
+        else { $async.AsyncWaitHandle.WaitOne($TimeoutSec * 1000) }
+    }
+    catch {
+        $waitFailure = $_
+        try { $null = $psi.BeginStop($null, $null) }
+        catch { Write-Log "$Name`: Connection cancellation failed after lease loss; retaining the worker. $_" -Warning }
+        Add-OrphanRunspace -Runspace $rs -PowerShell $psi -Reason 'connection wait interrupted by lease failure' -VmName $Name
+        throw $waitFailure
+    }
+    if (-not $sessionConnected) {
         # Timed out — use BeginStop (non-blocking) instead of Stop() which
         # blocks until the underlying VMBus call completes.  When PSDirect
         # is wedged, Stop() hangs indefinitely, defeating the timeout.
@@ -9601,6 +9680,10 @@ function Invoke-VmSessionCredentialDiagnostics {
         [scriptblock]$ProbeOperation
     )
 
+    if ([AppDomain]::CurrentDomain.GetData("MemLabsInternetLease.$([Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId)")) {
+        Write-Log "$VmName`: Alternate credential diagnostics skipped during a leased operation; required-identity failure remains explicit and no unbounded optional guest probe is started." -Warning -LogOnly
+        return @()
+    }
     if (-not $Common.LocalAdmin -or -not $Common.LocalAdmin.Password) {
         Write-Log "$VmName`: Alternate credential diagnostics skipped because the MemLabs credential is unavailable." -Warning -LogOnly
         return @()
@@ -9799,7 +9882,11 @@ function Get-VmSessionGuestIdentity {
         $psi.Runspace = $rs
         $null = $psi.AddScript($ProbeOperation.ToString()).AddArgument($Session)
         $async = $psi.BeginInvoke()
-        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
+        $identityReady = if ([AppDomain]::CurrentDomain.GetData("MemLabsInternetLease.$([Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId)")) {
+            Wait-MemLabsInternetHandle -Handle $async.AsyncWaitHandle -TimeoutSeconds $TimeoutSeconds
+        }
+        else { $async.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000) }
+        if (-not $identityReady) {
             try { $psi.BeginStop($null, $null) } catch {}
             $Session | Add-Member -MemberType NoteProperty -Name '_IdentityProbeAbandoned' -Value $true -Force
             Add-OrphanRunspace -Runspace $rs -PowerShell $psi -Session $Session `
@@ -11150,7 +11237,10 @@ function Get-VmSession {
                 -PrimaryUserNames $credentialUserNames
             $diagnosticRetryGranted = $true
             Write-Log "$VmName`: Alternate credential diagnostics completed; waiting 60 seconds before retrying the required domain credential." -Warning
-            Start-Sleep -Seconds 60
+            if ([AppDomain]::CurrentDomain.GetData("MemLabsInternetLease.$([Management.Automation.Runspaces.Runspace]::DefaultRunspace.InstanceId)")) {
+                Wait-MemLabsInternetOperation -Seconds 60
+            }
+            else { Start-Sleep -Seconds 60 }
         }
     }
     # Populate diagnostics for the caller so it knows WHY we failed
@@ -13891,6 +13981,7 @@ if ($removeOnlyProfile) {
     . $PSScriptRoot\common\Common.Colors.ps1
     . $PSScriptRoot\common\Common.Prereqs.ps1
     . $PSScriptRoot\common\Common.Config.ps1
+    . $PSScriptRoot\common\Common.Internet.ps1
     . $PSScriptRoot\common\Common.HyperV.ps1
     . $PSScriptRoot\common\Common.Phases.ps1
     . $PSScriptRoot\common\Common.Remove.ps1
@@ -13907,6 +13998,7 @@ else {
 . $PSScriptRoot\common\Common.Prereqs.ps1
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
+. $PSScriptRoot\common\Common.Internet.ps1
 . $PSScriptRoot\common\Common.Phases.ps1
 . $PSScriptRoot\common\Common.ExistingHierarchy.ps1
 . $PSScriptRoot\common\Common.ExistingHierarchy.BitLocker.ps1

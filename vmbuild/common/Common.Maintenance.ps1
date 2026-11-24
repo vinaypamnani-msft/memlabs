@@ -883,6 +883,14 @@ function Start-VMMaintenance {
         Write-Log "$vmName`: VM note is still marked in-progress from an interrupted run; proceeding through the mutex-owned mandatory Phase 0 maintenance gate." -Warning
     }
 
+    if ($vmNoteObject.noInternet -eq $true) {
+        try { Assert-VmNoInternetPolicy -VMName $VMName }
+        catch {
+            Write-Log "[NoInternet] $VMName`: Maintenance cannot start with unverified enforcement/recovery. $_" -Failure
+            return $false
+        }
+    }
+
     if ($FreshDeployOnly.IsPresent) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance on newly deployed VM..." -force
     }
@@ -964,6 +972,7 @@ function Start-VMFixes {
     $rootPath = Split-Path $PSScriptRoot -Parent
 
     if (-not $vmNote) { $vmNote = Get-VMNote -VMName $vmName }
+    $maintenanceNoInternet = $vmNote.noInternet -eq $true
     $vmDomain = $vmNote.domain
 
     if (-not $vmDomain) {
@@ -1028,7 +1037,8 @@ function Start-VMFixes {
 
         # Determine if we can use the batched fast-path (no fixes have DependentVMs)
         $hasDependentVMs = $sortedFixes | Where-Object { $_.DependentVMs -and $_.DependentVMs.Count -gt 0 -and $_.AppliesToThisVM }
-        if (-not $hasDependentVMs) {
+        $needsInternetLease = $vmNote.noInternet -eq $true -and @($pendingFixes | Where-Object { $_.InternetAccess }).Count -gt 0
+        if (-not $hasDependentVMs -and -not $needsInternetLease) {
             $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -FreshDeployOnly:$FreshDeployOnly
             $success = $batchResult.Success
             $toStop += $batchResult.VMsToStop
@@ -1063,6 +1073,14 @@ function Start-VMFixes {
             foreach ($vm in $toStop | Select-Object -Unique) {
                 if ([string]::IsNullOrWhiteSpace($vm)) { continue }
                 $vmNote = Get-VMNote -VMName $vm
+                if ($vmNote.noInternet -eq $true -or ($vm -eq $VMName -and $maintenanceNoInternet)) {
+                    try { Assert-VmNoInternetPolicy -VMName $vm }
+                    catch {
+                        Write-Log "[NoInternet] $vm`: Keeping maintenance VM running because enforcement/recovery is not verified: $_" -Failure
+                        if ($success) { throw }
+                        continue
+                    }
+                }
                 if ($vmNote.role -ne "DC") {
                     Write-Progress2 -Activity $global:MaintenanceActivity -Status "Shutting down VM "
                     $null = Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
@@ -1771,7 +1789,22 @@ function Start-VMFix {
     $maxFixAttempts = 2
     $providerRecoveryAttempted = $false
     for ($fixAttempt = 1; $fixAttempt -le $maxFixAttempts; $fixAttempt++) {
-        $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
+        if ($vmNote.noInternet -eq $true -and $vmFix.InternetAccess) {
+            $access = $vmFix.InternetAccess
+            $HashArguments.AsJob = $true
+            if ($executionTimeout -le 0) { $HashArguments.TimeoutSeconds = [int]$access.MaximumMinutes * 60 }
+            $HashArguments.FailOnRemoteError = $true
+            try {
+                $result = Invoke-WithVmInternetException -VMName $VMName -Purpose Maintenance `
+                    -Urls @($access.Urls) -HostNames @($access.HostNames) -MaximumMinutes $access.MaximumMinutes `
+                    -Operation { Invoke-VmCommand @HashArguments -ShowVMSessionError }
+            }
+            catch {
+                Write-Log "[NoInternet] $VMName`: Fix '$fixName' failed its Internet exception lifecycle: $_" -Failure
+                return $return
+            }
+        }
+        else { $result = Invoke-VmCommand @HashArguments -ShowVMSessionError }
 
         # Authoritative: read the marker file in a SEPARATE transaction.
         $marker = Get-VMFixResultMarker -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount

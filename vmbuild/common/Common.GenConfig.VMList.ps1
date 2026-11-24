@@ -326,6 +326,26 @@ function Select-Options {
 
 
         switch ($name) {
+            "noInternet" {
+                if ($property.useProxy -eq $true) {
+                    Add-ErrorMessage -property $name 'Turn useProxy off before enabling noInternet.'
+                    continue MainLoop
+                }
+                $property.noInternet = -not [bool]$value
+                Get-AdditionalValidations -property $property -name $name -CurrentValue $value
+                Get-TestResult -SuccessOnError | Out-Null
+                continue MainLoop
+            }
+            "useProxy" {
+                if ($property.noInternet -eq $true) {
+                    Add-ErrorMessage -property $name 'Turn noInternet off before enabling useProxy.'
+                    continue MainLoop
+                }
+                $property.useProxy = -not [bool]$value
+                Get-AdditionalValidations -property $property -name $name -CurrentValue $value
+                Get-TestResult -SuccessOnError | Out-Null
+                continue MainLoop
+            }
             "cmOptions" {
                 # Dive into this VM's cmOptions sub-object via the dedicated helper
                 # (lazy-creates defaults if missing; exposes Version/Install/etc).

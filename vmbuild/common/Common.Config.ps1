@@ -1232,6 +1232,11 @@ function Get-UserConfiguration {
                 $vm.PsObject.Members.Remove('useProxy')
             }
 
+            if (-not $vm.ExistingVM -and -not $vm.hidden -and
+                (Test-VmNoInternetEligible -VM $vm) -and $null -eq $vm.noInternet) {
+                $vm | Add-Member -MemberType NoteProperty -Name 'noInternet' -Value $false
+            }
+
             # installOffice property: normalize for DomainMember client-OS VMs
             # and OSD clients. OSDClient has no operatingSystem before PXE; its
             # selected task sequence supplies Windows and the CM client.

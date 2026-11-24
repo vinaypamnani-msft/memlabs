@@ -42,6 +42,49 @@ It can populate the descriptor's `InjectFiles` and `ArgumentList` properties.
 It must throw on failure; a failed preparation is logged and prevents execution
 and applied-version stamping.
 
+### Temporary Internet access on `noInternet` VMs
+
+Prefer verified host staging/injection (as Edge servicing already does). A fix
+that still needs guest web downloads declares an optional host-side descriptor:
+
+```powershell
+InternetAccess = [pscustomobject]@{
+    Urls = @('https://publisher.example/installer.msi')
+    HostNames = @() # Only additional named native child-download endpoints.
+    MaximumMinutes = 20
+}
+```
+
+Only pending, applicable fixes use this descriptor. On `noInternet` VMs the host
+routes these fixes individually through the shared exception lifecycle rather
+than opening a maintenance-wide bypass. `Fix-ODBC18` declares its catalog
+ODBC/VC++ URLs and native Microsoft download host. Connected/proxied VMs retain
+their existing maintenance paths. Cache hits remain supported; authorization
+does not imply a package was downloaded or installed.
+
+Host features outside maintenance use `Invoke-WithVmInternetException` from
+[Common.Internet.ps1](../common/Common.Internet.ps1), or the matching
+`Start-VmInternetException` / `Update-VmInternetExceptionHeartbeat` /
+`Stop-VmInternetException` lifecycle for existing polling loops. Resolve a finite
+destination scope, use a named purpose and bounded operation budget, and close
+in `finally`. Long-running work must heartbeat every 30 seconds; the existing
+`Invoke-VmCommand` leased wait does so automatically. Use the shared
+`Wait-MemLabsInternetOperation`, `Wait-MemLabsInternetHandle` or
+`Wait-MemLabsInternetJob` for blocking host waits. Handles are runspace-owned,
+so parallel maintenance cannot renew or release another operation's lease.
+Renewals never reset the original deadline. Never call ACL clear/remove helpers
+to invent another bypass.
+Leased remoting also bounds teardown/diagnostic readiness probes and retains
+timed-out jobs with their sessions for safe recovery. Optional alternate-account
+diagnostics are skipped with a warning during a lease; they never substitute a
+different principal for a failed required identity.
+
+An exception grants only stateless TCP 80/443 to the resolved addresses.
+Baseline restrictions stay installed. Durable host state, independent recovery,
+startup interlocks and the keep-running/degraded failure policy are described
+in the [GenConfig reference](../docs/GenConfig/README.md#no-internet-proxy-acl-coverage).
+Failed grant/revocation is a failed fix and must not stamp its applied version.
+
 ## Available variables
 
 - `$vmNote`    — `Get-VMNote` result for the target VM (`$null` for dummy list).

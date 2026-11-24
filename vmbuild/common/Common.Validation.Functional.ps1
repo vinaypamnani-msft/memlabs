@@ -845,6 +845,17 @@ function Test-VmFunctionality {
         }
     }
 
+    if ($CurrentItem.noInternet -eq $true) {
+        try {
+            Assert-VmNoInternetPolicy -VMName $VMName
+            Write-Log "[Phase 11] $VMName [NoInternet]: Complete proxy-coverage ACLs verified on every adapter; no temporary permissions remain." -Success
+        }
+        catch {
+            Write-Log "[Phase 11] $VMName [NoInternet]: Enforcement/recovery verification failed: $_" -Failure
+            $testsPassed = $false
+        }
+    }
+
     Stop-ValidationStep -VMName $VMName -RoleLabel $role
     Write-Progress2 -Activity $validationActivity -Completed
 

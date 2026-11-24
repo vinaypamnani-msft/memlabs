@@ -1411,6 +1411,10 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name "useProxy" -Value $useProxyDefault -Force
     }
 
+    if (Test-VmNoInternetEligible -VM $virtualMachine) {
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'noInternet' -Value $false -Force
+    }
+
     # Linux VMs run with static memory (Hyper-V Dynamic Memory on Linux is
     # flaky), so dynamicMinRam is meaningless for them -- don't add it.
     if (-not (Test-VmIsLinux -Vm $virtualMachine)) {

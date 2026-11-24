@@ -386,10 +386,104 @@ These labels are stable; numbers are not an API.
 | `InstallSSMS` | Boolean. | Install SQL Server Management Studio even when SQL is remote. |
 | `useFakeWSUSServer` | Boolean on eligible Windows clients. | Prevent normal Windows Update by pointing at a fake WSUS endpoint. |
 | `useProxy` | Boolean; requires exactly one Proxy VM. | Route HTTP/HTTPS through Squid and block direct host egress. |
+| `noInternet` | Boolean, default `false`; eligible new Windows VMs only; mutually exclusive with `useProxy`. | Apply the same Hyper-V ACL coverage without provisioning/configuring a proxy. The VM summary shows `[No Internet*]`; see the limitations and temporary exceptions below. |
 | `pushClient` | ConfigMgr site-code string or `false`. | Choose which site pushes the client and owns the subnet boundary. |
 | `enableRDP` | Boolean on Proxy/LinuxServer; enabling raises low sizing to 4 GB/2 vCPU. | Add XFCE/xrdp when a graphical Linux session is needed. |
 | `joinDomain` | Boolean on LinuxServer/LinuxClient; enabling assigns a domain user. | Join Linux through realmd/SSSD and grant the selected user sudo. |
 | `BitLocker` | Boolean; shown when BLM and vTPM make it applicable. | Add the VM to the ConfigMgr BLM policy target. |
+
+### No Internet (proxy ACL coverage)
+
+Set `noInternet=true` on selected **new** DomainMember, WorkgroupMember, CAS,
+Primary, Secondary, SiteSystem, PassiveSite, SQLAO, WSUS or FileServer VMs.
+Existing role/OS restrictions still apply. The setting is saved as a per-VM
+JSON boolean and persisted in Hyper-V notes; it has no domain-wide default.
+It is read-only for deployed VMs in v1. DC/BDC, dedicated PKI, Linux,
+Proxy/DHCPRelay, OSDClient, InternetClient and AADClient are excluded.
+
+```json
+{
+  "vmName": "OFFLINE1",
+  "role": "DomainMember",
+  "operatingSystem": "Server 2025",
+  "useProxy": false,
+  "noInternet": true
+}
+```
+
+This is deliberately **the existing proxy ACL set, without a proxy**, not full
+Internet isolation or physical air-gapping. It permits RFC1918 addresses and
+denies public TCP 80/443, UDP 443 and TCP/UDP 53. Other protocols, IPv6 behavior,
+internal DNS recursion and reachable internal forward proxies are unchanged.
+Internal AD, ConfigMgr, SQL, SMB and management traffic retain their normal
+paths. The host and unselected VMs are not restricted. No guest proxy settings
+are written for this option.
+
+The host verifies the baseline on every VM adapter before first boot. Rules
+match the destination, not the VM's current IP/subnet, so a subnet move does not
+detach the policy. Policy recovery is keyed by Hyper-V VM ID, not VM name.
+Reusing a deleted VM's name cannot inherit its exception authority.
+
+Host-side downloads/cache and file injection remain preferred. A guest-side
+read verifies required cached payloads against the DVD size/hash manifest and
+checks the same installed .NET/ADK/SSMS/PBIRS predicates used by provisioning
+before requesting access. Fully cached/installed work
+does not need an online exception; missing payloads are scoped independently.
+While Phase 2 workgroup prerequisites, Phase 3 prerequisites, Phase 4 SQL CU/
+maintenance-script acquisition, Phase 7 reporting/WSUS setup or applicable
+Phase 8/9 ConfigMgr/role setup run, MemLabs can add
+temporary, stateless **TCP 80/443** permits for the resolved prerequisite URL
+hosts, their HTTP(S) redirects and the named native-download endpoints.
+These permits do not remove baseline rules or enable public DNS/QUIC.
+Scopes are resolved before granting; an unknown destination or changed CDN
+address is not automatically granted because a connection failed.
+Native ADK/SSMS/setup downloaders can still need child payloads even when their
+bootstrapper is cached. Phase 2/7 have 60-minute outer exception budgets,
+Phase 3 has 180 minutes and Phases 4/8/9 have 210 minutes.
+These budgets include retries and do not change non-isolated deployments.
+
+Exceptions use 15-minute renewable leases and 30-second owner heartbeats.
+Each operation/runspace owns its handle, including parallel maintenance workers;
+one VM's work cannot renew or release another worker's lease. Shared remoting,
+connection, shutdown and reboot waits keep the owning operation's heartbeat
+alive without resetting its original deadline. Authorization is established
+before the node publishes its DSC-ready token.
+Lease loss during a primary command or connection wait retains the in-flight
+transport for safe cancellation/cleanup and reports failure. Shutdown recovery
+does not turn a lost/degraded lease into permission for hard power-off.
+An independent SYSTEM scheduled task checks every five seconds, revoking on
+expiry, lost heartbeat/owner, changed host boot or exhausted operation budget.
+With working Hyper-V/recovery services, revocation is targeted within 60 seconds
+of owner/heartbeat loss or expiry. This is not a kernel-enforced absolute TTL.
+An exception temporarily disables that VM's host-boot automatic start; recovery
+revokes permissions before restoring its original startup settings. Startup maintenance rechecks under the same VMId lock
+at the final write, including after operator confirmation. After an
+interrupted host boot, a stopped VM can then be started normally.
+
+State and per-VM JSONL audit events are retained under
+`%ProgramData%\MemLabs\InternetPolicy`, outside VM checkpoints and the checkout.
+The recovery task uses a verified, content-addressed runtime copy, not a mutable
+working-tree script. Phase resumes, maintenance and Phase 11 reject unverified
+or degraded policy. If revocation cannot be verified, the operation fails
+prominently, the **VM keeps running**, no new exception is allowed, and recovery
+keeps retrying. Temporary connectivity may remain during that degraded state.
+
+To retry recovery from elevated host PowerShell 7.4+:
+
+```powershell
+.\tools\Repair-VmInternetPolicy.ps1
+```
+
+The command does not stop or disconnect VMs. Missing/corrupt state is reported
+as a failure even after orphan temporary rules can be removed; unknown original
+startup settings are not guessed. Correct baseline/metadata failures before
+retrying a deployment. Do not manually clear whole ACL sets as a bypass.
+
+Focused, mocked validation:
+[Test-NoInternet.ps1](../../tools/Test-NoInternet.ps1). Real packet-filter,
+CDN/native-installer, host-reboot and checkpoint behavior still requires a
+disposable lab; a failed connection without a working connected control is not
+proof that a firewall rule enforced it.
 
 ### SQL and ConfigMgr role properties
 

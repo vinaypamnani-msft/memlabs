@@ -7,6 +7,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $root 'common\Common.Internet.ps1')
 $hyperVPath = Join-Path $root 'common\Common.HyperV.ps1'
 $scriptBlocksPath = Join-Path $root 'common\Common.ScriptBlocks.ps1'
 

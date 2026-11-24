@@ -165,6 +165,7 @@ function Get-SortedProperties {
         'domainName'          = 'DomainName'
         'prefix'              = 'Prefix'
         'network'             = 'Network'
+        'noInternet'          = 'noInternet'
         'DefaultServerOS'     = 'DefaultServerOS'
         'DefaultClientOS'     = 'DefaultClientOS'
         'DefaultLocale'       = 'DefaultLocale'
@@ -681,6 +682,7 @@ function get-VMString {
         if ($virtualMachine.joinDomain) { $name += " [AD]" }
     }
     if ($virtualMachine.useProxy) { $name += " [Proxy]" }
+    if ($virtualMachine.noInternet -eq $true) { $name += " [No Internet*]" }
     if ($virtualMachine.role -eq 'WSUS' -and $virtualMachine.wsusUseHTTPS) { $name += " [WSUS HTTPS:8531]" }
     if ($virtualMachine.BitLocker) { $name += " [BL]" }
     $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 12)

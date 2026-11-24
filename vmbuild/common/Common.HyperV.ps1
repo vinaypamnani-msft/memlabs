@@ -291,6 +291,13 @@ function Set-VMAutomaticStartup {
         $pending = @($plan | Where-Object {
                 $live = $liveVMs["$($_.VMId)"]
                 if (-not $live) { throw "VM '$($_.VMName)' was not found in live Hyper-V inventory." }
+                $internetVM = $vms | Where-Object { $_.vmId -eq $live.Id -and $_.noInternet -eq $true }
+                if ($internetVM) {
+                    $policy = Read-MemLabsInternetState -VMId $_.VMId
+                    if ($policy.RecoveryHold -or $policy.Lease -or $policy.Status -ne 'Isolated') {
+                        throw "VM '$($_.VMName)' has pending Internet exception recovery; automatic startup maintenance must not remove its hold."
+                    }
+                }
                 $live.AutomaticStartAction -ne $_.AutomaticStartAction -or
                 $live.AutomaticStartDelay -ne $_.AutomaticStartDelay
             })
@@ -313,13 +320,24 @@ function Set-VMAutomaticStartup {
             if (-not $PSCmdlet.ShouldProcess($item.VMName, "Set AutomaticStartAction=Start, AutomaticStartDelay=$($item.AutomaticStartDelay) seconds")) {
                 continue
             }
-            $vm = $liveVMs["$($item.VMId)"]
-            Set-VM -VM $vm -AutomaticStartAction Start -AutomaticStartDelay $item.AutomaticStartDelay -ErrorAction Stop
-            $verified = Get-VM -Id $item.VMId -ErrorAction Stop
-            if (-not $verified -or $verified.AutomaticStartAction -ne 'Start' -or
-                $verified.AutomaticStartDelay -ne $item.AutomaticStartDelay) {
-                throw "VM '$($item.VMName)' did not retain the requested automatic startup settings."
+            $internetVM = $vms | Where-Object { $_.vmId -eq $item.VMId -and $_.noInternet -eq $true }
+            $applyStartup = {
+                if ($internetVM) {
+                    $policy = Read-MemLabsInternetState -VMId $item.VMId
+                    if ($policy.Status -ne 'Isolated' -or $policy.Lease -or $policy.RecoveryHold) {
+                        throw "VM '$($item.VMName)' acquired an Internet exception/recovery hold; startup settings were not overwritten."
+                    }
+                }
+                $vm = if ($internetVM) { Get-VM -Id $item.VMId -ErrorAction Stop } else { $liveVMs["$($item.VMId)"] }
+                Set-VM -VM $vm -AutomaticStartAction Start -AutomaticStartDelay $item.AutomaticStartDelay -ErrorAction Stop
+                $verified = Get-VM -Id $item.VMId -ErrorAction Stop
+                if (-not $verified -or $verified.AutomaticStartAction -ne 'Start' -or
+                    $verified.AutomaticStartDelay -ne $item.AutomaticStartDelay) {
+                    throw "VM '$($item.VMName)' did not retain the requested automatic startup settings."
+                }
             }
+            if ($internetVM) { Invoke-MemLabsInternetStateLock -VMId $item.VMId -Operation $applyStartup }
+            else { & $applyStartup }
             Write-Log "$($item.VMName): AutomaticStartAction=Start; AutomaticStartDelay=$($item.AutomaticStartDelay) seconds." -Success
         }
         return $true
@@ -1215,6 +1233,7 @@ function Start-VM2 {
         [int]$RetrySeconds = 60
     )
 
+    Update-VmInternetExceptionHeartbeat -Force
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
     $vmLockMx = $null
@@ -1249,6 +1268,13 @@ function Start-VM2 {
 
         $vm = Get-VM2 -Name $Name -Fallback
 
+        if ($vm -and "$($vm.Notes)" -match '"noInternet"\s*:\s*true') {
+            $internetNote = $vm.Notes | ConvertFrom-Json -ErrorAction Stop
+            if ($internetNote.noInternet -eq $true) {
+                Assert-VmNoInternetPolicy -VMName $Name -AllowException
+            }
+        }
+
         if ($vm.State -eq "Running") {
             Write-Log "${Name}: VM is already running." -LogOnly
             if ($Passthru) {
@@ -1267,7 +1293,7 @@ function Start-VM2 {
                 $i++
                 if ($i -gt 1) {
                     write-progress2 "Start VM" -Status "Retry Start VM $Name"  -force
-                    Start-Sleep -Seconds $RetrySeconds
+                    Wait-MemLabsInternetOperation -Seconds $RetrySeconds
                 }
                 else {
                     write-progress2 "Start VM" -Status "Starting VM $Name"  -force
@@ -1374,7 +1400,7 @@ function Start-VM2 {
                             # RAM returns to the available pool before we retry.
                             try { Invoke-HostMemoryReclaim | Out-Null } catch {}
 
-                            Start-Sleep -Seconds $waitSec
+                            Wait-MemLabsInternetOperation -Seconds $waitSec
 
                             $StopError = $null
                             Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
@@ -1520,6 +1546,7 @@ function Wait-ForHeartbeat {
         [TimeSpan]$Timespan
     )
 
+    Update-VmInternetExceptionHeartbeat -Force
     $hbWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $hbLimit = New-TimeSpan -Seconds $TimeoutSeconds
     $hbState = "Unknown"
@@ -1535,7 +1562,7 @@ function Wait-ForHeartbeat {
         # If a parent timeout was supplied, bail if it expired too
         if ($Stopwatch -and $Stopwatch.Elapsed -ge $Timespan) { break }
 
-        Start-Sleep -Seconds $PollSeconds
+        Wait-MemLabsInternetOperation -Seconds $PollSeconds
         $vmObj = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
         $hbState = if ($vmObj) { $vmObj.Heartbeat } else { "N/A" }
 
@@ -2023,6 +2050,7 @@ function Stop-VM2 {
         [switch]$Force
     )
 
+    Update-VmInternetExceptionHeartbeat -Force
     try {
         $force = $true
         $vm = Get-VM2 -Name $Name -Fallback
@@ -2087,12 +2115,14 @@ function Stop-VM2 {
                 # caller's hard reset silently never happened on the one VM that needed it.
                 try {
                     # -AsJob so a wedged VM doesn't block forever
+                    Update-VmInternetExceptionHeartbeat -Force
                     $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
-                    $null = $stopJob | Wait-Job -Timeout 15
+                    $null = Wait-MemLabsInternetJob -Job $stopJob -TimeoutSeconds 15
                     if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
                     Remove-CompletedHyperVJob -Job $stopJob -Context "${Name}: TurnOff"
                 }
                 catch {
+                    Update-VmInternetExceptionHeartbeat -Force
                     Write-Log "${Name}: TurnOff attempt threw $($_.Exception.GetType().Name): $_ | $($_.ScriptStackTrace -replace '\s+', ' '); continuing to escalation." -Warning
                 }
                 Start-Sleep -Seconds 5
@@ -2113,12 +2143,13 @@ function Stop-VM2 {
             do {
                 $i++
                 if ($i -gt 1) {
-                    Start-Sleep -Seconds $RetrySeconds
+                    Wait-MemLabsInternetOperation -Seconds $RetrySeconds
                 }
                 $StopError = @()
                 try {
+                    Update-VmInternetExceptionHeartbeat -Force
                     $gracefulJob = Stop-VM -VM $vm -force:$force -WarningAction SilentlyContinue -AsJob
-                    $null = $gracefulJob | Wait-Job -Timeout $GracefulTimeoutSeconds
+                    $null = Wait-MemLabsInternetJob -Job $gracefulJob -TimeoutSeconds $GracefulTimeoutSeconds
                     if ($gracefulJob.State -eq 'Running') {
                         Write-Log "${Name}: Graceful stop did not complete within ${GracefulTimeoutSeconds}s; escalating." -Warning
                         Stop-Job $gracefulJob -ErrorAction SilentlyContinue
@@ -2130,6 +2161,7 @@ function Stop-VM2 {
                     Remove-CompletedHyperVJob -Job $gracefulJob -Context "${Name}: graceful stop"
                 }
                 catch {
+                    Update-VmInternetExceptionHeartbeat -Force
                     $StopError = @("graceful Stop-VM threw $($_.Exception.GetType().Name): $_")
                 }
                 if ($StopError.Count -eq 0) {
@@ -2146,15 +2178,17 @@ function Stop-VM2 {
 
                 # Escalation: TurnOff via -AsJob with timeout
                 try {
+                    Update-VmInternetExceptionHeartbeat -Force
                     $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
-                    $null = $stopJob | Wait-Job -Timeout 15
+                    $null = Wait-MemLabsInternetJob -Job $stopJob -TimeoutSeconds 15
                     if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
                     Remove-CompletedHyperVJob -Job $stopJob -Context "${Name}: escalation TurnOff"
                 }
                 catch {
+                    Update-VmInternetExceptionHeartbeat -Force
                     Write-Log "${Name}: escalation TurnOff threw $($_.Exception.GetType().Name): $_; falling through to the worker-process kill." -Warning
                 }
-                Start-Sleep -Seconds $RetrySeconds
+                Wait-MemLabsInternetOperation -Seconds $RetrySeconds
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Off") {
                     if ($Passthru.IsPresent) {
@@ -2258,6 +2292,7 @@ function Restart-VM2Smart {
         [object]$Timespan
     )
 
+    Update-VmInternetExceptionHeartbeat -Force
     $vm = Get-VM2 -Name $Name -Fallback
     if (-not $vm) {
         Write-Log "${Name}: Restart-VM2Smart ($Reason): VM not found." -Warning
@@ -2308,7 +2343,7 @@ function Restart-VM2Smart {
         $gracefulStart = [DateTime]::UtcNow
         try {
             $gracefulJob = Stop-VM -VM $vm -Force -WarningAction SilentlyContinue -AsJob
-            $null = $gracefulJob | Wait-Job -Timeout $GracefulTimeoutSeconds
+            $null = Wait-MemLabsInternetJob -Job $gracefulJob -TimeoutSeconds $GracefulTimeoutSeconds
             # Drain the job's own failure BEFORE disposing it. A Hyper-V Stop-VM job that fails
             # in under a second (shutdown integration service refusing) is otherwise reported
             # identically to a genuine timeout, and the reason is lost. The reason can land on
@@ -2368,7 +2403,7 @@ function Restart-VM2Smart {
         $shutdownLastProgress = [DateTime]::UtcNow
         $shutdownFingerprint = "$($vm.State)|$($vm.Heartbeat)|$($vm.Status)"
         while ($true) {
-            Start-Sleep -Seconds $ShutdownPollSeconds
+            Wait-MemLabsInternetOperation -Seconds $ShutdownPollSeconds
             $vm = Get-VM2 -Name $Name -Fallback
             if (-not $vm) {
                 Write-Log "${Name}: Restart ($Reason): VM disappeared while Windows owned shutdown; refusing hard TurnOff." -Warning
@@ -3144,106 +3179,22 @@ function Set-VmProxyEnforcement {
         [Parameter(Mandatory = $true)] [string]$VmName
     )
 
-    # Fixed RFC 1918 ranges -- covers every possible lab subnet without
-    # needing to enumerate them. Only public-IP traffic hits the deny rules.
-    $cidrs = @('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')
-
-    # Fast-path: if existing ACLs already match the desired state, skip the
-    # expensive clear+re-add cycle (~11 WMI calls saved per VM).
     try {
-        $existingAcls = @(Get-VMNetworkAdapterExtendedAcl -VMName $VmName -ErrorAction SilentlyContinue |
-            Where-Object { $_.Weight -ge $global:MemLabsProxyAclWeightMin -and $_.Weight -le $global:MemLabsProxyAclWeightMax })
-        $expectedTotal = ($cidrs.Count * 2) + 5   # 2 allow (in+out) per range + 5 deny rules = 11
-        if ($existingAcls.Count -eq $expectedTotal) {
-            $existingAllowCidrs = @($existingAcls |
-                Where-Object { $_.Action -eq 'Allow' } |
-                ForEach-Object { $_.RemoteIPAddress } |
-                Sort-Object -Unique)
-            $desiredCidrs = @($cidrs | Sort-Object)
-            if (($existingAllowCidrs -join ',') -eq ($desiredCidrs -join ',')) {
-                Write-Log "[Proxy] $VmName`: ACLs already current; skipping" -Verbose
-                return $true
+        $desired = @(Get-VmProxyEnforcementRules)
+        $adapters = @(Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop)
+        if ($adapters.Count -eq 0) { throw 'No VM network adapters were found.' }
+        foreach ($adapter in $adapters) {
+            if (Test-VmInternetAclSet -Adapter $adapter -Rules $desired -MinimumWeight 5000 -MaximumWeight 5099) { continue }
+            $oldRules = @(Get-VMNetworkAdapterExtendedAcl -VMNetworkAdapter $adapter -ErrorAction Stop |
+                Where-Object { $_.Weight -ge 5000 -and $_.Weight -le 5099 })
+            foreach ($oldRule in $oldRules) { $oldRule | Remove-VMNetworkAdapterExtendedAcl -ErrorAction Stop }
+            foreach ($rule in ($desired | Sort-Object { $_.Action -ne 'Deny' }, { $_.Weight })) {
+                Add-VMNetworkAdapterExtendedAcl -VMNetworkAdapter $adapter @rule -ErrorAction Stop | Out-Null
+            }
+            if (-not (Test-VmInternetAclSet -Adapter $adapter -Rules $desired -MinimumWeight 5000 -MaximumWeight 5099)) {
+                throw "Adapter '$($adapter.Name)' did not retain the complete enforcement rule set."
             }
         }
-    }
-    catch {
-        # If we can't read ACLs, fall through to the full clear+re-add path.
-    }
-
-    Clear-VmProxyEnforcement -VmName $VmName
-
-    # Helper: Add-VMNetworkAdapterExtendedAcl can return 0x800700B7 when an
-    # identical rule somehow survived the clear (e.g. switch port settings
-    # cached the rule across a clear/add race). Treat that as benign --
-    # the rule we wanted is already in place.
-    $addAcl = {
-        param([hashtable]$params)
-        try {
-            Add-VMNetworkAdapterExtendedAcl @params -ErrorAction Stop | Out-Null
-        }
-        catch {
-            if ($_.Exception.Message -match '0x800700B7|already exists') {
-                # Don't swallow silently -- if this fires it means a previous
-                # rule with the same (Direction + Weight + Protocol) key is
-                # still on the vNIC. Hyper-V's extended-ACL identity does
-                # NOT include RemotePort, so two deny rules at the same
-                # weight/direction/protocol but different ports will collide
-                # and the second silently lose. Warn loudly so the next
-                # diagnostic round-trip catches it.
-                Write-Log "[Proxy] $VmName`: ACL add returned 'already exists' -- prior rule at same Weight+Direction+Protocol survived clear, NEW RULE LOST: $($params | Out-String)" -Warning
-                return
-            }
-            throw
-        }
-    }
-
-    try {
-        # --- High-priority ALLOW rules (weights 5093-5099) ---
-        # Allow all traffic both directions to/from any RFC 1918 private IP.
-        # This covers every memlabs lab subnet regardless of how many labs
-        # or subnets exist on the host (no per-subnet enumeration needed).
-        # Intra-lab AD/SMB/SQL/CM and cross-domain hierarchy traffic all
-        # stay native. Only public-IP traffic on the denied ports is blocked.
-        #
-        # Each (range, direction) gets a unique weight: Hyper-V's
-        # extended-ACL identity is (Direction + Weight + Protocol) and does
-        # NOT include RemoteIPAddress, so rules sharing
-        # Direction+Weight+Protocol collide.
-        $w = 5099
-        foreach ($cidr in $cidrs) {
-            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Outbound'; RemoteIPAddress = $cidr; Weight = $w }
-            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Inbound';  RemoteIPAddress = $cidr; Weight = $w - 1 }
-            $w -= 2
-        }
-
-        # --- Low-priority DENY rules (weights 5000-5004, one per rule) ---
-        # Block outbound HTTP/HTTPS to anywhere not covered above (= Internet).
-        # The proxy itself reaches the Internet via the host NAT, so clients
-        # MUST go through the proxy for any web traffic.
-        #
-        # Each rule gets a unique weight: Hyper-V's extended-ACL identity
-        # key is (Direction + Weight + Protocol), NOT including RemotePort.
-        # If two rules share weight+direction+protocol, the second add fires
-        # 0x800700B7 ("already exists") which our addAcl helper benignly
-        # swallows -- and you end up with only the FIRST port enforced
-        # (e.g. TCP/80 deny lands, TCP/443 deny silently lost).
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 80;  Protocol = 'TCP'; Weight = 5004 }
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'TCP'; Weight = 5003 }
-
-        # Block QUIC/HTTP3 (UDP 443). Without this, Chromium-based browsers
-        # (Edge, Chrome) bypass the proxy entirely for domains in the QUIC
-        # preload list (e.g. Google) -- connecting directly over UDP 443,
-        # which the TCP-only deny above doesn't catch. Symptoms: Google
-        # works but doesn't appear in Squid logs; non-preloaded domains
-        # (Bing, microsoft.com) fail because Edge tries TCP 443 first
-        # (blocked), and never attempts QUIC without a prior Alt-Svc header.
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'UDP'; Weight = 5002 }
-
-        # Block outbound DNS to non-lab resolvers (lab DCs are covered by
-        # the lab-subnet allow above).
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'UDP'; Weight = 5001 }
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'TCP'; Weight = 5000 }
-
         Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (allow all RFC 1918 private, deny public 80/443/53)"
         return $true
     }
@@ -3376,6 +3327,14 @@ function Set-VmProxyEnforcementForAllLabs {
         $optedIn = $false
         if ($vm.PSObject.Properties.Name -contains 'useProxy') {
             $optedIn = [bool]$vm.useProxy
+        }
+        if ($vm.noInternet -eq $true) {
+            if (-not (Test-VmNoInternetEligible -VM $vm)) {
+                $failed++
+                Write-Log "[NoInternet] $($vm.vmName): unsupported role/OS; existing ACLs left unchanged." -Failure
+                continue
+            }
+            $optedIn = $true
         }
 
         try {

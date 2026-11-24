@@ -787,6 +787,34 @@ function Test-ValidSiteRoleFlags {
     }
 }
 
+function Test-ValidVmInternetPolicy {
+    param([Parameter(Mandatory)]$VM, [Parameter(Mandatory)]$ConfigObject, [Parameter(Mandatory)]$ReturnObject)
+
+    $property = $VM.PSObject.Properties['noInternet']
+    if (-not $property) { return }
+    if ($property.Value -isnot [bool]) {
+        Add-ValidationMessage -Message "VM Validation: [$($VM.vmName)] noInternet must be a JSON boolean." -ReturnObject $ReturnObject -Failure
+        return
+    }
+    if ($VM.noInternet -and -not (Test-VmNoInternetEligible -VM $VM)) {
+        Add-ValidationMessage -Message "VM Validation: [$($VM.vmName)] noInternet supports Windows member, ConfigMgr, SQLAO, WSUS and FileServer roles only." -ReturnObject $ReturnObject -Failure
+    }
+    if ($VM.noInternet -and $VM.useProxy) {
+        Add-ValidationMessage -Message "VM Validation: [$($VM.vmName)] noInternet and useProxy are mutually exclusive." -ReturnObject $ReturnObject -Failure
+    }
+    $fullName = Add-VmNamePrefix -Name $VM.vmName -Prefix $ConfigObject.vmOptions.prefix
+    try {
+        $existing = @(Get-List -Type VM -FailOnError | Where-Object { $_.vmName -eq $fullName })
+        if ($existing.Count -gt 1) { throw "Multiple deployed VMs match '$fullName'." }
+        if ($existing.Count -eq 1 -and [bool]$existing[0].noInternet -ne $VM.noInternet) {
+            Add-ValidationMessage -Message "VM Validation: [$fullName] noInternet cannot be enabled or disabled on an already deployed VM in v1." -ReturnObject $ReturnObject -Failure
+        }
+    }
+    catch {
+        Add-ValidationMessage -Message "VM Validation: [$fullName] could not verify deployed Internet policy: $($_.Exception.Message)" -ReturnObject $ReturnObject -Failure
+    }
+}
+
 function Test-ValidVmSupported {
     param (
         [object] $VM,
@@ -800,6 +828,7 @@ function Test-ValidVmSupported {
     }
 
     $vmName = $VM.vmName
+    Test-ValidVmInternetPolicy -VM $VM -ConfigObject $ConfigObject -ReturnObject $ReturnObject
     foreach ($reference in 'remoteSQLVM', 'replicaSqlServerVM', 'wsusDataBaseServer', 'fileServerVM', 'pullDPSourceDP', 'OtherNode', 'remoteContentLibVM', 'PatchMyPCFileServer') {
         if ($VM.PSObject.Properties[$reference] -and [string]::IsNullOrWhiteSpace($VM.$reference)) {
             Add-ValidationMessage -Message "VM Validation: [$vmName] contains an empty '$reference' VM reference. Select a valid VM or remove the unused property." -ReturnObject $ReturnObject -Failure

@@ -4966,6 +4966,10 @@ $global:VM_Config = {
             $domainName = "WORKGROUP"
         }
 
+        if ($currentItem.noInternet -eq $true) {
+            Assert-VmNoInternetPolicy -VMName $currentItem.vmName
+        }
+
         # AADClient idempotency: once OOBE has been reached, the VM has no
         # usable accounts (sysprep /generalize wiped them).  A persistent
         # 'oobeComplete' flag in the VM note lets us skip the entire block
@@ -6037,6 +6041,12 @@ $global:VM_Config = {
                 $Global:ProgressPreference = 'SilentlyContinue'
                 try {
                     $vmnet = Add-VMNetworkAdapter -VMName $currentItem.vmName -SwitchName "ClusterV2" -Name "Cluster" -Passthru
+                    if ($currentItem.noInternet -eq $true) {
+                        if (-not (Set-VmProxyEnforcement -VMName $currentItem.vmName)) {
+                            throw 'Could not apply noInternet rules to the new heartbeat adapter.'
+                        }
+                        Assert-VmNoInternetPolicy -VMName $currentItem.vmName
+                    }
                     $addedNic = $true
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): NIC added MAC: $($vmnet.MacAddress)" -LogOnly
                     if (-not $($vmnet.MacAddress)) {
@@ -7133,6 +7143,10 @@ $global:VM_Config = {
         }
 
         Write-Progress2 $Activity -Status "Clearing DSC Status" -percentcomplete 65 -force
+        $internetExceptionArguments = Get-VmDeploymentInternetException -VM $currentItem -DeployConfig $deployConfig -Phase $Phase -VMDomain $domainName
+        if ($internetExceptionArguments) {
+            $null = Start-VmInternetException @internetExceptionArguments
+        }
         Write-Log "[Phase $Phase]: $($currentItem.vmName):DSC_ClearStatus Clearing previous DSC status"
         $clearStatusSw = [System.Diagnostics.Stopwatch]::StartNew()
         $clearStatusAttempts = 1
@@ -8511,16 +8525,16 @@ $global:VM_Config = {
                             }
                             Write-Progress2 "Restarting $node" -PercentComplete $percent -force
                             Stop-Vm2 -Name $node
-                            Start-Sleep -seconds 20
+                            Wait-MemLabsInternetOperation -Seconds 20
                             Start-VM2 -Name $node
-                            Start-Sleep -seconds 60
+                            Wait-MemLabsInternetOperation -Seconds 60
                         }
                     }
 
                     # The node is normally already ready on the first poll, so poll hard early and
                     # back off rather than paying a flat 3s before every check.
                     $pollDelay = if ($attempts -lt 5) { 1 } elseif ($attempts -lt 10) { 2 } else { 3 }
-                    Start-Sleep -Seconds $pollDelay
+                    Wait-MemLabsInternetOperation -Seconds $pollDelay
                 } until ($allNodesReady -or ((Get-Date) - $nodeWaitStart) -ge $nodeWaitTimeout)
 
                 Write-Log "[StepTiming] $($currentItem.vmName) [Phase $Phase] NodeReadyWait completed in $([math]::Round(((Get-Date) - $nodeWaitStart).TotalSeconds, 1)) seconds after $attempts attempt(s), ready=$allNodesReady" -LogOnly
@@ -8799,6 +8813,7 @@ $global:VM_Config = {
         try {
             do {
 
+                Update-VmInternetExceptionHeartbeat
                 $dscStatusPolls++
 
                 # Self-recovery: if the DC was supposed to push DSC to this
@@ -10989,6 +11004,11 @@ $global:VM_Config = {
             }
         }
 
+        $internetExceptionHandle = Get-VmInternetExceptionHandle
+        if ($internetExceptionHandle) {
+            Stop-VmInternetException -Handle $internetExceptionHandle
+        }
+
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
         if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
 
@@ -11349,6 +11369,13 @@ $global:VM_Config = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
         Write-Progress "Exception Occurred" -Status "Failed end2 $_"
+    }
+    finally {
+        $internetExceptionHandle = Get-VmInternetExceptionHandle
+        if ($internetExceptionHandle) {
+            try { Stop-VmInternetException -Handle $internetExceptionHandle }
+            catch { Write-Log "[NoInternet] $($currentItem.vmName): Exception cleanup failed; recovery remains pending. $_" -Failure -OutputStream }
+        }
     }
 }
 # Per-VM Phase 2 job for the Linux Proxy VM. Runs Install-LinuxProxyServer

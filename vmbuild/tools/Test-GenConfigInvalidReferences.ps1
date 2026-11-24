@@ -9,6 +9,7 @@ param([string] $RootPath)
 $ErrorActionPreference = 'Stop'
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
 $commonPath = Join-Path $RootPath 'common'
+. (Join-Path $commonPath 'Common.Internet.ps1')
 
 function Import-TestFunction {
     param([string] $File, [string] $Name)
@@ -186,7 +187,7 @@ foreach ($name in 'select-PullDPMenu', 'select-ReplicaSQLMenu', 'Get-ListOfPossi
 foreach ($name in 'Add-VmNamePrefix', 'Get-OsdPxePaths', 'Test-SiteSystemClientOperatingSystem', 'Get-VMFromList2', 'Get-SiteServerForSiteCode', 'Get-SqlServerForSiteCode', 'Get-ParentSiteServerForSiteCode', 'Get-ActiveSiteServerForSiteCode') {
     . (Import-TestFunction 'Common.Config.ps1' $name)
 }
-foreach ($name in 'Add-ValidationMessage', 'Test-CrossDomainNameConflict', 'Test-MachineNameExists', 'Test-ValidMachineName', 'Test-ValidVmSupported', 'Test-ValidUserName') {
+foreach ($name in 'Add-ValidationMessage', 'Test-CrossDomainNameConflict', 'Test-MachineNameExists', 'Test-ValidMachineName', 'Test-ValidVmInternetPolicy', 'Test-ValidVmSupported', 'Test-ValidUserName') {
     . (Import-TestFunction 'Common.Validation.ps1' $name)
 }
 . (Import-TestFunction 'Common.Menu.ps1' 'Show-GenConfigErrorMessages')

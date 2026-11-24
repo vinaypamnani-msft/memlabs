@@ -7,6 +7,7 @@ param([string]$RootPath)
 
 $ErrorActionPreference = 'Stop'
 if (-not $RootPath) { $RootPath = Split-Path -Parent $PSScriptRoot }
+. (Join-Path $RootPath 'common\Common.Internet.ps1')
 
 $tokens = $null
 $parseErrors = $null

@@ -598,4 +598,9 @@ $fixesToPerform += [pscustomobject]@{
     DependentVMs        = @()
     ScriptBlock         = $Fix_ODBC18
     ArgumentList        = @($odbcTargetVersion, $odbcDownloadUrl, $vcRedistDownloadUrl)
+    InternetAccess      = [pscustomobject]@{
+        Urls = @($odbcDownloadUrl, $vcRedistDownloadUrl)
+        HostNames = @('download.microsoft.com')
+        MaximumMinutes = 20
+    }
 }
