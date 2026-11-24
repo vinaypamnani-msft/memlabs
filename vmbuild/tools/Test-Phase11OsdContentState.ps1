@@ -189,6 +189,8 @@ function New-WaitTarget {
         [int[]]$ProgressAt = @(),
         [string[]]$ProgressNames = @(),
         [int]$SourceReadyAt = -1,
+        [int[]]$SourceImportRetryAt = @(),
+        [int]$SourceImportErrorCode = 5,
         [int]$InstalledAt = 10000,
         [int]$LogVersion = 1,
         [switch]$NoStatus
@@ -198,6 +200,7 @@ function New-WaitTarget {
         SourceSite = 'SRC'; SourceVersion = 1; StoredPkgVersion = 1
         State = $State; TransferStarts = $TransferStarts; InstalledAt = $InstalledAt
         ProgressAt = $ProgressAt; ProgressNames = $ProgressNames; SourceReadyAt = $SourceReadyAt
+        SourceImportRetryAt = $SourceImportRetryAt; SourceImportErrorCode = $SourceImportErrorCode
         LogVersion = $LogVersion; NoStatus = $NoStatus.IsPresent
     }
 }
@@ -250,6 +253,20 @@ function Invoke-WaitFixture {
         $threadId = 1234
         foreach ($target in $fixture.Targets) {
             $threadId++
+            if ($LiteralPath -match '\\despool\.') {
+                foreach ($retryAt in $target.SourceImportRetryAt) {
+                    if ($fixture.Seconds -lt $retryAt) { continue }
+                    $received = $baseUtc.AddSeconds($retryAt - 2).ToString('MM-dd-yyyy HH:mm:ss.fff')
+                    $failed = $baseUtc.AddSeconds($retryAt - 1).ToString('MM-dd-yyyy HH:mm:ss.fff')
+                    $scheduled = $baseUtc.AddSeconds($retryAt).ToString('MM-dd-yyyy HH:mm:ss.fff')
+                    ('Received package {0} version {1}. Compressed file - C:\SMSPKG\{0}.PCK.1 as C:\Site\inboxes\despoolr.box\receive\fixture.pkg $$<SMS_DESPOOLER><{2}+000><thread={3}>' -f
+                        $target.PackageId, $target.LogVersion, $received, $threadId)
+                    ('STATMSG: ID=4402 SEV=E ISTR0="{0}" NUMATTRS=1 LE=0X{1:X} $$<SMS_DESPOOLER><{2}+000><thread={3}>' -f
+                        $target.PackageId, $target.SourceImportErrorCode, $failed, $threadId)
+                    ('Created retry instruction for job 00000001 $$<SMS_DESPOOLER><{0}+000><thread={1}>' -f $scheduled, $threadId)
+                }
+                continue
+            }
             foreach ($start in $target.TransferStarts) {
                 if ($fixture.Seconds -lt $start) { continue }
                 $timestamp = $baseUtc.AddSeconds($start).ToString('MM-dd-yyyy HH:mm:ss.fff')
@@ -407,6 +424,55 @@ $sourceReady = Invoke-WaitFixture -Targets @(
     (New-WaitTarget -SourceReadyAt 840 -TransferStarts 1500 -InstalledAt 2399)
 )
 Assert-WaitOutcome $sourceReady 2400 $false
+$sourceRetry = Invoke-WaitFixture -Targets @(
+    (New-WaitTarget -SourceImportRetryAt 600 -SourceReadyAt 1560 -TransferStarts 1590 -InstalledAt 2099)
+)
+Assert-WaitOutcome $sourceRetry 2100 $false
+if (($sourceRetry.Details -join ' ') -notmatch 'native despooler retry' -or
+    ($sourceRetry.Details -join ' ') -notmatch 'Win32 5') {
+    throw 'The source-import retry allowance hid its access-denied evidence.'
+}
+$sourceRetryCap = Invoke-WaitFixture -Targets @(
+    (New-WaitTarget -SourceImportRetryAt 600, 1500, 2400 -SourceReadyAt 10000)
+)
+Assert-WaitOutcome $sourceRetryCap 2700 $true
+if ($sourceRetryCap.Passed -or $sourceRetryCap.Targets[0].Stage -ne 'SourceImportRetry' -or
+    $sourceRetryCap.Targets[0].LastEvidenceKind -ne 'ValidationStarted' -or
+    $sourceRetryCap.Targets[0].NoProgressSeconds -ne 2700 -or
+    $sourceRetryCap.Targets[0].VerifiedCopiedFiles -ne 0 -or
+    $sourceRetryCap.Targets[0].LimitKind -ne 'OverallHardCap') {
+    throw 'Source-import failures became progress, renewed the retry allowance, or bypassed Installed validation.'
+}
+foreach ($ineligibleRetry in @(
+        (New-WaitTarget -SourceImportRetryAt 600 -SourceReadyAt 10000 -SourceImportErrorCode 3),
+        (New-WaitTarget -SourceImportRetryAt 600),
+        (New-WaitTarget -SourceImportRetryAt 600 -SourceReadyAt 10000 -LogVersion 2),
+        (New-WaitTarget -SourceImportRetryAt -30 -SourceReadyAt 10000),
+        (New-WaitTarget -SourceImportRetryAt 0 -SourceReadyAt 10000),
+        (New-WaitTarget -SourceImportRetryAt 901 -SourceReadyAt 10000)
+    )) {
+    Assert-WaitOutcome (Invoke-WaitFixture -Targets @($ineligibleRetry)) 900 $true
+}
+$retryIsolation = Invoke-WaitFixture -Targets @(
+    (New-WaitTarget -PackageId 'PRI00007' -SourceImportRetryAt 600 -SourceReadyAt 10000),
+    (New-WaitTarget -PackageId 'PRI00008' -SourceReadyAt 10000)
+)
+Assert-WaitOutcome $retryIsolation 900 $true
+if (@($retryIsolation.Targets | Where-Object { $_.Expired -and $_.PackageId -eq 'PRI00008' }).Count -ne 1) {
+    throw 'Another package borrowed the source-import retry allowance.'
+}
+$transferRetry = Invoke-WaitFixture -Targets @(
+    (New-WaitTarget -SourceImportRetryAt 600 -SourceReadyAt 10000 -TransferStarts 30)
+)
+Assert-WaitOutcome $transferRetry 930 $true
+$transferAfterRetry = Invoke-WaitFixture -Targets @(
+    (New-WaitTarget -SourceImportRetryAt 600 -SourceReadyAt 10000 -TransferStarts 1200)
+)
+Assert-WaitOutcome $transferAfterRetry 2100 $true
+if ($transferAfterRetry.Targets[0].Stage -ne 'TransferOrInstallation' -or
+    $transferAfterRetry.Targets[0].LimitKind -ne 'NoVerifiedProgress') {
+    throw 'A started DP transfer retained source-import grace after the source provider lagged behind.'
+}
 $uncorrelated = Invoke-WaitFixture -Targets @((New-WaitTarget -ProgressAt 600))
 Assert-WaitOutcome $uncorrelated 900 $true
 if (($uncorrelated.Details -join ' ') -notmatch 'no matching package/version sending thread' -or
@@ -502,4 +568,48 @@ if (-not $noResurrection.Targets[0].Expired -or
     }
 }
 
-Write-Host 'PASS -- executed per-target progress/stall clocks, 45-minute cap, evidence correlation, and unchanged required-content checks.'
+& {
+    $receive = 'Received package PRI00007 version 1. Compressed file - C:\SMSPKG\PRI00007.PCK.1 as C:\Site\inboxes\despoolr.box\receive\fixture.pkg $$<SMS_DESPOOLER><11-04-2026 00:01:00.000+000><thread=1234>'
+    $failure = 'STATMSG: ID=4402 SEV=E ISTR0="PRI00007" NUMATTRS=1 LE=0X5 $$<SMS_DESPOOLER><11-04-2026 00:02:00.000+000><thread=1234>'
+    $retry = 'Created retry instruction for job 00000001 $$<SMS_DESPOOLER><11-04-2026 00:02:00.100+000><thread=1234>'
+    $fixtureLogs = @{
+        'C:\FixtureSite\Logs\despool.lo_' = @($receive)
+        'C:\FixtureSite\Logs\despool.log' = @($failure, $retry)
+    }
+    function Get-ItemProperty {
+        param($Path, $Name, $ErrorAction)
+        [pscustomobject]@{ 'Installation Directory' = 'C:\FixtureSite' }
+    }
+    function Test-Path { param($LiteralPath, $ErrorAction) $fixtureLogs.ContainsKey($LiteralPath) }
+    function Get-Content { param($LiteralPath, $Tail, $ErrorAction) $fixtureLogs[$LiteralPath] }
+    $details = [System.Collections.Generic.List[string]]::new()
+    $evidence = Get-MemLabsOsdTransferEvidence -Details $details
+    if ($evidence.SourceRetries.Count -ne 1 -or $evidence.SourceRetries[0].PackageId -ne 'PRI00007' -or
+        $evidence.SourceRetries[0].SourceVersion -ne 1 -or
+        $evidence.SourceRetries[0].FailureAtUtc -ne ([datetime]'2026-11-04T00:02:00Z').ToUniversalTime() -or
+        $evidence.Starts.Count -ne 0 -or $evidence.Progress.Count -ne 0) {
+        throw 'A rolled source receive and current native retry lost their exact package/version correlation or became transfer progress.'
+    }
+    $fixtureLogs['C:\FixtureSite\Logs\despool.log'] = @($failure)
+    if ((Get-MemLabsOsdTransferEvidence -Details $details).SourceRetries.Count -ne 0) {
+        throw 'An access-denied error without a scheduled native retry authorized extra waiting.'
+    }
+    $fixtureLogs['C:\FixtureSite\Logs\despool.log'] = @(
+        $failure,
+        'Despooler failed to execute the instruction, error code = 8 $$<SMS_DESPOOLER><11-04-2026 00:02:00.050+000><thread=1234>',
+        $retry
+    )
+    if ((Get-MemLabsOsdTransferEvidence -Details $details).SourceRetries.Count -ne 0) {
+        throw 'A later instruction on a recycled despooler thread inherited an earlier source-import failure.'
+    }
+    $fixtureLogs['C:\FixtureSite\Logs\despool.log'] = @(
+        $receive.Replace('PRI00007', 'PRI00008'), $failure, $retry
+    )
+    $fixtureLogs.Remove('C:\FixtureSite\Logs\despool.lo_')
+    if ((Get-MemLabsOsdTransferEvidence -Details $details).SourceRetries.Count -ne 0 -or
+        ($details -join ' ') -notmatch 'no matching package/version receive record') {
+        throw 'A recycled despooler thread or uncorrelated failure authorized another package''s retry.'
+    }
+}
+
+Write-Host 'PASS -- executed per-target progress/stall clocks, bounded native source-import retries, 45-minute cap, evidence correlation, and unchanged required-content checks.'

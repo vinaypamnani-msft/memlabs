@@ -14211,8 +14211,31 @@ function Test-CMSiteWideFunctionality {
                 $kind = 'PackageTransferred'
             }
             if (-not $entry.Success) {
-                if ($Line -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package') {
-                    throw "Malformed PkgXferMgr transfer record: $Line"
+                $entry = [regex]::Match($Line,
+                    'Received package (?<PackageId>[A-Za-z0-9]{8}) version (?<Version>\d+)\.',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'SourceImportStarted'
+            }
+            if (-not $entry.Success) {
+                $entry = [regex]::Match($Line,
+                    'STATMSG:\s*ID=4402\b.*?\bISTR0="(?<PackageId>[A-Za-z0-9]{8})".*?\bLE=0X(?<ErrorCode>[0-9A-F]+)\b',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'SourceImportFailed'
+            }
+            if (-not $entry.Success) {
+                $entry = [regex]::Match($Line, 'Created retry instruction for job \S+',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'SourceImportRetryScheduled'
+            }
+            if (-not $entry.Success) {
+                $entry = [regex]::Match($Line,
+                    'Despooler (?:successfully executed one instruction|failed to execute the instruction)',
+                    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                $kind = 'SourceImportEnded'
+            }
+            if (-not $entry.Success) {
+                if ($Line -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package|Received package |STATMSG:\s*ID=4402\b|Created retry instruction for job') {
+                    throw "Malformed PkgXferMgr/despool content record: $Line"
                 }
                 return
             }
@@ -14227,7 +14250,7 @@ function Test-CMSiteWideFunctionality {
                 $dateField = [regex]::Match($Line, '\bdate="(?<Date>\d{1,2}-\d{1,2}-\d{4})"')
                 $timeField = [regex]::Match($Line, '\btime="(?<Time>\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?)(?<Offset>[+-]\d+)"')
                 if (-not $dateField.Success -or -not $timeField.Success) {
-                    throw "No supported timestamp in PkgXferMgr transfer record: $Line"
+                    throw "No supported timestamp in OSD content record: $Line"
                 }
                 $dateText = $dateField.Groups['Date'].Value
                 $timeText = $timeField.Groups['Time'].Value
@@ -14236,22 +14259,30 @@ function Test-CMSiteWideFunctionality {
             $stamp = [datetime]::MinValue
             $offsetMinutes = 0
             $sourceVersion = 0
+            [uint32]$errorCode = 0
+            $hasVersion = $kind -notin 'SourceImportFailed', 'SourceImportRetryScheduled', 'SourceImportEnded'
             if (-not [datetime]::TryParseExact("$dateText $timeText",
                     [string[]]@('M-d-yyyy HH:mm:ss.FFFFFFF', 'M-d-yyyy HH:mm:ss'),
                     [System.Globalization.CultureInfo]::InvariantCulture,
                     [System.Globalization.DateTimeStyles]::None, [ref]$stamp) -or
                 -not [int]::TryParse($offsetText, [ref]$offsetMinutes) -or
                 [math]::Abs([long]$offsetMinutes) -gt 840 -or
-                -not [int]::TryParse($entry.Groups['Version'].Value, [ref]$sourceVersion) -or
-                $sourceVersion -lt 1) {
-                throw "Invalid timestamp or version in PkgXferMgr transfer record: $Line"
+                ($hasVersion -and (-not [int]::TryParse($entry.Groups['Version'].Value, [ref]$sourceVersion) -or
+                    $sourceVersion -lt 1)) -or
+                ($kind -eq 'SourceImportFailed' -and -not [uint32]::TryParse($entry.Groups['ErrorCode'].Value,
+                    [System.Globalization.NumberStyles]::HexNumber,
+                    [System.Globalization.CultureInfo]::InvariantCulture, [ref]$errorCode))) {
+                throw "Invalid timestamp or version in OSD content record: $Line"
             }
             $thread = [regex]::Match($Line, '\bthread="?(?<ThreadId>\d+)')
-            if (-not $thread.Success) { throw "No thread identity in PkgXferMgr transfer record: $Line" }
+            if (-not $thread.Success) { throw "No thread identity in OSD content record: $Line" }
             $atUtc = [datetimeoffset]::new($stamp, [timespan]::FromMinutes(-$offsetMinutes)).UtcDateTime
             $startedAtUtc = $null
             $sortOrder = 1
             if ($kind -eq 'TransferStarted') { $startedAtUtc = $atUtc; $sortOrder = 0 }
+            elseif ($kind -eq 'SourceImportStarted') { $sortOrder = 0 }
+            elseif ($kind -eq 'SourceImportRetryScheduled') { $sortOrder = 2 }
+            elseif ($kind -eq 'SourceImportEnded') { $sortOrder = 3 }
             [pscustomobject]@{
                 PackageId = $entry.Groups['PackageId'].Value
                 DP = $entry.Groups['DP'].Value.TrimEnd('\')
@@ -14259,6 +14290,7 @@ function Test-CMSiteWideFunctionality {
                 Kind = $kind
                 FileName = $entry.Groups['FileName'].Value
                 ThreadId = $thread.Groups['ThreadId'].Value
+                ErrorCode = $errorCode
                 AtUtc = $atUtc
                 StartedAtUtc = $startedAtUtc
                 SortOrder = $sortOrder
@@ -14271,6 +14303,7 @@ function Test-CMSiteWideFunctionality {
             $events = [System.Collections.Generic.List[object]]::new()
             $starts = [System.Collections.Generic.List[object]]::new()
             $progress = [System.Collections.Generic.List[object]]::new()
+            $sourceRetries = [System.Collections.Generic.List[object]]::new()
             $smsDir = ''
             foreach ($key in @('HKLM:\SOFTWARE\Microsoft\SMS\Identification', 'HKLM:\SOFTWARE\Microsoft\SMS\Setup')) {
                 try {
@@ -14282,15 +14315,20 @@ function Test-CMSiteWideFunctionality {
                 }
                 if ($smsDir) { break }
             }
-            $foundLog = $false
+            $foundLogs = @{ PkgXferMgr = $false; despool = $false }
             if ($smsDir) {
+                foreach ($logName in @('PkgXferMgr', 'despool')) {
                 foreach ($extension in @('.log', '.lo_')) {
-                    $path = Join-Path $smsDir "Logs\PkgXferMgr$extension"
+                    $path = Join-Path $smsDir "Logs\$logName$extension"
                     try {
                         if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { continue }
-                        $foundLog = $true
+                        $foundLogs[$logName] = $true
+                        $pattern = 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package'
+                        if ($logName -eq 'despool') {
+                            $pattern = 'Received package |STATMSG:\s*ID=4402\b|Created retry instruction for job|Despooler (?:successfully executed one instruction|failed to execute the instruction)'
+                        }
                         foreach ($line in @(Get-Content -LiteralPath $path -Tail 10000 -ErrorAction Stop |
-                                Where-Object { $_ -match 'Sending thread starting for Job:|Adding .+ file in |Finished sending SWD package' })) {
+                                Where-Object { $_ -match $pattern })) {
                             try { $events.Add((ConvertFrom-MemLabsOsdTransferEvent -Line "$line")) }
                             catch {
                                 $message = "DIAG: OSD transfer-evidence parse failed in '$path': $($_.Exception.Message)"
@@ -14303,15 +14341,52 @@ function Test-CMSiteWideFunctionality {
                         if (-not $Details.Contains($message)) { $Details.Add($message) }
                     }
                 }
+                }
             }
-            if (-not $foundLog) {
+            if (-not $foundLogs.PkgXferMgr) {
                 $message = 'DIAG: PkgXferMgr transfer evidence was not measured; no readable log path was found. A pending state is not proof of progress.'
                 if (-not $Details.Contains($message)) { $Details.Add($message) }
             }
+            if (-not $foundLogs.despool) {
+                $message = 'DIAG: Native source-import retry evidence was not measured; no despool log path was found. The normal no-progress deadline still applies.'
+                if (-not $Details.Contains($message)) { $Details.Add($message) }
+            }
             $sessions = @{}
+            $imports = @{}
             $uncorrelated = $false
+            $uncorrelatedImport = $false
             foreach ($transferEvent in @($events | Sort-Object AtUtc, SortOrder)) {
-                if ($transferEvent.Kind -eq 'TransferStarted') {
+                if ($transferEvent.Kind -eq 'SourceImportStarted') {
+                    $imports[$transferEvent.ThreadId] = @{ Start = $transferEvent; Failure = $null }
+                }
+                elseif ($transferEvent.Kind -eq 'SourceImportFailed') {
+                    $import = $imports[$transferEvent.ThreadId]
+                    if ($import -and $import.Start.PackageId -ieq $transferEvent.PackageId -and
+                        $import.Start.AtUtc -le $transferEvent.AtUtc) {
+                        $import.Failure = $transferEvent
+                    }
+                    else {
+                        $imports.Remove($transferEvent.ThreadId)
+                        $uncorrelatedImport = $true
+                    }
+                }
+                elseif ($transferEvent.Kind -eq 'SourceImportRetryScheduled') {
+                    $import = $imports[$transferEvent.ThreadId]
+                    if ($import -and $import.Failure -and $import.Failure.ErrorCode -eq 5 -and
+                        $import.Failure.AtUtc -le $transferEvent.AtUtc) {
+                        $sourceRetries.Add([pscustomobject]@{
+                                PackageId = $import.Start.PackageId; DP = ''; SourceVersion = $import.Start.SourceVersion
+                                Kind = $transferEvent.Kind; Identity = 'SourceImportRetryScheduled'
+                                AtUtc = $transferEvent.AtUtc; SortOrder = 1
+                                FailureAtUtc = $import.Failure.AtUtc; ErrorCode = $import.Failure.ErrorCode
+                            })
+                    }
+                    $imports.Remove($transferEvent.ThreadId)
+                }
+                elseif ($transferEvent.Kind -eq 'SourceImportEnded') {
+                    $imports.Remove($transferEvent.ThreadId)
+                }
+                elseif ($transferEvent.Kind -eq 'TransferStarted') {
                     $sessions[$transferEvent.ThreadId] = $transferEvent
                     $starts.Add($transferEvent)
                 }
@@ -14339,7 +14414,13 @@ function Test-CMSiteWideFunctionality {
                 $message = 'DIAG: Some file-copy records had no matching package/version sending thread in the bounded log tail; they were not used as progress.'
                 if (-not $Details.Contains($message)) { $Details.Add($message) }
             }
-            [pscustomobject]@{ Starts = $starts.ToArray(); Progress = $progress.ToArray() }
+            if ($uncorrelatedImport) {
+                $message = 'DIAG: Some despool import failures had no matching package/version receive record on the same thread in the bounded log tail; they did not authorize extra waiting.'
+                if (-not $Details.Contains($message)) { $Details.Add($message) }
+            }
+            [pscustomobject]@{
+                Starts = $starts.ToArray(); Progress = $progress.ToArray(); SourceRetries = $sourceRetries.ToArray()
+            }
         }
 
         function Get-MemLabsOsdContentWaitState {
@@ -14347,6 +14428,7 @@ function Test-CMSiteWideFunctionality {
                 [object[]]$PendingTargets,
                 [object[]]$TransferStarts,
                 [object[]]$ProgressEvents = @(),
+                [object[]]$SourceImportRetries = @(),
                 [Parameter(Mandatory)][datetime]$StartedAtUtc,
                 [Parameter(Mandatory)][datetime]$NowUtc,
                 [Parameter(Mandatory)][hashtable]$TransferClocks,
@@ -14365,7 +14447,7 @@ function Test-CMSiteWideFunctionality {
                         Kind = 'TransferStarted'; Identity = 'TransferStarted'; AtUtc = $start.StartedAtUtc; SortOrder = 0
                     }
                 }
-            ) + @($ProgressEvents)
+            ) + @($ProgressEvents) + @($SourceImportRetries)
             $targets = [System.Collections.Generic.List[object]]::new()
             foreach ($target in $PendingTargets) {
                 $sourceVersion = 0
@@ -14382,6 +14464,7 @@ function Test-CMSiteWideFunctionality {
                         LastProgressUtc = $StartedAtUtc; LastVerifiedProgressUtc = $null
                         LastKind = 'ValidationStarted'; Seen = @{}; CopiedFiles = 0; TransferCompleted = $false
                         SourceWasPending = ($storedMeasured -and $storedVersion -lt $sourceVersion)
+                        SourceImportRetryScheduledUtc = $null; SourceImportFailureUtc = $null
                         BrokenDeadlineUtc = $null
                     }
                 }
@@ -14391,30 +14474,47 @@ function Test-CMSiteWideFunctionality {
                         $sameDp = $actualDp -ieq $wantedDp -or (
                             (-not $actualDp.Contains('.') -or -not $wantedDp.Contains('.')) -and
                             ($actualDp -split '\.')[0] -ieq ($wantedDp -split '\.')[0])
-                        "$($_.PackageId)" -ieq "$($target.PackageId)" -and $sameDp -and
+                        "$($_.PackageId)" -ieq "$($target.PackageId)" -and
+                        ($sameDp -or $_.Kind -eq 'SourceImportRetryScheduled') -and
                         $_.SourceVersion -eq $sourceVersion -and $_.AtUtc -ge $StartedAtUtc -and $_.AtUtc -le $NowUtc
                     })
                 if ($clock.SourceWasPending -and $storedMeasured -and $storedVersion -ge $sourceVersion) {
                     $eligible += [pscustomobject]@{
                         Kind = 'SourceContentReady'; Identity = 'SourceContentReady'; AtUtc = $NowUtc; SortOrder = 1
                     }
-                    $clock.SourceWasPending = $false
                 }
                 foreach ($transferEvent in @($eligible | Sort-Object AtUtc, SortOrder)) {
                     if ($clock.Seen.ContainsKey($transferEvent.Identity)) { continue }
                     if ($transferEvent.Kind -eq 'TransferStarted' -and $TransferClocks.ContainsKey($key)) { continue }
+                    if ($transferEvent.Kind -eq 'SourceImportRetryScheduled' -and
+                        (-not $clock.SourceWasPending -or $transferEvent.ErrorCode -ne 5 -or
+                            $transferEvent.FailureAtUtc -lt $StartedAtUtc -or
+                            $TransferClocks.ContainsKey($key) -or $clock.CopiedFiles -gt 0 -or $clock.TransferCompleted)) {
+                        continue
+                    }
                     if ($null -ne $clock.BrokenDeadlineUtc) { break }
                     $budget = $PreparationWaitSeconds
                     if ($TransferClocks.ContainsKey($key) -or $clock.CopiedFiles -gt 0 -or $clock.TransferCompleted) {
                         $budget = $TransferWaitSeconds
                     }
                     $previousDeadline = $clock.LastProgressUtc.AddSeconds($budget)
+                    if ($clock.SourceWasPending -and $null -ne $clock.SourceImportRetryScheduledUtc -and
+                        -not $TransferClocks.ContainsKey($key) -and $clock.CopiedFiles -eq 0 -and
+                        -not $clock.TransferCompleted) {
+                        $previousDeadline = $overallDeadline
+                    }
                     if ($transferEvent.AtUtc -gt $previousDeadline) {
                         $clock.BrokenDeadlineUtc = $previousDeadline
                         break
                     }
                     if ($transferEvent.AtUtc -gt $overallDeadline) { continue }
                     $clock.Seen[$transferEvent.Identity] = $true
+                    if ($transferEvent.Kind -eq 'SourceImportRetryScheduled') {
+                        $clock.SourceImportRetryScheduledUtc = $transferEvent.AtUtc
+                        $clock.SourceImportFailureUtc = $transferEvent.FailureAtUtc
+                        continue
+                    }
+                    if ($transferEvent.Kind -eq 'SourceContentReady') { $clock.SourceWasPending = $false }
                     if ($transferEvent.Kind -eq 'TransferStarted') { $TransferClocks[$key] = $transferEvent.AtUtc }
                     elseif ($transferEvent.Kind -eq 'FileCopiedToStaging') { $clock.CopiedFiles++ }
                     elseif ($transferEvent.Kind -eq 'PackageTransferred') { $clock.TransferCompleted = $true }
@@ -14437,6 +14537,13 @@ function Test-CMSiteWideFunctionality {
                     $budget = $TransferWaitSeconds
                 }
                 $noProgressDeadline = $clock.LastProgressUtc.AddSeconds($budget)
+                $retryPending = $clock.SourceWasPending -and $null -ne $clock.SourceImportRetryScheduledUtc -and
+                    $storedMeasured -and $storedVersion -lt $sourceVersion -and $null -eq $transferStart -and
+                    $clock.CopiedFiles -eq 0 -and -not $clock.TransferCompleted
+                if ($retryPending) {
+                    $stage = 'SourceImportRetry'
+                    $noProgressDeadline = $overallDeadline
+                }
                 if ($null -ne $clock.BrokenDeadlineUtc -and $clock.BrokenDeadlineUtc -lt $noProgressDeadline) {
                     $noProgressDeadline = $clock.BrokenDeadlineUtc
                 }
@@ -14444,7 +14551,11 @@ function Test-CMSiteWideFunctionality {
                 $limitKind = 'NoVerifiedProgress'
                 if ($overallDeadline -le $deadline) { $deadline = $overallDeadline; $limitKind = 'OverallHardCap' }
                 $noProgressSeconds = [math]::Max(0, [int]($NowUtc - $clock.LastProgressUtc).TotalSeconds)
-                $description = "${budget}s without verified forward progress; lastClockEvidence=$($clock.LastKind) atUtc=$($clock.LastProgressUtc.ToString('o')) copiedFiles=$($clock.CopiedFiles) deadlineUtc=$($deadline.ToString('o')) overallDeadlineUtc=$($overallDeadline.ToString('o')); intra-file byte progress is unmeasured"
+                $windowDescription = "${budget}s without verified forward progress"
+                if ($retryPending) {
+                    $windowDescription = "Source import failed with Win32 5 atUtc=$($clock.SourceImportFailureUtc.ToString('o')); allowing the scheduled native despooler retry atUtc=$($clock.SourceImportRetryScheduledUtc.ToString('o')) within the unchanged overall hard cap; the failure is not verified progress"
+                }
+                $description = "$windowDescription; lastClockEvidence=$($clock.LastKind) atUtc=$($clock.LastProgressUtc.ToString('o')) copiedFiles=$($clock.CopiedFiles) deadlineUtc=$($deadline.ToString('o')) overallDeadlineUtc=$($overallDeadline.ToString('o')); intra-file byte progress is unmeasured"
                 $targets.Add([pscustomobject]@{
                         Key = $key; PackageId = "$($target.PackageId)"; DP = $wantedDp
                         SourceVersion = $sourceVersion; SourceSite = "$($target.SourceSite)"
@@ -14455,6 +14566,8 @@ function Test-CMSiteWideFunctionality {
                         NoProgressSeconds = $noProgressSeconds; VerifiedCopiedFiles = $clock.CopiedFiles
                         OverallDeadlineUtc = $overallDeadline; LimitKind = $limitKind
                         IntraFileBytesMeasured = $false; SourceStoredVersionMeasured = $storedMeasured
+                        SourceImportRetryScheduledAtUtc = $clock.SourceImportRetryScheduledUtc
+                        SourceImportFailureAtUtc = $clock.SourceImportFailureUtc
                         RemainingSeconds = [math]::Max(0, [int][math]::Ceiling(($deadline - $NowUtc).TotalSeconds))
                         Expired = $NowUtc -ge $deadline; Description = $description
                     })
@@ -15610,7 +15723,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                 $initialPendingSummary = @($pendingOsdContent | ForEach-Object {
                         "$($_.PackageId) '$($_.Name)' on $($_.DP) is $($_.StateName) (State=$($_.State), SourceSite=$($_.SourceSite), SourceVersion=$($_.SourceVersion), StoredPkgVersion=$($_.StoredPkgVersion))"
                     }) -join '; '
-                $results.Details.Add("INFO: Required OSD content has ${osdContentWaitSeconds}s without verified progress per package/DP/version and a ${osdOverallWaitSeconds}s overall hard cap. A first transfer start seeds its transfer window; unique staged-file confirmations, package-transfer completion and observed source-content readiness renew progress. Retries, pending states and log freshness do not: $initialPendingSummary")
+                $results.Details.Add("INFO: Required OSD content has ${osdContentWaitSeconds}s without verified progress per package/DP/version and a ${osdOverallWaitSeconds}s overall hard cap. A first transfer start seeds its transfer window; unique staged-file confirmations, package-transfer completion and observed source-content readiness renew progress. A correlated native despooler retry after a source-import Win32 5 failure may use the existing hard cap while local source content is missing; the failure does not count as progress. Other retries, pending states and log freshness do not renew progress: $initialPendingSummary")
                 while ($pendingOsdContent.Count -gt 0 -and $results.OsdContentWaitProblems.Count -eq 0) {
                     $now = Get-Date
                     $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
@@ -15621,6 +15734,7 @@ SELECT CAST(dbo.fnIsPkgVersionAvailable(@pkg, @site, @version) AS INT) AS Availa
                         $elapsedSeconds = [int]($now - $pendingStart).TotalSeconds
                         $waitState = Get-MemLabsOsdContentWaitState -PendingTargets $pendingOsdContent `
                             -TransferStarts $transferStarts -ProgressEvents @($transferEvidence.Progress) `
+                            -SourceImportRetries @($transferEvidence.SourceRetries) `
                             -StartedAtUtc $pendingStart.ToUniversalTime() `
                             -NowUtc $now.ToUniversalTime() -TransferClocks $osdTransferClocks `
                             -ProgressClocks $osdProgressClocks -PreparationWaitSeconds $osdPreparationWaitSeconds `

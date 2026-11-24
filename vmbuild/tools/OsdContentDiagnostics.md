@@ -61,8 +61,27 @@ repeated transfer starts, and repeated attempts to add the same file do not rene
 the window. One package or DP cannot borrow another's progress. The existing
 one-time `InstallRetrying` re-arm does not reset a deadline.
 
+There is one narrow source-import exception. If local source content is still
+missing and `despool` records a package/version receive, a matching Win32 5
+extraction failure (status 4402), and creation of a native retry instruction on
+the same thread, validation allows that already scheduled retry to run within
+the **existing 45-minute overall cap**. It does not submit another retry, reset
+the progress clock, or count the error as progress. Repeated retry records cannot
+extend the cap. Once the source becomes ready, ordinary per-target transfer and
+installation windows apply again, still bounded by the original overall cap.
+Other errors, unrelated packages/versions, an already started DP transfer, and
+late evidence do not qualify. A missing receive/failure/retry correlation does
+not authorize extra waiting.
+
+This handles a source import denied while replacing a shared content hash, for
+example while another package is reading that WIM for distribution. Win32 5
+alone does not prove an ACL defect. The failure and retry timestamps remain
+visible as `SourceImportRetry`, and content must still reach Installed before
+validation passes. No content-library files, attributes, ACLs, services, or
+native retry schedules are changed. Persistent access failures still fail.
+
 The evidence reader checks the last 10,000 lines of active and rolled
-`PkgXferMgr` logs. Classic and CMTrace timestamps are normalized to UTC, and file
+`PkgXferMgr` and `despool` logs. Classic and CMTrace timestamps are normalized to UTC, and file
 milestones are correlated chronologically to the sending thread's package, DP,
 and source version. Previous attempts, future timestamps, other versions, and
 different DP FQDNs are excluded. Uncorrelated records and probe errors are reported
