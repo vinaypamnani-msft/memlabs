@@ -1547,6 +1547,10 @@ including the DP identity certificate, and site-control readback must confirm
 HTTPS configuration before conversion succeeds. Discovery, enrollment, or
 configuration failures stop the conversion rather than reporting CA setup as
 ConfigMgr PKI completion.
+Hidden conversion VMs and later VM-note imports resolve SQL, SQLAO peer/witness,
+WSUS database, and other VM dependencies to known same-domain VM names, including
+the lab prefix. This does not rename VMs or remove rebuild protection. `WID`
+remains an internal-database marker; missing dependencies are not guessed.
 Existing MPs refresh their TLS state even when no new client push is required;
 conversion does not reuse an old build's TLS-refresh flag, and refresh failures
 are terminal rather than warning-only.

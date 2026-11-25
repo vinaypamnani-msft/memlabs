@@ -617,6 +617,34 @@ function Resolve-ConfigVmReference {
     return $normalized
 }
 
+function Update-ConfigVmReferences {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$VM,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$KnownVMs,
+        [string]$DomainName,
+        [string]$Prefix
+    )
+
+    $vmDomain = if ($VM.domain) { "$($VM.domain)" } else { $DomainName }
+    $candidateNames = @($KnownVMs | Where-Object {
+            $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $DomainName }
+            $candidateDomain -ieq $vmDomain
+        } | ForEach-Object { $_.vmName })
+    if ($vmDomain -ine $DomainName) { $Prefix = '' }
+    foreach ($name in @('remoteSQLVM', 'replicaSqlServerVM', 'wsusDataBaseServer',
+            'OtherNode', 'fileServerVM', 'pullDPSourceDP', 'PatchMyPCFileServer', 'remoteContentLibVM')) {
+        $property = $VM.PSObject.Properties[$name]
+        if (-not $property -or -not $property.Value) { continue }
+        if ($name -eq 'wsusDataBaseServer' -and $property.Value -eq 'WID') { continue }
+        $resolved = Resolve-ConfigVmReference -VmReference $property.Value -VmNames $candidateNames -Prefix $Prefix
+        if ($resolved -cne "$($property.Value)") {
+            Write-Log "Resolved dependency '$name' for '$($VM.vmName)': '$($property.Value)' -> '$resolved'." -LogOnly
+            $property.Value = $resolved
+        }
+    }
+}
+
 function Get-UserConfiguration {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Configuration Name/File")]
@@ -1297,6 +1325,7 @@ function New-DeployConfig {
         [object] $configObject
     )
     try {
+        $existingDomainVMs = @()
 
         # Existing ConfigMgr hierarchy settings are authoritative for add-to-existing.
         # Static follow-on fixtures can carry newer/default cmOptions, but child sites
@@ -1451,6 +1480,12 @@ function New-DeployConfig {
                     $pmpcVM.PatchMyPCFileServer = $configObject.vmOptions.prefix + $pmpcVM.PatchMyPCFileServer
                 }
             }
+        }
+
+        $knownReferenceVms = @($virtualMachines) + @($existingDomainVMs)
+        foreach ($item in @($virtualMachines | Where-Object hidden)) {
+            Update-ConfigVmReferences -VM $item -KnownVMs $knownReferenceVms `
+                -DomainName $configObject.vmOptions.domainName -Prefix $configObject.vmOptions.prefix
         }
 
         # Add prefix to pkiOptions VM references
@@ -2644,7 +2679,8 @@ function Add-ExistingVMToDeployConfig {
         return
     }
 
-    $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
+    $existingVmInventory = @(Get-List -Type VM)
+    $existingVM = $existingVmInventory | Where-Object { $_.vmName -eq $vmName }
     if (-not $existingVM) {
         Write-Log "Not adding $vmName as it does not exist as an existing VM" -LogOnly
         return
@@ -2689,6 +2725,13 @@ function Add-ExistingVMToDeployConfig {
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
     }
+    $referencePrefix = "$($vmNote.prefix)"
+    if (-not $referencePrefix) {
+        $referencePrefix = "$($configToModify.vmOptions.prefix)"
+    }
+    $knownReferenceVms = @(@($configToModify.virtualMachines) + @($existingVmInventory) | Where-Object { $null -ne $_ })
+    Update-ConfigVmReferences -VM $newVMObject -KnownVMs $knownReferenceVms `
+        -DomainName $configToModify.vmOptions.domainName -Prefix $referencePrefix
     if ($OtherDC) {
         $newVMObject.role = "OtherDC"
     }

@@ -33,8 +33,9 @@ function Write-DscStatus { param($Message, [switch]$Failure) }
 if (-not $GuestOnly) {
     $configPath = Join-Path $root 'common\Common.Config.ps1'
     foreach ($name in @('Get-ExistingConfigMgrPkiConversionTargets', 'Sync-ExistingHierarchyOptionsToDeployConfig',
-            'New-DeployConfig', 'Add-ExistingVMToDeployConfig', 'ConvertFrom-MemLabsVmNoteScalar',
-            'Resolve-ConfigVmReference', 'Resolve-VmCmOptions', 'Set-VmCmOptionsResolved')) {
+            'New-DeployConfig', 'Add-ExistingVMToDeployConfig', 'Add-RemoteSQLVMToDeployConfig', 'ConvertFrom-MemLabsVmNoteScalar',
+            'Resolve-ConfigVmReference', 'Update-ConfigVmReferences', 'Resolve-VmCmOptions', 'Set-VmCmOptionsResolved',
+            'Add-Phase11HierarchyParentsToDeployConfig')) {
         . (Import-TestFunction $configPath $name)
     }
     foreach ($name in @('Get-Phase2ConfigurationData', 'Get-Phase4ConfigurationData', 'Get-Phase6ConfigurationData', 'Get-Phase8ConfigurationData',
@@ -47,6 +48,7 @@ if (-not $GuestOnly) {
         [pscustomobject]@{
             vmName = 'LAB-PRI'; role = 'Primary'; siteCode = 'PRI'; domain = 'lab.test'; state = 'Running'
             cmOptions = [pscustomobject]@{ UsePKI = $false; Install = $false; Version = '2609' }
+            remoteSQLVM = 'SQLAO1'; replicaSqlServerVM = 'SQLAO2'
         },
         [pscustomobject]@{
             vmName = 'LAB-MPDP'; role = 'SiteSystem'; siteCode = 'PRI'; domain = 'lab.test'; state = 'Running'
@@ -54,6 +56,7 @@ if (-not $GuestOnly) {
         },
         [pscustomobject]@{
             vmName = 'LAB-SUP'; role = 'SiteSystem'; siteCode = 'PRI'; domain = 'lab.test'; state = 'Running'; installSUP = $true
+            wsusDataBaseServer = 'SQLAO1'
         },
         [pscustomobject]@{
             vmName = 'LAB-SEC'; role = 'Secondary'; siteCode = 'SEC'; parentSiteCode = 'PRI'; domain = 'lab.test'; state = 'Running'
@@ -66,6 +69,19 @@ if (-not $GuestOnly) {
         },
         [pscustomobject]@{
             vmName = 'FOREIGN-PRI'; role = 'Primary'; siteCode = 'PRI'; domain = 'foreign.test'; state = 'Running'
+        },
+        [pscustomobject]@{
+            vmName = 'LAB-SQLAO1'; role = 'SQLAO'; domain = 'lab.test'; state = 'Running'
+            OtherNode = 'SQLAO2'; fileServerVM = 'FS1'; remoteContentLibVM = 'MISSING'
+        },
+        [pscustomobject]@{
+            vmName = 'LAB-SQLAO2'; role = 'SQLAO'; domain = 'lab.test'; state = 'Running'; OtherNode = 'SQLAO1'
+        },
+        [pscustomobject]@{
+            vmName = 'LAB-FS1'; role = 'DomainMember'; domain = 'lab.test'; state = 'Running'
+        },
+        [pscustomobject]@{
+            vmName = 'SQLAO2'; role = 'DomainMember'; domain = 'foreign.test'; state = 'Running'
         }
     )
     function Get-List {
@@ -95,8 +111,8 @@ if (-not $GuestOnly) {
     $converted = New-DeployConfig -configObject (New-FixtureConfig)
     Assert-True $script:FailClosedInventory 'PKI retrofit must use fail-closed domain inventory.'
     $targets = @($converted.virtualMachines | Where-Object pkiReconfigure)
-    Assert-True (($targets.vmName | Sort-Object) -join ',' -eq 'LAB-CLIENT,LAB-LEGACY,LAB-MPDP,LAB-PRI,LAB-SEC,LAB-SUP') `
-        'CA-only UsePKI enablement did not include exactly the existing hierarchy and its client.'
+    Assert-True (($targets.vmName | Sort-Object) -join ',' -eq 'LAB-CLIENT,LAB-FS1,LAB-LEGACY,LAB-MPDP,LAB-PRI,LAB-SEC,LAB-SQLAO1,LAB-SQLAO2,LAB-SUP') `
+        'CA-only UsePKI enablement did not include exactly the existing hierarchy and its domain members.'
     foreach ($vm in $targets) {
         Assert-True ($vm.hidden -and $vm.phase11Validate) "$($vm.vmName) lost rebuild protection or independent validation."
         Assert-True (-not (Test-MemLabsIncludeHiddenVmForPhase -Vm $vm -Phase 1) -and
@@ -104,9 +120,29 @@ if (-not $GuestOnly) {
             (Test-MemLabsIncludeHiddenVmForPhase -Vm $vm -Phase 11)) 'Retrofit changed hidden VM phase safety.'
     }
     $primary = $converted.virtualMachines | Where-Object vmName -eq 'LAB-PRI'
+    Assert-True ($primary.remoteSQLVM -eq 'LAB-SQLAO1' -and $primary.replicaSqlServerVM -eq 'LAB-SQLAO2') `
+        'Hidden PKI conversion retained unprefixed SQL dependencies or selected a foreign-domain VM.'
+    $sup = $converted.virtualMachines | Where-Object vmName -eq 'LAB-SUP'
+    Assert-True ($sup.wsusDataBaseServer -eq 'LAB-SQLAO1') 'Hidden SUP lost its canonical WSUS SQL dependency.'
+    $declared = New-FixtureConfig
+    $declared.virtualMachines += @(
+        [pscustomobject]@{
+            vmName='PRI'; role='Primary'; siteCode='PRI'; remoteSQLVM='SQLAO1'; replicaSqlServerVM='SQLAO2'
+        },
+        [pscustomobject]@{
+            vmName='SUP'; role='SiteSystem'; siteCode='PRI'; installSUP=$true; wsusDataBaseServer='SQLAO1'
+        }
+    )
+    $declaredDeploy = New-DeployConfig $declared
+    $declaredPrimary = $declaredDeploy.virtualMachines | Where-Object vmName -eq 'LAB-PRI'
+    $declaredSup = $declaredDeploy.virtualMachines | Where-Object vmName -eq 'LAB-SUP'
+    Assert-True ($declaredPrimary.hidden -and $declaredPrimary.remoteSQLVM -eq 'LAB-SQLAO1' -and
+        $declaredPrimary.replicaSqlServerVM -eq 'LAB-SQLAO2' -and $declaredSup.hidden -and
+        $declaredSup.wsusDataBaseServer -eq 'LAB-SQLAO1') 'Declared VMs hidden before prefixing retained base dependency names.'
     Assert-True ($primary.cmOptions.UsePKI -and -not $primary.cmOptions.Install -and $primary.cmOptions.Version -eq '2609') `
         'PKI intent was overwritten, or conversion changed unrelated hierarchy options.'
     Assert-True (-not $script:Inventory[1].cmOptions.UsePKI) 'Planning mutated the deployed hierarchy inventory.'
+    Assert-True ($script:Inventory[1].remoteSQLVM -eq 'SQLAO1') 'Dependency normalization mutated the VM inventory.'
     Assert-True ((Get-Phase4ConfigurationData $converted).AllNodes.NodeName -contains 'LAB-MPDP') 'Hidden role host missed certificate enrollment.'
     Assert-True ((Get-Phase6ConfigurationData $converted).AllNodes.NodeName -contains 'LAB-SUP') 'Hidden SUP missed WSUS TLS configuration.'
     Assert-True ((Get-Phase8ConfigurationData $converted).AllNodes.NodeName -contains 'LAB-PRI') 'Install=false suppressed the PKI conversion workflow.'
@@ -118,6 +154,39 @@ if (-not $GuestOnly) {
     $waitOnDomainJoin = [Collections.ArrayList]@()
     $members = @(& ([scriptblock]::Create($dcText.Substring($start, $end - $start) + "`n`$iisgroupMembers")))
     Assert-True ($members -contains 'LAB-MPDP$' -and $members -contains 'LAB-SUP$') 'Existing role hosts missed IIS certificate enrollment permissions.'
+
+    $dependencies = [pscustomobject]@{
+        vmOptions = [pscustomobject]@{ domainName = 'lab.test'; prefix = 'LAB-' }
+        virtualMachines = $null
+    }
+    Add-RemoteSQLVMToDeployConfig -vmName $primary.remoteSQLVM -configToModify $dependencies
+    Assert-True (($dependencies.virtualMachines.vmName | Sort-Object) -join ',' -eq 'LAB-FS1,LAB-SQLAO1,LAB-SQLAO2') `
+        'Existing SQLAO hydration missed its prefixed peer/file server or imported the foreign SQLAO2.'
+    $sql = $dependencies.virtualMachines | Where-Object vmName -eq 'LAB-SQLAO1'
+    Assert-True ($sql.OtherNode -eq 'LAB-SQLAO2' -and $sql.fileServerVM -eq 'LAB-FS1' -and
+        $sql.remoteContentLibVM -eq 'MISSING' -and $sql.hidden) 'Hydrated VM references were not canonical, unknown names were guessed, or rebuild protection was lost.'
+    Add-RemoteSQLVMToDeployConfig -vmName $primary.remoteSQLVM -configToModify $dependencies
+    Assert-True ($dependencies.virtualMachines.Count -eq 3) 'Repeated dependency hydration added duplicates or double-prefixed names.'
+    $hierarchySupport = [pscustomobject]@{
+        vmOptions = $dependencies.vmOptions
+        virtualMachines = @(
+            [pscustomobject]@{
+                vmName='LAB-CAS'; role='CAS'; siteCode='CAS'; hidden=$true
+                remoteSQLVM=$declaredPrimary.remoteSQLVM; replicaSqlServerVM=$declaredPrimary.replicaSqlServerVM
+            },
+            [pscustomobject]@{
+                vmName='LAB-CHILD'; role='Primary'; siteCode='CHD'; parentSiteCode='CAS'; hidden=$true; phase11Validate=$true
+            }
+        )
+    }
+    $null = Add-Phase11HierarchyParentsToDeployConfig -Config $hierarchySupport -ExistingVMs $script:Inventory
+    Assert-True ($hierarchySupport.virtualMachines.Count -eq 5 -and
+        $hierarchySupport.virtualMachines.vmName -contains 'LAB-SQLAO1' -and
+        $hierarchySupport.virtualMachines.vmName -contains 'LAB-SQLAO2' -and
+        $hierarchySupport.virtualMachines.vmName -contains 'LAB-FS1') 'CAS hierarchy support still rejects the normalized remote SQL dependency.'
+    $wid = [pscustomobject]@{ vmName='LAB-WID-SUP'; wsusDataBaseServer='WID' }
+    Update-ConfigVmReferences -VM $wid -KnownVMs @([pscustomobject]@{ vmName='LAB-WID' }) -DomainName 'lab.test' -Prefix 'LAB-'
+    Assert-True ($wid.wsusDataBaseServer -eq 'WID') 'The internal WSUS database marker was resolved as a VM name.'
 
     $caOnly = New-FixtureConfig
     $caOnly.cmOptions.UsePKI = $false

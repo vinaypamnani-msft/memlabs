@@ -75,6 +75,8 @@ function Get-VMNote {
 
 . (Import-TestFunction -Path $configPath -Name 'Get-ExistingConfigMgrRoleUpgradePlan')
 . (Import-TestFunction -Path $configPath -Name 'ConvertFrom-MemLabsVmNoteScalar')
+. (Import-TestFunction -Path $configPath -Name 'Resolve-ConfigVmReference')
+. (Import-TestFunction -Path $configPath -Name 'Update-ConfigVmReferences')
 . (Import-TestFunction -Path $configPath -Name 'Add-ModifiedExistingVMToDeployConfig')
 . (Import-TestFunction -Path $configPath -Name 'Add-ExistingVMToDeployConfig')
 . (Import-TestFunction -Path $configPath -Name 'Add-ExistingVMsToDeployConfig')
