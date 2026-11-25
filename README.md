@@ -373,17 +373,22 @@ are preserved. Validate without an interactive console using
 
 Elevated [`New-Lab.ps1`](vmbuild/New-Lab.ps1) startup, including through
 `VMBuild.cmd`, ensures the signed-in desktop user belongs to the host's Hyper-V
-Administrators group after Hyper-V prerequisites are ready. The target is the
-user in the launching Windows session, including RDP, not a different account
-used to approve elevation. Group and user membership are resolved by SID, so
-localized group names and repeated launches do not cause duplicate additions.
+Administrators group. On hosts with the service and management tools already
+installed, membership is initialized before the VMMS readiness check, so a
+provider failure does not prevent the access setup. New installations initialize
+membership after Hyper-V prerequisites succeed. The target is the user in the
+launching Windows session, including RDP, not a different account used to approve
+elevation. Group and user membership are resolved by SID, so localized group names
+and repeated launches do not cause duplicate additions.
 
 New membership is verified before success is reported. Sign out and back in,
 then restart VS Code/Copilot, to refresh the user's non-elevated token. No
 desktop user means a logged skip, never a fallback grant to the elevated account.
 Lookup, addition, and verification failures stop startup with the error details.
 `-WhatIf` skips the addition. Membership grants host-wide Hyper-V management,
-not per-lab isolation; full MemLabs deployment still requires elevation.
+not per-lab isolation; full MemLabs deployment still requires elevation. Access
+setup does not repair provider failures: an unsuccessful `Get-VM` readiness check
+still stops startup.
 
 Validate with
 [`Test-NewLabHostPrerequisites.ps1`](vmbuild/tools/Test-NewLabHostPrerequisites.ps1),

@@ -167,16 +167,18 @@ $readyResult = Initialize-NewLabHyperVPrerequisite
 Assert-Equal $true $readyResult 'ready host passes prerequisite check'
 Assert-Equal 0 $script:PromptCount 'ready host is not prompted'
 Assert-Equal 1 $script:InstallCount 'ready host still verifies Hyper-V service readiness'
-Assert-Equal 'Install,Desktop' ($script:StartupEvents -join ',') 'desktop membership is checked after Hyper-V installation'
+Assert-Equal 'Desktop,Install' ($script:StartupEvents -join ',') 'installed hosts check desktop membership before Hyper-V readiness'
 Assert-Equal 0 $script:GroupAddCount 'existing membership is matched by SID without another add'
 
 $script:VmmsPresent = $false
 $script:HyperVCmdletsPresent = $false
 $script:PromptResponse = 'y'
+$script:StartupEvents = @()
 $acceptedResult = Initialize-NewLabHyperVPrerequisite
 Assert-Equal $true $acceptedResult 'accepted missing prerequisite runs installer'
 Assert-Equal 1 $script:PromptCount 'missing prerequisite prompts once'
 Assert-Equal 2 $script:InstallCount 'accepted prompt invokes installer'
+Assert-Equal 'Install,Desktop' ($script:StartupEvents -join ',') 'new installations establish Hyper-V before checking desktop membership'
 
 $script:PromptResponse = 'n'
 $declinedResult = Initialize-NewLabHyperVPrerequisite
@@ -187,9 +189,11 @@ Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and 
 
 $script:PromptResponse = 'y'
 $script:InstallFailure = 'simulated install failure'
+$desktopReadsBefore = $script:DesktopLookupCount
 $failedResult = Initialize-NewLabHyperVPrerequisite
 Assert-Equal $false $failedResult 'installer failure stops startup'
 Assert-Equal 3 $script:InstallCount 'installer failure was exercised'
+Assert-Equal $desktopReadsBefore $script:DesktopLookupCount 'failed new installation does not attempt desktop membership'
 Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -like '*simulated install failure*' })) 'installer failure is logged'
 
 $script:MembershipElevated = $false
@@ -220,6 +224,8 @@ Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Warning -and 
 $script:DesktopUser = $savedDesktopUser
 $script:InstallFailure = $null
 
+$script:VmmsPresent = $true
+$script:HyperVCmdletsPresent = $true
 $script:HyperVGroupMembers = @()
 $groupAddsBefore = $script:GroupAddCount
 $wrapperWhatIfResult = Initialize-NewLabHyperVPrerequisite -WhatIf
@@ -289,6 +295,30 @@ $recoveredMembershipResult = Initialize-NewLabHyperVPrerequisite
 Assert-Equal $true $recoveredMembershipResult 'startup recovers by reading the previously persisted membership'
 Assert-Equal $groupAddsBefore $script:GroupAddCount 'recovery does not add the desktop user twice'
 Assert-Equal 1 @($script:HyperVGroupMembers | Where-Object { $_.SID.Value -eq $unrelatedMember.SID.Value }).Count 'membership changes preserve unrelated group members'
+
+$script:HyperVGroupMembers = @($unrelatedMember)
+$script:InstallFailure = 'simulated Get-VM readiness failure'
+$script:StartupEvents = @()
+$groupAddsBefore = $script:GroupAddCount
+$unhealthyHostResult = Initialize-NewLabHyperVPrerequisite
+Assert-Equal $false $unhealthyHostResult 'an installed host still fails startup when Get-VM readiness fails'
+Assert-Equal 'Desktop,Install' ($script:StartupEvents -join ',') 'provider failure occurs only after desktop membership initialization'
+Assert-Equal ($groupAddsBefore + 1) $script:GroupAddCount 'installed-host membership is added even when the provider subsequently fails'
+Assert-Equal 1 @($script:HyperVGroupMembers | Where-Object { $_.SID.Value -eq $script:DesktopUser.SID.Value }).Count 'verified membership persists after provider failure'
+Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -like '*simulated Get-VM readiness failure*' })) 'the provider readiness failure remains visible'
+$script:InstallFailure = $null
+
+$script:HyperVGroupMembers = @()
+$script:GroupAddFailure = 'simulated installed-host membership failure'
+$installCountBefore = $script:InstallCount
+try {
+    $membershipFirstFailure = Initialize-NewLabHyperVPrerequisite
+    Assert-Equal $false $membershipFirstFailure 'installed-host membership failure stops startup before readiness'
+    Assert-Equal $installCountBefore $script:InstallCount 'failed membership does not enter the provider readiness retry loop'
+}
+finally {
+    $script:GroupAddFailure = $null
+}
 
 $esmCacheFixture = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-vmhost-esm-' + [guid]::NewGuid().ToString('N') + '.json')
 try {

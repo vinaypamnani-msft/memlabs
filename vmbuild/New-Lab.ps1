@@ -219,10 +219,17 @@ function Initialize-NewLabHyperVPrerequisite {
     }
 
     try {
+        # Existing-host access must not depend on a healthy Get-VM provider.
+        if ($vmmsRegistered -and $hyperVCmdletsAvailable) {
+            Initialize-NewLabHyperVAccess -WhatIf:$WhatIf -Confirm:$false
+        }
+
         Write-Log "Post-init: Calling Install-HyperV before network validation..." -LogOnly
         Flush-LogBuffer -All
         $null = Install-HyperV
-        Initialize-NewLabHyperVAccess -WhatIf:$WhatIf -Confirm:$false
+        if (-not ($vmmsRegistered -and $hyperVCmdletsAvailable)) {
+            Initialize-NewLabHyperVAccess -WhatIf:$WhatIf -Confirm:$false
+        }
         return $true
     }
     catch {
