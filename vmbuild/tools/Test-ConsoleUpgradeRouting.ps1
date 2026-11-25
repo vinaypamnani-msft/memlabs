@@ -62,6 +62,35 @@ Assert-ConsoleUpgrade ($upgradeText -match 'Get-ConsoleVersionState' -and $upgra
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Invoke-ConsoleUpgrade')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Get-ConsoleVersionState')))
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Resolve-ExpectedConsoleRelease')))
+. ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $upgradePath -Name 'Get-ConsoleLocalSiteCode')))
+& {
+    $fixture = @{ Mode='Ready'; Reads=0; Logs=[Collections.Generic.List[string]]::new() }
+    function Get-ItemProperty {
+        param($LiteralPath,$ErrorAction)
+        $fixture.Reads++
+        if ($LiteralPath -like '*Identification') {
+            if ($fixture.Mode -eq 'Missing') { throw [Management.Automation.ItemNotFoundException]::new('site identification is absent') }
+            if ($fixture.Mode -eq 'Denied') { throw [UnauthorizedAccessException]::new('site identification access denied') }
+            $code = if ($fixture.Mode -eq 'Blank') { '' } else { 'PS1' }
+            return [pscustomobject]@{ 'Site Code'=$code }
+        }
+        [pscustomobject]@{ 'Installation Directory'='E:\ConfigMgr'; 'Full Version'='5.00.9146.1000' }
+    }
+    function Write-DscStatus { param($Status,[switch]$NoStatus) $fixture.Logs.Add("$Status") }
+    Assert-ConsoleUpgrade ((Get-ConsoleLocalSiteCode -ConfiguredSiteCode 'PS1') -eq 'PS1') 'console readiness uses its measured local site identity'
+    foreach ($mode in @('Missing','Denied','Blank','Mismatch')) {
+        $fixture.Mode=$mode; $fixture.Reads=0; $fixture.Logs.Clear()
+        $configured = if ($mode -eq 'Mismatch') { 'PS2' } else { 'PS1' }
+        $caught = $null
+        try { $null = Get-ConsoleLocalSiteCode -ConfiguredSiteCode $configured } catch { $caught=$_ }
+        Assert-ConsoleUpgrade ($null -ne $caught) "$mode site identity cannot authorize a console change"
+        if ($mode -in @('Missing','Denied')) {
+            Assert-ConsoleUpgrade ($fixture.Reads -eq 2 -and ($fixture.Logs -join '; ') -match 'ConfiguredSiteCode=PS1' -and
+                ($fixture.Logs -join '; ') -match 'Process64Bit=' -and ($fixture.Logs -join '; ') -match 'E:\\ConfigMgr' -and
+                $caught.Exception.InnerException) "$mode identity retains registry-view/setup diagnostics and its original exception without retrying setup"
+        }
+    }
+}
 . ([scriptblock]::Create((Import-ConsoleUpgradeFunction -Path $validationPath -Name 'Resolve-EffectiveHierarchyCmRelease')))
 $numericVM = [pscustomobject]@{}
 $symbolicVM = [pscustomobject]@{ thisParams = [pscustomobject]@{ cmDownloadVersion = [pscustomobject]@{ baselineVersion = '2603' } } }
@@ -510,7 +539,8 @@ foreach ($routingCase in @(
         [pscustomobject]@{ Name = 'standalone Primary'; Scenario = 'Standalone'; Role = 'Primary'; Parent = ''; Setup = 'InstallAndUpdateSCCM.ps1' }
         [pscustomobject]@{ Name = 'CAS'; Scenario = 'Hierarchy'; Role = 'CAS'; Parent = ''; Setup = 'InstallAndUpdateSCCM.ps1' }
         [pscustomobject]@{ Name = 'child Primary'; Scenario = 'Hierarchy'; Role = 'Primary'; Parent = 'CAS1'; Setup = 'InstallPSForHierarchy.ps1' }
-        [pscustomobject]@{ Name = 'existing child Primary'; Scenario = 'Hierarchy'; Role = 'Primary'; Parent = ''; Setup = '' }
+        [pscustomobject]@{ Name = 'restored hidden child Primary'; Scenario = 'Hierarchy'; Role = 'Primary'; Parent = 'CAS1'; Setup = 'InstallPSForHierarchy.ps1'; Hidden=$true }
+        [pscustomobject]@{ Name = 'missing-parent hidden Primary'; Scenario = 'Hierarchy'; Role = 'Primary'; Parent = ''; Setup = ''; Hidden=$true; RoutingError=$true }
     )) {
     foreach ($consoleFailure in @($false, $true)) {
         foreach ($usePki in @($false, $true)) {
@@ -547,6 +577,11 @@ foreach ($routingCase in @(
                 $ConfigFilePath = 'C:\fixture\deployConfig.json'
                 $LogPath = 'C:\fixture\logs'
                 $ThisVM = [pscustomobject]@{
+                    vmName = 'FIXTURE-PRIMARY'
+                    siteCode = 'PRI'
+                    parentSiteCode = $(if ($RoutingCase.Scenario -eq 'Hierarchy' -and $RoutingCase.Role -eq 'Primary') { 'CAS' } else { '' })
+                    hidden = [bool]$RoutingCase.Hidden
+                    pkiReconfigure = [bool]$RoutingCase.Hidden
                     thisParams = [pscustomobject]@{ ParentSiteServer = $RoutingCase.Parent }
                     cmOptions = [pscustomobject]@{ UsePKI = $UsePki }
                 }
@@ -572,6 +607,11 @@ foreach ($routingCase in @(
                 }
                 catch { $fixture.Error = $_.Exception.Message }
 
+                if ($RoutingCase.RoutingError) {
+                    Assert-ConsoleUpgrade ($fixture.Calls.Count -eq 0 -and $fixture.Error -match 'FIXTURE-PRIMARY.*ParentSiteServer.*CAS') `
+                        'Missing hierarchy parent metadata fails before either site setup or console setup, never silently skips installation.'
+                    return
+                }
                 $consoleCalls = @($fixture.Calls | Where-Object Name -eq 'Upgrade-Console.ps1')
                 $setupAndConsole = @($fixture.Calls | Where-Object {
                         $_.Name -in @('InstallAndUpdateSCCM.ps1', 'InstallPSForHierarchy.ps1', 'Upgrade-Console.ps1')

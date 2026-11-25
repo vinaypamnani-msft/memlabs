@@ -351,6 +351,33 @@ function Resolve-ExpectedConsoleRelease {
     return $deployedRelease
 }
 
+function Get-ConsoleLocalSiteCode {
+    param([string]$ConfiguredSiteCode)
+
+    try {
+        $identification = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop
+    }
+    catch {
+        $identityError = $_
+        $setupDetail = ''
+        try {
+            $setup = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop
+            $setupDetail = "InstallationDirectory=$($setup.'Installation Directory'); FullVersion=$($setup.'Full Version')"
+        }
+        catch { $setupDetail = "SetupReadError=$($_.Exception.Message)" }
+        Write-DscStatus -NoStatus "Upgrade-Console: local identity unavailable; ConfiguredSiteCode=$ConfiguredSiteCode; ComputerName=$env:COMPUTERNAME; Process64Bit=$([Environment]::Is64BitProcess); OS64Bit=$([Environment]::Is64BitOperatingSystem); $setupDetail. No console setup was launched."
+        throw [InvalidOperationException]::new("Upgrade-Console: local site identification could not be verified; configured SiteCode '$ConfiguredSiteCode' is not proof of an installed site. Inspect site setup and registry-view diagnostics. $($identityError.Exception.Message)", $identityError.Exception)
+    }
+    $siteCode = "$($identification.'Site Code')".Trim()
+    if ($siteCode -notmatch '^[A-Za-z0-9]{3}$') {
+        throw "Upgrade-Console: local site identification has an invalid Site Code ('$siteCode'); no console setup was launched."
+    }
+    if ($ConfiguredSiteCode -and $siteCode -ine $ConfiguredSiteCode) {
+        throw "Upgrade-Console: live SiteCode '$siteCode' differs from configured SiteCode '$ConfiguredSiteCode'; no console setup was launched."
+    }
+    return $siteCode
+}
+
 
 if ( -not $ConfigFilePath) {
     $ConfigFilePath = "C:\staging\DSC\deployConfig.json"
@@ -364,8 +391,7 @@ $machineName = if ($deployConfig.Parameters.ThisMachineName) { $deployConfig.Par
 $matches = @($deployConfig.virtualMachines | Where-Object { $_.vmName -ieq $machineName })
 if ($matches.Count -gt 1) { throw "Upgrade-Console: deployment metadata has multiple entries for '$machineName'" }
 $ThisVM = $matches | Select-Object -First 1
-$identification = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction Stop
-$sitecode = if ($identification.'Site Code') { $identification.'Site Code' } else { $ThisVM.SiteCode }
+$sitecode = Get-ConsoleLocalSiteCode -ConfiguredSiteCode $ThisVM.SiteCode
 $cmOptions = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
 if (-not $sitecode) { throw 'Upgrade-Console: this machine has no live or configured SiteCode' }
 

@@ -1551,6 +1551,20 @@ Hidden conversion VMs and later VM-note imports resolve SQL, SQLAO peer/witness,
 WSUS database, and other VM dependencies to known same-domain VM names, including
 the lab prefix. This does not rename VMs or remove rebuild protection. `WID`
 remains an internal-database marker; missing dependencies are not guessed.
+Site-owner and parent-server phase metadata is generated for hidden VMs too.
+Restoring the pre-Phase-8 checkpoint can leave these VMs without ConfigMgr even
+though they already exist in Hyper-V and are selected for PKI reconciliation.
+Hidden state is not installation evidence: hierarchy Primaries retain their
+idempotent setup path before console upgrade, and Secondaries retain their
+Primary workflow-receipt owner. Missing routing fails during generation or at
+the workflow boundary instead of silently skipping setup. `ConfigHierarchy` and
+the Primary setup-routing log record the selected parent and reconciliation flags.
+The saved user configuration is unchanged by snapshot restoration. Deployment
+configuration is generated before restore and includes inventory-derived runtime
+flags, so those flags must not stand in for the restored guest's installation
+state. Regression tests require identical site-owner/parent setup routes for the
+same topology on a fresh deployment, an installed rerun, and a pre-Phase-8 restore;
+existing/hidden phase protections intentionally remain different.
 `AUTO` domain/prefix selection precedes existing-hierarchy discovery. Declared
 conversion targets must match the deployed role/domain unless an explicit
 existing-VM role mutation was staged. Existing SQLAO cluster/listener names and
@@ -2048,6 +2062,23 @@ unhandled exceptions. A CAS update that exhausts its bounded retries persists
 `dmpdownloader.log` retry evidence, and stops before any primary or dependent
 role can enter an impossible wait. The hierarchy readers treat `Error` as
 terminal and bound dependency waits to four hours.
+The CAS registration wait also checks the Primary's exact-current-RunId failure
+receipt before sleeping; its registration window is capped at four hours.
+The host recognizes the actual VM in `Waiting for Primary site ... (<VM>)`,
+registers terminal output while the source worker is still collecting evidence,
+and propagates cancellation through dependent receipt waits. Cancellation is
+requested asynchronously so remoting close cannot hold the phase monitor.
+Unrelated workers and the original failing worker's diagnostic capture are not
+cancelled by this dependency-only path. End-of-run worker cleanup includes jobs
+already in `Stopping` state.
+
+Failure logs are copied beside the host build log as individual VM captures
+finish; those files can be collected before the overall phase exits. A missing
+or unreadable local `SMS\Identification` key is not proof of an installed site
+even when the saved configuration contains a SiteCode. Console preflight stops
+without launching setup and logs the configured code, process/OS bitness, and
+selected `SMS\Setup` metadata while preserving the original exception. It does
+not synthesize registry keys or silently use configured identity as live proof.
 
 Guest script failures automatically record `Exception.ToString()` (including
 inner exceptions and .NET stacks), error ID, source position, and the complete
@@ -2066,7 +2097,9 @@ remain fatal.
 Validate these contracts with
 `vmbuild\tools\Test-GuestScriptMemoryBoundary.ps1`,
 `vmbuild\tools\Test-ScriptWorkflowStateIo.ps1`, and
-`vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1`. Optional AD discovery is
+`vmbuild\tools\Test-CmHierarchyFailurePropagation.ps1`,
+`vmbuild\tools\Test-RemoteWorkflowDependency.ps1`, and
+`vmbuild\tools\Test-PhaseFailurePropagation.ps1`. Optional AD discovery is
 covered by
 [`Test-ScriptWorkflowAdReplication.ps1`](vmbuild/tools/Test-ScriptWorkflowAdReplication.ps1).
 

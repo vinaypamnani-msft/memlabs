@@ -252,3 +252,99 @@ $cleanupGuard = $newLabAst.FindAll({
     }, $true)
 Assert-True (@($cleanupGuard).Count -eq 1) 'Failed Phase 0 can still run incomplete-VM removal.'
 Write-Host 'PASS -- resume inventory, CM preflight, and phase-result failures stop deployment.'
+
+& {
+    foreach ($name in @('Get-JobWaitTargets','Test-JobTransportCloseFalseFailure','Wait-Phase')) {
+        . ([scriptblock]::Create((Get-TestFunction $name).Extent.Text))
+    }
+    function Invoke-DependencyFailureFixture {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'Common', Justification = 'The extracted production waiter reads the fixture logging context dynamically.')]
+        [CmdletBinding()]
+        param([string]$Mode)
+        $state = @{
+            Polls=0; Stops=[Collections.Generic.List[string]]::new(); Logs=[Collections.Generic.List[string]]::new()
+        }
+        function New-FixtureJob {
+            param($Id,$Name,$State,$Status,$Output)
+            $job = [pscustomobject]@{
+                Id=$Id; Name=$Name; State=$State; Status=$Status; Output=@($Output); Progress=@(); Error=@()
+                PSBeginTime=Get-Date; PSEndTime=Get-Date
+                JobStateInfo=[pscustomobject]@{ Reason=[InvalidOperationException]::new('fixture transport close failure') }
+            }
+            $job | Add-Member ScriptMethod StopJobAsync {
+                $state.Stops.Add($this.Name)
+                $this.State = if ($Mode -eq 'RunningFailurePendingStop') { 'Stopping' } else { 'Stopped' }
+            }
+            $job
+        }
+        $failure = [pscustomobject]@{ Text='Primary setup reported a terminal failure; collecting diagnostics'; LogLevel=3; ForegroundColor='Red' }
+        $sourceState = if ($Mode -eq 'FailedJob') { 'Failed' } else { 'Running' }
+        $sourceOutput = if ($Mode -eq 'FailedJob') { @() } else { @($failure) }
+        $source = New-FixtureJob 3 'FAB-PS1SITE [Primary]' $sourceState '' $sourceOutput
+        $cas = New-FixtureJob 1 'FAB-CS1SITE [CAS]' 'Running' `
+            'Setting up ConfigMgr. Status: Waiting for Primary site PS1 (FAB-PS1SITE) to show up via Get-CMSiteSystemServer (26m elapsed)' @()
+        $sql = New-FixtureJob 2 'FAB-CS1SQLAO1 [SQLAO]' 'Running' `
+            "WaitForWorkflowReceipt: Waiting for ScriptWorkflow receipt on FAB-CS1SITE (elapsed=131.7m, expected='current', completed='<missing>')" @()
+        $independent = New-FixtureJob 4 'FAB-OTHER [DomainMember]' 'Completed' '' @(
+            [pscustomobject]@{ Text='Independent work completed'; LogLevel=1; ForegroundColor='Green' }
+        )
+        $jobs = [Collections.ArrayList]@($cas,$sql,$source,$independent)
+        function Get-JobStreamSource { param($Job) $Job }
+        function Set-PS7ProgressWidth {}
+        function Write-Host { param($Object,[switch]$NoNewline) }
+        function Write-JobProgress {
+            param($Job,$AdditionalData)
+            $global:JobProgressHistory[$Job.Id]=@{ Status=$Job.Status }
+        }
+        function Write-JobProgressDiag { param($Job) }
+        function Write-Progress2 { param($Activity,$Id,$Status,$PercentComplete,[switch]$Completed,[switch]$Force) }
+        function Write-Log {
+            param($Message,[switch]$Failure,[switch]$Warning,[switch]$LogOnly,[switch]$Verbose)
+            $state.Logs.Add("$Message")
+        }
+        function Write-RedX { param($Message,$ForegroundColor) $state.Logs.Add("$Message") }
+        function Write-GreenCheck { param($Message,$ForegroundColor) }
+        function Write-OrangePoint { param($Message,$ForegroundColor) }
+        function Stop-Job { throw 'Dependent cancellation called synchronous Stop-Job and could block in remoting teardown.' }
+        function Remove-Job { param($Job,[switch]$Force,$ErrorAction) }
+        function Get-Job { param($ErrorAction) }
+        function Get-PSSession { param($ErrorAction) }
+        function Write-Phase8DiagnosticSnapshot { param($Path,$Jobs,$PhaseStart,$Trigger,$DeployConfig,[switch]$IncludeHostMetrics) }
+        function Start-Sleep {
+            param($Milliseconds)
+            $state.Polls++
+            if ($state.Polls -gt 35) { throw 'A known failed dependency left the phase waiting past its test budget.' }
+            if ($Mode -like 'RunningFailure*' -and $state.Polls -eq 3) { $source.State='Completed' }
+        }
+        $Common=[pscustomobject]@{ LogPath='C:\fixture\VMBuild.log'; PS7=$false }
+        $global:BuildStats=$null
+        $result = @(Wait-Phase -Phase 8 -Jobs $jobs)
+        Assert-True ($result.Count -eq 1 -and $result[0].Failed -eq 3 -and $result[0].Success -eq 1 -and
+            $result[0].Crashed.Count -eq 0 -and $jobs.Count -eq 0) "$Mode lost failure accounting, independent work, or phase completion."
+        Assert-True (($state.Stops -join ',') -eq 'FAB-CS1SITE [CAS],FAB-CS1SQLAO1 [SQLAO]') `
+            "$Mode did not stop the actual dependent chain, or stopped source diagnostic collection."
+        if ($Mode -like 'RunningFailure*') {
+            Assert-True ($state.Polls -le 4) 'Terminal source output was not propagated while its diagnostics were still collecting.'
+        }
+    }
+    Invoke-DependencyFailureFixture RunningFailure
+    Invoke-DependencyFailureFixture RunningFailurePendingStop
+    Invoke-DependencyFailureFixture FailedJob
+}
+& {
+    $cleanupSelection = @($newLabAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$runningJobs' -and
+                $node.Right.Extent.Text.Contains('PSEventJob')
+            }, $true))
+    Assert-True ($cleanupSelection.Count -eq 1) 'End-of-run job cleanup selection was not found.'
+    function Get-Job {
+        [pscustomobject]@{ Name='active'; State='Running' }
+        [pscustomobject]@{ Name='cancelling'; State='Stopping' }
+        [pscustomobject]@{ Name='finished'; State='Completed' }
+    }
+    $selection = [scriptblock]::Create($cleanupSelection[0].Extent.Text + "`n`$runningJobs.Name")
+    Assert-True ((@(& $selection) -join ',') -eq 'active,cancelling') 'Asynchronously stopping workers bypassed bounded end-of-run child-process cleanup.'
+}
+Write-Host 'PASS -- terminal Primary failures release CAS/SQL wait chains without blocking cancellation or stopping independent work.'

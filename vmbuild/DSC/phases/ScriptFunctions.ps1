@@ -813,6 +813,33 @@ function Write-ScriptWorkflowFailureReceipt {
     Write-ScriptWorkflowJsonAtomic -Configuration $receipt -ConfigurationFile (Join-Path $Root 'ScriptWorkflow.failed.json')
 }
 
+function Assert-ScriptWorkflowDependencyCanContinue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$MachineName,
+        [Parameter(Mandatory)][string]$Root
+    )
+
+    $expectedPath = Join-Path $Root 'ScriptWorkflow.expected.runid'
+    $failedPath = Join-Path $Root 'ScriptWorkflow.failed.json'
+    if (-not (Test-Path -LiteralPath $expectedPath -PathType Leaf -ErrorAction Stop)) { return }
+    if (-not (Test-Path -LiteralPath $failedPath -PathType Leaf -ErrorAction Stop)) { return }
+    $expected = (Get-Content -LiteralPath $expectedPath -Raw -ErrorAction Stop).Trim()
+    if ([string]::IsNullOrWhiteSpace($expected)) {
+        throw "Cannot verify workflow dependency '$MachineName': '$expectedPath' is empty while a failure receipt exists."
+    }
+    $failure = Get-Content -LiteralPath $failedPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ($failure.RunId -isnot [string] -or [string]::IsNullOrWhiteSpace($failure.RunId)) {
+        throw "Invalid ScriptWorkflow failure RunId for dependency '$MachineName' in '$failedPath'."
+    }
+    if (-not $expected.Equals($failure.RunId, [StringComparison]::OrdinalIgnoreCase)) { return }
+    if ($failure.SchemaVersion -ne 1 -or $failure.Status -cne 'Failed' -or
+        $failure.Message -isnot [string] -or [string]::IsNullOrWhiteSpace($failure.Message)) {
+        throw "Invalid ScriptWorkflow failure receipt for dependency '$MachineName' in '$failedPath'."
+    }
+    throw "Workflow dependency '$MachineName' failed for current RunId '$expected': $($failure.Message). Evidence: $failedPath"
+}
+
 function Read-ScriptWorkflowData {
     [CmdletBinding()]
     param(

@@ -651,12 +651,14 @@ if ($scenario -eq "Hierarchy") {
     elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
-        if (-not [string]::IsNullOrWhiteSpace($($ThisVM.thisParams.ParentSiteServer))) {
-            Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
-            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
-            Set-Location $LogPath
-            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
+        if ([string]::IsNullOrWhiteSpace("$($ThisVM.thisParams.ParentSiteServer)")) {
+            throw "Hierarchy Primary '$($ThisVM.vmName)' has no resolved ParentSiteServer for parent site '$($ThisVM.parentSiteCode)' (hidden=$($ThisVM.hidden), pkiReconfigure=$($ThisVM.pkiReconfigure)). Refusing to skip Primary setup and continue to console upgrade. Regenerate deployConfig with hierarchy routing for hidden VMs."
         }
+        Write-DscStatus "$scenario Primary setup routing: VM=$($ThisVM.vmName); site=$($ThisVM.siteCode); parentSite=$($ThisVM.parentSiteCode); parentServer=$($ThisVM.thisParams.ParentSiteServer); hidden=$($ThisVM.hidden); pkiReconfigure=$($ThisVM.pkiReconfigure); InstallSCCM=$($Configuration.InstallSCCM.Status)." -NoStatus
+        Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
+        Set-Location $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath -Rethrow
 
         Write-DscStatus "$scenario Primary Running Upgrade-Console.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Upgrade-Console.ps1"

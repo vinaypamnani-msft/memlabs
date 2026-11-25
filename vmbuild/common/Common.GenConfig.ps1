@@ -1459,8 +1459,11 @@ function ConvertTo-DeployConfigEx {
         }
 
         #Get the SiteServer this VM's SiteCode reports to.  If it has a passive node, get that as -P
-        if ($thisVM.siteCode -and -not $thisVM.Hidden) {
+        if ($thisVM.siteCode) {
             $SiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
+            if (-not $SiteServerVM -or [string]::IsNullOrWhiteSpace("$($SiteServerVM.vmName)")) {
+                throw "Cannot generate site routing for '$($thisVM.vmName)': site '$($thisVM.siteCode)' has no resolved site server in domain '$DomainName' (hidden=$($thisVM.hidden))."
+            }
             $thisParams | Add-Member -MemberType NoteProperty -Name "SiteServer" -Value $SiteServerVM.vmName -Force
             Add-VMToAccountLists -thisVM $thisVM -VM $SiteServerVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts  -WaitOnDomainJoin
             $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.siteCode -type VM -DomainName $DomainName
@@ -1484,9 +1487,13 @@ function ConvertTo-DeployConfigEx {
             }
         }
         #Get the VM Name of the Parent Site Code Site Server
-        if ($thisVM.parentSiteCode -and -not $thisVM.Hidden) {
+        if ($thisVM.parentSiteCode) {
             $parentSiteServerVM = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM -DomainName $DomainName
+            if (-not $parentSiteServerVM -or [string]::IsNullOrWhiteSpace("$($parentSiteServerVM.vmName)")) {
+                throw "Cannot generate hierarchy routing for '$($thisVM.vmName)': parent site '$($thisVM.parentSiteCode)' has no resolved server in domain '$DomainName' (hidden=$($thisVM.hidden))."
+            }
             $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServer" -Value $parentSiteServerVM.vmName -Force
+            Write-Log "[ConfigHierarchy] '$($thisVM.vmName)' site='$($thisVM.siteCode)' parentSite='$($thisVM.parentSiteCode)' parentServer='$($parentSiteServerVM.vmName)' domain='$DomainName' hidden=$($thisVM.hidden). Hidden state protects VM creation; it does not prove ConfigMgr is installed." -LogOnly
             $passiveSiteServerVM = Get-PassiveSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.parentSiteCode -type VM -DomainName $DomainName
             if ($passiveSiteServerVM) {
                 $thisParams | Add-Member -MemberType NoteProperty -Name "ParentSiteServerPassive" -Value $passiveSiteServerVM.vmName -Force

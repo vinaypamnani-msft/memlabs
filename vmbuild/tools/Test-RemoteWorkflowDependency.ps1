@@ -96,6 +96,10 @@ Assert-ReceiptTest ((@(Get-JobWaitTargets 'Waiting on LAB-PRI,LAB-CAS to Complet
     'Legacy multi-node dependency tracking changed.'
 Assert-ReceiptTest ((@(Get-JobWaitTargets 'Setting up ConfigMgr. [LAB-PRI]: Installing secondary') -join ',') -eq 'LAB-PRI') `
     'Mirrored workflow owner tracking changed.'
+foreach ($suffix in @('installation to finish', 'to show up via Get-CMSiteSystemServer (26m elapsed)')) {
+    Assert-ReceiptTest ((@(Get-JobWaitTargets "Setting up ConfigMgr. Status: Waiting for Primary site PS1 (FAB-PS1SITE) $suffix") -join ',') -eq 'FAB-PS1SITE') `
+        'The CAS registration wait did not identify its actual failed Primary.'
+}
 
 $errors = $null
 $moduleAst = [Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$null, [ref]$errors)
@@ -155,7 +159,7 @@ function Start-Sleep {
 
 try {
     $functionsPath = Join-Path $RootPath 'DSC\phases\ScriptFunctions.ps1'
-    foreach ($name in @('Write-ScriptWorkflowJsonAtomic', 'Write-ScriptWorkflowFailureReceipt')) {
+    foreach ($name in @('Write-ScriptWorkflowJsonAtomic', 'Write-ScriptWorkflowFailureReceipt', 'Assert-ScriptWorkflowDependencyCanContinue')) {
         . (Import-ReceiptTestFunction -Path $functionsPath -Name $name)
     }
     [IO.File]::WriteAllText($expectedPath, $currentId)
@@ -164,6 +168,15 @@ try {
     $published = [IO.File]::ReadAllText($failedPath) | ConvertFrom-Json
     Assert-ReceiptTest ($published.SchemaVersion -eq 1 -and $published.RunId -eq $currentId -and
         $published.Status -eq 'Failed' -and $published.FailedAtUtc) 'Terminal failure did not preserve its exact invocation identity.'
+    Assert-ReceiptFailure {
+        Assert-ScriptWorkflowDependencyCanContinue -MachineName 'LAB-OWNER' -Root $script:ReceiptTestRoot
+    } '*LAB-OWNER*current RunId*Secondary was not verified ready*'
+    $published.RunId = $oldId
+    [IO.File]::WriteAllText($failedPath, ($published | ConvertTo-Json))
+    Assert-ReceiptTest (@(Assert-ScriptWorkflowDependencyCanContinue -MachineName 'LAB-OWNER' -Root $script:ReceiptTestRoot).Count -eq 0) `
+        'A stale failure blocked current dependency work or polluted its output.'
+    $published.RunId = $currentId
+    [IO.File]::WriteAllText($failedPath, ($published | ConvertTo-Json))
     $beforeSuperseded = [IO.File]::ReadAllText($failedPath)
     Assert-ReceiptFailure {
         Write-ScriptWorkflowFailureReceipt -Root $script:ReceiptTestRoot -RunId $oldId -Message 'Old invocation'
@@ -204,6 +217,9 @@ try {
     $published.SchemaVersion = 2
     [IO.File]::WriteAllText($failedPath, ($published | ConvertTo-Json))
     Assert-ReceiptFailure { $wait.Set() } '*Invalid ScriptWorkflow failure receipt*'
+    Assert-ReceiptFailure {
+        Assert-ScriptWorkflowDependencyCanContinue -MachineName 'LAB-OWNER' -Root $script:ReceiptTestRoot
+    } '*Invalid ScriptWorkflow failure receipt*'
     $published.SchemaVersion = 1
     [IO.File]::WriteAllText($failedPath, ($published | ConvertTo-Json))
     $lock = [IO.File]::Open($failedPath, 'Open', 'ReadWrite', 'None')
@@ -213,6 +229,9 @@ try {
         try { $wait.Set() } catch { $failure = $_ }
         Assert-ReceiptTest ($null -ne $failure -and $failure.Exception.GetBaseException() -is [IO.IOException] -and
             $script:ReceiptSleeps -eq $sleepsBeforeRead) 'An unreadable failure receipt was silently ignored or replaced by a polling timeout.'
+        Assert-ReceiptFailure {
+            Assert-ScriptWorkflowDependencyCanContinue -MachineName 'LAB-OWNER' -Root $script:ReceiptTestRoot
+        } '*being used by another process*'
     }
     finally { $lock.Dispose() }
 

@@ -2,6 +2,7 @@
 .SYNOPSIS
     Verifies domain-aware site lookup and null deployConfig fail-closed behavior.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'Common', Justification = 'The production configuration generator reads the fixture context dynamically.')]
 [CmdletBinding()]
 param()
 
@@ -108,6 +109,80 @@ $unscopedSiteLookups = @($genAst.FindAll({
         }, $true))
 if ($unscopedSiteLookups.Count -gt 0) {
     throw "GenConfig still has unscoped site lookup(s): $(@($unscopedSiteLookups.Extent.Text) -join ' | ')"
+}
+
+& {
+    . (Import-TestFunction -Path $genConfigPath -Name 'ConvertTo-DeployConfigEx')
+    foreach ($name in @('Add-VMToAccountLists', 'get-RoleForSitecode')) {
+        . (Import-TestFunction -Path $configPath -Name $name)
+    }
+    . (Import-TestFunction -Path (Join-Path $root 'common\Common.Phases.ps1') -Name 'Test-MemLabsIncludeHiddenVmForPhase')
+    $routingFixture = @{ Config=$null; Logs=[Collections.Generic.List[string]]::new() }
+    function Get-List {
+        param($Type,$Domain,$DomainName,$SmartUpdate)
+        $wanted = if ($Domain) { $Domain } else { $DomainName }
+        @($routingFixture.Config.virtualMachines | Where-Object { -not $wanted -or -not $_.domain -or $_.domain -ieq $wanted })
+    }
+    function Get-List2 { param($DeployConfig) $DeployConfig.virtualMachines }
+    function Get-VMFromList2 { param($DeployConfig,$VmName) $DeployConfig.virtualMachines | Where-Object vmName -eq $VmName }
+    function Get-CMBaselineVersion { param($CMVersion) [pscustomobject]@{ baselineVersion='2509'; versions=@('2509') } }
+    function Get-EligiblePushSites { param($Config,$Domain,$Inventory) }
+    function Test-PushClientRequested { param($VM) $false }
+    function Resolve-DeployUrlCatalog { param($AzureFileList) [pscustomobject]@{ Urls=[pscustomobject]@{}; Metadata=[pscustomobject]@{} } }
+    function Write-Log { param($Message,[switch]$Warning,[switch]$LogOnly) $routingFixture.Logs.Add("$Message") }
+    $Common=[pscustomobject]@{ AzureFileList=[pscustomobject]@{ Tools=@() } }
+    $savedRoutingConfig=[pscustomobject]@{
+        vmOptions=[pscustomobject]@{ domainName='lab.test'; domainNetBiosName='LAB'; network='192.0.2.0'; prefix='LAB-'; adminName='admin' }
+        cmOptions=[pscustomobject]@{ Version='2509'; Install=$true }
+        virtualMachines=@(
+            [pscustomobject]@{ vmName='LAB-CAS'; role='CAS'; siteCode='CAS'; hidden=$false },
+            [pscustomobject]@{ vmName='LAB-PRI'; role='Primary'; siteCode='PRI'; parentSiteCode='CAS'; hidden=$false },
+            [pscustomobject]@{ vmName='LAB-PRI2'; role='Primary'; siteCode='PR2'; parentSiteCode='CAS'; hidden=$false },
+            [pscustomobject]@{ vmName='LAB-SEC'; role='Secondary'; siteCode='SEC'; parentSiteCode='PRI'; hidden=$false }
+        )
+    } | ConvertTo-Json -Depth 5
+    $expectedRouting=$null
+    foreach ($marker in @('FreshVisible','InstalledNoRestore','RestoredPrePhase8','phase11Validate','UnmarkedSupport')) {
+        $routingFixture.Config=$savedRoutingConfig | ConvertFrom-Json
+        $isExisting=$marker -ne 'FreshVisible'
+        foreach ($vm in $routingFixture.Config.virtualMachines) {
+            $vm.hidden=$isExisting
+            if ($marker -in @('InstalledNoRestore','RestoredPrePhase8')) {
+                $vm | Add-Member NoteProperty pkiReconfigure $true
+                $lastPhase = if ($marker -eq 'InstalledNoRestore') { 11 } else { 7 }
+                $vm | Add-Member NoteProperty lastPhaseComplete $lastPhase
+            }
+            elseif ($marker -eq 'phase11Validate') { $vm | Add-Member NoteProperty phase11Validate $true }
+        }
+        $generated = ConvertTo-DeployConfigEx -deployConfig $routingFixture.Config
+        $routing=@($generated.virtualMachines | Sort-Object vmName | Select-Object vmName,siteCode,parentSiteCode,
+            @{Name='SiteServer';Expression={$_.thisParams.SiteServer}},
+            @{Name='ParentSiteServer';Expression={$_.thisParams.ParentSiteServer}}) | ConvertTo-Json -Depth 3 -Compress
+        if ($null -eq $expectedRouting) { $expectedRouting=$routing }
+        else {
+            Assert-Equal $expectedRouting $routing "$marker changed required setup routes for the same saved topology."
+        }
+        $primary = $generated.virtualMachines | Where-Object vmName -eq 'LAB-PRI'
+        $secondary = $generated.virtualMachines | Where-Object vmName -eq 'LAB-SEC'
+        Assert-Equal 'LAB-CAS' $primary.thisParams.ParentSiteServer "$marker hidden Primary lost required hierarchy setup routing."
+        Assert-Equal 'LAB-CAS' ($generated.virtualMachines | Where-Object vmName -eq 'LAB-PRI2').thisParams.ParentSiteServer `
+            "$marker second hidden Primary lost its independent CAS setup route."
+        Assert-Equal 'LAB-PRI' $primary.thisParams.SiteServer "$marker hidden Primary lost its local site-owner metadata."
+        Assert-Equal 'LAB-PRI' $secondary.thisParams.ParentSiteServer "$marker hidden Secondary lost its Primary receipt owner."
+        Assert-Equal 'LAB-SEC' $secondary.thisParams.SiteServer "$marker hidden Secondary lost its own site-owner metadata."
+        foreach ($vm in $generated.virtualMachines) {
+            Assert-Equal $isExisting $vm.hidden 'Hierarchy routing changed rebuild protection.'
+            foreach ($phase in @(1,10)) {
+                Assert-Equal (-not $isExisting) (Test-MemLabsIncludeHiddenVmForPhase -Vm $vm -Phase $phase) 'Hierarchy metadata changed existing-VM rebuild/mutation phase protection.'
+            }
+        }
+    }
+    $routingFixture.Config.virtualMachines = @($routingFixture.Config.virtualMachines | Where-Object vmName -ne 'LAB-CAS')
+    $caught=$null
+    try { $null = ConvertTo-DeployConfigEx -deployConfig $routingFixture.Config } catch { $caught=$_ }
+    if (-not $caught -or $caught.Exception.Message -notmatch 'LAB-PRI.*parent.*CAS.*lab\.test') {
+        throw 'Missing hierarchy parent did not fail configuration generation with its child/site/domain context.'
+    }
 }
 
 $newLabText = Get-Content -LiteralPath $newLabPath -Raw

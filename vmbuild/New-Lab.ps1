@@ -1625,7 +1625,7 @@ finally {
     # PSEventJob entries are engine-event subscriptions (the log flush-on-exit
     # handler), not build work. Stopping and force-removing them tears down the
     # exit flush and loses the last buffered log lines.
-    $runningJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' -and $_ -isnot [System.Management.Automation.PSEventJob] })
+    $runningJobs = @(Get-Job | Where-Object { $_.State -in @('Running', 'Stopping') -and $_ -isnot [System.Management.Automation.PSEventJob] })
     $totalJobs = $runningJobs.Count
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $blankLine = " " * 100

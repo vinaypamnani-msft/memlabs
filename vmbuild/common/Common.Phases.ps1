@@ -3571,7 +3571,10 @@ function Get-JobWaitTargets {
 
     # [regex]::Match, not -match: a nested -match would clobber the caller's $Matches.
     # WaitFor is joined with ',' so one status can name several VMs.
-    $waitMatch = [regex]::Match($StatusText, 'Waiting for ScriptWorkflow receipt on ([A-Za-z0-9\-]+)')
+    $waitMatch = [regex]::Match($StatusText, 'Waiting for Primary site [A-Za-z0-9]{3} \(([A-Za-z0-9\-]+)(?:\.[A-Za-z0-9.\-]+)?\)')
+    if (-not $waitMatch.Success) {
+        $waitMatch = [regex]::Match($StatusText, 'Waiting for ScriptWorkflow receipt on ([A-Za-z0-9\-]+)')
+    }
     if (-not $waitMatch.Success) {
         $waitMatch = [regex]::Match($StatusText, 'Waiting (?:on|for)(?: Site Server)? ([A-Za-z0-9\-,]+)')
     }
@@ -3993,10 +3996,16 @@ function Wait-Phase {
                         # $jobs: the reaping below handles Failed/Completed only, so a
                         # Stopped job left in the list keeps $runningJobs non-empty and
                         # Wait-Phase's `until` never fires.
-                        Write-Log "[Phase $Phase]: $($job.Name): STOPPING this job -- it is waiting on '$deadDep', which FAILED at $($failedVmNames[$deadDep].ToString('HH:mm:ss')). Its DSC WaitForAll can never be satisfied and would otherwise hold the phase for up to 10h. Status: '$deadStatus'" -Failure
-                        try { Stop-Job $job -ErrorAction SilentlyContinue } catch { }
+                        Write-Log "[Phase $Phase]: $($job.Name): STOPPING this job -- it is waiting on '$deadDep', which FAILED at $($failedVmNames[$deadDep].ToString('HH:mm:ss')). The prerequisite cannot complete in this phase; cancelling this waiter without holding the phase in remoting teardown. Status: '$deadStatus'" -Failure
+                        $dependentName = ("$($job.Name)" -split ' ')[0].ToUpperInvariant()
+                        if (-not $failedVmNames.ContainsKey($dependentName)) { $failedVmNames[$dependentName] = Get-Date }
                         try { $jobs.Remove($job) } catch { }
-                        try { Remove-Job $job -Force -ErrorAction SilentlyContinue } catch { }
+                        try { $job.StopJobAsync() }
+                        catch { Write-Log "[Phase $Phase]: $($job.Name): asynchronous cancellation request failed: $($_.Exception.Message)" -Warning }
+                        if ($job.State -in @('Completed', 'Failed', 'Stopped')) {
+                            try { Remove-Job $job -Force -ErrorAction Stop }
+                            catch { Write-Log "[Phase $Phase]: $($job.Name): cancelled-job cleanup failed: $($_.Exception.Message)" -Warning }
+                        }
                         $return.Failed++
                         continue
                     }
@@ -4012,6 +4021,11 @@ function Wait-Phase {
                         if ($obj -and $obj.LogLevel -ge 2 -and $obj.Text) {
                             $line = $obj.Text.ToString().Trim()
                             if ($obj.LogLevel -eq 3) {
+                                $failedName = ("$($job.Name)" -split ' ')[0].ToUpperInvariant()
+                                if (-not $failedVmNames.ContainsKey($failedName)) {
+                                    $failedVmNames[$failedName] = Get-Date
+                                    Write-Log "[Phase $Phase]: ${failedName}: terminal failure is visible; dependent waits can stop while this worker retains failure diagnostics." -LogOnly
+                                }
                                 Write-RedX $line -ForegroundColor $obj.ForegroundColor
                             }
                             else {
@@ -4168,6 +4182,9 @@ function Wait-Phase {
                             $failedVmNames[$fvmKey] = Get-Date
                             Write-Log "[Phase $Phase]: ${fvmName}: replacement worker process also died; no further re-dispatch will be attempted." -Failure
                         }
+                    }
+                    elseif ($fvmKey -and -not $failedVmNames.ContainsKey($fvmKey)) {
+                        $failedVmNames[$fvmKey] = Get-Date
                     }
 
                     # Capture per-VM timing for failed jobs too

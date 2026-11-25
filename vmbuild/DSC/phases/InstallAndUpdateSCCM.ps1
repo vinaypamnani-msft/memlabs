@@ -2810,11 +2810,18 @@ else {
                 $PSSiteCode = $PSVM.siteCode
                 $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
                 $psWaitStart = Get-Date
+                $psRegistrationWaitSeconds = 14400
+                $psWorkflowRoot = "FileSystem::\\$($PSVM.vmName)\$(Split-Path $LogPath -Leaf)"
                 Write-DscStatus "Waiting for Primary site $PSSiteCode ($($PSVM.vmName)) installation to finish"
                 while (!$PSSystemServer) {
+                    Assert-ScriptWorkflowDependencyCanContinue -MachineName $PSVM.vmName -Root $psWorkflowRoot
                     # Elapsed goes in the TEXT: the host only records status CHANGES, and this
                     # poll is also the only guest-log evidence that the wait is still alive.
-                    $psWaitMin = [int]((Get-Date) - $psWaitStart).TotalMinutes
+                    $psWaitElapsed = (Get-Date) - $psWaitStart
+                    $psWaitMin = [int]$psWaitElapsed.TotalMinutes
+                    if ($psWaitElapsed.TotalSeconds -ge $psRegistrationWaitSeconds) {
+                        throw "Primary site $PSSiteCode ($($PSVM.vmName)) was not visible via Get-CMSiteSystemServer within $psRegistrationWaitSeconds seconds. Workflow receipts: $psWorkflowRoot. Primary installation readiness is unverified."
+                    }
                     Write-DscStatus "Waiting for Primary site $PSSiteCode ($($PSVM.vmName)) to show up via Get-CMSiteSystemServer (${psWaitMin}m elapsed)" -RetrySeconds 30
                     Start-Sleep -Seconds 30
                     $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode

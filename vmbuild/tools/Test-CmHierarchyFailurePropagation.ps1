@@ -62,6 +62,46 @@ function Assert-True {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
 }
+$registrationLoops = @($updateAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.WhileStatementAst] -and
+            $node.Extent.Text.Contains('Assert-ScriptWorkflowDependencyCanContinue')
+        }, $true))
+Assert-True ($registrationLoops.Count -eq 1) 'Expected one Primary registration wait with current-run failure checks.'
+$registrationLoop = [scriptblock]::Create($registrationLoops[0].Extent.Text)
+foreach ($mode in @('CurrentFailure', 'BeforeDeadline', 'AtDeadline')) {
+    & {
+        param($Mode)
+        $fixture = @{ Sleeps=0; ProviderReads=0 }
+        $base = [datetime]'2026-11-25T00:00:00Z'
+        $elapsed = if ($Mode -eq 'AtDeadline') { 14400 } else { 14399 }
+        function Get-Date { $base.AddSeconds($elapsed) }
+        function Assert-ScriptWorkflowDependencyCanContinue {
+            param($MachineName,$Root)
+            if ($Mode -eq 'CurrentFailure') { throw 'PRIMARY1 current workflow failed' }
+        }
+        function Write-DscStatus { param($Message,$RetrySeconds) }
+        function Start-Sleep { param($Seconds) $fixture.Sleeps++ }
+        function Get-CMSiteSystemServer {
+            param($SiteCode)
+            $fixture.ProviderReads++
+            [pscustomobject]@{ SiteCode=$SiteCode }
+        }
+        $PSVM=[pscustomobject]@{ vmName='PRIMARY1' }
+        $PSSiteCode='PRI'; $psWorkflowRoot='FileSystem::\\PRIMARY1\DSC'
+        $psWaitStart=$base; $psRegistrationWaitSeconds=14400; $PSSystemServer=$null
+        $caught=$null
+        try { . $registrationLoop } catch { $caught=$_ }
+        if ($Mode -eq 'BeforeDeadline') {
+            Assert-True (-not $caught -and $fixture.Sleeps -eq 1 -and $fixture.ProviderReads -eq 1) 'A healthy registration wait was stopped before the four-hour boundary.'
+        }
+        else {
+            $pattern = if ($Mode -eq 'CurrentFailure') { 'current workflow failed' } else { 'within 14400 seconds' }
+            Assert-True ($caught -and $caught.Exception.Message -match $pattern -and
+                $fixture.Sleeps -eq 0 -and $fixture.ProviderReads -eq 0) "$Mode did not stop registration immediately with its original reason."
+        }
+    } $mode
+}
 $timeoutGuards = @($updateAst.FindAll({
             param($node)
             $node -is [Management.Automation.Language.IfStatementAst] -and
