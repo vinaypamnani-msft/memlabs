@@ -112,6 +112,12 @@ overwriting earlier successful output. `-OutputPath` overrides this location.
 `CollectionErrors` distinguish measured zero reports from unreadable data and
 show which source supplied a recovered fact. Source SHA-256 fingerprints are
 retained for the entry point, host helpers, transport, and bounded-worker code.
+Guest attempts include the probe name, target, and successful fallback, not just
+errors. Failed web/catalog routes remain in `Attempts`, with `Recovered` and
+`RecoveryEvidence` identifying verified alternative measurements. Those recovered
+transport failures alone do not mark a complete capture as partial. Missing facts,
+incomplete file capture, and other unrecovered probe failures remain explicit;
+Phase 11 reports recovered transport failures separately from capture gaps.
 
 The collector does not install software, launch a browser, mount/modify a live
 VHDX, restart the VM/services, or change firewall, DNS, trust, credentials, or

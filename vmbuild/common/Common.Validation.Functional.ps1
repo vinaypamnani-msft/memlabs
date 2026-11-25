@@ -6835,6 +6835,10 @@ function Test-ReportingDiagnosticEvidence {
     if ($Evidence.CollectionStatus -eq 'Partial') {
         $results.Details.Add("WARN: Diagnostic capture is partial; independent raw files and checkpoints are retained. $((@($Evidence.CollectionErrors)+@($Evidence.Warnings)) -join '; ')")
     }
+    $recoveredAttempts = @($Evidence.Attempts | Where-Object { $_.Error -and $_.Recovered })
+    if ($recoveredAttempts.Count -gt 0) {
+        $results.Details.Add("OK: Diagnostic capture recovered $($recoveredAttempts.Count) transport probe failure(s) using verified alternative evidence; errors and recovery sources are retained in Attempts.")
+    }
     $failures = [System.Collections.Generic.List[string]]::new()
     $expectedFolder = if ($SiteCode) { "/ConfigMgr_$SiteCode" } else { 'a ConfigMgr_* folder' }
     $edgeVersions = @(

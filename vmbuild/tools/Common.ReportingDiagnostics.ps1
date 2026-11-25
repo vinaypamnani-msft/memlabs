@@ -546,29 +546,38 @@ function Invoke-ReportingGuestAlternative {
         [scriptblock]$Probe, [object[]]$ProbeArguments, [string]$PrimitiveSource,
         [string]$Name, [int]$TimeoutSeconds = 45, [switch]$SkipPowerShellDirect
     )
-    $attempts = [Collections.Generic.List[object]]::new()
+    $attemptReport = @{ Attempts = @() }
     try {
         if ($SkipPowerShellDirect) { throw 'PowerShell Direct skipped after a previous broken channel for this VM.' }
         $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain -ScriptBlock $Probe `
             -ArgumentList $ProbeArguments -DisplayName "Reporting isolated $Name" -AsJob -TimeoutSeconds $TimeoutSeconds `
             -SessionMaxRetries 1 -RequireDomainIdentity -FailOnRemoteError -SuppressLog
         if ($result.CommandResult -and -not $result.ScriptBlockFailed -and $null -ne $result.ScriptBlockOutput) {
-            return [pscustomobject]@{ Output = $result.ScriptBlockOutput; Method = 'PowerShellDirect'; Attempts = $attempts.ToArray(); Error = $null }
+            Add-ReportingHostAttempt $attemptReport $Name 'PowerShellDirect' $VMName @{
+                Output=$result.ScriptBlockOutput; Error=$null; TimedOut=$result.TimedOut; ElapsedSeconds=$result.ElapsedSeconds; ChannelBroken=$false
+            }
+            return [pscustomobject]@{ Output = $result.ScriptBlockOutput; Method = 'PowerShellDirect'; Attempts = @($attemptReport.Attempts); Error = $null }
         }
         $detail = if ($result.ErrorDetails) { $result.ErrorDetails -join '; ' } else { 'Guest call returned no verified result.' }
-        $attempts.Add([pscustomobject]@{ Method = 'PowerShellDirect'; Error = $detail; TimedOut = $result.TimedOut; ChannelBroken = $result.ChannelBroken })
+        Add-ReportingHostAttempt $attemptReport $Name 'PowerShellDirect' $VMName @{
+            Output=$null; Error=$detail; TimedOut=$result.TimedOut; ElapsedSeconds=$result.ElapsedSeconds; ChannelBroken=$result.ChannelBroken
+        }
     }
-    catch { $attempts.Add([pscustomobject]@{ Method = 'PowerShellDirect'; Error = $_.Exception.Message }) }
+    catch {
+        Add-ReportingHostAttempt $attemptReport $Name 'PowerShellDirect' $VMName @{
+            Output=$null; Error=$_.Exception.Message; TimedOut=$false; ElapsedSeconds=$null
+        }
+    }
     foreach ($address in @($Addresses | Sort-Object { $_ -match '^\d+\.' } | Select-Object -Unique -First 2)) {
         $result = Invoke-ReportingHostWorker -Operation WinRM -Parameters @{
             Target = $address; Credential = $Credential; Probe = $Probe.ToString(); ProbeArguments = $ProbeArguments
         } -PrimitiveSource $PrimitiveSource -TimeoutSeconds $TimeoutSeconds
+        Add-ReportingHostAttempt $attemptReport $Name 'WinRM' $address $result
         if (-not $result.Error -and $null -ne $result.Output) {
-            return [pscustomobject]@{ Output = $result.Output; Method = 'WinRM'; Attempts = $attempts.ToArray(); Error = $null }
+            return [pscustomobject]@{ Output = $result.Output; Method = 'WinRM'; Attempts = @($attemptReport.Attempts); Error = $null }
         }
-        $attempts.Add([pscustomobject]@{ Method = 'WinRM'; Target = $address; Error = $result.Error; TimedOut = $result.TimedOut })
     }
-    [pscustomobject]@{ Output = $null; Method = $null; Attempts = $attempts.ToArray(); Error = "No transport completed '$Name'." }
+    [pscustomobject]@{ Output = $null; Method = $null; Attempts = @($attemptReport.Attempts); Error = "No transport completed '$Name'." }
 }
 
 function Save-ReportingHostCheckpoint {
@@ -583,7 +592,7 @@ function Add-ReportingHostAttempt {
     $Report.Attempts += [pscustomobject]@{
         Name = $Name; Method = $Method; Target = $Target
         Succeeded = (-not $Result.Error -and $null -ne $Result.Output)
-        TimedOut = $Result.TimedOut; ElapsedSeconds = $Result.ElapsedSeconds; Error = $Result.Error
+        TimedOut = $Result.TimedOut; ElapsedSeconds = $Result.ElapsedSeconds; Error = $Result.Error; ChannelBroken = $Result.ChannelBroken
     }
 }
 
@@ -905,7 +914,22 @@ function Invoke-ReportingHostCollection {
         if (-not $report.OperatingSystem) { $report.CollectionErrors += 'Operating-system/inventory identity could not be verified through native or guest methods.' }
         if ($report.Browsers.Count -eq 0) { $report.Warnings += 'Installed browser version could not be read; browser-only blank-page compatibility is unverified.' }
         if ($report.ReportServerConfiguration.Count -eq 0) { $report.Warnings += 'Report Server WMI configuration is unavailable; any SQL target inference is recorded in its connection result.' }
-        if (@($report.Attempts | Where-Object { $_.Error }).Count -gt 0) { $report.Warnings += 'One or more collection methods failed; consult Attempts for errors and successful alternative sources.' }
+        $pageKnown = @($report.Endpoints | Where-Object { $_.ReportServerPage -and -not $_.ReportServerPageError }).Count -gt 0
+        foreach ($attempt in @($report.Attempts | Where-Object Error)) {
+            $recoveryEvidence = switch ($attempt.Name) {
+                Catalog { if ($catalogKnown) { 'Endpoints.Catalog / SqlCatalog' } }
+                SqlCatalog { if ($catalogKnown) { 'Endpoints.Catalog / SqlCatalog' } }
+                Portal { if ($portalKnown) { 'Endpoints.Portal' } }
+                ReportServerPage { if ($pageKnown) { 'Endpoints.ReportServerPage' } }
+            }
+            $attempt | Add-Member NoteProperty Recovered ([bool]$recoveryEvidence) -Force
+            $attempt | Add-Member NoteProperty RecoveryEvidence $recoveryEvidence -Force
+        }
+        $unrecoveredAttempts = @($report.Attempts | Where-Object { $_.Error -and -not $_.Recovered })
+        if ($unrecoveredAttempts.Count -gt 0) {
+            $probeNames = @($unrecoveredAttempts | ForEach-Object { "$($_.Name) via $($_.Method) ($($_.Target))" } | Select-Object -Unique -First 5) -join '; '
+            $report.Warnings += "Collection probes lack verified alternative evidence: $probeNames. Consult Attempts for the retained errors."
+        }
         $report.CollectionFailed = -not ($catalogKnown -and $portalKnown)
         $report.CollectionStatus = if ($report.CollectionErrors.Count -or $report.Warnings.Count) { 'Partial' } else { 'Complete' }
         $report.CurrentStage = 'Finished'

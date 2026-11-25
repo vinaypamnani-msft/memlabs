@@ -804,6 +804,7 @@ Write-DscStatus "$Tag Starting perfloading"
 
         $mutex = $null
         $owned = $false
+        $readiness = @()
         try {
             $wimPath = $Path
             if ($ContentType -eq 'OperatingSystemInstaller') { $wimPath = [IO.Path]::Combine($Path, 'sources\install.wim') }
@@ -821,6 +822,7 @@ Write-DscStatus "$Tag Starting perfloading"
             $started = Get-Date
             $requested = $false
             while ($true) {
+                $readiness = @()
                 if ($ContentType -eq 'OperatingSystemImage') {
                     $rows = @(Get-CMOperatingSystemImage -Name $Name -ErrorAction Stop | Where-Object { $_.Name -eq $Name })
                     $otherRows = @(Get-CMOperatingSystemUpgradePackage -Name $OtherContentName -ErrorAction Stop | Where-Object { $_.Name -eq $OtherContentName })
@@ -846,6 +848,20 @@ Write-DscStatus "$Tag Starting perfloading"
                         throw "Package '$($row.Name)' has unmeasured identity or source-site metadata."
                     }
                     if ("$($row.SourceSite)" -ine $SiteCode) { continue }
+                    $hydratedAction = "$($row.ActionInProgress)"
+                    $readinessIndex = $readiness.Count
+                    $readiness += "$($row.PackageID) RawQueryRows=unmeasured HydratedActionInProgress=$hydratedAction"
+                    # Hydrated CM objects can report UPDATE after completion; query state without lazy-property hydration.
+                    $current = @(Get-CimInstance -Namespace "root\SMS\site_$SiteCode" -ClassName SMS_PackageBaseclass `
+                        -Filter "PackageID='$($row.PackageID)'" -OperationTimeoutSec 10 -ErrorAction Stop)
+                    $rawIdentities = @($current | Select-Object -First 3 | ForEach-Object { "$($_.PackageID)@$($_.SourceSite)" }) -join ', '
+                    $readiness[$readinessIndex] = "$($row.PackageID) RawQueryRows=$($current.Count) RawIdentities=[$rawIdentities] HydratedActionInProgress=$hydratedAction"
+                    if ($current.Count -ne 1 -or "$($current[0].PackageID)" -ine "$($row.PackageID)" -or
+                        "$($current[0].SourceSite)" -ine $SiteCode) {
+                        throw "Package '$($row.PackageID)' did not read back one matching local provider state."
+                    }
+                    $row = $current[0]
+                    $readiness[$readinessIndex] = "$($row.PackageID) SourceSite=$($row.SourceSite) RawSourceVersion=$($row.SourceVersion) RawStoredPkgVersion=$($row.StoredPkgVersion) RawActionInProgress=$($row.ActionInProgress) HydratedActionInProgress=$hydratedAction"
                     $sourceVersion = 0
                     $storedVersion = 0
                     $action = 0
@@ -860,7 +876,8 @@ Write-DscStatus "$Tag Starting perfloading"
                     }
                 }
                 if ($rows.Count -eq 1 -and $pending.Count -eq 0) {
-                    Write-DscStatus "$StatusTag Reusing $ContentType '$Name' ($($rows[0].PackageID)); no import request is needed."
+                    $readinessDetail = if ($readiness.Count) { $readiness -join '; ' } else { 'no site-owned source import to wait for' }
+                    Write-DscStatus "$StatusTag Reusing $ContentType '$Name' ($($rows[0].PackageID)); no import request is needed. Raw SMS_PackageBaseclass query readiness: $readinessDetail"
                     return $true
                 }
                 if ($rows.Count -eq 0 -and $pending.Count -eq 0 -and -not $requested) {
@@ -883,7 +900,8 @@ Write-DscStatus "$Tag Starting perfloading"
             }
         }
         catch {
-            Write-DscStatus "$StatusTag OSD import for '$Name' was not verified: $($_.Exception.Message)" -Warning
+            $readinessDetail = if ($readiness.Count) { $readiness -join '; ' } else { 'not measured' }
+            Write-DscStatus "$StatusTag OSD import for '$Name' was not verified: $($_.Exception.Message) Raw SMS_PackageBaseclass query readiness: $readinessDetail" -Warning
             return $false
         }
         finally {

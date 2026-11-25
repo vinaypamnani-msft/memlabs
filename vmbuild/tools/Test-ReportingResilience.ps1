@@ -122,6 +122,12 @@ try {
                 }
                 Events { return (New-Result ([pscustomobject]@{ Method='NativeEventRPC'; Target=$Parameters.Target; EventLogs=@(); Errors=@() })) }
                 Web {
+                    if ($state.Mode -eq 'HttpsGuestRecovery') {
+                        if ($Parameters.Uri -match '^http://192\.0\.2\.1/' -and $Parameters.Kind -eq 'ReportServerPage') {
+                            return (New-Result (Get-FixtureWeb $Parameters.Kind))
+                        }
+                        return (New-Result -Error 'Fixture host DNS unavailable or HTTPS required')
+                    }
                     if ($state.Mode -in @('WinRMRecovery','NoEvidence') -or
                         ($state.Mode -eq 'HostDnsFailure' -and $Parameters.Uri -match 'RP1\.fixture\.test') -or
                         ($state.Mode -eq 'AllGuestFail' -and $Parameters.Kind -eq 'Catalog')) {
@@ -130,13 +136,13 @@ try {
                     return (New-Result (Get-FixtureWeb $Parameters.Kind))
                 }
                 Sql {
-                    if ($state.Mode -eq 'NoEvidence') { return (New-Result -Error 'Fixture SQL unavailable') }
+                    if ($state.Mode -in @('NoEvidence','HttpsGuestRecovery')) { return (New-Result -Error 'Fixture SQL unavailable') }
                     if ($state.Mode -eq 'HostDnsFailure' -and $Parameters.Server -match '^RP1\.') { return (New-Result -Error 'Fixture host DNS unavailable') }
                     Assert-ReportingTest ($Parameters.Server -match ',1544$') 'SQL target lost its configured non-default port.'
                     return (New-Result ([pscustomobject]@{ Server = $Parameters.Server; Database = 'ReportServer'; ExpectedFolder = '/ConfigMgr_PS1'; FolderExists = $true; ReportCount = 3; VerificationSucceeded = $true; Source = 'HostSQL' }))
                 }
                 WinRM {
-                    if ($state.Mode -in @('AllGuestFail','NoEvidence')) { return (New-Result -Error 'Fixture WinRM unavailable') }
+                    if ($state.Mode -in @('AllGuestFail','NoEvidence','HttpsGuestRecovery')) { return (New-Result -Error 'Fixture WinRM unavailable') }
                     $kind = $Parameters.ProbeArguments[1]
                     if ($kind -eq 'RP1') { return (New-Result (Get-FixtureInventory)) }
                     if ($kind -in @('Catalog','ReportServerPage','Portal')) { return (New-Result (Get-FixtureWeb $kind)) }
@@ -159,12 +165,29 @@ try {
                     ScriptBlockOutput = [pscustomobject]@{ Files = @([pscustomobject]@{ Source='C:\fixture.log'; SourceBytes=3; CopiedBytes=3; Offset=0; Truncated=$false; ContentBase64=[Convert]::ToBase64String([byte[]](1,2,3)) }); Errors=@() }
                 }
             }
+            if ($state.Mode -eq 'HttpsGuestRecovery') {
+                $output = $null
+                if ($DisplayName -like '*SqlCatalog') {
+                    $output = [pscustomobject]@{
+                        Server='RP1.fixture.test,1544'; Database='ReportServer'; ExpectedFolder='/ConfigMgr_PS1'
+                        FolderExists=$true; ReportCount=3; VerificationSucceeded=$true; Source='GuestSQL'
+                    }
+                }
+                elseif ($ArgumentList[1] -eq 'ReportServerPage' -or "$($ArgumentList[2])" -match '^https://RP1\.fixture\.test/') {
+                    $output = Get-FixtureWeb $ArgumentList[1]
+                }
+                return [pscustomobject]@{
+                    CommandResult=($null -ne $output); ScriptBlockFailed=($null -eq $output)
+                    ScriptBlockOutput=$output; ChannelBroken=$false; TimedOut=$false
+                    ErrorDetails='Fixture endpoint requires HTTPS'
+                }
+            }
             [pscustomobject]@{ CommandResult = $false; ScriptBlockFailed = $true; ChannelBroken = $true; ErrorDetails = 'Fixture Hyper-V socket target process has ended' }
         }
         $note = [pscustomobject]@{ domain = 'fixture.test'; role = 'DomainMember'; sqlVersion = 'Sql Server 2022'; sqlPort = 1544; sqlInstanceName = 'MSSQLSERVER' }
         $collectorSource = Get-Content -LiteralPath $CollectorPath -Raw
         $processSource = Get-Content -LiteralPath (Join-Path $RootPath 'DSC\phases\ProcessFunctions.ps1') -Raw
-        foreach ($mode in @('Native','SmbFallback','FileTimeout','WinRMRecovery','AllGuestFail','NoSmb','NoEvidence','HostDnsFailure')) {
+        foreach ($mode in @('Native','SmbFallback','FileTimeout','WinRMRecovery','AllGuestFail','NoSmb','NoEvidence','HostDnsFailure','HttpsGuestRecovery')) {
             $state.Mode = $mode; $state.GuestCalls = 0; $state.Calls.Clear()
             $directory = Join-Path $ScenarioRoot $mode
             $null = New-Item -Path $directory -ItemType Directory
@@ -186,6 +209,21 @@ try {
                 Assert-ReportingTest ($state.GuestCalls -eq 1 -and @($report.Attempts | Where-Object Name -eq 'PostFailureEvents').Count -eq 1) 'A broken PowerShell Direct channel was retried or its fresh native crash events were not collected.'
             }
             if ($mode -eq 'HostDnsFailure') { Assert-ReportingTest (@($report.SqlCatalog | Where-Object { $_.VerificationSucceeded -and $_.Server -eq '192.0.2.1,1544' }).Count -eq 1) 'SQL IP fallback lost the non-default port or authoritative count.' }
+            if ($mode -eq 'HttpsGuestRecovery') {
+                $failedAttempts = @($report.Attempts | Where-Object Error)
+                Assert-ReportingTest ($report.CollectionStatus -eq 'Complete' -and -not $report.CollectionFailed -and
+                    $report.CollectionErrors.Count -eq 0 -and $report.Warnings.Count -eq 0) 'Recovered HTTPS/SOAP/SQL evidence was still reported as a partial capture.'
+                Assert-ReportingTest ($failedAttempts.Count -gt 0 -and
+                    @($failedAttempts | Where-Object { -not $_.Recovered -or -not $_.RecoveryEvidence }).Count -eq 0) 'Recovered transport failures were discarded or lost their evidence attribution.'
+                Assert-ReportingTest (@($report.Attempts | Where-Object {
+                            $_.Name -eq 'Catalog' -and $_.Method -eq 'PowerShellDirect' -and $_.Succeeded -and -not $_.Error
+                        }).Count -eq 1) 'The successful guest catalog attempt was not retained with its probe name.'
+            }
+            if ($mode -eq 'FileTimeout') {
+                Assert-ReportingTest ($report.CollectionStatus -eq 'Partial' -and @($report.Attempts | Where-Object {
+                            $_.Name -eq 'PrePowerShellFiles' -and $_.Error -and -not $_.Recovered
+                        }).Count -gt 0) 'An incomplete file worker was disguised as recovered web/catalog evidence.'
+            }
             if ($mode -eq 'NoEvidence') { Assert-ReportingTest ($report.CollectionFailed -and $report.CollectionStatus -eq 'Partial' -and $report.CollectionErrors.Count -gt 0) 'Unavailable facts became an empty healthy inventory.' }
             if ($mode -eq 'NoEvidence') {
                 $latest = Join-Path $directory 'report.json'

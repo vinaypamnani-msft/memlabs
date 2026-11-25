@@ -144,6 +144,15 @@ Phase 8 also guards work initiated by MemLabs:
   A per-source-WIM Windows mutex on the publishing VM excludes a second MemLabs
   caller, and remains held while local source import is pending. Source
   version zero is pending, not completed. The wait is limited to 15 minutes.
+  Local readiness is measured by a fresh `SMS_PackageBaseclass` query keyed by
+  PackageID, with a ten-second operation limit. Hydrated ConfigMgr cmdlet objects
+  can report `ActionInProgress=1` (UPDATE) after source import has completed; that
+  value is not the completion oracle. The raw query must report idle action and
+  current stored content. Missing, mismatched, unreadable, or genuinely busy
+  provider state still blocks new work.
+  Reuse and failure messages retain raw identity, source/stored versions, and
+  action alongside the hydrated action value in `InstallCMLog.log`, which the
+  failure bundle already captures. An unreadable query is explicitly unmeasured.
 - An unverified import blocks further imports and new distribution requests
   for that media family in the current pass, while preserving existing targets.
 - New image/upgrade distribution requests sharing a WIM are sequenced. A

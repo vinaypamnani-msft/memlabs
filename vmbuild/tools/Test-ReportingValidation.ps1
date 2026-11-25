@@ -45,6 +45,15 @@ function New-TestEvidence {
 }
 $evidence = New-TestEvidence
 if (-not (Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1).Passed) { throw 'Healthy reporting failed.' }
+$evidence | Add-Member NoteProperty CollectionStatus 'Complete'
+$evidence | Add-Member NoteProperty Attempts @(
+    [pscustomobject]@{ Name='Catalog'; Method='HostHTTP'; Error='Host DNS unavailable'; Recovered=$true; RecoveryEvidence='Endpoints.Catalog' }
+)
+$recovered = Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1
+if (-not $recovered.Passed -or ($recovered.Details -join '; ') -notmatch 'recovered 1 transport' -or
+    @($recovered.Details | Where-Object { $_ -like 'WARN: Diagnostic capture is partial*' }).Count -gt 0) {
+    throw 'Verified diagnostic recovery was hidden or mislabeled as partial capture.'
+}
 $evidence.Endpoints[0].Catalog.ReportCount = 1
 if (-not (Test-ReportingDiagnosticEvidence $evidence -SiteCode PS1).Passed) { throw 'The one-published-report boundary failed.' }
 foreach ($version in @('86.0.622.38','93.999.999.999','94.0.0.0','156.0.4314.56')) {

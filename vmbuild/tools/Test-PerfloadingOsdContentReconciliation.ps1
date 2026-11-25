@@ -284,7 +284,7 @@ Write-Host "PASS -- per-package commands=$($distributionCommands.Count), already
         Seconds = 0; Rows = @(); NewCalls = 0; NewAt = -1; ReadFails = $false
         NewFails = $false; DistributionCalls = 0; TargetSecond = $false; AutoTargetAt = -1
         SourceReadyAt = 30; DpReadyAt = 60; ExtraDpReadyAt = 90; StatusVersion = 1; StatusState = 1
-        FailClass = ''; Messages = [System.Collections.Generic.List[string]]::new()
+        ImportAction = 0; ImportReadback = ''; FailClass = ''; Messages = [System.Collections.Generic.List[string]]::new()
     }
     $base = [datetime]'2026-11-24T00:00:00Z'
     function Get-Date { $base.AddSeconds($state.Seconds) }
@@ -298,16 +298,39 @@ Write-Host "PASS -- per-package commands=$($distributionCommands.Count), already
         $state.Messages.Add("$Message")
     }
     function Read-ImportFixture {
-        param($Name)
+        param($Name, [switch]$Query)
         if ($state.ReadFails) { throw 'fixture provider read denied' }
         foreach ($row in @($state.Rows | Where-Object { $_.Name -eq $Name })) {
             $stored = 0; $action = 2; $version = 0
-            if ($state.Seconds -ge $row.ReadyAt) { $stored = 1; $action = 0; $version = 1 }
+            if ($state.Seconds -ge $row.ReadyAt) {
+                $stored = 1; $action = 1; $version = 1
+                if ($Query) { $action = $state.ImportAction }
+            }
             $sourceSite = 'PRI'
             if ($row.PSObject.Properties['SourceSite']) { $sourceSite = $row.SourceSite }
             [pscustomobject]@{
                 Name = $Name; PackageID = $row.PackageID; SourceSite = $sourceSite
                 SourceVersion = $version; StoredPkgVersion = $stored; ActionInProgress = $action
+            }
+        }
+    }
+    function Get-CimInstance {
+        param($Namespace, $ClassName, $Filter, $OperationTimeoutSec, $ErrorAction)
+        if ($ClassName -ne 'SMS_PackageBaseclass' -or $OperationTimeoutSec -ne 10) {
+            throw 'Import readiness requires a bounded package-state query.'
+        }
+        if ($ClassName -eq $state.FailClass) { throw 'fixture import-state query failed' }
+        if ($Filter -notmatch "^PackageID='([A-Za-z0-9]{8})'$") { throw "Unexpected filter: $Filter" }
+        $id = $Matches[1]
+        if ($state.ImportReadback -eq 'Missing') { return }
+        foreach ($name in @($state.Rows | Where-Object { $_.PackageID -eq $id } | Select-Object -ExpandProperty Name -Unique)) {
+            foreach ($row in @(Read-ImportFixture $name -Query | Where-Object { $_.PackageID -eq $id })) {
+                switch ($state.ImportReadback) {
+                    WrongId { $row.PackageID = 'PRI99999' }
+                    WrongSite { $row.SourceSite = 'OTH' }
+                    SourceLag { $row.StoredPkgVersion = 0 }
+                }
+                $row
             }
         }
     }
@@ -330,8 +353,30 @@ Write-Host "PASS -- per-package commands=$($distributionCommands.Count), already
     }
     $state.Rows = @([pscustomobject]@{ Name = 'Windows 11'; PackageID = 'PRI00007'; ReadyAt = 30 })
     if (-not (Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0 -or $state.Seconds -ne 30) {
-        throw 'An existing pending import was resubmitted or its zero source version was not treated as pending.'
+        throw 'An existing import was resubmitted, accepted before source readiness, or blocked by the hydrated UPDATE flag after the provider query became idle.'
     }
+    if (($state.Messages -join '; ') -notmatch 'RawActionInProgress=0.+HydratedActionInProgress=1') {
+        throw 'Readiness diagnostics do not retain the raw/hydrated action disagreement.'
+    }
+    $state.Seconds = 0; $state.ImportAction = 1; $import.TimeoutSeconds = 30
+    $state.Rows = @([pscustomobject]@{ Name = 'Windows 11'; PackageID = 'PRI00007'; ReadyAt = 0 })
+    if ((Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0 -or $state.Seconds -ne 30) {
+        throw 'A genuinely busy provider state bypassed the import guard or submitted another import.'
+    }
+    $state.Seconds = 0; $state.ImportAction = 0; $state.FailClass = 'SMS_PackageBaseclass'
+    if ((Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0 -or $state.Seconds -ne 0) {
+        throw 'An unreadable provider state authorized import reuse or another import.'
+    }
+    $state.FailClass = ''
+    foreach ($readback in @('Missing', 'WrongId', 'WrongSite', 'SourceLag')) {
+        $state.Seconds = 0; $state.ImportReadback = $readback
+        $expectedWait = if ($readback -eq 'SourceLag') { 30 } else { 0 }
+        if ((Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 0 -or $state.Seconds -ne $expectedWait) {
+            throw "Invalid raw provider readback '$readback' authorized import reuse or another import."
+        }
+    }
+    $state.ImportReadback = ''
+    $state.FailClass = ''; $import.TimeoutSeconds = 120
     $state.Seconds = 0; $state.Rows = @()
     if (-not (Invoke-MemLabsOsdPackageImport @import) -or $state.NewCalls -ne 1 -or $state.Seconds -ne 30) {
         throw 'A new import was not requested exactly once and verified asynchronously.'
@@ -474,4 +519,4 @@ public sealed class MemLabsOsdImportLockFixture : IDisposable {
     }
     if (($state.Messages -join ' ') -notmatch 'not submitting a duplicate import|not verified') { throw 'Import guard failures were not surfaced.' }
 }
-Write-Host 'PASS -- pending imports reused, source-WIM mutex excludes a second caller, provider errors fail closed, and shared-WIM delivery waits for current-version installation.'
+Write-Host 'PASS -- raw provider readiness overrides hydrated UPDATE flags, busy/unreadable states fail closed, imports are not duplicated, and shared-WIM delivery waits for current-version installation.'
