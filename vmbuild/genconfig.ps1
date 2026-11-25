@@ -106,6 +106,83 @@ Function Select-PendingVMMaintenance {
     Start-Maintenance
 }
 
+function Invoke-CopilotControlCommand {
+    param([ValidateSet('Start', 'Stop', 'Status')][string]$Action)
+    & (Join-Path $PSScriptRoot 'control\Start-Control.ps1') -Action $Action
+}
+
+function Invoke-CopilotControlMenuAction {
+    param([ValidateSet('Start', 'Stop', 'Status')][string]$Action)
+
+    $interlockRequired = $false
+    try {
+        if ($PSVersionTable.PSVersion -lt [version]'7.4' -or -not [Environment]::Is64BitProcess) {
+            throw 'Copilot Control requires 64-bit PowerShell 7.4 or newer.'
+        }
+        $interlockRequired = ($Action -eq 'Start')
+        $result = Invoke-CopilotControlCommand -Action $Action
+        Write-Log "Copilot Control: $($result.state)."
+        if ($Action -eq 'Start') {
+            foreach ($configuration in $result.mcpConfiguration) {
+                $registration = if ($configuration.Added) { 'Added' } else { 'Already registered' }
+                Write-Log "$registration MemLabs MCP in '$($configuration.Path)'."
+            }
+            Write-Log 'Keep VS Code unelevated. Approve its MCP trust/tool prompts yourself; deployment and deletion are not exposed.'
+        }
+        if ($result.activeOperation) {
+            Write-Log "Active operation: $($result.activeOperation.operationId) $($result.activeOperation.action)."
+        }
+    }
+    catch {
+        Write-Log "Copilot Control $Action failed: $($_.Exception.Message)" -Failure
+    }
+    finally {
+        if ($interlockRequired) {
+            $stopped = $false
+            while (-not $stopped) {
+                try {
+                    Show-CopilotControlSession
+                    $status = Invoke-CopilotControlCommand -Action Status
+                    if ($status.state -ne 'Stopped') { throw 'Worker shutdown has not been verified.' }
+                    $stopped = $true
+                }
+                catch {
+                    Write-Log "Deployment menus remain locked until Copilot Control is verified stopped. Close this window to leave the worker running. $($_.Exception.Message)" -Failure
+                    Start-Sleep -Seconds 1
+                }
+            }
+        }
+    }
+}
+
+function Show-CopilotControlSession {
+    while ($true) {
+        try {
+            $status = Invoke-CopilotControlCommand -Action Status
+            if ($status.state -eq 'Stopped') { return }
+            $label = "Copilot Control: $($status.state)"
+            if ($status.activeOperation) { $label += " - $($status.activeOperation.operationId)" }
+        }
+        catch {
+            Write-Log "Copilot Control status failed: $($_.Exception.Message)" -Failure
+            $label = 'Copilot Control: Connection failed'
+        }
+        $options = [ordered]@{
+            'S' = 'Refresh status'
+            'X' = 'Stop control and return to Tools'
+            'HX' = 'Wait for any active VM operation; stopping never interrupts it'
+        }
+        $response = Get-Menu2 -MenuName $label -Prompt 'Keep this control session open for Copilot, or stop control to return' `
+            -AdditionalOptions $options -NoNewLine -test:$false -return
+        if ($response -and $response.ToLowerInvariant() -eq 'x') {
+            Invoke-CopilotControlMenuAction -Action Stop
+        }
+        elseif ($response -ne 's' -and $response -ne 'S') {
+            Write-Log 'Stop Copilot Control before returning to deployment menus. Closing this window leaves the worker running.' -Warning
+        }
+    }
+}
+
 Function Select-ToolsMenu {
 
     while ($true) {
@@ -118,6 +195,15 @@ Function Select-ToolsMenu {
             "H2" = "Add additional tools, like windbg, Azure Data Studio, and others to a running VM"
         }
 
+        $customOptions += [ordered]@{
+            "M" = "Start Copilot / MCP Control"
+            "HM" = "Approve elevation once for the protected local worker; register MCP in VS Code without changing existing servers or trust settings"
+            "S" = "Copilot Control Status"
+            "HS" = "Show whether the local control worker is Ready, Busy, or Stopped"
+            "X" = "Stop Copilot Control"
+            "HX" = "Stop the worker only when idle; never interrupt an active VM operation"
+        }
+
         $response = Get-Menu2 -MenuName "Tools Menu" -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false -return
 
         if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
@@ -127,6 +213,9 @@ Function Select-ToolsMenu {
         switch ($response.ToLowerInvariant()) {
             "1" { Invoke-ToolDeployment -Optional:$false }
             "2" { Invoke-ToolDeployment -Optional:$true }
+            "m" { Invoke-CopilotControlMenuAction -Action Start }
+            "s" { Invoke-CopilotControlMenuAction -Action Status }
+            "x" { Invoke-CopilotControlMenuAction -Action Stop }
             default { continue }
         }
     }

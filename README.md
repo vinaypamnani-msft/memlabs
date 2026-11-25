@@ -394,6 +394,72 @@ Validate with
 [`Test-NewLabHostPrerequisites.ps1`](vmbuild/tools/Test-NewLabHostPrerequisites.ps1),
 which observes the current Windows session and mocks all group changes.
 
+## Copilot / MCP Control
+
+In GenConfig's **Tools** menu, select **[M] Start Copilot / MCP Control**.
+Approve the UAC prompt once; keep VS Code and Copilot unelevated.
+**[S]** reports Ready/Busy/Stopped and **[X]** stops an idle worker.
+Starting from the UI enters a status/stop-only control page until the worker is
+stopped, so that same launcher cannot start an uncoordinated deployment.
+This interlock remains active if registration or control-page rendering fails:
+deployment menus do not resume until a fresh status verifies Stopped.
+Closing the UI does not cancel an active VM operation. The worker does not start
+automatically after a Windows restart.
+
+The equivalent standalone command avoids initializing a lab:
+
+```powershell
+pwsh -NoProfile -File .\vmbuild\control\Start-Control.ps1
+pwsh -NoProfile -File .\vmbuild\control\Start-Control.ps1 -Action Status
+pwsh -NoProfile -File .\vmbuild\control\Start-Control.ps1 -Action Stop
+```
+
+Successful Start adds a `memlabs` stdio server to the workspace's
+`.vscode\mcp.json` and `.mcp.json` if missing. It preserves other servers
+(including WireMCP), JSON comments, inputs, and VS Code trust/tool approvals.
+Identical entries are left byte-for-byte unchanged. Invalid configuration,
+conflicting `memlabs` entries, and concurrent edits are reported rather than
+overwritten. Existing files are backed up as `*.memlabs-control*.bak` on change.
+An exclusive file handle covers comparison and writing, preventing an editor's
+concurrent save from being silently overwritten; a busy file reports an error
+and can be retried. Backups preserve the original bytes and access permissions.
+VS Code may still require its normal trust prompt or **MCP: List Servers**
+to start/restart the adapter. Moving the checkout requires explicitly updating
+its existing adapter path; Start will not silently replace a different entry.
+
+The adapter exposes status, paged VM inventory, start, graceful stop, and
+operation-result tools. Mutations address one exact VM GUID; stop requires
+`confirm: true` and never force-powers off. Start/stop return an operation ID:
+poll `memlabs_get_operation` for success/failure and the verified final state.
+The last 32 completed operations remain available until worker exit. Busy
+workers reject another mutation or shutdown rather than silently interrupting
+work. This is host-wide Hyper-V access, not per-domain isolation.
+
+Elevation uses a frozen in-memory bootstrap rather than reopening scripts from
+the checkout after the UAC prompt. Approved package bytes are verified before
+execution, environment lookup is restricted to system locations, and each
+installation attempt publishes a protected result with its actual failure.
+Packages are built in protected staging and published only after verification;
+an interrupted copy can be retried without an incomplete version directory.
+The elevated worker runs only a hash-verified, administrator-owned snapshot
+under `%ProgramFiles%\MemLabs\CopilotControl\Packages`, not scripts dynamically
+loaded from the writable checkout. Each authorized account has a local named
+pipe restricted by Windows SID; remote pipe clients are rejected. The adapter
+checks the server PID, creation time, executable, and protected runtime record.
+Only fixed, schema-checked operations are accepted: no arbitrary commands,
+scripts, executable paths, credentials, deployment, deletion, or domain removal.
+Guest notes and passwords are not returned in inventory.
+
+VM changes use the existing host-wide Live Ops lease and independent
+postconditions. Journals and control state stay administrator/SYSTEM-writable;
+no filesystem ACLs are weakened to let Copilot write privileged code or logs.
+Readiness, installation conflicts, UAC cancellation, and request failures are
+explicit errors. Updated worker bytes require Stop followed by Start; in-flight
+operations are never swapped to a newer checkout.
+
+Validate without changing VMs using
+[`Test-CopilotControl.ps1`](vmbuild/tools/Test-CopilotControl.ps1).
+
 ## RDCMan startup preparation
 
 Launching `New-Lab.ps1` (including through `VMBuild.cmd`) or standalone
