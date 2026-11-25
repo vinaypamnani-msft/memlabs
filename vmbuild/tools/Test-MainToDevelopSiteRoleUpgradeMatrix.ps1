@@ -189,7 +189,7 @@ function Get-SiteServerForSiteCode {
 }
 function Get-VMFromList2 { param([object]$DeployConfig, [string]$VmName, [switch]$SmartUpdate) return $null }
 function Add-RemoteSQLVMToDeployConfig {
-    param([string]$VmName, [object]$ConfigToModify, [bool]$Hidden = $true)
+    param([string]$VmName, [object]$ConfigToModify, [bool]$Hidden = $true, [string]$DomainName)
     Add-ExistingVMToDeployConfig -VmName $VmName -ConfigToModify $ConfigToModify -Hidden $Hidden
 }
 function Add-Phase8DistributionPointMetadata {
@@ -587,5 +587,82 @@ Assert-True ($phasesSource -match 'Test-MemLabsIncludeHiddenVmForPhase -Vm \$cur
 $configSource = Get-Content -LiteralPath $configPath -Raw
 Assert-True ($configSource -match 'Get-ExistingConfigMgrRoleUpgradePlan -Config \$config') `
     'Existing role upgrade plan is not wired into deploy-config expansion.'
+
+& {
+    $inventoryBeforeAudit = @($script:Inventory)
+    try {
+        $script:Inventory = @(
+            [pscustomobject]@{
+                vmName='AO1'; role='SQLAO'; domain='upgrade.test'; state='Running'
+                OtherNode='AO2'; fileServerVM='WITNESS'; AlwaysOnListenerName='DEPLOYED-LISTENER'
+            },
+            [pscustomobject]@{ vmName='AO2'; role='SQLAO'; domain='upgrade.test'; state='Running' },
+            [pscustomobject]@{ vmName='WITNESS'; role='FileServer'; domain='upgrade.test'; state='Running' }
+        )
+        $config = [pscustomobject]@{
+            vmOptions=[pscustomobject]@{ domainName='upgrade.test'; prefix='' }
+            parameters=[pscustomobject]@{ ExistingDCName=$null }
+            virtualMachines=@([pscustomobject]@{
+                vmName='AO1'; role='SQLAO'; OtherNode='AO2'; fileServerVM='WITNESS'; hidden=$true
+            })
+        }
+        Add-ExistingVMsToDeployConfig -Config $config
+        Assert-True (($config.virtualMachines.vmName | Sort-Object) -join ',' -eq 'AO1,AO2,WITNESS') `
+            'Hidden SQLAO nodes bypassed peer/witness hydration even though phase-data generation consumes them.'
+        Assert-Equal 'AO2' "$($config.virtualMachines[0].OtherNode)" 'A present hidden SQLAO peer was silently treated as removed.'
+    }
+    finally { $script:Inventory = $inventoryBeforeAudit }
+}
+foreach ($mode in @('PresentButNotHydrated', 'UnverifiedMissing', 'PlannedOwner', 'WrongOwnerRole', 'ConfirmedDeleted')) {
+    & {
+        param($Mode)
+        $scenario = @{
+            Logs=[Collections.Generic.List[string]]::new()
+            Inventory=@([pscustomobject]@{ vmName='AO1'; role='SQLAO'; domain='upgrade.test'; state='Running' })
+        }
+        if ($Mode -eq 'PresentButNotHydrated') {
+            $scenario.Inventory += [pscustomobject]@{ vmName='AO2'; role='SQLAO'; domain='upgrade.test'; state='Running' }
+        }
+        if ($Mode -eq 'PlannedOwner') {
+            $scenario.Inventory = @([pscustomobject]@{ vmName='UNRELATED'; role='DomainMember'; domain='upgrade.test'; state='Running' })
+        }
+        if ($Mode -eq 'WrongOwnerRole') { $scenario.Inventory[0].role='DomainMember' }
+        function Get-List {
+            param($Type,$DomainName,[switch]$SmartUpdate)
+            $global:vm_List_LastUpdate = Get-Date
+            $global:vm_List_Dirty = $Mode -eq 'UnverifiedMissing'
+            $scenario.Inventory
+        }
+        function Add-ExistingVMToDeployConfig { param($VmName,$ConfigToModify,$Hidden,$OtherDC) }
+        function Write-Log {
+            param($Message,[switch]$Verbose,[switch]$LogOnly,[switch]$Warning,[switch]$Failure)
+            $scenario.Logs.Add("$Message")
+        }
+        $owner = [pscustomobject]@{
+            vmName='AO1'; role='SQLAO'; OtherNode='AO2'; AlwaysOnListenerName='DEPLOYED-LISTENER'; hidden=$true
+        }
+        $config = [pscustomobject]@{
+            vmOptions=[pscustomobject]@{ domainName='upgrade.test'; prefix='' }
+            parameters=[pscustomobject]@{ ExistingDCName=$null }
+            virtualMachines=@($owner)
+        }
+        if ($Mode -eq 'ConfirmedDeleted') {
+            Add-ExistingVMsToDeployConfig -Config $config
+            Assert-True (-not $owner.OtherNode -and $owner.AlwaysOnListenerName -eq 'DEPLOYED-LISTENER' -and
+                ($scenario.Logs -join '; ') -match 'verified.*inventory') 'A confirmed removed peer did not retain the documented single-node fallback and its evidence.'
+        }
+        else {
+            $pattern = switch ($Mode) {
+                PresentButNotHydrated { '*AO2*present in refreshed*' }
+                UnverifiedMissing { '*Cannot confirm*AO2*inventory*' }
+                PlannedOwner { '*Cannot degrade*AO1*not an existing*' }
+                WrongOwnerRole { '*Cannot degrade*AO1*not an existing*SQLAO owner*' }
+            }
+            Assert-ThrowsLike { Add-ExistingVMsToDeployConfig -Config $config } $pattern `
+                "$Mode silently degraded a SQLAO pair without proof that its peer was removed."
+            Assert-Equal 'AO2' "$($owner.OtherNode)" "$Mode mutated peer topology after a failed hydration."
+        }
+    } $mode
+}
 
 Write-Host 'PASS -- main-era PKI, DP, MP, SUP/WSUS, RP, PXE, and cross-subnet role upgrades use develop repair and validation safeguards.'

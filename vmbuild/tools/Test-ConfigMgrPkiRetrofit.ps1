@@ -33,9 +33,10 @@ function Write-DscStatus { param($Message, [switch]$Failure) }
 if (-not $GuestOnly) {
     $configPath = Join-Path $root 'common\Common.Config.ps1'
     foreach ($name in @('Get-ExistingConfigMgrPkiConversionTargets', 'Sync-ExistingHierarchyOptionsToDeployConfig',
-            'New-DeployConfig', 'Add-ExistingVMToDeployConfig', 'Add-RemoteSQLVMToDeployConfig', 'ConvertFrom-MemLabsVmNoteScalar',
+            'New-DeployConfig', 'Add-ExistingVMToDeployConfig', 'Add-ModifiedExistingVMToDeployConfig',
+            'Add-RemoteSQLVMToDeployConfig', 'ConvertFrom-MemLabsVmNoteScalar',
             'Resolve-ConfigVmReference', 'Update-ConfigVmReferences', 'Resolve-VmCmOptions', 'Set-VmCmOptionsResolved',
-            'Add-Phase11HierarchyParentsToDeployConfig')) {
+            'Add-Phase11HierarchyParentsToDeployConfig', 'Get-SQLAOConfig')) {
         . (Import-TestFunction $configPath $name)
     }
     foreach ($name in @('Get-Phase2ConfigurationData', 'Get-Phase4ConfigurationData', 'Get-Phase6ConfigurationData', 'Get-Phase8ConfigurationData',
@@ -73,12 +74,14 @@ if (-not $GuestOnly) {
         [pscustomobject]@{
             vmName = 'LAB-SQLAO1'; role = 'SQLAO'; domain = 'lab.test'; state = 'Running'
             OtherNode = 'SQLAO2'; fileServerVM = 'FS1'; remoteContentLibVM = 'MISSING'
+            ClusterName = 'DEPLOYED-CLUSTER'; AlwaysOnListenerName = 'DEPLOYED-LISTENER'
+            ClusterIPAddress = '10.1.1.201'; AGIPAddress = '10.1.1.202'
         },
         [pscustomobject]@{
-            vmName = 'LAB-SQLAO2'; role = 'SQLAO'; domain = 'lab.test'; state = 'Running'; OtherNode = 'SQLAO1'
+            vmName = 'LAB-SQLAO2'; role = 'SQLAO'; domain = 'lab.test'; state = 'Running'
         },
         [pscustomobject]@{
-            vmName = 'LAB-FS1'; role = 'DomainMember'; domain = 'lab.test'; state = 'Running'
+            vmName = 'LAB-FS1'; role = 'FileServer'; domain = 'lab.test'; state = 'Running'
         },
         [pscustomobject]@{
             vmName = 'SQLAO2'; role = 'DomainMember'; domain = 'foreign.test'; state = 'Running'
@@ -111,13 +114,23 @@ if (-not $GuestOnly) {
     $converted = New-DeployConfig -configObject (New-FixtureConfig)
     Assert-True $script:FailClosedInventory 'PKI retrofit must use fail-closed domain inventory.'
     $targets = @($converted.virtualMachines | Where-Object pkiReconfigure)
-    Assert-True (($targets.vmName | Sort-Object) -join ',' -eq 'LAB-CLIENT,LAB-FS1,LAB-LEGACY,LAB-MPDP,LAB-PRI,LAB-SEC,LAB-SQLAO1,LAB-SQLAO2,LAB-SUP') `
+    Assert-True (($targets.vmName | Sort-Object) -join ',' -eq 'LAB-CLIENT,LAB-LEGACY,LAB-MPDP,LAB-PRI,LAB-SEC,LAB-SQLAO1,LAB-SQLAO2,LAB-SUP') `
         'CA-only UsePKI enablement did not include exactly the existing hierarchy and its domain members.'
     foreach ($vm in $targets) {
         Assert-True ($vm.hidden -and $vm.phase11Validate) "$($vm.vmName) lost rebuild protection or independent validation."
         Assert-True (-not (Test-MemLabsIncludeHiddenVmForPhase -Vm $vm -Phase 1) -and
             -not (Test-MemLabsIncludeHiddenVmForPhase -Vm $vm -Phase 10) -and
             (Test-MemLabsIncludeHiddenVmForPhase -Vm $vm -Phase 11)) 'Retrofit changed hidden VM phase safety.'
+    }
+    & {
+        function Get-ValidDomainNames { @{ 'lab.test'='LAB-' } }
+        $automatic = New-FixtureConfig
+        $automatic.vmOptions.domainName = 'AUTO'
+        $automatic.vmOptions.prefix = 'AUTO'
+        $automaticDeploy = New-DeployConfig $automatic
+        Assert-True ($automaticDeploy.vmOptions.domainName -eq 'lab.test' -and
+            @($automaticDeploy.virtualMachines | Where-Object pkiReconfigure).Count -eq 8) `
+            'AUTO domain resolution happened after existing-hierarchy PKI discovery.'
     }
     $primary = $converted.virtualMachines | Where-Object vmName -eq 'LAB-PRI'
     Assert-True ($primary.remoteSQLVM -eq 'LAB-SQLAO1' -and $primary.replicaSqlServerVM -eq 'LAB-SQLAO2') `
@@ -131,6 +144,11 @@ if (-not $GuestOnly) {
         },
         [pscustomobject]@{
             vmName='SUP'; role='SiteSystem'; siteCode='PRI'; installSUP=$true; wsusDataBaseServer='SQLAO1'
+        },
+        [pscustomobject]@{
+            vmName='SQLAO1'; role='SQLAO'; OtherNode='SQLAO2'; fileServerVM='FS1'
+            ClusterName='TEMPLATE-CLUSTER'; AlwaysOnListenerName='TEMPLATE-LISTENER'
+            ClusterIPAddress='192.0.2.201'; AGIPAddress='192.0.2.202'
         }
     )
     $declaredDeploy = New-DeployConfig $declared
@@ -139,6 +157,19 @@ if (-not $GuestOnly) {
     Assert-True ($declaredPrimary.hidden -and $declaredPrimary.remoteSQLVM -eq 'LAB-SQLAO1' -and
         $declaredPrimary.replicaSqlServerVM -eq 'LAB-SQLAO2' -and $declaredSup.hidden -and
         $declaredSup.wsusDataBaseServer -eq 'LAB-SQLAO1') 'Declared VMs hidden before prefixing retained base dependency names.'
+    $declaredSql = $declaredDeploy.virtualMachines | Where-Object vmName -eq 'LAB-SQLAO1'
+    Assert-True ($declaredSql.ClusterName -eq 'DEPLOYED-CLUSTER' -and
+        $declaredSql.AlwaysOnListenerName -eq 'DEPLOYED-LISTENER' -and
+        $declaredSql.ClusterIPAddress -eq '10.1.1.201' -and $declaredSql.AGIPAddress -eq '10.1.1.202') `
+        'PKI conversion replaced deployed SQLAO identities or addresses with saved-template values.'
+    foreach ($conflict in @('Role', 'Domain')) {
+        $bad = New-FixtureConfig
+        $row = [pscustomobject]@{ vmName='PRI'; role='Primary'; siteCode='PRI' }
+        if ($conflict -eq 'Role') { $row.role = 'OSDClient' }
+        else { $row | Add-Member NoteProperty domain 'foreign.test' }
+        $bad.virtualMachines += $row
+        Assert-Throws { New-DeployConfig $bad } '*PKI conversion*conflict*LAB-PRI*'
+    }
     Assert-True ($primary.cmOptions.UsePKI -and -not $primary.cmOptions.Install -and $primary.cmOptions.Version -eq '2609') `
         'PKI intent was overwritten, or conversion changed unrelated hierarchy options.'
     Assert-True (-not $script:Inventory[1].cmOptions.UsePKI) 'Planning mutated the deployed hierarchy inventory.'
@@ -167,6 +198,40 @@ if (-not $GuestOnly) {
         $sql.remoteContentLibVM -eq 'MISSING' -and $sql.hidden) 'Hydrated VM references were not canonical, unknown names were guessed, or rebuild protection was lost.'
     Add-RemoteSQLVMToDeployConfig -vmName $primary.remoteSQLVM -configToModify $dependencies
     Assert-True ($dependencies.virtualMachines.Count -eq 3) 'Repeated dependency hydration added duplicates or double-prefixed names.'
+    $aliasDependencies = [pscustomobject]@{
+        vmOptions=[pscustomobject]@{ domainName='lab.test'; prefix='LAB-' }
+        virtualMachines=@()
+    }
+    Add-RemoteSQLVMToDeployConfig -vmName 'SQLAO1' -configToModify $aliasDependencies -DomainName 'lab.test'
+    Assert-True (($aliasDependencies.virtualMachines.vmName | Sort-Object) -join ',' -eq 'LAB-FS1,LAB-SQLAO1,LAB-SQLAO2') `
+        'SQL hydration reused a raw inventory reference without resolving its owning domain and lab prefix.'
+    foreach ($sqlDomain in @('lab.test', 'foreign.test')) {
+        $scopedSql = [pscustomobject]@{
+            vmOptions=[pscustomobject]@{ domainName='lab.test'; prefix='LAB-' }
+            virtualMachines=@()
+        }
+        Add-RemoteSQLVMToDeployConfig -vmName 'SQLAO2' -configToModify $scopedSql -DomainName $sqlDomain
+        $expectedName = if ($sqlDomain -eq 'lab.test') { 'LAB-SQLAO2' } else { 'SQLAO2' }
+        Assert-True ($scopedSql.virtualMachines.Count -eq 1 -and $scopedSql.virtualMachines[0].vmName -eq $expectedName) `
+            'An overlapping bare SQL name resolved outside the owning VM domain.'
+        if ($sqlDomain -eq 'foreign.test') {
+            Assert-Throws { Add-RemoteSQLVMToDeployConfig -vmName 'SQLAO2' -configToModify $scopedSql -DomainName 'lab.test' } '*not its owning VM*'
+        }
+    }
+    Add-RemoteSQLVMToDeployConfig -vmName 'LAB-SQLAO1' -configToModify $declaredDeploy
+    $generatedSql = Get-SQLAOConfig -deployConfig $declaredDeploy -vmName 'LAB-SQLAO1'
+    Assert-True ($generatedSql.GroupName -eq 'DEPLOYED-CLUSTERGroup' -and
+        $generatedSql.FileServerName -eq 'LAB-FS1' -and $generatedSql.SecondaryNodeName -eq 'LAB-SQLAO2') `
+        'SQLAO phase-data generation did not consume the hydrated topology.'
+    foreach ($emptyPrefix in @('', $null)) {
+        $unprefixedSql = $declaredDeploy | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        $unprefixedSql.vmOptions.prefix = $emptyPrefix
+        Assert-True ((Get-SQLAOConfig -deployConfig $unprefixedSql -vmName 'LAB-SQLAO1').WitnessLocalPath -eq
+            'F:\DEPLOYED-CLUSTER-Witness') 'SQLAO configuration failed with an empty/absent optional lab prefix.'
+    }
+    $missingWitness = $declaredDeploy | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $missingWitness.virtualMachines = @($missingWitness.virtualMachines | Where-Object vmName -ne 'LAB-FS1')
+    Assert-Throws { Get-SQLAOConfig -deployConfig $missingWitness -vmName 'LAB-SQLAO1' } '*witness*LAB-FS1*hydration is incomplete*'
     $hierarchySupport = [pscustomobject]@{
         vmOptions = $dependencies.vmOptions
         virtualMachines = @(
@@ -187,6 +252,64 @@ if (-not $GuestOnly) {
     $wid = [pscustomobject]@{ vmName='LAB-WID-SUP'; wsusDataBaseServer='WID' }
     Update-ConfigVmReferences -VM $wid -KnownVMs @([pscustomobject]@{ vmName='LAB-WID' }) -DomainName 'lab.test' -Prefix 'LAB-'
     Assert-True ($wid.wsusDataBaseServer -eq 'WID') 'The internal WSUS database marker was resolved as a VM name.'
+
+    foreach ($merge in @($false, $true)) {
+        $modifiedConfig = [pscustomobject]@{
+            vmOptions=[pscustomobject]@{ domainName='lab.test'; prefix='LAB-' }
+            virtualMachines=@()
+        }
+        if ($merge) {
+            $modifiedConfig.virtualMachines = @([pscustomobject]@{ vmName='LAB-PRI'; role='Primary'; hidden=$true })
+        }
+        Add-ModifiedExistingVMToDeployConfig -vm (Get-VMNote 'LAB-PRI') -configToModify $modifiedConfig
+        Assert-True ($modifiedConfig.virtualMachines.Count -eq 1 -and
+            $modifiedConfig.virtualMachines[0].remoteSQLVM -eq 'LAB-SQLAO1' -and
+            $modifiedConfig.virtualMachines[0].replicaSqlServerVM -eq 'LAB-SQLAO2' -and
+            $modifiedConfig.virtualMachines[0].hidden) 'Modified-VM append/merge bypassed canonical reference resolution.'
+    }
+    $duplicateSql = [pscustomobject]@{
+        vmOptions=[pscustomobject]@{ domainName='lab.test'; prefix='LAB-' }
+        virtualMachines=@(
+            [pscustomobject]@{ vmName='LAB-SQL'; role='DomainMember' },
+            [pscustomobject]@{ vmName='LAB-SQL'; role='DomainMember' }
+        )
+    }
+    Assert-Throws { Add-RemoteSQLVMToDeployConfig -vmName 'LAB-SQL' -configToModify $duplicateSql } '*SQL dependency*LAB-SQL*2*'
+    & {
+        function Get-VMFromList2 { param($DeployConfig,$VmName,$SmartUpdate,$Global) $null }
+        Assert-Throws { Add-RemoteSQLVMToDeployConfig -vmName 'SQL-MISSING' -configToModify $dependencies } '*Required SQL dependency*SQL-MISSING*lab.test*LAB-*'
+    }
+    foreach ($noteMode in @('Unreadable', 'WrongName', 'WrongDomain', 'DuplicateInventory', 'InventoryFailure')) {
+        & {
+            param($Mode)
+            $probeState = @{ Starts=0 }
+            function Get-List {
+                param($Type,[switch]$FailOnError)
+                if ($Mode -eq 'InventoryFailure') {
+                    if ($FailOnError) { throw 'LAB-BAD inventory access failed' }
+                    return
+                }
+                $row = [pscustomobject]@{ vmName='LAB-BAD'; domain='lab.test'; role='SiteSystem'; state='Off' }
+                if ($Mode -eq 'DuplicateInventory') { $row; $row } else { $row }
+            }
+            function Get-VMNote {
+                param($VMName)
+                if ($Mode -eq 'Unreadable') { return }
+                $row = [pscustomobject]@{ vmName='LAB-BAD'; domain='lab.test'; role='SiteSystem' }
+                if ($Mode -eq 'WrongName') { $row.vmName='LAB-OTHER' }
+                if ($Mode -eq 'WrongDomain') { $row.domain='foreign.test' }
+                $row
+            }
+            function Start-VM2 { param($Name) $probeState.Starts++ }
+            $config = [pscustomobject]@{
+                vmOptions=[pscustomobject]@{ domainName='lab.test'; prefix='LAB-' }
+                virtualMachines=@()
+            }
+            Assert-Throws { Add-ExistingVMToDeployConfig -vmName 'LAB-BAD' -configToModify $config } '*LAB-BAD*'
+            Assert-True ($probeState.Starts -eq 0 -and $config.virtualMachines.Count -eq 0) `
+                "$Mode VM metadata was powered on or added before its identity was verified."
+        } $noteMode
+    }
 
     $caOnly = New-FixtureConfig
     $caOnly.cmOptions.UsePKI = $false

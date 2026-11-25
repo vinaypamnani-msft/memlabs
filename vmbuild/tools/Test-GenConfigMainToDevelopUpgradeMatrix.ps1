@@ -140,6 +140,8 @@ foreach ($pkiProperty in @('EnablePKI', 'IssuingCAVM', 'UseOfflineRoot', 'Offlin
 }
 
 . (Import-TestFunction -Path $configPath -Name 'ConvertFrom-MemLabsVmNoteScalar')
+. (Import-TestFunction -Path $configPath -Name 'Resolve-ConfigVmReference')
+. (Import-TestFunction -Path $configPath -Name 'Update-ConfigVmReferences')
 . (Import-TestFunction -Path $configPath -Name 'Add-ModifiedExistingVMToDeployConfig')
 . (Import-TestFunction -Path $validationPath -Name 'Test-ValidSiteRoleFlags')
 

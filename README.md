@@ -1551,6 +1551,24 @@ Hidden conversion VMs and later VM-note imports resolve SQL, SQLAO peer/witness,
 WSUS database, and other VM dependencies to known same-domain VM names, including
 the lab prefix. This does not rename VMs or remove rebuild protection. `WID`
 remains an internal-database marker; missing dependencies are not guessed.
+`AUTO` domain/prefix selection precedes existing-hierarchy discovery. Declared
+conversion targets must match the deployed role/domain unless an explicit
+existing-VM role mutation was staged. Existing SQLAO cluster/listener names and
+virtual IPs come from deployed metadata, not stale template values.
+Hidden SQLAO owners hydrate their peer and witness dependencies too. A missing
+peer row does not prove a VM was deleted: single-node fallback requires a verified
+host inventory refresh, an existing same-domain SQLAO owner, and an absent peer.
+Hydration failures leave the topology unchanged. Incomplete SQLAO phase data
+fails explicitly, including a missing witness; blank optional lab prefixes remain
+supported.
+VM-note identity and inventory cardinality are checked before an imported VM is
+powered on. Modified existing VMs use the same reference normalization. Required
+SQL targets fail on missing/ambiguous results instead of silently choosing a row.
+The normal build log/JSONL includes bounded naming, domain/prefix, import-identity,
+and PKI-stage diagnostics (`ConfigRefs`, `ConfigSQL`, `ConfigHydration`, and
+`ConfigPKI`), including the original PKI-planning stack on failure. These contain
+selected metadata rather than complete configuration or credential dumps, and
+are retained by the existing build-log bundle.
 Existing MPs refresh their TLS state even when no new client push is required;
 conversion does not reuse an old build's TLS-refresh flag, and refresh failures
 are terminal rather than warning-only.

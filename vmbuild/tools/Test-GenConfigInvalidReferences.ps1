@@ -649,7 +649,7 @@ try {
         . (Import-TestFunction '..\genconfig.ps1' $name)
     }
     . (Import-TestFunction 'Common.GenConfig.Validation.ps1' 'get-IsExistingVMModified')
-    foreach ($name in 'ConvertFrom-MemLabsVmNoteScalar', 'Add-ModifiedExistingVMToDeployConfig') {
+    foreach ($name in 'ConvertFrom-MemLabsVmNoteScalar', 'Resolve-ConfigVmReference', 'Update-ConfigVmReferences', 'Add-ModifiedExistingVMToDeployConfig') {
         . (Import-TestFunction 'Common.Config.ps1' $name)
     }
     function Get-VMOptionsSummary { '' }

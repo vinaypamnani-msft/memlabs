@@ -638,6 +638,9 @@ function Update-ConfigVmReferences {
         if (-not $property -or -not $property.Value) { continue }
         if ($name -eq 'wsusDataBaseServer' -and $property.Value -eq 'WID') { continue }
         $resolved = Resolve-ConfigVmReference -VmReference $property.Value -VmNames $candidateNames -Prefix $Prefix
+        if ($candidateNames -notcontains $resolved) {
+            Write-Log "[ConfigRefs] Unresolved '$name' for '$($VM.vmName)': reference='$resolved', domain='$vmDomain', prefix='$Prefix', knownVmCount=$($candidateNames.Count). Required dependency hydration must verify this reference." -LogOnly
+        }
         if ($resolved -cne "$($property.Value)") {
             Write-Log "Resolved dependency '$name' for '$($VM.vmName)': '$($property.Value)' -> '$resolved'." -LogOnly
             $property.Value = $resolved
@@ -1326,17 +1329,29 @@ function New-DeployConfig {
     )
     try {
         $existingDomainVMs = @()
+        if ($configObject.vmOptions.domainName -eq 'AUTO') {
+            $domains = Get-ValidDomainNames
+            if (-not $domains -or $domains.Count -eq 0) {
+                throw 'Cannot resolve AUTO domain/prefix: no domain candidates were returned.'
+            }
+            $domainEntry = $domains.Keys | Sort-Object { $_.Length } | Select-Object -First 1
+            $configObject.vmOptions.domainName = $domainEntry
+            $configObject.vmOptions.prefix = $domains[$domainEntry]
+        }
 
         # Existing ConfigMgr hierarchy settings are authoritative for add-to-existing.
         # Static follow-on fixtures can carry newer/default cmOptions, but child sites
         # cannot independently change their hierarchy's version or HTTPS mode.
         if ($Common -and -not $Common.InJob -and $configObject.vmOptions.domainName) {
+            $pkiStage = 'Reading existing-domain inventory'
             try {
                 $pkiRequested = $configObject.cmOptions.UsePKI -eq $true -or
                     @($configObject.virtualMachines | Where-Object { $_.cmOptions.UsePKI -eq $true }).Count -gt 0
                 $existingDomainVMs = @(Get-List -Type VM -DomainName $configObject.vmOptions.domainName -FailOnError:$pkiRequested)
+                $pkiStage = 'Selecting existing PKI conversion targets'
                 $pkiTargets = @(Get-ExistingConfigMgrPkiConversionTargets -Config $configObject -ExistingVMs $existingDomainVMs)
                 foreach ($target in $pkiTargets) {
+                    $pkiStage = "Hydrating PKI target '$($target.vmName)'"
                     $matches = @($configObject.virtualMachines | Where-Object {
                             $_.vmName -ieq $target.vmName -or
                             "$($configObject.vmOptions.prefix)$($_.vmName)" -ieq $target.vmName
@@ -1348,6 +1363,23 @@ function New-DeployConfig {
                     }
                     if ($matches.Count -ne 1) { throw "Could not include '$($target.vmName)' in ConfigMgr PKI conversion." }
                     $conversionVm = $matches[0]
+                    if ($conversionVm.domain -and "$($conversionVm.domain)" -ine "$($target.domain)") {
+                        throw "PKI conversion domain conflict for '$($target.vmName)': configuration='$($conversionVm.domain)', inventory='$($target.domain)'."
+                    }
+                    if ("$($conversionVm.role)" -ine "$($target.role)" -and
+                        (ConvertFrom-MemLabsVmNoteScalar -Value $conversionVm.ExistingVM) -ne $true) {
+                        throw "PKI conversion role conflict for '$($target.vmName)': configuration='$($conversionVm.role)', inventory='$($target.role)'. Stage an explicit existing-VM mutation instead."
+                    }
+                    if ($conversionVm.role -eq 'SQLAO') {
+                        foreach ($propertyName in @('ClusterName', 'AlwaysOnListenerName', 'ClusterIPAddress', 'AGIPAddress')) {
+                            $deployedProperty = $target.PSObject.Properties[$propertyName]
+                            if ($deployedProperty -and -not [string]::IsNullOrWhiteSpace("$($deployedProperty.Value)") -and
+                                "$($conversionVm.$propertyName)" -cne "$($deployedProperty.Value)") {
+                                Write-Log "[ConfigPKI] '$($target.vmName)' retaining deployed $propertyName='$($deployedProperty.Value)' rather than saved-template value '$($conversionVm.$propertyName)'." -LogOnly
+                                $conversionVm | Add-Member NoteProperty $propertyName $deployedProperty.Value -Force
+                            }
+                        }
+                    }
                     $conversionVm.vmName = $target.vmName
                     $conversionVm | Add-Member -MemberType NoteProperty -Name 'hidden' -Value $true -Force
                     $conversionVm | Add-Member -MemberType NoteProperty -Name 'pkiReconfigure' -Value $true -Force
@@ -1356,6 +1388,7 @@ function New-DeployConfig {
                 }
                 if ($pkiTargets.Count -gt 0 -and
                     -not ($configObject.virtualMachines | Where-Object { $_.InstallCA })) {
+                    $pkiStage = 'Resolving the existing issuing CA'
                     $caReference = "$($configObject.pkiOptions.IssuingCAVM)"
                     $existingCAs = @($existingDomainVMs | Where-Object {
                             ($caReference -and ($_.vmName -ieq $caReference -or
@@ -1371,10 +1404,12 @@ function New-DeployConfig {
                     $issuingCA | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true -Force
                     $issuingCA | Add-Member -MemberType NoteProperty -Name 'UseOfflineRoot' -Value ([bool]$configObject.pkiOptions.UseOfflineRoot) -Force
                 }
+                $pkiStage = 'Reconciling existing hierarchy options'
                 $null = Sync-ExistingHierarchyOptionsToDeployConfig -Config $configObject -ExistingVMs $existingDomainVMs
             }
             catch {
-                throw "New-DeployConfig: existing ConfigMgr option recovery failed closed. $($_.Exception.Message)"
+                Write-Log "[ConfigPKI] Failed at '$pkiStage': domain='$($configObject.vmOptions.domainName)', prefix='$($configObject.vmOptions.prefix)', inventoryVmCount=$($existingDomainVMs.Count). $($_.ScriptStackTrace)" -LogOnly
+                throw "New-DeployConfig: existing ConfigMgr option recovery failed closed at '$pkiStage'. $($_.Exception.Message)"
             }
         }
 
@@ -1396,15 +1431,6 @@ function New-DeployConfig {
         # mirror for legacy reads; new/updated DSC phases prefer $ThisVM.cmOptions.
         Set-VmCmOptionsResolved -Config $configObject
 
-        if ($null -ne ($configObject.vmOptions.domainName)) { 
-            if (($configObject.vmOptions.domainName) -eq "AUTO") {
-                $domains = (Get-ValidDomainNames)
-                $domainEntry = ($domains.Keys | sort-object { $_.Length } | Select-Object -first 1)
-                $domainPrefix = $domains[$domainEntry] 
-                $configObject.vmOptions.domainName = $domainEntry
-                $configObject.vmOptions.prefix = $domainPrefix
-            }
-        }
         if ($null -ne ($configObject.vmOptions.network)) { 
             if (($configObject.vmOptions.network) -eq "AUTO") {                
                 $configObject.vmOptions.network = (Get-ValidSubnets)[0]                
@@ -1573,24 +1599,65 @@ function Add-RemoteSQLVMToDeployConfig {
         [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
         [object] $configToModify,
         [Parameter(Mandatory = $false, HelpMessage = "Should this be added as hidden?")]
-        [bool] $hidden = $true
+        [bool] $hidden = $true,
+        [string] $DomainName
     )
     Write-Log -Verbose "Adding Hidden SQL to config $vmName"
-    $remoteSQLVM = $configToModify.virtualMachines |
-        Where-Object { $_.vmName -ieq $vmName } |
-        Select-Object -First 1
-    if (-not $remoteSQLVM) {
-        Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
-        $remoteSQLVM = $configToModify.virtualMachines |
-            Where-Object { $_.vmName -ieq $vmName } |
-            Select-Object -First 1
+    $requestedName = $vmName
+    $lookupDomain = if ($DomainName) { $DomainName } else { "$($configToModify.vmOptions.domainName)" }
+    $lookupPrefix = if ($lookupDomain -ieq "$($configToModify.vmOptions.domainName)") { "$($configToModify.vmOptions.prefix)" } else { '' }
+    $remoteSqlMatches = @($configToModify.virtualMachines | Where-Object { $_.vmName -ieq $vmName })
+    if ($remoteSqlMatches.Count -gt 1) {
+        throw "SQL dependency '$vmName' has $($remoteSqlMatches.Count) deployConfig entries; refusing an ambiguous target."
     }
-    if (-not $remoteSQLVM) {
-        $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
+    if ($remoteSqlMatches.Count -eq 0) {
+        $inventory = @(Get-List -Type VM -FailOnError)
+        $domainInventory = @($inventory | Where-Object { "$($_.domain)" -ieq $lookupDomain })
+        if (-not $lookupPrefix) {
+            $prefixes = @($domainInventory | ForEach-Object { $_.prefix } | Where-Object { $_ } | Select-Object -Unique)
+            if ($prefixes.Count -eq 1) { $lookupPrefix = "$($prefixes[0])" }
+        }
+        $configCandidates = @($configToModify.virtualMachines | Where-Object {
+                $candidateDomain = if ($_.domain) { "$($_.domain)" } else { "$($configToModify.vmOptions.domainName)" }
+                $candidateDomain -ieq $lookupDomain
+            })
+        $candidateNames = @(@($configCandidates) + @($domainInventory) | ForEach-Object { $_.vmName })
+        $vmName = Resolve-ConfigVmReference -VmReference $vmName -VmNames $candidateNames -Prefix $lookupPrefix
+        Write-Log "[ConfigSQL] requested='$requestedName', resolved='$vmName', domain='$lookupDomain', prefix='$lookupPrefix', domainInventoryCount=$($domainInventory.Count)." -LogOnly
+        $remoteSqlMatches = @($configToModify.virtualMachines | Where-Object { $_.vmName -ieq $vmName })
+        $inventoryMatches = @($inventory | Where-Object { $_.vmName -ieq $vmName })
+        if ($inventoryMatches.Count -gt 1) {
+            throw "SQL dependency '$vmName' has $($inventoryMatches.Count) inventory entries; refusing an ambiguous target."
+        }
+        if ($DomainName -and $inventoryMatches.Count -eq 1 -and "$($inventoryMatches[0].domain)" -ine $lookupDomain) {
+            throw "SQL dependency '$vmName' belongs to '$($inventoryMatches[0].domain)', not its owning VM's domain '$lookupDomain'."
+        }
+        if ($remoteSqlMatches.Count -eq 0) {
+            Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
+            $remoteSqlMatches = @($configToModify.virtualMachines | Where-Object { $_.vmName -ieq $vmName })
+        }
+        if ($remoteSqlMatches.Count -eq 0) {
+            $discovered = @(Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true |
+                    Where-Object { $null -ne $_ })
+            if ($discovered.Count -gt 1) {
+                throw "SQL dependency '$vmName' has $($discovered.Count) refreshed lookup results; refusing an ambiguous target."
+            }
+            if ($discovered.Count -eq 1) {
+                if ("$($discovered[0].vmName)" -ine $vmName -or
+                    ($DomainName -and "$($discovered[0].domain)" -ine $lookupDomain)) {
+                    throw "SQL dependency '$vmName' lookup returned a different identity: '$($discovered[0].vmName)' in '$($discovered[0].domain)'; expected domain='$lookupDomain'."
+                }
+                Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
+                $remoteSqlMatches = @($configToModify.virtualMachines | Where-Object { $_.vmName -ieq $vmName })
+            }
+        }
     }
-    if (-not $remoteSQLVM) {
-        Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it does not, please modify the hyper-v config to reflect the new name" -Failure
-        return
+    if ($remoteSqlMatches.Count -ne 1) {
+        throw "Required SQL dependency '$requestedName' resolved to '$vmName' but produced $($remoteSqlMatches.Count) deployConfig entries. Domain='$lookupDomain', prefix='$lookupPrefix'. Check VM existence, note identity, and dependency references."
+    }
+    $remoteSQLVM = $remoteSqlMatches[0]
+    if ($DomainName -and $remoteSQLVM.domain -and "$($remoteSQLVM.domain)" -ine $lookupDomain) {
+        throw "SQL dependency '$vmName' is configured in '$($remoteSQLVM.domain)', not its owning VM's domain '$lookupDomain'."
     }
     Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.VmName -configToModify $configToModify -hidden:$hidden
     if ($remoteSQLVM.OtherNode) {
@@ -1762,19 +1829,19 @@ function Add-Phase11HierarchyParentsToDeployConfig {
                 $workflowVm | Add-Member -MemberType NoteProperty -Name 'phase11Validate' -Value $true -Force
             }
             if ($workflowVm.remoteSQLVM) {
-                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.remoteSQLVM -configToModify $Config
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.remoteSQLVM -configToModify $Config -DomainName $childDomainName
                 if ($Config.virtualMachines.vmName -notcontains $workflowVm.remoteSQLVM) {
                     throw "Failed to add remote SQL dependency '$($workflowVm.remoteSQLVM)' for hierarchy support VM '$($workflowVm.vmName)'."
                 }
             }
             if ($workflowVm.replicaSqlServerVM) {
-                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.replicaSqlServerVM -configToModify $Config
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.replicaSqlServerVM -configToModify $Config -DomainName $childDomainName
                 if ($Config.virtualMachines.vmName -notcontains $workflowVm.replicaSqlServerVM) {
                     throw "Failed to add replica SQL dependency '$($workflowVm.replicaSqlServerVM)' for hierarchy support VM '$($workflowVm.vmName)'."
                 }
             }
             if ($workflowVm.wsusDataBaseServer -and $workflowVm.wsusDataBaseServer -ne 'WID') {
-                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.wsusDataBaseServer -configToModify $Config
+                Add-RemoteSQLVMToDeployConfig -vmName $workflowVm.wsusDataBaseServer -configToModify $Config -DomainName $childDomainName
                 if ($Config.virtualMachines.vmName -notcontains $workflowVm.wsusDataBaseServer) {
                     throw "Failed to add WSUS database dependency '$($workflowVm.wsusDataBaseServer)' for hierarchy support VM '$($workflowVm.vmName)'."
                 }
@@ -2316,21 +2383,21 @@ function Add-ExistingVMsToDeployConfig {
         if ($systemSite) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
             if ($systemSite.RemoteSQLVM) {
-                Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
+                Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config -DomainName $systemSite.domain
             }            
         }
         $systemSite = Get-SiteServerForSiteCode -deployConfig $config -siteCode $siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
             if ($systemSite.RemoteSQLVM) {
-                Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
+                Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config -DomainName $systemSite.domain
             }
         }
         if ($systemSite.pullDPSourceDP) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
         }
         if ($system.RemoteSQLVM) {
-            Add-RemoteSQLVMToDeployConfig -vmName $system.RemoteSQLVM -configToModify $config
+            Add-RemoteSQLVMToDeployConfig -vmName $system.RemoteSQLVM -configToModify $config -DomainName $system.domain
         }
         # MP database replica hosted on an EXISTING SQL server: pull it in as hidden
         # so Phase 4 reaches it and can add the SQL 'Replication' feature. New (in
@@ -2338,12 +2405,12 @@ function Add-ExistingVMsToDeployConfig {
         if ($system.replicaSqlServerVM) {
             $replicaAlreadyInConfig = $config.virtualMachines | Where-Object { $_.vmName -eq $system.replicaSqlServerVM -and -not $_.hidden }
             if (-not $replicaAlreadyInConfig) {
-                Add-RemoteSQLVMToDeployConfig -vmName $system.replicaSqlServerVM -configToModify $config
+                Add-RemoteSQLVMToDeployConfig -vmName $system.replicaSqlServerVM -configToModify $config -DomainName $system.domain
             }
         }
         if ($system.wsusDataBaseServer) {
             if ($system.wsusDataBaseServer -ne "WID") {
-                Add-RemoteSQLVMToDeployConfig -vmName $system.wsusDataBaseServer -configToModify $config
+                Add-RemoteSQLVMToDeployConfig -vmName $system.wsusDataBaseServer -configToModify $config -DomainName $system.domain
             }
         }
     }
@@ -2355,7 +2422,7 @@ function Add-ExistingVMsToDeployConfig {
         if ($primary) {
             Add-ExistingVMToDeployConfig -vmName $primary.vmName -configToModify $config
             if ($primary.RemoteSQLVM) {
-                Add-RemoteSQLVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config
+                Add-RemoteSQLVMToDeployConfig -vmName $primary.RemoteSQLVM -configToModify $config -DomainName $primary.domain
             }
         }
     }
@@ -2368,7 +2435,7 @@ function Add-ExistingVMsToDeployConfig {
             $ActiveNodeVM = Get-VMFromList2 -deployConfig $config -vmName $ActiveNode -SmartUpdate:$false
             if ($ActiveNodeVM) {
                 if ($ActiveNodeVM.remoteSQLVM) {
-                    Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config
+                    Add-RemoteSQLVMToDeployConfig -vmName $ActiveNodeVM.remoteSQLVM -configToModify $config -DomainName $ActiveNodeVM.domain
                 }
                 Add-ExistingVMToDeployConfig -vmName $ActiveNode -configToModify $config
             }
@@ -2386,7 +2453,7 @@ function Add-ExistingVMsToDeployConfig {
             if ($CAS) {
                 Add-ExistingVMToDeployConfig -vmName $CAS.vmName -configToModify $config
                 if ($CAS.RemoteSQLVM) {
-                    Add-RemoteSQLVMToDeployConfig -vmName $CAS.RemoteSQLVM -configToModify $config
+                    Add-RemoteSQLVMToDeployConfig -vmName $CAS.RemoteSQLVM -configToModify $config -DomainName $CAS.domain
                 }
             }
         }
@@ -2397,18 +2464,18 @@ function Add-ExistingVMsToDeployConfig {
     $vms = $config.virtualMachines
     foreach ($vm in $vms) {
         if ($vm.RemoteSQLVM) {
-            Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
+            Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config -DomainName $vm.domain
         }
         if ($vm.wsusDataBaseServer) {
             if ($vm.wsusDataBaseServer -ne "WID") {
-                Add-RemoteSQLVMToDeployConfig -vmName $vm.wsusDataBaseServer -configToModify $config
+                Add-RemoteSQLVMToDeployConfig -vmName $vm.wsusDataBaseServer -configToModify $config -DomainName $vm.domain
             }
         }
     }
 
 
     # Add FS to list, when adding SQLAO
-    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode -and -not $_.Hidden }
+    $SQLAOVMs = $config.virtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
     foreach ($SQLAOVM in $SQLAOVMs) {
         if ($SQLAOVM.FileServerVM) {
             Add-ExistingVMToDeployConfig -vmName $SQLAOVM.FileServerVM -configToModify $config
@@ -2425,7 +2492,7 @@ function Add-ExistingVMsToDeployConfig {
             if ($ss) {
                 Add-ExistingVMToDeployConfig -vmName $ss.vmName -configToModify $config
                 if ($ss.RemoteSQLVM) {
-                    Add-RemoteSQLVMToDeployConfig -vmName $ss.RemoteSQLVM -configToModify $config
+                    Add-RemoteSQLVMToDeployConfig -vmName $ss.RemoteSQLVM -configToModify $config -DomainName $ss.domain
                 }
             }
         }
@@ -2434,7 +2501,7 @@ function Add-ExistingVMsToDeployConfig {
     $vms = $config.virtualMachines
     foreach ($vm in $vms) {
         if ($vm.RemoteSQLVM) {
-            Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
+            Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config -DomainName $vm.domain
         }
     }
 
@@ -2475,13 +2542,13 @@ function Add-ExistingVMsToDeployConfig {
         $roleVm = $config.virtualMachines | Where-Object { $_.vmName -ieq $roleVmName } | Select-Object -First 1
         if (-not $roleVm) { continue }
         if ($roleVm.remoteSQLVM) {
-            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.remoteSQLVM -configToModify $config
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.remoteSQLVM -configToModify $config -DomainName $roleVm.domain
         }
         if ($roleVm.replicaSqlServerVM) {
-            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.replicaSqlServerVM -configToModify $config
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.replicaSqlServerVM -configToModify $config -DomainName $roleVm.domain
         }
         if ($roleVm.wsusDataBaseServer -and $roleVm.wsusDataBaseServer -ne 'WID') {
-            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.wsusDataBaseServer -configToModify $config
+            Add-RemoteSQLVMToDeployConfig -vmName $roleVm.wsusDataBaseServer -configToModify $config -DomainName $roleVm.domain
         }
         if ($roleVm.pullDPSourceDP) {
             Add-ExistingVMToDeployConfig -vmName $roleVm.pullDPSourceDP -configToModify $config
@@ -2516,9 +2583,9 @@ function Add-ExistingVMsToDeployConfig {
     # Heal a SQLAO node whose partner (OtherNode) no longer exists. If the
     # second AG node was removed (e.g. via the remove script / Remove-Lab),
     # the surviving node's note still carries a dangling OtherNode pointing at
-    # a VM that isn't on the host -- the OtherNode add above
-    # (Add-ExistingVMToDeployConfig) silently skips it because the VM is gone,
-    # so it never lands in virtualMachines. Left in place, every OtherNode-keyed
+    # a VM that isn't on the host. A missing deployConfig row alone is not proof:
+    # require a verified refresh and an existing owner before clearing the link.
+    # Left in place after a confirmed removal, every OtherNode-keyed
     # step tries to reach the missing node and fails: the Phase 8 host preflight
     # admin-add (Common.Phases.ps1), the Phase 8 DSC SQL pre-flight $sqlNode2
     # WMI probe (InstallAndUpdateSCCM.ps1), the Phase 11 AG-health validator
@@ -2535,7 +2602,20 @@ function Add-ExistingVMsToDeployConfig {
     foreach ($sqlao in @($config.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode })) {
         $partnerPresent = $config.virtualMachines | Where-Object { $_.vmName -eq $sqlao.OtherNode } | Select-Object -First 1
         if (-not $partnerPresent) {
-            Write-Log "$($sqlao.vmName): SQLAO partner node '$($sqlao.OtherNode)' was not found on this host (it appears to have been removed). Clearing OtherNode and treating '$($sqlao.vmName)' as a single-node (degraded) Availability Group -- CM Setup will keep using the existing AG listener '$($sqlao.AlwaysOnListenerName)'." -Warning
+            if (-not $inventoryRefreshVerified) {
+                throw "Cannot confirm SQLAO peer '$($sqlao.OtherNode)' is removed: host inventory refresh was not verified. Owner='$($sqlao.vmName)', domain='$($config.vmOptions.domainName)'. OtherNode is unchanged."
+            }
+            $hostPartners = @($refreshedVmInventory | Where-Object { $_.vmName -ieq $sqlao.OtherNode })
+            if ($hostPartners.Count -gt 0) {
+                throw "SQLAO peer '$($sqlao.OtherNode)' is present in refreshed host inventory ($($hostPartners.Count) match(es)) but missing from deployConfig for '$($sqlao.vmName)'. Check dependency prefixes, domains, and VM-note hydration. OtherNode is unchanged."
+            }
+            $hostOwners = @($refreshedVmInventory | Where-Object { $_.vmName -ieq $sqlao.vmName })
+            $ownerDomain = if ($sqlao.domain) { "$($sqlao.domain)" } else { "$($config.vmOptions.domainName)" }
+            if ($hostOwners.Count -ne 1 -or $hostOwners[0].role -ne 'SQLAO' -or
+                "$($hostOwners[0].domain)" -ine $ownerDomain) {
+                throw "Cannot degrade SQLAO '$($sqlao.vmName)': it is not an existing unambiguous SQLAO owner in '$ownerDomain' (inventory matches=$($hostOwners.Count)). Required peer='$($sqlao.OtherNode)'."
+            }
+            Write-Log "$($sqlao.vmName): SQLAO partner '$($sqlao.OtherNode)' is absent from verified host inventory refreshed at '$($global:vm_List_LastUpdate)'. Clearing OtherNode for the existing single-node (degraded) Availability Group; retaining listener '$($sqlao.AlwaysOnListenerName)'." -Warning
             $sqlao.PSObject.Properties.Remove('OtherNode')
         }
     }
@@ -2571,16 +2651,13 @@ function Add-ModifiedExistingVMToDeployConfig {
     if ($matchingConfigVms.Count -gt 1) {
         throw "Cannot merge modified existing VM '$vmName': deployConfig contains $($matchingConfigVms.Count) matching entries."
     }
-    $existingVM = (get-list -Type VM | where-object { $_.vmName -eq $vmName })
-    if (-not $existingVM) {
-        Write-Log "Not adding $vmName as it does not exist as an existing VM" -LogOnly
-        return
+    $existingVmInventory = @(Get-List -Type VM -FailOnError)
+    $inventoryMatches = @($existingVmInventory | Where-Object { $_.vmName -ieq $vmName })
+    if ($inventoryMatches.Count -ne 1) {
+        throw "Cannot modify existing VM '$vmName': expected one inventory entry, found $($inventoryMatches.Count). Domain='$($configToModify.vmOptions.domainName)', prefix='$($configToModify.vmOptions.prefix)'."
     }
-
+    $existingVM = $inventoryMatches[0]
     Write-Log -Verbose "Adding $vmName as a modified existing VM"
-    if ($existingVM.state -ne "Running") {
-        Start-VM2 -Name $existingVM.vmName
-    }
 
     $newVMObject = [PSCustomObject]@{
         hidden = $hidden
@@ -2639,6 +2716,15 @@ function Add-ModifiedExistingVMToDeployConfig {
     if (-not $newVMObject.vmName) {
         throw "Could not add hidden VM, because it does not have a vmName property"
     }
+    $referenceDomain = "$($configToModify.vmOptions.domainName)"
+    if (-not $referenceDomain) { $referenceDomain = "$($existingVM.domain)" }
+    $referencePrefix = "$($vm.prefix)"
+    if (-not $referencePrefix) { $referencePrefix = "$($configToModify.vmOptions.prefix)" }
+    $knownReferenceVms = @(@($configToModify.virtualMachines) + @($existingVmInventory) | Where-Object { $null -ne $_ })
+    Update-ConfigVmReferences -VM $newVMObject -KnownVMs $knownReferenceVms -DomainName $referenceDomain -Prefix $referencePrefix
+    if ($existingVM.state -ne 'Running') {
+        Start-VM2 -Name $existingVM.vmName
+    }
     if ($matchingConfigVms.Count -eq 1) {
         $target = $matchingConfigVms[0]
         # Generated phase data belongs to the pre-edit shape. Retaining it after a
@@ -2679,23 +2765,33 @@ function Add-ExistingVMToDeployConfig {
         return
     }
 
-    $existingVmInventory = @(Get-List -Type VM)
-    $existingVM = $existingVmInventory | Where-Object { $_.vmName -eq $vmName }
-    if (-not $existingVM) {
+    $existingVmInventory = @(Get-List -Type VM -FailOnError)
+    $inventoryMatches = @($existingVmInventory | Where-Object { $_.vmName -ieq $vmName })
+    if ($inventoryMatches.Count -eq 0) {
         Write-Log "Not adding $vmName as it does not exist as an existing VM" -LogOnly
         return
     }
-
-    Write-Log -Verbose "Adding $vmName as an existing VM"
-    if ($existingVM.state -ne "Running") {
-        Start-VM2 -Name $existingVM.vmName
+    if ($inventoryMatches.Count -ne 1) {
+        throw "Cannot hydrate VM '$vmName': expected one inventory entry, found $($inventoryMatches.Count). Domain='$($configToModify.vmOptions.domainName)', prefix='$($configToModify.vmOptions.prefix)'."
     }
+    $existingVM = $inventoryMatches[0]
+    Write-Log -Verbose "Adding $vmName as an existing VM"
 
     $newVMObject = [PSCustomObject]@{
         hidden = $hidden
     }
 
     $vmNote = Get-VMNote -VMName $vmName
+    $noteName = ConvertFrom-MemLabsVmNoteScalar -Value $vmNote.vmName
+    if (-not $vmNote -or [string]::IsNullOrWhiteSpace("$noteName") -or
+        [string]::IsNullOrWhiteSpace("$($vmNote.role)")) {
+        throw "Cannot hydrate VM '$vmName': no readable MemLabs VM note with a name and role was returned. Inventory domain='$($existingVM.domain)', role='$($existingVM.role)'."
+    }
+    if ("$noteName" -ine $vmName -or
+        ($existingVM.domain -and "$($vmNote.domain)" -ine "$($existingVM.domain)") -or
+        ($existingVM.role -and "$($vmNote.role)" -ine "$($existingVM.role)")) {
+        throw "Cannot hydrate VM '$vmName': VM-note identity mismatch. Note name='$noteName', domain='$($vmNote.domain)', role='$($vmNote.role)'; inventory domain='$($existingVM.domain)', role='$($existingVM.role)'. Refresh inventory and inspect the VM note before retrying."
+    }
     $propsToExclude = @(
         "LastKnownIP",
         "inProgress",
@@ -2726,14 +2822,25 @@ function Add-ExistingVMToDeployConfig {
         throw "Could not add hidden VM, because it does not have a vmName property"
     }
     $referencePrefix = "$($vmNote.prefix)"
-    if (-not $referencePrefix) {
+    $referenceDomain = "$($newVMObject.domain)"
+    $configDomain = "$($configToModify.vmOptions.domainName)"
+    if (-not $referenceDomain) { $referenceDomain = $configDomain }
+    if (-not $referencePrefix -and $referenceDomain -ieq $configDomain) {
         $referencePrefix = "$($configToModify.vmOptions.prefix)"
     }
-    $knownReferenceVms = @(@($configToModify.virtualMachines) + @($existingVmInventory) | Where-Object { $null -ne $_ })
+    $knownReferenceVms = @(@($configToModify.virtualMachines) + @($existingVmInventory) | Where-Object {
+            if ($null -eq $_) { return $false }
+            $candidateDomain = if ($_.domain) { "$($_.domain)" } else { $configDomain }
+            $candidateDomain -ieq $referenceDomain
+        })
     Update-ConfigVmReferences -VM $newVMObject -KnownVMs $knownReferenceVms `
-        -DomainName $configToModify.vmOptions.domainName -Prefix $referencePrefix
+        -DomainName $referenceDomain -Prefix $referencePrefix
     if ($OtherDC) {
         $newVMObject.role = "OtherDC"
+    }
+    Write-Log "[ConfigHydration] Verified note identity for '$vmName': domain='$referenceDomain', role='$($vmNote.role)', prefix='$referencePrefix', hidden=$hidden." -LogOnly
+    if ($existingVM.state -ne 'Running') {
+        Start-VM2 -Name $existingVM.vmName
     }
     if ($null -eq $configToModify.virtualMachines) {
         $configToModify | Add-Member -MemberType NoteProperty -Name "virtualMachines" -Value @($newVMObject) -Force
@@ -3174,23 +3281,21 @@ function Get-SQLAOConfig {
         [object] $vmName
     )
     Write-Log "Running Get-SQLAOConfig for $vmName" -LogOnly
-    $PrimaryAO = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName }
-
-    if (-not $PrimaryAO) {
-        Write-Log -Failure "Could not find Primary SQLAO VM $vmName"
-        return $null
+    $primaryRows = @($deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vmName })
+    if ($primaryRows.Count -ne 1) {
+        throw "Cannot generate SQLAO configuration for '$vmName': expected one owner row, found $($primaryRows.Count)."
     }
+    $PrimaryAO = $primaryRows[0]
     if (-not ($PrimaryAO.OtherNode)) {
         #ignore this.. We run this on all SQLAO nodes,and don't care about secondary
         return $null
     }
 
     $SecondAO = $PrimaryAO.OtherNode
-    $FSAO = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "FileServer" -and $_.vmName -eq $PrimaryAO.FileServerVM }
+    $fileServerRows = @($deployConfig.virtualMachines | Where-Object { $_.Role -eq "FileServer" -and $_.vmName -eq $PrimaryAO.FileServerVM })
     #$DC = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }
 
     $ClusterName = $PrimaryAO.ClusterName
-    $ClusterNameNoPrefix = $ClusterName.Replace($deployConfig.vmOptions.prefix, "")
 
     $ServiceAccount = $PrimaryAO.SqlServiceAccount
     $AgentAccount = $PrimaryAO.SqlAgentAccount
@@ -3217,6 +3322,19 @@ function Get-SQLAOConfig {
         write-log "Cluster IP is not yet set. Skipping SQLAO Config for $vmName" -LogOnly
         return
         #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
+    }
+    if ([string]::IsNullOrWhiteSpace("$ClusterName")) {
+        throw "Cannot generate SQLAO configuration for '$vmName': ClusterName is unmeasured although ClusterIPAddress='$($PrimaryAO.ClusterIPAddress)' is present. Inspect persisted VM topology."
+    }
+    $peerRows = @($deployConfig.virtualMachines | Where-Object { $_.vmName -ieq $PrimaryAO.OtherNode })
+    if ($peerRows.Count -ne 1 -or $fileServerRows.Count -ne 1) {
+        throw "Cannot generate SQLAO configuration for '$vmName': peer='$($PrimaryAO.OtherNode)' matches=$($peerRows.Count), witness='$($PrimaryAO.FileServerVM)' FileServer matches=$($fileServerRows.Count), cluster='$ClusterName'. Required dependency hydration is incomplete."
+    }
+    $FSAO = $fileServerRows[0]
+    $ClusterNameNoPrefix = "$ClusterName"
+    $clusterPrefix = "$($deployConfig.vmOptions.prefix)"
+    if ($clusterPrefix) {
+        $ClusterNameNoPrefix = $ClusterNameNoPrefix.Replace($clusterPrefix, '')
     }
 
     # Warn if ClusterIP or AGIP are on the legacy heartbeat subnet.
