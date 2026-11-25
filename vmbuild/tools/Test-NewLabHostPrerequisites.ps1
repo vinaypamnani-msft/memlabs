@@ -42,6 +42,8 @@ $configPath = Join-Path $RootPath 'vmbuild\common\Common.Config.ps1'
 $prerequisitePath = Join-Path $RootPath 'vmbuild\common\Common.Prereqs.ps1'
 $dscBuilderPath = Join-Path $RootPath 'vmbuild\DSC\createGuestDscZip.ps1'
 . $prerequisitePath
+. (Import-TestFunction -Path $newLabPath -Name 'Get-NewLabDesktopUser')
+. (Import-TestFunction -Path $newLabPath -Name 'Initialize-NewLabHyperVAccess')
 . (Import-TestFunction -Path $newLabPath -Name 'Initialize-NewLabHyperVPrerequisite')
 . (Import-TestFunction -Path $newLabPath -Name 'Test-NewLabEnhancedSessionModeCache')
 . (Import-TestFunction -Path $newLabPath -Name 'Invoke-NewLabEnhancedSessionModeCheck')
@@ -54,6 +56,21 @@ Assert-Equal $false ($windowsPowerShellModulePath -match [regex]::Escape([Enviro
 $repositoryArtifactState = Get-MemLabsDscArtifactState -DscRoot (Join-Path $RootPath 'vmbuild\DSC')
 Assert-Equal $true $repositoryArtifactState.Current 'repository ships a version-bound DSC archive matching its loose TemplateHelp sources'
 
+$observedDesktopUser = Get-NewLabDesktopUser
+$currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+if ($observedDesktopUser) {
+    Assert-Equal $currentSessionId $observedDesktopUser.SessionId 'native desktop lookup targets the launching Windows session'
+    Assert-Equal $true ($observedDesktopUser.SID -is [Security.Principal.SecurityIdentifier]) 'native desktop lookup resolves an account SID'
+}
+else {
+    [Console]::WriteLine('  INFO: No desktop user in the test session; native account SID resolution was not exercised.')
+}
+Assert-Equal $null ([MemLabs.NewLabDesktopSession]::GetAccountName(0)) 'session zero does not select another signed-in user'
+$invalidSessionError = $null
+try { $null = [MemLabs.NewLabDesktopSession]::GetAccountName([int]::MaxValue) }
+catch { $invalidSessionError = $_ }
+Assert-Equal $true ($invalidSessionError.Exception.InnerException -is [ComponentModel.Win32Exception]) 'native session-query failures surface the Windows error'
+
 $script:VmmsPresent = $true
 $script:HyperVCmdletsPresent = $true
 $script:PromptResponse = 'y'
@@ -62,6 +79,24 @@ $script:InstallCount = 0
 $script:StartJobCount = 0
 $script:InstallFailure = $null
 $script:LogMessages = @()
+$script:MembershipElevated = $true
+$script:DesktopUser = [pscustomobject]@{
+    Name = 'MEMLABS\desktop-user'
+    SID = [Security.Principal.SecurityIdentifier]::new('S-1-5-21-100-200-300-1234')
+    SessionId = 9
+}
+$script:DesktopLookupCount = 0
+$script:DesktopLookupFailure = $null
+$script:HyperVGroupMembers = @($script:DesktopUser)
+$script:GroupReadFailure = $null
+$script:GroupAddFailure = $null
+$script:PostAddReadFailure = $null
+$script:ApplyGroupAddition = $true
+$script:ConcurrentGroupAddition = $false
+$script:GroupReadCount = 0
+$script:GroupAddCount = 0
+$script:AddedGroupSids = @()
+$script:StartupEvents = @()
 
 function Get-Service {
     param([string] $Name)
@@ -82,11 +117,44 @@ function Read-YesOrNoWithTimeout {
 }
 function Install-HyperV {
     $script:InstallCount++
+    $script:StartupEvents += 'Install'
     if ($script:InstallFailure) { throw $script:InstallFailure }
 }
+function Test-MemLabsElevated { return $script:MembershipElevated }
+function Get-NewLabDesktopUser {
+    $script:DesktopLookupCount++
+    $script:StartupEvents += 'Desktop'
+    if ($script:DesktopLookupFailure) { throw $script:DesktopLookupFailure }
+    return $script:DesktopUser
+}
+function Get-LocalGroupMember {
+    [CmdletBinding()]
+    param([Security.Principal.SecurityIdentifier]$SID)
+    if ($SID.Value -ne 'S-1-5-32-578') { throw "Unexpected group SID: $SID" }
+    $script:GroupReadCount++
+    if ($script:GroupReadFailure) { Write-Error -Message $script:GroupReadFailure }
+    return $script:HyperVGroupMembers
+}
+function Add-LocalGroupMember {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Security.Principal.SecurityIdentifier]$SID, [string[]]$Member)
+    if ($SID.Value -ne 'S-1-5-32-578' -or $Member.Count -ne 1) { throw 'Unexpected membership target.' }
+    $script:GroupAddCount++
+    $script:AddedGroupSids += $Member[0]
+    if ($script:GroupAddFailure) { Write-Error -Message $script:GroupAddFailure }
+    if ($script:ApplyGroupAddition) {
+        $script:HyperVGroupMembers += [pscustomobject]@{ SID = [Security.Principal.SecurityIdentifier]::new($Member[0]) }
+    }
+    if ($script:ConcurrentGroupAddition) {
+        Write-Error -Message 'Another startup added the member.' -ErrorId 'MemberExists' -Category ResourceExists
+    }
+    if ($script:PostAddReadFailure) { $script:GroupReadFailure = $script:PostAddReadFailure }
+}
 function Write-Log {
-    param($Message, [switch] $LogOnly, [switch] $Failure)
-    $script:LogMessages += [pscustomobject]@{ Message = "$Message"; Failure = $Failure.IsPresent }
+    param($Message, [switch] $LogOnly, [switch] $Failure, [switch] $Warning, [switch] $Success)
+    $script:LogMessages += [pscustomobject]@{
+        Message = "$Message"; Failure = $Failure.IsPresent; Warning = $Warning.IsPresent; Success = $Success.IsPresent
+    }
 }
 function Flush-LogBuffer {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '', Justification = 'Test double must match the production helper name.')]
@@ -99,6 +167,8 @@ $readyResult = Initialize-NewLabHyperVPrerequisite
 Assert-Equal $true $readyResult 'ready host passes prerequisite check'
 Assert-Equal 0 $script:PromptCount 'ready host is not prompted'
 Assert-Equal 1 $script:InstallCount 'ready host still verifies Hyper-V service readiness'
+Assert-Equal 'Install,Desktop' ($script:StartupEvents -join ',') 'desktop membership is checked after Hyper-V installation'
+Assert-Equal 0 $script:GroupAddCount 'existing membership is matched by SID without another add'
 
 $script:VmmsPresent = $false
 $script:HyperVCmdletsPresent = $false
@@ -121,6 +191,104 @@ $failedResult = Initialize-NewLabHyperVPrerequisite
 Assert-Equal $false $failedResult 'installer failure stops startup'
 Assert-Equal 3 $script:InstallCount 'installer failure was exercised'
 Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -like '*simulated install failure*' })) 'installer failure is logged'
+
+$script:MembershipElevated = $false
+$desktopReadsBefore = $script:DesktopLookupCount
+$membershipError = $null
+try { Initialize-NewLabHyperVAccess -Confirm:$false }
+catch { $membershipError = $_ }
+Assert-Equal $true ($membershipError.Exception.Message -like '*requires an elevated host session*') 'non-elevated membership calls fail explicitly'
+Assert-Equal $desktopReadsBefore $script:DesktopLookupCount 'non-elevated calls do not resolve or grant another account'
+$script:MembershipElevated = $true
+
+$script:HyperVGroupMembers = @()
+Initialize-NewLabHyperVAccess -WhatIf -Confirm:$false
+Assert-Equal 0 $script:GroupAddCount 'WhatIf does not add the desktop account'
+Initialize-NewLabHyperVAccess -Confirm:$false
+Assert-Equal 1 $script:GroupAddCount 'missing desktop membership is added once'
+Assert-Equal $script:DesktopUser.SID.Value $script:AddedGroupSids[0] 'alternate-account elevation grants the desktop SID, not the elevated identity'
+Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Success -and $_.Message -like '*Sign out and back in*' })) 'verified membership reports how to refresh the user token'
+Initialize-NewLabHyperVAccess -Confirm:$false
+Assert-Equal 1 $script:GroupAddCount 'repeated startup does not add an existing member again'
+
+$savedDesktopUser = $script:DesktopUser
+$script:DesktopUser = $null
+$groupReadsBefore = $script:GroupReadCount
+Initialize-NewLabHyperVAccess -Confirm:$false
+Assert-Equal $groupReadsBefore $script:GroupReadCount 'no desktop user skips group access rather than falling back to the elevated account'
+Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Warning -and $_.Message -like '*No signed-in desktop user*' })) 'noninteractive membership skip is visible'
+$script:DesktopUser = $savedDesktopUser
+$script:InstallFailure = $null
+
+$script:HyperVGroupMembers = @()
+$groupAddsBefore = $script:GroupAddCount
+$wrapperWhatIfResult = Initialize-NewLabHyperVPrerequisite -WhatIf
+Assert-Equal $true $wrapperWhatIfResult 'startup prerequisite forwards WhatIf without failing readiness'
+Assert-Equal $groupAddsBefore $script:GroupAddCount 'startup prerequisite WhatIf does not grant membership'
+
+$membershipErrorPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    foreach ($failureCase in @(
+            @{ Variable = 'DesktopLookupFailure'; Message = 'simulated desktop SID lookup failure' },
+            @{ Variable = 'GroupReadFailure'; Message = 'simulated membership read failure' },
+            @{ Variable = 'GroupAddFailure'; Message = 'simulated membership add failure' }
+        )) {
+        $script:HyperVGroupMembers = @()
+        Set-Variable -Name $failureCase.Variable -Value $failureCase.Message -Scope Script
+        $membershipResult = Initialize-NewLabHyperVPrerequisite
+        Assert-Equal $false $membershipResult "$($failureCase.Variable) stops startup under Continue"
+        Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -like "*$($failureCase.Message)*" })) "$($failureCase.Variable) retains the failure detail"
+        Set-Variable -Name $failureCase.Variable -Value $null -Scope Script
+    }
+}
+finally {
+    $ErrorActionPreference = $membershipErrorPreference
+    $script:DesktopLookupFailure = $null
+    $script:GroupReadFailure = $null
+    $script:GroupAddFailure = $null
+}
+
+$script:ApplyGroupAddition = $false
+$script:LogMessages = @()
+$unverifiedResult = Initialize-NewLabHyperVPrerequisite
+Assert-Equal $false $unverifiedResult 'an add that does not persist membership stops startup'
+Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -like '*membership could not be verified*' })) 'failed membership verification is reported'
+Assert-Equal $false ([bool]($script:LogMessages | Where-Object Success)) 'unverified membership never reports success'
+
+$script:ConcurrentGroupAddition = $true
+$script:LogMessages = @()
+$unverifiedRaceResult = Initialize-NewLabHyperVPrerequisite
+Assert-Equal $false $unverifiedRaceResult 'member-exists without persisted membership still stops startup'
+Assert-Equal $false ([bool]($script:LogMessages | Where-Object Success)) 'an unverified concurrent addition does not report success'
+$script:ApplyGroupAddition = $true
+$concurrentResult = Initialize-NewLabHyperVPrerequisite
+Assert-Equal $true $concurrentResult 'a concurrent member-exists error succeeds only after membership verification'
+$script:ConcurrentGroupAddition = $false
+
+$unrelatedMember = [pscustomobject]@{
+    SID = [Security.Principal.SecurityIdentifier]::new('S-1-5-21-100-200-300-2345')
+}
+$script:HyperVGroupMembers = @($unrelatedMember)
+$script:PostAddReadFailure = 'simulated post-add membership read failure'
+$script:LogMessages = @()
+try {
+    $ErrorActionPreference = 'Continue'
+    $postAddReadResult = Initialize-NewLabHyperVPrerequisite
+    Assert-Equal $false $postAddReadResult 'a post-add read error stops startup even after the membership persisted'
+    Assert-Equal $true ([bool]($script:LogMessages | Where-Object { $_.Failure -and $_.Message -like '*simulated post-add membership read failure*' })) 'post-add read failure preserves its error detail'
+    Assert-Equal $false ([bool]($script:LogMessages | Where-Object Success)) 'failed post-add read never reports verified success'
+}
+finally {
+    $ErrorActionPreference = $membershipErrorPreference
+    $script:GroupReadFailure = $null
+    $script:PostAddReadFailure = $null
+}
+$groupAddsBefore = $script:GroupAddCount
+$recoveredMembershipResult = Initialize-NewLabHyperVPrerequisite
+Assert-Equal $true $recoveredMembershipResult 'startup recovers by reading the previously persisted membership'
+Assert-Equal $groupAddsBefore $script:GroupAddCount 'recovery does not add the desktop user twice'
+Assert-Equal 1 @($script:HyperVGroupMembers | Where-Object { $_.SID.Value -eq $unrelatedMember.SID.Value }).Count 'membership changes preserve unrelated group members'
 
 $esmCacheFixture = Join-Path ([IO.Path]::GetTempPath()) ('memlabs-vmhost-esm-' + [guid]::NewGuid().ToString('N') + '.json')
 try {

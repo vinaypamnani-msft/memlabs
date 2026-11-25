@@ -103,9 +103,108 @@ function Write-NewLabResumeCommand {
     Add-CmdHistory $resumeCommand
 }
 
-function Initialize-NewLabHyperVPrerequisite {
+function Get-NewLabDesktopUser {
     [CmdletBinding()]
     param ()
+
+    if (-not ('MemLabs.NewLabDesktopSession' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace MemLabs {
+    public static class NewLabDesktopSession {
+        [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool WTSQuerySessionInformation(
+            IntPtr server, int sessionId, int informationClass, out IntPtr buffer, out int bytesReturned);
+
+        [DllImport("wtsapi32.dll")]
+        private static extern void WTSFreeMemory(IntPtr buffer);
+
+        private static string QueryString(int sessionId, int informationClass) {
+            IntPtr buffer;
+            int bytesReturned;
+            if (!WTSQuerySessionInformation(IntPtr.Zero, sessionId, informationClass, out buffer, out bytesReturned)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            try {
+                return Marshal.PtrToStringUni(buffer);
+            }
+            finally {
+                WTSFreeMemory(buffer);
+            }
+        }
+
+        public static string GetAccountName(int sessionId) {
+            if (sessionId == 0) { return null; }
+            string user = QueryString(sessionId, 5); // WTSUserName
+            if (String.IsNullOrWhiteSpace(user)) { return null; }
+            string domain = QueryString(sessionId, 7); // WTSDomainName
+            if (String.IsNullOrWhiteSpace(domain)) {
+                throw new InvalidOperationException("The desktop username was returned without an account domain.");
+            }
+            return domain + "\\" + user;
+        }
+    }
+}
+'@ -ErrorAction Stop
+    }
+
+    $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $accountName = [MemLabs.NewLabDesktopSession]::GetAccountName($sessionId)
+    if ([string]::IsNullOrWhiteSpace($accountName)) { return $null }
+
+    $sid = [Security.Principal.NTAccount]::new($accountName).Translate([Security.Principal.SecurityIdentifier])
+    return [pscustomobject]@{
+        Name      = $accountName
+        SID       = $sid
+        SessionId = $sessionId
+    }
+}
+
+function Initialize-NewLabHyperVAccess {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param ()
+
+    if (-not (Test-MemLabsElevated)) {
+        throw 'Hyper-V Administrators membership requires an elevated host session.'
+    }
+
+    $desktopUser = Get-NewLabDesktopUser
+    if ($null -eq $desktopUser) {
+        Write-Log 'No signed-in desktop user in this Windows session; skipping Hyper-V Administrators membership. The elevated account is not added as a fallback.' -Warning
+        return
+    }
+
+    $groupSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-578')
+    $userSid = $desktopUser.SID.Value
+    $member = @(Get-LocalGroupMember -SID $groupSid -ErrorAction Stop | Where-Object { $_.SID.Value -eq $userSid })
+    if ($member.Count -gt 0) {
+        Write-Log "Hyper-V Administrators membership already present for desktop user '$($desktopUser.Name)' (SID $userSid, session $($desktopUser.SessionId))." -LogOnly
+        return
+    }
+
+    if (-not $PSCmdlet.ShouldProcess("$($desktopUser.Name) (SID $userSid, session $($desktopUser.SessionId))", 'Add to Hyper-V Administrators')) {
+        return
+    }
+    try {
+        Add-LocalGroupMember -SID $groupSid -Member $userSid -Confirm:$false -ErrorAction Stop
+    }
+    catch {
+        if ($_.FullyQualifiedErrorId -notlike 'MemberExists,*') { throw }
+    }
+
+    $member = @(Get-LocalGroupMember -SID $groupSid -ErrorAction Stop | Where-Object { $_.SID.Value -eq $userSid })
+    if ($member.Count -eq 0) {
+        throw "Hyper-V Administrators membership could not be verified for desktop user '$($desktopUser.Name)' (SID $userSid)."
+    }
+    Write-Log "Hyper-V Administrators membership verified for desktop user '$($desktopUser.Name)' (SID $userSid, session $($desktopUser.SessionId)). Sign out and back in, then restart VS Code/Copilot to refresh the non-elevated user token." -Success
+}
+
+function Initialize-NewLabHyperVPrerequisite {
+    [CmdletBinding()]
+    param ([switch]$WhatIf)
 
     $vmmsRegistered = [bool](Get-Service -Name vmms -ErrorAction SilentlyContinue)
     $hyperVCmdletsAvailable = [bool](Get-Command -Name Get-VMNetworkAdapter -Module Hyper-V -ErrorAction SilentlyContinue)
@@ -123,6 +222,7 @@ function Initialize-NewLabHyperVPrerequisite {
         Write-Log "Post-init: Calling Install-HyperV before network validation..." -LogOnly
         Flush-LogBuffer -All
         $null = Install-HyperV
+        Initialize-NewLabHyperVAccess -WhatIf:$WhatIf -Confirm:$false
         return $true
     }
     catch {
@@ -314,7 +414,7 @@ if (-not ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Ad
     exit 1
 }
 
-if (-not (Initialize-NewLabHyperVPrerequisite)) {
+if (-not (Initialize-NewLabHyperVPrerequisite -WhatIf:$WhatIf)) {
     exit 1
 }
 
