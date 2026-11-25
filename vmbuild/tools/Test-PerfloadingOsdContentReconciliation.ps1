@@ -36,6 +36,36 @@ if ($perGroupOsdFilters.Count -ne 2) {
     throw "Expected two exact-GroupID OSD membership queries; found $($perGroupOsdFilters.Count)."
 }
 $perfloadingText = Get-Content -LiteralPath $perfloadingPath -Raw
+& {
+    $connectionStart = $perfloadingText.IndexOf('    # Connect to the site')
+    $connectionEnd = $perfloadingText.IndexOf('    function Sync-MemLabsClientScriptPolicy', $connectionStart)
+    if ($connectionStart -lt 0 -or $connectionEnd -le $connectionStart) { throw 'Could not locate the shipped perfloading site-drive setup.' }
+    $connect = [scriptblock]::Create('param($SiteCode,$ProviderMachineName,$initParams)' + "`n" +
+        $perfloadingText.Substring($connectionStart, $connectionEnd - $connectionStart))
+    $driveState = @{ Exists=$true; Creates=0; Locations=0 }
+    function Get-PSDrive {
+        [CmdletBinding()]param($Name,$PSProvider)
+        if ($driveState.Exists) { [pscustomobject]@{ Name=$Name; Provider=$PSProvider } }
+    }
+    function New-PSDrive {
+        [CmdletBinding()]param($Name,$PSProvider,$Root,$Scope)
+        if ($driveState.Exists) { throw 'Perfloading created a child-scoped shadow of an existing site drive.' }
+        if ($Scope -ne 'Global') { throw 'A perfloading-created CMSite drive would expire with the child script scope.' }
+        $driveState.Creates++; $driveState.Exists=$true
+    }
+    function Set-Location {
+        [CmdletBinding()]param($Path)
+        if (-not $driveState.Exists -or $Path -ne 'PRI:\') { throw 'Perfloading did not enter the registered site drive.' }
+        $driveState.Locations++
+    }
+    function Write-DscStatus { param($Message,[switch]$Failure,[switch]$NoStatus) }
+    function Start-Sleep { param($Seconds) throw 'The ready drive fixture must not retry.' }
+    & $connect 'PRI' 'SITE.lab.test' @{}
+    if ($driveState.Creates -ne 0 -or $driveState.Locations -ne 1) { throw 'A registered CMSite drive was not reused.' }
+    $driveState.Exists=$false
+    & $connect 'PRI' 'SITE.lab.test' @{}
+    if ($driveState.Creates -ne 1 -or $driveState.Locations -ne 2) { throw 'A missing site drive was not created once with a surviving scope.' }
+}
 if (-not $perfloadingText.Contains('Add-CMDistributionPointToGroup -DistributionPointGroupId $osdGroupId')) {
     throw 'OSD membership add does not pin the resolved GroupID.'
 }

@@ -1222,20 +1222,57 @@ if ($ThisVM.role -ne "CAS") {
         if ($requiresTlsRefresh -and -not (Test-Path $mpBounceFlag)) {
             $siteMPs = @()
             try {
+                $mpProviderSiteCode = "$($ThisVM.siteCode)"
+                if ($mpProviderSiteCode -notmatch '^[A-Za-z0-9]{3}$' -or
+                    [string]::IsNullOrWhiteSpace("$DomainFullName")) {
+                    throw "MP TLS discovery requires a measured provider site and domain: site='$mpProviderSiteCode', domain='$DomainFullName'."
+                }
+                $mpPreviousContext = 'previousDrive=<unmeasured>; previousProvider=<unmeasured>'
+                try {
+                    $mpPreviousLocation = Get-Location
+                    $mpPreviousContext = "previousDrive=$($mpPreviousLocation.Drive.Name); previousProvider=$($mpPreviousLocation.Provider.Name)"
+                }
+                catch { Write-DscStatus "MP TLS bounce: previous drive context is unavailable; reconnecting explicitly. $($_.Exception.Message)" -Warning }
+                $mpProvider = Get-SMSProvider -SiteCode $mpProviderSiteCode
+                if ([string]::IsNullOrWhiteSpace("$($mpProvider.FQDN)")) {
+                    throw "MP TLS discovery could not resolve the provider for site '$mpProviderSiteCode'."
+                }
+                $mpConnected = Set-CMSiteProvider -SiteCode $mpProviderSiteCode -ProviderFQDN $mpProvider.FQDN
+                if ($mpConnected -isnot [bool] -or -not $mpConnected) {
+                    throw "MP TLS discovery could not initialize site '$mpProviderSiteCode' on '$($mpProvider.FQDN)'."
+                }
+                # Child scripts can leave the location bound to an expired local drive instance.
+                Set-Location "$($mpProviderSiteCode):\" -ErrorAction Stop
+                $mpActiveLocation = Get-Location
+                if ($mpActiveLocation.Provider.Name -ne 'CMSite' -or $mpActiveLocation.Drive.Name -ine $mpProviderSiteCode) {
+                    throw "MP TLS discovery did not enter the CMSite drive for '$mpProviderSiteCode'."
+                }
+                Write-DscStatus "MP TLS bounce: CMSite context providerSite=$mpProviderSiteCode; provider=$($mpProvider.FQDN); $mpPreviousContext; activeDrive=$($mpActiveLocation.Drive.Name); activeProvider=$($mpActiveLocation.Provider.Name)." -NoStatus
                 $mpSiteCodes = @($ThisVM.siteCode)
                 if ($ThisVM.pkiReconfigure) {
                     $mpSiteCodes += @($deployConfig.virtualMachines | Where-Object {
-                            $_.role -eq 'Secondary' -and $_.parentSiteCode -eq $ThisVM.siteCode -and $_.pkiReconfigure
+                            $_.role -eq 'Secondary' -and $_.parentSiteCode -eq $ThisVM.siteCode -and $_.pkiReconfigure -and
+                            (-not $_.domain -or $_.domain -ieq $DomainFullName)
                         } | ForEach-Object { $_.siteCode })
                 }
-                $siteMPs = @(
-                    foreach ($candidate in $deployConfig.virtualMachines | Where-Object { $_.siteCode -in $mpSiteCodes }) {
-                        if ($candidate.installMP) { $candidate }
-                        elseif ($ThisVM.pkiReconfigure -and $candidate.role -in @('Primary', 'Secondary') -and
-                            @(Get-CMManagementPoint -SiteSystemServerName "$($candidate.vmName).$DomainFullName" `
-                                -SiteCode $candidate.siteCode -ErrorAction Stop).Count -eq 1) { $candidate }
+                foreach ($candidate in $deployConfig.virtualMachines | Where-Object {
+                        $_.siteCode -in $mpSiteCodes -and (-not $_.domain -or $_.domain -ieq $DomainFullName)
+                    }) {
+                    if ($candidate.installMP) { $siteMPs += $candidate }
+                    elseif ($ThisVM.pkiReconfigure -and $candidate.role -in @('Primary', 'Secondary')) {
+                        if ([string]::IsNullOrWhiteSpace("$($candidate.vmName)") -or
+                            "$($candidate.siteCode)" -notmatch '^[A-Za-z0-9]{3}$') {
+                            throw 'MP TLS discovery encountered a site-server candidate with missing name/site metadata.'
+                        }
+                        Write-DscStatus "MP TLS bounce: probing implicit MP host=$($candidate.vmName).$DomainFullName; querySite=$($candidate.siteCode); providerSite=$mpProviderSiteCode." -NoStatus
+                        $mpConfiguration = @(Get-CMManagementPoint -SiteSystemServerName "$($candidate.vmName).$DomainFullName" `
+                            -SiteCode $candidate.siteCode -ErrorAction Stop)
+                        if ($mpConfiguration.Count -gt 1) {
+                            throw "MP TLS discovery returned $($mpConfiguration.Count) configurations for '$($candidate.vmName)' in '$($candidate.siteCode)'."
+                        }
+                        if ($mpConfiguration.Count -eq 1) { $siteMPs += $candidate }
                     }
-                )
+                }
             }
             catch {
                 if ($ThisVM.pkiReconfigure) { throw }
@@ -1444,7 +1481,10 @@ if ($ThisVM.role -ne "CAS") {
                 catch { return "RESET-FAILED|$($_.Exception.Message)" }
             }
 
-            $siteMPsForHealth = @($deployConfig.virtualMachines | Where-Object { $_.installMP -and $_.siteCode -eq $ThisVM.siteCode })
+            $siteMPsForHealth = @($deployConfig.virtualMachines | Where-Object {
+                    $_.installMP -and $_.siteCode -eq $ThisVM.siteCode -and
+                    (-not $_.domain -or $_.domain -ieq $DomainFullName)
+                })
             foreach ($mp in $siteMPsForHealth) {
                 $endpointHealthy = $false
                 $lastHealth = 'UNHEALTHY|not probed'

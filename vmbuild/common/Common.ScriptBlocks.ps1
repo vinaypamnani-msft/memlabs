@@ -2913,8 +2913,9 @@ function Save-CMRoleFailureDiagnostics {
         }
         $toolsPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools'
         $collectGuest = {
-            param([string]$Source, [hashtable]$CollectorArguments, [string]$Destination)
+            param([string]$Source, [hashtable]$CollectorArguments, [string]$Destination, [string]$HelperSource)
             $ErrorActionPreference = 'Stop'
+            if ($HelperSource) { . ([scriptblock]::Create($HelperSource)) }
             $payload = @(& ([scriptblock]::Create($Source)) @CollectorArguments)
             if ($payload.Count -ne 1 -or $payload[0] -isnot [string] -or [string]::IsNullOrWhiteSpace($payload[0])) {
                 throw 'Role collector did not return one JSON document.'
@@ -2932,11 +2933,16 @@ function Save-CMRoleFailureDiagnostics {
                 $toolName = if ($target.Role -eq 'RP') { 'Get-ReportingDiagnostics.ps1' } else { 'Get-ManagementPointDiagnostics.ps1' }
                 $timeout = if ($target.Role -eq 'RP') { 600 } else { 180 }
                 $source = Get-Content -LiteralPath (Join-Path $toolsPath $toolName) -Raw -ErrorAction Stop
+                $helperSource = ''
+                if ($target.Role -eq 'RP') {
+                    # Inline collectors have no PSScriptRoot from which to load sibling helpers.
+                    $helperSource = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'DSC\phases\ProcessFunctions.ps1') -Raw -ErrorAction Stop
+                }
                 $arguments = @{ AsJson = $true }
                 if ($target.SiteCode) { $arguments.SiteCode = $target.SiteCode }
                 if ($target.Role -eq 'SiteServer') { $arguments.SiteServerOnly = $true }
                 $result = Invoke-VmCommand -VmName $target.VmName -VmDomainName $DomainName `
-                    -ScriptBlock $collectGuest -ArgumentList @($source, $arguments, $target.GuestPath) `
+                    -ScriptBlock $collectGuest -ArgumentList @($source, $arguments, $target.GuestPath, $helperSource) `
                     -AsJob -TimeoutSeconds $timeout -SessionMaxRetries 1 -SuppressLog `
                     -RequireDomainIdentity -FailOnRemoteError -DisplayName "Capture $($target.Role) role diagnostics"
                 if (-not $result -or -not $result.CommandResult -or $result.ScriptBlockFailed) {

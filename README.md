@@ -1572,6 +1572,12 @@ are retained by the existing build-log bundle.
 Existing MPs refresh their TLS state even when no new client push is required;
 conversion does not reuse an old build's TLS-refresh flag, and refresh failures
 are terminal rather than warning-only.
+Pre-population reuses registered CMSite drives and creates missing drives in
+global scope, so a child script cannot dispose a shadow drive used by the
+workflow. Before implicit MP discovery, TLS refresh explicitly reconnects and
+re-enters the owning site's drive. Prior/current drive context, provider, and
+each queried host/site are logged. Secondary MPs are queried through their
+managing Primary; refresh and health targets stay in the owning domain.
 
 The legacy domain-wide CM toggle is accepted only when the domain has one
 existing hierarchy. With multiple hierarchies, explicitly include the selected
@@ -1934,6 +1940,9 @@ timeouts; large log bodies do not cross the PSDirect return stream. A failed
 target cannot suppress other targets, baseline setup logs, or the original
 validation failure. Only diagnostic staging files are created/removed in guests;
 no services, configuration, or replication state are changed by collection.
+Inline RP collection receives its bounded-process helper source explicitly.
+It does not depend on `PSScriptRoot`, which is empty for the remotely compiled
+collector, to locate sibling files.
 
 Validate with
 [`Test-CmRoleFailureDiagnostics.ps1`](vmbuild/tools/Test-CmRoleFailureDiagnostics.ps1).

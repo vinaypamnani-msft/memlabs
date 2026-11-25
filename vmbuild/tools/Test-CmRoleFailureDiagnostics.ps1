@@ -242,6 +242,27 @@ try {
         $manifest = @(& $stage $source @{ AsJson = $true } $stagePath)
         Assert-True ($manifest.Count -eq 1 -and $manifest[0].Bytes -gt 65536 -and ($manifest | ConvertTo-Json).Length -lt 1024) 'Large guest diagnostic bodies crossed the PSDirect return stream.'
 
+        $reportingAst = Get-TestAst (Join-Path $RootPath 'tools\Get-ReportingDiagnostics.ps1')
+        $bootstrap = @($reportingAst.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.IfStatementAst] -and
+                    $node.Clauses[0].Item1.Extent.Text -eq "-not (Get-Command Invoke-MemLabsBoundedPowerShell -ErrorAction Ignore)"
+                }, $true))
+        Assert-True ($bootstrap.Count -eq 1) 'Could not locate the actual local reporting worker bootstrap.'
+        $bootstrapSource = "param([switch]`$AsJson,[string]`$SiteCode)`n$($bootstrap[0].Extent.Text)`n" + @'
+if (-not (Get-Command Test-RoleBootstrapMarker -ErrorAction Ignore) -or
+    -not (Get-Command Invoke-MemLabsBoundedPowerShell -ErrorAction Ignore)) {
+    throw 'The inline reporting collector did not inherit its bounded-worker helpers.'
+}
+'{"ComputerName":"fixture","HelperLoaded":true}'
+'@
+        $bootstrapPath = Join-Path $workDir 'reporting-bootstrap.json'
+        $workerSource = "$($rpCall.Arguments[3])`nfunction Test-RoleBootstrapMarker { }"
+        $manifest = @(& $rpCall.ScriptBlock $bootstrapSource $rpCall.Arguments[1] $bootstrapPath $workerSource)
+        Assert-True ($manifest.Count -eq 1 -and
+            (Get-Content -LiteralPath $bootstrapPath -Raw | ConvertFrom-Json).HelperLoaded -and
+            $rpCall.Arguments[3] -match 'function Invoke-MemLabsBoundedPowerShell') 'RP failure capture did not ship and load its real process helpers without PSScriptRoot.'
+
         foreach ($mode in @('Success', 'TransportFailure', 'CopyFailure', 'InvalidManifest', 'InvalidJson', 'IdentityMismatch', 'ProbeFailure', 'CleanupFailure')) {
             $transportFixture.Mode = $mode
             $transportFixture.Calls.Clear()

@@ -58,7 +58,9 @@ Write-DscStatus "$Tag Starting perfloading"
     }
 
     # Connect to the site's drive if it is not already present
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+    if (-not (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+        New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName -Scope Global @initParams | Out-Null
+    }
     $psDriveFailcount = 0
     while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
         $psDriveFailcount++
@@ -70,7 +72,7 @@ Write-DscStatus "$Tag Starting perfloading"
         }
         Write-DscStatus "$Tag Retry in 10s to Set PS Drive" -NoStatus
         Start-Sleep -Seconds 10
-        New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+        New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName -Scope Global @initParams | Out-Null
     }
 
     # Set the current location to be the site code.

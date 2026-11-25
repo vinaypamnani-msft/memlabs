@@ -527,7 +527,36 @@ $bounce = @($workflowAst.FindAll({
 Assert-True ($refresh.Count -eq 1 -and $bounce.Count -eq 1) 'Could not locate production MP TLS refresh control flow.'
 $bounceBlock = [scriptblock]::Create($refresh[0].Extent.Text + "`n" + $bounce[0].Extent.Text)
 $script:BounceCalls = [Collections.Generic.List[string]]::new()
+$script:BounceContextCalls = [Collections.Generic.List[string]]::new()
+$script:BounceMessages = [Collections.Generic.List[string]]::new()
 $script:BounceMode = 'Ready'
+$script:BounceActiveSite = ''
+$script:BounceRegisteredSite = ''
+function Write-DscStatus { param($Message,[switch]$Failure,[switch]$Warning,[switch]$NoStatus) $script:BounceMessages.Add("$Message") }
+function Set-CMSiteProvider {
+    param($SiteCode,$ProviderFQDN)
+    if ($script:BounceMode -eq 'ProviderFailure') { return $false }
+    $script:BounceRegisteredSite="$SiteCode"
+    $script:BounceContextCalls.Add("Connect:$SiteCode")
+    $true
+}
+function Set-Location {
+    [CmdletBinding()]param($Path)
+    if ($script:BounceMode -eq 'LocationFailure') { throw 'fixture CMSite location failure' }
+    if ($Path -ne "$($script:BounceRegisteredSite):\") { throw 'TLS refresh rebound to the wrong provider site.' }
+    $script:BounceActiveSite=$script:BounceRegisteredSite
+}
+function Get-Location {
+    $drive='C'; $provider='FileSystem'
+    if ($script:BounceActiveSite) { $drive=$script:BounceActiveSite; $provider='CMSite' }
+    [pscustomobject]@{ Drive=[pscustomobject]@{ Name=$drive }; Provider=[pscustomobject]@{ Name=$provider } }
+}
+function Get-CMManagementPoint {
+    [CmdletBinding()]param($SiteSystemServerName,$SiteCode)
+    if ($script:BounceActiveSite -ne 'PRI') { throw [ArgumentNullException]::new('key') }
+    if ($script:BounceMode -eq 'DiscoveryFailure') { throw 'fixture MP discovery failure' }
+    if ($SiteSystemServerName -eq 'SEC.lab.test' -and $SiteCode -eq 'SEC') { [pscustomobject]@{ Found=$true } }
+}
 function Test-Path { param($Path) $false }
 function iisreset.exe {
     param($Argument)
@@ -564,9 +593,40 @@ foreach ($failure in @('IisFailure', 'RestartFailure', 'StampFailure')) {
     Assert-Throws { & $bounceBlock } '*'
     Assert-True (-not $script:BounceCalls.Contains('Stamp')) "$failure incorrectly recorded a successful TLS refresh."
 }
+$script:BounceCalls.Clear(); $script:BounceContextCalls.Clear(); $script:BounceMessages.Clear()
+$script:BounceMode='Ready'; $script:BounceActiveSite=''
+$implicitPrimary = $site.PSObject.Copy()
+$implicitSecondary = [pscustomobject]@{
+    vmName='SEC'; role='Secondary'; siteCode='SEC'; parentSiteCode='PRI'; pkiReconfigure=$true
+}
+$foreignMp = [pscustomobject]@{
+    vmName='FOREIGN'; role='SiteSystem'; siteCode='PRI'; domain='foreign.test'; installMP=$true
+}
+$ThisVM=$implicitPrimary
+$deployConfig=[pscustomobject]@{ virtualMachines=@($implicitPrimary,$roleVm,$implicitSecondary,$foreignMp) }
+& $bounceBlock
+Assert-True (($script:BounceCalls -join ',') -eq 'Restart:ROLE,Restart:SEC,Stamp' -and
+    ($script:BounceContextCalls -join ',') -eq 'Connect:PRI') 'Implicit MP discovery lost its provider context, used the Secondary as provider, or restarted a Primary with no local MP.'
+Assert-True (($script:BounceMessages -join '; ') -match 'providerSite=PRI' -and
+    ($script:BounceMessages -join '; ') -match 'previousProvider=FileSystem' -and
+    ($script:BounceMessages -join '; ') -match 'querySite=SEC') 'MP discovery diagnostics did not retain the provider/query site and prior drive context.'
+$healthSelection = @($workflowAst.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -eq '$siteMPsForHealth'
+        }, $true))
+Assert-True ($healthSelection.Count -eq 1) 'Could not locate the shipped MP health target selection.'
+$healthBlock = [scriptblock]::Create($healthSelection[0].Extent.Text + "`n`$siteMPsForHealth.vmName")
+Assert-True ((@(& $healthBlock) -join ',') -eq 'ROLE') 'MP pre-push health selection crossed the owning domain.'
+foreach ($failure in @('ProviderFailure','LocationFailure','DiscoveryFailure')) {
+    $script:BounceCalls.Clear(); $script:BounceMode=$failure; $script:BounceActiveSite=''
+    Assert-Throws { & $bounceBlock } '*'
+    Assert-True ($script:BounceCalls.Count -eq 0) "$failure rebooted an MP or stamped success without verified discovery."
+}
 $script:BounceCalls.Clear()
+$script:BounceContextCalls.Clear()
 $ThisVM.pkiReconfigure = $false
 & $bounceBlock
-Assert-True ($script:BounceCalls.Count -eq 0) 'An ordinary already-installed client triggered a new MP TLS restart.'
+Assert-True ($script:BounceCalls.Count -eq 0 -and $script:BounceContextCalls.Count -eq 0) 'An ordinary already-installed client triggered a new MP TLS restart or unnecessary connection.'
 Write-Host 'PASS -- existing MP/DP/SUP HTTPS updates, independent site-control readback, scoped targets, and failure propagation.'
 Write-Host 'PASS -- existing MP TLS refresh is required without client push and cannot silently ignore restart or receipt failures.'
