@@ -439,6 +439,37 @@ Elevation uses a frozen in-memory bootstrap rather than reopening scripts from
 the checkout after the UAC prompt. Approved package bytes are verified before
 execution, environment lookup is restricted to system locations, and each
 installation attempt publishes a protected result with its actual failure.
+UI startup uses the same locally scoped bootstrap helpers as the standalone
+launcher. Failures stay on a **Retry / Diagnostics / Back** screen instead of
+being cleared by the next menu redraw or terminating the launcher. **Retry**
+rechecks the complete startup path only when explicitly selected; **Diagnostics**
+shows the saved attempt, worker error log, and coordination journal locations.
+**Enter/B** returns safely once no worker is running.
+Detailed startup results are retained under
+`%ProgramData%\MemLabs-CopilotControl\<user-SID>\install-<attempt-ID>.json`.
+Coordination failures retain a safe reason, blocking process IDs when known,
+and concrete remediation; private command lines and arbitrary operation
+exception messages are not copied into the journal. An active lease or another
+deployment is never bypassed, force-terminated, or automatically retried.
+
+Read-only pipe/status queries retry transient connection failures at most three
+times. Permission, authentication, integrity, and invalid-frame failures are not
+retried, nor are VM mutations or shutdown requests with uncertain responses.
+A protected runtime record whose PID is absent or has a different creation time
+is treated as stale, allowing a new Start without manually deleting state.
+Unreadable or malformed process identity is not assumed to be stopped.
+Offline startup details are also available without starting or elevating control:
+
+```powershell
+pwsh -NoProfile -File .\vmbuild\control\Start-Control.ps1 -Action Diagnostics
+```
+
+The unelevated adapter records bounded protocol method names and numeric request
+IDs, never request arguments, under
+`%LocalAppData%\MemLabs\CopilotControl\adapter.jsonl`. Diagnostics includes that
+location. Older-protocol fallback responds exactly once to an unsupported
+discovery request before accepting the normal MCP initialization handshake.
+
 Packages are built in protected staging and published only after verification;
 an interrupted copy can be retried without an incomplete version directory.
 The elevated worker runs only a hash-verified, administrator-owned snapshot
@@ -450,8 +481,15 @@ Only fixed, schema-checked operations are accepted: no arbitrary commands,
 scripts, executable paths, credentials, deployment, deletion, or domain removal.
 Guest notes and passwords are not returned in inventory.
 
-VM changes use the existing host-wide Live Ops lease and independent
-postconditions. Journals and control state stay administrator/SYSTEM-writable;
+Worker startup/shutdown use a dedicated `ControlLifecycle` classification:
+other PowerShell scripts or idle MemLabs windows do not block starting control.
+A duplicate worker on the same account endpoint is not started; repeated Start
+reuses the existing healthy instance. Other MCP servers are independent.
+Protected package installation still takes the existing host mutation lease.
+VM changes retain the stricter `LabState` coordination and independent
+postconditions, so this startup classification cannot be used for VM targets,
+deployments, or destructive operations.
+Journals and control state stay administrator/SYSTEM-writable;
 no filesystem ACLs are weakened to let Copilot write privileged code or logs.
 Readiness, installation conflicts, UAC cancellation, and request failures are
 explicit errors. Updated worker bytes require Stop followed by Start; in-flight

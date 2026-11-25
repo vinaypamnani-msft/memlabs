@@ -1,11 +1,31 @@
 #requires -Version 7.4
 [CmdletBinding()]
-param([ValidateSet('Start', 'Stop', 'Status')][string]$Action = 'Start')
+param([ValidateSet('Start', 'Stop', 'Status', 'Diagnostics')][string]$Action = 'Start')
 
 $ErrorActionPreference = 'Stop'
 if (-not [Environment]::Is64BitProcess -or -not $IsWindows) { throw 'Copilot Control requires 64-bit PowerShell 7.4+ on Windows.' }
 . (Join-Path $PSScriptRoot 'Common.Control.ps1')
 $paths = Get-MemLabsControlPaths
+if ($Action -eq 'Diagnostics') {
+    $latest = if (Test-Path -LiteralPath $paths.RuntimeRoot) {
+        Get-ChildItem -LiteralPath $paths.RuntimeRoot -Filter 'install-*.json' -File -ErrorAction Stop |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    }
+    else { $null }
+    $attempt = $null
+    if ($latest) {
+        Assert-MemLabsControlProtectedPath -Path $latest.FullName -Boundary $paths.DataRoot
+        $attempt = Get-Content -LiteralPath $latest.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    }
+    return [pscustomobject]@{
+        latestAttempt = $attempt
+        attemptPath = $(if ($latest) { $latest.FullName } else { $null })
+        runtimePath = $paths.RuntimeFile
+        workerErrorLog = Join-Path $paths.RuntimeRoot 'worker.stderr.log'
+        adapterLog = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'MemLabs\CopilotControl\adapter.jsonl'
+        journalPath = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'MemLabs\LiveOps\operations.jsonl'
+    }
+}
 if ($Action -ne 'Start') {
     if ($Action -eq 'Status') { return (Invoke-MemLabsControlRequest -Method status) }
     if ((Invoke-MemLabsControlRequest -Method status).state -eq 'Stopped') { return [pscustomobject]@{ state = 'Stopped' } }
@@ -37,13 +57,24 @@ if (-not $alreadyRunning) {
     finally { $identity.Dispose() }
     if ($elevated) {
         # Keep an already-elevated VMBuild UI as the worker's real, persistent ancestor.
-        & ([scriptblock]::Create($loader)) | Out-Null
+        try { & ([scriptblock]::Create($loader)) | Out-Null }
+        catch {
+            if (-not (Test-Path -LiteralPath (Join-Path $paths.RuntimeRoot ("install-" + $attempt.ToString('D') + '.json')))) { throw }
+        }
     }
     else {
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
         if ($encoded.Length -gt 30000) { throw 'The frozen UAC bootstrap exceeds the Windows command-line limit; it was not launched.' }
-        $installer = Start-Process -FilePath $paths.PowerShell -Verb RunAs `
-            -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -PassThru -ErrorAction Stop
+        try {
+            $installer = Start-Process -FilePath $paths.PowerShell -Verb RunAs `
+                -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -PassThru -ErrorAction Stop
+        }
+        catch {
+            $failure = Get-MemLabsControlFailure -Exception $_.Exception -Phase Elevation
+            $exception = [InvalidOperationException]::new("$($failure.message)`nNext step: $($failure.remediation)")
+            $exception.Data['ControlFailure'] = $failure
+            throw $exception
+        }
         $installer.WaitForExit()
         $exitCode = $installer.ExitCode
     }
@@ -54,7 +85,12 @@ if (-not $alreadyRunning) {
     Assert-MemLabsControlProtectedPath -Path $attemptPath -Boundary $paths.DataRoot
     $installation = Get-Content -LiteralPath $attemptPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     if ($installation.attemptId -cne $attempt.ToString('D') -or -not $installation.success -or (-not $elevated -and $exitCode -ne 0)) {
-        throw "Copilot Control installation failed: $($installation.error)"
+        $failure = if ($installation.Contains('failure')) { $installation.failure } else {
+            @{ message = $installation.error; remediation = 'Choose Diagnostics for this attempt, correct the reported cause, then Retry.'; code = 'StartupFailed' }
+        }
+        $exception = [InvalidOperationException]::new("$($failure.message)`nNext step: $($failure.remediation)`nDiagnostics: $attemptPath")
+        $exception.Data['ControlFailure'] = $failure
+        throw $exception
     }
     $status = Invoke-MemLabsControlRequest -Method status
     if ($status.state -notin @('Ready', 'Busy')) { throw 'The worker exited after installation; MCP registration was not reported as successful.' }

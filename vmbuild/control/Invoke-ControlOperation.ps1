@@ -77,11 +77,14 @@ try {
     }
 }
 catch {
-    $message = if ($context.Failure) { $context.Failure } else { $_.Exception.Message }
+    $failure = Get-MemLabsControlFailure -Exception $_.Exception -Phase 'VmOperation'
+    $message = if ($context.Failure) { $context.Failure } else { $failure.message }
     [pscustomobject]@{
         success = $false
         operationId = $RequestId.ToString('D')
         error = $message
+        remediation = $failure.remediation
+        code = $failure.code
         journalOperationId = $_.Exception.Data['OperationId']
         journalPath = $_.Exception.Data['JournalPath']
     }

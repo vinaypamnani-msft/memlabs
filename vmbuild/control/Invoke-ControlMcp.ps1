@@ -8,6 +8,20 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Common.Control.ps1')
 Initialize-MemLabsControlTransport
 
+$adapterLog = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'MemLabs\CopilotControl\adapter.jsonl'
+function Write-ControlAdapterTrace {
+    param([string]$EventName, [string]$Method = '', $RequestId = $null)
+    try {
+        $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $adapterLog))
+        $safeId = if ($RequestId -is [string]) { '<string>' } else { $RequestId }
+        $safeMethod = if ($Method -cmatch '^[A-Za-z0-9._/-]{1,80}$') { $Method } else { '<unknown>' }
+        $record = @{ timeUtc = [datetime]::UtcNow.ToString('o'); pid = $PID; event = $EventName; method = $safeMethod; requestId = $safeId }
+        [IO.File]::AppendAllText($adapterLog, (($record | ConvertTo-Json -Compress) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+    }
+    catch { [Console]::Error.WriteLine("MCP adapter diagnostics could not be written: $($_.Exception.Message)") }
+}
+Write-ControlAdapterTrace -EventName 'Started'
+
 function Get-ControlMcpTools {
     $emptySchema = @{ type = 'object'; properties = @{}; additionalProperties = $false }
     $vmSchema = @{
@@ -48,7 +62,7 @@ function Get-ControlMcpTools {
 }
 
 $initialized = $false
-while ($true) {
+:mcpRequests while ($true) {
     $id = $null
     $notification = $false
     $errorCode = -32700
@@ -65,6 +79,7 @@ while ($true) {
             if ($request.id -isnot [string] -and $request.id -isnot [long] -and $request.id -isnot [int]) { throw 'Request ID must be a string or integer.' }
             $id = $request.id
         }
+        Write-ControlAdapterTrace -EventName 'Request' -Method $request.method -RequestId $id
         $parameters = if ($request.Contains('params')) { $request.params } else { @{} }
         $errorCode = -32602
         if ($parameters -isnot [Collections.IDictionary]) { throw 'Request parameters must be an object.' }
@@ -118,16 +133,18 @@ while ($true) {
                 }
             }
             default {
-                if ($notification) { continue }
+                if ($notification) { continue mcpRequests }
                 [Console]::Out.WriteLine((@{ jsonrpc = '2.0'; id = $id; error = @{ code = -32601; message = 'Method not found.' } } | ConvertTo-Json -Depth 6 -Compress))
-                continue
+                continue mcpRequests
             }
         }
         if (-not $notification) {
+            Write-ControlAdapterTrace -EventName 'Response' -Method $request.method -RequestId $id
             [Console]::Out.WriteLine((@{ jsonrpc = '2.0'; id = $id; result = $value } | ConvertTo-Json -Depth 20 -Compress))
         }
     }
     catch {
+        Write-ControlAdapterTrace -EventName 'ProtocolError' -RequestId $id
         [Console]::Error.WriteLine($_.Exception.Message)
         if (-not $notification) {
             [Console]::Out.WriteLine((@{ jsonrpc = '2.0'; id = $id; error = @{ code = $errorCode; message = $_.Exception.Message } } | ConvertTo-Json -Depth 6 -Compress))

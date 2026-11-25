@@ -213,7 +213,7 @@ function Stop-MemLabsControlWorker {
     $diagnostics = { [pscustomobject]@{ stopping = $State.Stopping; busy = $null -ne $State.Active } }.GetNewClosure()
     $result = & (Join-Path $State.PackagePath 'Invoke-MemLabsLiveOperation.ps1') `
         -Mode Mutate -Intent 'Stop the explicitly requested idle Copilot Control worker' `
-        -TargetType HostResource -Target @("CopilotControl:$PID") `
+        -CoordinationScope ControlLifecycle -TargetType HostResource -Target @('MemLabs:CopilotControl', "Owner:$($State.ClientSid)") `
         -Operation $operation -Postcondition $postcondition -FailureDiagnostics $diagnostics
     return [pscustomobject]@{ state = 'Stopping'; journalOperationId = $result.OperationId }
 }
@@ -288,6 +288,24 @@ function Complete-MemLabsControlOperation {
     return $State.History[$active.Id]
 }
 
+function Test-MemLabsControlWorkerAlive {
+    param([Parameter(Mandatory)][Collections.IDictionary]$Runtime)
+
+    $workerId = 0
+    $started = 0L
+    if (-not [int]::TryParse([string]$Runtime.pid, [ref]$workerId) -or $workerId -le 0 -or
+        -not [long]::TryParse([string]$Runtime.startFileTime, [ref]$started) -or $started -le 0) {
+        throw 'The protected worker record has an invalid process identity. Choose Diagnostics; it was not treated as stopped.'
+    }
+    try { $process = [Diagnostics.Process]::GetProcessById($workerId) }
+    catch [ArgumentException] { return $false }
+    try {
+        if ($process.HasExited) { return $false }
+        return [bool]($process.StartTime.ToUniversalTime().ToFileTimeUtc() -eq $started)
+    }
+    finally { $process.Dispose() }
+}
+
 function Get-MemLabsControlRuntime {
     param([string]$ClientSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
 
@@ -297,8 +315,53 @@ function Get-MemLabsControlRuntime {
     $runtime = Get-Content -LiteralPath $paths.RuntimeFile -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     if ($runtime.ownerSid -cne $ClientSid -or $runtime.pipeName -cne $paths.PipeName) { throw 'The protected runtime record belongs to a different endpoint.' }
     if ($runtime.state -eq 'Stopped') { return $null }
+    if (-not (Test-MemLabsControlWorkerAlive -Runtime $runtime)) { return $null }
     Assert-MemLabsControlPackage -Path $runtime.packagePath -Hash $runtime.packageHash
     return $runtime
+}
+
+function Get-MemLabsControlFailure {
+    param([Parameter(Mandatory)][Exception]$Exception, [string]$Phase = 'Startup', [string]$DetailsPath = '')
+
+    if ($Exception.Data.Contains('ControlFailure')) { return $Exception.Data['ControlFailure'] }
+    $cause = $Exception
+    while ($cause.InnerException) { $cause = $cause.InnerException }
+    if ($cause -is [ComponentModel.Win32Exception] -and $cause.NativeErrorCode -eq 1223) {
+        return @{
+            code = 'ElevationCancelled'
+            message = 'Windows elevation was canceled; no new control worker was started.'
+            remediation = 'Choose Retry only when you are ready to approve the Windows prompt, or choose Back to leave control stopped.'
+            phase = 'Elevation'
+            detailsPath = ''
+            operationId = ''
+            conflictingProcessIds = @()
+            automaticRetry = $false
+        }
+    }
+    $code = [string]$Exception.Data['FailureReason']
+    $message = [string]$Exception.Data['SafeMessage']
+    $remediation = [string]$Exception.Data['Remediation']
+    if (-not $code) { $code = 'StartupFailed' }
+    if (-not $message) { $message = $Exception.Message }
+    if (-not $remediation) {
+        $remediation = 'Choose Diagnostics for the saved startup result. Correct the reported cause, then choose Retry; Back returns without changing VMs.'
+    }
+    return @{
+        code = $code
+        message = $message
+        remediation = $remediation
+        phase = $Phase
+        detailsPath = $DetailsPath
+        operationId = [string]$Exception.Data['OperationId']
+        conflictingProcessIds = @($Exception.Data['ConflictingProcessIds'] | Where-Object { $null -ne $_ })
+        automaticRetry = $false
+    }
+}
+
+function Invoke-MemLabsControlPipeExchange {
+    param([Parameter(Mandatory)]$Paths, [Parameter(Mandatory)]$Runtime, [Parameter(Mandatory)][string]$Request, [int]$TimeoutMilliseconds)
+
+    return [MemLabs.Control.Transport]::Exchange($Paths.PipeName, $Request, $Runtime.pid, [long]$Runtime.startFileTime, $Paths.PowerShell, $TimeoutMilliseconds)
 }
 
 function Invoke-MemLabsControlRequest {
@@ -314,10 +377,28 @@ function Invoke-MemLabsControlRequest {
     Initialize-MemLabsControlTransport
     $id = [guid]::NewGuid().ToString('D')
     $request = @{ version = 1; id = $id; method = $Method; arguments = $Arguments } | ConvertTo-Json -Depth 8 -Compress
-    $text = [MemLabs.Control.Transport]::Exchange($paths.PipeName, $request, $runtime.pid, [long]$runtime.startFileTime, $paths.PowerShell, $TimeoutMilliseconds)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $text = Invoke-MemLabsControlPipeExchange -Paths $paths -Runtime $runtime -Request $request -TimeoutMilliseconds $TimeoutMilliseconds
+            break
+        }
+        catch {
+            $cause = $_.Exception
+            while ($cause -is [Management.Automation.MethodInvocationException] -and $cause.InnerException) { $cause = $cause.InnerException }
+            $transient = $cause -is [TimeoutException] -or $cause -is [IO.EndOfStreamException] -or
+                ($cause -is [ComponentModel.Win32Exception] -and $cause.NativeErrorCode -in @(2, 109, 231, 232, 233)) -or
+                ($cause -is [IO.IOException] -and $cause -isnot [IO.InvalidDataException] -and ($cause.HResult -band 0xFFFF) -in @(109, 231, 232, 233))
+            if ($Method -cnotin @('status', 'inventory', 'operation') -or -not $transient -or $attempt -eq 3) { throw }
+            Start-Sleep -Milliseconds (100 * $attempt)
+        }
+    }
     $response = $text | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     if ($response.id -cne $id -or $response.version -ne 1) { throw 'Control response does not match the request.' }
-    if ($response.ok -isnot [bool] -or -not $response.ok) { throw "MemLabs control request failed: $($response.error)" }
+    if ($response.ok -isnot [bool] -or -not $response.ok) {
+        $exception = [InvalidOperationException]::new("MemLabs control request failed: $($response.error)")
+        if ($response.Contains('failure')) { $exception.Data['ControlFailure'] = $response.failure }
+        throw $exception
+    }
     return [pscustomobject]$response.result
 }
 
@@ -342,7 +423,7 @@ function New-MemLabsControlBootstrap {
     if ($errors.Count -gt 0) { throw $errors[0] }
     $helperNames = @(
         'Get-MemLabsControlPaths', 'Assert-MemLabsControlNoReparsePoint', 'Assert-MemLabsControlProtectedPath',
-        'New-MemLabsControlProtectedDirectory', 'Write-MemLabsControlJson', 'Assert-MemLabsControlPackage'
+        'New-MemLabsControlProtectedDirectory', 'Write-MemLabsControlJson', 'Assert-MemLabsControlPackage', 'Get-MemLabsControlFailure'
     )
     $helpers = foreach ($name in $helperNames) {
         $node = $ast.Find({
@@ -403,8 +484,10 @@ try {
         & ([scriptblock]::Create($bundle.installer)) -Payload ($bundle.payload | ConvertTo-Json -Depth 10 -Compress)
     }
     catch {
+        $failure = Get-MemLabsControlFailure -Exception $_.Exception -DetailsPath $resultPath
+        $failure.message = 'Copilot Control could not start: ' + $failure.message
         Write-MemLabsControlJson -Path $resultPath -Value @{
-            attemptId = $attempt; success = $false; state = 'Failed'; error = $_.Exception.Message
+            attemptId = $attempt; success = $false; state = 'Failed'; error = $failure.message; failure = $failure
         }
         throw
     }

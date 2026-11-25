@@ -97,6 +97,56 @@ try {
             -Pattern $case.Pattern -Message "Rejected unsafe $($case.Method) parameters: $($case.Arguments.Keys -join ',')"
     }
 
+    $self = Get-Process -Id $PID -ErrorAction Stop
+    $currentIdentity = @{ pid = $PID; startFileTime = $self.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() }
+    Assert-Control -Condition (Test-MemLabsControlWorkerAlive -Runtime $currentIdentity) -Message 'Worker liveness matches both the current PID and its creation time'
+    Assert-Control -Condition (-not (Test-MemLabsControlWorkerAlive -Runtime @{ pid = $PID; startFileTime = '1' })) -Message 'A reused PID does not keep a stale worker record alive'
+    Assert-Control -Condition (-not (Test-MemLabsControlWorkerAlive -Runtime @{ pid = [int]::MaxValue; startFileTime = '1' })) -Message 'A proven absent worker is recoverable without deleting protected state'
+    Assert-ControlThrows -Action { Test-MemLabsControlWorkerAlive -Runtime @{ pid = 'not-a-pid'; startFileTime = '1' } } `
+        -Pattern 'invalid process identity' -Message 'Invalid worker metadata is not silently treated as a stopped process'
+    $cancelled = Get-MemLabsControlFailure -Exception ([InvalidOperationException]::new('Outer fixture', [ComponentModel.Win32Exception]::new(1223)))
+    Assert-Control -Condition ($cancelled.code -eq 'ElevationCancelled' -and -not $cancelled.automaticRetry -and
+        $cancelled.message -like '*no new control worker*' -and $cancelled.remediation -like '*Back*stopped*') `
+        -Message 'Canceled elevation is explained clearly and never triggers an automatic retry'
+
+    & {
+        $pipeProbe = [pscustomobject]@{ Calls = 0; Sleeps = 0; Mode = 'timeout-then-ready' }
+        function Get-MemLabsControlPaths { [pscustomobject]@{ PipeName = 'fixture' } }
+        function Get-MemLabsControlRuntime { @{ pid = 123; startFileTime = '1' } }
+        function Initialize-MemLabsControlTransport {}
+        function Start-Sleep {
+            param([int]$Milliseconds)
+            if ($Milliseconds -notin @(100, 200)) { throw 'Unexpected connection retry delay.' }
+            $pipeProbe.Sleeps++
+        }
+        function Invoke-MemLabsControlPipeExchange {
+            param($Paths, $Runtime, [string]$Request, [int]$TimeoutMilliseconds)
+            if ($Paths.PipeName -ne 'fixture' -or $Runtime.pid -ne 123 -or $TimeoutMilliseconds -ne 5000) { throw 'Unexpected transport fixture arguments.' }
+            $pipeProbe.Calls++
+            if ($pipeProbe.Mode -eq 'denied') { throw [UnauthorizedAccessException]::new('Synthetic access denied') }
+            if ($pipeProbe.Mode -eq 'bad-frame') { throw [IO.InvalidDataException]::new('Synthetic invalid frame') }
+            if ($pipeProbe.Mode -eq 'always-timeout' -or $pipeProbe.Calls -lt 3) { throw [TimeoutException]::new('Synthetic pipe readiness delay') }
+            $requestObject = $Request | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            return (@{ version = 1; id = $requestObject.id; ok = $true; result = @{ state = 'Ready' } } | ConvertTo-Json -Depth 5 -Compress)
+        }
+        $ready = Invoke-MemLabsControlRequest -Method status
+        Assert-Control -Condition ($ready.state -eq 'Ready' -and $pipeProbe.Calls -eq 3 -and $pipeProbe.Sleeps -eq 2) -Message 'Read-only readiness checks recover from bounded transient pipe failures'
+        foreach ($mode in @('denied', 'bad-frame', 'always-timeout')) {
+            $pipeProbe.Mode = $mode; $pipeProbe.Calls = 0; $pipeProbe.Sleeps = 0
+            Assert-ControlThrows -Action { Invoke-MemLabsControlRequest -Method status } `
+                -Pattern 'Synthetic' -Message "$mode status failure remains visible"
+            $expectedCalls = if ($mode -eq 'always-timeout') { 3 } else { 1 }
+            Assert-Control -Condition ($pipeProbe.Calls -eq $expectedCalls) -Message "$mode retries remain bounded and never retry permission or integrity failures"
+        }
+        foreach ($method in @('start_vm', 'stop_vm', 'shutdown')) {
+            $pipeProbe.Mode = 'always-timeout'; $pipeProbe.Calls = 0; $pipeProbe.Sleeps = 0
+            $arguments = if ($method -eq 'start_vm') { @{ vmId = $id } } elseif ($method -eq 'stop_vm') { @{ vmId = $id; confirm = $true } } else { @{} }
+            Assert-ControlThrows -Action { Invoke-MemLabsControlRequest -Method $method -Arguments $arguments } `
+                -Pattern 'Synthetic pipe' -Message "An uncertain $method response is reported instead of replaying the mutation"
+            Assert-Control -Condition ($pipeProbe.Calls -eq 1 -and $pipeProbe.Sleeps -eq 0) -Message "$method is never automatically retried"
+        }
+    }
+
     $adapter = Join-Path $controlRoot 'Invoke-ControlMcp.ps1'
     $workspace = Join-Path $fixture 'workspace'
     $vscodeDirectory = Join-Path $workspace '.vscode'
@@ -182,6 +232,100 @@ try {
             & (Join-Path $controlRoot 'Install-Control.ps1') -Payload ($badPayload | ConvertTo-Json -Depth 8 -Compress) -VerifyOnly
         } -Pattern 'Approved source changed' -Message "Changed $targetName is rejected before its marker executes"
         Assert-Control -Condition (-not (Test-Path -LiteralPath $marker)) -Message 'The unapproved script was never executed'
+    }
+
+    & {
+        $tokens = $null
+        $errors = $null
+        $installerAst = [Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $controlRoot 'Install-Control.ps1'), [ref]$tokens, [ref]$errors)
+        if ($errors.Count -gt 0) { throw $errors[0] }
+        $callbackDefinitions = foreach ($name in @('operation', 'postcondition', 'diagnostics')) {
+            $assignment = $installerAst.Find({
+                    param($node)
+                    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                    $node.Left.VariablePath.UserPath -eq $name
+                }, $true)
+            if ($null -eq $assignment) { throw "The shipped installer callback '$name' was not found." }
+            [scriptblock]::Create($assignment.Extent.Text)
+        }
+        function Invoke-UiInstallerScopeFixture {
+            param([bool]$FailPublication)
+
+            $caseRoot = Join-Path $fixture ('ui-installer-' + [guid]::NewGuid().ToString('N'))
+            $null = New-Item -Path $caseRoot -ItemType Directory -ErrorAction Stop
+            $paths = [pscustomobject]@{
+                InstallRoot = Join-Path $caseRoot 'installed'
+                RuntimeRoot = $caseRoot
+                RuntimeFile = Join-Path $caseRoot 'runtime.json'
+                PowerShell = 'C:\fixture\pwsh.exe'
+            }
+            $data = @{ clientSid = 'S-1-5-21-1-2-3-1234'; hash = 'a' * 64 }
+            $fingerprint = $data.hash
+            $approved = @{}
+            $context = [pscustomobject]@{ PackagePath = Join-Path $paths.InstallRoot 'package'; Broker = $null; Failure = $null }
+            $scopeState = [pscustomobject]@{ DirectoryCalls = 0; PackageChecks = 0; WorkerStarts = 0 }
+            function New-MemLabsControlProtectedDirectory {
+                param([string]$Path)
+                if (-not $Path.StartsWith($caseRoot + '\', [StringComparison]::OrdinalIgnoreCase) -and $Path -ne $caseRoot) {
+                    throw 'The installer fixture escaped its isolated path.'
+                }
+                $scopeState.DirectoryCalls++
+            }
+            function Assert-MemLabsControlPackage {
+                param([string]$Path, [string]$Hash)
+                if ($Path -ne $context.PackagePath -or $Hash -cne $fingerprint) { throw 'Unexpected publication identity.' }
+                $scopeState.PackageChecks++
+            }
+            function Publish-MemLabsControlPackage {
+                param($Paths, $Context, $Approved, $Data)
+                if ($Paths.RuntimeFile -ne $paths.RuntimeFile -or $Approved.Count -ne 0) { throw 'Unexpected publication arguments.' }
+                Assert-MemLabsControlPackage -Path $Context.PackagePath -Hash $Data.hash
+                if ($FailPublication) { throw 'Synthetic locally scoped publication failure' }
+            }
+            function Get-AuthenticodeSignature {
+                [CmdletBinding()]
+                param([string]$LiteralPath)
+                if ($LiteralPath -ne $paths.PowerShell) { throw 'Unexpected executable lookup.' }
+                [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'O=Microsoft Corporation' } }
+            }
+            function Start-Process {
+                [CmdletBinding()]
+                param($FilePath, $ArgumentList, $WorkingDirectory, $RedirectStandardOutput, $RedirectStandardError,
+                    $WindowStyle, [switch]$PassThru)
+                if ($FilePath -ne $paths.PowerShell -or $WorkingDirectory -ne $context.PackagePath -or -not $PassThru -or
+                    $WindowStyle -ne 'Hidden' -or $ArgumentList -notcontains '-ClientSid' -or
+                    $RedirectStandardOutput -ne (Join-Path $paths.RuntimeRoot 'worker.stdout.log') -or
+                    $RedirectStandardError -ne (Join-Path $paths.RuntimeRoot 'worker.stderr.log')) { throw 'Unexpected worker launch arguments.' }
+                $scopeState.WorkerStarts++
+                [IO.File]::WriteAllText($paths.RuntimeFile,
+                    (@{ pid = 987654; state = 'Ready'; packageHash = $fingerprint } | ConvertTo-Json -Compress))
+                $process = [pscustomobject]@{ Id = 987654; HasExited = $false }
+                $process | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+                return $process
+            }
+            $publish = ${function:Publish-MemLabsControlPackage}
+            if ($publish -isnot [scriptblock]) { throw 'The local publication helper was not captured for the shipped callback.' }
+            foreach ($definition in $callbackDefinitions) { . $definition }
+            $caught = $null
+            try { & $operation }
+            catch { $caught = $_ }
+            if ($FailPublication) {
+                $failure = & $diagnostics
+                Assert-Control -Condition ($null -ne $caught -and $failure.failure -eq 'Synthetic locally scoped publication failure' -and
+                    $scopeState.WorkerStarts -eq 0) -Message 'Nested elevated-UI callbacks retain the actual publication failure without starting a worker'
+            }
+            else {
+                if ($caught) { throw $caught }
+                $observed = @(& $postcondition)
+                Assert-Control -Condition ($scopeState.DirectoryCalls -eq 3 -and $scopeState.PackageChecks -eq 1 -and
+                    $scopeState.WorkerStarts -eq 1 -and $observed.Count -eq 1 -and $observed[0] -is [bool] -and $observed[0]) `
+                    -Message 'Nested elevated-UI installer callbacks can resolve local bootstrap helpers and verify worker readiness'
+            }
+        }
+        Invoke-UiInstallerScopeFixture -FailPublication $false
+        Invoke-UiInstallerScopeFixture -FailPublication $true
     }
 
     & {
@@ -352,19 +496,23 @@ try {
         finally { Remove-Variable -Name Common -Scope Global -ErrorAction Stop }
     }
 
-    foreach ($scenario in @('registration', 'rendering', 'status', 'pre-worker')) {
+    foreach ($scenario in @('registration', 'rendering', 'status', 'pre-worker', 'retry', 'diagnostics')) {
         & {
             . (Import-ControlTestFunction -Path (Join-Path $RootPath 'genconfig.ps1') -Name 'Invoke-CopilotControlMenuAction')
+            . (Import-ControlTestFunction -Path (Join-Path $RootPath 'genconfig.ps1') -Name 'Show-CopilotControlFailure')
             . (Import-ControlTestFunction -Path (Join-Path $RootPath 'genconfig.ps1') -Name 'Show-CopilotControlSession')
             $ui = [pscustomobject]@{
-                State = 'Stopped'; MenuCalls = 0; StatusCalls = 0; StopCalls = 0; RetryCalls = 0
+                State = 'Stopped'; MenuCalls = 0; StatusCalls = 0; StopCalls = 0; RetryCalls = 0; Acknowledgements = 0
+                StartCalls = 0; DiagnosticsCalls = 0
                 Messages = [Collections.Generic.List[object]]::new()
             }
             function Invoke-CopilotControlCommand {
                 param([string]$Action)
                 switch ($Action) {
                     'Start' {
+                        $ui.StartCalls++
                         if ($scenario -eq 'pre-worker') { throw 'Synthetic UAC cancellation before worker startup' }
+                        if ($scenario -in @('retry', 'diagnostics') -and $ui.StartCalls -eq 1) { throw 'Synthetic coordination conflict; finish the operation and retry' }
                         $ui.State = 'Ready'
                         if ($scenario -eq 'registration') { throw 'Synthetic registration failure after worker startup' }
                         return [pscustomobject]@{ state = 'Ready'; mcpConfiguration = @(); activeOperation = $null }
@@ -380,6 +528,14 @@ try {
                         $ui.State = 'Stopped'
                         return [pscustomobject]@{ state = 'Stopped'; activeOperation = $null }
                     }
+                    'Diagnostics' {
+                        $ui.DiagnosticsCalls++
+                        return [pscustomobject]@{
+                            latestAttempt = [pscustomobject]@{ attemptId = 'fixture'; state = 'Failed'; error = 'Synthetic coordination conflict' }
+                            attemptPath = 'C:\fixture\install.json'; runtimePath = 'C:\fixture\runtime.json'
+                            workerErrorLog = 'C:\fixture\stderr.log'; journalPath = 'C:\fixture\operations.jsonl'
+                        }
+                    }
                     default { throw 'Unexpected UI command.' }
                 }
             }
@@ -391,6 +547,17 @@ try {
                 param([int]$Seconds)
                 if ($Seconds -ne 1) { throw 'Unexpected interlock retry interval.' }
                 $ui.RetryCalls++
+            }
+            function Read-Host2 {
+                param([string]$Prompt, [switch]$HideHelp)
+                if ($Prompt -notlike '*Retry*Diagnostics*Back*' -or -not $HideHelp -or
+                    @($ui.Messages | Where-Object Failure).Count -eq 0) { throw 'The failure was not displayed before requesting acknowledgement.' }
+                $ui.Acknowledgements++
+                if ($scenario -eq 'retry' -and $ui.Acknowledgements -eq 1) { return 'r' }
+                if ($scenario -eq 'diagnostics') {
+                    if ($ui.Acknowledgements -eq 1) { return 'l' }
+                    if ($ui.Acknowledgements -eq 2) { return 'r' }
+                }
             }
             function Get-Menu2 {
                 param($MenuName, $Prompt, $AdditionalOptions, [switch]$NoNewLine, [bool]$test, [switch]$return)
@@ -412,6 +579,7 @@ try {
             if ($scenario -eq 'registration') {
                 Assert-Control -Condition ($ui.StopCalls -eq 2 -and @($ui.Messages | Where-Object { $_.Failure -and $_.Message -match 'registration failure|Busy operation' }).Count -eq 2) `
                     -Message 'Registration failure and Busy shutdown refusal stay visible without escaping the control interlock'
+                Assert-Control -Condition ($ui.Acknowledgements -eq 2) -Message 'Start and Busy-stop errors each wait for acknowledgement before the UI redraws'
             }
             if ($scenario -eq 'rendering') {
                 Assert-Control -Condition ($ui.RetryCalls -eq 1 -and @($ui.Messages | Where-Object { $_.Failure -and $_.Message -like '*Deployment menus remain locked*' }).Count -eq 1) `
@@ -419,6 +587,15 @@ try {
             }
             if ($scenario -eq 'pre-worker') {
                 Assert-Control -Condition ($ui.MenuCalls -eq 0 -and $ui.StopCalls -eq 0) -Message 'A pre-worker cancellation returns safely without inventing a running worker'
+                Assert-Control -Condition ($ui.Acknowledgements -eq 1) -Message 'A startup failure stays visible until acknowledged even when no worker was created'
+            }
+            if ($scenario -eq 'retry') {
+                Assert-Control -Condition ($ui.StartCalls -eq 2 -and $ui.Acknowledgements -eq 1) -Message 'Explicit Retry rechecks startup without returning to deployment menus'
+            }
+            if ($scenario -eq 'diagnostics') {
+                Assert-Control -Condition ($ui.StartCalls -eq 2 -and $ui.DiagnosticsCalls -eq 1 -and
+                    @($ui.Messages | Where-Object { $_.Message -like '*Startup details: C:\fixture\install.json*' }).Count -eq 1) `
+                    -Message 'Diagnostics shows the saved attempt location and allows a deliberate retry in the same recovery screen'
             }
         }
     }
@@ -474,6 +651,7 @@ try {
     $client = [Diagnostics.Process]::Start($info)
     try {
         $requests = @(
+            @{ jsonrpc = '2.0'; id = 0; method = 'server/discover' },
             @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{ protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{ name = 'memlabs-test'; version = '1' } } },
             @{ jsonrpc = '2.0'; method = 'notifications/initialized' },
             @{ jsonrpc = '2.0'; id = 2; method = 'tools/list' },
@@ -489,12 +667,14 @@ try {
         $lines = @($stdout.GetAwaiter().GetResult() -split '\r?\n' | Where-Object { $_ })
         $responses = @($lines | ForEach-Object { $_ | ConvertFrom-Json -AsHashtable -ErrorAction Stop })
         $null = $stderr.GetAwaiter().GetResult()
-        Assert-Control -Condition ($client.ExitCode -eq 0 -and $responses.Count -eq 5) -Message 'MCP stdout contains only JSON responses and notifications produce no response'
-        Assert-Control -Condition ($responses[0].result.protocolVersion -eq '2025-11-25') -Message 'The adapter negotiates its implemented MCP version'
-        $tools = $responses[1].result.tools
+        Assert-Control -Condition ($client.ExitCode -eq 0 -and $responses.Count -eq 6) -Message 'MCP stdout contains exactly one response per request and notifications produce no response'
+        Assert-Control -Condition ($responses[0].id -eq 0 -and $responses[0].error.code -eq -32601 -and
+            $responses[1].id -eq 1 -and $responses[1].result.protocolVersion -eq '2025-11-25') `
+            -Message 'An unsupported discovery probe produces only one error, so the real client can fall back to initialize'
+        $tools = $responses[2].result.tools
         Assert-Control -Condition ($tools.Count -eq 5 -and @($tools.name | Where-Object { $_ -match 'delete|deploy|script|shell' }).Count -eq 0) -Message 'Only the five bounded control tools are exposed'
-        Assert-Control -Condition ($responses[2].error.code -eq -32602 -and $responses[3].error.code -eq -32602) -Message 'Unconfirmed stops and arbitrary-shell tools are rejected before reaching the broker'
-        Assert-Control -Condition ($responses[4].id -eq 5 -and $responses[4].Contains('result')) -Message 'The adapter remains responsive after rejected tool requests'
+        Assert-Control -Condition ($responses[3].error.code -eq -32602 -and $responses[4].error.code -eq -32602) -Message 'Unconfirmed stops and arbitrary-shell tools are rejected before reaching the broker'
+        Assert-Control -Condition ($responses[5].id -eq 5 -and $responses[5].Contains('result')) -Message 'The adapter remains responsive after rejected tool requests'
     }
     finally {
         if (-not $client.HasExited) { Stop-Process -Id $client.Id -Force -ErrorAction Stop; $client.WaitForExit() }

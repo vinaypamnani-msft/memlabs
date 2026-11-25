@@ -107,8 +107,35 @@ Function Select-PendingVMMaintenance {
 }
 
 function Invoke-CopilotControlCommand {
-    param([ValidateSet('Start', 'Stop', 'Status')][string]$Action)
+    param([ValidateSet('Start', 'Stop', 'Status', 'Diagnostics')][string]$Action)
     & (Join-Path $PSScriptRoot 'control\Start-Control.ps1') -Action $Action
+}
+
+function Show-CopilotControlFailure {
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord]$Failure, [string]$Action)
+
+    Write-Log "Copilot Control $Action failed: $($Failure.Exception.Message)" -Failure
+    while ($true) {
+        $choice = Read-Host2 -Prompt 'Copilot Control: [R] Retry after resolving the cause, [L] Diagnostics, [Enter/B] Back' -HideHelp
+        if ([string]::IsNullOrWhiteSpace($choice) -or $choice -ieq 'b') { return $false }
+        if ($choice -ieq 'r') { return $true }
+        if ($choice -ieq 'l') {
+            try {
+                $details = Invoke-CopilotControlCommand -Action Diagnostics
+                if ($details.latestAttempt) {
+                    Write-Log "Latest startup attempt: $($details.latestAttempt.attemptId) - $($details.latestAttempt.state)"
+                    if ($details.latestAttempt.error) { Write-Log "$($details.latestAttempt.error)" -Warning }
+                }
+                Write-Log "Startup details: $($details.attemptPath)"
+                Write-Log "Worker state: $($details.runtimePath)"
+                Write-Log "Worker errors: $($details.workerErrorLog)"
+                if ($details.PSObject.Properties.Name -contains 'adapterLog') { Write-Log "MCP adapter: $($details.adapterLog)" }
+                Write-Log "Host coordination journal: $($details.journalPath)"
+            }
+            catch { Write-Log "Could not read startup diagnostics: $($_.Exception.Message)" -Failure }
+        }
+        else { Write-Log 'Choose R to retry, L for diagnostics, or Enter/B to return safely.' -Warning }
+    }
 }
 
 function Invoke-CopilotControlMenuAction {
@@ -120,22 +147,26 @@ function Invoke-CopilotControlMenuAction {
             throw 'Copilot Control requires 64-bit PowerShell 7.4 or newer.'
         }
         $interlockRequired = ($Action -eq 'Start')
-        $result = Invoke-CopilotControlCommand -Action $Action
-        Write-Log "Copilot Control: $($result.state)."
-        if ($Action -eq 'Start') {
-            foreach ($configuration in $result.mcpConfiguration) {
-                $registration = if ($configuration.Added) { 'Added' } else { 'Already registered' }
-                Write-Log "$registration MemLabs MCP in '$($configuration.Path)'."
+        do {
+            $retry = $false
+            try {
+                $result = Invoke-CopilotControlCommand -Action $Action
+                Write-Log "Copilot Control: $($result.state)."
+                if ($Action -eq 'Start') {
+                    foreach ($configuration in $result.mcpConfiguration) {
+                        $registration = if ($configuration.Added) { 'Added' } else { 'Already registered' }
+                        Write-Log "$registration MemLabs MCP in '$($configuration.Path)'."
+                    }
+                    Write-Log 'Keep VS Code unelevated. Approve its MCP trust/tool prompts yourself; deployment and deletion are not exposed.'
+                }
+                if ($result.activeOperation) {
+                    Write-Log "Active operation: $($result.activeOperation.operationId) $($result.activeOperation.action)."
+                }
             }
-            Write-Log 'Keep VS Code unelevated. Approve its MCP trust/tool prompts yourself; deployment and deletion are not exposed.'
-        }
-        if ($result.activeOperation) {
-            Write-Log "Active operation: $($result.activeOperation.operationId) $($result.activeOperation.action)."
-        }
+            catch { $retry = Show-CopilotControlFailure -Failure $_ -Action $Action }
+        } while ($retry)
     }
-    catch {
-        Write-Log "Copilot Control $Action failed: $($_.Exception.Message)" -Failure
-    }
+    catch { $null = Show-CopilotControlFailure -Failure $_ -Action $Action }
     finally {
         if ($interlockRequired) {
             $stopped = $false

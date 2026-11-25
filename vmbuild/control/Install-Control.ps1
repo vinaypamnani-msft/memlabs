@@ -72,6 +72,7 @@ function Publish-MemLabsControlPackage {
 }
 
 $publish = ${function:Publish-MemLabsControlPackage}
+# These callbacks are synchronous; closures hide helpers local to the elevated UI bootstrap.
 $operation = {
     try {
         foreach ($directory in @((Split-Path -Parent $paths.InstallRoot), $paths.InstallRoot, (Join-Path $paths.InstallRoot 'Packages'))) {
@@ -106,15 +107,16 @@ $operation = {
         throw 'Worker readiness was not verified within 30 seconds; inspect its protected logs.'
     }
     catch { $context.Failure = $_.Exception.Message; throw }
-}.GetNewClosure()
+}
 $postcondition = {
     $runtime = Get-Content -LiteralPath $paths.RuntimeFile -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable -ErrorAction Stop
     return [bool]($context.Broker -and $runtime.pid -eq $context.Broker.Id -and $runtime.state -eq 'Ready' -and $runtime.packageHash -ceq $fingerprint)
-}.GetNewClosure()
-$diagnostics = { [pscustomobject]@{ failure = $context.Failure; packagePath = $context.PackagePath; runtimeDirectory = $paths.RuntimeRoot } }.GetNewClosure()
+}
+$diagnostics = { [pscustomobject]@{ failure = $context.Failure; packagePath = $context.PackagePath; runtimeDirectory = $paths.RuntimeRoot } }
 try {
     $coordinator = [scriptblock]::Create([Text.Encoding]::UTF8.GetString($approved['Invoke-MemLabsLiveOperation.ps1']))
     $result = & $coordinator -Mode Mutate -Intent 'Install the frozen Copilot Control package and verify readiness' `
+        -CoordinationScope ControlLifecycle `
         -TargetType HostResource -Target @('MemLabs:CopilotControl', "Owner:$($data.clientSid)") `
         -Operation $operation -Postcondition $postcondition -FailureDiagnostics $diagnostics
     $answer = @{ attemptId = $attempt; success = $true; state = 'Ready'; pid = $context.Broker.Id; packageHash = $fingerprint; journalOperationId = $result.OperationId }
@@ -122,6 +124,9 @@ try {
     [pscustomobject]$answer
 }
 catch {
-    $message = if ($context.Failure) { $context.Failure } else { $_.Exception.Message }
-    throw "Copilot Control installation failed: $message"
+    $failure = Get-MemLabsControlFailure -Exception $_.Exception -Phase $(if ($context.Failure) { 'Installation' } else { 'Coordination' }) -DetailsPath $resultPath
+    if ($context.Failure) { $failure.message = $context.Failure }
+    $exception = [InvalidOperationException]::new($failure.message)
+    $exception.Data['ControlFailure'] = $failure
+    throw $exception
 }

@@ -31,6 +31,9 @@ param (
     [ValidateSet('VM', 'HostResource')]
     [string] $TargetType = 'VM',
 
+    [ValidateSet('LabState', 'ControlLifecycle')]
+    [string] $CoordinationScope = 'LabState',
+
     [string] $SessionId = '',
 
     [string] $ExpectedLoss = '',
@@ -269,6 +272,15 @@ function Test-LiveOpsTestHarnessCaller {
     return $false
 }
 
+$normalizedTargets = @($Target | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+if ($normalizedTargets.Count -eq 0) { throw 'At least one non-empty target is required.' }
+if ($CoordinationScope -eq 'ControlLifecycle' -and (
+        $Mode -ne 'Mutate' -or $TargetType -ne 'HostResource' -or
+        $normalizedTargets -notcontains 'MemLabs:CopilotControl' -or
+        @($normalizedTargets | Where-Object { $_ -ne 'MemLabs:CopilotControl' -and $_ -notmatch '^Owner:S-1-(?:\d+-)*\d+$' }).Count -gt 0)) {
+    throw 'ControlLifecycle is restricted to Mutate operations on the MemLabs:CopilotControl host resource and optional owner SID; it cannot coordinate VM or deployment changes.'
+}
+
 $commonApplicationData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 $defaultCoordinationRoot = Join-Path $commonApplicationData 'MemLabs\LiveOps'
 $coordinationRoot = $defaultCoordinationRoot
@@ -290,8 +302,6 @@ if ($SkipActiveProcessCheck -and [string]::IsNullOrWhiteSpace($TestCoordinationR
 if ($TestLeaseDisposeFailure -and [string]::IsNullOrWhiteSpace($TestCoordinationRoot)) {
     throw '-TestLeaseDisposeFailure requires the restricted -TestCoordinationRoot test mode.'
 }
-$normalizedTargets = @($Target | ForEach-Object { "$_".Trim() } | Where-Object { $_ } | Sort-Object -Unique)
-if ($normalizedTargets.Count -eq 0) { throw 'At least one non-empty target is required.' }
 if ($Mode -ne 'Observe' -and -not $Postcondition) {
     throw "$Mode operations require a behavior-specific -Postcondition that returns exactly one Boolean result."
 }
@@ -324,6 +334,7 @@ $owner = [ordered]@{
     Intent        = $Intent
     Targets       = $normalizedTargets
     TargetType    = $TargetType
+    CoordinationScope = $CoordinationScope
     PID           = $PID
     ProcessStartUtc = $process.StartTime.ToUniversalTime().ToString('o')
     SessionId     = $SessionId
@@ -346,25 +357,42 @@ $operationSucceeded = $false
 $beforeState = $null
 $afterState = $null
 $failureStage = 'Coordination'
+$failureReason = ''
+$safeFailureMessage = ''
+$remediation = ''
+$conflictingProcessIds = @()
 $activeOwnerMetadata = $null
 $correlatedException = $null
 $successResult = $null
 try {
     if ($Mode -ne 'Observe') {
-        if (-not $SkipActiveProcessCheck) {
+        if (-not $SkipActiveProcessCheck -and $CoordinationScope -eq 'LabState') {
+            $failureReason = 'ProcessInspectionFailed'
+            $safeFailureMessage = 'Windows process inventory could not be checked, so safe host coordination was not established.'
+            $remediation = 'Run from an elevated MemLabs window. If already elevated, check Windows WMI/process inventory before retrying.'
             $conflictingProcesses = @(Get-LiveOpsConflictingProcesses)
             if ($conflictingProcesses.Count -gt 0) {
+                $conflictingProcessIds = @($conflictingProcesses | Select-Object -ExpandProperty ProcessId)
                 $summary = @($conflictingProcesses | ForEach-Object { "PID $($_.ProcessId)" }) -join ', '
+                $failureReason = 'ActiveProcessConflict'
+                $safeFailureMessage = "Host coordination is blocked by another MemLabs or encoded PowerShell process ($summary)."
+                $remediation = 'Wait for those operations to finish, or close only their idle MemLabs windows, then choose Retry. Do not terminate an active deployment.'
                 throw "Active MemLabs process(es) detected ($summary); mutation coordination is required before proceeding."
             }
         }
 
+        $failureReason = 'LeaseAccessFailed'
+        $safeFailureMessage = 'The host mutation lock could not be opened or initialized.'
+        $remediation = 'Use an elevated MemLabs window and check access to the Live Ops coordination directory. Do not delete the lock or weaken its permissions.'
         try {
             $leaseStream = [IO.File]::Open($leasePath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
         }
         catch [IO.IOException] {
             $currentOwner = Read-LiveOpsActiveOwner -Path $leasePath
             $activeOwnerMetadata = $currentOwner
+            $failureReason = 'LeaseHeld'
+            $safeFailureMessage = 'Another session currently owns the host mutation lease.'
+            $remediation = 'Wait for the owning operation to finish before retrying. Do not delete its lock file or terminate its owner.'
             throw "Live Ops mutation lease is held by another session. Owner metadata: $currentOwner"
         }
 
@@ -374,6 +402,9 @@ try {
         Write-LiveOpsJournal -Path $journalPath -Record ([ordered]@{ Event = 'LeaseAcquired'; TimeUtc = [datetime]::UtcNow.ToString('o'); OperationId = $operationId })
     }
 
+    $failureReason = ''
+    $safeFailureMessage = ''
+    $remediation = ''
     $beforeState = @(Get-LiveOpsVmState -Name $normalizedTargets -Type $TargetType -AllowMissing:$AllowMissingTargets)
     Write-LiveOpsJournal -Path $journalPath -Record ([ordered]@{ Event = 'OperationStarted'; TimeUtc = [datetime]::UtcNow.ToString('o'); OperationId = $operationId; Before = $beforeState })
 
@@ -486,6 +517,10 @@ catch {
                 OperationId               = $operationId
                 ErrorType                 = $operationError.Exception.GetType().FullName
                 FailureStage              = $failureStage
+                FailureReason             = $failureReason
+                SafeMessage               = $safeFailureMessage
+                Remediation               = $remediation
+                ConflictingProcessIds     = $conflictingProcessIds
                 Before                    = $beforeState
                 After                     = $afterState
                 PostFailureStateErrorType = $postFailureStateErrorType
@@ -502,6 +537,10 @@ catch {
     $correlatedException.Data['OperationId'] = $operationId
     $correlatedException.Data['JournalPath'] = $journalPath
     $correlatedException.Data['FailureStage'] = $failureStage
+    $correlatedException.Data['FailureReason'] = $failureReason
+    $correlatedException.Data['SafeMessage'] = $safeFailureMessage
+    $correlatedException.Data['Remediation'] = $remediation
+    $correlatedException.Data['ConflictingProcessIds'] = $conflictingProcessIds
     $correlatedException.Data['ActiveOwnerMetadata'] = $activeOwnerMetadata
     $correlatedException.Data['FailureDiagnostics'] = @($failureDiagnosticsOutput)
     $correlatedException.Data['FailureDiagnosticsErrorType'] = $failureDiagnosticsErrorType

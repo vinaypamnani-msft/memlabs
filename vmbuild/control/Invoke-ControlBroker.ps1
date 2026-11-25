@@ -93,8 +93,9 @@ try {
             $response = @{ version = 1; id = $requestId; ok = $true; result = $answer }
         }
         catch {
-            Write-ControlAudit -EventName 'RequestFailed' -Message $_.Exception.Message
-            $response = @{ version = 1; id = $requestId; ok = $false; error = $_.Exception.Message }
+            $failure = Get-MemLabsControlFailure -Exception $_.Exception -Phase 'Request'
+            Write-ControlAudit -EventName 'RequestFailed' -Message $failure.message
+            $response = @{ version = 1; id = $requestId; ok = $false; error = "$($failure.message) Next step: $($failure.remediation)"; failure = $failure }
         }
         try { $listener.Respond(($response | ConvertTo-Json -Depth 20 -Compress)) }
         catch { Write-ControlAudit -EventName 'ResponseFailed' -Message $_.Exception.Message }

@@ -130,9 +130,94 @@ param($Helper, $TestRoot)
     catch { $blockedError = $_ }
     Assert-LiveOpsEqual $true ([bool]$blockedError) 'Second mutation is rejected while lease is held'
     Assert-LiveOpsEqual $true ([string]$blockedError.Exception.Data['ActiveOwnerMetadata'] -like '*other-session*') 'Lease rejection includes readable owner metadata'
+    Assert-LiveOpsEqual 'LeaseHeld' ([string]$blockedError.Exception.Data['FailureReason']) 'Lease rejection exposes a safe actionable reason'
+    Assert-LiveOpsEqual $true ([string]$blockedError.Exception.Data['Remediation'] -like '*Do not delete*') 'Lease rejection explains safe remediation without automatic retries'
+
+    $coordinationProbe = [pscustomobject]@{ Ran = $false }
+    $processConflictError = & {
+        function Get-CimInstance {
+            [CmdletBinding()]
+            param([string]$ClassName)
+            if ($ClassName -ne 'Win32_Process') { throw 'Unexpected inventory class.' }
+            @(
+                [pscustomobject]@{ Name = 'pwsh.exe'; ProcessId = $PID; ParentProcessId = 0; CommandLine = 'pwsh -NoProfile'; CreationDate = Get-Date },
+                [pscustomobject]@{ Name = 'pwsh.exe'; ProcessId = 765432; ParentProcessId = 0; CommandLine = 'pwsh -EncodedCommand sensitive-command-fixture'; CreationDate = Get-Date }
+            )
+        }
+        try {
+            $null = & $helper -Mode Mutate -Intent 'actionable process conflict fixture' -Target 'TEST-RESOURCE' -TargetType HostResource `
+                -TestCoordinationRoot $testRoot -Operation { $coordinationProbe.Ran = $true } -Postcondition { $true } -FailureDiagnostics {}
+        }
+        catch { return $_ }
+    }
+    Assert-LiveOpsEqual 'ActiveProcessConflict' ([string]$processConflictError.Exception.Data['FailureReason']) 'Process conflicts survive exception correlation as a typed reason'
+    Assert-LiveOpsEqual '765432' (@($processConflictError.Exception.Data['ConflictingProcessIds']) -join ',') 'Coordination failure identifies the exact blocking PID'
+    Assert-LiveOpsEqual $true ([string]$processConflictError.Exception.Data['SafeMessage'] -like '*PID 765432*') 'The actionable message includes the blocking process without its command line'
+    Assert-LiveOpsEqual $false $coordinationProbe.Ran 'A coordination failure never invokes the operation callback'
+
+    $inspectionError = & {
+        function Get-CimInstance {
+            [CmdletBinding()]
+            param([string]$ClassName)
+            if ($ClassName -ne 'Win32_Process') { throw 'Unexpected inventory class.' }
+            throw 'sensitive-process-inspection-fixture'
+        }
+        try {
+            $null = & $helper -Mode Mutate -Intent 'actionable inventory failure fixture' -Target 'TEST-RESOURCE' -TargetType HostResource `
+                -TestCoordinationRoot $testRoot -Operation { $coordinationProbe.Ran = $true } -Postcondition { $true } -FailureDiagnostics {}
+        }
+        catch { return $_ }
+    }
+    Assert-LiveOpsEqual 'ProcessInspectionFailed' ([string]$inspectionError.Exception.Data['FailureReason']) 'Unreadable process inventory fails closed with a distinct safe reason'
+    Assert-LiveOpsEqual $false ([string]$inspectionError.Exception.Data['SafeMessage'] -like '*sensitive-process-inspection-fixture*') 'Process-inventory diagnostics do not disclose the original exception text'
+    $coordinationRecords = @(Get-Content -LiteralPath $journalPath | ForEach-Object { $_ | ConvertFrom-Json })
+    $conflictRecord = @($coordinationRecords | Where-Object { $_.Event -eq 'OperationFailed' -and $_.FailureReason -eq 'ActiveProcessConflict' })
+    Assert-LiveOpsEqual 1 $conflictRecord.Count 'The journal retains the safe failure reason instead of only a generic exception type'
+    Assert-LiveOpsEqual '765432' ($conflictRecord[0].ConflictingProcessIds -join ',') 'The journal retains the blocking PID for post-failure diagnosis'
+    Assert-LiveOpsEqual $false ([IO.File]::ReadAllText($journalPath) -match 'sensitive-command-fixture|sensitive-process-inspection-fixture') 'Coordination diagnostics do not persist command lines or private exception messages'
+
+    $controlLeaseError = $null
+    try {
+        $null = & $helper -Mode Mutate -CoordinationScope ControlLifecycle -Intent 'control install cannot overlap a held lease' `
+            -Target 'MemLabs:CopilotControl' -TargetType HostResource -TestCoordinationRoot $testRoot `
+            -Operation { $coordinationProbe.Ran = $true } -Postcondition { $true } -FailureDiagnostics {}
+    }
+    catch { $controlLeaseError = $_ }
+    Assert-LiveOpsEqual 'LeaseHeld' ([string]$controlLeaseError.Exception.Data['FailureReason']) 'Control lifecycle still honors the authoritative host lease'
+    Assert-LiveOpsEqual $false $coordinationProbe.Ran 'A held lease prevents control lifecycle changes'
 
     $heldStream.Dispose()
     $heldStream = $null
+
+    $controlResult = & {
+        function Get-CimInstance {
+            [CmdletBinding()]
+            param([string]$ClassName)
+            throw "Control startup must not inspect unrelated scripts: $ClassName"
+        }
+        & $helper -Mode Mutate -CoordinationScope ControlLifecycle -Intent 'control startup with unrelated scripts open' `
+            -Target @('MemLabs:CopilotControl', 'Owner:S-1-5-21-1-2-3-1234') -TargetType HostResource -TestCoordinationRoot $testRoot `
+            -Operation { 'control-started' } -Postcondition { $true } -FailureDiagnostics {} -IncludeOperationOutput
+    }
+    Assert-LiveOpsEqual 'control-started' $controlResult.Output[0] 'Control startup allows other scripts without scanning or interrupting them'
+    Assert-LiveOpsEqual $true $controlResult.PostconditionPassed 'Control lifecycle completes only after a lease-held postcondition'
+    foreach ($invalidScope in @(
+            @{ Mode = 'Mutate'; Type = 'VM'; Target = 'MemLabs:CopilotControl' },
+            @{ Mode = 'Observe'; Type = 'HostResource'; Target = 'MemLabs:CopilotControl' },
+            @{ Mode = 'Destructive'; Type = 'HostResource'; Target = 'MemLabs:CopilotControl' },
+            @{ Mode = 'Mutate'; Type = 'HostResource'; Target = 'SQL:EXAMPLE' },
+            @{ Mode = 'Mutate'; Type = 'HostResource'; Target = @('MemLabs:CopilotControl', 'VM:EXAMPLE') }
+        )) {
+        $scopeError = $null
+        try {
+            $null = & $helper -Mode $invalidScope.Mode -CoordinationScope ControlLifecycle -Intent 'invalid control scope fixture' `
+                -Target $invalidScope.Target -TargetType $invalidScope.Type -TestCoordinationRoot $testRoot `
+                -Operation { throw 'must not run' } -Postcondition { $true } -FailureDiagnostics {} `
+                -AcknowledgeDestructive -ExpectedLoss 'fixture' -RecoveryPath 'fixture'
+        }
+        catch { $scopeError = $_ }
+        Assert-LiveOpsEqual $true ($scopeError.Exception.Message -like '*ControlLifecycle is restricted*') 'The control lifecycle classification cannot be applied to lab state or destructive work'
+    }
 
     $missingPostconditionError = $null
     try {
@@ -345,6 +430,7 @@ param($Helper, $TestRoot)
     $records = @(Get-Content -LiteralPath $journalPath | ForEach-Object { $_ | ConvertFrom-Json })
     Assert-LiveOpsEqual $true ($records.Count -gt 0) 'Journal contains operation records'
     Assert-LiveOpsEqual $true ([bool]($records | Where-Object Event -eq 'LeaseAcquired' | Select-Object -First 1)) 'Journal records lease acquisition'
+    Assert-LiveOpsEqual 'ControlLifecycle' ($records | Where-Object { $_.Event -eq 'Requested' -and $_.Owner.Intent -eq 'control startup with unrelated scripts open' } | Select-Object -First 1 -ExpandProperty Owner).CoordinationScope 'Journal explicitly identifies control lifecycle coordination'
     Assert-LiveOpsEqual $true ([bool]($records | Where-Object Event -eq 'OperationCompleted' | Select-Object -First 1)) 'Journal records successful completion'
     Assert-LiveOpsEqual $true ([bool]($records | Where-Object Event -eq 'PostconditionChecked' | Select-Object -First 1)) 'Journal records postcondition verification'
     $failureDiagnosticRecord = $records | Where-Object Event -eq 'FailureDiagnosticsCompleted' | Select-Object -First 1
